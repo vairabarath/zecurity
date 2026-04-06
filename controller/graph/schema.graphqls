@@ -1,0 +1,54 @@
+# controller/graph/schema.graphqls
+
+type Query {
+  # Returns the currently authenticated user.
+  # Requires valid JWT in Authorization header.
+  me: User!
+
+  # Returns the workspace the current user belongs to.
+  # Scoped to tenant_id from JWT — never crosses workspaces.
+  workspace: Workspace!
+}
+
+type Mutation {
+  # Step 1 of login: React calls this first.
+  # Go generates PKCE pair, stores code_verifier in Redis,
+  # builds and returns the Google OAuth redirect URL.
+  initiateAuth(provider: String!): AuthInitPayload!
+}
+
+type AuthInitPayload {
+  # The full Google OAuth URL React should redirect the browser to.
+  redirectUrl: String!
+  # The signed state value. React stores this for CSRF verification.
+  state:       String!
+}
+
+type User {
+  id:          ID!
+  email:       String!
+  role:        Role!
+  provider:    String!
+  createdAt:   String!
+}
+
+type Workspace {
+  id:          ID!
+  slug:        String!
+  name:        String!
+  status:      WorkspaceStatus!
+  createdAt:   String!
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum WorkspaceStatus {
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  DELETED
+}

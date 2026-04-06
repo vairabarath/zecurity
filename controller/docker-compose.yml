@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: ztna-postgres
+    environment:
+      POSTGRES_USER: ztna
+      POSTGRES_PASSWORD: ztna_dev
+      POSTGRES_DB: ztna
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+
+  redis:
+    image: redis:7-alpine
+    container_name: ztna-redis
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:
