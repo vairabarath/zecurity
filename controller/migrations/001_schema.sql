@@ -70,6 +70,11 @@ CREATE TABLE workspace_ca_keys (
 );
 
 -- Indexes
+-- provider_sub lookup happens before tenant_id is known (auth flow step 1)
 CREATE INDEX idx_users_provider_sub  ON users (provider_sub, provider);
+-- All other queries are scoped to tenant_id
 CREATE INDEX idx_users_tenant_email  ON users (tenant_id, email);
 CREATE INDEX idx_users_tenant_role   ON users (tenant_id, role);
+-- workspace status check happens on every authenticated request
+CREATE INDEX idx_workspaces_active  ON workspaces (id)
+    WHERE status = 'active';
