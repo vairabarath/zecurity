@@ -65,6 +65,12 @@ and the entire PKI package (Root CA, Intermediate CA, WorkspaceCA).
 This is the hardest work on the team. Nothing else fully works until
 Member 3's bootstrap transaction is solid.
 
+Implementation note:
+The PKI crypto helpers should use the Go standard library `crypto/hkdf`
+API available in this repo's toolchain. That means using `hkdf.Key(...)`
+for key derivation rather than the older reader-style `hkdf.New(...)`
+examples some external snippets still show.
+
 ### Member 4 — Backend: GraphQL Schema + Resolvers + DB + Middleware
 Owns `schema.graphqls` — writes and owns the contract.
 Sets up gqlgen, pgx connection pool, Docker PostgreSQL, migrations.
