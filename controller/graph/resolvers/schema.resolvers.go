@@ -10,11 +10,12 @@ import (
 	"fmt"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/graph/model"
 	"github.com/yourorg/ztna/controller/internal/models"
 )
 
 // InitiateAuth is the resolver for the initiateAuth field.
-func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string) (*graph.AuthInitPayload, error) {
+func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string) (*model.AuthInitPayload, error) {
 	panic(fmt.Errorf("not implemented: InitiateAuth - initiateAuth"))
 }
 

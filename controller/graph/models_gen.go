@@ -9,11 +9,6 @@ import (
 	"strconv"
 )
 
-type AuthInitPayload struct {
-	RedirectURL string `json:"redirectUrl"`
-	State       string `json:"state"`
-}
-
 type Mutation struct {
 }
 
