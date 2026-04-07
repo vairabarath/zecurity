@@ -86,8 +86,8 @@ func (s *serviceImpl) generateAndStoreRootCA(ctx context.Context) error {
     template := &x509.Certificate{
         SerialNumber: serial,
         Subject: pkix.Name{
-            CommonName:   "ZTNA Root CA",
-            Organization: []string{"ZTNA Platform"},
+            CommonName:   "ZECURITY Root CA",
+            Organization: []string{"ZECURITY Platform"},
         },
         NotBefore:             notBefore,
         NotAfter:              notAfter,

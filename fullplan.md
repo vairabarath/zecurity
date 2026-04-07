@@ -1,4 +1,4 @@
-# ZTNA — Admin Bootstrap, Auth & WorkspaceCA Isolation
+# ZECURITY — Admin Bootstrap, Auth & WorkspaceCA Isolation
 ## Team Plan: 1 Frontend + 3 Backend
 
 ---
@@ -287,7 +287,7 @@ Member 2 (Go HTTP handler — not GraphQL):
   receive { tenant_id, user_id, role }
 
   sign JWT:
-    { sub: user_id, tenant_id, role, iss: "ztna-controller", exp: now+15min }
+    { sub: user_id, tenant_id, role, iss: "zecurity-controller", exp: now+15min }
     signed with HS256 using JWT_SECRET
     (swap to RS256 later — one config change)
 

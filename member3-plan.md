@@ -524,8 +524,8 @@ func (s *serviceImpl) generateAndStoreRootCA(ctx context.Context) error {
     template := &x509.Certificate{
         SerialNumber: serial,
         Subject: pkix.Name{
-            CommonName:   "ZTNA Root CA",
-            Organization: []string{"ZTNA Platform"},
+            CommonName:   "ZECURITY Root CA",
+            Organization: []string{"ZECURITY Platform"},
         },
         NotBefore:             notBefore,
         NotAfter:              notAfter,
@@ -679,8 +679,8 @@ func (s *serviceImpl) generateAndStoreIntermediateCA(ctx context.Context) error 
     template := &x509.Certificate{
         SerialNumber: serial,
         Subject: pkix.Name{
-            CommonName:   "ZTNA Intermediate CA",
-            Organization: []string{"ZTNA Platform"},
+            CommonName:   "ZECURITY Intermediate CA",
+            Organization: []string{"ZECURITY Platform"},
         },
         NotBefore:             notBefore,
         NotAfter:              notAfter,
@@ -830,7 +830,7 @@ func (s *serviceImpl) GenerateWorkspaceCA(ctx context.Context,
         SerialNumber: serial,
         Subject: pkix.Name{
             CommonName:   "workspace-" + tenantID,
-            Organization: []string{"ZTNA Workspace"},
+            Organization: []string{"ZECURITY Workspace"},
         },
         NotBefore:             notBefore,
         NotAfter:              notAfter,

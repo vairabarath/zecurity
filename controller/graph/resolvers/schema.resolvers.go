@@ -12,41 +12,90 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/model"
 	"github.com/yourorg/ztna/controller/internal/models"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // InitiateAuth is the resolver for the initiateAuth field.
 func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string) (*model.AuthInitPayload, error) {
-	panic(fmt.Errorf("not implemented: InitiateAuth - initiateAuth"))
+	return r.AuthService.InitiateAuth(ctx, provider)
 }
 
 // Me is the resolver for the me field.
 func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
-	panic(fmt.Errorf("not implemented: Me - me"))
+	tc := tenant.MustGet(ctx)
+
+	var u models.User
+	err := r.TenantDB.QueryRow(ctx,
+		`SELECT id, tenant_id, email, provider, provider_sub,
+		        role, status, last_login_at, created_at, updated_at
+		 FROM users
+		 WHERE id        = $1
+		   AND tenant_id = $2
+		   AND status    = 'active'`,
+		tc.UserID, tc.TenantID,
+	).Scan(
+		&u.ID, &u.TenantID, &u.Email,
+		&u.Provider, &u.ProviderSub,
+		&u.Role, &u.Status, &u.LastLoginAt,
+		&u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("me: %w", err)
+	}
+
+	return &u, nil
 }
 
 // Workspace is the resolver for the workspace field.
 func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error) {
-	panic(fmt.Errorf("not implemented: Workspace - workspace"))
+	tc := tenant.MustGet(ctx)
+
+	var ws models.Workspace
+	err := r.TenantDB.QueryRow(ctx,
+		`SELECT id, slug, name, status, ca_cert_pem, created_at, updated_at
+		 FROM workspaces
+		 WHERE id = $1`,
+		tc.TenantID,
+	).Scan(
+		&ws.ID, &ws.Slug, &ws.Name,
+		&ws.Status, &ws.CACertPEM,
+		&ws.CreatedAt, &ws.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("workspace: %w", err)
+	}
+
+	return &ws, nil
 }
 
 // Role is the resolver for the role field.
 func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, error) {
-	panic(fmt.Errorf("not implemented: Role - role"))
+	role := graph.Role(obj.Role)
+	if !role.IsValid() {
+		return "", fmt.Errorf("invalid role: %q", obj.Role)
+	}
+
+	return role, nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *userResolver) CreatedAt(ctx context.Context, obj *models.User) (string, error) {
-	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
 }
 
 // Status is the resolver for the status field.
 func (r *workspaceResolver) Status(ctx context.Context, obj *models.Workspace) (graph.WorkspaceStatus, error) {
-	panic(fmt.Errorf("not implemented: Status - status"))
+	status := graph.WorkspaceStatus(obj.Status)
+	if !status.IsValid() {
+		return "", fmt.Errorf("invalid workspace status: %q", obj.Status)
+	}
+
+	return status, nil
 }
 
 // CreatedAt is the resolver for the createdAt field.
 func (r *workspaceResolver) CreatedAt(ctx context.Context, obj *models.Workspace) (string, error) {
-	panic(fmt.Errorf("not implemented: CreatedAt - createdAt"))
+	return obj.CreatedAt.Format("2006-01-02T15:04:05Z07:00"), nil
 }
 
 // Mutation returns graph.MutationResolver implementation.

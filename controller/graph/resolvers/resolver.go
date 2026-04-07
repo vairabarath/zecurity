@@ -1,8 +1,12 @@
 package resolvers
 
-// This file will not be regenerated automatically.
-//
-// It serves as dependency injection for your app, add any dependencies you require
-// here.
+import (
+	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/db"
+)
 
-type Resolver struct{}
+// Resolver holds shared dependencies for all resolvers.
+type Resolver struct {
+	TenantDB    *db.TenantDB
+	AuthService auth.Service
+}

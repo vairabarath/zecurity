@@ -76,7 +76,7 @@ func (s *serviceImpl) GenerateWorkspaceCA(ctx context.Context,
         SerialNumber: serial,
         Subject: pkix.Name{
             CommonName:   "workspace-" + tenantID,
-            Organization: []string{"ZTNA Workspace"},
+            Organization: []string{"ZECURITY Workspace"},
         },
         NotBefore:             notBefore,
         NotAfter:              notAfter,

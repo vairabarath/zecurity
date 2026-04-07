@@ -2,6 +2,8 @@
 
 Coordinate across Member 2, Member 3, and Member 4 to wire the bootstrap service into the application.
 
+Status: Completed
+
 ---
 
 ## Overview
@@ -87,10 +89,10 @@ Coordination needed:
 ## Verification Checklist
 
 ```
-[ ] bootstrap.Service wired in main.go with Pool + PKIService
-[ ] auth.Config updated with BootstrapService field
-[ ] Member 2's callback.go updated to call bootstrapSvc.Bootstrap()
+[x] bootstrap.Service wired in main.go with Pool + PKIService
+[x] auth.Config updated with BootstrapService field
+[x] Member 2's callback.go updated to call bootstrapSvc.Bootstrap()
 [ ] Full flow test: login → bootstrap → workspace active → JWT issued
-[ ] No compilation errors after wiring changes
-[ ] All existing auth tests still pass
+[x] No compilation errors after wiring changes
+[x] All existing auth tests still pass
 ```
