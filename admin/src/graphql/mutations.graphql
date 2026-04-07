@@ -1,0 +1,6 @@
+mutation InitiateAuth($provider: String!) {
+  initiateAuth(provider: $provider) {
+    redirectUrl
+    state
+  }
+}

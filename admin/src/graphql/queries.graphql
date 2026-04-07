@@ -1,0 +1,19 @@
+query Me {
+  me {
+    id
+    email
+    role
+    provider
+    createdAt
+  }
+}
+
+query GetWorkspace {
+  workspace {
+    id
+    slug
+    name
+    status
+    createdAt
+  }
+}
