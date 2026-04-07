@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -49,7 +50,7 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 					}
 					return []byte(secret), nil
 				},
-				jwt.WithIssuer("ztna-controller"),
+				jwt.WithIssuer(appmeta.ControllerIssuer),
 				jwt.WithExpirationRequired(),
 			)
 			if err != nil || !token.Valid {
