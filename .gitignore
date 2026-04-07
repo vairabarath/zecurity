@@ -29,3 +29,6 @@ controller/graph/generated.go
 
 # Docker volumes
 pgdata/
+
+# Local tooling
+.codex
