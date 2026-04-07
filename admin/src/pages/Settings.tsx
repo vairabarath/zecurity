@@ -27,7 +27,7 @@ export default function Settings() {
                 <dd>{data?.workspace.name}</dd>
               </div>
               <div className="flex gap-4">
-                <dt className="text-muted-foreground w-24">Slug</dt>
+                <dt className="text-muted-foreground w-24">Network ID</dt>
                 <dd className="font-mono text-xs">{data?.workspace.slug}</dd>
               </div>
               <div className="flex gap-4">

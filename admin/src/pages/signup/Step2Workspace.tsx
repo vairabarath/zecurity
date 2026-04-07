@@ -80,15 +80,17 @@ export default function Step2Workspace() {
             </div>
 
             {/* Slug Preview */}
-            <div className="rounded-lg border bg-muted/50 p-4">
-              <div className="text-sm text-muted-foreground">
-                Your network URL
+            {slug && (
+              <div className="rounded-lg border bg-muted/50 p-4">
+                <div className="text-sm text-muted-foreground">
+                  Your network URL
+                </div>
+                <div className="mt-1 font-mono text-sm">
+                  <span className="text-foreground">{slug}</span>
+                  <span className="text-muted-foreground">.zecurity.in</span>
+                </div>
               </div>
-              <div className="mt-1 font-mono text-sm">
-                <span className="text-muted-foreground">ztna.yourapp.com/</span>
-                <span className="text-foreground">{slug || 'your-network'}</span>
-              </div>
-            </div>
+            )}
 
             {/* Buttons */}
             <div className="flex flex-col gap-3">

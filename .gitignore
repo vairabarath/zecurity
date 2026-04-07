@@ -32,6 +32,8 @@ pgdata/
 
 # Local tooling
 .codex
+.claude
+.qwen
 
 # Local auth tests
 controller/internal/auth/*_test.go
