@@ -8,6 +8,7 @@ package resolvers
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/model"
@@ -16,8 +17,8 @@ import (
 )
 
 // InitiateAuth is the resolver for the initiateAuth field.
-func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string) (*model.AuthInitPayload, error) {
-	return r.AuthService.InitiateAuth(ctx, provider)
+func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error) {
+	return r.AuthService.InitiateAuth(ctx, provider, workspaceName)
 }
 
 // Me is the resolver for the me field.
@@ -70,7 +71,7 @@ func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error
 
 // Role is the resolver for the role field.
 func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, error) {
-	role := graph.Role(obj.Role)
+	role := graph.Role(strings.ToUpper(obj.Role))
 	if !role.IsValid() {
 		return "", fmt.Errorf("invalid role: %q", obj.Role)
 	}
@@ -85,7 +86,7 @@ func (r *userResolver) CreatedAt(ctx context.Context, obj *models.User) (string,
 
 // Status is the resolver for the status field.
 func (r *workspaceResolver) Status(ctx context.Context, obj *models.Workspace) (graph.WorkspaceStatus, error) {
-	status := graph.WorkspaceStatus(obj.Status)
+	status := graph.WorkspaceStatus(strings.ToUpper(obj.Status))
 	if !status.IsValid() {
 		return "", fmt.Errorf("invalid workspace status: %q", obj.Status)
 	}

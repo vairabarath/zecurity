@@ -22,13 +22,13 @@ import (
 //  1. Generates a cryptographically random code_verifier (PKCE, RFC 7636)
 //  2. Derives code_challenge = BASE64URL(SHA256(code_verifier))
 //  3. Generates a signed state value for CSRF protection
-//  4. Stores code_verifier in Redis keyed by state, TTL=5min
+//  4. Stores code_verifier + optional workspaceName in Redis keyed by state, TTL=5min
 //  5. Builds the Google OAuth authorization URL
 //  6. Returns the URL + state to the caller
 //
 // React redirects the browser to the returned URL.
 // React stores the state in sessionStorage for CSRF verification on return.
-func (s *serviceImpl) InitiateAuth(ctx context.Context, provider string) (*model.AuthInitPayload, error) {
+func (s *serviceImpl) InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error) {
 	// Only Google is supported in this sprint.
 	// Other providers can be added here without changing the interface.
 	if provider != "google" {
@@ -61,8 +61,9 @@ func (s *serviceImpl) InitiateAuth(ctx context.Context, provider string) (*model
 
 	// 4. Store code_verifier in Redis keyed by state.
 	// The callback retrieves this using the state value from the URL.
+	// If workspaceName is provided (signup flow), it is stored alongside code_verifier.
 	// Called: redis.go → SetPKCEState()
-	if err := s.redisClient.SetPKCEState(ctx, state, codeVerifier); err != nil {
+	if err := s.redisClient.SetPKCEState(ctx, state, codeVerifier, workspaceName); err != nil {
 		return nil, fmt.Errorf("store pkce state: %w", err)
 	}
 

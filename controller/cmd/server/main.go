@@ -51,6 +51,7 @@ func main() {
 		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
 		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
 		RedisURL:           mustEnv("REDIS_URL"),
+		AllowedOrigin:      mustEnv("ALLOWED_ORIGIN"),
 	})
 	if err != nil {
 		log.Fatalf("auth init: %v", err)

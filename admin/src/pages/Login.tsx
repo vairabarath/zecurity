@@ -69,6 +69,12 @@ export default function Login() {
           >
             {loading ? 'Redirecting...' : 'Sign in with Google'}
           </Button>
+          <p className="text-sm text-center text-muted-foreground">
+            Don't have a network?{' '}
+            <a href="/signup" className="text-primary underline hover:no-underline">
+              Create one
+            </a>
+          </p>
         </CardContent>
       </Card>
     </div>

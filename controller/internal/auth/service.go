@@ -15,7 +15,8 @@ import (
 type Service interface {
 	// InitiateAuth builds the IdP redirect URL with PKCE.
 	// Called by the initiateAuth GraphQL mutation resolver.
-	InitiateAuth(ctx context.Context, provider string) (*model.AuthInitPayload, error)
+	// workspaceName is optional — set during signup flow, empty during normal login.
+	InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error)
 
 	// CallbackHandler handles GET /auth/callback.
 	// Google redirects here after user authenticates.

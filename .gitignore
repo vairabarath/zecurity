@@ -35,3 +35,4 @@ pgdata/
 
 # Local auth tests
 controller/internal/auth/*_test.go
+!controller/internal/auth/integration_test.go

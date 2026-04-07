@@ -92,7 +92,7 @@ Coordination needed:
 [x] bootstrap.Service wired in main.go with Pool + PKIService
 [x] auth.Config updated with BootstrapService field
 [x] Member 2's callback.go updated to call bootstrapSvc.Bootstrap()
-[ ] Full flow test: login → bootstrap → workspace active → JWT issued
+[x] Full flow test: login → bootstrap → workspace active → JWT issued
 [x] No compilation errors after wiring changes
 [x] All existing auth tests still pass
 ```

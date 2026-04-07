@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -39,16 +40,35 @@ func newRedisClient(url string) (*redisClient, error) {
 
 // SetPKCEState stores the code_verifier keyed by the HMAC-signed state value.
 // TTL = 5 minutes — after that, the PKCE pair is unusable and the user must restart login.
+// If workspaceName is provided, it is stored alongside the code_verifier as JSON.
 // Called by: InitiateAuth() in oidc.go (Step 4).
-func (r *redisClient) SetPKCEState(ctx context.Context, state, codeVerifier string) error {
-	return r.rdb.Set(ctx, pkceKey(state), codeVerifier, 5*time.Minute).Err()
+func (r *redisClient) SetPKCEState(ctx context.Context, state, codeVerifier string, workspaceName *string) error {
+	key := pkceKey(state)
+
+	// If workspaceName is set, store as JSON object
+	if workspaceName != nil && *workspaceName != "" {
+		payload := map[string]string{
+			"code_verifier": codeVerifier,
+			"workspaceName": *workspaceName,
+		}
+		jsonBytes, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal pkce state: %w", err)
+		}
+		return r.rdb.Set(ctx, key, string(jsonBytes), 5*time.Minute).Err()
+	}
+
+	// No workspaceName — store plain string (backward compatible)
+	return r.rdb.Set(ctx, key, codeVerifier, 5*time.Minute).Err()
 }
 
 // GetAndDeletePKCEState retrieves the code_verifier and immediately deletes it.
 // Single-use — cannot be replayed. Uses a Redis pipeline for atomic GET+DEL.
-// Returns ("", false, nil) if the key does not exist (expired or already used).
+// Returns ("", "", false, nil) if the key does not exist (expired or already used).
+// Returns (codeVerifier, workspaceName, true, nil) on success.
+// workspaceName is empty if not set (backward compatible with plain string storage).
 // Called by: CallbackHandler() in callback.go (Step 3).
-func (r *redisClient) GetAndDeletePKCEState(ctx context.Context, state string) (string, bool, error) {
+func (r *redisClient) GetAndDeletePKCEState(ctx context.Context, state string) (string, string, bool, error) {
 	// Pipeline ensures GET+DEL happen atomically.
 	// If we GET then DEL separately, a crash between the two
 	// could leave a used verifier in Redis (replay risk).
@@ -59,18 +79,34 @@ func (r *redisClient) GetAndDeletePKCEState(ctx context.Context, state string) (
 	_, err := pipe.Exec(ctx)
 
 	if err != nil && err != redis.Nil {
-		return "", false, fmt.Errorf("redis pipeline: %w", err)
+		return "", "", false, fmt.Errorf("redis pipeline: %w", err)
 	}
 
 	val, err := getCmd.Result()
 	if err == redis.Nil {
-		return "", false, nil // expired or already used
+		return "", "", false, nil // expired or already used
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get pkce state: %w", err)
+		return "", "", false, fmt.Errorf("get pkce state: %w", err)
 	}
 
-	return val, true, nil
+	// Check if this is JSON (new format with workspaceName) or plain string (old format)
+	var codeVerifier, workspaceName string
+	if val[0] == '{' {
+		// New JSON format
+		var payload map[string]string
+		if err := json.Unmarshal([]byte(val), &payload); err != nil {
+			return "", "", false, fmt.Errorf("unmarshal pkce state: %w", err)
+		}
+		codeVerifier = payload["code_verifier"]
+		workspaceName = payload["workspaceName"] // empty string if not present
+	} else {
+		// Old plain string format
+		codeVerifier = val
+		workspaceName = ""
+	}
+
+	return codeVerifier, workspaceName, true, nil
 }
 
 // SetRefreshToken stores a refresh token in Redis keyed to the user_id.

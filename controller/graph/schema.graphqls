@@ -14,7 +14,8 @@ type Mutation {
   # Step 1 of login: React calls this first.
   # Go generates PKCE pair, stores code_verifier in Redis,
   # builds and returns the Google OAuth redirect URL.
-  initiateAuth(provider: String!): AuthInitPayload!
+  # workspaceName is optional — set during signup flow, empty during normal login.
+  initiateAuth(provider: String!, workspaceName: String): AuthInitPayload!
 }
 
 type AuthInitPayload {

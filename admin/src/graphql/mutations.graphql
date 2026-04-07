@@ -1,5 +1,5 @@
-mutation InitiateAuth($provider: String!) {
-  initiateAuth(provider: $provider) {
+mutation InitiateAuth($provider: String!, $workspaceName: String) {
+  initiateAuth(provider: $provider, workspaceName: $workspaceName) {
     redirectUrl
     state
   }

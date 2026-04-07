@@ -3,6 +3,9 @@ import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
 import Settings from '@/pages/Settings'
+import Step1Email from '@/pages/signup/Step1Email'
+import Step2Workspace from '@/pages/signup/Step2Workspace'
+import Step3Auth from '@/pages/signup/Step3Auth'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 
@@ -20,6 +23,11 @@ export default function App() {
       {/* Public routes */}
       <Route path="/login"         element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+
+      {/* Signup wizard routes */}
+      <Route path="/signup"             element={<Step1Email />} />
+      <Route path="/signup/workspace"   element={<Step2Workspace />} />
+      <Route path="/signup/auth"        element={<Step3Auth />} />
 
       {/* Protected routes */}
       <Route element={<ProtectedLayout />}>

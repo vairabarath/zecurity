@@ -1,9 +1,16 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
+
+var exchangeCodeForTokensHook = func(s *serviceImpl, ctx context.Context, code, codeVerifier string) (*GoogleTokenResponse, error) {
+	return s.exchangeCodeForTokens(ctx, code, codeVerifier)
+}
+
+var verifyGoogleIDTokenHook = VerifyGoogleIDToken
 
 // CallbackHandler handles GET /auth/callback.
 // Registered as a public route in main.go (no auth middleware).
@@ -20,7 +27,7 @@ import (
 //  7. Call bootstrap.Bootstrap() → get tenant_id + user_id + role → calls bootstrap/bootstrap.go
 //  8. Issue access JWT                                             → calls session.go → issueAccessToken()
 //  9. Issue refresh token → store in Redis → set httpOnly cookie   → calls session.go → issueRefreshToken()
-//  10. Redirect React to /#token=<JWT>
+//  10. Redirect React to /auth/callback#token=<JWT>
 //
 // On any failure: redirect to /login?error=<reason>.
 // Never show raw error details to the browser.
@@ -28,9 +35,10 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		// fail redirects to login with an error code — never exposes internal details.
+		// fail redirects to the frontend login page with an error code — never exposes internal details.
+		// Uses AllowedOrigin so the redirect goes to the React app, not back to the Go server.
 		fail := func(reason string) {
-			http.Redirect(w, r, "/login?error="+reason, http.StatusFound)
+			http.Redirect(w, r, s.cfg.AllowedOrigin+"/login?error="+reason, http.StatusFound)
 		}
 
 		// Step 1 — Read query params sent by Google after user authenticates.
@@ -55,7 +63,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Single use: GetAndDeletePKCEState deletes the key atomically.
 		// If this returns false, the state expired (>5min) or was already used (replay).
 		// Called: redis.go → GetAndDeletePKCEState()
-		codeVerifier, found, err := s.redisClient.GetAndDeletePKCEState(ctx, state)
+		codeVerifier, workspaceName, found, err := s.redisClient.GetAndDeletePKCEState(ctx, state)
 		if err != nil {
 			fail("server_error")
 			return
@@ -68,7 +76,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Step 4 — Exchange code for tokens (server-to-server).
 		// client_secret is used here — never exposed to the browser.
 		// Called: exchange.go → exchangeCodeForTokens()
-		tokenResp, err := s.exchangeCodeForTokens(ctx, code, codeVerifier)
+		tokenResp, err := exchangeCodeForTokensHook(s, ctx, code, codeVerifier)
 		if err != nil {
 			fail("token_exchange_failed")
 			return
@@ -77,7 +85,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Step 5 — Verify id_token.
 		// ALL six checks must pass (see idtoken.go): signature, aud, iss, exp, email_verified, sub.
 		// Called: idtoken.go → VerifyGoogleIDToken()
-		googleClaims, err := VerifyGoogleIDToken(ctx, tokenResp.IDToken, s.cfg.GoogleClientID)
+		googleClaims, err := verifyGoogleIDTokenHook(ctx, tokenResp.IDToken, s.cfg.GoogleClientID)
 		if err != nil {
 			fail("invalid_id_token")
 			return
@@ -96,8 +104,13 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Step 7 — Bootstrap.
 		// Direct Go function call — no network, no HTTP.
 		// Member 3 implements the real transaction. Until then, the stub returns test data.
+		// Use workspaceName if provided (signup flow), otherwise fall back to Google name (returning login).
 		// Called: bootstrap/bootstrap.go → (*bootstrap.Service).Bootstrap()
-		result, err := s.bootstrapSvc.Bootstrap(ctx, email, "google", providerSub, name)
+		bootstrapName := name
+		if workspaceName != "" {
+			bootstrapName = workspaceName
+		}
+		result, err := s.bootstrapSvc.Bootstrap(ctx, email, "google", providerSub, bootstrapName)
 		if err != nil {
 			fail("bootstrap_failed")
 			return
@@ -139,6 +152,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Fragment (#token=...) is NEVER sent to the server.
 		// Only the browser reads it. React extracts it from window.location.hash
 		// and stores in memory (Zustand), then clears the hash from the URL.
-		http.Redirect(w, r, "/#token="+accessToken, http.StatusFound)
+		// We redirect to the frontend callback route so React can process the fragment.
+		http.Redirect(w, r, s.cfg.AllowedOrigin+"/auth/callback#token="+accessToken, http.StatusFound)
 	})
 }
