@@ -7,7 +7,7 @@
 
 ```
 1. appmeta.go     All SPIFFE constants + trust domain helpers moved here.
-                  No package ever hardcodes "zecurity.io", "ws-", "connector", etc.
+                  No package ever hardcodes "zecurity.in", "ws-", "connector", etc.
                   Same pattern as existing PKIRootCACommonName constants.
 
 2. ConnectorConfig  New struct in internal/connector/config.go.
@@ -49,13 +49,13 @@ CA security          Option C — enrollment token contains CA fingerprint (SHA-
 Identity             SPIFFE — every cert carries spiffe://<trust_domain>/<role>/<id>
                      All SPIFFE strings originate from appmeta.go (Go) / appmeta.rs (Rust)
                      No package hardcodes trust domain strings directly
-                     Controller cert:  spiffe://zecurity.io/controller/global
-                     Connector cert:   spiffe://ws-<slug>.zecurity.io/connector/<id>
-                     Agent cert:       spiffe://ws-<slug>.zecurity.io/agent/<id>  (future)
+                     Controller cert:  spiffe://zecurity.in/controller/global
+                     Connector cert:   spiffe://ws-<slug>.zecurity.in/connector/<id>
+                     Agent cert:       spiffe://ws-<slug>.zecurity.in/agent/<id>  (future)
 
-Trust domain format  ws-<workspace_slug>.zecurity.io
+Trust domain format  ws-<workspace_slug>.zecurity.in
                      Derived via appmeta.WorkspaceTrustDomain(slug) — never inline
-                     Global/vendor domain: zecurity.io (appmeta.SPIFFEGlobalTrustDomain)
+                     Global/vendor domain: zecurity.in (appmeta.SPIFFEGlobalTrustDomain)
 
 Cert validity        7 days — CONNECTOR_CERT_TTL in .env (default: 168h)
                      GROK final instruction — aligns with Zero Trust short-lived certs
@@ -92,10 +92,10 @@ Distribution         GitHub Actions — musl static binaries on tag push (amd64 
 ```
 Value                              Where          Why
 ─────────────────────────────────────────────────────────────────────────────
-"zecurity.io"  (global domain)     appmeta.go     Product identity — a config
+"zecurity.in"  (global domain)     appmeta.go     Product identity — a config
                                    appmeta.rs     file must never override this
 "ws-" prefix                       appmeta.go     Format is product-defined
-".zecurity.io" suffix              appmeta.go     Same
+".zecurity.in" suffix              appmeta.go     Same
 "connector" role string            appmeta.go     Part of identity schema
 "agent" role string                appmeta.go     Future — plumbed now
 "controller" role string           appmeta.go     Same
@@ -265,12 +265,12 @@ const (
 // identity trust to a rogue domain.
 //
 // All packages that need SPIFFE strings import these. No package writes
-// "zecurity.io", "ws-", or "connector" as a string literal directly.
+// "zecurity.in", "ws-", or "connector" as a string literal directly.
 const (
     // SPIFFEGlobalTrustDomain is the vendor-level trust domain.
     // Used for the controller certificate and as the root of all workspace
     // trust domains.
-    SPIFFEGlobalTrustDomain = "zecurity.io"
+    SPIFFEGlobalTrustDomain = "zecurity.in"
 
     // SPIFFEControllerID is the full SPIFFE URI embedded in the controller's
     // TLS certificate. The Rust connector verifies this on every mTLS handshake.
@@ -293,7 +293,7 @@ const (
 
 // WorkspaceTrustDomain derives the SPIFFE trust domain for a workspace.
 //
-// Example: slug "acme" → "ws-acme.zecurity.io"
+// Example: slug "acme" → "ws-acme.zecurity.in"
 //
 // Every package that needs a workspace trust domain calls this function.
 // The format is defined once here — nowhere else.
@@ -303,8 +303,8 @@ func WorkspaceTrustDomain(slug string) string {
 
 // ConnectorSPIFFEID builds the full SPIFFE URI for a connector certificate.
 //
-// Example: trustDomain "ws-acme.zecurity.io", connectorID "abc-123"
-//       → "spiffe://ws-acme.zecurity.io/connector/abc-123"
+// Example: trustDomain "ws-acme.zecurity.in", connectorID "abc-123"
+//       → "spiffe://ws-acme.zecurity.in/connector/abc-123"
 //
 // Used in SignConnectorCert (Go) and enrollment.rs (Rust, mirrored).
 func ConnectorSPIFFEID(trustDomain, connectorID string) string {
@@ -528,12 +528,12 @@ New migration: `002_connector_schema.sql`
 
 -- Each workspace has its own SPIFFE trust domain.
 -- Format enforced by appmeta.WorkspaceTrustDomain(slug) in Go.
--- Backfilled here to match: ws-<slug>.zecurity.io
+-- Backfilled here to match: ws-<slug>.zecurity.in
 ALTER TABLE workspaces
     ADD COLUMN IF NOT EXISTS trust_domain TEXT UNIQUE;
 
 UPDATE workspaces
-   SET trust_domain = 'ws-' || slug || '.zecurity.io'
+   SET trust_domain = 'ws-' || slug || '.zecurity.in'
  WHERE trust_domain IS NULL;
 
 ALTER TABLE workspaces
@@ -680,7 +680,7 @@ connectors(remoteNetworkId: ID!): [Connector!]!
   "jti":            "random-uuid",
   "connector_id":   "uuid-of-connector-row",
   "workspace_id":   "uuid-of-workspace",
-  "trust_domain":   "ws-acme.zecurity.io",
+  "trust_domain":   "ws-acme.zecurity.in",
   "ca_fingerprint": "sha256-hex-of-intermediate-ca-cert-DER",
   "iss":            "zecurity-controller",
   "exp":            "now + CONNECTOR_ENROLLMENT_TOKEN_TTL"
@@ -742,7 +742,7 @@ package connector
 // parseSPIFFEID extracts trust domain, role, and entity ID from an X.509 cert.
 //
 // Expected URI SAN format: spiffe://<trust_domain>/<role>/<id>
-// Example: spiffe://ws-acme.zecurity.io/connector/abc-123
+// Example: spiffe://ws-acme.zecurity.in/connector/abc-123
 //
 // Returns an error if:
 //   - cert has != 1 URI SAN
@@ -818,7 +818,7 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator) grpc.UnaryServerInte
 type TrustDomainValidator func(domain string) bool
 
 // NewTrustDomainValidator returns a validator that accepts:
-//   - appmeta.SPIFFEGlobalTrustDomain ("zecurity.io") — the controller domain
+//   - appmeta.SPIFFEGlobalTrustDomain ("zecurity.in") — the controller domain
 //   - any active workspace's trust domain (looked up via WorkspaceStore)
 //
 // globalDomain should always be passed as appmeta.SPIFFEGlobalTrustDomain.
@@ -1049,18 +1049,18 @@ for SPIFFE domains or roles.
 // Compile-time identity constants for the ZECURITY connector.
 // Mirrors controller/appmeta/appmeta.go exactly.
 //
-// Rule: no other src/ file writes "zecurity.io", "ws-", "connector",
+// Rule: no other src/ file writes "zecurity.in", "ws-", "connector",
 // or any SPIFFE string as a literal. Import from here instead.
 
 /// Global SPIFFE trust domain for the ZECURITY controller.
-/// The controller certificate carries spiffe://zecurity.io/controller/global.
-pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.io";
+/// The controller certificate carries spiffe://zecurity.in/controller/global.
+pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.in";
 
 /// Full SPIFFE URI embedded in the controller's TLS certificate.
 /// tls.rs verifies this on every mTLS heartbeat handshake.
 /// A cert signed by the right CA but with a different SPIFFE ID is rejected.
 pub const SPIFFE_CONTROLLER_ID: &str =
-    "spiffe://zecurity.io/controller/global";
+    "spiffe://zecurity.in/controller/global";
 
 /// SPIFFE role path segment for connectors.
 /// enrollment.rs uses this when building the CSR SAN URI.
@@ -1210,7 +1210,7 @@ use crate::appmeta;
 
 /// Verifies the controller's TLS certificate carries the expected SPIFFE ID.
 ///
-/// Expected: appmeta::SPIFFE_CONTROLLER_ID = "spiffe://zecurity.io/controller/global"
+/// Expected: appmeta::SPIFFE_CONTROLLER_ID = "spiffe://zecurity.in/controller/global"
 ///
 /// Called after every mTLS handshake for Heartbeat connections.
 /// Prevents a rogue server (e.g. a connector cert signed by the same WorkspaceCA)
@@ -1566,7 +1566,7 @@ Day 1 — two things must land before anyone else can start:
 appmeta + Config
   ✓ appmeta.go SPIFFE constants committed Day 1
   ✓ appmeta.rs mirrors Go constants exactly
-  ✓ No package contains "zecurity.io", "ws-", or "connector" as a string literal
+  ✓ No package contains "zecurity.in", "ws-", or "connector" as a string literal
   ✓ WorkspaceTrustDomain(slug) used everywhere — never inline concatenation
   ✓ ConnectorSPIFFEID used in SignConnectorCert — not fmt.Sprintf inline
   ✓ ConnectorConfig populated in main.go from .env — no hardcoded durations
