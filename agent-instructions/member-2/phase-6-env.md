@@ -111,4 +111,4 @@ Member 2's individual work is complete. Remaining integration work:
 
 1. **When Member 3 merges `spiffe.go`**: update main.go TODOs to wire `UnarySPIFFEInterceptor`
 2. **When Member 3 merges `enrollment.go` + `heartbeat.go`**: register `ConnectorServiceServer` in main.go
-3. **When Member 3 merges `appmeta` additions**: verify `token.go` compiles with real `appmeta.WorkspaceTrustDomain()`
+3. **Member 3's `appmeta` additions are merged**: keep `token.go` using the shared `appmeta.WorkspaceTrustDomain()` helper

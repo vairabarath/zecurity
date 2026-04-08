@@ -12,8 +12,7 @@ Create the enrollment token system: JWT generation for connector enrollment and 
 ## Prerequisites
 
 - **Phase 2** completed (Config struct exists)
-- **Member 3's appmeta additions** committed (needs `appmeta.WorkspaceTrustDomain()` and `appmeta.ControllerIssuer`)
-  - If not yet merged: use `// TODO: replace with appmeta.WorkspaceTrustDomain(slug)` placeholder and hardcode temporarily for compilation
+- **Member 3's appmeta additions** committed (`appmeta.WorkspaceTrustDomain()` and `appmeta.ControllerIssuer` are now available)
 
 ---
 
@@ -210,7 +209,7 @@ cd controller && go build ./internal/connector/...
 - [ ] `VerifyEnrollmentToken` validates signature, expiry, and issuer
 - [ ] `StoreEnrollmentJTI` uses `enrollmentJTIPrefix` + TTL
 - [ ] `BurnEnrollmentJTI` uses pipeline for atomic GET+DEL
-- [ ] `go build ./internal/connector/...` passes (requires appmeta additions from Member 3)
+- [ ] `go build ./internal/connector/...` passes
 
 ---
 
@@ -224,10 +223,7 @@ cd controller && go build ./internal/connector/...
 
 ## Dependency Note
 
-If Member 3's appmeta additions (`WorkspaceTrustDomain`, `ControllerIssuer`) are not yet merged, this file won't compile. Options:
-
-1. **Preferred:** Wait for Member 3's Day 1 commit of `identity.go` additions.
-2. **Fallback:** Temporarily import existing `appmeta.ControllerIssuer` (already exists) and hardcode `WorkspaceTrustDomain` with a `// TODO` comment. Replace once Member 3 merges.
+Member 3's appmeta additions are now available, so this file should import and use `appmeta.WorkspaceTrustDomain()` and `appmeta.ControllerIssuer` directly with no temporary fallback.
 
 ---
 
