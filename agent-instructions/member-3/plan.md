@@ -58,7 +58,7 @@ Add new constants and functions BELOW the existing sprint 1 constants. Do NOT re
 ```go
 // SPIFFE identity constants
 const (
-    SPIFFEGlobalTrustDomain = "zecurity.io"
+    SPIFFEGlobalTrustDomain = "zecurity.in"
     SPIFFEControllerID      = "spiffe://" + SPIFFEGlobalTrustDomain + "/controller/global"
     SPIFFETrustDomainPrefix = "ws-"
     SPIFFETrustDomainSuffix = "." + SPIFFEGlobalTrustDomain
@@ -82,7 +82,7 @@ func ConnectorSPIFFEID(trustDomain, connectorID string) string {
 }
 ```
 
-**Why this is critical:** Member 2 imports `WorkspaceTrustDomain` in token.go. Member 4 mirrors these constants into Rust `appmeta.rs`. Every SPIFFE string in the entire system originates from this file. No other file should contain `"zecurity.io"`, `"ws-"`, or `"connector"` as string literals.
+**Why this is critical:** Member 2 imports `WorkspaceTrustDomain` in token.go. Member 4 mirrors these constants into Rust `appmeta.rs`. Every SPIFFE string in the entire system originates from this file. No other file should contain `"zecurity.in"`, `"ws-"`, or `"connector"` as string literals.
 
 ### Phase 2 — spiffe.go (DAY 1 — COMMIT ALONGSIDE PHASE 1)
 

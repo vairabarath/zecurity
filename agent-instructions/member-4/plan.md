@@ -91,7 +91,7 @@ ALTER TABLE workspaces
     ADD COLUMN IF NOT EXISTS trust_domain TEXT UNIQUE;
 
 UPDATE workspaces
-   SET trust_domain = 'ws-' || slug || '.zecurity.io'
+   SET trust_domain = 'ws-' || slug || '.zecurity.in'
  WHERE trust_domain IS NULL;
 
 ALTER TABLE workspaces
@@ -252,8 +252,8 @@ curl -fsSL https://github.com/yourorg/zecurity/releases/latest/download/connecto
 **`connector/src/appmeta.rs`** — Mirrors `controller/internal/appmeta/identity.go` EXACTLY:
 
 ```rust
-pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.io";
-pub const SPIFFE_CONTROLLER_ID: &str = "spiffe://zecurity.io/controller/global";
+pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.in";
+pub const SPIFFE_CONTROLLER_ID: &str = "spiffe://zecurity.in/controller/global";
 pub const SPIFFE_ROLE_CONNECTOR: &str = "connector";
 pub const PRODUCT_NAME: &str = "ZECURITY";
 pub const PKI_CONNECTOR_CN_PREFIX: &str = "connector-";
