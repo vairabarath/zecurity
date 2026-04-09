@@ -8,6 +8,18 @@ type Query {
   # Returns the workspace the current user belongs to.
   # Scoped to tenant_id from JWT — never crosses workspaces.
   workspace: Workspace!
+
+  # List all remote networks for the current tenant.
+  # Excludes soft-deleted networks.
+  remoteNetworks: [RemoteNetwork!]!
+
+  # Get a single remote network by ID.
+  # Scoped to tenant_id — never crosses tenants.
+  remoteNetwork(id: ID!): RemoteNetwork
+
+  # List all connectors for a given remote network.
+  # Scoped to tenant_id — never crosses tenants.
+  connectors(remoteNetworkId: ID!): [Connector!]!
 }
 
 type Mutation {
@@ -16,6 +28,22 @@ type Mutation {
   # builds and returns the Google OAuth redirect URL.
   # workspaceName is optional — set during signup flow, empty during normal login.
   initiateAuth(provider: String!, workspaceName: String): AuthInitPayload!
+
+  # Create a new remote network for the current tenant.
+  createRemoteNetwork(name: String!, location: NetworkLocation!): RemoteNetwork!
+
+  # Soft-delete a remote network (only if no active connectors remain).
+  deleteRemoteNetwork(id: ID!): Boolean!
+
+  # Generate a one-time enrollment token for a new connector.
+  # Creates the connector row in "pending" status and returns the install command.
+  generateConnectorToken(remoteNetworkId: ID!, connectorName: String!): ConnectorToken!
+
+  # Revoke a connector (set status to "revoked").
+  revokeConnector(id: ID!): Boolean!
+
+  # Delete a connector row (only if status is "pending" or "revoked").
+  deleteConnector(id: ID!): Boolean!
 }
 
 type AuthInitPayload {
@@ -52,4 +80,56 @@ enum WorkspaceStatus {
   ACTIVE
   SUSPENDED
   DELETED
+}
+
+# ============================================================================
+# Connector & Remote Network types
+# ============================================================================
+
+type RemoteNetwork {
+  id:         ID!
+  name:       String!
+  location:   NetworkLocation!
+  status:     RemoteNetworkStatus!
+  connectors: [Connector!]!
+  createdAt:  String!
+}
+
+enum NetworkLocation {
+  HOME
+  OFFICE
+  AWS
+  GCP
+  AZURE
+  OTHER
+}
+
+enum RemoteNetworkStatus {
+  ACTIVE
+  DELETED
+}
+
+type Connector {
+  id:              ID!
+  name:            String!
+  status:          ConnectorStatus!
+  remoteNetworkId: ID!
+  lastSeenAt:      String
+  version:         String
+  hostname:        String
+  publicIp:        String
+  certNotAfter:    String
+  createdAt:       String!
+}
+
+enum ConnectorStatus {
+  PENDING
+  ACTIVE
+  DISCONNECTED
+  REVOKED
+}
+
+type ConnectorToken {
+  connectorId:    ID!
+  installCommand: String!
 }

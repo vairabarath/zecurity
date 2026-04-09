@@ -21,6 +21,31 @@ func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, wo
 	return r.AuthService.InitiateAuth(ctx, provider, workspaceName)
 }
 
+// CreateRemoteNetwork is the resolver for the createRemoteNetwork field.
+func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string, location graph.NetworkLocation) (*graph.RemoteNetwork, error) {
+	panic(fmt.Errorf("not implemented: CreateRemoteNetwork - createRemoteNetwork"))
+}
+
+// DeleteRemoteNetwork is the resolver for the deleteRemoteNetwork field.
+func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (bool, error) {
+	panic(fmt.Errorf("not implemented: DeleteRemoteNetwork - deleteRemoteNetwork"))
+}
+
+// GenerateConnectorToken is the resolver for the generateConnectorToken field.
+func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*graph.ConnectorToken, error) {
+	panic(fmt.Errorf("not implemented: GenerateConnectorToken - generateConnectorToken"))
+}
+
+// RevokeConnector is the resolver for the revokeConnector field.
+func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool, error) {
+	panic(fmt.Errorf("not implemented: RevokeConnector - revokeConnector"))
+}
+
+// DeleteConnector is the resolver for the deleteConnector field.
+func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool, error) {
+	panic(fmt.Errorf("not implemented: DeleteConnector - deleteConnector"))
+}
+
 // Me is the resolver for the me field.
 func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
 	tc := tenant.MustGet(ctx)
@@ -69,6 +94,21 @@ func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error
 	return &ws, nil
 }
 
+// RemoteNetworks is the resolver for the remoteNetworks field.
+func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetwork, error) {
+	panic(fmt.Errorf("not implemented: RemoteNetworks - remoteNetworks"))
+}
+
+// RemoteNetwork is the resolver for the remoteNetwork field.
+func (r *queryResolver) RemoteNetwork(ctx context.Context, id string) (*graph.RemoteNetwork, error) {
+	panic(fmt.Errorf("not implemented: RemoteNetwork - remoteNetwork"))
+}
+
+// Connectors is the resolver for the connectors field.
+func (r *queryResolver) Connectors(ctx context.Context, remoteNetworkID string) ([]*graph.Connector, error) {
+	panic(fmt.Errorf("not implemented: Connectors - connectors"))
+}
+
 // Role is the resolver for the role field.
 func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, error) {
 	role := graph.Role(strings.ToUpper(obj.Role))
@@ -115,3 +155,16 @@ type mutationResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }
 type userResolver struct{ *Resolver }
 type workspaceResolver struct{ *Resolver }
+
+// !!! WARNING !!!
+// The code below was going to be deleted when updating resolvers. It has been copied here so you have
+// one last chance to move it out of harms way if you want. There are two reasons this happens:
+//  - When renaming or deleting a resolver the old code will be put in here. You can safely delete
+//    it when you're done.
+//  - You have helper methods in this file. Move them out to keep these resolver files clean.
+/*
+	func (r *Resolver) RemoteNetwork() graph.RemoteNetworkResolver { return &remoteNetworkResolver{r} }
+func (r *Resolver) Connector() graph.ConnectorResolver { return &connectorResolver{r} }
+type connectorResolver struct{ *Resolver }
+type remoteNetworkResolver struct{ *Resolver }
+*/
