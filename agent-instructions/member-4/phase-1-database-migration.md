@@ -24,7 +24,7 @@ controller/graph/schema.graphqls
 
 - `controller/migrations/001_schema.sql` — Sprint 1 schema, immutable
 - `controller/internal/appmeta/identity.go` — Member 3 owns SPIFFE constants
-- `controller/proto/connector.proto` — Member 2 writes this
+- `controller/proto/connector/connector.proto` — Member 2 writes this
 - `controller/internal/connector/config.go` — Member 2 owns Config struct
 - `controller/internal/connector/token.go` — Member 2 owns token generation
 - `controller/internal/connector/spiffe.go` — Member 3 owns SPIFFE parsing

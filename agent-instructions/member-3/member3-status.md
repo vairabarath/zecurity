@@ -17,14 +17,16 @@ Status legend:
 - `controller/internal/pki/workspace.go`
 - `controller/internal/pki/service.go`
 - `controller/cmd/server/main.go`
+- `controller/proto/connector/connector.proto`
+- `controller/migrations/002_connector_schema.sql`
+- `controller/internal/connector/config.go`
+- `controller/internal/connector/token.go`
 
 ### Missing now
 
 - `controller/internal/connector/spiffe.go`
 - `controller/internal/connector/enrollment.go`
 - `controller/internal/connector/heartbeat.go`
-- `controller/proto/connector.proto`
-- `controller/migrations/002_connector_schema.sql`
 
 ## Phase Status
 
@@ -32,16 +34,16 @@ Status legend:
   SPIFFE constants (`SPIFFEGlobalTrustDomain`, `SPIFFEControllerID`, `SPIFFETrustDomainPrefix/Suffix`, `SPIFFERoleConnector/Agent/Controller`, `PKIConnectorCNPrefix`, `PKIAgentCNPrefix`) and helper functions (`WorkspaceTrustDomain`, `ConnectorSPIFFEID`) added to `identity.go`. Tests written and all pass (5/5). Committed and compiles cleanly. Unblocks Member 2 + Member 4.
 
 - `[-]` Phase 2: partially ready
-  `spiffe.go` can be drafted as a standalone file, but the connector package, proto definitions, and gRPC wiring are not present yet for integration.
+  `spiffe.go` is still missing, but the connector package, proto definitions, and fallback gRPC wiring are now present for integration.
 
-- `[ ]` Phase 3: blocked
-  Enrollment depends on connector proto stubs, token/JTI burn support, and connector DB schema that are not present in the repo now.
+- `[x]` Phase 3: ready now
+  Enrollment can now be implemented against the current shared contract: nested proto path, Member 2 token helpers in `controller/internal/connector/token.go`, and Member 4's connector schema migration.
 
-- `[ ]` Phase 4: blocked
-  Heartbeat depends on connector proto stubs, connector table schema, and connector package structure that are not present now.
+- `[x]` Phase 4: ready now
+  Heartbeat can now be implemented because the connector proto, package structure, and connector DB schema are all present in the repo.
 
-- `[ ]` Phase 5: blocked
-  Disconnect watcher depends on the same connector runtime and DB pieces as Phase 4.
+- `[x]` Phase 5: ready now
+  Disconnect watcher remains unimplemented, but it is no longer externally blocked; it should be built in `heartbeat.go` alongside the heartbeat handler.
 
 - `[x]` Phase 6: ready now
   `workspace.go` and the existing PKI base are present, so `SignConnectorCert` can be added without waiting for proto or migrations.
@@ -49,23 +51,22 @@ Status legend:
 ## Dependency Breakdown
 
 - Blocked by Member 2:
-  `controller/proto/connector.proto` and related token/config/enrollment infrastructure
+  nothing critical at the contract layer now; Member 2's proto/config/token/CA endpoint/main wiring contracts are present
 
 - Blocked by Member 4:
-  `controller/migrations/002_connector_schema.sql` and connector DB/schema support
+  nothing critical at the schema layer now; `controller/migrations/002_connector_schema.sql` is present
 
 ## Next Actionable Order
 
 1. ~~Start now: Phase 1~~ **completed**
-2. Start now: Phase 6
-3. Optional prep only: Phase 2
-4. Wait for dependencies: Phase 3
-5. Wait for dependencies: Phase 4
-6. Wait for dependencies: Phase 5
+2. Start now: Phase 2
+3. Start now: Phase 3
+4. Start now: Phase 4
+5. Start now: Phase 5
+6. Continue: Phase 6
 
 ## Bottom Line
 
 - Completed: Phase 1
-- Fully ready now: Phase 6
-- Partially actionable: Phase 2
-- Blocked right now: Phase 3, Phase 4, and Phase 5
+- Fully ready now: Phase 2, Phase 3, Phase 4, Phase 5, and Phase 6
+- Remaining implementation gap: `spiffe.go`, `enrollment.go`, and `heartbeat.go`

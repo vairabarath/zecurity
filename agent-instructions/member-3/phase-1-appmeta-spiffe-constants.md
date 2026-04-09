@@ -27,7 +27,7 @@ controller/internal/pki/workspace.go      ← add SignConnectorCert method
 
 ### DO NOT TOUCH
 
-- `controller/proto/connector.proto` — Member 2 writes this
+- `controller/proto/connector/connector.proto` — Member 2 writes this
 - `controller/internal/connector/config.go` — Member 2 writes the Config struct
 - `controller/internal/connector/token.go` — Member 2 writes token generation/burn
 - `controller/internal/connector/ca_endpoint.go` — Member 2 writes HTTP CA endpoint

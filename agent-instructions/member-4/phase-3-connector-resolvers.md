@@ -55,9 +55,11 @@ Soft delete (set `status='deleted'`), only if zero non-deleted connectors exist.
 ### `generateConnectorToken`
 
 1. INSERT connector row (status='pending')
-2. Call Member 2's `GenerateEnrollmentToken` from `controller/internal/connector/token.go`
-3. Build install command string
-4. Return `ConnectorToken`
+2. Call Member 2's `GenerateEnrollmentToken` from `controller/internal/connector/token.go` and receive `tokenString, jti, err`
+3. Call Member 2's `StoreEnrollmentJTI(...)`
+4. UPDATE connector row with `enrollment_token_jti = jti`
+5. Build install command string using `tokenString`
+6. Return `ConnectorToken`
 
 **Install command format:**
 
@@ -95,7 +97,7 @@ Follow the same patterns as existing resolvers in `schema.resolvers.go` for enum
 
 1. **Every query includes explicit `tenant_id` conditions.** No implicit tenant scoping.
 2. **Follow existing resolver patterns** from `schema.resolvers.go`.
-3. **Coordinate with Member 2** on the `GenerateEnrollmentToken` function signature.
+3. **Use Member 2's normalized token contract.** `GenerateEnrollmentToken` returns `(tokenString, jti, err)`, and `VerifyEnrollmentToken` is already consumed by Member 3 on the backend side.
 
 ---
 

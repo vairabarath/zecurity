@@ -51,11 +51,11 @@ Required dependencies:
 
 ## `connector/build.rs` — Proto Compilation
 
-Uses `tonic-build` to compile Member 2's `controller/proto/connector.proto` into Rust stubs.
+Uses `tonic-build` to compile Member 2's `controller/proto/connector/connector.proto` into Rust stubs.
 
 ```rust
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("../controller/proto/connector.proto")?;
+    tonic_build::compile_protos("../controller/proto/connector/connector.proto")?;
     Ok(())
 }
 ```

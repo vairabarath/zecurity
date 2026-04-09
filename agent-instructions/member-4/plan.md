@@ -34,7 +34,7 @@ connector/src/heartbeat.rs
 connector/src/crypto.rs
 connector/src/tls.rs
 connector/src/updater.rs
-connector/proto/                    ← symlink or copy of controller/proto/connector.proto
+connector/proto/                    ← symlink or copy of controller/proto/connector/connector.proto
 connector/systemd/zecurity-connector.service
 connector/systemd/zecurity-connector-update.service
 connector/systemd/zecurity-connector-update.timer
@@ -59,7 +59,7 @@ connector/docker-compose.yml        ← connector-side compose example (NOT cont
 ## DO NOT TOUCH — Conflict Boundaries
 
 - **`controller/internal/appmeta/identity.go`** — Member 3 owns all SPIFFE constants. You MIRROR them into Rust `appmeta.rs` but never modify the Go source.
-- **`controller/proto/connector.proto`** — Member 2 writes this. You consume it via `tonic-build` in `build.rs`.
+- **`controller/proto/connector/connector.proto`** — Member 2 writes this. You consume it via `tonic-build` in `build.rs`.
 - **`controller/internal/connector/config.go`** — Member 2 owns the Config struct.
 - **`controller/internal/connector/token.go`** — Member 2 owns token generation/burn.
 - **`controller/internal/connector/spiffe.go`** — Member 3 owns SPIFFE parsing + interceptor.
@@ -225,7 +225,7 @@ All resolvers use tenant-scoped queries (explicit `tenant_id` in WHERE clauses),
 
 - `createRemoteNetwork` — INSERT into remote_networks with tenant_id from context
 - `deleteRemoteNetwork` — Soft delete (set status='deleted'), only if zero non-deleted connectors exist
-- `generateConnectorToken` — INSERT connector row (status='pending'), call Member 2's `GenerateEnrollmentToken`, build install command string, return `ConnectorToken`
+- `generateConnectorToken` — INSERT connector row (status='pending'), call Member 2's `GenerateEnrollmentToken`, store the JTI, build install command string, return `ConnectorToken`
 - `revokeConnector` — UPDATE status='revoked' WHERE tenant_id matches
 - `deleteConnector` — DELETE connector row WHERE tenant_id matches (only if status is 'pending' or 'revoked')
 
@@ -414,7 +414,7 @@ Day 3+: Phase 7 (updater) — independent, can be done anytime
 
 3. **You consume the proto, you don't write it.** Member 2 writes `connector.proto`. You reference it via `tonic-build` in `build.rs`. If you need a proto change, ask Member 2 — don't modify the proto yourself.
 
-4. **Your resolvers call Member 2's token function.** The `generateConnectorToken` resolver calls `connector.GenerateEnrollmentToken(...)` from Member 2's `token.go`. You build the install command string and return the `ConnectorToken` response. Coordinate the function signature with Member 2.
+4. **Your resolvers call Member 2's token function.** The `generateConnectorToken` resolver calls `connector.GenerateEnrollmentToken(...)` from Member 2's `token.go` and receives `(tokenString, jti, err)`. Then it must call `connector.StoreEnrollmentJTI(...)`, persist `enrollment_token_jti = jti` on the connector row, build the install command string using `tokenString`, and return the `ConnectorToken` response.
 
 5. **Do NOT modify `controller/docker-compose.yml`.** That's the sprint 1 dev infrastructure (Postgres + Redis). Your Docker Compose file for the connector goes in `connector/docker-compose.yml` — a separate file for connector deployment.
 

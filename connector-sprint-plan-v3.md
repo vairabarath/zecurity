@@ -457,7 +457,7 @@ SPIFFE lives in the X.509 certificate — proto messages are unchanged from v1
 except the addition of `re_enroll` to `HeartbeatResponse`.
 
 ```protobuf
-// controller/proto/connector.proto
+// controller/proto/connector/connector.proto
 syntax = "proto3";
 
 package connector;
@@ -696,18 +696,24 @@ Never concatenated inline. The `iss` claim must equal `appmeta.ControllerIssuer`
 generateConnectorToken mutation:
   1. INSERT connector row (status='pending', name, remote_network_id, tenant_id)
   2. Load workspace → trust_domain = appmeta.WorkspaceTrustDomain(workspace.Slug)
-  3. Generate random jti (UUID v4)
+  3. Call GenerateEnrollmentToken(...) → receive tokenString, jti, err
   4. SET enrollment:jti:<jti> <connector_id> Redis TTL=cfg.EnrollmentTokenTTL
-  5. Sign JWT:
+  5. Persist enrollment_token_jti = jti on the connector row
+  6. Build install command using tokenString
+  7. Return ConnectorToken { connectorId, installCommand }
+
+GenerateEnrollmentToken helper:
+  - returns (tokenString, jti, err)
+  - lives in controller/internal/connector/token.go
+  - shared verification helper VerifyEnrollmentToken(...) is also defined there
+
+JWT signing inside GenerateEnrollmentToken:
        iss = appmeta.ControllerIssuer
        exp = now + cfg.EnrollmentTokenTTL
        all claims including trust_domain
-  6. Build install command string
-  7. Return ConnectorToken { connectorId, installCommand }
-  JWT never stored anywhere — jti is the only handle in Redis
 
 Enroll gRPC handler:
-  1. Verify JWT signature (cfg.JWTSecret), exp, iss == appmeta.ControllerIssuer
+  1. Call VerifyEnrollmentToken(...) from controller/internal/connector/token.go
   2. Extract jti, connector_id, workspace_id, trust_domain from claims
   3. GET+DEL jti from Redis atomically
      NOT FOUND → PERMISSION_DENIED ("token expired or already used")
@@ -731,6 +737,15 @@ curl -fsSL https://github.com/yourorg/zecurity/releases/latest/download/connecto
 ---
 
 ## SPIFFE Core — Member 3 (new file: `spiffe.go`, written Day 1)
+
+## Contract Normalization Note
+
+The overall connector sprint architecture remains unchanged, but the shared implementation contracts are normalized to the current branch state:
+
+- canonical proto path: `controller/proto/connector/connector.proto`
+- token API: `GenerateEnrollmentToken(...) (tokenString, jti, err)`
+- token verification remains a shared helper in `controller/internal/connector/token.go`
+- CA endpoint remains DB-pool based in `controller/internal/connector/ca_endpoint.go`
 
 All SPIFFE logic lives in this one file.
 No other Go file parses SPIFFE IDs or duplicates trust domain validation.

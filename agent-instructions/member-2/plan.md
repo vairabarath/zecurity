@@ -11,7 +11,7 @@ You own the proto definition (Day 1 blocker for Member 3 and 4), the connector c
 ### New files you create
 
 ```
-controller/proto/connector.proto
+controller/proto/connector/connector.proto
 controller/internal/connector/config.go
 controller/internal/connector/token.go
 controller/internal/connector/ca_endpoint.go
@@ -49,7 +49,7 @@ controller/.env                      ← add new env vars for local dev
 
 This file unblocks Member 3 (Go stub generation) and Member 4 (Rust tonic-build). Commit it before doing anything else.
 
-**File: `controller/proto/connector.proto`**
+**File: `controller/proto/connector/connector.proto`**
 
 ```protobuf
 syntax = "proto3";
@@ -114,7 +114,7 @@ This struct is the single source of tunable values. Member 3's handlers receive 
 
 Implements the JWT enrollment token used by `generateConnectorToken` GraphQL mutation (resolver is Member 4's, but it calls your function).
 
-**Function: `GenerateEnrollmentToken(cfg Config, connectorID, workspaceID, workspaceSlug, caFingerprint string) (string, error)`**
+**Function: `GenerateEnrollmentToken(cfg Config, connectorID, workspaceID, workspaceSlug, caFingerprint string) (tokenString string, jti string, err error)`**
 
 JWT payload:
 ```json
@@ -138,15 +138,22 @@ Critical rules:
 - On token generation: `SET enrollment:jti:<jti> <connector_id>` with TTL = `cfg.EnrollmentTokenTTL`
 - On enrollment (called by Member 3's handler): `GET+DEL enrollment:jti:<jti>` atomically. Not found = token expired or already used.
 
-Expose both functions:
+Expose all shared token helpers:
+- `VerifyEnrollmentToken(cfg Config, tokenString string) (*EnrollmentClaims, error)`
 - `StoreEnrollmentJTI(ctx, redis, jti, connectorID, ttl)`
 - `BurnEnrollmentJTI(ctx, redis, jti) (connectorID string, found bool, err error)`
+
+Member 4's resolver uses the returned `jti` to:
+- store `enrollment:jti:<jti>` in Redis
+- persist `enrollment_token_jti = jti` on the connector row
+
+`VerifyEnrollmentToken` is treated as a shared helper in `token.go` that Member 3's enrollment handler consumes.
 
 ### Phase 4 — CA Certificate HTTP Endpoint
 
 **File: `controller/internal/connector/ca_endpoint.go`**
 
-**Handler: `CAEndpointHandler(pkiSvc pki.Service) http.HandlerFunc`**
+**Handler: `CAEndpointHandler(pool *pgxpool.Pool) http.HandlerFunc`**
 
 - `GET /ca.crt`
 - Returns the Intermediate CA certificate as PEM
@@ -180,7 +187,7 @@ Add alongside existing sprint 1 wiring:
 
 3. **HTTP route for `/ca.crt`** — register on the existing HTTP mux:
    ```go
-   mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(pkiSvc))
+   mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
    ```
 
 4. **gRPC server startup** — wire the SPIFFE interceptor (from Member 3) and register the service:
@@ -242,6 +249,6 @@ Day 2:  Phase 4 (ca_endpoint.go) — needs PKI service interface stable
 
 4. **Token generation vs. token verification.** You generate and store the enrollment JWT + Redis jti. Member 3's enrollment handler verifies the JWT and calls your `BurnEnrollmentJTI` to consume the jti. Keep these responsibilities clean — don't verify in token.go, don't generate in enrollment.go.
 
-5. **The gRPC server in main.go depends on Member 3's interceptor.** If `spiffe.go` isn't merged yet, you can still write the wiring code with a clear TODO comment. Don't block your own progress, but don't stub out the interceptor yourself — that's Member 3's job.
+5. **The gRPC server in main.go depends on Member 3's interceptor and runtime files.** If `spiffe.go`, `enrollment.go`, or `heartbeat.go` aren't merged yet, keep fallback wiring with clear TODO comments. Don't block your own progress, but don't implement Member 3's runtime files yourself.
 
 6. **Do not modify existing sprint 1 auth code.** `auth/service.go`, `auth/callback.go`, `auth/refresh.go`, etc. are unchanged. The `JWT_SECRET` is reused but the auth package itself is not modified.

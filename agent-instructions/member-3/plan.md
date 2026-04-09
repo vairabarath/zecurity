@@ -27,7 +27,7 @@ controller/internal/pki/workspace.go      ← add SignConnectorCert method
 
 ## DO NOT TOUCH — Conflict Boundaries
 
-- **`controller/proto/connector.proto`** — Member 2 writes this. You consume the generated stubs.
+- **`controller/proto/connector/connector.proto`** — Member 2 writes this. You consume the generated stubs.
 - **`controller/internal/connector/config.go`** — Member 2 writes the Config struct. You receive it as a parameter; never create your own config.
 - **`controller/internal/connector/token.go`** — Member 2 writes token generation/burn. You call `BurnEnrollmentJTI` in your enrollment handler; never reimplement it.
 - **`controller/internal/connector/ca_endpoint.go`** — Member 2 writes the HTTP CA endpoint.
@@ -126,7 +126,7 @@ Implements the `Enroll` gRPC handler.
 
 **Flow:**
 
-1. Verify JWT signature using `cfg.JWTSecret`, check `exp`, verify `iss == appmeta.ControllerIssuer`
+1. Call Member 2's `VerifyEnrollmentToken(cfg, request.enrollment_token)` to verify JWT signature, `exp`, and `iss == appmeta.ControllerIssuer`
 2. Extract `jti`, `connector_id`, `workspace_id`, `trust_domain` from JWT claims
 3. Call Member 2's `BurnEnrollmentJTI(ctx, redis, jti)` — atomic GET+DEL
    - Not found → `codes.PermissionDenied` ("token expired or already used")
@@ -218,7 +218,7 @@ Day 1:  Phase 1 (appmeta constants) — COMMIT FIRST, unblocks Member 2 + 4
         Phase 6 (SignConnectorCert) — can start, depends only on existing PKI code
 
 Day 2:  Phase 3 (enrollment.go) — needs:
-          - Member 2's proto stubs generated (from connector.proto)
+          - Member 2's proto stubs generated (from controller/proto/connector/connector.proto)
           - Member 2's BurnEnrollmentJTI function
           - Member 4's DB migration (connector table schema)
         Phase 4 + 5 (heartbeat + watcher) — needs:
@@ -234,7 +234,9 @@ Day 2:  Phase 3 (enrollment.go) — needs:
 
 2. **spiffe.go is the ONLY file that parses SPIFFE IDs.** Do not duplicate `parseSPIFFEID` logic in enrollment.go or heartbeat.go. The interceptor parses and injects into context; handlers read from context.
 
-3. **You call Member 2's token functions, not the reverse.** Your enrollment handler calls `BurnEnrollmentJTI` from Member 2's `token.go`. You do not implement token storage. If you need to verify the JWT signature in enrollment.go, do it locally (it's just HMAC verification) but coordinate the signing/verification key handling with Member 2.
+3. **You call Member 2's token functions, not the reverse.** Your enrollment handler calls `VerifyEnrollmentToken` and `BurnEnrollmentJTI` from Member 2's `token.go`. You do not implement token storage, and shared JWT verification stays in Member 2's token helper layer.
+
+9. **`heartbeat.go` remains a critical runtime file.** Full connector backend completion still depends on `controller/internal/connector/heartbeat.go` landing with the heartbeat handler and disconnect watcher.
 
 4. **Config comes from Member 2.** Your handlers receive `connector.Config` as a struct parameter. Never read environment variables directly in handler code. If you need a new config field, ask Member 2 to add it to the struct.
 
