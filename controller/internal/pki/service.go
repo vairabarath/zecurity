@@ -11,6 +11,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// x509 and time are used in the Service interface method signatures.
+
 // Service is the public PKI contract used by the rest of the controller.
 // The application should depend on this interface rather than concrete CA
 // implementation details.
@@ -19,6 +21,11 @@ type Service interface {
 	// It returns encrypted key material and the signed certificate, but does
 	// not persist them. The bootstrap transaction stores the result in the DB.
 	GenerateWorkspaceCA(ctx context.Context, tenantID string) (*WorkspaceCAResult, error)
+
+	// SignConnectorCert signs a connector's CSR with the workspace CA, producing
+	// a short-lived client certificate with the connector's SPIFFE ID as URI SAN.
+	// Called by: enrollment.go (Phase 3, Step 9)
+	SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ConnectorCertResult, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.
@@ -30,6 +37,15 @@ type WorkspaceCAResult struct {
 	KeyAlgorithm        string
 	NotBefore           time.Time
 	NotAfter            time.Time
+}
+
+// ConnectorCertResult holds the output of SignConnectorCert.
+// Called by: enrollment.go (Phase 3) to build the EnrollResponse.
+type ConnectorCertResult struct {
+	CertificatePEM string
+	Serial         string
+	NotBefore      time.Time
+	NotAfter       time.Time
 }
 
 // serviceImpl is the concrete PKI service used inside the controller.

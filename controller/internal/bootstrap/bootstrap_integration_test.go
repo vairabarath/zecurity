@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"net/url"
 	"os"
@@ -300,12 +301,20 @@ func (f failingPKIService) GenerateWorkspaceCA(ctx context.Context, tenantID str
 	return nil, f.err
 }
 
+func (f failingPKIService) SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*pki.ConnectorCertResult, error) {
+	return nil, fmt.Errorf("not implemented in test stub")
+}
+
 type stubPKIService struct {
 	result *pki.WorkspaceCAResult
 }
 
 func (s stubPKIService) GenerateWorkspaceCA(ctx context.Context, tenantID string) (*pki.WorkspaceCAResult, error) {
 	return s.result, nil
+}
+
+func (s stubPKIService) SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*pki.ConnectorCertResult, error) {
+	return nil, fmt.Errorf("not implemented in test stub")
 }
 
 func setupBootstrapTestDB(t *testing.T) (context.Context, *pgxpool.Pool) {
