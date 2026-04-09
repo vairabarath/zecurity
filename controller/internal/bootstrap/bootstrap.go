@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/appmeta" // WorkspaceTrustDomain for bootstrap INSERT
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
@@ -83,14 +84,19 @@ func (s *Service) runBootstrapTransaction(
 
 	slug := slugify(name)
 
+	// SPIFFE trust domain derived from workspace slug.
+	// Required since migration 002 makes trust_domain NOT NULL.
+	trustDomain := appmeta.WorkspaceTrustDomain(slug)
+
 	var tenantID string
 	err = tx.QueryRow(
 		ctx,
-		`INSERT INTO workspaces (slug, name, status)
-		 VALUES ($1, $2, 'provisioning')
+		`INSERT INTO workspaces (slug, name, status, trust_domain)
+		 VALUES ($1, $2, 'provisioning', $3)
 		 RETURNING id`,
 		slug,
 		name,
+		trustDomain,
 	).Scan(&tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("insert workspace: %w", err)
