@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
-	"google.golang.org/grpc"
+	"github.com/redis/go-redis/v9"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -22,6 +25,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	pb "github.com/yourorg/ztna/controller/proto/connector"
+	"google.golang.org/grpc"
 )
 
 func main() {
@@ -95,17 +100,32 @@ func main() {
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 
+	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
+	if err != nil {
+		log.Fatalf("connector redis init: %v", err)
+	}
+	defer connectorRedis.Close()
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
 	}
 
-	grpcServer := grpc.NewServer(
-		// TODO: Add TLS credentials once controller TLS cert is configured.
-		// TODO: Wire UnarySPIFFEInterceptor once Member 3's spiffe.go lands.
-	)
+	// TODO: Add TLS credentials once controller TLS cert is configured.
+	// TODO: Wire UnarySPIFFEInterceptor with TLS credentials:
+	// validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorWorkspaceStore{pool: db.Pool})
+	// grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator))
+	grpcServer := grpc.NewServer()
 
-	// TODO: Register ConnectorServiceServer once Member 3's handler service lands.
+	connectorSvc := &connector.EnrollmentHandler{
+		Cfg:        connectorCfg,
+		Pool:       db.Pool,
+		Redis:      connectorRedis,
+		PKIService: pkiService,
+	}
+	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
+
+	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 
 	go func() {
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
@@ -171,6 +191,44 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 	}
 
 	return d
+}
+
+func newConnectorRedisClient(ctx context.Context, redisURL string) (*redis.Client, error) {
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis URL: %w", err)
+	}
+
+	rdb := redis.NewClient(opts)
+
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		_ = rdb.Close()
+		return nil, fmt.Errorf("ping redis: %w", err)
+	}
+
+	return rdb, nil
+}
+
+type connectorWorkspaceStore struct {
+	pool *pgxpool.Pool
+}
+
+func (s connectorWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string) (*connector.WorkspaceLookup, error) {
+	var workspace connector.WorkspaceLookup
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, status FROM workspaces WHERE trust_domain = $1`,
+		domain,
+	).Scan(&workspace.ID, &workspace.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get workspace by trust domain: %w", err)
+	}
+
+	return &workspace, nil
 }
 
 func loadOptionalEnv() {
