@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,12 +63,77 @@ func Init(ctx context.Context, pool *pgxpool.Pool) (Service, error) {
 	}
 
 	if err := svc.initRootCA(ctx); err != nil {
-		return nil, fmt.Errorf("init root CA: %w", err)
+		if recovered, recoveryErr := svc.tryRecoverFromSecretMismatch(ctx, err); recoveryErr != nil {
+			return nil, recoveryErr
+		} else if !recovered {
+			return nil, fmt.Errorf("init root CA: %w", err)
+		}
 	}
 
 	if err := svc.initIntermediateCA(ctx); err != nil {
-		return nil, fmt.Errorf("init intermediate CA: %w", err)
+		if recovered, recoveryErr := svc.tryRecoverFromSecretMismatch(ctx, err); recoveryErr != nil {
+			return nil, recoveryErr
+		} else if !recovered {
+			return nil, fmt.Errorf("init intermediate CA: %w", err)
+		}
 	}
 
 	return svc, nil
+}
+
+func (s *serviceImpl) tryRecoverFromSecretMismatch(ctx context.Context, initErr error) (bool, error) {
+	if !isSecretMismatchError(initErr) {
+		return false, nil
+	}
+
+	canReset, err := s.canResetPKI(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check PKI recovery safety after secret mismatch: %w", err)
+	}
+
+	if !canReset {
+		return false, fmt.Errorf(
+			"pki secret mismatch: stored CA key material was encrypted with a different PKI_MASTER_SECRET, and controller PKI cannot be regenerated because workspaces already exist: %w",
+			initErr,
+		)
+	}
+
+	if err := s.resetPKI(ctx); err != nil {
+		return false, fmt.Errorf("reset PKI after secret mismatch: %w", err)
+	}
+
+	if err := s.initRootCA(ctx); err != nil {
+		return false, fmt.Errorf("re-init root CA after secret mismatch reset: %w", err)
+	}
+
+	if err := s.initIntermediateCA(ctx); err != nil {
+		return false, fmt.Errorf("re-init intermediate CA after secret mismatch reset: %w", err)
+	}
+
+	return true, nil
+}
+
+func isSecretMismatchError(err error) bool {
+	return strings.Contains(err.Error(), "cipher: message authentication failed")
+}
+
+func (s *serviceImpl) canResetPKI(ctx context.Context) (bool, error) {
+	var workspaceCount int
+	err := s.pool.QueryRow(ctx, "SELECT COUNT(*) FROM workspaces").Scan(&workspaceCount)
+	if err != nil {
+		return false, fmt.Errorf("count workspaces: %w", err)
+	}
+
+	return workspaceCount == 0, nil
+}
+
+func (s *serviceImpl) resetPKI(ctx context.Context) error {
+	s.intermediateKey = nil
+
+	_, err := s.pool.Exec(ctx, "TRUNCATE TABLE ca_intermediate, ca_root")
+	if err != nil {
+		return fmt.Errorf("truncate controller CA tables: %w", err)
+	}
+
+	return nil
 }

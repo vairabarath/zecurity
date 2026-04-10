@@ -82,15 +82,17 @@ func (s *Service) runBootstrapTransaction(
 	defer tx.Rollback(ctx)
 
 	slug := slugify(name)
+	trustDomain := "ws-" + slug + ".zecurity.in"
 
 	var tenantID string
 	err = tx.QueryRow(
 		ctx,
-		`INSERT INTO workspaces (slug, name, status)
-		 VALUES ($1, $2, 'provisioning')
+		`INSERT INTO workspaces (slug, name, status, trust_domain)
+		 VALUES ($1, $2, 'provisioning', $3)
 		 RETURNING id`,
 		slug,
 		name,
+		trustDomain,
 	).Scan(&tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("insert workspace: %w", err)
