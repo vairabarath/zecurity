@@ -83,6 +83,7 @@ func (s *Service) runBootstrapTransaction(
 	defer tx.Rollback(ctx)
 
 	slug := slugify(name)
+	trustDomain := "ws-" + slug + ".zecurity.in"
 
 	// SPIFFE trust domain derived from workspace slug.
 	// Required since migration 002 makes trust_domain NOT NULL.
