@@ -7,14 +7,119 @@ package resolvers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/model"
+	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/models"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
+
+const rfc3339 = "2006-01-02T15:04:05Z07:00"
+
+func fmtTime(t time.Time) string { return t.Format(rfc3339) }
+
+func fmtTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format(rfc3339)
+	return &s
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRemoteNetwork(s scanner) (*graph.RemoteNetwork, error) {
+	var (
+		rn        graph.RemoteNetwork
+		location  string
+		status    string
+		createdAt time.Time
+	)
+	if err := s.Scan(&rn.ID, &rn.Name, &location, &status, &createdAt); err != nil {
+		return nil, err
+	}
+	rn.Location = graph.NetworkLocation(strings.ToUpper(location))
+	if !rn.Location.IsValid() {
+		return nil, fmt.Errorf("invalid network location: %q", location)
+	}
+	rn.Status = graph.RemoteNetworkStatus(strings.ToUpper(status))
+	if !rn.Status.IsValid() {
+		return nil, fmt.Errorf("invalid remote network status: %q", status)
+	}
+	rn.CreatedAt = fmtTime(createdAt)
+	rn.Connectors = []*graph.Connector{}
+	return &rn, nil
+}
+
+func scanConnector(s scanner) (*graph.Connector, error) {
+	var (
+		c            graph.Connector
+		status       string
+		lastSeenAt   *time.Time
+		certNotAfter *time.Time
+		createdAt    time.Time
+	)
+	if err := s.Scan(
+		&c.ID, &c.Name, &status, &c.RemoteNetworkID,
+		&lastSeenAt, &c.Version, &c.Hostname, &c.PublicIP,
+		&certNotAfter, &createdAt,
+	); err != nil {
+		return nil, err
+	}
+	c.Status = graph.ConnectorStatus(strings.ToUpper(status))
+	if !c.Status.IsValid() {
+		return nil, fmt.Errorf("invalid connector status: %q", status)
+	}
+	c.CreatedAt = fmtTime(createdAt)
+	c.LastSeenAt = fmtTimePtr(lastSeenAt)
+	c.CertNotAfter = fmtTimePtr(certNotAfter)
+	return &c, nil
+}
+
+func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetworkID string) ([]*graph.Connector, error) {
+	rows, err := r.TenantDB.Query(ctx,
+		`SELECT id, name, status, remote_network_id,
+		        last_heartbeat_at, version, hostname, public_ip,
+		        cert_not_after, created_at
+		   FROM connectors
+		  WHERE remote_network_id = $1
+		    AND tenant_id = $2
+		  ORDER BY created_at DESC`,
+		remoteNetworkID, tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*graph.Connector
+	for rows.Next() {
+		c, err := scanConnector(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []*graph.Connector{}
+	}
+	return result, nil
+}
 
 // InitiateAuth is the resolver for the initiateAuth field.
 func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error) {
@@ -23,27 +128,195 @@ func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, wo
 
 // CreateRemoteNetwork is the resolver for the createRemoteNetwork field.
 func (r *mutationResolver) CreateRemoteNetwork(ctx context.Context, name string, location graph.NetworkLocation) (*graph.RemoteNetwork, error) {
-	panic(fmt.Errorf("not implemented: CreateRemoteNetwork - createRemoteNetwork"))
+	tc := tenant.MustGet(ctx)
+
+	rn, err := scanRemoteNetwork(r.TenantDB.QueryRow(ctx,
+		`INSERT INTO remote_networks (tenant_id, name, location)
+		 VALUES ($1, $2, $3)
+		 RETURNING id, name, location, status, created_at`,
+		tc.TenantID, name, strings.ToLower(string(location)),
+	))
+	if err != nil {
+		return nil, fmt.Errorf("create remote network: %w", err)
+	}
+
+	return rn, nil
 }
 
 // DeleteRemoteNetwork is the resolver for the deleteRemoteNetwork field.
 func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (bool, error) {
-	panic(fmt.Errorf("not implemented: DeleteRemoteNetwork - deleteRemoteNetwork"))
+	tc := tenant.MustGet(ctx)
+
+	var discardedID string
+	err := r.TenantDB.QueryRow(ctx,
+		`UPDATE remote_networks
+		    SET status = 'deleted', updated_at = NOW()
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status = 'active'
+		    AND NOT EXISTS (
+		        SELECT 1 FROM connectors
+		         WHERE remote_network_id = $1
+		           AND tenant_id = $2
+		           AND status NOT IN ('pending', 'revoked')
+		    )
+		 RETURNING id`,
+		id, tc.TenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("delete remote network: network not found, already deleted, or has active connectors")
+		}
+		return false, fmt.Errorf("delete remote network: %w", err)
+	}
+
+	return true, nil
 }
 
 // GenerateConnectorToken is the resolver for the generateConnectorToken field.
 func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*graph.ConnectorToken, error) {
-	panic(fmt.Errorf("not implemented: GenerateConnectorToken - generateConnectorToken"))
+	tc := tenant.MustGet(ctx)
+
+	// 1. Verify remote network exists and is active.
+	var rnStatus string
+	err := r.TenantDB.QueryRow(ctx,
+		`SELECT status FROM remote_networks WHERE id = $1 AND tenant_id = $2`,
+		remoteNetworkID, tc.TenantID,
+	).Scan(&rnStatus)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: remote network not found: %w", err)
+	}
+	if rnStatus != "active" {
+		return nil, fmt.Errorf("generate connector token: remote network is %q, expected active", rnStatus)
+	}
+
+	// 2. Insert connector row in pending status.
+	var connectorID string
+	err = r.TenantDB.QueryRow(ctx,
+		`INSERT INTO connectors (tenant_id, remote_network_id, name)
+		 VALUES ($1, $2, $3)
+		 RETURNING id`,
+		tc.TenantID, remoteNetworkID, connectorName,
+	).Scan(&connectorID)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: insert connector: %w", err)
+	}
+
+	// 3. Get workspace slug for trust domain (not tenant-scoped).
+	var workspaceSlug string
+	err = r.Pool.QueryRow(ctx,
+		`SELECT slug FROM workspaces WHERE id = $1`,
+		tc.TenantID,
+	).Scan(&workspaceSlug)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: workspace not found: %w", err)
+	}
+
+	// 4. Load intermediate CA cert for fingerprint (not tenant-scoped).
+	var certPEM string
+	err = r.Pool.QueryRow(ctx,
+		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
+	).Scan(&certPEM)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: load intermediate CA: %w", err)
+	}
+
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("generate connector token: failed to decode intermediate CA PEM")
+	}
+	fingerprint := sha256.Sum256(block.Bytes)
+	caFingerprint := hex.EncodeToString(fingerprint[:])
+
+	// 5. Generate enrollment JWT.
+	tokenString, jti, err := connector.GenerateEnrollmentToken(
+		r.ConnectorCfg,
+		connectorID,
+		tc.TenantID,
+		workspaceSlug,
+		caFingerprint,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: %w", err)
+	}
+
+	// 6. Store JTI in Redis for single-use verification.
+	err = connector.StoreEnrollmentJTI(ctx, r.Redis, jti, connectorID, r.ConnectorCfg.EnrollmentTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: store jti: %w", err)
+	}
+
+	// 7. Record JTI on connector row.
+	err = r.TenantDB.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1, updated_at = NOW()
+		  WHERE id = $2 AND tenant_id = $3`,
+		jti, connectorID, tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("generate connector token: save jti: %w", err)
+	}
+
+	// 8. Build install command.
+	controllerAddr := os.Getenv("CONTROLLER_ADDR")
+	if controllerAddr == "" {
+		controllerAddr = "localhost:" + r.ConnectorCfg.GRPCPort
+	}
+	installCmd := fmt.Sprintf(
+		"curl -fsSL https://github.com/yourorg/zecurity/releases/latest/download/connector-install.sh | sudo CONTROLLER_ADDR=%s ENROLLMENT_TOKEN=%s bash",
+		controllerAddr, tokenString,
+	)
+
+	return &graph.ConnectorToken{
+		ConnectorID:    connectorID,
+		InstallCommand: installCmd,
+	}, nil
 }
 
 // RevokeConnector is the resolver for the revokeConnector field.
 func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool, error) {
-	panic(fmt.Errorf("not implemented: RevokeConnector - revokeConnector"))
+	tc := tenant.MustGet(ctx)
+
+	var discardedID string
+	err := r.TenantDB.QueryRow(ctx,
+		`UPDATE connectors
+		    SET status = 'revoked', updated_at = NOW()
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status IN ('active', 'disconnected')
+		 RETURNING id`,
+		id, tc.TenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("revoke connector: connector not found or not in revocable status")
+		}
+		return false, fmt.Errorf("revoke connector: %w", err)
+	}
+
+	return true, nil
 }
 
 // DeleteConnector is the resolver for the deleteConnector field.
 func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool, error) {
-	panic(fmt.Errorf("not implemented: DeleteConnector - deleteConnector"))
+	tc := tenant.MustGet(ctx)
+
+	var discardedID string
+	err := r.TenantDB.QueryRow(ctx,
+		`DELETE FROM connectors
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status IN ('pending', 'revoked')
+		 RETURNING id`,
+		id, tc.TenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("delete connector: connector not found or must be revoked before deletion")
+		}
+		return false, fmt.Errorf("delete connector: %w", err)
+	}
+
+	return true, nil
 }
 
 // Me is the resolver for the me field.
@@ -96,17 +369,77 @@ func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error
 
 // RemoteNetworks is the resolver for the remoteNetworks field.
 func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetwork, error) {
-	panic(fmt.Errorf("not implemented: RemoteNetworks - remoteNetworks"))
+	tc := tenant.MustGet(ctx)
+
+	rows, err := r.TenantDB.Query(ctx,
+		`SELECT id, name, location, status, created_at
+		   FROM remote_networks
+		  WHERE tenant_id = $1
+		    AND status = 'active'
+		  ORDER BY created_at DESC`,
+		tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("remote networks: %w", err)
+	}
+	defer rows.Close()
+
+	var networks []*graph.RemoteNetwork
+	for rows.Next() {
+		rn, err := scanRemoteNetwork(rows)
+		if err != nil {
+			return nil, fmt.Errorf("remote networks: scan: %w", err)
+		}
+		networks = append(networks, rn)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("remote networks: rows: %w", err)
+	}
+	if networks == nil {
+		networks = []*graph.RemoteNetwork{}
+	}
+
+	return networks, nil
 }
 
 // RemoteNetwork is the resolver for the remoteNetwork field.
 func (r *queryResolver) RemoteNetwork(ctx context.Context, id string) (*graph.RemoteNetwork, error) {
-	panic(fmt.Errorf("not implemented: RemoteNetwork - remoteNetwork"))
+	tc := tenant.MustGet(ctx)
+
+	rn, err := scanRemoteNetwork(r.TenantDB.QueryRow(ctx,
+		`SELECT id, name, location, status, created_at
+		   FROM remote_networks
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status = 'active'`,
+		id, tc.TenantID,
+	))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("remote network: %w", err)
+	}
+
+	connectors, err := r.loadConnectors(ctx, tc.TenantID, id)
+	if err != nil {
+		return nil, fmt.Errorf("remote network: load connectors: %w", err)
+	}
+	rn.Connectors = connectors
+
+	return rn, nil
 }
 
 // Connectors is the resolver for the connectors field.
 func (r *queryResolver) Connectors(ctx context.Context, remoteNetworkID string) ([]*graph.Connector, error) {
-	panic(fmt.Errorf("not implemented: Connectors - connectors"))
+	tc := tenant.MustGet(ctx)
+
+	connectors, err := r.loadConnectors(ctx, tc.TenantID, remoteNetworkID)
+	if err != nil {
+		return nil, fmt.Errorf("connectors: %w", err)
+	}
+
+	return connectors, nil
 }
 
 // Role is the resolver for the role field.

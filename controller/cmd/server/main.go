@@ -66,11 +66,29 @@ func main() {
 		log.Fatalf("auth init: %v", err)
 	}
 
+	connectorCfg := connector.Config{
+		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
+		EnrollmentTokenTTL:  mustDuration("CONNECTOR_ENROLLMENT_TOKEN_TTL", 24*time.Hour),
+		HeartbeatInterval:   mustDuration("CONNECTOR_HEARTBEAT_INTERVAL", 30*time.Second),
+		DisconnectThreshold: mustDuration("CONNECTOR_DISCONNECT_THRESHOLD", 90*time.Second),
+		GRPCPort:            envOr("GRPC_PORT", "9090"),
+		JWTSecret:           mustEnv("JWT_SECRET"),
+	}
+
+	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
+	if err != nil {
+		log.Fatalf("connector redis init: %v", err)
+	}
+	defer connectorRedis.Close()
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
-				TenantDB:    tenantDB,
-				AuthService: authSvc,
+				TenantDB:     tenantDB,
+				AuthService:  authSvc,
+				ConnectorCfg: connectorCfg,
+				Redis:        connectorRedis,
+				Pool:         db.Pool,
 			},
 		}),
 	)
@@ -89,22 +107,7 @@ func main() {
 	)
 	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
 
-	connectorCfg := connector.Config{
-		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
-		EnrollmentTokenTTL:  mustDuration("CONNECTOR_ENROLLMENT_TOKEN_TTL", 24*time.Hour),
-		HeartbeatInterval:   mustDuration("CONNECTOR_HEARTBEAT_INTERVAL", 30*time.Second),
-		DisconnectThreshold: mustDuration("CONNECTOR_DISCONNECT_THRESHOLD", 90*time.Second),
-		GRPCPort:            envOr("GRPC_PORT", "9090"),
-		JWTSecret:           mustEnv("JWT_SECRET"),
-	}
-
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
-
-	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
-	if err != nil {
-		log.Fatalf("connector redis init: %v", err)
-	}
-	defer connectorRedis.Close()
 
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
