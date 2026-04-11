@@ -43,3 +43,6 @@ controller/internal/auth/*_test.go
 
 # Local connector tests (enrollment integration tests need live DB)
 controller/internal/connector/enrollment_test.go
+
+# Rust / Cargo
+connector/target/
