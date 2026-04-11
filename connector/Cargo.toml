@@ -1,0 +1,32 @@
+[package]
+name = "zecurity-connector"
+version = "0.1.0"
+edition = "2021"
+description = "ZECURITY connector — enrollment, heartbeat, and auto-update agent"
+
+[dependencies]
+tokio              = { version = "1", features = ["full"] }
+tonic              = { version = "0.14", features = ["tls-ring", "tls-webpki-roots", "transport"] }
+prost              = "0.14"
+tonic-prost        = "0.14"
+rcgen              = "0.14"
+tokio-rustls       = "0.26"
+rustls             = "0.23"
+rustls-pemfile     = "2"
+x509-parser        = "0.18"
+sha2               = "0.11"
+hex                = "0.4"
+anyhow             = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+figment            = { version = "0.10", features = ["env", "toml"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+semver             = "1"
+reqwest            = { version = "0.13", features = ["json", "rustls"] }
+base64             = "0.22"
+time               = { version = "0.3", features = ["formatting"] }
+
+[build-dependencies]
+tonic-build       = "0.14"
+tonic-prost-build = "0.14"

@@ -2,19 +2,15 @@
 //
 // This is the binary's starting point. It wires together all modules.
 //
-// Current startup flow (Phase 4 — foundation only):
+// Startup flow (Phases 4-7 complete):
 //   1. Load config from env vars + /etc/zecurity/connector.conf  (config.rs)
 //   2. Initialize structured logging with the configured log level (tracing)
-//   3. Log startup info and exit cleanly
-//
-// Future startup flow (after Phases 5-8):
-//   1. Load config                                  (config.rs)
-//   2. Init logging                                 (tracing)
-//   3. Check state.json in state_dir:
+//   3. Log startup info
+//   4. Check state.json in state_dir:
 //      - Not exists → run enrollment flow           (enrollment.rs, Phase 5)
 //      - Exists     → load saved certs/keys
-//   4. Spawn heartbeat loop on mTLS channel         (heartbeat.rs, Phase 6)
-//   5. Spawn auto-updater if enabled                (updater.rs, Phase 7)
+//   5a. Spawn heartbeat loop on mTLS channel        (heartbeat.rs, Phase 6)
+//   5b. Spawn auto-updater if enabled               (updater.rs, Phase 7)
 //   6. Wait for SIGTERM / Ctrl+C → graceful shutdown
 //
 // Module layout:
@@ -28,6 +24,7 @@ mod crypto;
 mod enrollment;
 mod heartbeat;
 mod tls;
+mod updater;
 
 /// Generated gRPC client stubs from connector.proto.
 ///
@@ -114,6 +111,18 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Step 5b: Spawn auto-updater if enabled.
+    let mut updater_handle: Option<tokio::task::JoinHandle<()>> = None;
+    if cfg.auto_update_enabled {
+        let upd_cfg = cfg.clone();
+        updater_handle = Some(tokio::spawn(async move {
+            if let Err(e) = updater::run_update_loop(&upd_cfg).await {
+                error!(error = %e, "auto-updater failed");
+            }
+        }));
+        info!("auto-updater spawned");
+    }
+
     info!("connector running — press Ctrl+C to shut down");
 
     // Step 6: Wait for shutdown signal.
@@ -121,8 +130,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to wait for Ctrl+C")?;
 
-    info!("shutdown signal received, stopping heartbeat");
+    info!("shutdown signal received, stopping background tasks");
     heartbeat_handle.abort();
+    if let Some(handle) = updater_handle {
+        handle.abort();
+    }
     info!("connector shut down gracefully");
 
     Ok(())
