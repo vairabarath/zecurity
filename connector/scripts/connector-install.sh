@@ -178,16 +178,29 @@ log "installing binary to $INSTALL_BIN"
 install -m 0755 -o root -g root "${TMP_DIR}/${BINARY_NAME}" "$INSTALL_BIN"
 
 # ── Install systemd units ───────────────────────────────────────────────────
-# If this script was downloaded standalone, expect units to be fetched from
-# the release too. If run from the repo checkout, units live in connector/systemd/.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Two possible sources for systemd unit files:
+#   1. Repo checkout  — units live at ../systemd relative to this script.
+#                        Detected via BASH_SOURCE (only set when bash reads the
+#                        script from a file on disk, NOT when piped via curl|bash).
+#   2. Release download — fetched from the same release as the binary.
+#                        This path is taken when the install command is:
+#                        curl -fsSL ... | sudo ... bash
+#
+# `set -u` is active, so use `${BASH_SOURCE[0]:-}` to get an empty default
+# instead of erroring on the unbound array element when piped.
+SCRIPT_FILE="${BASH_SOURCE[0]:-}"
 UNITS_SRC=""
 
-if [[ -d "${SCRIPT_DIR}/../systemd" ]]; then
-    UNITS_SRC="${SCRIPT_DIR}/../systemd"
-    log "using systemd units from: $UNITS_SRC"
-else
-    # Download units from the release.
+if [[ -n "$SCRIPT_FILE" && -f "$SCRIPT_FILE" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_FILE")" && pwd)"
+    if [[ -d "${SCRIPT_DIR}/../systemd" ]]; then
+        UNITS_SRC="${SCRIPT_DIR}/../systemd"
+        log "using systemd units from repo checkout: $UNITS_SRC"
+    fi
+fi
+
+if [[ -z "$UNITS_SRC" ]]; then
+    # Download units from the release (curl|bash install path).
     log "downloading systemd units from release"
     mkdir -p "${TMP_DIR}/systemd"
     for unit in zecurity-connector.service zecurity-connector-update.service zecurity-connector-update.timer; do
