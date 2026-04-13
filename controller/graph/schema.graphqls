@@ -20,6 +20,16 @@ type Query {
   # List all connectors for a given remote network.
   # Scoped to tenant_id — never crosses tenants.
   connectors(remoteNetworkId: ID!): [Connector!]!
+
+  # Public: Look up a workspace by slug during login/signup.
+  # Returns {found: false, workspace: null} if not found (no error).
+  # Used by the signup wizard to warn on slug collision.
+  lookupWorkspace(slug: String!): WorkspaceLookupResult!
+
+  # Public: List active workspaces a given email has an account in.
+  # Used by the login page to let returning users pick a workspace.
+  # Scoped by email only — no cross-tenant data exposed.
+  lookupWorkspacesByEmail(email: String!): WorkspaceListResult!
 }
 
 type Mutation {
@@ -132,4 +142,25 @@ enum ConnectorStatus {
 type ConnectorToken {
   connectorId:    ID!
   installCommand: String!
+}
+
+# ============================================================================
+# Public workspace lookup types (used by login / signup flows)
+# ============================================================================
+
+# Minimal public workspace info — exposed on unauthenticated lookups.
+# Does NOT include status or cert material.
+type WorkspacePublic {
+  id:   ID!
+  name: String!
+  slug: String!
+}
+
+type WorkspaceLookupResult {
+  found:     Boolean!
+  workspace: WorkspacePublic
+}
+
+type WorkspaceListResult {
+  workspaces: [WorkspacePublic!]!
 }

@@ -1,148 +1,204 @@
-# connector-release.yml — Build and publish ZECURITY connector release artifacts.
+# Build & release the Zecurity connector binary for Linux amd64 + arm64.
 #
-# Trigger: push of a tag matching 'connector-v*' (e.g. connector-v0.1.0).
-# Non-connector tags do not trigger this workflow.
+# Trigger: push a tag matching "connector-v*"  (e.g. connector-v1.0.0)
 #
-# Produces a GitHub Release containing:
-#   - connector-linux-amd64              (static musl binary, x86_64)
-#   - connector-linux-arm64              (static musl binary, aarch64)
-#   - checksums.txt                      (SHA-256 of both binaries)
-#   - connector-install.sh               (the install script)
-#   - zecurity-connector.service         (systemd main unit)
-#   - zecurity-connector-update.service  (systemd oneshot update unit)
-#   - zecurity-connector-update.timer    (systemd daily timer)
+# Jobs:
+#   build-amd64  — cross-compile x86_64 binary on GitHub runner
+#   build-arm64  — cross-compile aarch64 binary on GitHub runner
+#   release      — collect all artifacts + upload to GitHub Release
 #
-# The install script and updater rely on these exact asset names and the
-# layout of checksums.txt ("<hash>  <filename>" — standard sha256sum format).
+# Assets uploaded to the release:
+#   connector-linux-amd64              — x86_64 binary
+#   connector-linux-arm64              — ARM64 binary
+#   checksums.txt                      — SHA-256 of both binaries
+#   connector-install.sh               — installer script
+#   zecurity-connector.service         — systemd main unit
+#   zecurity-connector-update.service  — systemd updater unit
+#   zecurity-connector-update.timer    — systemd daily timer
 
-name: connector-release
+name: Build & Release Connector
 
 on:
   push:
     tags:
-      - 'connector-v*'
+      - "connector-v*"
 
 permissions:
-  contents: write   # required by softprops/action-gh-release to create releases
+  contents: write
 
-jobs:
-  # ── Stage 1: build both linux targets in parallel ──────────────────────────
-  build:
-    name: build (${{ matrix.asset }})
-    runs-on: ubuntu-latest
+env:
+  CARGO_TERM_COLOR: always
 
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            asset: connector-linux-amd64
-          - target: aarch64-unknown-linux-musl
-            asset: connector-linux-arm64
+# ────────────────────────────────────────────────────────
+# Job 1: Build for Linux x86_64 (amd64)
+# ────────────────────────────────────────────────────────
+build-amd64:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler \
-            musl-tools \
-            gcc-aarch64-linux-gnu
+    - name: Cache cargo registry & build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          connector/target
+        key: ${{ runner.os }}-cargo-amd64-${{ hashFiles('connector/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-amd64-
 
-      - name: Install Rust toolchain with ${{ matrix.target }}
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+    - name: Build release binary (amd64)
+      working-directory: connector
+      run: cargo build --release
 
-      - name: Cache cargo artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            connector/target
-          key: cargo-${{ matrix.target }}-${{ hashFiles('connector/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ matrix.target }}-
+    - name: Rename binary
+      run: |
+        cp connector/target/release/zecurity-connector \
+           connector-linux-amd64
 
-      - name: Build release binary
-        working-directory: connector
-        env:
-          # Cross-linker for aarch64 musl builds. Harmless for x86_64 builds.
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }}
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: connector-linux-amd64
+        path: connector-linux-amd64
 
-      - name: Rename binary
-        run: |
-          mkdir -p dist
-          cp connector/target/${{ matrix.target }}/release/zecurity-connector dist/${{ matrix.asset }}
-          chmod +x dist/${{ matrix.asset }}
+# ────────────────────────────────────────────────────────
+# Job 2: Build for Linux ARM64 (aarch64)
+# ────────────────────────────────────────────────────────
+build-arm64:
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset }}
-          path: dist/${{ matrix.asset }}
-          retention-days: 1
-          if-no-files-found: error
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-unknown-linux-gnu
 
-  # ── Stage 2: collect artifacts, checksum, publish release ──────────────────
-  release:
-    name: publish release
-    needs: build
-    runs-on: ubuntu-latest
+    - name: Install cross-compilation tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Cache cargo registry & build
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          connector/target
+        key: ${{ runner.os }}-cargo-arm64-${{ hashFiles('connector/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-arm64-
 
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+    - name: Configure cargo for cross-compilation
+      run: |
+        mkdir -p .cargo
+        cat >> .cargo/config.toml <<'EOF'
+        [target.aarch64-unknown-linux-gnu]
+        linker = "aarch64-linux-gnu-gcc"
+        EOF
 
-      - name: Assemble release bundle
-        run: |
-          mkdir -p release
-          # Flatten downloaded binaries from artifacts/<asset>/<asset>.
-          cp artifacts/connector-linux-amd64/connector-linux-amd64 release/
-          cp artifacts/connector-linux-arm64/connector-linux-arm64 release/
-          chmod +x release/connector-linux-amd64 release/connector-linux-arm64
+    - name: Build release binary (arm64)
+      working-directory: connector
+      env:
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      run: cargo build --release --target aarch64-unknown-linux-gnu
 
-          # Install script + systemd units from the repo checkout.
-          cp connector/scripts/connector-install.sh release/
-          chmod +x release/connector-install.sh
-          cp connector/systemd/zecurity-connector.service release/
-          cp connector/systemd/zecurity-connector-update.service release/
-          cp connector/systemd/zecurity-connector-update.timer release/
+    - name: Rename binary
+      run: |
+        cp connector/target/aarch64-unknown-linux-gnu/release/zecurity-connector \
+           connector-linux-arm64
 
-      - name: Generate checksums.txt
-        working-directory: release
-        run: |
-          # sha256sum format: "<hash>  <filename>" (two spaces), which matches
-          # the parser in connector/src/updater.rs and connector-install.sh.
-          sha256sum connector-linux-amd64 connector-linux-arm64 > checksums.txt
-          echo "----- checksums.txt -----"
-          cat checksums.txt
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: connector-linux-arm64
+        path: connector-linux-arm64
 
-      - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ZECURITY Connector ${{ github.ref_name }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
-            release/connector-linux-amd64
-            release/connector-linux-arm64
-            release/checksums.txt
-            release/connector-install.sh
-            release/zecurity-connector.service
-            release/zecurity-connector-update.service
-            release/zecurity-connector-update.timer
+# ────────────────────────────────────────────────────────
+# Job 3: Create GitHub Release & upload all assets
+# ────────────────────────────────────────────────────────
+release:
+  needs: [build-amd64, build-arm64]
+  runs-on: ubuntu-latest
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download amd64 binary
+      uses: actions/download-artifact@v4
+      with:
+        name: connector-linux-amd64
+        path: release-assets/
+
+    - name: Download arm64 binary
+      uses: actions/download-artifact@v4
+      with:
+        name: connector-linux-arm64
+        path: release-assets/
+
+    - name: Copy install script & systemd units
+      run: |
+        cp connector/scripts/connector-install.sh          release-assets/connector-install.sh
+        cp connector/systemd/zecurity-connector.service             release-assets/
+        cp connector/systemd/zecurity-connector-update.service       release-assets/
+        cp connector/systemd/zecurity-connector-update.timer         release-assets/
+
+    - name: Generate checksums
+      working-directory: release-assets
+      run: |
+        sha256sum connector-linux-amd64 connector-linux-arm64 > checksums.txt
+        echo "── checksums.txt ──"
+        cat checksums.txt
+
+    - name: Make binaries & script executable
+      working-directory: release-assets
+      run: |
+        chmod +x connector-linux-amd64
+        chmod +x connector-linux-arm64
+        chmod +x connector-install.sh
+
+    - name: List all release assets
+      run: ls -lah release-assets/
+
+    - name: Create GitHub Release & upload assets
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Connector ${{ github.ref_name }}
+        body: |
+          ## Zecurity Connector ${{ github.ref_name }}
+
+          ### Assets
+          | File | Description |
+          |------|-------------|
+          | `connector-linux-amd64` | Linux x86_64 binary |
+          | `connector-linux-arm64` | Linux ARM64 binary |
+          | `checksums.txt` | SHA-256 checksums |
+          | `connector-install.sh` | Installer script |
+          | `zecurity-connector.service` | systemd main service |
+          | `zecurity-connector-update.service` | systemd updater service |
+          | `zecurity-connector-update.timer` | systemd daily update timer |
+
+          ### Quick Install
+          ```bash
+          curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | \
+            sudo CONTROLLER_ADDR=host:9090 CONTROLLER_HTTP_ADDR=host:8080 ENROLLMENT_TOKEN=eyJ... bash
+          ```
+        draft: false
+        prerelease: false
+        files: |
+          release-assets/connector-linux-amd64
+          release-assets/connector-linux-arm64
+          release-assets/checksums.txt
+          release-assets/connector-install.sh
+          release-assets/zecurity-connector.service
+          release-assets/zecurity-connector-update.service
+          release-assets/zecurity-connector-update.timer
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

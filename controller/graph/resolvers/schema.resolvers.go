@@ -14,112 +14,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/jackc/pgx/v5"
+	pgx "github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/model"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/models"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
-
-const rfc3339 = "2006-01-02T15:04:05Z07:00"
-
-func fmtTime(t time.Time) string { return t.Format(rfc3339) }
-
-func fmtTimePtr(t *time.Time) *string {
-	if t == nil {
-		return nil
-	}
-	s := t.Format(rfc3339)
-	return &s
-}
-
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanRemoteNetwork(s scanner) (*graph.RemoteNetwork, error) {
-	var (
-		rn        graph.RemoteNetwork
-		location  string
-		status    string
-		createdAt time.Time
-	)
-	if err := s.Scan(&rn.ID, &rn.Name, &location, &status, &createdAt); err != nil {
-		return nil, err
-	}
-	rn.Location = graph.NetworkLocation(strings.ToUpper(location))
-	if !rn.Location.IsValid() {
-		return nil, fmt.Errorf("invalid network location: %q", location)
-	}
-	rn.Status = graph.RemoteNetworkStatus(strings.ToUpper(status))
-	if !rn.Status.IsValid() {
-		return nil, fmt.Errorf("invalid remote network status: %q", status)
-	}
-	rn.CreatedAt = fmtTime(createdAt)
-	rn.Connectors = []*graph.Connector{}
-	return &rn, nil
-}
-
-func scanConnector(s scanner) (*graph.Connector, error) {
-	var (
-		c            graph.Connector
-		status       string
-		lastSeenAt   *time.Time
-		certNotAfter *time.Time
-		createdAt    time.Time
-	)
-	if err := s.Scan(
-		&c.ID, &c.Name, &status, &c.RemoteNetworkID,
-		&lastSeenAt, &c.Version, &c.Hostname, &c.PublicIP,
-		&certNotAfter, &createdAt,
-	); err != nil {
-		return nil, err
-	}
-	c.Status = graph.ConnectorStatus(strings.ToUpper(status))
-	if !c.Status.IsValid() {
-		return nil, fmt.Errorf("invalid connector status: %q", status)
-	}
-	c.CreatedAt = fmtTime(createdAt)
-	c.LastSeenAt = fmtTimePtr(lastSeenAt)
-	c.CertNotAfter = fmtTimePtr(certNotAfter)
-	return &c, nil
-}
-
-func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetworkID string) ([]*graph.Connector, error) {
-	rows, err := r.TenantDB.Query(ctx,
-		`SELECT id, name, status, remote_network_id,
-		        last_heartbeat_at, version, hostname, public_ip,
-		        cert_not_after, created_at
-		   FROM connectors
-		  WHERE remote_network_id = $1
-		    AND tenant_id = $2
-		  ORDER BY created_at DESC`,
-		remoteNetworkID, tenantID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var result []*graph.Connector
-	for rows.Next() {
-		c, err := scanConnector(rows)
-		if err != nil {
-			return nil, err
-		}
-		result = append(result, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if result == nil {
-		result = []*graph.Connector{}
-	}
-	return result, nil
-}
 
 // InitiateAuth is the resolver for the initiateAuth field.
 func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error) {
@@ -261,9 +163,18 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 	if controllerAddr == "" {
 		controllerAddr = "localhost:" + r.ConnectorCfg.GRPCPort
 	}
+	controllerHTTPAddr := os.Getenv("CONTROLLER_HTTP_ADDR")
+	if controllerHTTPAddr == "" {
+		// Derive HTTP addr from gRPC port by replacing port with 8080
+		if colon := strings.LastIndex(controllerAddr, ":"); colon != -1 {
+			controllerHTTPAddr = controllerAddr[:colon] + ":8080"
+		} else {
+			controllerHTTPAddr = "localhost:8080"
+		}
+	}
 	installCmd := fmt.Sprintf(
-		"curl -fsSL https://github.com/yourorg/zecurity/releases/latest/download/connector-install.sh | sudo CONTROLLER_ADDR=%s ENROLLMENT_TOKEN=%s bash",
-		controllerAddr, tokenString,
+		"curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s bash",
+		controllerAddr, controllerHTTPAddr, tokenString,
 	)
 
 	return &graph.ConnectorToken{
@@ -442,6 +353,58 @@ func (r *queryResolver) Connectors(ctx context.Context, remoteNetworkID string) 
 	return connectors, nil
 }
 
+// LookupWorkspace is the resolver for the lookupWorkspace field.
+// Public query — no JWT required. Used by signup to check slug availability.
+// Only exposes {id, name, slug} via WorkspacePublic.
+func (r *queryResolver) LookupWorkspace(ctx context.Context, slug string) (*graph.WorkspaceLookupResult, error) {
+	var ws graph.WorkspacePublic
+	err := r.Pool.QueryRow(ctx,
+		`SELECT id, name, slug FROM workspaces
+		  WHERE slug = $1 AND status = 'active'`,
+		slug,
+	).Scan(&ws.ID, &ws.Name, &ws.Slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &graph.WorkspaceLookupResult{Found: false, Workspace: nil}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup workspace: %w", err)
+	}
+	return &graph.WorkspaceLookupResult{Found: true, Workspace: &ws}, nil
+}
+
+// LookupWorkspacesByEmail is the resolver for the lookupWorkspacesByEmail field.
+// Public query — no JWT required. Lists active workspaces a given email belongs to.
+// Used by the login page for returning users to pick a workspace.
+func (r *queryResolver) LookupWorkspacesByEmail(ctx context.Context, email string) (*graph.WorkspaceListResult, error) {
+	rows, err := r.Pool.Query(ctx,
+		`SELECT DISTINCT w.id, w.name, w.slug
+		   FROM workspaces w
+		   JOIN users u ON u.tenant_id = w.id
+		  WHERE u.email = $1
+		    AND u.status = 'active'
+		    AND w.status = 'active'
+		  ORDER BY w.name`,
+		email,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("lookup workspaces by email: %w", err)
+	}
+	defer rows.Close()
+
+	result := &graph.WorkspaceListResult{Workspaces: []*graph.WorkspacePublic{}}
+	for rows.Next() {
+		var ws graph.WorkspacePublic
+		if err := rows.Scan(&ws.ID, &ws.Name, &ws.Slug); err != nil {
+			return nil, fmt.Errorf("scan workspace: %w", err)
+		}
+		result.Workspaces = append(result.Workspaces, &ws)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate workspaces: %w", err)
+	}
+	return result, nil
+}
+
 // Role is the resolver for the role field.
 func (r *userResolver) Role(ctx context.Context, obj *models.User) (graph.Role, error) {
 	role := graph.Role(strings.ToUpper(obj.Role))
@@ -488,3 +451,4 @@ type mutationResolver struct{ *Resolver }
 type queryResolver struct{ *Resolver }
 type userResolver struct{ *Resolver }
 type workspaceResolver struct{ *Resolver }
+

@@ -142,9 +142,20 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
+// publicOperations is the set of GraphQL operation names that may be called
+// without a JWT. The frontend sets `X-Public-Operation: <OperationName>` for
+// these via admin/src/apollo/links/auth.ts. Names match the PascalCase
+// `mutation ... { ... }` / `query ... { ... }` names in admin/src/graphql/.
+var publicOperations = map[string]struct{}{
+	"InitiateAuth":             {}, // login redirect (Member 2)
+	"LookupWorkspace":          {}, // signup slug availability (Member 1 login flow)
+	"LookupWorkspacesByEmail":  {}, // login workspace picker (Member 1 login flow)
+}
+
 func routeGraphQL(protected, public http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Public-Operation") == "initiateAuth" {
+		op := r.Header.Get("X-Public-Operation")
+		if _, ok := publicOperations[op]; ok {
 			public.ServeHTTP(w, r)
 			return
 		}
