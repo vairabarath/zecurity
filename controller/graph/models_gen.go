@@ -42,6 +42,21 @@ type RemoteNetwork struct {
 	CreatedAt  string              `json:"createdAt"`
 }
 
+type WorkspaceListResult struct {
+	Workspaces []*WorkspacePublic `json:"workspaces"`
+}
+
+type WorkspaceLookupResult struct {
+	Found     bool             `json:"found"`
+	Workspace *WorkspacePublic `json:"workspace,omitempty"`
+}
+
+type WorkspacePublic struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
 type ConnectorStatus string
 
 const (
