@@ -1,0 +1,24 @@
+# zecurity-connector-update.service — Oneshot auto-update check
+#
+# Triggered daily by zecurity-connector-update.timer.
+# Runs as root because it needs to replace /usr/local/bin/zecurity-connector
+# and call systemctl to restart the main service.
+#
+# The main zecurity-connector.service runs as the unprivileged 'zecurity' user
+# and cannot perform these operations itself.
+
+[Unit]
+Description=ZECURITY Connector Auto-Update Check
+Documentation=https://github.com/vairabarath/zecurity
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/zecurity/connector.conf
+Environment=AUTO_UPDATE_ENABLED=true
+# TODO: requires --check-update CLI flag in main.rs (runs one update check then exits).
+# For now, invoking the binary normally runs the full daemon; use the in-process
+# updater via AUTO_UPDATE_ENABLED on the main service as an alternative.
+ExecStart=/usr/local/bin/zecurity-connector --check-update

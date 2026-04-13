@@ -1,0 +1,113 @@
+package resolvers
+
+// helpers.go — shared scan + format helpers used by connector/remote-network resolvers.
+//
+// Lives in a separate file from schema.resolvers.go so gqlgen does NOT move this
+// code around or wrap it in deletion-warning comments when regenerating resolvers.
+// gqlgen only touches files it generates; hand-written files here are untouched.
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/yourorg/ztna/controller/graph"
+)
+
+const rfc3339 = "2006-01-02T15:04:05Z07:00"
+
+func fmtTime(t time.Time) string { return t.Format(rfc3339) }
+
+func fmtTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.Format(rfc3339)
+	return &s
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanRemoteNetwork(s scanner) (*graph.RemoteNetwork, error) {
+	var (
+		rn        graph.RemoteNetwork
+		location  string
+		status    string
+		createdAt time.Time
+	)
+	if err := s.Scan(&rn.ID, &rn.Name, &location, &status, &createdAt); err != nil {
+		return nil, err
+	}
+	rn.Location = graph.NetworkLocation(strings.ToUpper(location))
+	if !rn.Location.IsValid() {
+		return nil, fmt.Errorf("invalid network location: %q", location)
+	}
+	rn.Status = graph.RemoteNetworkStatus(strings.ToUpper(status))
+	if !rn.Status.IsValid() {
+		return nil, fmt.Errorf("invalid remote network status: %q", status)
+	}
+	rn.CreatedAt = fmtTime(createdAt)
+	rn.Connectors = []*graph.Connector{}
+	return &rn, nil
+}
+
+func scanConnector(s scanner) (*graph.Connector, error) {
+	var (
+		c            graph.Connector
+		status       string
+		lastSeenAt   *time.Time
+		certNotAfter *time.Time
+		createdAt    time.Time
+	)
+	if err := s.Scan(
+		&c.ID, &c.Name, &status, &c.RemoteNetworkID,
+		&lastSeenAt, &c.Version, &c.Hostname, &c.PublicIP,
+		&certNotAfter, &createdAt,
+	); err != nil {
+		return nil, err
+	}
+	c.Status = graph.ConnectorStatus(strings.ToUpper(status))
+	if !c.Status.IsValid() {
+		return nil, fmt.Errorf("invalid connector status: %q", status)
+	}
+	c.CreatedAt = fmtTime(createdAt)
+	c.LastSeenAt = fmtTimePtr(lastSeenAt)
+	c.CertNotAfter = fmtTimePtr(certNotAfter)
+	return &c, nil
+}
+
+func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetworkID string) ([]*graph.Connector, error) {
+	rows, err := r.TenantDB.Query(ctx,
+		`SELECT id, name, status, remote_network_id,
+		        last_heartbeat_at, version, hostname, public_ip,
+		        cert_not_after, created_at
+		   FROM connectors
+		  WHERE remote_network_id = $1
+		    AND tenant_id = $2
+		  ORDER BY created_at DESC`,
+		remoteNetworkID, tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []*graph.Connector
+	for rows.Next() {
+		c, err := scanConnector(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if result == nil {
+		result = []*graph.Connector{}
+	}
+	return result, nil
+}

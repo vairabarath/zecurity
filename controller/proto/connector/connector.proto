@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package connector;
+option go_package = "github.com/yourorg/ztna/controller/proto/connector";
+
+service ConnectorService {
+
+  // Called once during enrollment.
+  // Uses plain TLS — connector has no cert yet.
+  // Connector presents enrollment JWT + PKCS#10 CSR.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
+  // Uses mTLS — connector presents its SPIFFE-certified cert.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;  // signed JWT — single-use enrollment token
+  bytes  csr_der          = 2;  // DER-encoded PKCS#10 CSR (EC P-384)
+  string version          = 3;  // CARGO_PKG_VERSION
+  string hostname         = 4;
+}
+
+message EnrollResponse {
+  bytes  certificate_pem      = 1;  // signed leaf cert — 7-day validity, SPIFFE SAN
+  bytes  workspace_ca_pem     = 2;  // WorkspaceCA cert (PEM)
+  bytes  intermediate_ca_pem  = 3;  // Intermediate CA cert (PEM)
+  string connector_id         = 4;  // confirmed connector UUID
+}
+
+message HeartbeatRequest {
+  string connector_id = 1;  // for logging only — NOT authoritative identity
+  string version      = 2;  // CARGO_PKG_VERSION
+  string hostname     = 3;
+  string public_ip    = 4;  // optional
+}
+
+message HeartbeatResponse {
+  bool   ok             = 1;
+  string latest_version = 2;  // controller informs connector of latest release
+  bool   re_enroll      = 3;  // always false this sprint — field plumbed for next sprint
+}

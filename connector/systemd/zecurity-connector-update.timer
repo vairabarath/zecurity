@@ -1,0 +1,21 @@
+# zecurity-connector-update.timer — Daily trigger for auto-update check
+#
+# Runs zecurity-connector-update.service once per day with up to 1 hour
+# of random jitter. Matches the thundering-herd prevention logic in
+# connector/src/updater.rs (MAX_STARTUP_DELAY_SECS = 3600).
+#
+# Persistent=true: if the system was off during the scheduled time,
+# the timer fires on next boot.
+
+[Unit]
+Description=Daily ZECURITY Connector update check
+Documentation=https://github.com/vairabarath/zecurity
+Requires=zecurity-connector-update.service
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target
