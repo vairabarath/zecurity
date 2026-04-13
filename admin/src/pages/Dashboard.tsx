@@ -1,27 +1,27 @@
-import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
 import { motion } from 'framer-motion'
 import {
   MeDocument,
   GetWorkspaceDocument,
+  GetRemoteNetworksDocument,
   WorkspaceStatus,
+  ConnectorStatus,
+  RemoteNetworkStatus,
   type MeQuery,
   type GetWorkspaceQuery,
+  type GetRemoteNetworksQuery,
 } from '@/generated/graphql'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { 
-  Shield, 
-  Globe, 
-  Users, 
-  Activity, 
+import {
+  Globe,
   Network,
   Clock,
-  ArrowUpRight,
-  ArrowDownRight,
-  AlertTriangle,
-  CheckCircle2,
   Server,
+  Plug,
+  ArrowRight,
+  Inbox,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -35,12 +35,11 @@ const statusVariant: Record<WorkspaceStatus, 'default' | 'secondary' | 'destruct
 interface StatCardProps {
   title: string
   value: string | number
-  change?: number
-  trend?: 'up' | 'down'
+  loading?: boolean
   delay?: number
 }
 
-function StatCard({ title, value, change, trend, delay = 0 }: StatCardProps) {
+function StatCard({ title, value, loading, delay = 0 }: StatCardProps) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 16 }}
@@ -48,100 +47,65 @@ function StatCard({ title, value, change, trend, delay = 0 }: StatCardProps) {
       transition={{ delay, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
       className="group relative rounded-xl border border-border bg-white p-5 hover:border-primary/30 hover:shadow-md transition-all duration-300"
     >
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-xs font-medium text-muted-foreground">{title}</span>
-        {change !== undefined && (
-          <div className={cn(
-            "flex items-center gap-1 text-xs font-medium",
-            trend === 'up' ? "text-secure" : "text-destructive"
-          )}>
-            {trend === 'up' ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
-            {Math.abs(change)}%
-          </div>
-        )}
-      </div>
-      <div className="text-3xl font-semibold text-foreground">{value}</div>
+      <div className="mb-3 text-xs font-medium text-muted-foreground">{title}</div>
+      {loading ? (
+        <Skeleton className="h-9 w-16" />
+      ) : (
+        <div className="text-3xl font-semibold text-foreground">{value}</div>
+      )}
     </motion.div>
   )
 }
 
-function ActivityItem({ type, message, time }: { type: string; message: string; time: string }) {
-  const icons: Record<string, React.ReactNode> = {
-    connection: <Network className="w-4 h-4 text-primary" />,
-    auth: <Shield className="w-4 h-4 text-info" />,
-    alert: <AlertTriangle className="w-4 h-4 text-warning" />,
-    success: <CheckCircle2 className="w-4 h-4 text-secure" />,
-  }
-  
-  return (
-    <motion.div
-      className="flex items-start gap-3 p-3 rounded-xl bg-muted/50 hover:bg-muted transition-colors"
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-    >
-      <div className={cn(
-        "flex items-center justify-center w-8 h-8 rounded-lg",
-        type === 'connection' && "bg-primary/10 text-primary",
-        type === 'auth' && "bg-info/10 text-info",
-        type === 'alert' && "bg-warning/10 text-warning",
-        type === 'success' && "bg-secure/10 text-secure"
-      )}>
-        {icons[type]}
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm text-foreground truncate">{message}</p>
-        <p className="text-xs text-muted-foreground mt-0.5">{time}</p>
-      </div>
-    </motion.div>
-  )
+function relativeTime(dateStr: string | null | undefined): string {
+  if (!dateStr) return 'Never'
+  const now = Date.now()
+  const then = new Date(dateStr).getTime()
+  const diff = now - then
+  if (diff < 0) return 'just now'
+  const seconds = Math.floor(diff / 1000)
+  if (seconds < 60) return `${seconds}s ago`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.floor(hours / 24)
+  if (days < 30) return `${days}d ago`
+  const months = Math.floor(days / 30)
+  return `${months}mo ago`
 }
 
-function NetworkCard({ name, status, users, lastActive, delay = 0 }: { name: string; status: string; users: number; lastActive: string; delay?: number }) {
-  return (
-    <motion.div
-      className="group relative rounded-xl border border-border bg-white p-4 hover:border-primary/30 hover:shadow-md transition-all duration-300"
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      transition={{ delay, duration: 0.3 }}
-      whileHover={{ scale: 1.01 }}
-    >
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Globe className="w-4 h-4 text-primary" />
-          <span className="font-medium text-foreground">{name}</span>
-        </div>
-        <Badge variant={status === 'active' ? 'default' : 'secondary'} className="text-[10px]">
-          {status}
-        </Badge>
-      </div>
-      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-        <span className="flex items-center gap-1">
-          <Users className="w-3 h-3" /> {users}
-        </span>
-        <span className="flex items-center gap-1">
-          <Clock className="w-3 h-3" /> {lastActive}
-        </span>
-      </div>
-    </motion.div>
-  )
+const connectorStatusClass: Record<ConnectorStatus, string> = {
+  [ConnectorStatus.Pending]: 'text-gray-500 bg-gray-500/10 border-gray-500/20',
+  [ConnectorStatus.Active]: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
+  [ConnectorStatus.Disconnected]: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
+  [ConnectorStatus.Revoked]: 'text-red-600 bg-red-500/10 border-red-500/20',
 }
 
 export default function Dashboard() {
   const { data: meData, loading: meLoading } = useQuery<MeQuery>(MeDocument)
   const { data: wsData, loading: wsLoading } = useQuery<GetWorkspaceQuery>(GetWorkspaceDocument)
-  
-  const [activities] = useState([
-    { type: 'connection', message: 'New connection from 192.168.1.105', time: '2 min ago' },
-    { type: 'auth', message: 'User john@acme.com authenticated', time: '5 min ago' },
-    { type: 'alert', message: 'Failed login attempt detected', time: '12 min ago' },
-    { type: 'success', message: 'Network "prod-us-east" synced', time: '1 hour ago' },
-  ])
-  
-  const [networks] = useState([
-    { name: 'Production US-East', status: 'active', users: 24, lastActive: 'now' },
-    { name: 'Staging EU-West', status: 'active', users: 8, lastActive: '5m ago' },
-    { name: 'Dev Network', status: 'inactive', users: 0, lastActive: '2d ago' },
-  ])
+  const { data: rnData, loading: rnLoading } = useQuery<GetRemoteNetworksQuery>(
+    GetRemoteNetworksDocument,
+    { fetchPolicy: 'cache-and-network', pollInterval: 30000 },
+  )
+
+  const networks = rnData?.remoteNetworks ?? []
+  const activeNetworks = networks.filter((n) => n.status === RemoteNetworkStatus.Active)
+
+  const allConnectors = networks.flatMap((n) =>
+    n.connectors.map((c) => ({ ...c, networkId: n.id, networkName: n.name })),
+  )
+  const activeConnectors = allConnectors.filter((c) => c.status === ConnectorStatus.Active)
+
+  // Most recently seen connectors first; fall back to created_at-style ordering by name
+  const recentConnectors = [...allConnectors]
+    .sort((a, b) => {
+      const aTime = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0
+      const bTime = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0
+      return bTime - aTime
+    })
+    .slice(0, 6)
 
   return (
     <div className="space-y-6">
@@ -167,17 +131,31 @@ export default function Dashboard() {
         </div>
       </motion.div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard title="Active Networks" value="12" change={8} trend="up" delay={0.1} />
-        <StatCard title="Total Users" value="1,248" change={12} trend="up" delay={0.15} />
-        <StatCard title="Connections" value="3,846" change={-3} trend="down" delay={0.2} />
-        <StatCard title="Threats Blocked" value="7" change={-25} trend="down" delay={0.25} />
+      {/* Stats — all derived from real GraphQL data */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <StatCard
+          title="Active Networks"
+          value={activeNetworks.length}
+          loading={rnLoading && !rnData}
+          delay={0.1}
+        />
+        <StatCard
+          title="Total Connectors"
+          value={allConnectors.length}
+          loading={rnLoading && !rnData}
+          delay={0.15}
+        />
+        <StatCard
+          title="Active Connectors"
+          value={activeConnectors.length}
+          loading={rnLoading && !rnData}
+          delay={0.2}
+        />
       </div>
 
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Activity */}
+        {/* Recent Connectors */}
         <motion.div
           className="lg:col-span-2 rounded-xl border border-border bg-white overflow-hidden"
           initial={{ opacity: 0, y: 16 }}
@@ -186,15 +164,62 @@ export default function Dashboard() {
         >
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <div className="flex items-center gap-2">
-              <Activity className="w-4 h-4 text-primary" />
-              <h2 className="font-semibold text-foreground">Activity Feed</h2>
+              <Plug className="w-4 h-4 text-primary" />
+              <h2 className="font-semibold text-foreground">Recent Connectors</h2>
             </div>
-            <button className="text-xs text-primary hover:underline">View all</button>
+            <Link to="/remote-networks" className="text-xs text-primary hover:underline">
+              View networks
+            </Link>
           </div>
-          <div className="p-4 space-y-2">
-            {activities.map((activity, i) => (
-              <ActivityItem key={i} {...activity} />
-            ))}
+          <div className="p-4">
+            {rnLoading && !rnData ? (
+              <div className="space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-14 w-full rounded-xl" />
+                ))}
+              </div>
+            ) : recentConnectors.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 text-center">
+                <div className="rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
+                  <Inbox className="w-6 h-6 text-primary/40" />
+                </div>
+                <p className="text-sm text-foreground/70">No connectors yet</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Add a remote network and deploy a connector to get started.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {recentConnectors.map((c) => (
+                  <div
+                    key={c.id}
+                    className="flex items-center gap-3 p-3 rounded-xl bg-muted/40 hover:bg-muted transition-colors"
+                  >
+                    <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/10 text-primary shrink-0">
+                      <Server className="w-4 h-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium text-foreground truncate">{c.name}</p>
+                        <Badge
+                          variant="outline"
+                          className={cn('text-[10px] font-mono border', connectorStatusClass[c.status])}
+                        >
+                          {c.status.toLowerCase()}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground truncate">
+                        {c.networkName} · {c.hostname ?? 'no hostname'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+                      <Clock className="w-3 h-3" />
+                      {relativeTime(c.lastSeenAt)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </motion.div>
 
@@ -210,7 +235,7 @@ export default function Dashboard() {
               <h2 className="font-semibold text-foreground">Workspace</h2>
             </div>
             <div className="p-5 space-y-4">
-              {wsLoading ? (
+              {wsLoading && !wsData ? (
                 <div className="space-y-3">
                   <Skeleton className="h-5 w-32" />
                   <Skeleton className="h-4 w-24" />
@@ -223,16 +248,20 @@ export default function Dashboard() {
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Endpoint</p>
-                    <p className="text-sm font-mono text-primary">{wsData?.workspace.slug}.ztna.io</p>
+                    <p className="text-sm font-mono text-primary">
+                      {wsData?.workspace.slug}.zecurity.in
+                    </p>
                   </div>
                   <div>
-                    <Badge variant={statusVariant[wsData?.workspace.status!] ?? 'outline'}>
-                      {wsData?.workspace.status}
-                    </Badge>
+                    {wsData?.workspace.status && (
+                      <Badge variant={statusVariant[wsData.workspace.status] ?? 'outline'}>
+                        {wsData.workspace.status}
+                      </Badge>
+                    )}
                   </div>
                   <div className="pt-3 border-t border-border">
                     <p className="text-xs text-muted-foreground mb-1">Account</p>
-                    {meLoading ? (
+                    {meLoading && !meData ? (
                       <Skeleton className="h-4 w-40" />
                     ) : (
                       <p className="text-sm text-foreground truncate">{meData?.me.email}</p>
@@ -256,13 +285,67 @@ export default function Dashboard() {
             <Network className="w-4 h-4 text-primary" />
             <h2 className="font-semibold text-foreground">Networks</h2>
           </div>
-          <button className="text-xs text-primary hover:underline">Add network</button>
+          <Link to="/remote-networks" className="text-xs text-primary hover:underline">
+            Manage networks
+          </Link>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {networks.map((network, i) => (
-            <NetworkCard key={i} {...network} delay={i * 0.05} />
-          ))}
-        </div>
+        {rnLoading && !rnData ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 w-full rounded-xl" />
+            ))}
+          </div>
+        ) : networks.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-border bg-muted/20 p-8 text-center">
+            <div className="inline-flex rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
+              <Globe className="w-6 h-6 text-primary/40" />
+            </div>
+            <p className="text-sm text-foreground/70">No remote networks yet</p>
+            <Link
+              to="/remote-networks"
+              className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-2"
+            >
+              Create your first network <ArrowRight className="w-3 h-3" />
+            </Link>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {networks.map((n, i) => (
+              <motion.div
+                key={n.id}
+                className="group relative rounded-xl border border-border bg-white p-4 hover:border-primary/30 hover:shadow-md transition-all duration-300"
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: i * 0.05, duration: 0.3 }}
+                whileHover={{ scale: 1.01 }}
+              >
+                <Link to={`/remote-networks/${n.id}/connectors`} className="block">
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Globe className="w-4 h-4 text-primary shrink-0" />
+                      <span className="font-medium text-foreground truncate">{n.name}</span>
+                    </div>
+                    <Badge
+                      variant={n.status === RemoteNetworkStatus.Active ? 'default' : 'secondary'}
+                      className="text-[10px]"
+                    >
+                      {n.status.toLowerCase()}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
+                    <span className="flex items-center gap-1">
+                      <Plug className="w-3 h-3" /> {n.connectors.length} connector
+                      {n.connectors.length !== 1 ? 's' : ''}
+                    </span>
+                    <span className="font-mono text-[10px] uppercase tracking-wider">
+                      {n.location.toLowerCase()}
+                    </span>
+                  </div>
+                </Link>
+              </motion.div>
+            ))}
+          </div>
+        )}
       </motion.div>
     </div>
   )
