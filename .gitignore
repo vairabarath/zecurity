@@ -26,6 +26,23 @@ admin/src/generated/
 
 # Go
 controller/graph/generated.go
+controller/cmd/server/__debug_bin*
 
 # Docker volumes
 pgdata/
+
+# Local tooling
+.codex
+.claude
+.qwen
+completed/
+
+# Local auth tests
+controller/internal/auth/*_test.go
+!controller/internal/auth/integration_test.go
+
+# Local connector tests (enrollment integration tests need live DB)
+controller/internal/connector/enrollment_test.go
+
+# Rust / Cargo
+connector/target/

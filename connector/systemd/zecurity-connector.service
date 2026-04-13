@@ -1,0 +1,52 @@
+# zecurity-connector.service — Main ZECURITY connector daemon
+#
+# Installed to: /etc/systemd/system/zecurity-connector.service
+# Binary path:  /usr/local/bin/zecurity-connector
+# Config file:  /etc/zecurity/connector.conf  (mode 0600, owned by root:zecurity)
+# State dir:    /var/lib/zecurity-connector/  (auto-created by systemd)
+#
+# Runs as unprivileged user 'zecurity' with security hardening.
+# The connector performs enrollment on first run, then maintains an mTLS
+# heartbeat loop to the controller.
+
+[Unit]
+Description=ZECURITY Connector
+Documentation=https://github.com/vairabarath/zecurity
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zecurity
+Group=zecurity
+EnvironmentFile=-/etc/zecurity/connector.conf
+ExecStart=/usr/local/bin/zecurity-connector
+Restart=on-failure
+RestartSec=5s
+
+# State dir — systemd auto-creates /var/lib/zecurity-connector owned by the service user.
+StateDirectory=zecurity-connector
+StateDirectoryMode=0700
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/zecurity-connector
+
+# Only allow network sockets needed for gRPC + HTTP.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Additional sandboxing
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

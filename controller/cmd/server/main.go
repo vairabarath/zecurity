@@ -1,1 +1,267 @@
 package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/99designs/gqlgen/graphql/handler"
+	"github.com/99designs/gqlgen/graphql/playground"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
+	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/graph/resolvers"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/middleware"
+	"github.com/yourorg/ztna/controller/internal/pki"
+	pb "github.com/yourorg/ztna/controller/proto/connector"
+	"google.golang.org/grpc"
+)
+
+func main() {
+	loadOptionalEnv()
+
+	ctx := context.Background()
+
+	if err := db.Init(ctx); err != nil {
+		log.Fatalf("db init: %v", err)
+	}
+	defer db.Close()
+
+	pkiService, err := pki.Init(ctx, db.Pool)
+	if err != nil {
+		log.Fatalf("pki init: %v", err)
+	}
+
+	bootstrapSvc := &bootstrap.Service{
+		Pool:       db.Pool,
+		PKIService: pkiService,
+	}
+
+	tenantDB := db.NewTenantDB(db.Pool)
+
+	authSvc, err := auth.NewService(auth.Config{
+		Pool:               db.Pool,
+		BootstrapService:   bootstrapSvc,
+		JWTSecret:          mustEnv("JWT_SECRET"),
+		JWTIssuer:          appmeta.ControllerIssuer,
+		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
+		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
+		RedisURL:           mustEnv("REDIS_URL"),
+		AllowedOrigin:      mustEnv("ALLOWED_ORIGIN"),
+	})
+	if err != nil {
+		log.Fatalf("auth init: %v", err)
+	}
+
+	connectorCfg := connector.Config{
+		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
+		EnrollmentTokenTTL:  mustDuration("CONNECTOR_ENROLLMENT_TOKEN_TTL", 24*time.Hour),
+		HeartbeatInterval:   mustDuration("CONNECTOR_HEARTBEAT_INTERVAL", 30*time.Second),
+		DisconnectThreshold: mustDuration("CONNECTOR_DISCONNECT_THRESHOLD", 90*time.Second),
+		GRPCPort:            envOr("GRPC_PORT", "9090"),
+		JWTSecret:           mustEnv("JWT_SECRET"),
+	}
+
+	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
+	if err != nil {
+		log.Fatalf("connector redis init: %v", err)
+	}
+	defer connectorRedis.Close()
+
+	gqlSrv := handler.NewDefaultServer(
+		graph.NewExecutableSchema(graph.Config{
+			Resolvers: &resolvers.Resolver{
+				TenantDB:     tenantDB,
+				AuthService:  authSvc,
+				ConnectorCfg: connectorCfg,
+				Redis:        connectorRedis,
+				Pool:         db.Pool,
+			},
+		}),
+	)
+
+	mux := http.NewServeMux()
+	mux.Handle("/auth/callback", authSvc.CallbackHandler())
+	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
+	mux.Handle("/health", healthHandler())
+
+	if os.Getenv("ENV") == "development" {
+		mux.Handle("/playground", playground.Handler(appmeta.ProductName, "/graphql"))
+	}
+
+	protected := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.WorkspaceGuard(db.Pool)(gqlSrv),
+	)
+	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
+
+	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
+
+	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
+	if err != nil {
+		log.Fatalf("grpc listen: %v", err)
+	}
+
+	// TODO: Add TLS credentials once controller TLS cert is configured.
+	// TODO: Wire UnarySPIFFEInterceptor with TLS credentials:
+	// validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorWorkspaceStore{pool: db.Pool})
+	// grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator))
+	grpcServer := grpc.NewServer()
+
+	connectorSvc := &connector.EnrollmentHandler{
+		Cfg:        connectorCfg,
+		Pool:       db.Pool,
+		Redis:      connectorRedis,
+		PKIService: pkiService,
+	}
+	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
+
+	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
+
+	go func() {
+		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
+		if err := grpcServer.Serve(grpcListener); err != nil {
+			log.Fatalf("grpc serve: %v", err)
+		}
+	}()
+
+	addr := ":" + envOr("PORT", "8080")
+	log.Printf("listening on %s", addr)
+	log.Fatal(http.ListenAndServe(addr, mux))
+}
+
+// publicOperations is the set of GraphQL operation names that may be called
+// without a JWT. The frontend sets `X-Public-Operation: <OperationName>` for
+// these via admin/src/apollo/links/auth.ts. Names match the PascalCase
+// `mutation ... { ... }` / `query ... { ... }` names in admin/src/graphql/.
+var publicOperations = map[string]struct{}{
+	"InitiateAuth":             {}, // login redirect (Member 2)
+	"LookupWorkspace":          {}, // signup slug availability (Member 1 login flow)
+	"LookupWorkspacesByEmail":  {}, // login workspace picker (Member 1 login flow)
+}
+
+func routeGraphQL(protected, public http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op := r.Header.Get("X-Public-Operation")
+		if _, ok := publicOperations[op]; ok {
+			public.ServeHTTP(w, r)
+			return
+		}
+
+		protected.ServeHTTP(w, r)
+	})
+}
+
+func healthHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := db.Pool.Ping(r.Context()); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+}
+
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		log.Fatalf("required env var %s not set", key)
+	}
+
+	return v
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+
+	return fallback
+}
+
+func mustDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		log.Fatalf("env var %s is not a valid duration: %s", key, v)
+	}
+
+	return d
+}
+
+func newConnectorRedisClient(ctx context.Context, redisURL string) (*redis.Client, error) {
+	opts, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis URL: %w", err)
+	}
+
+	rdb := redis.NewClient(opts)
+
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := rdb.Ping(pingCtx).Err(); err != nil {
+		_ = rdb.Close()
+		return nil, fmt.Errorf("ping redis: %w", err)
+	}
+
+	return rdb, nil
+}
+
+type connectorWorkspaceStore struct {
+	pool *pgxpool.Pool
+}
+
+func (s connectorWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string) (*connector.WorkspaceLookup, error) {
+	var workspace connector.WorkspaceLookup
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, status FROM workspaces WHERE trust_domain = $1`,
+		domain,
+	).Scan(&workspace.ID, &workspace.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get workspace by trust domain: %w", err)
+	}
+
+	return &workspace, nil
+}
+
+func loadOptionalEnv() {
+	candidates := []string{
+		".env",
+		"controller/.env",
+	}
+
+	for _, path := range candidates {
+		err := godotenv.Load(path)
+		if err == nil {
+			log.Printf("loaded environment from %s", path)
+			return
+		}
+
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		log.Fatalf("load %s: %v", path, err)
+	}
+}

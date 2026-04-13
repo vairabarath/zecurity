@@ -1,0 +1,81 @@
+query LookupWorkspace($slug: String!) {
+  lookupWorkspace(slug: $slug) {
+    found
+    workspace {
+      id
+      name
+      slug
+    }
+  }
+}
+
+query LookupWorkspacesByEmail($email: String!) {
+  lookupWorkspacesByEmail(email: $email) {
+    workspaces {
+      id
+      name
+      slug
+    }
+  }
+}
+
+query Me {
+  me {
+    id
+    email
+    role
+    provider
+    createdAt
+  }
+}
+
+query GetWorkspace {
+  workspace {
+    id
+    slug
+    name
+    status
+    createdAt
+  }
+}
+
+query GetRemoteNetworks {
+  remoteNetworks {
+    id
+    name
+    location
+    status
+    createdAt
+    connectors {
+      id
+      name
+      status
+      lastSeenAt
+      version
+      hostname
+    }
+  }
+}
+
+query GetConnectors($remoteNetworkId: ID!) {
+  connectors(remoteNetworkId: $remoteNetworkId) {
+    id
+    name
+    status
+    lastSeenAt
+    version
+    hostname
+    publicIp
+    certNotAfter
+    createdAt
+  }
+}
+
+query GetRemoteNetwork($id: ID!) {
+  remoteNetwork(id: $id) {
+    id
+    name
+    location
+    status
+  }
+}

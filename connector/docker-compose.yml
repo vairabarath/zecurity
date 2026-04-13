@@ -1,0 +1,44 @@
+# docker-compose.yml — Example ZECURITY connector deployment via Docker.
+#
+# This file is ONLY for the connector-side deployment on end-user hosts.
+# Do NOT confuse with controller/docker-compose.yml which is Sprint 1
+# dev infrastructure (Postgres + Redis).
+#
+# Usage on a new host (first run with enrollment token):
+#   docker compose up -d
+#
+# On subsequent runs, remove the ENROLLMENT_TOKEN env var — the connector
+# loads its saved state from /var/lib/zecurity-connector/state.json.
+
+services:
+  zecurity-connector:
+    image: ghcr.io/vairabarath/zecurity/connector:latest
+    container_name: zecurity-connector
+    restart: unless-stopped
+
+    # Host networking required so the connector can reach the local network
+    # and forward traffic. Containers with bridge networking cannot do this.
+    network_mode: host
+
+    # Required for network manipulation (future: tunnel setup, routing).
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    volumes:
+      # Persistent state (keys, certs, state.json). Must survive container restarts.
+      - /var/lib/zecurity-connector:/var/lib/zecurity-connector
+      # Config file (read-only). Contains CONTROLLER_ADDR, ENROLLMENT_TOKEN, etc.
+      - /etc/zecurity:/etc/zecurity:ro
+
+    environment:
+      # gRPC address of the controller (required)
+      - CONTROLLER_ADDR=controller.example.com:9090
+      # HTTP address for /ca.crt fetch (required on first run for enrollment)
+      - CONTROLLER_HTTP_ADDR=controller.example.com:8080
+      # Single-use enrollment JWT (REMOVE after first successful enrollment)
+      - ENROLLMENT_TOKEN=eyJ...replace.with.token.from.admin.ui
+      # Set to true to enable in-process auto-update. Requires container to
+      # be able to restart itself — restart: unless-stopped handles this.
+      - AUTO_UPDATE_ENABLED=false
+      - LOG_LEVEL=info

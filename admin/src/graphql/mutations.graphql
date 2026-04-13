@@ -1,0 +1,35 @@
+mutation InitiateAuth($provider: String!, $workspaceName: String) {
+  initiateAuth(provider: $provider, workspaceName: $workspaceName) {
+    redirectUrl
+    state
+  }
+}
+
+mutation CreateRemoteNetwork($name: String!, $location: NetworkLocation!) {
+  createRemoteNetwork(name: $name, location: $location) {
+    id
+    name
+    location
+    status
+    createdAt
+  }
+}
+
+mutation DeleteRemoteNetwork($id: ID!) {
+  deleteRemoteNetwork(id: $id)
+}
+
+mutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {
+  generateConnectorToken(remoteNetworkId: $remoteNetworkId, connectorName: $connectorName) {
+    connectorId
+    installCommand
+  }
+}
+
+mutation RevokeConnector($id: ID!) {
+  revokeConnector(id: $id)
+}
+
+mutation DeleteConnector($id: ID!) {
+  deleteConnector(id: $id)
+}

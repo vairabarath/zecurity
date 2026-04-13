@@ -1,0 +1,8 @@
+schema: '../controller/graph/schema.graphqls'
+documents: 'src/graphql/**/*.graphql'
+generates:
+  src/generated/:
+    preset: client
+    config:
+      scalars:
+        ID: string
