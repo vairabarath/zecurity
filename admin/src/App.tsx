@@ -2,6 +2,8 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
+import RemoteNetworks from '@/pages/RemoteNetworks'
+import Connectors from '@/pages/Connectors'
 import Settings from '@/pages/Settings'
 import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
@@ -33,6 +35,8 @@ export default function App() {
       <Route element={<ProtectedLayout />}>
         <Route path="/"          element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/remote-networks" element={<RemoteNetworks />} />
+        <Route path="/remote-networks/:id/connectors" element={<Connectors />} />
         <Route path="/settings"  element={<Settings />} />
       </Route>
     </Routes>
