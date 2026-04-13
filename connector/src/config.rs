@@ -1,10 +1,16 @@
 // config.rs — Configuration loading for the ZECURITY connector
 //
-// Reads config from two sources (higher priority wins):
-//   1. /etc/zecurity/connector.conf  (TOML file, optional — missing file is silently skipped)
-//   2. Environment variables          (CONTROLLER_ADDR, ENROLLMENT_TOKEN, LOG_LEVEL, etc.)
+// Reads config from environment variables only. The systemd unit uses
+// `EnvironmentFile=-/etc/zecurity/connector.conf` to inject KEY=VALUE
+// pairs from that file into the process environment before the service
+// starts, so the file path itself is never opened by this code.
 //
-// Environment variables are automatically lowercased to match struct field names:
+// We deliberately do NOT parse /etc/zecurity/connector.conf as TOML here:
+// systemd's EnvironmentFile= syntax (KEY=VALUE, unquoted) is incompatible
+// with TOML syntax (key = "value"). Dual-loading caused startup failures.
+//
+// Environment variable names are automatically lowercased to match struct
+// field names:
 //   CONTROLLER_ADDR → controller_addr
 //   LOG_LEVEL       → log_level
 //
@@ -22,10 +28,7 @@
 //
 // Called by: main.rs at startup via ConnectorConfig::load()
 
-use figment::{
-    providers::{Env, Format, Toml},
-    Figment,
-};
+use figment::{providers::Env, Figment};
 use serde::Deserialize;
 
 /// Default config file path. The install script (Phase 9) writes this file
@@ -117,8 +120,10 @@ impl ConnectorConfig {
     ///
     /// The config file is optional — missing file is silently skipped.
     pub fn load() -> Result<Self, figment::Error> {
+        // Env-only. systemd's EnvironmentFile= injects vars from
+        // /etc/zecurity/connector.conf (KEY=VALUE format) into our process
+        // env before we run, and figment picks them up here.
         Figment::new()
-            .merge(Toml::file(CONFIG_FILE_PATH))
             .merge(Env::raw().map(|key| key.as_str().to_ascii_lowercase().into()))
             .extract()
     }
