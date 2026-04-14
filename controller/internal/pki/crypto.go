@@ -170,6 +170,20 @@ func encodeCertToPEM(certDER []byte) string {
 	}))
 }
 
+// encodeECPrivateKeyToPEM converts an ECDSA private key to PEM text.
+func encodeECPrivateKeyToPEM(key *ecdsa.PrivateKey) (string, error) {
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return "", fmt.Errorf("marshal EC private key: %w", err)
+	}
+	defer zeroBytes(keyDER)
+
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: keyDER,
+	})), nil
+}
+
 // parseCertFromPEM parses a PEM certificate string into an x509 object.
 //
 // Why this exists:

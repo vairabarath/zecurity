@@ -13,8 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, PKCS_ECDSA_P384_SHA384,
-    SanType,
+    CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType, PKCS_ECDSA_P384_SHA384,
 };
 
 /// Generate an EC P-384 keypair.
@@ -59,8 +58,8 @@ pub fn load_private_key(path: &Path) -> Result<KeyPair> {
     let pem = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read private key from {}", path.display()))?;
 
-    let key_pair =
-        KeyPair::from_pem(&pem).with_context(|| format!("failed to parse PEM key from {}", path.display()))?;
+    let key_pair = KeyPair::from_pem(&pem)
+        .with_context(|| format!("failed to parse PEM key from {}", path.display()))?;
 
     Ok(key_pair)
 }
@@ -81,15 +80,17 @@ pub fn build_csr(key_pair: &KeyPair, cn: &str, spiffe_uri: &str) -> Result<Vec<u
         .context("failed to create certificate params")?;
     params.distinguished_name = distinguished_name;
     params.is_ca = IsCa::NoCa;
-    params.subject_alt_names = vec![SanType::URI(spiffe_uri.try_into().context("invalid SPIFFE URI for SAN")?)];
+    params.subject_alt_names = vec![SanType::URI(
+        spiffe_uri
+            .try_into()
+            .context("invalid SPIFFE URI for SAN")?,
+    )];
 
     let csr = params
         .serialize_request(key_pair)
         .context("failed to serialize CSR")?;
 
-    let der = csr
-        .der()
-        .to_vec();
+    let der = csr.der().to_vec();
 
     Ok(der)
 }

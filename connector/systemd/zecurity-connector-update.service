@@ -18,7 +18,4 @@ Type=oneshot
 User=root
 EnvironmentFile=-/etc/zecurity/connector.conf
 Environment=AUTO_UPDATE_ENABLED=true
-# TODO: requires --check-update CLI flag in main.rs (runs one update check then exits).
-# For now, invoking the binary normally runs the full daemon; use the in-process
-# updater via AUTO_UPDATE_ENABLED on the main service as an alternative.
 ExecStart=/usr/local/bin/zecurity-connector --check-update
