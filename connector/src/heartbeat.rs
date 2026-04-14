@@ -142,21 +142,17 @@ async fn verify_controller_spiffe_preflight(cfg: &ConnectorConfig) -> Result<()>
         .await
         .with_context(|| format!("failed to TCP connect to {}:{}", host, port))?;
 
-    // TLS handshake with callback to extract peer cert
-    let (tx, rx) = tokio::sync::oneshot::channel::<Option<CertificateDer<'static>>>();
-
-    let _tls_stream = tls_connector
-        .connect_with(domain, tcp, |conn| {
-            let cert = conn.peer_certificates().and_then(|c| c.first().cloned());
-            let _ = tx.send(cert);
-        })
+    // TLS handshake — connect() completes the full handshake before returning.
+    let tls_stream = tls_connector
+        .connect(domain, tcp)
         .await
         .context("TLS handshake failed")?;
 
-    let peer_cert = rx
-        .await
-        .ok()
-        .flatten()
+    // Handshake is complete — extract peer cert from the connection.
+    let (_, conn) = tls_stream.get_ref();
+    let peer_cert = conn
+        .peer_certificates()
+        .and_then(|c| c.first().cloned())
         .context("no peer certificate received from controller")?;
 
     // Verify SPIFFE identity
