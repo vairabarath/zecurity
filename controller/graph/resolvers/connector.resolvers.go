@@ -157,7 +157,7 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 		}
 	}
 	installCmd := fmt.Sprintf(
-		"curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s bash",
+		"curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/connector/scripts/connector-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s bash",
 		controllerAddr, controllerHTTPAddr, tokenString,
 	)
 
