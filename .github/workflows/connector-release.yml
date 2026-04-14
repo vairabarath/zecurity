@@ -65,14 +65,15 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-assets
+          path: build-artifacts
 
       - name: Prepare release assets
         run: |
-          # Move binaries from artifact subdirectories into release-assets/
-          mv release-assets/connector-linux-amd64/connector-linux-amd64 release-assets/
-          mv release-assets/connector-linux-arm64/connector-linux-arm64 release-assets/
-          rmdir release-assets/connector-linux-amd64 release-assets/connector-linux-arm64
+          mkdir -p release-assets
+
+          # Extract binaries from artifact subdirectories
+          cp build-artifacts/connector-linux-amd64/connector-linux-amd64 release-assets/
+          cp build-artifacts/connector-linux-arm64/connector-linux-arm64 release-assets/
 
           # Copy install script and systemd units
           cp connector/scripts/connector-install.sh release-assets/connector-install.sh
