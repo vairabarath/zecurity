@@ -154,11 +154,18 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
     fs::create_dir_all(state_dir)
         .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
 
-    // Save leaf cert
+    // Save full certificate chain (leaf + Workspace CA) for mTLS client auth.
+    // The controller's x509.Verify() needs the Workspace CA as an intermediate
+    // to build the chain: Connector cert ← Workspace CA ← Intermediate CA.
     let cert_path = state_dir.join("connector.crt");
-    fs::write(&cert_path, &response.certificate_pem)
+    let leaf_cert = String::from_utf8(response.certificate_pem.clone())
+        .context("certificate_pem is not valid UTF-8")?;
+    let workspace_ca_for_chain = String::from_utf8(response.workspace_ca_pem.clone())
+        .context("workspace_ca_pem is not valid UTF-8")?;
+    let full_chain = format!("{}\n{}", leaf_cert, workspace_ca_for_chain);
+    fs::write(&cert_path, &full_chain)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
-    info!(path = %cert_path.display(), "saved connector certificate");
+    info!(path = %cert_path.display(), "saved connector certificate chain");
     let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
 
     // Save CA chain (workspace CA + intermediate CA concatenated)
