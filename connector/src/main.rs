@@ -50,6 +50,12 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the rustls crypto provider before any TLS operations.
+    // Required by rustls 0.23+ — without this, ClientConfig::builder() panics.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install default crypto provider");
+
     // Handle --check-update flag (used by systemd oneshot update service).
     // Runs a single update check and exits — does not start the full daemon.
     if std::env::args().any(|a| a == "--check-update") {
