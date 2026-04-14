@@ -69,22 +69,13 @@ async fn build_channel(cfg: &ConnectorConfig) -> Result<Channel> {
     let key_pem = load_pem(&state_dir.join("connector.key"))?;
     let ca_pem = load_pem(&state_dir.join("workspace_ca.crt"))?;
 
-    // Parse individual certs from the CA chain file
-    let ca_certs: Result<Vec<CertificateDer<'static>>> = CertificateDer::pem_slice_iter(&ca_pem)
-        .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse CA cert: {}", e)))
-        .collect();
-    let ca_certs = ca_certs?;
-
-    // Build tonic identity and CA certificates
+    // Tonic accepts raw PEM bytes directly — no DER conversion needed.
     let identity = Identity::from_pem(&cert_pem, &key_pem);
-    let ca_certs_tonic: Vec<Certificate> = ca_certs
-        .iter()
-        .map(|der| Certificate::from_pem(der.as_ref()))
-        .collect();
+    let ca = Certificate::from_pem(&ca_pem);
 
     let tls = ClientTlsConfig::new()
         .identity(identity)
-        .ca_certificates(ca_certs_tonic);
+        .ca_certificate(ca);
 
     let grpc_addr = format!("https://{}", cfg.controller_addr);
     let channel = Channel::from_shared(grpc_addr.clone())
