@@ -120,9 +120,9 @@ async fn verify_controller_spiffe_preflight(cfg: &ConnectorConfig) -> Result<()>
         .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))
         .collect::<Result<_>>()?;
 
-    // Parse client key
-    let key = rustls::pki_types::PrivateKeyDer::try_from(key_pem.clone())
-        .map_err(|e| anyhow::anyhow!("failed to parse client private key: {:?}", e))?;
+    // Parse client key (PEM → DER)
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+        .map_err(|e| anyhow::anyhow!("failed to parse client private key: {}", e))?;
 
     let config = ClientConfig::builder()
         .with_root_certificates(root_store)

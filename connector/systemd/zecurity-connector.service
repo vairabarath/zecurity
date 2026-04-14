@@ -43,7 +43,7 @@ ProtectControlGroups=true
 ProtectHostname=true
 ProtectClock=true
 ProtectProc=invisible
-ReadWritePaths=/var/lib/zecurity-connector
+ReadWritePaths=/var/lib/zecurity-connector /etc/zecurity
 
 # Only allow network sockets needed for gRPC + HTTP.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
