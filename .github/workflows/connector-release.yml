@@ -12,29 +12,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset_name: connector-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            asset_name: connector-linux-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install protobuf compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends protobuf-compiler
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
-      - name: Install cargo-zigbuild
-        run: cargo install --locked cargo-zigbuild
+      - name: Install cross
+        run: cargo install cross --locked
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -42,25 +42,49 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            connector/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('connector/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('connector/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binaries
+      - name: Build release binary
         working-directory: connector
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
         run: |
-          cargo zigbuild --release --target x86_64-unknown-linux-musl
-          cargo zigbuild --release --target aarch64-unknown-linux-musl
+          cp connector/target/${{ matrix.target }}/release/zecurity-connector ${{ matrix.asset_name }}
+          chmod +x ${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
 
       - name: Prepare release assets
         run: |
-          mkdir -p release-assets
-          cp connector/target/x86_64-unknown-linux-musl/release/zecurity-connector release-assets/connector-linux-amd64
-          cp connector/target/aarch64-unknown-linux-musl/release/zecurity-connector release-assets/connector-linux-arm64
+          # Move binaries from artifact subdirectories into release-assets/
+          mv release-assets/connector-linux-amd64/connector-linux-amd64 release-assets/
+          mv release-assets/connector-linux-arm64/connector-linux-arm64 release-assets/
+          rmdir release-assets/connector-linux-amd64 release-assets/connector-linux-arm64
+
+          # Copy install script and systemd units
           cp connector/scripts/connector-install.sh release-assets/connector-install.sh
           cp connector/systemd/zecurity-connector.service release-assets/
           cp connector/systemd/zecurity-connector-update.service release-assets/
           cp connector/systemd/zecurity-connector-update.timer release-assets/
+
           chmod +x release-assets/connector-linux-amd64
           chmod +x release-assets/connector-linux-arm64
           chmod +x release-assets/connector-install.sh
