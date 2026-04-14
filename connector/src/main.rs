@@ -25,6 +25,7 @@ mod enrollment;
 mod heartbeat;
 mod tls;
 mod updater;
+mod util;
 
 /// Generated gRPC client stubs from connector.proto.
 ///
@@ -49,6 +50,20 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Handle --check-update flag (used by systemd oneshot update service).
+    // Runs a single update check and exits — does not start the full daemon.
+    if std::env::args().any(|a| a == "--check-update") {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .init();
+
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            "running single update check"
+        );
+        return updater::run_single_check().await;
+    }
+
     // Step 1: Load config. Fails fast if CONTROLLER_ADDR is missing.
     let cfg = ConnectorConfig::load()?;
 
@@ -57,9 +72,7 @@ async fn main() -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     // Step 3: Log startup info.
     // PRODUCT_NAME comes from appmeta.rs (mirrors Go's appmeta.ProductName).

@@ -305,6 +305,10 @@ func (f failingPKIService) SignConnectorCert(ctx context.Context, tenantID, conn
 	return nil, fmt.Errorf("not implemented in test stub")
 }
 
+func (f failingPKIService) GenerateControllerServerTLS(ctx context.Context, hosts []string, certTTL time.Duration) (*pki.ControllerServerTLSResult, error) {
+	return nil, fmt.Errorf("not implemented in test stub")
+}
+
 type stubPKIService struct {
 	result *pki.WorkspaceCAResult
 }
@@ -314,6 +318,10 @@ func (s stubPKIService) GenerateWorkspaceCA(ctx context.Context, tenantID string
 }
 
 func (s stubPKIService) SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*pki.ConnectorCertResult, error) {
+	return nil, fmt.Errorf("not implemented in test stub")
+}
+
+func (s stubPKIService) GenerateControllerServerTLS(ctx context.Context, hosts []string, certTTL time.Duration) (*pki.ControllerServerTLSResult, error) {
 	return nil, fmt.Errorf("not implemented in test stub")
 }
 

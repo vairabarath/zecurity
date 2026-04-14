@@ -14,17 +14,18 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use reqwest::Client;
-use rustls::pki_types::{CertificateDer, pem::PemObject, ServerName};
+use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::net::TcpStream;
-use tokio::time::{sleep, interval};
+use tokio::time::{interval, sleep};
 use tokio_rustls::TlsConnector;
-use tonic::transport::{Channel, ClientTlsConfig, Certificate, Identity};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{error, info, warn};
 
 use crate::config::ConnectorConfig;
 use crate::proto;
 use crate::tls;
+use crate::util;
 
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
@@ -55,13 +56,6 @@ async fn fetch_public_ip() -> String {
     }
 }
 
-/// Read hostname from /etc/hostname.
-fn read_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|h| h.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
 /// Load PEM data from a file.
 fn load_pem(path: &Path) -> Result<Vec<u8>> {
     std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
@@ -76,10 +70,9 @@ async fn build_channel(cfg: &ConnectorConfig) -> Result<Channel> {
     let ca_pem = load_pem(&state_dir.join("workspace_ca.crt"))?;
 
     // Parse individual certs from the CA chain file
-    let ca_certs: Result<Vec<CertificateDer<'static>>> =
-        CertificateDer::pem_slice_iter(&ca_pem)
-            .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse CA cert: {}", e)))
-            .collect();
+    let ca_certs: Result<Vec<CertificateDer<'static>>> = CertificateDer::pem_slice_iter(&ca_pem)
+        .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse CA cert: {}", e)))
+        .collect();
     let ca_certs = ca_certs?;
 
     // Build tonic identity and CA certificates
@@ -117,14 +110,15 @@ async fn verify_controller_spiffe_preflight(cfg: &ConnectorConfig) -> Result<()>
     let mut root_store = RootCertStore::empty();
     for cert_result in CertificateDer::pem_slice_iter(&ca_pem) {
         let cert = cert_result.context("failed to parse CA cert from chain")?;
-        root_store.add(cert).context("failed to add CA to root store")?;
+        root_store
+            .add(cert)
+            .context("failed to add CA to root store")?;
     }
 
     // Parse client cert chain
-    let client_certs: Vec<CertificateDer<'static>> =
-        CertificateDer::pem_slice_iter(&cert_pem)
-            .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))
-            .collect::<Result<_>>()?;
+    let client_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
+        .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))
+        .collect::<Result<_>>()?;
 
     // Parse client key
     let key = rustls::pki_types::PrivateKeyDer::try_from(key_pem.clone())
@@ -198,7 +192,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<
     let channel = build_channel(cfg).await?;
     let mut client = proto::connector_service_client::ConnectorServiceClient::new(channel);
 
-    let hostname = read_hostname();
+    let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
     let version = env!("CARGO_PKG_VERSION").to_string();
     let interval_secs = cfg.heartbeat_interval_secs;
@@ -235,9 +229,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<
                 }
 
                 if resp.re_enroll {
-                    warn!(
-                        "controller requests re-enrollment — not yet implemented, ignoring"
-                    );
+                    warn!("controller requests re-enrollment — not yet implemented, ignoring");
                 }
 
                 if !resp.latest_version.is_empty() && resp.latest_version != version {

@@ -21,16 +21,19 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::Client;
+use rustls_pemfile::certs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use tonic::transport::Endpoint;
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
+use x509_parser::parse_x509_certificate;
 
 use crate::appmeta;
 use crate::config::ConnectorConfig;
 use crate::crypto;
 use crate::proto;
+use crate::util;
 
 // ── Data structures ─────────────────────────────────────────────────────────
 
@@ -54,6 +57,7 @@ pub struct EnrollmentState {
     pub trust_domain: String,
     pub workspace_id: String,
     pub enrolled_at: String,
+    pub cert_not_after: String,
 }
 
 /// Result returned to main.rs after enrollment succeeds.
@@ -103,15 +107,26 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
     info!(path = %key_path.display(), "saved private key");
 
     // Step 6: Build CSR
-    let cn = format!("{}{}", appmeta::PKI_CONNECTOR_CN_PREFIX, claims.connector_id);
+    let cn = format!(
+        "{}{}",
+        appmeta::PKI_CONNECTOR_CN_PREFIX,
+        claims.connector_id
+    );
     let spiffe_uri = appmeta::connector_spiffe_id(&claims.trust_domain, &claims.connector_id);
     let csr_der = crypto::build_csr(&key_pair, &cn, &spiffe_uri)?;
     info!(cn = %cn, san = %spiffe_uri, "built CSR");
 
-    // Step 7: Connect to controller gRPC
-    let grpc_addr = format!("http://{}", cfg.controller_addr);
+    // Step 7: Connect to controller gRPC over TLS rooted in the verified CA.
+    let grpc_host = controller_host(&cfg.controller_addr);
+    let grpc_addr = format!("https://{}", cfg.controller_addr);
     let channel = Endpoint::from_shared(grpc_addr.clone())
         .with_context(|| format!("invalid gRPC address: {}", grpc_addr))?
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(ca_pem.as_bytes()))
+                .domain_name(grpc_host.clone()),
+        )
+        .with_context(|| format!("failed to configure TLS for {}", grpc_addr))?
         .connect()
         .await
         .with_context(|| format!("failed to connect to {}", grpc_addr))?;
@@ -119,7 +134,7 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
     info!(addr = %grpc_addr, "connected to controller gRPC");
 
     // Step 8: Call Enroll RPC
-    let hostname = read_hostname();
+    let hostname = util::read_hostname();
     let request = tonic::Request::new(proto::EnrollRequest {
         enrollment_token: token.to_string(),
         csr_der,
@@ -144,6 +159,7 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
     fs::write(&cert_path, &response.certificate_pem)
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
     info!(path = %cert_path.display(), "saved connector certificate");
+    let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
 
     // Save CA chain (workspace CA + intermediate CA concatenated)
     let ca_chain_path = state_dir.join("workspace_ca.crt");
@@ -166,20 +182,96 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
         trust_domain: claims.trust_domain.clone(),
         workspace_id: claims.workspace_id.clone(),
         enrolled_at,
+        cert_not_after,
     };
 
     let state_path = state_dir.join("state.json");
-    let state_json = serde_json::to_string_pretty(&state)
-        .context("failed to serialize enrollment state")?;
+    let state_json =
+        serde_json::to_string_pretty(&state).context("failed to serialize enrollment state")?;
     fs::write(&state_path, state_json)
         .with_context(|| format!("failed to write {}", state_path.display()))?;
     info!(path = %state_path.display(), "saved enrollment state");
+
+    // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
+    // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
+    // so the connector process (running as zecurity) may not have write access.
+    cleanup_config_after_enrollment(&claims.connector_id);
 
     // Step 10: Return result
     Ok(EnrollmentResult {
         connector_id: claims.connector_id,
         trust_domain: claims.trust_domain,
     })
+}
+
+// ── Config cleanup ─────────────────────────────────────────────────────────
+
+/// Best-effort cleanup of /etc/zecurity/connector.conf after enrollment.
+///
+/// Removes the ENROLLMENT_TOKEN line (the token is already burned in Redis,
+/// but keeping the raw JWT on disk leaks claims like connector_id and
+/// trust_domain if the config file is ever exposed).
+///
+/// Adds CONNECTOR_ID=<uuid> so the config file stays a complete record
+/// of the connector's identity.
+///
+/// This is best-effort because the config file is typically owned by
+/// root:zecurity with mode 0640 — the connector (running as zecurity)
+/// may not have write permission. If the write fails, a warning is logged
+/// and enrollment proceeds normally.
+const CONFIG_PATH: &str = "/etc/zecurity/connector.conf";
+
+fn cleanup_config_after_enrollment(connector_id: &str) {
+    let path = Path::new(CONFIG_PATH);
+
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(
+                path = CONFIG_PATH,
+                error = %e,
+                "could not read config file to remove enrollment token — \
+                 consider manually removing ENROLLMENT_TOKEN from {}", CONFIG_PATH
+            );
+            return;
+        }
+    };
+
+    // Remove ENROLLMENT_TOKEN line, add CONNECTOR_ID if not already present.
+    let mut lines: Vec<String> = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.starts_with("ENROLLMENT_TOKEN=")
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    let has_connector_id = lines
+        .iter()
+        .any(|l| l.trim().starts_with("CONNECTOR_ID="));
+    if !has_connector_id {
+        lines.push(format!("CONNECTOR_ID={}", connector_id));
+    }
+
+    let new_content = lines.join("\n") + "\n";
+
+    match fs::write(path, new_content) {
+        Ok(()) => {
+            info!(
+                path = CONFIG_PATH,
+                "cleaned config: removed ENROLLMENT_TOKEN, added CONNECTOR_ID"
+            );
+        }
+        Err(e) => {
+            warn!(
+                path = CONFIG_PATH,
+                error = %e,
+                "could not write config file — \
+                 consider manually removing ENROLLMENT_TOKEN from {}", CONFIG_PATH
+            );
+        }
+    }
 }
 
 // ── Internal helpers ────────────────────────────────────────────────────────
@@ -191,7 +283,10 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
 fn parse_jwt_payload(token: &str) -> Result<JwtClaims> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
-        bail!("invalid JWT format: expected 3 dot-separated segments, got {}", parts.len());
+        bail!(
+            "invalid JWT format: expected 3 dot-separated segments, got {}",
+            parts.len()
+        );
     }
 
     let payload_bytes = URL_SAFE_NO_PAD
@@ -231,7 +326,10 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
         .context("failed to read CA cert response body")?;
 
     if !pem.contains("-----BEGIN CERTIFICATE-----") {
-        bail!("response from {} does not contain a valid PEM certificate", url);
+        bail!(
+            "response from {} does not contain a valid PEM certificate",
+            url
+        );
     }
 
     Ok(pem)
@@ -243,7 +341,7 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
 /// Mismatch → bail with MITM warning.
 fn verify_ca_fingerprint(ca_pem: &str, expected_fingerprint: &str) -> Result<()> {
     // Parse PEM to DER using rustls_pemfile
-    let certs = rustls_pemfile::certs(&mut ca_pem.as_bytes())
+    let certs = certs(&mut ca_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .context("failed to parse PEM certificates")?;
 
@@ -272,6 +370,25 @@ fn verify_ca_fingerprint(ca_pem: &str, expected_fingerprint: &str) -> Result<()>
     Ok(())
 }
 
+fn parse_cert_not_after(cert_pem: &[u8]) -> Result<String> {
+    let mut pem_slice = cert_pem;
+    let certs = certs(&mut pem_slice)
+        .collect::<Result<Vec<_>, _>>()
+        .context("failed to parse connector certificate PEM")?;
+    let leaf = certs
+        .first()
+        .context("connector certificate PEM did not contain a certificate")?;
+    let (_, cert) = parse_x509_certificate(leaf.as_ref())
+        .context("failed to parse connector certificate DER")?;
+
+    Ok(cert
+        .validity()
+        .not_after
+        .to_datetime()
+        .format(&time::format_description::well_known::Rfc3339)
+        .context("failed to format connector certificate expiry")?)
+}
+
 /// Derive the HTTP address from the gRPC address.
 ///
 /// If `controller_http_addr` is not set in config, we assume the HTTP server
@@ -288,10 +405,10 @@ fn derive_http_addr(grpc_addr: &str) -> String {
     format!("{}:8080", grpc_addr)
 }
 
-/// Read the system hostname from /etc/hostname.
-/// Falls back to "unknown" if the file is missing or unreadable.
-fn read_hostname() -> String {
-    fs::read_to_string("/etc/hostname")
-        .map(|h| h.trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+fn controller_host(grpc_addr: &str) -> String {
+    grpc_addr
+        .rsplit_once(':')
+        .map(|(host, _)| host.to_string())
+        .unwrap_or_else(|| grpc_addr.to_string())
 }
+

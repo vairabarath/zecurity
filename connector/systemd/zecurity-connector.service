@@ -28,6 +28,9 @@ RestartSec=5s
 StateDirectory=zecurity-connector
 StateDirectoryMode=0700
 
+# Runtime directory — systemd auto-creates /run/zecurity-connector owned by the service user.
+RuntimeDirectory=zecurity-connector
+
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -37,10 +40,24 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+ProtectProc=invisible
 ReadWritePaths=/var/lib/zecurity-connector
 
 # Only allow network sockets needed for gRPC + HTTP.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Namespace and privilege restrictions
+RestrictNamespaces=true
+RemoveIPC=true
+
+# System call filtering — allow standard service calls, deny privileged ones.
+SystemCallFilter=@system-service ~@privileged
+
+# Capabilities — only what the connector needs for future network tunneling.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 
 # Additional sandboxing
 LockPersonality=true

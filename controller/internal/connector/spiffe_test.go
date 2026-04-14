@@ -144,6 +144,14 @@ func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string
 	return ws, nil
 }
 
+func (m *mockWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context, domain string) (*x509.Certificate, error) {
+	return nil, nil
+}
+
+func (m *mockWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
+	return nil, nil
+}
+
 func TestNewTrustDomainValidator_GlobalDomain(t *testing.T) {
 	store := &mockWorkspaceStore{workspaces: map[string]*WorkspaceLookup{}}
 	v := NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, store)

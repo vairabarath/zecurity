@@ -27,6 +27,12 @@ type Service interface {
 	// a short-lived client certificate with the connector's SPIFFE ID as URI SAN.
 	// Called by: enrollment.go (Phase 3, Step 9)
 	SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ConnectorCertResult, error)
+
+	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
+	// for the controller gRPC endpoint. The certificate is signed by the
+	// intermediate CA, carries the controller SPIFFE ID, and includes DNS/IP SANs
+	// for the supplied hosts.
+	GenerateControllerServerTLS(ctx context.Context, hosts []string, certTTL time.Duration) (*ControllerServerTLSResult, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.
@@ -45,6 +51,15 @@ type WorkspaceCAResult struct {
 type ConnectorCertResult struct {
 	CertificatePEM string
 	Serial         string
+	NotBefore      time.Time
+	NotAfter       time.Time
+}
+
+// ControllerServerTLSResult holds the PEM-encoded server certificate and key
+// used by the controller's gRPC listener.
+type ControllerServerTLSResult struct {
+	CertificatePEM string
+	PrivateKeyPEM  string
 	NotBefore      time.Time
 	NotAfter       time.Time
 }
