@@ -11,4 +11,5 @@ type Config struct {
 	DisconnectThreshold time.Duration
 	GRPCPort            string
 	JWTSecret           string
+	RenewalWindow       time.Duration
 }

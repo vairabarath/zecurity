@@ -21,12 +21,12 @@ import (
 //
 // Flow:
 //
-//	1. Read identity from context (injected by interceptor in spiffe.go)
-//	2. Verify role == appmeta.SPIFFERoleConnector
-//	3. Resolve tenant: SELECT tenant_id FROM connectors WHERE id = $1 AND trust_domain = $2
-//	4. Verify not revoked: check connector status != 'revoked'
-//	5. Update connector: last_heartbeat_at=NOW(), version, hostname, public_ip, status='active'
-//	6. Return HeartbeatResponse{Ok: true, ReEnroll: false}
+//  1. Read identity from context (injected by interceptor in spiffe.go)
+//  2. Verify role == appmeta.SPIFFERoleConnector
+//  3. Resolve tenant: SELECT tenant_id FROM connectors WHERE id = $1 AND trust_domain = $2
+//  4. Verify not revoked: check connector status != 'revoked'
+//  5. Update connector: last_heartbeat_at=NOW(), version, hostname, public_ip, status='active'
+//  6. Return HeartbeatResponse{Ok: true, ReEnroll: false}
 //
 // re_enroll is ALWAYS false this sprint.
 func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
@@ -41,12 +41,13 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		return nil, status.Errorf(codes.PermissionDenied, "expected role %q, got %q", appmeta.SPIFFERoleConnector, role)
 	}
 
-	// Step 3 — Resolve tenant and load connector status.
+	// Step 3 — Resolve tenant and load connector status + cert expiry.
 	var connStatus, tenantID string
+	var certNotAfter *time.Time
 	err := h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id FROM connectors WHERE id = $1 AND trust_domain = $2`,
+		`SELECT status, tenant_id, cert_not_after FROM connectors WHERE id = $1 AND trust_domain = $2`,
 		connectorID, trustDomain,
-	).Scan(&connStatus, &tenantID)
+	).Scan(&connStatus, &tenantID, &certNotAfter)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "connector not found: %v", err)
 	}
@@ -54,6 +55,16 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 	// Step 4 — Verify not revoked.
 	if connStatus == "revoked" {
 		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
+	}
+
+	// Step 4b — Check if cert is expiring soon (within renewal window).
+	reEnroll := false
+	if certNotAfter != nil {
+		renewBy := time.Now().Add(h.Cfg.RenewalWindow)
+		if certNotAfter.Before(renewBy) {
+			reEnroll = true
+			log.Printf("connector %s: cert expiring soon (not_after=%v), requesting renewal", connectorID, *certNotAfter)
+		}
 	}
 
 	// Step 5 — Update connector row.
@@ -76,10 +87,10 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 	}
 
 	// Step 6 — Return success.
-	// re_enroll = false always this sprint — field exists for next sprint's auto-renewal.
+	// re_enroll = true when cert expiring within the renewal window.
 	return &pb.HeartbeatResponse{
 		Ok:       true,
-		ReEnroll: false,
+		ReEnroll: reEnroll,
 	}, nil
 }
 

@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	ConnectorService_Enroll_FullMethodName    = "/connector.ConnectorService/Enroll"
 	ConnectorService_Heartbeat_FullMethodName = "/connector.ConnectorService/Heartbeat"
+	ConnectorService_RenewCert_FullMethodName = "/connector.ConnectorService/RenewCert"
 )
 
 // ConnectorServiceClient is the client API for ConnectorService service.
@@ -34,6 +35,10 @@ type ConnectorServiceClient interface {
 	// Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
 	// Uses mTLS — connector presents its SPIFFE-certified cert.
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	// Called by connector when HeartbeatResponse.re_enroll=true.
+	// Uses mTLS — connector presents its current (still-valid) cert.
+	// Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
+	RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error)
 }
 
 type connectorServiceClient struct {
@@ -64,6 +69,16 @@ func (c *connectorServiceClient) Heartbeat(ctx context.Context, in *HeartbeatReq
 	return out, nil
 }
 
+func (c *connectorServiceClient) RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewCertResponse)
+	err := c.cc.Invoke(ctx, ConnectorService_RenewCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ConnectorServiceServer is the server API for ConnectorService service.
 // All implementations must embed UnimplementedConnectorServiceServer
 // for forward compatibility.
@@ -75,6 +90,10 @@ type ConnectorServiceServer interface {
 	// Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
 	// Uses mTLS — connector presents its SPIFFE-certified cert.
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	// Called by connector when HeartbeatResponse.re_enroll=true.
+	// Uses mTLS — connector presents its current (still-valid) cert.
+	// Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
+	RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error)
 	mustEmbedUnimplementedConnectorServiceServer()
 }
 
@@ -90,6 +109,9 @@ func (UnimplementedConnectorServiceServer) Enroll(context.Context, *EnrollReques
 }
 func (UnimplementedConnectorServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedConnectorServiceServer) RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenewCert not implemented")
 }
 func (UnimplementedConnectorServiceServer) mustEmbedUnimplementedConnectorServiceServer() {}
 func (UnimplementedConnectorServiceServer) testEmbeddedByValue()                          {}
@@ -148,6 +170,24 @@ func _ConnectorService_Heartbeat_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ConnectorService_RenewCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConnectorServiceServer).RenewCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConnectorService_RenewCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConnectorServiceServer).RenewCert(ctx, req.(*RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ConnectorService_ServiceDesc is the grpc.ServiceDesc for ConnectorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -162,6 +202,10 @@ var ConnectorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _ConnectorService_Heartbeat_Handler,
+		},
+		{
+			MethodName: "RenewCert",
+			Handler:    _ConnectorService_RenewCert_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

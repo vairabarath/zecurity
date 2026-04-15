@@ -229,7 +229,7 @@ type HeartbeatResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Ok            bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	LatestVersion string                 `protobuf:"bytes,2,opt,name=latest_version,json=latestVersion,proto3" json:"latest_version,omitempty"` // controller informs connector of latest release
-	ReEnroll      bool                   `protobuf:"varint,3,opt,name=re_enroll,json=reEnroll,proto3" json:"re_enroll,omitempty"`               // always false this sprint — field plumbed for next sprint
+	ReEnroll      bool                   `protobuf:"varint,3,opt,name=re_enroll,json=reEnroll,proto3" json:"re_enroll,omitempty"`               // true when cert expiring soon, connector should call RenewCert
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -285,6 +285,118 @@ func (x *HeartbeatResponse) GetReEnroll() bool {
 	return false
 }
 
+type RenewCertRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ConnectorId   string                 `protobuf:"bytes,1,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`      // for logging only — identity comes from mTLS cert
+	PublicKeyDer  []byte                 `protobuf:"bytes,2,opt,name=public_key_der,json=publicKeyDer,proto3" json:"public_key_der,omitempty"` // connector's existing EC P-384 public key (DER)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewCertRequest) Reset() {
+	*x = RenewCertRequest{}
+	mi := &file_proto_connector_connector_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewCertRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewCertRequest) ProtoMessage() {}
+
+func (x *RenewCertRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_connector_connector_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewCertRequest.ProtoReflect.Descriptor instead.
+func (*RenewCertRequest) Descriptor() ([]byte, []int) {
+	return file_proto_connector_connector_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *RenewCertRequest) GetConnectorId() string {
+	if x != nil {
+		return x.ConnectorId
+	}
+	return ""
+}
+
+func (x *RenewCertRequest) GetPublicKeyDer() []byte {
+	if x != nil {
+		return x.PublicKeyDer
+	}
+	return nil
+}
+
+type RenewCertResponse struct {
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	CertificatePem    []byte                 `protobuf:"bytes,1,opt,name=certificate_pem,json=certificatePem,proto3" json:"certificate_pem,omitempty"`            // fresh 7-day cert, same SPIFFE SAN
+	WorkspaceCaPem    []byte                 `protobuf:"bytes,2,opt,name=workspace_ca_pem,json=workspaceCaPem,proto3" json:"workspace_ca_pem,omitempty"`          // WorkspaceCA (may not have changed, but send anyway)
+	IntermediateCaPem []byte                 `protobuf:"bytes,3,opt,name=intermediate_ca_pem,json=intermediateCaPem,proto3" json:"intermediate_ca_pem,omitempty"` // Intermediate CA
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
+}
+
+func (x *RenewCertResponse) Reset() {
+	*x = RenewCertResponse{}
+	mi := &file_proto_connector_connector_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewCertResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewCertResponse) ProtoMessage() {}
+
+func (x *RenewCertResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_connector_connector_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewCertResponse.ProtoReflect.Descriptor instead.
+func (*RenewCertResponse) Descriptor() ([]byte, []int) {
+	return file_proto_connector_connector_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *RenewCertResponse) GetCertificatePem() []byte {
+	if x != nil {
+		return x.CertificatePem
+	}
+	return nil
+}
+
+func (x *RenewCertResponse) GetWorkspaceCaPem() []byte {
+	if x != nil {
+		return x.WorkspaceCaPem
+	}
+	return nil
+}
+
+func (x *RenewCertResponse) GetIntermediateCaPem() []byte {
+	if x != nil {
+		return x.IntermediateCaPem
+	}
+	return nil
+}
+
 var File_proto_connector_connector_proto protoreflect.FileDescriptor
 
 const file_proto_connector_connector_proto_rawDesc = "" +
@@ -308,10 +420,18 @@ const file_proto_connector_connector_proto_rawDesc = "" +
 	"\x11HeartbeatResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12%\n" +
 	"\x0elatest_version\x18\x02 \x01(\tR\rlatestVersion\x12\x1b\n" +
-	"\tre_enroll\x18\x03 \x01(\bR\breEnroll2\x99\x01\n" +
+	"\tre_enroll\x18\x03 \x01(\bR\breEnroll\"[\n" +
+	"\x10RenewCertRequest\x12!\n" +
+	"\fconnector_id\x18\x01 \x01(\tR\vconnectorId\x12$\n" +
+	"\x0epublic_key_der\x18\x02 \x01(\fR\fpublicKeyDer\"\x96\x01\n" +
+	"\x11RenewCertResponse\x12'\n" +
+	"\x0fcertificate_pem\x18\x01 \x01(\fR\x0ecertificatePem\x12(\n" +
+	"\x10workspace_ca_pem\x18\x02 \x01(\fR\x0eworkspaceCaPem\x12.\n" +
+	"\x13intermediate_ca_pem\x18\x03 \x01(\fR\x11intermediateCaPem2\xe1\x01\n" +
 	"\x10ConnectorService\x12=\n" +
 	"\x06Enroll\x12\x18.connector.EnrollRequest\x1a\x19.connector.EnrollResponse\x12F\n" +
-	"\tHeartbeat\x12\x1b.connector.HeartbeatRequest\x1a\x1c.connector.HeartbeatResponseB4Z2github.com/yourorg/ztna/controller/proto/connectorb\x06proto3"
+	"\tHeartbeat\x12\x1b.connector.HeartbeatRequest\x1a\x1c.connector.HeartbeatResponse\x12F\n" +
+	"\tRenewCert\x12\x1b.connector.RenewCertRequest\x1a\x1c.connector.RenewCertResponseB4Z2github.com/yourorg/ztna/controller/proto/connectorb\x06proto3"
 
 var (
 	file_proto_connector_connector_proto_rawDescOnce sync.Once
@@ -325,20 +445,24 @@ func file_proto_connector_connector_proto_rawDescGZIP() []byte {
 	return file_proto_connector_connector_proto_rawDescData
 }
 
-var file_proto_connector_connector_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_connector_connector_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_connector_connector_proto_goTypes = []any{
 	(*EnrollRequest)(nil),     // 0: connector.EnrollRequest
 	(*EnrollResponse)(nil),    // 1: connector.EnrollResponse
 	(*HeartbeatRequest)(nil),  // 2: connector.HeartbeatRequest
 	(*HeartbeatResponse)(nil), // 3: connector.HeartbeatResponse
+	(*RenewCertRequest)(nil),  // 4: connector.RenewCertRequest
+	(*RenewCertResponse)(nil), // 5: connector.RenewCertResponse
 }
 var file_proto_connector_connector_proto_depIdxs = []int32{
 	0, // 0: connector.ConnectorService.Enroll:input_type -> connector.EnrollRequest
 	2, // 1: connector.ConnectorService.Heartbeat:input_type -> connector.HeartbeatRequest
-	1, // 2: connector.ConnectorService.Enroll:output_type -> connector.EnrollResponse
-	3, // 3: connector.ConnectorService.Heartbeat:output_type -> connector.HeartbeatResponse
-	2, // [2:4] is the sub-list for method output_type
-	0, // [0:2] is the sub-list for method input_type
+	4, // 2: connector.ConnectorService.RenewCert:input_type -> connector.RenewCertRequest
+	1, // 3: connector.ConnectorService.Enroll:output_type -> connector.EnrollResponse
+	3, // 4: connector.ConnectorService.Heartbeat:output_type -> connector.HeartbeatResponse
+	5, // 5: connector.ConnectorService.RenewCert:output_type -> connector.RenewCertResponse
+	3, // [3:6] is the sub-list for method output_type
+	0, // [0:3] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -355,7 +479,7 @@ func file_proto_connector_connector_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_connector_connector_proto_rawDesc), len(file_proto_connector_connector_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -28,6 +28,10 @@ type Service interface {
 	// Called by: enrollment.go (Phase 3, Step 9)
 	SignConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ConnectorCertResult, error)
 
+	// RenewConnectorCert issues a fresh certificate for an existing connector's public key.
+	// Called by: renewal.go
+	RenewConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, publicKeyDER []byte, certTTL time.Duration) (*ConnectorCertResult, error)
+
 	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
 	// for the controller gRPC endpoint. The certificate is signed by the
 	// intermediate CA, carries the controller SPIFFE ID, and includes DNS/IP SANs
@@ -49,10 +53,12 @@ type WorkspaceCAResult struct {
 // ConnectorCertResult holds the output of SignConnectorCert.
 // Called by: enrollment.go (Phase 3) to build the EnrollResponse.
 type ConnectorCertResult struct {
-	CertificatePEM string
-	Serial         string
-	NotBefore      time.Time
-	NotAfter       time.Time
+	CertificatePEM    string // leaf certificate
+	WorkspaceCAPEM    string // WorkspaceCA certificate
+	IntermediateCAPEM string // Intermediate CA certificate
+	Serial            string
+	NotBefore         time.Time
+	NotAfter          time.Time
 }
 
 // ControllerServerTLSResult holds the PEM-encoded server certificate and key

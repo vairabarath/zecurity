@@ -23,7 +23,9 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{error, info, warn};
 
 use crate::config::ConnectorConfig;
+use crate::enrollment::EnrollmentState;
 use crate::proto;
+use crate::renewal;
 use crate::tls;
 use crate::util;
 
@@ -168,7 +170,7 @@ fn parse_host_port(addr: &str) -> Result<(String, u16)> {
 ///
 /// Called from main.rs after enrollment succeeds.
 /// Blocks indefinitely — spawn on a tokio task.
-pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<()> {
+pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState) -> Result<()> {
     info!("starting mTLS heartbeat pre-flight check");
 
     // Pre-flight: verify controller SPIFFE identity
@@ -185,7 +187,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<
     let interval_secs = cfg.heartbeat_interval_secs;
 
     info!(
-        connector_id = %connector_id,
+        connector_id = %state.connector_id,
         interval_secs = interval_secs,
         version = %version,
         "entering heartbeat loop"
@@ -194,11 +196,14 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     let mut heartbeat_interval = interval(Duration::from_secs(interval_secs));
 
+    // Mutable state for renewal
+    let mut current_state = state.clone();
+
     loop {
         heartbeat_interval.tick().await;
 
         let request = tonic::Request::new(proto::HeartbeatRequest {
-            connector_id: connector_id.to_string(),
+            connector_id: current_state.connector_id.clone(),
             version: version.clone(),
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
@@ -216,7 +221,30 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, connector_id: &str) -> Result<
                 }
 
                 if resp.re_enroll {
-                    warn!("controller requests re-enrollment — not yet implemented, ignoring");
+                    info!("controller requested cert renewal — starting renewal");
+                    match renewal::renew_cert(&current_state, cfg).await {
+                        Ok(new_state) => {
+                            info!(
+                                "cert renewed successfully, new expiry: {}",
+                                new_state.cert_not_after
+                            );
+                            current_state = new_state;
+                            // Rebuild the mTLS channel so subsequent connections
+                            // (and any reconnects after TCP drop) use the new cert.
+                            match build_channel(cfg).await {
+                                Ok(new_channel) => {
+                                    client = proto::connector_service_client::ConnectorServiceClient::new(new_channel);
+                                    info!("mTLS channel rebuilt with renewed certificate");
+                                }
+                                Err(e) => {
+                                    error!("failed to rebuild mTLS channel after renewal: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("cert renewal failed: {}", e);
+                        }
+                    }
                 }
 
                 if !resp.latest_version.is_empty() && resp.latest_version != version {

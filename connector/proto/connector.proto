@@ -5,6 +5,7 @@ package connector;
 service ConnectorService {
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 }
 
 message EnrollRequest {
@@ -32,4 +33,15 @@ message HeartbeatResponse {
   bool ok = 1;
   string latest_version = 2;
   bool re_enroll = 3;
+}
+
+message RenewCertRequest {
+  string connector_id = 1;
+  bytes public_key_der = 2;
+}
+
+message RenewCertResponse {
+  bytes certificate_pem = 1;
+  bytes workspace_ca_pem = 2;
+  bytes intermediate_ca_pem = 3;
 }
