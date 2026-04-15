@@ -18,8 +18,8 @@ use crate::appmeta;
 ///
 /// Returns `Ok(())` if the SPIFFE ID matches, `Err` otherwise.
 pub fn verify_controller_spiffe(cert_der: &[u8]) -> Result<()> {
-    let (_, cert) = X509Certificate::from_der(cert_der)
-        .context("failed to parse peer certificate as X.509")?;
+    let (_, cert) =
+        X509Certificate::from_der(cert_der).context("failed to parse peer certificate as X.509")?;
 
     // Look for the Subject Alternative Name extension (OID 2.5.29.17)
     let san = cert

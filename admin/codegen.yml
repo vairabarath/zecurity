@@ -1,4 +1,6 @@
-schema: '../controller/graph/schema.graphqls'
+schema:
+  - '../controller/graph/schema.graphqls'
+  - '../controller/graph/connector.graphqls'
 documents: 'src/graphql/**/*.graphql'
 generates:
   src/generated/:

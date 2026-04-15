@@ -230,11 +230,11 @@ LOG_LEVEL=info
 STATE_DIR=${STATE_DIR}
 EOF
 
-# 0640 = root owner can read/write, zecurity group can read.
+# 0660 = root owner can read/write, zecurity group can read/write.
 # The service process reads this file via figment's Toml loader in config.rs
-# (separate from systemd's EnvironmentFile= which reads it as root before the
-# service starts). Both paths need to work.
-chmod 0640 "$CONFIG_FILE"
+# and writes to it after enrollment to remove ENROLLMENT_TOKEN.
+# systemd reads it as root via EnvironmentFile= before starting the service.
+chmod 0660 "$CONFIG_FILE"
 chown root:"$SERVICE_USER" "$CONFIG_FILE"
 
 # ── Reload systemd + enable + start ─────────────────────────────────────────

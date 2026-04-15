@@ -1,0 +1,52 @@
+/* eslint-disable */
+import * as types from './graphql';
+import { TypedDocumentNode as DocumentNode } from '@graphql-typed-document-node/core';
+
+/**
+ * Map of all GraphQL operations in the project.
+ *
+ * This map has several performance disadvantages:
+ * 1. It is not tree-shakeable, so it will include all operations in the project.
+ * 2. It is not minifiable, so the string of a GraphQL query will be multiple times inside the bundle.
+ * 3. It does not support dead code elimination, so it will add unused operations.
+ *
+ * Therefore it is highly recommended to use the babel or swc plugin for production.
+ * Learn more about it here: https://the-guild.dev/graphql/codegen/plugins/presets/preset-client#reducing-bundle-size
+ */
+type Documents = {
+    "mutation InitiateAuth($provider: String!, $workspaceName: String) {\n  initiateAuth(provider: $provider, workspaceName: $workspaceName) {\n    redirectUrl\n    state\n  }\n}\n\nmutation CreateRemoteNetwork($name: String!, $location: NetworkLocation!) {\n  createRemoteNetwork(name: $name, location: $location) {\n    id\n    name\n    location\n    status\n    createdAt\n  }\n}\n\nmutation DeleteRemoteNetwork($id: ID!) {\n  deleteRemoteNetwork(id: $id)\n}\n\nmutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {\n  generateConnectorToken(\n    remoteNetworkId: $remoteNetworkId\n    connectorName: $connectorName\n  ) {\n    connectorId\n    installCommand\n  }\n}\n\nmutation RevokeConnector($id: ID!) {\n  revokeConnector(id: $id)\n}\n\nmutation DeleteConnector($id: ID!) {\n  deleteConnector(id: $id)\n}": typeof types.InitiateAuthDocument,
+    "query LookupWorkspace($slug: String!) {\n  lookupWorkspace(slug: $slug) {\n    found\n    workspace {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery LookupWorkspacesByEmail($email: String!) {\n  lookupWorkspacesByEmail(email: $email) {\n    workspaces {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery Me {\n  me {\n    id\n    email\n    role\n    provider\n    createdAt\n  }\n}\n\nquery GetWorkspace {\n  workspace {\n    id\n    slug\n    name\n    status\n    createdAt\n  }\n}\n\nquery GetRemoteNetworks {\n  remoteNetworks {\n    id\n    name\n    location\n    status\n    createdAt\n    connectors {\n      id\n      name\n      status\n      lastSeenAt\n      version\n      hostname\n    }\n  }\n}\n\nquery GetConnectors($remoteNetworkId: ID!) {\n  connectors(remoteNetworkId: $remoteNetworkId) {\n    id\n    name\n    status\n    lastSeenAt\n    version\n    hostname\n    publicIp\n    certNotAfter\n    createdAt\n  }\n}\n\nquery GetRemoteNetwork($id: ID!) {\n  remoteNetwork(id: $id) {\n    id\n    name\n    location\n    status\n  }\n}": typeof types.LookupWorkspaceDocument,
+};
+const documents: Documents = {
+    "mutation InitiateAuth($provider: String!, $workspaceName: String) {\n  initiateAuth(provider: $provider, workspaceName: $workspaceName) {\n    redirectUrl\n    state\n  }\n}\n\nmutation CreateRemoteNetwork($name: String!, $location: NetworkLocation!) {\n  createRemoteNetwork(name: $name, location: $location) {\n    id\n    name\n    location\n    status\n    createdAt\n  }\n}\n\nmutation DeleteRemoteNetwork($id: ID!) {\n  deleteRemoteNetwork(id: $id)\n}\n\nmutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {\n  generateConnectorToken(\n    remoteNetworkId: $remoteNetworkId\n    connectorName: $connectorName\n  ) {\n    connectorId\n    installCommand\n  }\n}\n\nmutation RevokeConnector($id: ID!) {\n  revokeConnector(id: $id)\n}\n\nmutation DeleteConnector($id: ID!) {\n  deleteConnector(id: $id)\n}": types.InitiateAuthDocument,
+    "query LookupWorkspace($slug: String!) {\n  lookupWorkspace(slug: $slug) {\n    found\n    workspace {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery LookupWorkspacesByEmail($email: String!) {\n  lookupWorkspacesByEmail(email: $email) {\n    workspaces {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery Me {\n  me {\n    id\n    email\n    role\n    provider\n    createdAt\n  }\n}\n\nquery GetWorkspace {\n  workspace {\n    id\n    slug\n    name\n    status\n    createdAt\n  }\n}\n\nquery GetRemoteNetworks {\n  remoteNetworks {\n    id\n    name\n    location\n    status\n    createdAt\n    connectors {\n      id\n      name\n      status\n      lastSeenAt\n      version\n      hostname\n    }\n  }\n}\n\nquery GetConnectors($remoteNetworkId: ID!) {\n  connectors(remoteNetworkId: $remoteNetworkId) {\n    id\n    name\n    status\n    lastSeenAt\n    version\n    hostname\n    publicIp\n    certNotAfter\n    createdAt\n  }\n}\n\nquery GetRemoteNetwork($id: ID!) {\n  remoteNetwork(id: $id) {\n    id\n    name\n    location\n    status\n  }\n}": types.LookupWorkspaceDocument,
+};
+
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ *
+ *
+ * @example
+ * ```ts
+ * const query = graphql(`query GetUser($id: ID!) { user(id: $id) { name } }`);
+ * ```
+ *
+ * The query argument is unknown!
+ * Please regenerate the types.
+ */
+export function graphql(source: string): unknown;
+
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(source: "mutation InitiateAuth($provider: String!, $workspaceName: String) {\n  initiateAuth(provider: $provider, workspaceName: $workspaceName) {\n    redirectUrl\n    state\n  }\n}\n\nmutation CreateRemoteNetwork($name: String!, $location: NetworkLocation!) {\n  createRemoteNetwork(name: $name, location: $location) {\n    id\n    name\n    location\n    status\n    createdAt\n  }\n}\n\nmutation DeleteRemoteNetwork($id: ID!) {\n  deleteRemoteNetwork(id: $id)\n}\n\nmutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {\n  generateConnectorToken(\n    remoteNetworkId: $remoteNetworkId\n    connectorName: $connectorName\n  ) {\n    connectorId\n    installCommand\n  }\n}\n\nmutation RevokeConnector($id: ID!) {\n  revokeConnector(id: $id)\n}\n\nmutation DeleteConnector($id: ID!) {\n  deleteConnector(id: $id)\n}"): (typeof documents)["mutation InitiateAuth($provider: String!, $workspaceName: String) {\n  initiateAuth(provider: $provider, workspaceName: $workspaceName) {\n    redirectUrl\n    state\n  }\n}\n\nmutation CreateRemoteNetwork($name: String!, $location: NetworkLocation!) {\n  createRemoteNetwork(name: $name, location: $location) {\n    id\n    name\n    location\n    status\n    createdAt\n  }\n}\n\nmutation DeleteRemoteNetwork($id: ID!) {\n  deleteRemoteNetwork(id: $id)\n}\n\nmutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {\n  generateConnectorToken(\n    remoteNetworkId: $remoteNetworkId\n    connectorName: $connectorName\n  ) {\n    connectorId\n    installCommand\n  }\n}\n\nmutation RevokeConnector($id: ID!) {\n  revokeConnector(id: $id)\n}\n\nmutation DeleteConnector($id: ID!) {\n  deleteConnector(id: $id)\n}"];
+/**
+ * The graphql function is used to parse GraphQL queries into a document that can be used by GraphQL clients.
+ */
+export function graphql(source: "query LookupWorkspace($slug: String!) {\n  lookupWorkspace(slug: $slug) {\n    found\n    workspace {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery LookupWorkspacesByEmail($email: String!) {\n  lookupWorkspacesByEmail(email: $email) {\n    workspaces {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery Me {\n  me {\n    id\n    email\n    role\n    provider\n    createdAt\n  }\n}\n\nquery GetWorkspace {\n  workspace {\n    id\n    slug\n    name\n    status\n    createdAt\n  }\n}\n\nquery GetRemoteNetworks {\n  remoteNetworks {\n    id\n    name\n    location\n    status\n    createdAt\n    connectors {\n      id\n      name\n      status\n      lastSeenAt\n      version\n      hostname\n    }\n  }\n}\n\nquery GetConnectors($remoteNetworkId: ID!) {\n  connectors(remoteNetworkId: $remoteNetworkId) {\n    id\n    name\n    status\n    lastSeenAt\n    version\n    hostname\n    publicIp\n    certNotAfter\n    createdAt\n  }\n}\n\nquery GetRemoteNetwork($id: ID!) {\n  remoteNetwork(id: $id) {\n    id\n    name\n    location\n    status\n  }\n}"): (typeof documents)["query LookupWorkspace($slug: String!) {\n  lookupWorkspace(slug: $slug) {\n    found\n    workspace {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery LookupWorkspacesByEmail($email: String!) {\n  lookupWorkspacesByEmail(email: $email) {\n    workspaces {\n      id\n      name\n      slug\n    }\n  }\n}\n\nquery Me {\n  me {\n    id\n    email\n    role\n    provider\n    createdAt\n  }\n}\n\nquery GetWorkspace {\n  workspace {\n    id\n    slug\n    name\n    status\n    createdAt\n  }\n}\n\nquery GetRemoteNetworks {\n  remoteNetworks {\n    id\n    name\n    location\n    status\n    createdAt\n    connectors {\n      id\n      name\n      status\n      lastSeenAt\n      version\n      hostname\n    }\n  }\n}\n\nquery GetConnectors($remoteNetworkId: ID!) {\n  connectors(remoteNetworkId: $remoteNetworkId) {\n    id\n    name\n    status\n    lastSeenAt\n    version\n    hostname\n    publicIp\n    certNotAfter\n    createdAt\n  }\n}\n\nquery GetRemoteNetwork($id: ID!) {\n  remoteNetwork(id: $id) {\n    id\n    name\n    location\n    status\n  }\n}"];
+
+export function graphql(source: string) {
+  return (documents as any)[source] ?? {};
+}
+
+export type DocumentType<TDocumentNode extends DocumentNode<any, any>> = TDocumentNode extends DocumentNode<  infer TType,  any>  ? TType  : never;
