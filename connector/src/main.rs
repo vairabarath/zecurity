@@ -23,6 +23,7 @@ mod config;
 mod crypto;
 mod enrollment;
 mod heartbeat;
+mod renewal;
 mod tls;
 mod updater;
 mod util;
@@ -94,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     // Step 4: Check enrollment state.
     let state_path = Path::new(&cfg.state_dir).join("state.json");
 
-    let connector_id: String = if state_path.exists() {
+    let enrollment_state: EnrollmentState = if state_path.exists() {
         // Already enrolled — load state and log connector_id.
         let state_json = fs::read_to_string(&state_path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {}", state_path.display(), e))?;
@@ -108,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
             enrolled_at = %state.enrolled_at,
             "connector already enrolled"
         );
-        state.connector_id
+        state
     } else {
         // First run — perform enrollment.
         info!("no state found — starting enrollment");
@@ -118,14 +119,17 @@ async fn main() -> anyhow::Result<()> {
             trust_domain = %result.trust_domain,
             "enrollment complete"
         );
-        result.connector_id
+        // Load the saved state
+        let state_json = fs::read_to_string(&state_path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", state_path.display(), e))?;
+        serde_json::from_str(&state_json)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", state_path.display(), e))?
     };
 
     // Step 5: Spawn heartbeat loop on mTLS channel.
     let hb_cfg = cfg.clone();
-    let hb_id = connector_id.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        if let Err(e) = heartbeat::run_heartbeat(&hb_cfg, &hb_id).await {
+        if let Err(e) = heartbeat::run_heartbeat(&hb_cfg, &enrollment_state).await {
             error!(error = %e, "heartbeat loop failed");
         }
     });

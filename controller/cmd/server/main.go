@@ -77,6 +77,7 @@ func main() {
 		DisconnectThreshold: mustDuration("CONNECTOR_DISCONNECT_THRESHOLD", 90*time.Second),
 		GRPCPort:            envOr("GRPC_PORT", "9090"),
 		JWTSecret:           mustEnv("JWT_SECRET"),
+		RenewalWindow:       mustDuration("CONNECTOR_RENEWAL_WINDOW", 48*time.Hour),
 	}
 
 	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))

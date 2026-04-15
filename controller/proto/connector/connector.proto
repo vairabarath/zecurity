@@ -13,6 +13,11 @@ service ConnectorService {
   // Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
   // Uses mTLS — connector presents its SPIFFE-certified cert.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Called by connector when HeartbeatResponse.re_enroll=true.
+  // Uses mTLS — connector presents its current (still-valid) cert.
+  // Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 }
 
 message EnrollRequest {
@@ -39,5 +44,16 @@ message HeartbeatRequest {
 message HeartbeatResponse {
   bool   ok             = 1;
   string latest_version = 2;  // controller informs connector of latest release
-  bool   re_enroll      = 3;  // always false this sprint — field plumbed for next sprint
+  bool   re_enroll      = 3;  // true when cert expiring soon, connector should call RenewCert
+}
+
+message RenewCertRequest {
+  string connector_id = 1;  // for logging only — identity comes from mTLS cert
+  bytes  public_key_der = 2;  // connector's existing EC P-384 public key (DER)
+}
+
+message RenewCertResponse {
+  bytes certificate_pem = 1;        // fresh 7-day cert, same SPIFFE SAN
+  bytes workspace_ca_pem = 2;      // WorkspaceCA (may not have changed, but send anyway)
+  bytes intermediate_ca_pem = 3;     // Intermediate CA
 }

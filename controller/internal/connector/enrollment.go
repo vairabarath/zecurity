@@ -34,24 +34,24 @@ type EnrollmentHandler struct {
 //
 // Full sequence:
 //
-//	 1. Verify JWT signature using cfg.JWTSecret, check exp, verify iss == appmeta.ControllerIssuer
-//	 2. Extract jti, connector_id, workspace_id, trust_domain from JWT claims
-//	 3. Call BurnEnrollmentJTI(ctx, redis, jti) — atomic GET+DEL (single-use)
-//	    - Not found → codes.PermissionDenied ("token expired or already used")
-//	 4. Load connector row: verify status='pending', verify tenant_id == workspace_id
-//	    - Fail → codes.PermissionDenied
-//	 5. Verify workspace status='active'
-//	    - Fail → codes.FailedPrecondition
-//	 6. Parse CSR from request.csr_der
-//	 7. Verify CSR self-signature (proves connector holds the private key)
-//	 8. Verify CSR SPIFFE SAN matches expected:
-//	      expected := appmeta.ConnectorSPIFFEID(trust_domain, connector_id)
-//	    - Mismatch → codes.PermissionDenied
-//	 9. Call pki.SignConnectorCert(ctx, tenantID, connectorID, trustDomain, csr, cfg.CertTTL)
-//	10. UPDATE connector row: status='active', trust_domain, cert_serial, cert_not_after,
-//	    hostname, version, last_heartbeat_at=NOW(), enrollment_token_jti=NULL
-//	11. Return EnrollResponse with signed cert PEM, workspace CA PEM, intermediate CA PEM,
-//	    and connector ID
+//  1. Verify JWT signature using cfg.JWTSecret, check exp, verify iss == appmeta.ControllerIssuer
+//  2. Extract jti, connector_id, workspace_id, trust_domain from JWT claims
+//  3. Call BurnEnrollmentJTI(ctx, redis, jti) — atomic GET+DEL (single-use)
+//     - Not found → codes.PermissionDenied ("token expired or already used")
+//  4. Load connector row: verify status='pending', verify tenant_id == workspace_id
+//     - Fail → codes.PermissionDenied
+//  5. Verify workspace status='active'
+//     - Fail → codes.FailedPrecondition
+//  6. Parse CSR from request.csr_der
+//  7. Verify CSR self-signature (proves connector holds the private key)
+//  8. Verify CSR SPIFFE SAN matches expected:
+//     expected := appmeta.ConnectorSPIFFEID(trust_domain, connector_id)
+//     - Mismatch → codes.PermissionDenied
+//  9. Call pki.SignConnectorCert(ctx, tenantID, connectorID, trustDomain, csr, cfg.CertTTL)
+//  10. UPDATE connector row: status='active', trust_domain, cert_serial, cert_not_after,
+//     hostname, version, last_heartbeat_at=NOW(), enrollment_token_jti=NULL
+//  11. Return EnrollResponse with signed cert PEM, workspace CA PEM, intermediate CA PEM,
+//     and connector ID
 func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.EnrollResponse, error) {
 	// Step 1 — Verify enrollment JWT.
 	// Called: token.go → VerifyEnrollmentToken()
@@ -209,6 +209,72 @@ func csrHasSPIFFEURI(csr *x509.CertificateRequest, expectedURI string) bool {
 		}
 	}
 	return false
+}
+
+// RenewCert handles the RenewCert RPC.
+// Called by: gRPC server when connector's cert is expiring soon.
+func (h *EnrollmentHandler) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
+	trustDomain := TrustDomainFromContext(ctx)
+	role := SPIFFERoleFromContext(ctx)
+	connectorID := SPIFFEEntityIDFromContext(ctx)
+
+	if role != appmeta.SPIFFERoleConnector {
+		return nil, status.Errorf(codes.PermissionDenied, "expected role %q, got %q", appmeta.SPIFFERoleConnector, role)
+	}
+
+	var connStatus, tenantID string
+	var certNotAfter *time.Time
+	err := h.Pool.QueryRow(ctx,
+		`SELECT status, tenant_id, cert_not_after FROM connectors WHERE id = $1 AND trust_domain = $2`,
+		connectorID, trustDomain,
+	).Scan(&connStatus, &tenantID, &certNotAfter)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "connector not found: %v", err)
+	}
+
+	if connStatus == "revoked" {
+		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
+	}
+
+	certResult, err := h.PKIService.RenewConnectorCert(
+		ctx,
+		tenantID,
+		connectorID,
+		trustDomain,
+		req.PublicKeyDer,
+		h.Cfg.CertTTL,
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "renew connector cert: %v", err)
+	}
+
+	_, err = h.Pool.Exec(ctx,
+		`UPDATE connectors
+		    SET cert_serial = $1,
+		        cert_not_after = $2,
+		        updated_at = NOW()
+		  WHERE id = $3 AND tenant_id = $4`,
+		certResult.Serial,
+		certResult.NotAfter,
+		connectorID,
+		tenantID,
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "update connector cert: %v", err)
+	}
+
+	workspaceCAPEM, intermediateCAPEM, err := h.loadCACerts(ctx, tenantID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load CA certs: %v", err)
+	}
+
+	fmt.Printf("connector %s: cert renewed, new expiry=%v\n", connectorID, certResult.NotAfter)
+
+	return &pb.RenewCertResponse{
+		CertificatePem:    []byte(certResult.CertificatePEM),
+		WorkspaceCaPem:    []byte(workspaceCAPEM),
+		IntermediateCaPem: []byte(intermediateCAPEM),
+	}, nil
 }
 
 // Compile-time interface check — ensure EnrollmentHandler implements ConnectorServiceServer.

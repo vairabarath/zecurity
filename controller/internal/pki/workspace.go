@@ -199,3 +199,130 @@ func (s *serviceImpl) SignConnectorCert(
 		NotAfter:       notAfter,
 	}, nil
 }
+
+// RenewConnectorCert issues a fresh certificate for an existing connector's public key.
+// Called by: renewal.go (Phase 3)
+//
+// Unlike SignConnectorCert (enrollment), there is no CSR here.
+// The connector keeps its existing EC P-384 keypair — we just issue
+// a new certificate with a fresh validity window.
+//
+// Parameters:
+//   - tenantID: workspace ID (used to load the workspace CA key)
+//   - connectorID: connector UUID (for CN and SPIFFE ID)
+//   - trustDomain: workspace trust domain (for the SPIFFE URI SAN)
+//   - publicKeyDER: connector's existing EC P-384 public key in DER format
+//   - certTTL: certificate lifetime (typically 7 days)
+//
+// Returns the new certificate PEM + serial number + validity window.
+func (s *serviceImpl) RenewConnectorCert(
+	ctx context.Context,
+	tenantID, connectorID, trustDomain string,
+	publicKeyDER []byte,
+	certTTL time.Duration,
+) (*ConnectorCertResult, error) {
+	// 1. Parse the connector's CSR to extract the public key.
+	// The connector sends a PKCS#10 CSR (self-signed) — CheckSignature proves
+	// it holds the corresponding private key, and PublicKey carries the key
+	// we need to sign the renewal certificate.
+	csr, err := x509.ParseCertificateRequest(publicKeyDER)
+	if err != nil {
+		return nil, fmt.Errorf("parse connector CSR: %w", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, fmt.Errorf("verify connector CSR signature: %w", err)
+	}
+	pubKey := csr.PublicKey
+
+	// 2. Load workspace CA key material from the database.
+	var encryptedKey, nonce, caCertPEM string
+	err = s.pool.QueryRow(ctx,
+		`SELECT encrypted_private_key, nonce, certificate_pem
+		   FROM workspace_ca_keys
+		  WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(&encryptedKey, &nonce, &caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load workspace CA key for tenant %s: %w", tenantID, err)
+	}
+
+	// 3. Decrypt the workspace CA private key.
+	caPrivKey, err := decryptPrivateKey(encryptedKey, nonce, s.masterSecret, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt workspace CA key: %w", err)
+	}
+	defer caPrivKey.D.SetInt64(0)
+
+	// 4. Parse the workspace CA certificate.
+	caCert, err := parseCertFromPEM(caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse workspace CA cert: %w", err)
+	}
+
+	// 5. Generate a unique serial number.
+	serial, err := newSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	// 6. Build the SPIFFE URI SAN.
+	spiffeURI, err := url.Parse(appmeta.ConnectorSPIFFEID(trustDomain, connectorID))
+	if err != nil {
+		return nil, fmt.Errorf("parse SPIFFE URI: %w", err)
+	}
+
+	// 7. Build validity window.
+	now := time.Now().UTC()
+	notBefore := now.Add(-1 * time.Hour) // clock skew tolerance
+	notAfter := now.Add(certTTL)
+
+	// 8. Build the certificate template (same as SignConnectorCert, but using provided public key).
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   appmeta.PKIConnectorCNPrefix + connectorID,
+			Organization: []string{appmeta.PKIWorkspaceOrganization},
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		URIs:                  []*url.URL{spiffeURI},
+	}
+
+	// 9. Sign the certificate with the workspace CA.
+	certDER, err := x509.CreateCertificate(
+		rand.Reader,
+		template,
+		caCert,
+		pubKey,
+		caPrivKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sign connector certificate: %w", err)
+	}
+
+	// 10. Encode to PEM.
+	certPEM := encodeCertToPEM(certDER)
+
+	// 11. Load intermediate CA for the response
+	var intermediateCAPEM string
+	err = s.pool.QueryRow(ctx,
+		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
+	).Scan(&intermediateCAPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load intermediate CA: %w", err)
+	}
+
+	// 12. Return the CA chain for the connector
+	return &ConnectorCertResult{
+		CertificatePEM:    certPEM,
+		WorkspaceCAPEM:    caCertPEM,
+		IntermediateCAPEM: intermediateCAPEM,
+		Serial:            serial.Text(16),
+		NotBefore:         notBefore,
+		NotAfter:          notAfter,
+	}, nil
+}

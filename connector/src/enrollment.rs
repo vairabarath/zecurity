@@ -51,7 +51,7 @@ struct JwtClaims {
 }
 
 /// Persistent enrollment state saved to state.json after successful enrollment.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentState {
     pub connector_id: String,
     pub trust_domain: String,
