@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package connector;
+
+service ConnectorService {
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;
+  bytes csr_der = 2;
+  string version = 3;
+  string hostname = 4;
+}
+
+message EnrollResponse {
+  bytes certificate_pem = 1;
+  bytes workspace_ca_pem = 2;
+  bytes intermediate_ca_pem = 3;
+  string connector_id = 4;
+}
+
+message HeartbeatRequest {
+  string connector_id = 1;
+  string version = 2;
+  string hostname = 3;
+  string public_ip = 4;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+  string latest_version = 2;
+  bool re_enroll = 3;
+}

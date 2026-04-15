@@ -92,7 +92,10 @@ pub async fn run_update_loop(cfg: &ConnectorConfig) -> Result<()> {
         .subsec_nanos() as u64;
     let delay_secs = pid.wrapping_mul(nanos) % MAX_STARTUP_DELAY_SECS;
 
-    info!(delay_secs = delay_secs, "auto-updater starting after random delay");
+    info!(
+        delay_secs = delay_secs,
+        "auto-updater starting after random delay"
+    );
     sleep(Duration::from_secs(delay_secs)).await;
 
     // Create a reusable HTTP client for all requests.
@@ -111,6 +114,20 @@ pub async fn run_update_loop(cfg: &ConnectorConfig) -> Result<()> {
             error!(error = %e, "update check failed");
         }
     }
+}
+
+/// Run a single update check and exit. Called when --check-update is passed.
+///
+/// This is the entry point for the systemd oneshot update service.
+/// Returns Ok(()) after the check (whether or not an update was applied).
+pub async fn run_single_check() -> Result<()> {
+    let client = reqwest::Client::builder()
+        .user_agent(format!("zecurity-connector/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .context("build HTTP client")?;
+
+    check_and_update(&client).await
 }
 
 // ── Core update logic ───────────────────────────────────────────────────────
@@ -224,19 +241,17 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease>
         bail!("GitHub API returned HTTP {}", resp.status());
     }
 
-    let release: GitHubRelease = resp
-        .json()
-        .await
-        .context("parse GitHub release JSON")?;
+    let release: GitHubRelease = resp.json().await.context("parse GitHub release JSON")?;
 
     Ok(release)
 }
 
 /// Extract a semver::Version from a tag like "connector-v0.2.0".
 fn parse_version_from_tag(tag: &str) -> Result<semver::Version> {
-    let version_str = tag
-        .strip_prefix(TAG_PREFIX)
-        .context(format!("tag '{}' does not start with '{}'", tag, TAG_PREFIX))?;
+    let version_str = tag.strip_prefix(TAG_PREFIX).context(format!(
+        "tag '{}' does not start with '{}'",
+        tag, TAG_PREFIX
+    ))?;
 
     version_str
         .parse()
@@ -276,8 +291,8 @@ async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) -> R
 
     let bytes = resp.bytes().await.context("read download body")?;
 
-    let mut file = fs::File::create(dest)
-        .with_context(|| format!("create temp file {}", dest.display()))?;
+    let mut file =
+        fs::File::create(dest).with_context(|| format!("create temp file {}", dest.display()))?;
 
     file.write_all(&bytes)
         .with_context(|| format!("write to {}", dest.display()))?;
@@ -287,8 +302,8 @@ async fn download_to_file(client: &reqwest::Client, url: &str, dest: &Path) -> R
 
 /// Compute SHA-256 of a file and return the hex-encoded digest.
 fn sha256_file(path: &Path) -> Result<String> {
-    let data = fs::read(path)
-        .with_context(|| format!("read file for checksum: {}", path.display()))?;
+    let data =
+        fs::read(path).with_context(|| format!("read file for checksum: {}", path.display()))?;
 
     let mut hasher = Sha256::new();
     hasher.update(&data);
@@ -358,20 +373,17 @@ fn replace_binary(new_binary: &Path, install_path: &Path, backup_path: &Path) ->
         let perms = fs::metadata(install_path)
             .context("read current binary permissions")?
             .permissions();
-        fs::set_permissions(new_binary, perms)
-            .context("set permissions on new binary")?;
+        fs::set_permissions(new_binary, perms).context("set permissions on new binary")?;
     }
 
     // Backup: rename current → .bak
     if install_path.exists() {
-        fs::rename(install_path, backup_path)
-            .context("backup current binary")?;
+        fs::rename(install_path, backup_path).context("backup current binary")?;
         info!(backup = %backup_path.display(), "backed up current binary");
     }
 
     // Replace: rename .tmp → install path
-    fs::rename(new_binary, install_path)
-        .context("move new binary into place")?;
+    fs::rename(new_binary, install_path).context("move new binary into place")?;
 
     Ok(())
 }

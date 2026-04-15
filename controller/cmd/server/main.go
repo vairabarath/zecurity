@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
@@ -27,6 +30,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/pki"
 	pb "github.com/yourorg/ztna/controller/proto/connector"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
@@ -114,11 +118,25 @@ func main() {
 		log.Fatalf("grpc listen: %v", err)
 	}
 
-	// TODO: Add TLS credentials once controller TLS cert is configured.
-	// TODO: Wire UnarySPIFFEInterceptor with TLS credentials:
-	// validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorWorkspaceStore{pool: db.Pool})
-	// grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator))
-	grpcServer := grpc.NewServer()
+	connectorStore := connectorWorkspaceStore{pool: db.Pool}
+	controllerTLS, err := pkiService.GenerateControllerServerTLS(ctx, controllerCertHosts(connectorCfg.GRPCPort), connectorCfg.CertTTL)
+	if err != nil {
+		log.Fatalf("generate controller gRPC TLS cert: %v", err)
+	}
+	controllerCert, err := tls.X509KeyPair([]byte(controllerTLS.CertificatePEM), []byte(controllerTLS.PrivateKeyPEM))
+	if err != nil {
+		log.Fatalf("load controller gRPC TLS keypair: %v", err)
+	}
+
+	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
+	grpcServer := grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{controllerCert},
+			ClientAuth:   tls.RequestClientCert,
+			MinVersion:   tls.VersionTLS13,
+		})),
+		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore)),
+	)
 
 	connectorSvc := &connector.EnrollmentHandler{
 		Cfg:        connectorCfg,
@@ -147,9 +165,9 @@ func main() {
 // these via admin/src/apollo/links/auth.ts. Names match the PascalCase
 // `mutation ... { ... }` / `query ... { ... }` names in admin/src/graphql/.
 var publicOperations = map[string]struct{}{
-	"InitiateAuth":             {}, // login redirect (Member 2)
-	"LookupWorkspace":          {}, // signup slug availability (Member 1 login flow)
-	"LookupWorkspacesByEmail":  {}, // login workspace picker (Member 1 login flow)
+	"InitiateAuth":            {}, // login redirect (Member 2)
+	"LookupWorkspace":         {}, // signup slug availability (Member 1 login flow)
+	"LookupWorkspacesByEmail": {}, // login workspace picker (Member 1 login flow)
 }
 
 func routeGraphQL(protected, public http.Handler) http.Handler {
@@ -243,6 +261,82 @@ func (s connectorWorkspaceStore) GetByTrustDomain(ctx context.Context, domain st
 	}
 
 	return &workspace, nil
+}
+
+func (s connectorWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context, domain string) (*x509.Certificate, error) {
+	var certPEM string
+	err := s.pool.QueryRow(ctx,
+		`SELECT wk.certificate_pem
+		   FROM workspace_ca_keys wk
+		   JOIN workspaces w ON w.id = wk.tenant_id
+		  WHERE w.trust_domain = $1
+		    AND w.status = 'active'`,
+		domain,
+	).Scan(&certPEM)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get workspace CA by trust domain: %w", err)
+	}
+
+	return parseCertPEM(certPEM)
+}
+
+func (s connectorWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
+	var certPEM string
+	err := s.pool.QueryRow(ctx,
+		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
+	).Scan(&certPEM)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get intermediate CA: %w", err)
+	}
+
+	return parseCertPEM(certPEM)
+}
+
+func parseCertPEM(certPEM string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(certPEM))
+	if block == nil {
+		return nil, fmt.Errorf("decode certificate PEM")
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse certificate: %w", err)
+	}
+
+	return cert, nil
+}
+
+func controllerCertHosts(grpcPort string) []string {
+	hosts := map[string]struct{}{
+		"localhost": {},
+		"127.0.0.1": {},
+		"::1":       {},
+	}
+
+	if addr := os.Getenv("CONTROLLER_ADDR"); addr != "" {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+			hosts[host] = struct{}{}
+		}
+	}
+
+	if addr := os.Getenv("CONTROLLER_HTTP_ADDR"); addr != "" {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+			hosts[host] = struct{}{}
+		}
+	}
+
+	result := make([]string, 0, len(hosts))
+	for host := range hosts {
+		result = append(result, host)
+	}
+
+	return result
 }
 
 func loadOptionalEnv() {

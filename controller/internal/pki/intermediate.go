@@ -73,8 +73,8 @@ func (s *serviceImpl) generateAndStoreIntermediateCA(ctx context.Context) error 
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true,
+		MaxPathLen:            1,
+		MaxPathLenZero:        false,
 	}
 
 	certDER, err := x509.CreateCertificate(

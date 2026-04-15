@@ -78,7 +78,10 @@ pub const PKI_AGENT_CN_PREFIX: &str = "agent-";
 /// Mirrors Go's `appmeta.WorkspaceTrustDomain(slug)`.
 /// Used by enrollment.rs (Phase 5) to build the CSR SAN URI.
 pub fn workspace_trust_domain(slug: &str) -> String {
-    format!("{}{}{}", SPIFFE_TRUST_DOMAIN_PREFIX, slug, SPIFFE_TRUST_DOMAIN_SUFFIX)
+    format!(
+        "{}{}{}",
+        SPIFFE_TRUST_DOMAIN_PREFIX, slug, SPIFFE_TRUST_DOMAIN_SUFFIX
+    )
 }
 
 /// Builds the full SPIFFE URI for a connector certificate.

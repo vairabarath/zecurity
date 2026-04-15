@@ -65,6 +65,14 @@ type WorkspaceStore interface {
 	// Returns (nil, nil) if the workspace does not exist.
 	// Returns (nil, err) on DB errors.
 	GetByTrustDomain(ctx context.Context, domain string) (*WorkspaceLookup, error)
+
+	// GetWorkspaceCAByTrustDomain loads the workspace CA certificate for the
+	// active workspace owning the trust domain.
+	GetWorkspaceCAByTrustDomain(ctx context.Context, domain string) (*x509.Certificate, error)
+
+	// GetIntermediateCA loads the platform intermediate CA certificate used to
+	// verify workspace CA chains and the controller server certificate.
+	GetIntermediateCA(ctx context.Context) (*x509.Certificate, error)
 }
 
 // WorkspaceLookup is the minimal workspace info needed by the trust domain validator.
@@ -158,7 +166,7 @@ func parseSPIFFEID(cert *x509.Certificate) (trustDomain, role, id string, err er
 //   - spiffeRoleKey{}     — "connector", "agent", or "controller"
 //   - spiffeEntityIDKey{} — the entity-specific ID (e.g. connector UUID)
 //   - trustDomainKey{}    — the trust domain from the SPIFFE URI
-func UnarySPIFFEInterceptor(validator TrustDomainValidator) grpc.UnaryServerInterceptor {
+func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
 		req interface{},
@@ -183,14 +191,14 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator) grpc.UnaryServerInte
 			return nil, status.Error(codes.Unauthenticated, "no TLS credentials")
 		}
 
-		// The peer must present exactly one verified certificate chain.
-		if len(tlsInfo.State.VerifiedChains) == 0 ||
-			len(tlsInfo.State.VerifiedChains[0]) == 0 {
-			return nil, status.Error(codes.Unauthenticated, "no verified client certificate")
+		// We request client certs but verify them dynamically per workspace.
+		// The TLS handshake gives us the presented leaf; the interceptor verifies
+		// the chain against the workspace CA resolved from the SPIFFE trust domain.
+		if len(tlsInfo.State.PeerCertificates) == 0 {
+			return nil, status.Error(codes.Unauthenticated, "no client certificate")
 		}
 
-		// The leaf certificate is the first in the first verified chain.
-		leaf := tlsInfo.State.VerifiedChains[0][0]
+		leaf := tlsInfo.State.PeerCertificates[0]
 
 		// Parse the SPIFFE ID from the certificate's URI SAN.
 		trustDomain, role, entityID, err := parseSPIFFEID(leaf)
@@ -201,6 +209,12 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator) grpc.UnaryServerInte
 		// Validate the trust domain (live DB lookup, no cache).
 		if !validator(ctx, trustDomain) {
 			return nil, status.Errorf(codes.PermissionDenied, "trust domain %q not accepted", trustDomain)
+		}
+
+		if role == appmeta.SPIFFERoleConnector {
+			if err := verifyConnectorCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return nil, status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
+			}
 		}
 
 		// Build the full SPIFFE URI for context injection.
@@ -214,6 +228,34 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator) grpc.UnaryServerInte
 
 		return handler(ctx, req)
 	}
+}
+
+func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {
+	workspaceCA, err := store.GetWorkspaceCAByTrustDomain(ctx, trustDomain)
+	if err != nil {
+		return fmt.Errorf("load workspace CA: %w", err)
+	}
+	if workspaceCA == nil {
+		return fmt.Errorf("workspace CA not found for trust domain %q", trustDomain)
+	}
+
+	// Verify the leaf cert was signed by the Workspace CA.
+	// We use the Workspace CA as the trusted root directly — it is the
+	// immediate issuer of connector leaf certs. This avoids Go's x509.Verify
+	// enforcing MaxPathLen across the full chain (Root → Intermediate →
+	// Workspace → Leaf), which would require all CAs to have correct
+	// path length values in already-generated certificates.
+	roots := x509.NewCertPool()
+	roots.AddCert(workspaceCA)
+
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("verify leaf against workspace CA: %w", err)
+	}
+
+	return nil
 }
 
 // Compile-time check: ensure the Enroll method name matches expectations.

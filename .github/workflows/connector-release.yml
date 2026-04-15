@@ -11,26 +11,25 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# NOTE: arm64 cross-compile is disabled for now — `aws-lc-sys` (transitive from
-# rustls 0.23) requires a full C cross toolchain (CC/CXX/CMake vars + sysroot)
-# that's fragile to set up on Ubuntu runners. Ship amd64 only until we either:
-#   - switch rustls to the `ring` provider, or
-#   - adopt `cross` (Docker-based cross-compile) in the build pipeline.
-
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset_name: connector-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            asset_name: connector-linux-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -38,28 +37,57 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            connector/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('connector/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('connector/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
-      - name: Build release binary (amd64)
+      - name: Build release binary
         working-directory: connector
-        run: cargo build --release
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp connector/target/${{ matrix.target }}/release/zecurity-connector ${{ matrix.asset_name }}
+          chmod +x ${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build-artifacts
 
       - name: Prepare release assets
         run: |
           mkdir -p release-assets
-          cp connector/target/release/zecurity-connector release-assets/connector-linux-amd64
+
+          # Extract binaries from artifact subdirectories
+          cp build-artifacts/connector-linux-amd64/connector-linux-amd64 release-assets/
+          cp build-artifacts/connector-linux-arm64/connector-linux-arm64 release-assets/
+
+          # Copy install script and systemd units
           cp connector/scripts/connector-install.sh release-assets/connector-install.sh
           cp connector/systemd/zecurity-connector.service release-assets/
           cp connector/systemd/zecurity-connector-update.service release-assets/
           cp connector/systemd/zecurity-connector-update.timer release-assets/
+
           chmod +x release-assets/connector-linux-amd64
+          chmod +x release-assets/connector-linux-arm64
           chmod +x release-assets/connector-install.sh
 
       - name: Generate checksums
         working-directory: release-assets
-        run: sha256sum connector-linux-amd64 > checksums.txt
+        run: sha256sum connector-linux-amd64 connector-linux-arm64 > checksums.txt
 
       - name: List release assets
         run: ls -lh release-assets/
@@ -72,15 +100,14 @@ jobs:
           body: |
             ## Zecurity Connector ${{ github.ref_name }}
 
-            Currently ships amd64 only. arm64 support coming in a follow-up.
-
-            ### Install (x86_64 Linux hosts)
+            ### Install (Linux hosts)
             ```bash
             curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | \
               sudo CONTROLLER_ADDR=host:9090 CONTROLLER_HTTP_ADDR=host:8080 ENROLLMENT_TOKEN=eyJ... bash
             ```
           files: |
             release-assets/connector-linux-amd64
+            release-assets/connector-linux-arm64
             release-assets/checksums.txt
             release-assets/connector-install.sh
             release-assets/zecurity-connector.service
