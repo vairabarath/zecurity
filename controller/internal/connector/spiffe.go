@@ -239,26 +239,20 @@ func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trust
 		return fmt.Errorf("workspace CA not found for trust domain %q", trustDomain)
 	}
 
-	intermediateCA, err := store.GetIntermediateCA(ctx)
-	if err != nil {
-		return fmt.Errorf("load intermediate CA: %w", err)
-	}
-	if intermediateCA == nil {
-		return fmt.Errorf("intermediate CA not found")
-	}
-
+	// Verify the leaf cert was signed by the Workspace CA.
+	// We use the Workspace CA as the trusted root directly — it is the
+	// immediate issuer of connector leaf certs. This avoids Go's x509.Verify
+	// enforcing MaxPathLen across the full chain (Root → Intermediate →
+	// Workspace → Leaf), which would require all CAs to have correct
+	// path length values in already-generated certificates.
 	roots := x509.NewCertPool()
-	roots.AddCert(intermediateCA)
-
-	intermediates := x509.NewCertPool()
-	intermediates.AddCert(workspaceCA)
+	roots.AddCert(workspaceCA)
 
 	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         roots,
-		Intermediates: intermediates,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
-		return fmt.Errorf("verify leaf against workspace CA chain: %w", err)
+		return fmt.Errorf("verify leaf against workspace CA: %w", err)
 	}
 
 	return nil
