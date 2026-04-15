@@ -70,7 +70,7 @@ func (s *serviceImpl) generateAndStoreRootCA(ctx context.Context) error {
 		IsCA:                  true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
-		MaxPathLen:            1,
+		MaxPathLen:            2,
 		MaxPathLenZero:        false,
 	}
 
