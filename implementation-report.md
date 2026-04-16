@@ -592,12 +592,32 @@ ALLOWED_ORIGIN=http://localhost:5173
 
 ## What Is NOT Built Yet (Future Sprints)
 
-- gRPC service for Connector and Linux client communication
-- Device certificate issuance (signed by WorkspaceCA)
-- Connector certificate issuance (signed by WorkspaceCA)
+- gRPC service for Linux client communication
+- Device/client certificate issuance (signed by WorkspaceCA)
 - User invitation flow (admin invites members)
 - Resource management (defining protected resources)
 - Policy engine (access rules)
-- mTLS termination for Connector connections
+- **Sprint 4: Traffic proxying (WireGuard / tun)** — next sprint
 - Workspace management (rename, suspend, delete)
 - Multi-workspace support for same Google account
+
+## What Was Added Since This Report (Sprint 3 — Cert Renewal)
+
+**Controller:**
+- `RenewCert` gRPC RPC handler added to `enrollment.go` (mTLS, proof-of-possession CSR)
+- `heartbeat.go` — sets `re_enroll=true` when cert expires within `CONNECTOR_RENEWAL_WINDOW`
+- `pki/workspace.go` — `RenewConnectorCert()` method (signs new cert from existing public key)
+- `config.go` — `RenewalWindow` field, `CONNECTOR_RENEWAL_WINDOW` env var (default 48h)
+
+**Connector:**
+- `src/renewal.rs` — NEW: reads key, extracts public key DER, calls RenewCert RPC, saves cert, rebuilds mTLS channel
+- `src/heartbeat.rs` — triggers `renewal::renew_cert()` when `re_enroll=true`
+- `src/crypto.rs` — added `extract_public_key_der()` + `parse_cert_not_after()`
+
+**Proto (`proto/connector/v1/connector.proto`):**
+- Added `RenewCert` RPC + `RenewCertRequest` / `RenewCertResponse` messages
+- Moved to repo root (was `controller/proto/connector/v1/`)
+
+**CI:**
+- `cross build --manifest-path connector/Cargo.toml` — runs from repo root so Docker container can access `proto/`
+- Released as `connector-v0.3.0`
