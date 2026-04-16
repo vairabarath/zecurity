@@ -20,4 +20,4 @@ codegen: gqlgen
 # Generate protobuf Go code from proto/connector/v1/connector.proto
 # Uses Buf CLI - requires buf to be installed
 generate-proto:
-	cd controller && buf generate
+	buf generate
