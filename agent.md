@@ -144,12 +144,13 @@ Append a session entry to `.zecurity-obs/Planning/Session Log.md`:
 
 ### Proto (connector.proto)
 
-**Source of truth:** `controller/proto/connector/v1/connector.proto`
+**Source of truth:** `proto/connector/v1/connector.proto` (repo root)
 
 - Single source file with versioned package `connector.v1`
 - Go generated code: `controller/gen/go/proto/connector/v1/` (via Buf)
-- Rust builds reference controller proto directly: `../controller/proto/connector/v1/connector.proto`
-- Generate Go code: `make generate-proto` or `cd controller && buf generate`
+- Rust `build.rs` references: `../proto/connector/v1/connector.proto`
+- Buf configs (`buf.yaml`, `buf.gen.yaml`) live at repo root
+- Generate Go code: `make generate-proto` or `buf generate` (from repo root)
 - Build: `go build ./...` (Go) / `cargo build` (Rust)
 
 ---
