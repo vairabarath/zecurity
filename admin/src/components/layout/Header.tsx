@@ -34,7 +34,7 @@ export function Header() {
   const pageName = location.pathname.split('/')[1] || 'Dashboard'
 
   return (
-    <header className="relative h-14 flex items-center justify-between px-6 bg-card/80 border-b border-border">
+    <header className="h-14 flex items-center justify-between px-6 bg-card/80 border-b border-border">
       <div className="flex items-center gap-3">
         <span className="text-sm font-semibold text-foreground capitalize">
           {pageName.replace('-', ' ')}

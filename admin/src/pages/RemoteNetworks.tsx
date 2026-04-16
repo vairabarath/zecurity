@@ -53,7 +53,6 @@ export default function RemoteNetworks() {
 
   const { data, loading } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
-    pollInterval: 30000,
   })
 
   const [createNetwork, { loading: creating }] = useMutation(CreateRemoteNetworkDocument, {

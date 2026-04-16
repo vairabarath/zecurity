@@ -22,8 +22,6 @@ export default defineConfig({
     proxy: {
       '/graphql':      'http://localhost:8080',
       '/auth/refresh': 'http://localhost:8080',
-      '/connectors':   'http://localhost:8080',
-      '/ca.crt':       'http://localhost:8080',
     },
   },
 })
