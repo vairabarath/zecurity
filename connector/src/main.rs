@@ -38,7 +38,7 @@ mod util;
 ///   proto::EnrollRequest, proto::EnrollResponse              — enrollment types
 ///   proto::HeartbeatRequest, proto::HeartbeatResponse        — heartbeat types
 pub mod proto {
-    tonic::include_proto!("connector");
+    tonic::include_proto!("connector.v1");
 }
 
 use std::fs;

@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package connector.v1;
+
+option go_package = "github.com/yourorg/ztna/controller/gen/go/connector/v1;connectorv1";
+
+service ConnectorService {
+
+  // Called once during enrollment.
+  // Uses plain TLS — connector has no cert yet.
+  // Connector presents enrollment JWT + PKCS#10 CSR.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
+  // Uses mTLS — connector presents its SPIFFE-certified cert.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Called by connector when HeartbeatResponse.re_enroll=true.
+  // Uses mTLS — connector presents its current (still-valid) cert.
+  // Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;  // signed JWT — single-use enrollment token
+  bytes  csr_der          = 2;  // DER-encoded PKCS#10 CSR (EC P-384)
+  string version          = 3;  // CARGO_PKG_VERSION
+  string hostname         = 4;
+}
+
+message EnrollResponse {
+  bytes  certificate_pem      = 1;  // signed leaf cert — 7-day validity, SPIFFE SAN
+  bytes  workspace_ca_pem     = 2;  // WorkspaceCA cert (PEM)
+  bytes  intermediate_ca_pem  = 3;  // Intermediate CA cert (PEM)
+  string connector_id         = 4;  // confirmed connector UUID
+}
+
+message HeartbeatRequest {
+  string connector_id = 1;  // for logging only — NOT authoritative identity
+  string version      = 2;  // CARGO_PKG_VERSION
+  string hostname     = 3;
+  string public_ip    = 4;  // optional
+}
+
+message HeartbeatResponse {
+  bool   ok             = 1;
+  string latest_version = 2;  // controller informs connector of latest release
+  bool   re_enroll      = 3;  // true when cert expiring soon, connector should call RenewCert
+}
+
+message RenewCertRequest {
+  string connector_id = 1;  // for logging only — identity comes from mTLS cert
+  bytes  public_key_der = 2;  // connector's existing EC P-384 public key (DER)
+}
+
+message RenewCertResponse {
+  bytes certificate_pem = 1;        // fresh 7-day cert, same SPIFFE SAN
+  bytes workspace_ca_pem = 2;      // WorkspaceCA (may not have changed, but send anyway)
+  bytes intermediate_ca_pem = 3;     // Intermediate CA
+}
