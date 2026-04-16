@@ -27,6 +27,10 @@ admin/src/generated/
 # Go
 controller/graph/generated.go
 controller/cmd/server/__debug_bin*
+controller/server
+
+# Generated proto (regenerated via make generate-proto)
+controller/gen/
 
 # Docker volumes
 pgdata/
