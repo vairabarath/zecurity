@@ -1,0 +1,30 @@
+{
+	"nodes":[
+		{"id":"group-enroll","type":"group","x":-960,"y":-980,"width":340,"height":980,"color":"3","label":"Phase 1 — Enrollment (first run only)"},
+		{"id":"group-heartbeat","type":"group","x":-560,"y":-980,"width":340,"height":860,"color":"5","label":"Phase 2 — Heartbeat Loop (runs forever)"},
+		{"id":"group-renewal","type":"group","x":-160,"y":-980,"width":340,"height":1000,"color":"2","label":"Phase 3 — Cert Renewal (triggered by re_enroll)"},
+		{"id":"e1-config","type":"text","x":-940,"y":-900,"width":300,"height":140,"text":"**1. Load Config & Check State**\n`state.json` not found → start enrollment\nReads: `CONTROLLER_ADDR`, `ENROLLMENT_TOKEN`\n`STATE_DIR` (default `/var/lib/zecurity`)"},
+		{"id":"e2-keygen","type":"text","x":-940,"y":-740,"width":300,"height":120,"text":"**2. Generate EC P-384 Keypair**\n`crypto::generate_keypair()` via rcgen\nSaved to `connector.key` (mode 0600)"},
+		{"id":"e3-csr","type":"text","x":-940,"y":-600,"width":300,"height":130,"text":"**3. Build PKCS#10 CSR**\nSPIFFE URI SAN:\n`spiffe://<trust_domain>/connector/<id>`\nSelf-signed — proves key possession"},
+		{"id":"e4-rpc","type":"text","x":-940,"y":-450,"width":300,"height":160,"text":"**4. Enroll RPC** (plain TLS, no client cert)\nPayload: enrollment JWT + CSR DER\nController: verifies JWT, burns JTI (Redis),\nchecks connector status=pending,\nsigns 7-day cert with Workspace CA"},
+		{"id":"e5-save","type":"text","x":-940,"y":-270,"width":300,"height":160,"text":"**5. Save Cert Bundle**\n`connector.crt` — SPIFFE leaf (7 days)\n`workspace_ca.crt` — CA trust chain\n`state.json` — connector_id, trust_domain,\n  workspace_id, enrolled_at, cert_not_after"},
+		{"id":"e6-done","type":"text","x":-940,"y":-90,"width":300,"height":70,"color":"3","text":"**→ Proceed to Phase 2**\nRun heartbeat loop"},
+		{"id":"h1-channel","type":"text","x":-540,"y":-900,"width":300,"height":140,"text":"**1. SPIFFE Preflight Check**\nRaw TLS → extract controller cert\n`tls::verify_controller_spiffe()` validates\ncontroller's SPIFFE URI before trusting"},
+		{"id":"h2-channel","type":"text","x":-540,"y":-740,"width":300,"height":130,"text":"**2. Build mTLS Channel**\n`connector.crt` + `connector.key`\n+ `workspace_ca.crt` as trust root\nSPIFFE interceptor validates on server side"},
+		{"id":"h3-send","type":"text","x":-540,"y":-590,"width":300,"height":130,"text":"**3. Send HeartbeatRequest**\nEvery `HEARTBEAT_INTERVAL_SECS` (30s)\nPayload: connector_id, version,\nhostname, public_ip"},
+		{"id":"h4-ctrl","type":"text","x":-540,"y":-440,"width":300,"height":150,"text":"**4. Controller Response**\nUpdates: `last_heartbeat_at`, `status=active`\nChecks: `cert_not_after` vs `NOW() + renewal_window`\nIf expiring → `re_enroll=true`\nIf healthy → `re_enroll=false`"},
+		{"id":"h5-ok","type":"text","x":-540,"y":-270,"width":300,"height":100,"color":"5","text":"**re_enroll = false** ✓\nHeartbeat OK — wait for next tick\nLoop continues indefinitely"},
+		{"id":"h6-renew","type":"text","x":-540,"y":-150,"width":300,"height":110,"color":"6","text":"**re_enroll = true** ⚠\nCert expires within renewal window\n→ trigger Phase 3 (renewal)\n→ rebuild channel after renewal"},
+		{"id":"r1-readkey","type":"text","x":-140,"y":-900,"width":300,"height":110,"text":"**1. Read Private Key**\n`connector.key` from `STATE_DIR`\n(key never changes — only cert is renewed)"},
+		{"id":"r2-csr","type":"text","x":-140,"y":-770,"width":300,"height":130,"text":"**2. Build CSR from Existing Key**\n`crypto::extract_public_key_der()`\nPKCS#10 — self-signed with current key\nProves connector still holds the private key"},
+		{"id":"r3-rpc","type":"text","x":-140,"y":-620,"width":300,"height":180,"text":"**3. RenewCert RPC** (mTLS, no JWT)\nIdentity from mTLS cert — no JWT needed\nServer: SPIFFE interceptor validates identity,\nchecks connector not revoked,\nparses CSR + verifies self-signature,\nsigns fresh 7-day cert for same keypair"},
+		{"id":"r4-savecert","type":"text","x":-140,"y":-420,"width":300,"height":130,"text":"**4. Save New Cert Bundle**\n`connector.crt` — fresh 7-day cert\n`workspace_ca.crt` — updated CA chain\n(CA chain always included in response)"},
+		{"id":"r5-state","type":"text","x":-140,"y":-270,"width":300,"height":130,"text":"**5. Update state.json**\nNew `cert_not_after` written to disk\nDB: `cert_not_after` + `cert_serial` updated\nController heartbeat window recalculates"},
+		{"id":"r6-rebuild","type":"text","x":-140,"y":-120,"width":300,"height":110,"color":"2","text":"**6. Rebuild mTLS Channel**\nNew cert loaded from disk immediately\nNext heartbeat uses the fresh certificate\n→ return to Phase 2 heartbeat loop"}
+	],
+	"edges":[
+		{"id":"e-enroll-done","fromNode":"e6-done","fromSide":"right","toNode":"h1-channel","toSide":"left","color":"3","label":"start heartbeat"},
+		{"id":"e-renew-trigger","fromNode":"h6-renew","fromSide":"right","toNode":"r1-readkey","toSide":"left","color":"6","label":"re_enroll=true"},
+		{"id":"e-renew-done","fromNode":"r6-rebuild","fromSide":"left","toNode":"h3-send","toSide":"right","color":"2","label":"continue loop"}
+	]
+}
