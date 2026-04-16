@@ -41,8 +41,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
 
       - name: Build release binary
-        working-directory: connector
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --manifest-path connector/Cargo.toml --release --target ${{ matrix.target }}
 
       - name: Rename binary
         run: |
