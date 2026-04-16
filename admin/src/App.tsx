@@ -4,6 +4,8 @@ import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
 import RemoteNetworks from '@/pages/RemoteNetworks'
 import Connectors from '@/pages/Connectors'
+import AllConnectors from '@/pages/AllConnectors'
+import ConnectorDetail from '@/pages/ConnectorDetail'
 import Settings from '@/pages/Settings'
 import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
@@ -37,6 +39,8 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/remote-networks" element={<RemoteNetworks />} />
         <Route path="/remote-networks/:id/connectors" element={<Connectors />} />
+        <Route path="/connectors/:connectorId" element={<ConnectorDetail />} />
+        <Route path="/connectors" element={<AllConnectors />} />
         <Route path="/settings"  element={<Settings />} />
       </Route>
     </Routes>
