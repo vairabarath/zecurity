@@ -12,6 +12,38 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-16 — Claude Code (Sonnet 4.6) — Sprint 4 Planning
+
+**What was done:**
+- Deep-read `sprint4-shield-plan.md` (full 1700-line spec)
+- Created `.zecurity-obs/Sprint4/` folder with complete execution documentation:
+  - `path.md` — master dependency map, conflict zones, ordered checklist with checkboxes, dependency graph
+  - `Member1-Frontend/` — 4 phase files (Layout, GraphQL ops, Shields page, RemoteNetworks+Sidebar)
+  - `Member2-Go-Proto-Shield/` — 4 phase files (Proto+appmeta Day1, Shield package, PKI, Main wiring)
+  - `Member3-Go-DB-GraphQL/` — 5 phase files (DB+Schema Day1, Resolvers, Goodbye RPC, Heartbeat, AgentServer Rust)
+  - `Member4-Rust-Shield-CI/` — 7 phase files (Crate scaffold, Core modules, Enrollment, Heartbeat+Renewal, Network, Updater+Systemd, CI+Connector main)
+- Created `Services/Shield.md` — full service documentation (module map, startup flow, SPIFFE identity, state files, config)
+- Updated `Planning/Roadmap.md` — added Sprint 4 section with team split + decisions, future sprints table
+- Updated `Home.md` — added Shield service, Sprint 4 navigation links, updated system diagrams
+- Updated `agent.md` — Shield added to project overview, Sprint 4 quick rules, new build commands, updated proto section
+
+**Key decisions:**
+- `path.md` is the team's single source of truth for execution order — agents must check it before touching any file
+- Phase files use frontmatter `depends_on`/`unlocks` for machine-readable dependency tracking
+- Conflict zone table in `path.md` prevents simultaneous edits to shared files
+- Day 1 items (M2 proto + M3 DB/GraphQL schema) must land before anyone fans out — documented as critical
+- Agreed with spec: Shield heartbeats to Connector :9091 only, never directly to Controller
+
+**What's next:**
+- M2 should start Phase 1 (proto/shield/v1/shield.proto + connector.proto modifications + appmeta) — this is the Day 1 unblocking commit
+- M3 should start Phase 1 in parallel (003_shield_schema.sql + graph/shield.graphqls + connector.graphqls)
+- Once both Day 1 commits land: run `buf generate` + `go generate ./graph/...` + `npm run codegen`
+- M1 can start Phase 1 (layout/routing scaffold) immediately — no backend dependency
+- M4 can start Phase 1 (crate scaffold) immediately after proto lands
+- Phase 6 end-to-end renewal test should be run before Sprint 4 merges
+
+---
+
 ## 2026-04-16 — Claude Code (Sonnet 4.6)
 
 **What was done:**
