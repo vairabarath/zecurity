@@ -232,53 +232,18 @@ func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetw
 	defer rows.Close()
 
 	var networks []*graph.RemoteNetwork
-	networkIdx := map[string]int{}
 	for rows.Next() {
 		rn, err := scanRemoteNetwork(rows)
 		if err != nil {
 			return nil, fmt.Errorf("remote networks: scan: %w", err)
 		}
-		networkIdx[rn.ID] = len(networks)
 		networks = append(networks, rn)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("remote networks: rows: %w", err)
 	}
 	if networks == nil {
-		return []*graph.RemoteNetwork{}, nil
-	}
-
-	// Batch-load all connectors for all networks in a single query.
-	networkIDs := make([]string, len(networks))
-	for i, n := range networks {
-		networkIDs[i] = n.ID
-	}
-	cRows, err := r.TenantDB.Query(ctx,
-		`SELECT id, name, status, remote_network_id,
-		        last_heartbeat_at, version, hostname, public_ip,
-		        cert_not_after, created_at
-		   FROM connectors
-		  WHERE remote_network_id = ANY($1)
-		    AND tenant_id = $2
-		  ORDER BY created_at DESC`,
-		networkIDs, tc.TenantID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("remote networks: load connectors: %w", err)
-	}
-	defer cRows.Close()
-
-	for cRows.Next() {
-		c, err := scanConnector(cRows)
-		if err != nil {
-			return nil, fmt.Errorf("remote networks: scan connector: %w", err)
-		}
-		if idx, ok := networkIdx[c.RemoteNetworkID]; ok {
-			networks[idx].Connectors = append(networks[idx].Connectors, c)
-		}
-	}
-	if err := cRows.Err(); err != nil {
-		return nil, fmt.Errorf("remote networks: connector rows: %w", err)
+		networks = []*graph.RemoteNetwork{}
 	}
 
 	return networks, nil

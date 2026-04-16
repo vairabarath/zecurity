@@ -49,19 +49,19 @@ function relativeTime(dateStr: string | null | undefined): string {
 const statusConfig: Record<ConnectorStatus, { label: string; className: string }> = {
   [ConnectorStatus.Pending]: {
     label: 'Pending',
-    className: 'text-gray-600 bg-gray-500/10 border-gray-500/20',
+    className: 'text-gray-400 bg-gray-400/10 border-gray-400/20',
   },
   [ConnectorStatus.Active]: {
     label: 'Active',
-    className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
+    className: 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20',
   },
   [ConnectorStatus.Disconnected]: {
     label: 'Disconnected',
-    className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
+    className: 'text-amber-400 bg-amber-400/10 border-amber-400/20',
   },
   [ConnectorStatus.Revoked]: {
     label: 'Revoked',
-    className: 'text-red-600 bg-red-500/10 border-red-500/20',
+    className: 'text-red-400 bg-red-400/10 border-red-400/20',
   },
 }
 
@@ -169,7 +169,7 @@ export default function Connectors() {
       {/* Connector Rows */}
       {connectors.length > 0 && (
         <Card className="bg-card/60 backdrop-blur-sm border-border/50 overflow-hidden">
-          <CardContent className="p-0 overflow-x-auto">
+          <CardContent className="p-0">
             {/* Table Header */}
             <div className="grid grid-cols-[1fr_100px_100px_1fr_100px_120px] gap-4 px-5 py-3 border-b border-border/50 bg-muted/20">
               <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Name</span>
@@ -224,17 +224,11 @@ export default function Connectors() {
 
                   {/* Actions */}
                   <div className="flex items-center justify-end gap-1.5">
-                    <Link
-                      to={`/connectors/${connector.id}`}
-                      className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 font-medium transition-colors mr-1"
-                    >
-                      Manage
-                    </Link>
                     {canRevoke && (
                       <Button
                         variant="outline"
                         size="sm"
-                        className="h-7 px-2 text-[10px] text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 border-amber-500/20"
+                        className="h-7 px-2 text-[10px] text-amber-400 hover:text-amber-300 hover:bg-amber-400/10 border-amber-400/20"
                         onClick={() => handleRevoke(connector.id)}
                       >
                         <ShieldOff className="w-3 h-3 mr-1" />
