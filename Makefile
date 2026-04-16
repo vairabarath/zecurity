@@ -1,4 +1,4 @@
-.PHONY: gqlgen codegen
+.PHONY: gqlgen codegen generate-proto
 
 GQLGEN_VERSION := v0.17.89
 GQLGEN_CACHE ?= /tmp/go-build-cache
@@ -16,3 +16,8 @@ gqlgen:
 # Regenerate both Go and TypeScript types from the shared schema.
 codegen: gqlgen
 	cd admin && npm run codegen
+
+# Generate protobuf Go code from proto/connector/v1/connector.proto
+# Uses Buf CLI - requires buf to be installed
+generate-proto:
+	cd controller && buf generate

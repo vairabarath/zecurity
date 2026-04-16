@@ -3,7 +3,7 @@
 // Cargo runs this BEFORE compiling any src/ files.
 //
 // What it does:
-//   Reads  → proto/connector.proto  (copied from controller/proto/connector/connector.proto)
+//   Reads  → ../controller/proto/connector/v1/connector.proto
 //   Calls  → protoc (system protobuf compiler) via tonic-prost-build
 //   Writes → target/build/<hash>/out/connector.rs  (auto-generated Rust structs + gRPC client)
 //
@@ -23,11 +23,11 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tell cargo to re-run this build script only when the proto file changes.
-    println!("cargo:rerun-if-changed=proto/connector.proto");
+    println!("cargo:rerun-if-changed=../controller/proto/connector/v1/connector.proto");
 
     // Compile the proto into Rust gRPC client stubs.
     // This generates both client and server code, but we only use the client side.
-    tonic_prost_build::compile_protos("proto/connector.proto")?;
+    tonic_prost_build::compile_protos("../controller/proto/connector/v1/connector.proto")?;
 
     Ok(())
 }
