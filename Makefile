@@ -1,4 +1,4 @@
-.PHONY: gqlgen codegen generate-proto
+.PHONY: gqlgen codegen generate-proto setup
 
 GQLGEN_VERSION := v0.17.89
 GQLGEN_CACHE ?= /tmp/go-build-cache
@@ -21,3 +21,9 @@ codegen: gqlgen
 # Uses Buf CLI - requires buf to be installed
 generate-proto:
 	buf generate
+
+# First-time setup after cloning — generates all code needed for build
+setup: generate-proto gqlgen
+	@echo "Setup complete. You can now build:"
+	@echo "  cd controller && go build ./..."
+	@echo "  cd connector  && cargo build"
