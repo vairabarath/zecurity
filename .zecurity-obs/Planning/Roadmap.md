@@ -12,7 +12,7 @@ tags:
 
 ## Current State (2026-04-16)
 
-Three sprints complete. The connector is fully operational with automatic cert renewal. Traffic proxying is the next major feature.
+Three sprints complete. The connector is fully operational with automatic cert renewal. Sprint 4 is now planned and underway — deploying the Shield agent on resource hosts with SPIFFE identity, zecurity0 interface, and nftables-based network protection.
 
 ---
 
@@ -40,10 +40,30 @@ Three sprints complete. The connector is fully operational with automatic cert r
 - Zero downtime, zero admin action
 - `CONNECTOR_RENEWAL_WINDOW` env var (default 48h)
 
+### 🚧 Sprint 4 — Shield Deployment (In Progress)
+
+**Goal:** Deploy a Shield on any resource host, see it appear ACTIVE in the dashboard, watch it go DISCONNECTED if the server goes offline, and have its `zecurity0` interface + base nftables table set up automatically on enrollment.
+
+**Team split:**
+- **M1 (Frontend):** Shields page, NetworkHealth indicator, Sidebar nav, GraphQL operations
+- **M2 (Go — Proto + Shield + PKI):** shield.proto, appmeta constants, `internal/shield/` package, `SignShieldCert`, main.go wiring
+- **M3 (Go — DB + GraphQL + Connector):** DB migration, GraphQL schema + resolvers, Connector Goodbye RPC, ShieldHealth processing, `agent_server.rs`
+- **M4 (Rust — Shield + CI):** `shield/` crate, enrollment, heartbeat, `network.rs` (zecurity0 + nftables), systemd, CI
+
+**Key decisions locked:**
+- Shield binary: `zecurity-shield`, service: `zecurity-shield.service`
+- Shield SPIFFE: `spiffe://ws-<slug>.zecurity.in/shield/<id>`
+- Shield cert TTL: 7 days, renewal window: 48h
+- Shield heartbeats to Connector `:9091` (NOT Controller directly)
+- Connector gets a new Shield-facing gRPC server on `:9091`
+- Interface: `zecurity0` (TUN, CGNAT 100.64.0.0/10)
+- Connector gets `Goodbye` RPC for clean shutdown → immediate DISCONNECTED
+
+**Tracking:** [[Sprint4/path.md]] — full dependency map with checkboxes
 
 ---
 
-## Phase 6 — End-to-End Renewal Test (In Progress)
+## Phase 6 — End-to-End Renewal Test (Pending — run before Sprint 4 merges)
 
 Testing cert renewal with short TTLs:
 
@@ -66,12 +86,36 @@ CONNECTOR_HEARTBEAT_INTERVAL=5s
 
 ---
 
+---
+
+## Sprint 5 — Resource Discovery (Planned)
+
+After Shield is deployed and active:
+- RDE: Connector scans network, reports reachable services
+- Admin adds resource definitions (IP/port/protocol)
+- Per-resource nftables DROP rules delivered via Shield
+- "Protect" button in admin UI triggers rule push
+
+---
+
+## Future Sprints (Rough Order)
+
+| Sprint | Feature |
+|--------|---------|
+| Sprint 6 | Client enrollment (end-user device cert + SPIFFE identity) |
+| Sprint 7 | Access policies (workspace ACLs: who can reach what resource) |
+| Sprint 8 | Policy enforcement at Shield (nftables rules from ACL) |
+| Sprint 9 | Traffic proxying (WireGuard or tun, full packet path) |
+
+---
+
 ## Deferred Features
 
 | Feature | Reason Deferred |
 |---------|----------------|
 | CRL / OCSP revocation | DB status flag is sufficient for now |
-| Agent cert renewal | Same pattern as connector, next sprint |
+| Shield cert renewal | Sprint 4 — same pattern as Connector cert renewal |
 | Client cert renewal | Same pattern, future sprint |
-| Renewal failure alerting | Connector retries on next heartbeat |
+| Renewal failure alerting | Agent retries on next heartbeat |
 | Admin notification on renewal | No UI change needed, fully automatic |
+| WireGuard integration | Sprint 9 — after ACL enforcement is solid |
