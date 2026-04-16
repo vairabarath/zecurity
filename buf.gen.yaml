@@ -2,11 +2,11 @@ version: v1
 
 plugins:
   - plugin: buf.build/protocolbuffers/go:v1.36.0
-    out: gen/go
+    out: controller/gen/go
     opt:
       - paths=source_relative
 
   - plugin: buf.build/grpc/go:v1.4.0
-    out: gen/go
+    out: controller/gen/go
     opt:
       - paths=source_relative
