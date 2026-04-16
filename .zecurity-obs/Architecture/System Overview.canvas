@@ -1,0 +1,15 @@
+{
+	"nodes":[
+		{"id":"admin-ui","type":"text","text":"## Admin UI\nReact + Vite + Apollo Client\n\n**Dev port:** 5173\n\n**Features**\n- Workspace management\n- Connector provisioning\n- Enrollment token generation\n- Connector status dashboard\n- Google OAuth login flow","x":-750,"y":-280,"width":280,"height":280,"color":"5"},
+		{"id":"controller","type":"text","text":"## Controller (Go)\n`cmd/server/main.go`\n\n**HTTP :8080**\n- `/graphql` — GraphQL API (gqlgen)\n- `/auth/callback` — Google OAuth\n- `/auth/refresh` — JWT refresh\n- `/health` — health check\n- `/ca.crt` — workspace CA cert download\n\n**gRPC :9090** (mTLS + SPIFFE interceptor)\n- `Enroll` — JWT + CSR → 7-day SPIFFE cert\n- `Heartbeat` — keepalive + renewal signal\n- `RenewCert` — cert renewal, CSR proof-of-possession\n\n**Internal Services**\n- [[PKI]] — 3-tier CA hierarchy, cert signing + renewal\n- [[Auth]] — Google OAuth + JWT session management\n- Bootstrap — workspace provisioning on first-user signup","x":-380,"y":-280,"width":420,"height":560,"color":"3"},
+		{"id":"connector","type":"text","text":"## Connector (Rust)\n`connector/src/` · musl static binary\n\n**SPIFFE Identity**\nURI: `spiffe://<trust_domain>/connector/<id>`\nKeypair: EC P-384 · Cert TTL: 7 days (auto-renewed)\n\n**Lifecycle Modules**\n- `enrollment.rs` — JWT + CSR → receive cert from controller\n- `heartbeat.rs` — mTLS loop every 30s, watches re_enroll\n- `renewal.rs` — auto-renew cert when within renewal window\n- `updater.rs` — binary self-update via GitHub releases\n\n**State Files** (`STATE_DIR`)\n- `connector.key` — EC P-384 private key (mode 0600)\n- `connector.crt` — SPIFFE leaf cert (auto-renewed)\n- `workspace_ca.crt` — CA trust chain\n- `state.json` — connector_id, trust_domain, cert_not_after","x":130,"y":-280,"width":400,"height":560,"color":"2"},
+		{"id":"postgres","type":"text","text":"## PostgreSQL :5432\n`pgx/v5` connection pool\n\n**Key Tables**\n- `workspaces` — tenants + trust_domain\n- `connectors` — id, status, cert_not_after, cert_serial\n- `ca_root` — Root CA cert + encrypted key\n- `ca_intermediate` — Intermediate CA cert + encrypted key\n- `workspace_ca_keys` — per-tenant Workspace CA (AES-GCM encrypted)","x":-750,"y":380,"width":340,"height":300,"color":"1"},
+		{"id":"redis","type":"text","text":"## Redis :6379\n\n**Usage**\n- Enrollment JTI burn\n  (atomic GET+DEL — single-use token enforcement)\n- Session management\n  (refresh token storage + revocation)","x":-320,"y":380,"width":300,"height":220,"color":"6"}
+	],
+	"edges":[
+		{"id":"admin-to-ctrl","fromNode":"admin-ui","fromSide":"right","toNode":"controller","toSide":"left","label":"HTTPS GraphQL"},
+		{"id":"conn-to-ctrl","fromNode":"connector","fromSide":"left","toNode":"controller","toSide":"right","color":"3","label":"mTLS gRPC :9090 / SPIFFE"},
+		{"id":"ctrl-to-pg","fromNode":"controller","fromSide":"bottom","toNode":"postgres","toSide":"top","label":"pgx/v5"},
+		{"id":"ctrl-to-redis","fromNode":"controller","fromSide":"bottom","toNode":"redis","toSide":"top","label":"go-redis"}
+	]
+}
