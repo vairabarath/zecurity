@@ -63,26 +63,13 @@ func (r *redisClient) SetPKCEState(ctx context.Context, state, codeVerifier stri
 }
 
 // GetAndDeletePKCEState retrieves the code_verifier and immediately deletes it.
-// Single-use — cannot be replayed. Uses a Redis pipeline for atomic GET+DEL.
+// Single-use — cannot be replayed. Uses GETDEL for a true atomic read-and-delete.
 // Returns ("", "", false, nil) if the key does not exist (expired or already used).
 // Returns (codeVerifier, workspaceName, true, nil) on success.
 // workspaceName is empty if not set (backward compatible with plain string storage).
 // Called by: CallbackHandler() in callback.go (Step 3).
 func (r *redisClient) GetAndDeletePKCEState(ctx context.Context, state string) (string, string, bool, error) {
-	// Pipeline ensures GET+DEL happen atomically.
-	// If we GET then DEL separately, a crash between the two
-	// could leave a used verifier in Redis (replay risk).
-	key := pkceKey(state)
-	pipe := r.rdb.Pipeline()
-	getCmd := pipe.Get(ctx, key)
-	pipe.Del(ctx, key)
-	_, err := pipe.Exec(ctx)
-
-	if err != nil && err != redis.Nil {
-		return "", "", false, fmt.Errorf("redis pipeline: %w", err)
-	}
-
-	val, err := getCmd.Result()
+	val, err := r.rdb.GetDel(ctx, pkceKey(state)).Result()
 	if err == redis.Nil {
 		return "", "", false, nil // expired or already used
 	}
