@@ -19,6 +19,7 @@
 //   proto    — auto-generated gRPC stubs from build.rs (EnrollRequest, ConnectorServiceClient, etc.)
 
 mod appmeta;
+pub mod agent_server;
 mod config;
 mod crypto;
 mod enrollment;
@@ -39,6 +40,11 @@ mod util;
 ///   proto::HeartbeatRequest, proto::HeartbeatResponse        — heartbeat types
 pub mod proto {
     tonic::include_proto!("connector.v1");
+}
+
+/// Generated Shield gRPC stubs used by the Shield-facing Connector server.
+pub mod shield_proto {
+    tonic::include_proto!("shield.v1");
 }
 
 use std::fs;
