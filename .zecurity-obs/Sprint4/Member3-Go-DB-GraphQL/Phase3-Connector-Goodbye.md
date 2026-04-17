@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M3
 phase: 3
@@ -37,28 +37,18 @@ Implement the `Goodbye` RPC handler for the Connector service on the Controller.
 
 ### goodbye.go
 
-- [ ] Package `connector`
-- [ ] Implement `Goodbye(ctx context.Context, req *pb.GoodbyeRequest) (*pb.GoodbyeResponse, error)`
-- [ ] Extract `connectorID` from SPIFFE context (same pattern as `Heartbeat` and `RenewCert`):
-  ```go
-  connectorID := ctx.Value(spiffeEntityIDKey{}).(string)
-  trustDomain := ctx.Value(trustDomainKey{}).(string)
-  ```
-- [ ] SQL:
-  ```sql
-  UPDATE connectors
-     SET status = 'disconnected', updated_at = NOW()
-   WHERE id = $1 AND trust_domain = $2
-  ```
-- [ ] Return `INTERNAL` on DB error
-- [ ] Log: `tracing.Info("connector goodbye", "connector_id", connectorID)`
-- [ ] Return `&pb.GoodbyeResponse{Ok: true}, nil` on success
-- [ ] Add `Goodbye` to the `EnrollmentHandler` struct (or wherever ConnectorService RPCs live — check enrollment.go for pattern)
+- [x] Package `connector`
+- [x] Implement `Goodbye(ctx context.Context, req *pb.GoodbyeRequest) (*pb.GoodbyeResponse, error)`
+- [x] Extract `connectorID`, `trustDomain`, `role` from SPIFFE context using `SPIFFEEntityIDFromContext`, `TrustDomainFromContext`, `SPIFFERoleFromContext`
+- [x] SQL: `UPDATE connectors SET status='disconnected', updated_at=NOW() WHERE id=$1 AND trust_domain=$2`
+- [x] Return `INTERNAL` on DB error
+- [x] Log: `log.Printf("connector goodbye: connector_id=%s trust_domain=%s", ...)`
+- [x] Return `&pb.GoodbyeResponse{Ok: true}, nil` on success
+- [x] `Goodbye` added as method on `EnrollmentHandler` (same struct as `Enroll`, `Heartbeat`, `RenewCert`)
 
 ### Register Goodbye on gRPC handler
 
-- [ ] Confirm `Goodbye` method is on the same struct as `Enroll`, `Heartbeat`, `RenewCert`
-- [ ] `ConnectorServiceServer` interface requires `Goodbye` method — `go build ./...` will enforce this after buf generate
+- [x] `Goodbye` on `EnrollmentHandler` — `go build ./...` enforces interface compliance
 
 ---
 
