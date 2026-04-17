@@ -4,6 +4,7 @@ import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
 import RemoteNetworks from '@/pages/RemoteNetworks'
 import Connectors from '@/pages/Connectors'
+import Shields from '@/pages/Shields'
 import AllConnectors from '@/pages/AllConnectors'
 import ConnectorDetail from '@/pages/ConnectorDetail'
 import Settings from '@/pages/Settings'
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/remote-networks" element={<RemoteNetworks />} />
         <Route path="/remote-networks/:id/connectors" element={<Connectors />} />
+        <Route path="/remote-networks/:id/shields" element={<Shields />} />
         <Route path="/connectors" element={<AllConnectors />} />
         <Route path="/connectors/:connectorId" element={<ConnectorDetail />} />
         <Route path="/settings"  element={<Settings />} />

@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version string, lastHeartbeatAt int64) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE shields
+		    SET last_heartbeat_at = to_timestamp($1),
+		        status            = $2,
+		        version           = $3,
+		        updated_at        = NOW()
+		  WHERE id           = $4
+		    AND connector_id = $5`,
+		lastHeartbeatAt, status, version, shieldID, connectorID,
+	)
+	return err
+}
+
 func (s *service) RunDisconnectWatcher(ctx context.Context) {
 	interval := s.cfg.DisconnectThreshold / 2
 	if interval <= 0 {
