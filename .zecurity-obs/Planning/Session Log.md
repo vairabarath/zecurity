@@ -21,11 +21,12 @@ Most recent first. Every agent appends an entry after their session.
 - **Phase 2 (Core Modules)** — created `shield/src/appmeta.rs`, `config.rs`, `crypto.rs`, `tls.rs`, `util.rs`, `types.rs`; full `main.rs` startup flow with SIGTERM handler; `cargo build` passes
 - **Phase 3 (Enrollment)** — created `shield/src/enrollment.rs` (12-step flow: JWT parse → CA fetch → fingerprint verify → keygen → CSR → gRPC Enroll → save certs + state.json → config cleanup); wired into `main.rs`; `cargo build` passes
 - Marked M4-G1–G4, M4-H1–H6, M4-I1 ✅ in `path.md`; set Phase 1/2/3 status to `done`
+- Added `shield/target/` to `.gitignore`; removed build cache from tracking
 
 **Key decisions:**
 - `ShieldState` moved to `types.rs` (not `main.rs`) to avoid circular imports between `main.rs` and `enrollment.rs`
 - `time` crate added to `Cargo.toml` with `formatting + macros` features for RFC 3339 timestamps
-- `tonic_prost_build::configure()` used in `build.rs` (not `tonic_build::configure`) — matches the tonic-prost split in this project
+- `tonic_prost_build::configure()` used in `build.rs` — matches the tonic-prost split in this project
 - Enrollment uses plain HTTP for CA fetch + fingerprint verification for MITM detection (same pattern as connector)
 - `network::setup()` stubbed with a warning — Phase K will implement it
 
@@ -37,20 +38,30 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
-## 2026-04-17 — Kiro — Member 4
+## 2026-04-17 — Claude Code (Sonnet 4.6) — M3 Phases 2–4
 
 **What was done:**
-- Moved Sprint 3 planning files (`agent-instructions/`, `cert-renewal-plan.md`, `cert-renewal-phased-plan.md`, `connector-sprint-plan-v3.md`, `sprint4-shield-plan.md`, `implementation-report-connector-phase.md`) to `completed/` (gitignored, local backup only)
-- Deleted unused `Dockerfile.aarch64-unknown-linux-musl-custom` and `Dockerfile.x86_64-unknown-linux-musl-custom` (superseded by `Cross.toml` `pre-build` commands)
-- Merged `ui_fixed` branch into `main` (no conflicts) — adds `AllConnectors.tsx`, `ConnectorDetail.tsx`, updated `InstallCommandModal.tsx`, new `dialog.tsx` UI component, `token_handler.go`, updated connector resolvers and main wiring
-- Pushed `main` to `origin/main`
+- **Phase 2 — GraphQL Resolvers:**
+  - Added `shield.graphqls` to `gqlgen.yml` and ran codegen — generated `Shield`, `ShieldToken`, `NetworkHealth` types
+  - Added `Service` interface to `internal/shield/config.go`
+  - Added `ShieldSvc shield.Service` to `Resolver` struct
+  - Implemented `GenerateShieldToken`, `RevokeShield`, `DeleteShield` mutations + `Shields`, `Shield` queries in `shield.resolvers.go`
+  - Added `scanShield`, `loadShields`, `computeNetworkHealth` helpers to `helpers.go`
+  - `RemoteNetworks` and `RemoteNetwork` now populate `NetworkHealth` and `Shields` inline
+  - Fixed `connector/src/heartbeat.rs`: added `shields: vec![]` to `HeartbeatRequest`
+- **Phase 3 — Connector Goodbye RPC:** Created `controller/internal/connector/goodbye.go`
+- **Phase 4 — Connector Heartbeat Shield Processing:** Modified `heartbeat.go` to process `req.Shields`
 
 **Key decisions:**
-- Sprint 3 planning docs kept locally in `completed/` rather than deleted — safe local backup, hidden from team via `.gitignore`
-- `ui_fixed` merged directly into `main` after confirming clean merge and reviewing diff
+- `NetworkHealth` and `Shields` are direct struct fields populated inline during queries
+- Merge conflict in `shield.resolvers.go` resolved by keeping full implementation over M2's codegen panic stubs
 
 **What's next:**
-- Sprint 4 execution — Member 4 starts with Phase 1 (Rust Shield crate scaffold) per `path.md`
+- Phase 5 (`connector/src/agent_server.rs`) — waiting on M4 to confirm `ShieldServer::new()` API signature
+
+---
+
+## 2026-04-17 — Kiro — Member 4
 
 ---
 
@@ -284,7 +295,31 @@ Most recent first. Every agent appends an entry after their session.
 - Add Shield env vars to `controller/.env` and `.env.example`
 - Coordinate with M3/M1 on the remaining team `go generate ./graph/...` step when GraphQL codegen is needed
 
-## 2026-04-17 — Codex
+---
+
+## 2026-04-17 — Codex (M1 Phase 3)
+
+**What was done:**
+- Completed Sprint 4 M1 Phase 3 Shields page implementation
+- Replaced the `Shields.tsx` stub with live GraphQL-backed Shield data, 30-second polling, empty/loading states, and revoke/delete actions
+- Extended `InstallCommandModal` to support a Shield variant for the Add Shield flow
+- Fixed the unrelated frontend query/type mismatch by expanding `GetRemoteNetworks` connector fields and regenerated frontend GraphQL artifacts
+- Verified `cd admin && npm run codegen` and `cd admin && npm run build` pass
+- Marked `M1-N1` done in `Sprint4/path.md`
+- Marked `Phase3-Shields-Page.md` status as `done`
+
+**Key decisions:**
+- Used the repo's actual Apollo pattern with generated `*Document` nodes plus `useQuery` and `useMutation`, instead of the phase note's outdated generated-hook wording
+- Reused and extended the shared install modal instead of creating a second Shield-specific modal component
+- Kept `Via Connector` rendering as truncated `connectorId`, since the current Shield query does not expose connector name
+
+**What's next:**
+- Continue with M1 Phase 4 to add `networkHealth` and shield counts on `RemoteNetworks.tsx`
+- Decide whether to mark any additional M1-N items complete after reviewing exact scope against Phase 4
+
+---
+
+## 2026-04-17 — Codex (M2 Phase 4)
 
 **What was done:**
 - Implemented M2 Phase 4 controller wiring for Shield support
