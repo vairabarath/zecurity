@@ -166,7 +166,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE K — M4 Network Setup (Independent — no external dependencies)
 
-- [ ] **M4-K1** `shield/src/network.rs` — `setup(interface_addr, connector_addr)`: creates `zecurity0` TUN interface via rtnetlink, assigns interface_addr (/32), brings UP; writes nftables table `inet zecurity` with chain `input` (ACCEPT lo, ACCEPT connector_ip, DROP on zecurity0)
+- [x] **M4-K1** `shield/src/network.rs` — `setup(interface_addr, connector_addr)`: creates `zecurity0` TUN interface via rtnetlink, assigns interface_addr (/32), brings UP; writes nftables table `inet zecurity` with chain `input` (ACCEPT lo, ACCEPT connector_ip, DROP on zecurity0)
 
 > Test check: After enrollment, `ip link show zecurity0` shows interface. `nft list ruleset` shows `table inet zecurity`.
 
@@ -174,11 +174,11 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE L — M4 Updater + Systemd + Install Script (Depends on: M4-H done)
 
-- [ ] **M4-L1** `shield/src/updater.rs` — Mirror connector updater; check `shield-v*` releases; replace `/usr/local/bin/zecurity-shield`
-- [ ] **M4-L2** `shield/systemd/zecurity-shield.service` — Service unit with `CAP_NET_ADMIN` + `CAP_NET_RAW` capabilities
-- [ ] **M4-L3** `shield/systemd/zecurity-shield-update.service` — Update service unit
-- [ ] **M4-L4** `shield/systemd/zecurity-shield-update.timer` — Weekly update timer
-- [ ] **M4-L5** `shield/scripts/shield-install.sh` — One-line install script (mirrors connector-install.sh)
+- [x] **M4-L1** `shield/src/updater.rs` — Mirror connector updater; check `shield-v*` releases; replace `/usr/local/bin/zecurity-shield`
+- [x] **M4-L2** `shield/systemd/zecurity-shield.service` — Service unit with `CAP_NET_ADMIN` + `CAP_NET_RAW` capabilities
+- [x] **M4-L3** `shield/systemd/zecurity-shield-update.service` — Update service unit
+- [x] **M4-L4** `shield/systemd/zecurity-shield-update.timer` — Weekly update timer
+- [x] **M4-L5** `shield/scripts/shield-install.sh` — One-line install script (mirrors connector-install.sh)
 
 ---
 

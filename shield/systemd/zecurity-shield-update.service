@@ -1,0 +1,18 @@
+# zecurity-shield-update.service — Oneshot auto-update check
+#
+# Triggered weekly by zecurity-shield-update.timer.
+# Runs as root because it needs to replace /usr/local/bin/zecurity-shield
+# and call systemctl to restart the main service.
+
+[Unit]
+Description=ZECURITY Shield Auto-Update Check
+Documentation=https://github.com/vairabarath/zecurity
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=-/etc/zecurity/shield.conf
+Environment=AUTO_UPDATE_ENABLED=true
+ExecStart=/usr/local/bin/zecurity-shield --check-update

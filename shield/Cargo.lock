@@ -1145,6 +1145,7 @@ dependencies = [
  "strum",
  "strum_macros",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
@@ -3235,6 +3236,7 @@ dependencies = [
  "anyhow",
  "base64",
  "figment",
+ "futures-util",
  "hex",
  "nftables",
  "prost",
