@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M3
 phase: 4
@@ -39,31 +39,15 @@ Modify the Connector's `Heartbeat` handler on the Controller to process the `shi
 
 ### Heartbeat handler modification
 
-- [ ] After the existing connector row update (`UPDATE connectors SET ...`), add Shield health processing:
-  ```go
-  for _, sh := range req.Shields {
-      s.db.Exec(ctx, `
-          UPDATE shields
-             SET last_heartbeat_at = to_timestamp($1),
-                 status            = $2,
-                 version           = $3,
-                 updated_at        = NOW()
-           WHERE id           = $4
-             AND connector_id = $5
-      `, sh.LastHeartbeatAt, sh.Status, sh.Version, sh.ShieldId, connectorID)
-  }
-  ```
-- [ ] `connectorID` comes from SPIFFE context (already extracted at top of handler)
-- [ ] Log shield health updates at `debug` level (avoid noisy info logs)
-- [ ] Do not fail the heartbeat if a shield update fails — log error and continue
+- [x] After connector row update, iterate `req.Shields` and call `h.ShieldSvc.UpdateShieldHealth()` for each entry
+- [x] `connectorID` from SPIFFE context (already extracted at top of handler)
+- [x] Errors logged via `log.Printf` — heartbeat never fails due to shield update errors
+- [x] `ShieldSvc shield.Service` added to `EnrollmentHandler` struct in `enrollment.go`
 
-### UpdateShieldHealth helper (if used)
+### UpdateShieldHealth helper
 
-- [ ] If shieldSvc.UpdateShieldHealth() is the pattern, implement it in `internal/shield/heartbeat.go`:
-  ```go
-  func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, status, version string, lastHeartbeatAt int64, connectorTenantID string) error
-  ```
-- [ ] The connector's Heartbeat handler calls this for each `sh` in `req.Shields`
+- [x] Implemented by M2 in `internal/shield/heartbeat.go` — `UpdateShieldHealth(ctx, shieldID, connectorID, status, version string, lastHeartbeatAt int64) error`
+- [x] Added to `shield.Service` interface in `config.go`
 
 ---
 

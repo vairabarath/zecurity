@@ -162,25 +162,13 @@ func StoreShieldJTI(ctx context.Context, rdb *redis.Client, jti, shieldID string
 }
 
 func BurnShieldJTI(ctx context.Context, rdb *redis.Client, jti string) (shieldID string, found bool, err error) {
-	key := enrollmentJTIPrefix + jti
-
-	pipe := rdb.Pipeline()
-	getCmd := pipe.Get(ctx, key)
-	pipe.Del(ctx, key)
-
-	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return "", false, fmt.Errorf("redis pipeline burn shield jti: %w", err)
-	}
-
-	val, err := getCmd.Result()
+	val, err := rdb.GetDel(ctx, enrollmentJTIPrefix+jti).Result()
 	if err == redis.Nil {
 		return "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get shield jti: %w", err)
+		return "", false, fmt.Errorf("burn shield jti: %w", err)
 	}
-
 	return val, true, nil
 }
 
