@@ -114,6 +114,14 @@ func main() {
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 
+	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
+	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.WorkspaceGuard(db.Pool)(
+			connector.RegenerateTokenHandler(db.Pool, connectorCfg, connectorRedis),
+		),
+	)
+	mux.Handle("/api/connectors/", connectorTokenRoute)
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
