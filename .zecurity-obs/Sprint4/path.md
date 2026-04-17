@@ -106,8 +106,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE E — M3 Connector Improvements (Depends on: Day 1 connector.proto done + buf generate)
 
-- [ ] **M3-E1** `controller/internal/connector/goodbye.go` — NEW file: `Goodbye` RPC handler; marks Connector DISCONNECTED immediately on clean shutdown
-- [ ] **M3-E2** `controller/internal/connector/heartbeat.go` — MODIFY: process `req.Shields` list → call `shieldSvc.UpdateShieldHealth()` for each entry after updating connector row
+- [x] **M3-E1** `controller/internal/connector/goodbye.go` — NEW file: `Goodbye` RPC handler; marks Connector DISCONNECTED immediately on clean shutdown
+- [x] **M3-E2** `controller/internal/connector/heartbeat.go` — MODIFY: process `req.Shields` list → call `shieldSvc.UpdateShieldHealth()` for each entry after updating connector row
 
 > Build check: `cd controller && go build ./...` must pass.
 
