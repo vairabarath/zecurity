@@ -281,6 +281,39 @@ func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetw
 		return nil, fmt.Errorf("remote networks: connector rows: %w", err)
 	}
 
+	// Batch-load shields for all networks.
+	sRows, err := r.TenantDB.Query(ctx,
+		`SELECT id, name, status, remote_network_id, connector_id,
+		        last_heartbeat_at, version, hostname, public_ip,
+		        interface_addr, cert_not_after, created_at
+		   FROM shields
+		  WHERE remote_network_id = ANY($1)
+		    AND tenant_id = $2
+		  ORDER BY created_at DESC`,
+		networkIDs, tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("remote networks: load shields: %w", err)
+	}
+	defer sRows.Close()
+
+	for sRows.Next() {
+		sh, err := scanShield(sRows)
+		if err != nil {
+			return nil, fmt.Errorf("remote networks: scan shield: %w", err)
+		}
+		if idx, ok := networkIdx[sh.RemoteNetworkID]; ok {
+			networks[idx].Shields = append(networks[idx].Shields, sh)
+		}
+	}
+	if err := sRows.Err(); err != nil {
+		return nil, fmt.Errorf("remote networks: shield rows: %w", err)
+	}
+
+	for _, n := range networks {
+		n.NetworkHealth = computeNetworkHealth(n.Connectors)
+	}
+
 	return networks, nil
 }
 
@@ -308,6 +341,13 @@ func (r *queryResolver) RemoteNetwork(ctx context.Context, id string) (*graph.Re
 		return nil, fmt.Errorf("remote network: load connectors: %w", err)
 	}
 	rn.Connectors = connectors
+	rn.NetworkHealth = computeNetworkHealth(connectors)
+
+	shields, err := r.loadShields(ctx, tc.TenantID, id)
+	if err != nil {
+		return nil, fmt.Errorf("remote network: load shields: %w", err)
+	}
+	rn.Shields = shields
 
 	return rn, nil
 }
