@@ -41,12 +41,12 @@ pgdata/
 .qwen
 completed/
 
-# Local auth tests
-controller/internal/auth/*_test.go
-!controller/internal/auth/integration_test.go
+# # Local auth tests
+# controller/internal/auth/*_test.go
+# !controller/internal/auth/integration_test.go
 
-# Local connector tests (enrollment integration tests need live DB)
-controller/internal/connector/enrollment_test.go
+# # Local connector tests (enrollment integration tests need live DB)
+# controller/internal/connector/enrollment_test.go
 
 # Rust / Cargo
 connector/target/
