@@ -193,3 +193,23 @@ Most recent first. Every agent appends an entry after their session.
 - Wire Shield config and service registration into `controller/cmd/server/main.go`
 - Add Shield env vars to `controller/.env` and `.env.example`
 - Coordinate with M3/M1 on the remaining team `go generate ./graph/...` step when GraphQL codegen is needed
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Implemented M2 Phase 4 controller wiring for Shield support
+- Added Shield config loading in `controller/cmd/server/main.go`
+- Instantiated `shield.NewService(...)` with DB, PKI, and Redis dependencies
+- Registered `ShieldServiceServer` on the controller gRPC server alongside `ConnectorService`
+- Started the Shield disconnect watcher goroutine from `main.go`
+- Added Shield env vars to `controller/.env` and `controller/.env.example`
+- Ran `cd controller && go build ./...` successfully
+- Marked M2 Phase 4 done in Sprint 4 tracking docs
+
+**Key decisions:**
+- Reused the existing shared Redis client for Shield enrollment JTI storage instead of introducing a second client path
+- Registered Shield on the same controller gRPC listener and TLS stack as Connector, matching the Sprint 4 service model
+
+**What's next:**
+- Push the Phase 4 changes on the active branch
+- Coordinate final integration steps with M4 once Shield enrollment is exercised against a running controller
