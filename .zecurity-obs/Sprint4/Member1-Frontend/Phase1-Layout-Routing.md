@@ -1,9 +1,11 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M1
 phase: 1
+completed: 2026-04-17
+commit: deb908d
 depends_on: []
 unlocks:
   - Phase2-GraphQL-Operations
@@ -39,17 +41,17 @@ Set up all routing, page stubs, and loading states for the Shields feature befor
 
 ## Checklist
 
-- [ ] Create `admin/src/pages/Shields.tsx` as a stub:
+- [x] Create `admin/src/pages/Shields.tsx` as a stub:
   - Route: `/remote-networks/:id/shields`
   - Skeleton table with column headers: Name, Status, Interface, Via Connector, Last Seen, Version
   - "Add Shield" button (opens modal placeholder)
   - Loading spinner component reused from Connectors page
-- [ ] Add "Shields" nav link to `admin/src/components/layout/Sidebar.tsx`
+- [x] Add "Shields" nav link to `admin/src/components/layout/Sidebar.tsx`
   - Place it under "Connectors" in the sidebar
   - Icon: use a shield or lock icon consistent with existing icon set
-  - Link: `/remote-networks/:networkId/shields` (use current network context)
-- [ ] Add route in router config for `Shields` page
-- [ ] Verify: `cd admin && npm run dev` starts without errors and Shields page renders (empty state OK)
+  - Link: `/remote-networks` (sidebar has no network context — deep-link arrives in Phase 4)
+- [x] Add route in router config for `Shields` page
+- [x] Verify: `cd admin && npm run dev` starts without errors and Shields page renders (empty state OK)
 
 ---
 
