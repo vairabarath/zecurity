@@ -60,7 +60,7 @@ These must be committed to the shared branch **before** anyone else starts their
 - [x] **M3-D1-B** `controller/graph/shield.graphqls` — Shield type, ShieldToken, Mutation + Query extensions (unblocks M1 codegen)
 - [x] **M3-D1-C** `controller/graph/connector.graphqls` — Add `networkHealth`, `shields` field to `RemoteNetwork` type; add `NetworkHealth` enum (unblocks M1 codegen)
 - [x] **TEAM** Run `buf generate` from repo root → Go stubs generated under `controller/gen/go/proto/shield/v1/` and connector stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
 
 > After Day 1 checkboxes are done: M1 can start Shields page layout, M4 can scaffold the crate.
 
@@ -88,8 +88,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE C — M2 Wiring (Depends on: M2-A done + M2-B done + M3-D1-A done)
 
-- [ ] **M2-C1** `controller/cmd/server/main.go` — Wire `ShieldConfig`, `shield.NewService()`, register `shieldpb.RegisterShieldServiceServer()`, start `RunDisconnectWatcher()`
-- [ ] **M2-C2** Add `SHIELD_CERT_TTL`, `SHIELD_RENEWAL_WINDOW`, `SHIELD_ENROLLMENT_TOKEN_TTL`, `SHIELD_DISCONNECT_THRESHOLD` to `controller/.env` and `.env.example`
+- [x] **M2-C1** `controller/cmd/server/main.go` — Wire `ShieldConfig`, `shield.NewService()`, register `shieldpb.RegisterShieldServiceServer()`, start `RunDisconnectWatcher()`
+- [x] **M2-C2** Add `SHIELD_CERT_TTL`, `SHIELD_RENEWAL_WINDOW`, `SHIELD_ENROLLMENT_TOKEN_TTL`, `SHIELD_DISCONNECT_THRESHOLD` to `controller/.env` and `.env.example`
 
 > Final build check: `cd controller && go build ./...` must pass.
 
@@ -97,8 +97,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE D — M3 Resolvers (Depends on: Day 1 done + buf generate done)
 
-- [ ] **M3-D1** `controller/graph/resolvers/shield.resolvers.go` — `GenerateShieldToken`, `RevokeShield`, `DeleteShield` mutations; `Shields`, `Shield` queries
-- [ ] **M3-D2** `controller/graph/resolvers/connector.resolvers.go` — Add `NetworkHealth` computation (ONLINE / DEGRADED / OFFLINE based on active connector count)
+- [x] **M3-D1** `controller/graph/resolvers/shield.resolvers.go` — `GenerateShieldToken`, `RevokeShield`, `DeleteShield` mutations; `Shields`, `Shield` queries
+- [x] **M3-D2** `controller/graph/resolvers/connector.resolvers.go` — Add `NetworkHealth` computation (ONLINE / DEGRADED / OFFLINE based on active connector count)
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -198,7 +198,7 @@ These must be committed to the shared branch **before** anyone else starts their
 - [ ] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
 - [ ] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
 - [ ] **M1-N5** `admin/src/graphql/queries.graphql` — Add `GetShields`
-- [ ] **M1-N6** Run `cd admin && npm run codegen` — generates TypeScript hooks from final schema
+- [x] **M1-N6** Run `cd admin && npm run codegen` — generates TypeScript hooks from final schema
 
 > Coordination: M1 can build layout + routing immediately. Only N1–N3 wiring needs the generated hooks (N6). Run codegen after Day 1 schema is committed for initial hooks, then re-run after all schema changes are final.
 

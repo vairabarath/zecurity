@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Planning/Session Log.md",
+                "file": "Sprint4/team-workflow.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Session Log"
+              "title": "team-workflow"
             }
           }
         ]
@@ -186,17 +186,27 @@
   },
   "active": "home-leaf",
   "lastOpenFiles": [
-    "Planning/Roadmap.md",
+    "Sprint4/path.md",
+    "Sprint4/team-workflow.md",
+    "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase2-Shield-Package.md",
+    "Sprint4/Member4-Rust-Shield-CI/Phase2-Core-Modules.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase4-Main-Wiring.md",
+    "Services/Shield.md",
     "Home.md",
+    "Services/PKI.md",
     "Services/Controller.md",
+    "Architecture/Connector Lifecycle.excalidraw.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase1-Proto-appmeta.md",
+    "Sprint4/Member4-Rust-Shield-CI/Phase1-Crate-Scaffold.md",
+    "Planning/Session Log.md",
+    "Planning/Roadmap.md",
     "Services/Connector.md",
     "Services/Auth.md",
-    "Planning/Session Log.md",
     "Architecture/System Overview.excalidraw.md",
-    "Architecture/Connector Lifecycle.excalidraw.md",
     "Architecture/Connector Lifecycle.canvas",
     "Architecture/System Overview.canvas",
-    "Services/PKI.md",
     "Architecture/Connector Lifecycle.excalidraw.md.tmp.10855.1776310006594",
     "Architecture/System Overview.excalidraw.md.tmp.10855.1776309670083",
     "Untitled.base"

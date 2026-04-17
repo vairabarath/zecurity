@@ -66,9 +66,12 @@ type ComplexityRoot struct {
 		CreateRemoteNetwork    func(childComplexity int, name string, location NetworkLocation) int
 		DeleteConnector        func(childComplexity int, id string) int
 		DeleteRemoteNetwork    func(childComplexity int, id string) int
+		DeleteShield           func(childComplexity int, id string) int
 		GenerateConnectorToken func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken    func(childComplexity int, remoteNetworkID string, shieldName string) int
 		InitiateAuth           func(childComplexity int, provider string, workspaceName *string) int
 		RevokeConnector        func(childComplexity int, id string) int
+		RevokeShield           func(childComplexity int, id string) int
 	}
 
 	Query struct {
@@ -78,16 +81,40 @@ type ComplexityRoot struct {
 		Me                      func(childComplexity int) int
 		RemoteNetwork           func(childComplexity int, id string) int
 		RemoteNetworks          func(childComplexity int) int
+		Shield                  func(childComplexity int, id string) int
+		Shields                 func(childComplexity int, remoteNetworkID string) int
 		Workspace               func(childComplexity int) int
 	}
 
 	RemoteNetwork struct {
-		Connectors func(childComplexity int) int
-		CreatedAt  func(childComplexity int) int
-		ID         func(childComplexity int) int
-		Location   func(childComplexity int) int
-		Name       func(childComplexity int) int
-		Status     func(childComplexity int) int
+		Connectors    func(childComplexity int) int
+		CreatedAt     func(childComplexity int) int
+		ID            func(childComplexity int) int
+		Location      func(childComplexity int) int
+		Name          func(childComplexity int) int
+		NetworkHealth func(childComplexity int) int
+		Shields       func(childComplexity int) int
+		Status        func(childComplexity int) int
+	}
+
+	Shield struct {
+		CertNotAfter    func(childComplexity int) int
+		ConnectorID     func(childComplexity int) int
+		CreatedAt       func(childComplexity int) int
+		Hostname        func(childComplexity int) int
+		ID              func(childComplexity int) int
+		InterfaceAddr   func(childComplexity int) int
+		LastSeenAt      func(childComplexity int) int
+		Name            func(childComplexity int) int
+		PublicIP        func(childComplexity int) int
+		RemoteNetworkID func(childComplexity int) int
+		Status          func(childComplexity int) int
+		Version         func(childComplexity int) int
+	}
+
+	ShieldToken struct {
+		InstallCommand func(childComplexity int) int
+		ShieldID       func(childComplexity int) int
 	}
 
 	User struct {
@@ -129,6 +156,9 @@ type MutationResolver interface {
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
 	RevokeConnector(ctx context.Context, id string) (bool, error)
 	DeleteConnector(ctx context.Context, id string) (bool, error)
+	GenerateShieldToken(ctx context.Context, remoteNetworkID string, shieldName string) (*ShieldToken, error)
+	RevokeShield(ctx context.Context, id string) (bool, error)
+	DeleteShield(ctx context.Context, id string) (bool, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -138,6 +168,8 @@ type QueryResolver interface {
 	RemoteNetworks(ctx context.Context) ([]*RemoteNetwork, error)
 	RemoteNetwork(ctx context.Context, id string) (*RemoteNetwork, error)
 	Connectors(ctx context.Context, remoteNetworkID string) ([]*Connector, error)
+	Shields(ctx context.Context, remoteNetworkID string) ([]*Shield, error)
+	Shield(ctx context.Context, id string) (*Shield, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -283,6 +315,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.DeleteRemoteNetwork(childComplexity, args["id"].(string)), true
+	case "Mutation.deleteShield":
+		if e.ComplexityRoot.Mutation.DeleteShield == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_deleteShield_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.DeleteShield(childComplexity, args["id"].(string)), true
 	case "Mutation.generateConnectorToken":
 		if e.ComplexityRoot.Mutation.GenerateConnectorToken == nil {
 			break
@@ -294,6 +337,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.GenerateConnectorToken(childComplexity, args["remoteNetworkId"].(string), args["connectorName"].(string)), true
+	case "Mutation.generateShieldToken":
+		if e.ComplexityRoot.Mutation.GenerateShieldToken == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_generateShieldToken_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.GenerateShieldToken(childComplexity, args["remoteNetworkId"].(string), args["shieldName"].(string)), true
 	case "Mutation.initiateAuth":
 		if e.ComplexityRoot.Mutation.InitiateAuth == nil {
 			break
@@ -316,6 +370,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeConnector(childComplexity, args["id"].(string)), true
+	case "Mutation.revokeShield":
+		if e.ComplexityRoot.Mutation.RevokeShield == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_revokeShield_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.RevokeShield(childComplexity, args["id"].(string)), true
 
 	case "Query.connectors":
 		if e.ComplexityRoot.Query.Connectors == nil {
@@ -374,6 +439,28 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.RemoteNetworks(childComplexity), true
+	case "Query.shield":
+		if e.ComplexityRoot.Query.Shield == nil {
+			break
+		}
+
+		args, err := ec.field_Query_shield_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Shield(childComplexity, args["id"].(string)), true
+	case "Query.shields":
+		if e.ComplexityRoot.Query.Shields == nil {
+			break
+		}
+
+		args, err := ec.field_Query_shields_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Shields(childComplexity, args["remoteNetworkId"].(string)), true
 	case "Query.workspace":
 		if e.ComplexityRoot.Query.Workspace == nil {
 			break
@@ -411,12 +498,110 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.RemoteNetwork.Name(childComplexity), true
+	case "RemoteNetwork.networkHealth":
+		if e.ComplexityRoot.RemoteNetwork.NetworkHealth == nil {
+			break
+		}
+
+		return e.ComplexityRoot.RemoteNetwork.NetworkHealth(childComplexity), true
+	case "RemoteNetwork.shields":
+		if e.ComplexityRoot.RemoteNetwork.Shields == nil {
+			break
+		}
+
+		return e.ComplexityRoot.RemoteNetwork.Shields(childComplexity), true
 	case "RemoteNetwork.status":
 		if e.ComplexityRoot.RemoteNetwork.Status == nil {
 			break
 		}
 
 		return e.ComplexityRoot.RemoteNetwork.Status(childComplexity), true
+
+	case "Shield.certNotAfter":
+		if e.ComplexityRoot.Shield.CertNotAfter == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.CertNotAfter(childComplexity), true
+	case "Shield.connectorId":
+		if e.ComplexityRoot.Shield.ConnectorID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.ConnectorID(childComplexity), true
+	case "Shield.createdAt":
+		if e.ComplexityRoot.Shield.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.CreatedAt(childComplexity), true
+	case "Shield.hostname":
+		if e.ComplexityRoot.Shield.Hostname == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.Hostname(childComplexity), true
+	case "Shield.id":
+		if e.ComplexityRoot.Shield.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.ID(childComplexity), true
+	case "Shield.interfaceAddr":
+		if e.ComplexityRoot.Shield.InterfaceAddr == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.InterfaceAddr(childComplexity), true
+	case "Shield.lastSeenAt":
+		if e.ComplexityRoot.Shield.LastSeenAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.LastSeenAt(childComplexity), true
+	case "Shield.name":
+		if e.ComplexityRoot.Shield.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.Name(childComplexity), true
+	case "Shield.publicIp":
+		if e.ComplexityRoot.Shield.PublicIP == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.PublicIP(childComplexity), true
+	case "Shield.remoteNetworkId":
+		if e.ComplexityRoot.Shield.RemoteNetworkID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.RemoteNetworkID(childComplexity), true
+	case "Shield.status":
+		if e.ComplexityRoot.Shield.Status == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.Status(childComplexity), true
+	case "Shield.version":
+		if e.ComplexityRoot.Shield.Version == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.Version(childComplexity), true
+
+	case "ShieldToken.installCommand":
+		if e.ComplexityRoot.ShieldToken.InstallCommand == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ShieldToken.InstallCommand(childComplexity), true
+	case "ShieldToken.shieldId":
+		if e.ComplexityRoot.ShieldToken.ShieldID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ShieldToken.ShieldID(childComplexity), true
 
 	case "User.createdAt":
 		if e.ComplexityRoot.User.CreatedAt == nil {
@@ -600,7 +785,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -614,6 +799,7 @@ func sourceData(filename string) string {
 var sources = []*ast.Source{
 	{Name: "schema.graphqls", Input: sourceData("schema.graphqls"), BuiltIn: false},
 	{Name: "connector.graphqls", Input: sourceData("connector.graphqls"), BuiltIn: false},
+	{Name: "shield.graphqls", Input: sourceData("shield.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -659,6 +845,17 @@ func (ec *executionContext) field_Mutation_deleteRemoteNetwork_args(ctx context.
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_deleteShield_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_generateConnectorToken_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -672,6 +869,22 @@ func (ec *executionContext) field_Mutation_generateConnectorToken_args(ctx conte
 		return nil, err
 	}
 	args["connectorName"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_generateShieldToken_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "remoteNetworkId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["remoteNetworkId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "shieldName", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["shieldName"] = arg1
 	return args, nil
 }
 
@@ -692,6 +905,17 @@ func (ec *executionContext) field_Mutation_initiateAuth_args(ctx context.Context
 }
 
 func (ec *executionContext) field_Mutation_revokeConnector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_revokeShield_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
@@ -754,6 +978,28 @@ func (ec *executionContext) field_Query_remoteNetwork_args(ctx context.Context, 
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_shield_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_shields_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "remoteNetworkId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["remoteNetworkId"] = arg0
 	return args, nil
 }
 
@@ -1297,6 +1543,10 @@ func (ec *executionContext) fieldContext_Mutation_createRemoteNetwork(ctx contex
 				return ec.fieldContext_RemoteNetwork_status(ctx, field)
 			case "connectors":
 				return ec.fieldContext_RemoteNetwork_connectors(ctx, field)
+			case "networkHealth":
+				return ec.fieldContext_RemoteNetwork_networkHealth(ctx, field)
+			case "shields":
+				return ec.fieldContext_RemoteNetwork_shields(ctx, field)
 			case "createdAt":
 				return ec.fieldContext_RemoteNetwork_createdAt(ctx, field)
 			}
@@ -1481,6 +1731,135 @@ func (ec *executionContext) fieldContext_Mutation_deleteConnector(ctx context.Co
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_deleteConnector_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_generateShieldToken(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_generateShieldToken,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().GenerateShieldToken(ctx, fc.Args["remoteNetworkId"].(string), fc.Args["shieldName"].(string))
+		},
+		nil,
+		ec.marshalNShieldToken2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldToken,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_generateShieldToken(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "shieldId":
+				return ec.fieldContext_ShieldToken_shieldId(ctx, field)
+			case "installCommand":
+				return ec.fieldContext_ShieldToken_installCommand(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type ShieldToken", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_generateShieldToken_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_revokeShield(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_revokeShield,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().RevokeShield(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_revokeShield(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_revokeShield_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_deleteShield(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_deleteShield,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().DeleteShield(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_deleteShield(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_deleteShield_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -1695,6 +2074,10 @@ func (ec *executionContext) fieldContext_Query_remoteNetworks(_ context.Context,
 				return ec.fieldContext_RemoteNetwork_status(ctx, field)
 			case "connectors":
 				return ec.fieldContext_RemoteNetwork_connectors(ctx, field)
+			case "networkHealth":
+				return ec.fieldContext_RemoteNetwork_networkHealth(ctx, field)
+			case "shields":
+				return ec.fieldContext_RemoteNetwork_shields(ctx, field)
 			case "createdAt":
 				return ec.fieldContext_RemoteNetwork_createdAt(ctx, field)
 			}
@@ -1739,6 +2122,10 @@ func (ec *executionContext) fieldContext_Query_remoteNetwork(ctx context.Context
 				return ec.fieldContext_RemoteNetwork_status(ctx, field)
 			case "connectors":
 				return ec.fieldContext_RemoteNetwork_connectors(ctx, field)
+			case "networkHealth":
+				return ec.fieldContext_RemoteNetwork_networkHealth(ctx, field)
+			case "shields":
+				return ec.fieldContext_RemoteNetwork_shields(ctx, field)
 			case "createdAt":
 				return ec.fieldContext_RemoteNetwork_createdAt(ctx, field)
 			}
@@ -1816,6 +2203,140 @@ func (ec *executionContext) fieldContext_Query_connectors(ctx context.Context, f
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Query_connectors_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_shields(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_shields,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Shields(ctx, fc.Args["remoteNetworkId"].(string))
+		},
+		nil,
+		ec.marshalNShield2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_shields(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Shield_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Shield_name(ctx, field)
+			case "status":
+				return ec.fieldContext_Shield_status(ctx, field)
+			case "remoteNetworkId":
+				return ec.fieldContext_Shield_remoteNetworkId(ctx, field)
+			case "connectorId":
+				return ec.fieldContext_Shield_connectorId(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_Shield_lastSeenAt(ctx, field)
+			case "version":
+				return ec.fieldContext_Shield_version(ctx, field)
+			case "hostname":
+				return ec.fieldContext_Shield_hostname(ctx, field)
+			case "publicIp":
+				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "interfaceAddr":
+				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
+			case "certNotAfter":
+				return ec.fieldContext_Shield_certNotAfter(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Shield_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Shield", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_shields_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_shield(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_shield,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Shield(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalOShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_shield(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Shield_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Shield_name(ctx, field)
+			case "status":
+				return ec.fieldContext_Shield_status(ctx, field)
+			case "remoteNetworkId":
+				return ec.fieldContext_Shield_remoteNetworkId(ctx, field)
+			case "connectorId":
+				return ec.fieldContext_Shield_connectorId(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_Shield_lastSeenAt(ctx, field)
+			case "version":
+				return ec.fieldContext_Shield_version(ctx, field)
+			case "hostname":
+				return ec.fieldContext_Shield_hostname(ctx, field)
+			case "publicIp":
+				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "interfaceAddr":
+				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
+			case "certNotAfter":
+				return ec.fieldContext_Shield_certNotAfter(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Shield_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Shield", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_shield_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -2097,6 +2618,90 @@ func (ec *executionContext) fieldContext_RemoteNetwork_connectors(_ context.Cont
 	return fc, nil
 }
 
+func (ec *executionContext) _RemoteNetwork_networkHealth(ctx context.Context, field graphql.CollectedField, obj *RemoteNetwork) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_RemoteNetwork_networkHealth,
+		func(ctx context.Context) (any, error) {
+			return obj.NetworkHealth, nil
+		},
+		nil,
+		ec.marshalNNetworkHealth2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkHealth,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_RemoteNetwork_networkHealth(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "RemoteNetwork",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type NetworkHealth does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _RemoteNetwork_shields(ctx context.Context, field graphql.CollectedField, obj *RemoteNetwork) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_RemoteNetwork_shields,
+		func(ctx context.Context) (any, error) {
+			return obj.Shields, nil
+		},
+		nil,
+		ec.marshalNShield2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_RemoteNetwork_shields(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "RemoteNetwork",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Shield_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Shield_name(ctx, field)
+			case "status":
+				return ec.fieldContext_Shield_status(ctx, field)
+			case "remoteNetworkId":
+				return ec.fieldContext_Shield_remoteNetworkId(ctx, field)
+			case "connectorId":
+				return ec.fieldContext_Shield_connectorId(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_Shield_lastSeenAt(ctx, field)
+			case "version":
+				return ec.fieldContext_Shield_version(ctx, field)
+			case "hostname":
+				return ec.fieldContext_Shield_hostname(ctx, field)
+			case "publicIp":
+				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "interfaceAddr":
+				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
+			case "certNotAfter":
+				return ec.fieldContext_Shield_certNotAfter(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Shield_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Shield", field.Name)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _RemoteNetwork_createdAt(ctx context.Context, field graphql.CollectedField, obj *RemoteNetwork) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -2116,6 +2721,412 @@ func (ec *executionContext) _RemoteNetwork_createdAt(ctx context.Context, field 
 func (ec *executionContext) fieldContext_RemoteNetwork_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "RemoteNetwork",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_id(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_id,
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_name(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_status(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_status,
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		ec.marshalNShieldStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldStatus,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ShieldStatus does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_remoteNetworkId(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_remoteNetworkId,
+		func(ctx context.Context) (any, error) {
+			return obj.RemoteNetworkID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_remoteNetworkId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_connectorId(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_connectorId,
+		func(ctx context.Context) (any, error) {
+			return obj.ConnectorID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_lastSeenAt(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_lastSeenAt,
+		func(ctx context.Context) (any, error) {
+			return obj.LastSeenAt, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_lastSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_version(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_version,
+		func(ctx context.Context) (any, error) {
+			return obj.Version, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_version(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_hostname(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_hostname,
+		func(ctx context.Context) (any, error) {
+			return obj.Hostname, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_hostname(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_publicIp(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_publicIp,
+		func(ctx context.Context) (any, error) {
+			return obj.PublicIP, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_publicIp(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_interfaceAddr(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_interfaceAddr,
+		func(ctx context.Context) (any, error) {
+			return obj.InterfaceAddr, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_interfaceAddr(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_certNotAfter(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_certNotAfter,
+		func(ctx context.Context) (any, error) {
+			return obj.CertNotAfter, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_certNotAfter(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Shield_createdAt(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Shield_createdAt,
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Shield_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Shield",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ShieldToken_shieldId(ctx context.Context, field graphql.CollectedField, obj *ShieldToken) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ShieldToken_shieldId,
+		func(ctx context.Context) (any, error) {
+			return obj.ShieldID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ShieldToken_shieldId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ShieldToken",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ShieldToken_installCommand(ctx context.Context, field graphql.CollectedField, obj *ShieldToken) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ShieldToken_installCommand,
+		func(ctx context.Context) (any, error) {
+			return obj.InstallCommand, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ShieldToken_installCommand(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ShieldToken",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -4278,6 +5289,27 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "generateShieldToken":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_generateShieldToken(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "revokeShield":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_revokeShield(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deleteShield":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_deleteShield(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -4471,6 +5503,47 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "shields":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_shields(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "shield":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_shield(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -4538,8 +5611,138 @@ func (ec *executionContext) _RemoteNetwork(ctx context.Context, sel ast.Selectio
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "networkHealth":
+			out.Values[i] = ec._RemoteNetwork_networkHealth(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "shields":
+			out.Values[i] = ec._RemoteNetwork_shields(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "createdAt":
 			out.Values[i] = ec._RemoteNetwork_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var shieldImplementors = []string{"Shield"}
+
+func (ec *executionContext) _Shield(ctx context.Context, sel ast.SelectionSet, obj *Shield) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, shieldImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("Shield")
+		case "id":
+			out.Values[i] = ec._Shield_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._Shield_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "status":
+			out.Values[i] = ec._Shield_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "remoteNetworkId":
+			out.Values[i] = ec._Shield_remoteNetworkId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "connectorId":
+			out.Values[i] = ec._Shield_connectorId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "lastSeenAt":
+			out.Values[i] = ec._Shield_lastSeenAt(ctx, field, obj)
+		case "version":
+			out.Values[i] = ec._Shield_version(ctx, field, obj)
+		case "hostname":
+			out.Values[i] = ec._Shield_hostname(ctx, field, obj)
+		case "publicIp":
+			out.Values[i] = ec._Shield_publicIp(ctx, field, obj)
+		case "interfaceAddr":
+			out.Values[i] = ec._Shield_interfaceAddr(ctx, field, obj)
+		case "certNotAfter":
+			out.Values[i] = ec._Shield_certNotAfter(ctx, field, obj)
+		case "createdAt":
+			out.Values[i] = ec._Shield_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var shieldTokenImplementors = []string{"ShieldToken"}
+
+func (ec *executionContext) _ShieldToken(ctx context.Context, sel ast.SelectionSet, obj *ShieldToken) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, shieldTokenImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ShieldToken")
+		case "shieldId":
+			out.Values[i] = ec._ShieldToken_shieldId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "installCommand":
+			out.Values[i] = ec._ShieldToken_installCommand(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -5368,6 +6571,16 @@ func (ec *executionContext) marshalNID2string(ctx context.Context, sel ast.Selec
 	return res
 }
 
+func (ec *executionContext) unmarshalNNetworkHealth2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkHealth(ctx context.Context, v any) (NetworkHealth, error) {
+	var res NetworkHealth
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNNetworkHealth2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkHealth(ctx context.Context, sel ast.SelectionSet, v NetworkHealth) graphql.Marshaler {
+	return v
+}
+
 func (ec *executionContext) unmarshalNNetworkLocation2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkLocation(ctx context.Context, v any) (NetworkLocation, error) {
 	var res NetworkLocation
 	err := res.UnmarshalGQL(v)
@@ -5426,6 +6639,56 @@ func (ec *executionContext) unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontr
 
 func (ec *executionContext) marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx context.Context, sel ast.SelectionSet, v Role) graphql.Marshaler {
 	return v
+}
+
+func (ec *executionContext) marshalNShield2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldᚄ(ctx context.Context, sel ast.SelectionSet, v []*Shield) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx context.Context, sel ast.SelectionSet, v *Shield) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._Shield(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNShieldStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldStatus(ctx context.Context, v any) (ShieldStatus, error) {
+	var res ShieldStatus
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNShieldStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldStatus(ctx context.Context, sel ast.SelectionSet, v ShieldStatus) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) marshalNShieldToken2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldToken(ctx context.Context, sel ast.SelectionSet, v ShieldToken) graphql.Marshaler {
+	return ec._ShieldToken(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNShieldToken2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldToken(ctx context.Context, sel ast.SelectionSet, v *ShieldToken) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ShieldToken(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNString2string(ctx context.Context, v any) (string, error) {
@@ -5712,6 +6975,13 @@ func (ec *executionContext) marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋzt
 		return graphql.Null
 	}
 	return ec._RemoteNetwork(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx context.Context, sel ast.SelectionSet, v *Shield) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._Shield(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalOString2ᚖstring(ctx context.Context, v any) (*string, error) {
