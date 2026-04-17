@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package shield.v1;
+
+option go_package = "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1;shieldv1";
+
+service ShieldService {
+  // Called once during enrollment.
+  // Uses plain TLS — shield has no cert yet.
+  // Shield presents enrollment JWT + PKCS#10 CSR.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+
+  // Called every SHIELD_HEARTBEAT_INTERVAL seconds after enrollment.
+  // Uses mTLS — shield presents its SPIFFE-certified cert.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Called by shield when HeartbeatResponse.re_enroll=true.
+  // Uses mTLS — shield presents its current (still-valid) cert.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
+  // Called by shield during best-effort graceful shutdown.
+  rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
+}
+
+message EnrollRequest {
+  string enrollment_token = 1;  // signed JWT — single-use enrollment token
+  bytes csr_der           = 2;  // DER-encoded PKCS#10 CSR (EC P-384)
+  string version          = 3;  // CARGO_PKG_VERSION
+  string hostname         = 4;
+}
+
+message EnrollResponse {
+  bytes certificate_pem     = 1;  // signed leaf cert — 7-day validity, SPIFFE SAN
+  bytes workspace_ca_pem    = 2;  // WorkspaceCA cert (PEM)
+  bytes intermediate_ca_pem = 3;  // Intermediate CA cert (PEM)
+  string shield_id          = 4;  // confirmed shield UUID
+  string interface_addr     = 5;  // assigned zecurity0 /32
+  string connector_addr     = 6;  // selected connector Shield gRPC addr
+  string connector_id       = 7;  // confirmed connector UUID
+}
+
+message HeartbeatRequest {
+  string shield_id = 1;  // for logging only — NOT authoritative identity
+  string version   = 2;  // CARGO_PKG_VERSION
+  string hostname  = 3;
+  string public_ip = 4;  // optional
+}
+
+message HeartbeatResponse {
+  bool ok             = 1;
+  string latest_version = 2;  // controller/connector informs shield of latest release
+  bool re_enroll      = 3;    // true when cert expiring soon, shield should call RenewCert
+}
+
+message RenewCertRequest {
+  string shield_id = 1;  // for logging only — identity comes from mTLS cert
+  bytes public_key_der = 2;  // shield's existing EC P-384 public key (DER)
+}
+
+message RenewCertResponse {
+  bytes certificate_pem     = 1;  // fresh 7-day cert, same SPIFFE SAN
+  bytes workspace_ca_pem    = 2;  // WorkspaceCA (may not have changed, but send anyway)
+  bytes intermediate_ca_pem = 3;  // Intermediate CA
+}
+
+message GoodbyeRequest {
+  string shield_id = 1;
+}
+
+message GoodbyeResponse {
+  bool ok = 1;
+}

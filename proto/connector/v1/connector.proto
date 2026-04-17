@@ -19,6 +19,9 @@ service ConnectorService {
   // Uses mTLS — connector presents its current (still-valid) cert.
   // Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
+  // Called by connector during best-effort graceful shutdown.
+  rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
 }
 
 message EnrollRequest {
@@ -40,6 +43,7 @@ message HeartbeatRequest {
   string version      = 2;  // CARGO_PKG_VERSION
   string hostname     = 3;
   string public_ip    = 4;  // optional
+  repeated ShieldHealth shields = 5;
 }
 
 message HeartbeatResponse {
@@ -57,4 +61,19 @@ message RenewCertResponse {
   bytes certificate_pem = 1;        // fresh 7-day cert, same SPIFFE SAN
   bytes workspace_ca_pem = 2;      // WorkspaceCA (may not have changed, but send anyway)
   bytes intermediate_ca_pem = 3;     // Intermediate CA
+}
+
+message GoodbyeRequest {
+  string connector_id = 1;
+}
+
+message GoodbyeResponse {
+  bool ok = 1;
+}
+
+message ShieldHealth {
+  string shield_id         = 1;
+  string status            = 2;
+  string version           = 3;
+  int64 last_heartbeat_at  = 4;
 }
