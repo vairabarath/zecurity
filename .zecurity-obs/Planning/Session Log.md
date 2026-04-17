@@ -219,3 +219,25 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Continue with M1 Phase 3 to wire `Shields.tsx` to generated Shield queries and mutations
 - Use the generated `GetShieldsDocument` and related mutation documents in the page implementation
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Pulled latest `main`, including M3 Day 1 schema and GraphQL updates
+- Implemented `controller/internal/shield/` Phase 2 package: `config.go`, `token.go`, `enrollment.go`, `heartbeat.go`, and `spiffe.go`
+- Added `shield.NewService(...)` with Redis, DB, and PKI dependencies plus ShieldService interface compliance
+- Implemented shield enrollment JWT generation and verification, Redis JTI burn, connector selection, interface address assignment from `100.64.0.0/10`, and the Enroll gRPC handler
+- Implemented shield disconnect watcher logic for stale ACTIVE shields
+- Added PKI `SignShieldCert` and `RenewShieldCert` support in `controller/internal/pki/`
+- Ran `cd controller && go build ./...` successfully
+- Marked M2 Phase 2 and Phase 3 done in Sprint 4 tracking docs
+
+**Key decisions:**
+- Derived `connector_addr` from the selected connector's `public_ip` with port `9091`, since Sprint 4 expects Shield post-enrollment traffic to target Connector `:9091` and the schema does not have a dedicated connector address column
+- Kept shield cert issuance parallel to connector cert issuance instead of mutating existing connector PKI methods
+- Reused the controller's intermediate CA fingerprint flow already used by connector enrollment
+
+**What's next:**
+- Wire Shield config and service registration into `controller/cmd/server/main.go`
+- Add Shield env vars to `controller/.env` and `.env.example`
+- Coordinate with M3/M1 on the remaining team `go generate ./graph/...` step when GraphQL codegen is needed

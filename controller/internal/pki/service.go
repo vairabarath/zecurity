@@ -32,6 +32,13 @@ type Service interface {
 	// Called by: renewal.go
 	RenewConnectorCert(ctx context.Context, tenantID, connectorID, trustDomain string, publicKeyDER []byte, certTTL time.Duration) (*ConnectorCertResult, error)
 
+	// SignShieldCert signs a shield CSR with the workspace CA, producing a
+	// short-lived client certificate with the shield SPIFFE ID as URI SAN.
+	SignShieldCert(ctx context.Context, tenantID, shieldID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ShieldCertResult, error)
+
+	// RenewShieldCert issues a fresh shield certificate from a renewal CSR.
+	RenewShieldCert(ctx context.Context, tenantID, shieldID, trustDomain string, csrDER []byte, certTTL time.Duration) (*ShieldCertResult, error)
+
 	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
 	// for the controller gRPC endpoint. The certificate is signed by the
 	// intermediate CA, carries the controller SPIFFE ID, and includes DNS/IP SANs
@@ -56,6 +63,15 @@ type ConnectorCertResult struct {
 	CertificatePEM    string // leaf certificate
 	WorkspaceCAPEM    string // WorkspaceCA certificate
 	IntermediateCAPEM string // Intermediate CA certificate
+	Serial            string
+	NotBefore         time.Time
+	NotAfter          time.Time
+}
+
+type ShieldCertResult struct {
+	CertificatePEM    string
+	WorkspaceCAPEM    string
+	IntermediateCAPEM string
 	Serial            string
 	NotBefore         time.Time
 	NotAfter          time.Time
