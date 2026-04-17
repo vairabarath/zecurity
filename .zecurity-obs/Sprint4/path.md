@@ -88,8 +88,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE C — M2 Wiring (Depends on: M2-A done + M2-B done + M3-D1-A done)
 
-- [ ] **M2-C1** `controller/cmd/server/main.go` — Wire `ShieldConfig`, `shield.NewService()`, register `shieldpb.RegisterShieldServiceServer()`, start `RunDisconnectWatcher()`
-- [ ] **M2-C2** Add `SHIELD_CERT_TTL`, `SHIELD_RENEWAL_WINDOW`, `SHIELD_ENROLLMENT_TOKEN_TTL`, `SHIELD_DISCONNECT_THRESHOLD` to `controller/.env` and `.env.example`
+- [x] **M2-C1** `controller/cmd/server/main.go` — Wire `ShieldConfig`, `shield.NewService()`, register `shieldpb.RegisterShieldServiceServer()`, start `RunDisconnectWatcher()`
+- [x] **M2-C2** Add `SHIELD_CERT_TTL`, `SHIELD_RENEWAL_WINDOW`, `SHIELD_ENROLLMENT_TOKEN_TTL`, `SHIELD_DISCONNECT_THRESHOLD` to `controller/.env` and `.env.example`
 
 > Final build check: `cd controller && go build ./...` must pass.
 

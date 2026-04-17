@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Planning/Session Log.md",
+                "file": "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Session Log"
+              "title": "Phase3-PKI-SignShieldCert"
             }
           }
         ]
@@ -186,12 +186,20 @@
   },
   "active": "home-leaf",
   "lastOpenFiles": [
+    "Sprint4/Member2-Go-Proto-Shield/Phase1-Proto-appmeta.md",
+    "Sprint4/Member3-Go-DB-GraphQL/Phase1-DB-GraphQL-Schema.md",
+    "Sprint4/path.md",
+    "Sprint4/team-workflow.md",
+    "Sprint4/Member3-Go-DB-GraphQL/Phase2-Shield-Resolvers.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase4-Main-Wiring.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",
+    "Sprint4/Member2-Go-Proto-Shield/Phase2-Shield-Package.md",
+    "Planning/Session Log.md",
     "Planning/Roadmap.md",
     "Home.md",
     "Services/Controller.md",
     "Services/Connector.md",
     "Services/Auth.md",
-    "Planning/Session Log.md",
     "Architecture/System Overview.excalidraw.md",
     "Architecture/Connector Lifecycle.excalidraw.md",
     "Architecture/Connector Lifecycle.canvas",
