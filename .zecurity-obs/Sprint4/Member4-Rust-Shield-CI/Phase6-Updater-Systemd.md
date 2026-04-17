@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M4
 phase: 6
@@ -43,53 +43,59 @@ Implement binary self-update, create systemd service units, and write the instal
 
 ### updater.rs
 
-- [ ] Mirror `connector/src/updater.rs` exactly
-- [ ] Change GitHub release tag pattern from `connector-v*` to `shield-v*`
-- [ ] Change binary name from `zecurity-connector` to `zecurity-shield`
-- [ ] Change install path from `/usr/local/bin/zecurity-connector` to `/usr/local/bin/zecurity-shield`
-- [ ] `pub async fn run(cfg: ShieldConfig)` — loop checking for new versions
+- [x] Mirror `connector/src/updater.rs` exactly
+- [x] Change GitHub release tag pattern from `connector-v*` to `shield-v*`
+- [x] Change binary name from `zecurity-connector` to `zecurity-shield`
+- [x] Change install path from `/usr/local/bin/zecurity-connector` to `/usr/local/bin/zecurity-shield`
+- [x] Added `run_update_loop(&ShieldConfig)` plus `run_single_check()` for the systemd oneshot path
 
 ### zecurity-shield.service
 
-- [ ] `Description=Zecurity Shield — Resource Host Protection`
-- [ ] `ExecStart=/usr/local/bin/zecurity-shield`
-- [ ] `EnvironmentFile=/etc/zecurity/shield.conf`
-- [ ] `User=zecurity` / `Group=zecurity`
-- [ ] Full systemd hardening (NoNewPrivileges, ProtectSystem=strict, PrivateTmp, etc.) — mirror connector service
-- [ ] **Shield-specific capabilities** (different from connector):
+- [x] `Description=Zecurity Shield — Resource Host Protection`
+- [x] `ExecStart=/usr/local/bin/zecurity-shield`
+- [x] `EnvironmentFile=/etc/zecurity/shield.conf`
+- [x] `User=zecurity` / `Group=zecurity`
+- [x] Full systemd hardening (NoNewPrivileges, ProtectSystem=strict, PrivateTmp, etc.) — mirror connector service
+- [x] **Shield-specific capabilities** (different from connector):
   ```ini
   CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
   AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
   ```
-- [ ] `StateDirectory=zecurity-shield`
-- [ ] `WorkingDirectory=/var/lib/zecurity-shield`
-- [ ] `Restart=on-failure` / `RestartSec=3`
+- [x] `StateDirectory=zecurity-shield`
+- [x] `WorkingDirectory=/var/lib/zecurity-shield`
+- [x] `Restart=on-failure` / `RestartSec=3`
 
 ### zecurity-shield-update.service
 
-- [ ] `Description=Zecurity Shield Update`
-- [ ] `Type=oneshot`
-- [ ] `ExecStart=/usr/local/bin/zecurity-shield --update`
-- [ ] Mirror connector update service pattern
+- [x] `Description=Zecurity Shield Update`
+- [x] `Type=oneshot`
+- [x] `ExecStart=/usr/local/bin/zecurity-shield --check-update`
+- [x] Mirror connector update service pattern
+
+> Note: the original phase text said `--update`, but the implementation now matches the established connector pattern and uses `--check-update`.
 
 ### zecurity-shield-update.timer
 
-- [ ] `OnCalendar=weekly` (or `OnCalendar=*-*-* 03:00:00` for 3am weekly)
-- [ ] `Unit=zecurity-shield-update.service`
-- [ ] Mirror connector timer pattern
+- [x] `OnCalendar=weekly`
+- [x] `Unit=zecurity-shield-update.service`
+- [x] Mirror connector timer pattern with weekly cadence
 
 ### shield-install.sh
 
 Key differences from `connector-install.sh`:
 
-- [ ] Binary name: `zecurity-shield`
-- [ ] Config file: `/etc/zecurity/shield.conf` (not `connector.conf`)
-- [ ] State dir: `/var/lib/zecurity-shield/`
-- [ ] Service name: `zecurity-shield.service`
-- [ ] Release tag pattern: `shield-v*`
-- [ ] Env var written to config: `ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN`
-- [ ] System user `zecurity` — check if already exists (connector install may have created it)
-- [ ] Script should be idempotent — safe to run twice
+- [x] Binary name: `zecurity-shield`
+- [x] Config file: `/etc/zecurity/shield.conf` (not `connector.conf`)
+- [x] State dir: `/var/lib/zecurity-shield/`
+- [x] Service name: `zecurity-shield.service`
+- [x] Release tag pattern: `shield-v*`
+- [x] Env var written to config: `ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN`
+- [x] System user `zecurity` — check if already exists (connector install may have created it)
+- [x] Script is idempotent — safe to run twice
+- [x] Added distro detection from `/etc/os-release`
+- [x] Added kernel version check for nftables support
+- [x] Added `ensure_nftables()` package installation step for supported Linux families
+- [x] Added warning when the system `nftables` service is active
 
 Install script minimal structure:
 ```bash
@@ -116,7 +122,7 @@ set -euo pipefail
 # Verify updater compiles:
 cargo build --manifest-path shield/Cargo.toml
 
-# Verify systemd units are valid syntax (if systemd-analyze available):
+# Verify systemd units are valid syntax (if systemd-analyze available and not sandbox-blocked):
 systemd-analyze verify shield/systemd/zecurity-shield.service
 
 # Verify install script:
@@ -129,6 +135,7 @@ bash -n shield/scripts/shield-install.sh  # syntax check
 
 - The `zecurity` system user is shared between Connector and Shield — if connector is already installed, the user exists. The install script must handle this gracefully.
 - `CAP_NET_ADMIN` and `CAP_NET_RAW` are required for `network.rs` (zecurity0 TUN creation + nftables). These are NOT on the Connector service unit — do not copy that part blindly.
+- `shield-install.sh` now guarantees `nft` is present before the service starts. This matches the current `network.rs` implementation, where the `nftables` crate still applies rules via the `nft` executable in this crate version.
 
 ---
 

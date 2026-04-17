@@ -141,6 +141,11 @@ table inet zecurity {
 
 Sprint 5 will add per-resource ACCEPT rules to this table.
 
+**Implementation note:**
+- Interface creation/address/up uses `rtnetlink` directly from the daemon.
+- Firewall rules are constructed with the `nftables` Rust crate.
+- The current `nftables` crate helper still invokes the system `nft` executable when applying the ruleset, so the resource host still needs `nft` installed.
+
 ---
 
 ## State Files
@@ -180,6 +185,16 @@ Triggered by tags matching `shield-v*`.
 - `shield-linux-arm64` — aarch64 musl
 - `shield-install.sh` — one-line install + enrollment script
 - `zecurity-shield.service` + update units
+
+## Install Script Behavior
+
+`shield-install.sh` is responsible for preparing the host so the Shield binary can assume the required runtime pieces exist.
+
+- Detects distro from `/etc/os-release`
+- Checks kernel version is at least `3.13` for nftables support
+- Installs the `nftables` package if `nft` is missing on supported distros
+- Warns if the system `nftables` service is active, since host-level firewall boot logic can conflict with the Shield-managed `inet zecurity` table
+- Leaves `network.rs` free to assume `nft` exists, while still making startup idempotent so rules are recreated after reboot or firewall flush
 
 ---
 
