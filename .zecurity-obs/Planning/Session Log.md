@@ -199,3 +199,23 @@ Most recent first. Every agent appends an entry after their session.
 - Coordinate with M3 on `controller/migrations/003_shield_schema.sql`
 - Start M2 shield service implementation under `controller/internal/shield/`
 - Watch the dependency mismatch between `path.md` and `Phase2-Shield-Package.md` about whether the DB migration is required before all of Phase 2 or only the DB-backed parts
+
+---
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M1 Phase 2 GraphQL operations and codegen verification
+- Confirmed Shield mutations were added in `admin/src/graphql/mutations.graphql`
+- Confirmed the `GetShields` query was added in `admin/src/graphql/queries.graphql`
+- Confirmed generated GraphQL artifacts exist under `admin/src/generated/`, including `ShieldStatus` and the Shield document nodes
+- Marked `M1-N6` done in `Sprint4/path.md`
+- Marked `Phase2-GraphQL-Operations.md` status as `done`
+
+**Key decisions:**
+- Treated Phase 2 as complete based on the repo's actual GraphQL codegen output, which generates typed document nodes rather than Apollo `use*` hooks
+- Kept sprint tracking aligned with the verified build-check outcome instead of the older wording in the phase checklist
+
+**What's next:**
+- Continue with M1 Phase 3 to wire `Shields.tsx` to generated Shield queries and mutations
+- Use the generated `GetShieldsDocument` and related mutation documents in the page implementation
