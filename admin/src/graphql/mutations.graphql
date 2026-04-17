@@ -33,3 +33,18 @@ mutation RevokeConnector($id: ID!) {
 mutation DeleteConnector($id: ID!) {
   deleteConnector(id: $id)
 }
+
+mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
+  generateShieldToken(remoteNetworkId: $remoteNetworkId, shieldName: $shieldName) {
+    shieldId
+    installCommand
+  }
+}
+
+mutation RevokeShield($id: ID!) {
+  revokeShield(id: $id)
+}
+
+mutation DeleteShield($id: ID!) {
+  deleteShield(id: $id)
+}

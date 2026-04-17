@@ -10,7 +10,14 @@ import (
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
-// Config holds all tunable settings for the shield subsystem.
+// Service is the exported interface for the shield subsystem.
+// Used by connector/heartbeat.go and graph resolvers without depending on the concrete type.
+type Service interface {
+	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
+	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version string, lastHeartbeatAt int64) error
+	RunDisconnectWatcher(ctx context.Context)
+}
+
 type Config struct {
 	CertTTL             time.Duration
 	RenewalWindow       time.Duration
@@ -38,9 +45,4 @@ func NewService(cfg Config, db *pgxpool.Pool, pkiSvc pki.Service, redis *redis.C
 }
 
 var _ shieldpb.ShieldServiceServer = (*service)(nil)
-
-// Service is the interface the GraphQL resolver uses to interact with shield logic.
-type Service interface {
-	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
-	RunDisconnectWatcher(ctx context.Context)
-}
+var _ Service = (*service)(nil)
