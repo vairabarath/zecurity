@@ -106,8 +106,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE E — M3 Connector Improvements (Depends on: Day 1 connector.proto done + buf generate)
 
-- [ ] **M3-E1** `controller/internal/connector/goodbye.go` — NEW file: `Goodbye` RPC handler; marks Connector DISCONNECTED immediately on clean shutdown
-- [ ] **M3-E2** `controller/internal/connector/heartbeat.go` — MODIFY: process `req.Shields` list → call `shieldSvc.UpdateShieldHealth()` for each entry after updating connector row
+- [x] **M3-E1** `controller/internal/connector/goodbye.go` — NEW file: `Goodbye` RPC handler; marks Connector DISCONNECTED immediately on clean shutdown
+- [x] **M3-E2** `controller/internal/connector/heartbeat.go` — MODIFY: process `req.Shields` list → call `shieldSvc.UpdateShieldHealth()` for each entry after updating connector row
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -193,7 +193,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE N — M1 Frontend Wire-up (Depends on: Day 1 codegen done)
 
-- [ ] **M1-N1** `admin/src/pages/Shields.tsx` — New page at `/remote-networks/<id>/shields`; table with columns: Name, Status, Interface (zecurity0 IP), Via (connector), Last Seen, Version, Hostname; 30s auto-poll; "Add Shield" → `InstallCommandModal`
+- [x] **M1-N1** `admin/src/pages/Shields.tsx` — New page at `/remote-networks/<id>/shields`; table with columns: Name, Status, Interface (zecurity0 IP), Via (connector), Last Seen, Version, Hostname; 30s auto-poll; "Add Shield" → `InstallCommandModal`
 - [ ] **M1-N2** `admin/src/pages/RemoteNetworks.tsx` — Add NetworkHealth indicator (🟢/🟡/🔴) + shield count to each network card
 - [ ] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
 - [ ] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
