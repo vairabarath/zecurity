@@ -68,11 +68,11 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE A — M2 Core (No external dependencies after Day 1)
 
-- [ ] **M2-A1** `controller/internal/shield/config.go` — `ShieldConfig` struct with all duration fields
-- [ ] **M2-A2** `controller/internal/shield/token.go` — JWT generation, Redis JTI burn, connector selection (least-loaded), interface_addr assignment from 100.64.0.0/10
-- [ ] **M2-A3** `controller/internal/shield/enrollment.go` — `Enroll` gRPC handler (12-step flow: verify JWT → burn JTI → verify workspace → verify connector → parse+verify CSR → SignShieldCert → update DB → return response)
-- [ ] **M2-A4** `controller/internal/shield/heartbeat.go` — Disconnect watcher goroutine only (Controller does NOT receive Shield heartbeats directly)
-- [ ] **M2-A5** `controller/internal/shield/spiffe.go` — Thin wrapper reusing connector SPIFFE logic
+- [x] **M2-A1** `controller/internal/shield/config.go` — `ShieldConfig` struct with all duration fields
+- [x] **M2-A2** `controller/internal/shield/token.go` — JWT generation, Redis JTI burn, connector selection (least-loaded), interface_addr assignment from 100.64.0.0/10
+- [x] **M2-A3** `controller/internal/shield/enrollment.go` — `Enroll` gRPC handler (12-step flow: verify JWT → burn JTI → verify workspace → verify connector → parse+verify CSR → SignShieldCert → update DB → return response)
+- [x] **M2-A4** `controller/internal/shield/heartbeat.go` — Disconnect watcher goroutine only (Controller does NOT receive Shield heartbeats directly)
+- [x] **M2-A5** `controller/internal/shield/spiffe.go` — Thin wrapper reusing connector SPIFFE logic
 
 > Build check after M2-A5: `cd controller && go build ./...` must pass.
 
@@ -80,7 +80,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE B — M2 PKI (Depends on: appmeta Day 1)
 
-- [ ] **M2-B1** `controller/internal/pki/workspace.go` — Add `SignShieldCert()` and `RenewShieldCert()` alongside existing `SignConnectorCert`/`RenewConnectorCert`
+- [x] **M2-B1** `controller/internal/pki/workspace.go` — Add `SignShieldCert()` and `RenewShieldCert()` alongside existing `SignConnectorCert`/`RenewConnectorCert`
 
 > Build check: `cd controller && go build ./...` must pass.
 
