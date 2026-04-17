@@ -27,7 +27,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use base64::Engine;
-use rcgen::{CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType, PKCS_ECDSA_P384_SHA384};
+use rcgen::{
+    CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, SanType, PKCS_ECDSA_P384_SHA384,
+};
 use time::OffsetDateTime;
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
@@ -38,8 +40,7 @@ use x509_parser::prelude::FromDer;
 /// On first enrollment, a new keypair is generated and saved.
 /// On renewal, the SAME keypair is reused (load_private_key + build_csr).
 pub fn generate_keypair() -> Result<KeyPair> {
-    KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384)
-        .context("failed to generate EC P-384 keypair")
+    KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).context("failed to generate EC P-384 keypair")
 }
 
 /// Save a private key to disk as PEM with strict permissions (mode 0600).
@@ -100,7 +101,9 @@ pub fn build_csr(key_pair: &KeyPair, cn: &str, spiffe_uri: &str) -> Result<Vec<u
     params.distinguished_name = dn;
     params.is_ca = IsCa::NoCa;
     params.subject_alt_names = vec![SanType::URI(
-        spiffe_uri.try_into().context("invalid SPIFFE URI for SAN")?,
+        spiffe_uri
+            .try_into()
+            .context("invalid SPIFFE URI for SAN")?,
     )];
 
     let csr = params
@@ -130,8 +133,7 @@ pub fn parse_cert_not_after(cert_pem: &[u8]) -> Result<OffsetDateTime> {
         .decode(b64.as_bytes())
         .context("failed to base64-decode PEM certificate body")?;
 
-    let (_, cert) =
-        X509Certificate::from_der(&der).context("failed to parse certificate DER")?;
+    let (_, cert) = X509Certificate::from_der(&der).context("failed to parse certificate DER")?;
 
     let ts = cert.validity().not_after.timestamp();
     OffsetDateTime::from_unix_timestamp(ts).context("invalid NotAfter timestamp in certificate")

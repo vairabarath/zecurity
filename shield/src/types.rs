@@ -45,8 +45,7 @@ impl ShieldState {
         let path = Path::new(state_dir).join("state.json");
         let json = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        serde_json::from_str(&json)
-            .with_context(|| format!("failed to parse {}", path.display()))
+        serde_json::from_str(&json).with_context(|| format!("failed to parse {}", path.display()))
     }
 
     /// Save ShieldState to state.json in the given state directory.
@@ -55,9 +54,7 @@ impl ShieldState {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create state dir {}", dir.display()))?;
         let path = dir.join("state.json");
-        let json = serde_json::to_string_pretty(self)
-            .context("failed to serialize ShieldState")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("failed to write {}", path.display()))
+        let json = serde_json::to_string_pretty(self).context("failed to serialize ShieldState")?;
+        std::fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))
     }
 }
