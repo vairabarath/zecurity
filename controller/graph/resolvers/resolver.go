@@ -6,6 +6,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/shield"
 )
 
 // Resolver holds shared dependencies for all resolvers.
@@ -13,6 +14,7 @@ type Resolver struct {
 	TenantDB     *db.TenantDB
 	AuthService  auth.Service
 	ConnectorCfg connector.Config
+	ShieldSvc    shield.Service
 	Redis        *redis.Client
 	Pool         *pgxpool.Pool
 }
