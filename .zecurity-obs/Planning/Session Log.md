@@ -241,3 +241,25 @@ Most recent first. Every agent appends an entry after their session.
 - Wire Shield config and service registration into `controller/cmd/server/main.go`
 - Add Shield env vars to `controller/.env` and `.env.example`
 - Coordinate with M3/M1 on the remaining team `go generate ./graph/...` step when GraphQL codegen is needed
+
+---
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M1 Phase 3 Shields page implementation
+- Replaced the `Shields.tsx` stub with live GraphQL-backed Shield data, 30-second polling, empty/loading states, and revoke/delete actions
+- Extended `InstallCommandModal` to support a Shield variant for the Add Shield flow
+- Fixed the unrelated frontend query/type mismatch by expanding `GetRemoteNetworks` connector fields and regenerated frontend GraphQL artifacts
+- Verified `cd admin && npm run codegen` and `cd admin && npm run build` pass
+- Marked `M1-N1` done in `Sprint4/path.md`
+- Marked `Phase3-Shields-Page.md` status as `done`
+
+**Key decisions:**
+- Used the repo's actual Apollo pattern with generated `*Document` nodes plus `useQuery` and `useMutation`, instead of the phase note's outdated generated-hook wording
+- Reused and extended the shared install modal instead of creating a second Shield-specific modal component
+- Kept `Via Connector` rendering as truncated `connectorId`, since the current Shield query does not expose connector name
+
+**What's next:**
+- Continue with M1 Phase 4 to add `networkHealth` and shield counts on `RemoteNetworks.tsx`
+- Decide whether to mark any additional M1-N items complete after reviewing exact scope against Phase 4
