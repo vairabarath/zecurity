@@ -17,6 +17,7 @@ x509-parser        = "0.18"
 sha2               = "0.11"
 hex                = "0.4"
 anyhow             = "1"
+futures-util       = "0.3"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 figment            = { version = "0.10", features = ["env", "toml"] }
@@ -28,7 +29,7 @@ base64             = "0.22"
 time               = { version = "0.3", features = ["formatting", "macros"] }
 tokio-retry        = "0.3"
 rtnetlink          = "0.20"
-nftables           = "0.6"
+nftables           = { version = "0.6", features = ["tokio"] }
 
 [build-dependencies]
 tonic-build       = "0.14"

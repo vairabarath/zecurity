@@ -338,3 +338,69 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Push the Phase 4 changes on the active branch
 - Coordinate final integration steps with M4 once Shield enrollment is exercised against a running controller
+
+---
+
+## 2026-04-17 — Codex (M4 Phase 5)
+
+**What was done:**
+- Implemented `shield/src/network.rs` for Shield host network bootstrap
+- Added creation and reuse logic for the `zecurity0` TUN interface
+- Added interface address assignment and link-up steps for the controller-assigned Shield IP
+- Added base `inet zecurity` nftables rules allowing loopback and Connector traffic while dropping traffic entering on `zecurity0`
+- Wired `shield/src/main.rs` to include the new `network` module
+- Replaced the enrollment TODO in `shield/src/enrollment.rs` with the real best-effort `network::setup()` call
+- Ran `cargo build --manifest-path shield/Cargo.toml` successfully
+- Marked M4 Phase 5 done in Sprint 4 tracking docs
+
+**Key decisions:**
+- Kept network setup best-effort after enrollment so cert issuance and persisted state survive even if host capabilities or Linux tools are misconfigured
+- Used the native `ip` and `nft` commands for deterministic host networking behavior while keeping idempotency and validation in Rust
+- Reapplied the full nftables table declaratively on each run so restart behavior converges to one known rule set
+
+**What's next:**
+- Wait for M3 Phase 5 `connector/src/agent_server.rs` to land before starting M4 Phase 4 heartbeat/renewal
+- If M3 is still in progress, M4 Phase 6 updater/systemd/install-script work is also unblocked
+
+---
+
+## 2026-04-17 — Codex (M4 Phase 5 Refactor)
+
+**What was done:**
+- Refactored `shield/src/network.rs` to use `rtnetlink` for interface lookup, address assignment, and link-up
+- Replaced ad hoc nft rules file generation with typed `nftables` crate rule construction
+- Enabled the `tokio` feature on the `nftables` crate so the async helper API compiles in the shield binary
+- Updated Phase 5 and Shield service notes to reflect the final implementation accurately
+- Re-ran `cargo build --manifest-path shield/Cargo.toml` successfully
+
+**Key decisions:**
+- Removed the direct `ip` binary dependency from the daemon path, since the Shield should not rely on userspace ops tooling to configure `zecurity0`
+- Kept the docs honest about the current `nftables` crate: it gives typed Rust-side rule construction, but still applies rules through the system `nft` executable in this version
+- Restricted documentation changes to M4/Shield implementation notes so no other member's ownership or phase dependencies changed
+
+**What's next:**
+- Continue waiting on M3 Phase 5 before starting M4 Phase 4 heartbeat/renewal
+- Start M4 Phase 6 independently if you want to keep moving while M3 finishes `agent_server.rs`
+
+---
+
+## 2026-04-17 — Codex (M4 Phase 6)
+
+**What was done:**
+- Implemented `shield/src/updater.rs` by mirroring the connector updater for `shield-v*` releases and `/usr/local/bin/zecurity-shield`
+- Wired `shield/src/main.rs` to support `--check-update` and spawn the updater loop when `AUTO_UPDATE_ENABLED=true`
+- Added `shield/systemd/zecurity-shield.service`
+- Added `shield/systemd/zecurity-shield-update.service`
+- Added `shield/systemd/zecurity-shield-update.timer`
+- Added `shield/scripts/shield-install.sh` with OS detection, kernel check, nftables installation, and active nftables-service warning
+- Verified `cargo build --manifest-path shield/Cargo.toml` and `bash -n shield/scripts/shield-install.sh`
+- Marked M4 Phase 6 done in Sprint 4 tracking docs
+
+**Key decisions:**
+- Aligned the Shield updater flow with the existing connector pattern and standardized on `--check-update` rather than inventing a separate `--update` flag
+- Put distro-specific `nft` package installation in the install script, not the binary, so runtime assumptions stay simple for the daemon
+- Recorded the operational caveat that the current `nftables` crate still applies rules via the `nft` executable, so install-time guarantees matter
+
+**What's next:**
+- Wait for M3 Phase 5 before starting M4 Phase 4 heartbeat/renewal
+- M4 Phase 7 can start after that for connector main wiring and shield release CI

@@ -79,7 +79,11 @@ pub fn verify_connector_spiffe(
         san.value
             .general_names
             .iter()
-            .filter_map(|n| if let GeneralName::URI(u) = n { Some(*u) } else { None })
+            .filter_map(|n| if let GeneralName::URI(u) = n {
+                Some(*u)
+            } else {
+                None
+            })
             .collect::<Vec<_>>()
     );
 }
