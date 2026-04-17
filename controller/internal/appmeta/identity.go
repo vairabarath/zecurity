@@ -44,6 +44,15 @@ const (
 	// PKI cert subject CN prefixes — keeps cert naming consistent.
 	PKIConnectorCNPrefix = "connector-" // CN = "connector-<connectorID>"
 	PKIAgentCNPrefix     = "agent-"     // CN = "agent-<agentID>" — future
+	PKIShieldCNPrefix    = "shield-"    // CN = "shield-<shieldID>"
+
+	// Shield networking constants.
+	ShieldInterfaceName = "zecurity0"
+	ShieldInterfaceCIDR = "100.64.0.0/10"
+)
+
+const (
+	SPIFFERoleShield = "shield"
 )
 
 // WorkspaceTrustDomain derives the SPIFFE trust domain for a workspace.
@@ -65,4 +74,9 @@ func WorkspaceTrustDomain(slug string) string {
 // Used in SignConnectorCert (Go) and enrollment.rs (Rust, mirrored).
 func ConnectorSPIFFEID(trustDomain, connectorID string) string {
 	return "spiffe://" + trustDomain + "/" + SPIFFERoleConnector + "/" + connectorID
+}
+
+// ShieldSPIFFEID builds the full SPIFFE URI for a shield certificate.
+func ShieldSPIFFEID(trustDomain, shieldID string) string {
+	return "spiffe://" + trustDomain + "/" + SPIFFERoleShield + "/" + shieldID
 }

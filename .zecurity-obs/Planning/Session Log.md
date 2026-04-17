@@ -29,6 +29,22 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Codex (GPT-5) — M3 Phase 1
+
+**What was done:**
+- Created `controller/migrations/003_shield_schema.sql` with the `shields` table and Sprint 4 indexes
+- Added `controller/graph/shield.graphqls` with `Shield`, `ShieldStatus`, `ShieldToken`, and Shield query/mutation schema
+- Updated `controller/graph/connector.graphqls` with `NetworkHealth` plus `networkHealth` and `shields` on `RemoteNetwork`
+- Marked M3 Day 1 items complete in `Sprint4/path.md` and set the Phase 1 task note status to `done`
+
+**Key decisions:**
+- Kept `interface_addr` unique per tenant via a partial unique index so unassigned shields can coexist until enrollment
+- Left Shield data modeled in GraphQL at the schema layer first; resolver implementation stays in M3 Phase 2
+
+**What's next:**
+- Wait for M2 `token.go` support so `GenerateShieldToken` can call into the Shield service
+- Then implement M3 Phase 2 resolvers in `controller/graph/resolvers/shield.resolvers.go` and `connector.resolvers.go`
+
 ## 2026-04-16 — Claude Code (Sonnet 4.6) — Sprint 4 Planning
 
 **What was done:**
@@ -152,3 +168,45 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - what the next session should pick up
 ```
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M2 Phase 1 Day 1 unblockers
+- Created `proto/shield/v1/shield.proto` with `ShieldService` and all enrollment, heartbeat, renewal, and goodbye messages
+- Updated `proto/connector/v1/connector.proto` with `Goodbye`, `GoodbyeRequest`, `GoodbyeResponse`, `ShieldHealth`, and `HeartbeatRequest.shields = 5`
+- Added Shield SPIFFE and networking constants plus `ShieldSPIFFEID()` in `controller/internal/appmeta/identity.go`
+- Ran `buf generate` from repo root and verified `controller/gen/go/proto/shield/v1/` plus updated connector stubs
+- Ran `cd controller && go build ./...` successfully
+- Marked M2 Day 1 items and the team `buf generate` step done in `Sprint4/path.md`
+
+**Key decisions:**
+- Kept existing connector proto field numbers unchanged and assigned the new repeated `shields` field to `HeartbeatRequest = 5`
+- Used the repo's actual Go module path (`github.com/yourorg/ztna/controller/...`) for the new shield proto `go_package` so generated imports stay consistent with the existing controller module
+
+**What's next:**
+- Coordinate with M3 on `controller/migrations/003_shield_schema.sql`
+- Start M2 shield service implementation under `controller/internal/shield/`
+- Watch the dependency mismatch between `path.md` and `Phase2-Shield-Package.md` about whether the DB migration is required before all of Phase 2 or only the DB-backed parts
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Pulled latest `main`, including M3 Day 1 schema and GraphQL updates
+- Implemented `controller/internal/shield/` Phase 2 package: `config.go`, `token.go`, `enrollment.go`, `heartbeat.go`, and `spiffe.go`
+- Added `shield.NewService(...)` with Redis, DB, and PKI dependencies plus ShieldService interface compliance
+- Implemented shield enrollment JWT generation and verification, Redis JTI burn, connector selection, interface address assignment from `100.64.0.0/10`, and the Enroll gRPC handler
+- Implemented shield disconnect watcher logic for stale ACTIVE shields
+- Added PKI `SignShieldCert` and `RenewShieldCert` support in `controller/internal/pki/`
+- Ran `cd controller && go build ./...` successfully
+- Marked M2 Phase 2 and Phase 3 done in Sprint 4 tracking docs
+
+**Key decisions:**
+- Derived `connector_addr` from the selected connector's `public_ip` with port `9091`, since Sprint 4 expects Shield post-enrollment traffic to target Connector `:9091` and the schema does not have a dedicated connector address column
+- Kept shield cert issuance parallel to connector cert issuance instead of mutating existing connector PKI methods
+- Reused the controller's intermediate CA fingerprint flow already used by connector enrollment
+
+**What's next:**
+- Wire Shield config and service registration into `controller/cmd/server/main.go`
+- Add Shield env vars to `controller/.env` and `.env.example`
+- Coordinate with M3/M1 on the remaining team `go generate ./graph/...` step when GraphQL codegen is needed
