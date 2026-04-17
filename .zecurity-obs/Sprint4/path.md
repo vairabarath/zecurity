@@ -125,10 +125,10 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE G — M4 Crate Scaffold (Depends on: M2-D1-A proto landed + buf generate done)
 
-- [ ] **M4-G1** `shield/Cargo.toml` — Full dependency list (tokio, tonic, prost, rcgen, rustls, figment, rtnetlink, nftables, etc.)
-- [ ] **M4-G2** `shield/build.rs` — `tonic_build::compile_protos("../proto/shield/v1/shield.proto")`
-- [ ] **M4-G3** `shield/Cross.toml` — pre-build apt-get protobuf-compiler
-- [ ] **M4-G4** `shield/Dockerfile` — mirrors connector Dockerfile
+- [x] **M4-G1** `shield/Cargo.toml` — Full dependency list (tokio, tonic, prost, rcgen, rustls, figment, rtnetlink, nftables, etc.)
+- [x] **M4-G2** `shield/build.rs` — `tonic_build::compile_protos("../proto/shield/v1/shield.proto")`
+- [x] **M4-G3** `shield/Cross.toml` — pre-build apt-get protobuf-compiler
+- [x] **M4-G4** `shield/Dockerfile` — mirrors connector Dockerfile
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must compile (even if main is empty).
 
@@ -136,12 +136,12 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE H — M4 Core Modules (Depends on: M4-G done)
 
-- [ ] **M4-H1** `shield/src/appmeta.rs` — Mirror `connector/src/appmeta.rs` + Shield constants (`SPIFFE_ROLE_SHIELD`, `PKI_SHIELD_CN_PREFIX`, `SHIELD_INTERFACE_NAME`, `SHIELD_INTERFACE_CIDR_RANGE`)
-- [ ] **M4-H2** `shield/src/config.rs` — figment config: `CONTROLLER_ADDR`, `CONTROLLER_HTTP_ADDR`, `ENROLLMENT_TOKEN`, `AUTO_UPDATE_ENABLED`, `LOG_LEVEL`, `SHIELD_HEARTBEAT_INTERVAL_SECS`; state dir `/var/lib/zecurity-shield/`
-- [ ] **M4-H3** `shield/src/main.rs` — Startup: init tracing → load config → check state.json → enrollment or heartbeat loop → SIGTERM handler calls Goodbye
-- [ ] **M4-H4** `shield/src/crypto.rs` — EC P-384 keygen, CSR builder, PEM/DER helpers (mirror `connector/src/crypto.rs`)
-- [ ] **M4-H5** `shield/src/tls.rs` — `verify_connector_spiffe()`: verifies Connector's SPIFFE ID during mTLS handshake (checks full URI: `spiffe://<trust_domain>/connector/<connector_id>`)
-- [ ] **M4-H6** `shield/src/util.rs` — hostname reader, public IP helper (mirror connector)
+- [x] **M4-H1** `shield/src/appmeta.rs` — Mirror `connector/src/appmeta.rs` + Shield constants (`SPIFFE_ROLE_SHIELD`, `PKI_SHIELD_CN_PREFIX`, `SHIELD_INTERFACE_NAME`, `SHIELD_INTERFACE_CIDR_RANGE`)
+- [x] **M4-H2** `shield/src/config.rs` — figment config: `CONTROLLER_ADDR`, `CONTROLLER_HTTP_ADDR`, `ENROLLMENT_TOKEN`, `AUTO_UPDATE_ENABLED`, `LOG_LEVEL`, `SHIELD_HEARTBEAT_INTERVAL_SECS`; state dir `/var/lib/zecurity-shield/`
+- [x] **M4-H3** `shield/src/main.rs` — Startup: init tracing → load config → check state.json → enrollment or heartbeat loop → SIGTERM handler calls Goodbye
+- [x] **M4-H4** `shield/src/crypto.rs` — EC P-384 keygen, CSR builder, PEM/DER helpers (mirror `connector/src/crypto.rs`)
+- [x] **M4-H5** `shield/src/tls.rs` — `verify_connector_spiffe()`: verifies Connector's SPIFFE ID during mTLS handshake (checks full URI: `spiffe://<trust_domain>/connector/<connector_id>`)
+- [x] **M4-H6** `shield/src/util.rs` — hostname reader, public IP helper (mirror connector)
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
