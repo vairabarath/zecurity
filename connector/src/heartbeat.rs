@@ -207,6 +207,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState) -> Re
             version: version.clone(),
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
+            shields: vec![],
         });
 
         match client.heartbeat(request).await {

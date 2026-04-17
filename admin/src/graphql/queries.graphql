@@ -79,3 +79,19 @@ query GetRemoteNetwork($id: ID!) {
     status
   }
 }
+
+query GetShields($remoteNetworkId: ID!) {
+  shields(remoteNetworkId: $remoteNetworkId) {
+    id
+    name
+    status
+    lastSeenAt
+    version
+    hostname
+    publicIp
+    interfaceAddr
+    certNotAfter
+    createdAt
+    connectorId
+  }
+}
