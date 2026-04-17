@@ -28,6 +28,34 @@ Most recent first. Every agent appends an entry after their session.
 - Wait for M2 `token.go` support so `GenerateShieldToken` can call into the Shield service
 - Then implement M3 Phase 2 resolvers in `controller/graph/resolvers/shield.resolvers.go` and `connector.resolvers.go`
 
+---
+
+## 2026-04-17 — Claude Code (Opus 4) — M1 Sprint 4 Phase 1
+
+**Member:** M1 (Frontend)
+**Phase:** Phase 1 — Layout & Routing Scaffold — **DONE**
+**Branch / commit:** `sprint-4-m1` @ `deb908d` (pushed to origin)
+
+**What was done:**
+- Created new branch `sprint-4-m1` off `main`
+- Scaffolded `admin/src/pages/Shields.tsx` — breadcrumb, header, "Add Shield" placeholder button, 4-row skeleton loading state, empty state with CTA, full row/table layout ready for data, status config matching spec colors (PENDING gray / ACTIVE emerald / DISCONNECTED amber / REVOKED red)
+- Added route `/remote-networks/:id/shields` in `admin/src/App.tsx`
+- Added "Shields" nav entry in `admin/src/components/layout/Sidebar.tsx` under Infrastructure → Connectors (points to `/remote-networks` — sidebar has no per-network context; deep-link comes in Phase 4)
+- Build check: `cd admin && npm run build` — 0 new errors from Phase 1 changes (4 pre-existing `ConnectorDetail.tsx` errors for missing `publicIp`/`certNotAfter`/`createdAt` fields on `GetConnector` query are unrelated to M1 Phase 1 — flag to M3 as a separate task)
+
+**Decisions:**
+- Sidebar "Shields" target is `/remote-networks` (not `/shields`) because there's no AllShields global page in Sprint 4 scope. Matches the existing sidebar ergonomics (user picks network → deep-links).
+- Kept `showInstall` state as a placeholder (`const [, setShowInstall] = useState(false)`) so the "Add Shield" button click still does *something* — full `InstallCommandModal` wiring is Phase 3 scope.
+
+**What's next:**
+- M1 Phase 2 blocked on Day 1 deliverables from M2 + M3 (shield.proto + connector.proto changes + graph schemas) followed by `buf generate`, `go generate ./graph/...`, and `cd admin && npm run codegen`.
+- M1 Phase 4 (RemoteNetworks NetworkHealth + sidebar/per-network Shields link) can proceed in parallel with Phase 3 once codegen has run.
+- Open a PR `sprint-4-m1 → main` when ready for review.
+
+**Unresolved follow-up:**
+- Pre-existing `ConnectorDetail.tsx` type errors — owner likely M3 (GraphQL schema) or previous M1 work. Separate issue.
+
+---
 ## 2026-04-16 — Claude Code (Sonnet 4.6) — Sprint 4 Planning
 
 **What was done:**
@@ -171,6 +199,26 @@ Most recent first. Every agent appends an entry after their session.
 - Coordinate with M3 on `controller/migrations/003_shield_schema.sql`
 - Start M2 shield service implementation under `controller/internal/shield/`
 - Watch the dependency mismatch between `path.md` and `Phase2-Shield-Package.md` about whether the DB migration is required before all of Phase 2 or only the DB-backed parts
+
+---
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M1 Phase 2 GraphQL operations and codegen verification
+- Confirmed Shield mutations were added in `admin/src/graphql/mutations.graphql`
+- Confirmed the `GetShields` query was added in `admin/src/graphql/queries.graphql`
+- Confirmed generated GraphQL artifacts exist under `admin/src/generated/`, including `ShieldStatus` and the Shield document nodes
+- Marked `M1-N6` done in `Sprint4/path.md`
+- Marked `Phase2-GraphQL-Operations.md` status as `done`
+
+**Key decisions:**
+- Treated Phase 2 as complete based on the repo's actual GraphQL codegen output, which generates typed document nodes rather than Apollo `use*` hooks
+- Kept sprint tracking aligned with the verified build-check outcome instead of the older wording in the phase checklist
+
+**What's next:**
+- Continue with M1 Phase 3 to wire `Shields.tsx` to generated Shield queries and mutations
+- Use the generated `GetShieldsDocument` and related mutation documents in the page implementation
 
 ## 2026-04-17 — Codex
 

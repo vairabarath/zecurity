@@ -25,6 +25,7 @@ const sections = [
     items: [
       { to: '/remote-networks', label: 'Remote Networks', icon: Network },
       { to: '/connectors', label: 'Connectors', icon: Globe },
+      { to: '/remote-networks', label: 'Shields', icon: Shield },
     ],
   },
   {
