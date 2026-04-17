@@ -198,7 +198,7 @@ These must be committed to the shared branch **before** anyone else starts their
 - [ ] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
 - [ ] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
 - [ ] **M1-N5** `admin/src/graphql/queries.graphql` — Add `GetShields`
-- [ ] **M1-N6** Run `cd admin && npm run codegen` — generates TypeScript hooks from final schema
+- [x] **M1-N6** Run `cd admin && npm run codegen` — generates TypeScript hooks from final schema
 
 > Coordination: M1 can build layout + routing immediately. Only N1–N3 wiring needs the generated hooks (N6). Run codegen after Day 1 schema is committed for initial hooks, then re-run after all schema changes are final.
 
