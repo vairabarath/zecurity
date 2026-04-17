@@ -12,6 +12,32 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Kiro — Member 4 (Sprint 4 Phases 1–3)
+
+**What was done:**
+- Pulled latest `origin/main` — picked up M2 (shield proto + service), M3 (DB schema + GraphQL resolvers + Goodbye RPC), M1 (Shields page + GraphQL ops + codegen)
+- Merged `origin/main` into `member_4` branch (resolved session log conflict)
+- **Phase 1 (Crate Scaffold)** — created `shield/Cargo.toml`, `shield/build.rs`, `shield/Cross.toml`, `shield/Dockerfile`, `shield/src/main.rs` stub; `cargo build` passes
+- **Phase 2 (Core Modules)** — created `shield/src/appmeta.rs`, `config.rs`, `crypto.rs`, `tls.rs`, `util.rs`, `types.rs`; full `main.rs` startup flow with SIGTERM handler; `cargo build` passes
+- **Phase 3 (Enrollment)** — created `shield/src/enrollment.rs` (12-step flow: JWT parse → CA fetch → fingerprint verify → keygen → CSR → gRPC Enroll → save certs + state.json → config cleanup); wired into `main.rs`; `cargo build` passes
+- Marked M4-G1–G4, M4-H1–H6, M4-I1 ✅ in `path.md`; set Phase 1/2/3 status to `done`
+- Added `shield/target/` to `.gitignore`; removed build cache from tracking
+
+**Key decisions:**
+- `ShieldState` moved to `types.rs` (not `main.rs`) to avoid circular imports between `main.rs` and `enrollment.rs`
+- `time` crate added to `Cargo.toml` with `formatting + macros` features for RFC 3339 timestamps
+- `tonic_prost_build::configure()` used in `build.rs` — matches the tonic-prost split in this project
+- Enrollment uses plain HTTP for CA fetch + fingerprint verification for MITM detection (same pattern as connector)
+- `network::setup()` stubbed with a warning — Phase K will implement it
+
+**What's next:**
+- Phase J: `heartbeat.rs` + `renewal.rs` (mTLS heartbeat loop to connector :9091)
+- Phase K: `network.rs` (zecurity0 TUN interface + nftables)
+- Phase L: `updater.rs` + systemd units + install script
+- Phase M: CI workflow + `connector/src/main.rs` wiring
+
+---
+
 ## 2026-04-17 — Claude Code (Sonnet 4.6) — M3 Phases 2–4
 
 **What was done:**
@@ -23,20 +49,19 @@ Most recent first. Every agent appends an entry after their session.
   - Added `scanShield`, `loadShields`, `computeNetworkHealth` helpers to `helpers.go`
   - `RemoteNetworks` and `RemoteNetwork` now populate `NetworkHealth` and `Shields` inline
   - Fixed `connector/src/heartbeat.rs`: added `shields: vec![]` to `HeartbeatRequest`
-- **Phase 3 — Connector Goodbye RPC:**
-  - Created `controller/internal/connector/goodbye.go` — `Goodbye` on `EnrollmentHandler` marks connector DISCONNECTED immediately
-- **Phase 4 — Connector Heartbeat Shield Processing:**
-  - Added `ShieldSvc shield.Service` to `EnrollmentHandler` in `enrollment.go`
-  - Modified `heartbeat.go` to iterate `req.Shields` and call `h.ShieldSvc.UpdateShieldHealth()` per entry; errors logged, heartbeat never fails
+- **Phase 3 — Connector Goodbye RPC:** Created `controller/internal/connector/goodbye.go`
+- **Phase 4 — Connector Heartbeat Shield Processing:** Modified `heartbeat.go` to process `req.Shields`
 
 **Key decisions:**
-- `connector_id NOT NULL` constraint required INSERT with a placeholder connector; `token.go`'s `selectConnector` overwrites with least-loaded on UPDATE
-- `NetworkHealth` and `Shields` are direct struct fields (not field resolvers) — populated inline during `RemoteNetworks`/`RemoteNetwork` queries
-- Merge conflict in `shield.resolvers.go` resolved by keeping our full implementation over M2's codegen panic stubs
-- Duplicate `Service` interface dropped; adopted M2's compile-time check `var _ Service = (*service)(nil)`
+- `NetworkHealth` and `Shields` are direct struct fields populated inline during queries
+- Merge conflict in `shield.resolvers.go` resolved by keeping full implementation over M2's codegen panic stubs
 
 **What's next:**
-- Phase 5 (`connector/src/agent_server.rs`) — waiting on M4 to confirm `ShieldServer::new()` API signature before writing
+- Phase 5 (`connector/src/agent_server.rs`) — waiting on M4 to confirm `ShieldServer::new()` API signature
+
+---
+
+## 2026-04-17 — Kiro — Member 4
 
 ---
 
