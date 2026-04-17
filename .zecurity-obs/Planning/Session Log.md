@@ -12,6 +12,34 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Claude Code (Sonnet 4.6) — M3 Phases 2–4
+
+**What was done:**
+- **Phase 2 — GraphQL Resolvers:**
+  - Added `shield.graphqls` to `gqlgen.yml` and ran codegen — generated `Shield`, `ShieldToken`, `NetworkHealth` types
+  - Added `Service` interface to `internal/shield/config.go`
+  - Added `ShieldSvc shield.Service` to `Resolver` struct
+  - Implemented `GenerateShieldToken`, `RevokeShield`, `DeleteShield` mutations + `Shields`, `Shield` queries in `shield.resolvers.go`
+  - Added `scanShield`, `loadShields`, `computeNetworkHealth` helpers to `helpers.go`
+  - `RemoteNetworks` and `RemoteNetwork` now populate `NetworkHealth` and `Shields` inline
+  - Fixed `connector/src/heartbeat.rs`: added `shields: vec![]` to `HeartbeatRequest`
+- **Phase 3 — Connector Goodbye RPC:**
+  - Created `controller/internal/connector/goodbye.go` — `Goodbye` on `EnrollmentHandler` marks connector DISCONNECTED immediately
+- **Phase 4 — Connector Heartbeat Shield Processing:**
+  - Added `ShieldSvc shield.Service` to `EnrollmentHandler` in `enrollment.go`
+  - Modified `heartbeat.go` to iterate `req.Shields` and call `h.ShieldSvc.UpdateShieldHealth()` per entry; errors logged, heartbeat never fails
+
+**Key decisions:**
+- `connector_id NOT NULL` constraint required INSERT with a placeholder connector; `token.go`'s `selectConnector` overwrites with least-loaded on UPDATE
+- `NetworkHealth` and `Shields` are direct struct fields (not field resolvers) — populated inline during `RemoteNetworks`/`RemoteNetwork` queries
+- Merge conflict in `shield.resolvers.go` resolved by keeping our full implementation over M2's codegen panic stubs
+- Duplicate `Service` interface dropped; adopted M2's compile-time check `var _ Service = (*service)(nil)`
+
+**What's next:**
+- Phase 5 (`connector/src/agent_server.rs`) — waiting on M4 to confirm `ShieldServer::new()` API signature before writing
+
+---
+
 ## 2026-04-17 — Codex (GPT-5) — M3 Phase 1
 
 **What was done:**
