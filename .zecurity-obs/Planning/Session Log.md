@@ -12,6 +12,24 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Codex (GPT-5) — M3 Phase 1
+
+**What was done:**
+- Created `controller/migrations/003_shield_schema.sql` with the `shields` table and Sprint 4 indexes
+- Added `controller/graph/shield.graphqls` with `Shield`, `ShieldStatus`, `ShieldToken`, and Shield query/mutation schema
+- Updated `controller/graph/connector.graphqls` with `NetworkHealth` plus `networkHealth` and `shields` on `RemoteNetwork`
+- Marked M3 Day 1 items complete in `Sprint4/path.md` and set the Phase 1 task note status to `done`
+
+**Key decisions:**
+- Kept `interface_addr` unique per tenant via a partial unique index so unassigned shields can coexist until enrollment
+- Left Shield data modeled in GraphQL at the schema layer first; resolver implementation stays in M3 Phase 2
+
+**What's next:**
+- Wait for M2 `token.go` support so `GenerateShieldToken` can call into the Shield service
+- Then implement M3 Phase 2 resolvers in `controller/graph/resolvers/shield.resolvers.go` and `connector.resolvers.go`
+
+---
+
 ## 2026-04-17 — Claude Code (Opus 4) — M1 Sprint 4 Phase 1
 
 **Member:** M1 (Frontend)
@@ -38,7 +56,6 @@ Most recent first. Every agent appends an entry after their session.
 - Pre-existing `ConnectorDetail.tsx` type errors — owner likely M3 (GraphQL schema) or previous M1 work. Separate issue.
 
 ---
-
 ## 2026-04-16 — Claude Code (Sonnet 4.6) — Sprint 4 Planning
 
 **What was done:**
