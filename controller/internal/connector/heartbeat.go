@@ -86,7 +86,14 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		return nil, status.Errorf(codes.Internal, "update connector: %v", err)
 	}
 
-	// Step 6 — Return success.
+	// Step 6 — Process shield health reports from this connector.
+	for _, sh := range req.Shields {
+		if err := h.ShieldSvc.UpdateShieldHealth(ctx, sh.ShieldId, connectorID, sh.Status, sh.Version, sh.LastHeartbeatAt); err != nil {
+			log.Printf("heartbeat: update shield health shield_id=%s: %v", sh.ShieldId, err)
+		}
+	}
+
+	// Step 7 — Return success.
 	// re_enroll = true when cert expiring within the renewal window.
 	return &pb.HeartbeatResponse{
 		Ok:       true,

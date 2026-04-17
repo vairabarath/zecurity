@@ -20,6 +20,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -29,6 +30,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -78,6 +80,14 @@ func main() {
 		GRPCPort:            envOr("GRPC_PORT", "9090"),
 		JWTSecret:           mustEnv("JWT_SECRET"),
 		RenewalWindow:       mustDuration("CONNECTOR_RENEWAL_WINDOW", 48*time.Hour),
+	}
+
+	shieldCfg := shield.Config{
+		CertTTL:             mustDuration("SHIELD_CERT_TTL", 7*24*time.Hour),
+		RenewalWindow:       mustDuration("SHIELD_RENEWAL_WINDOW", 48*time.Hour),
+		EnrollmentTokenTTL:  mustDuration("SHIELD_ENROLLMENT_TOKEN_TTL", 24*time.Hour),
+		DisconnectThreshold: mustDuration("SHIELD_DISCONNECT_THRESHOLD", 120*time.Second),
+		JWTSecret:           mustEnv("JWT_SECRET"),
 	}
 
 	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
@@ -153,9 +163,12 @@ func main() {
 		Redis:      connectorRedis,
 		PKIService: pkiService,
 	}
+	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, connectorRedis)
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
+	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
+	go shieldSvc.RunDisconnectWatcher(ctx)
 
 	go func() {
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
