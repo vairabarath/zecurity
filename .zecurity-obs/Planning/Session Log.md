@@ -233,7 +233,7 @@ Most recent first. Every agent appends an entry after their session.
 - what the next session should pick up
 ```
 
-## 2026-04-17 — Codex
+## 2026-04-17 — Codex (M3 Phase 5)
 
 **What was done:**
 - Completed Sprint 4 M2 Phase 1 Day 1 unblockers
@@ -338,6 +338,41 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Push the Phase 4 changes on the active branch
 - Coordinate final integration steps with M4 once Shield enrollment is exercised against a running controller
+
+## 2026-04-17 — Codex (M3 Phase 5 Started)
+
+**What was done:**
+- Started Sprint 4 M3 Phase 5 after M4 confirmed the `ShieldServer` API matches the phase spec
+- Added `connector/src/agent_server.rs` with the agreed `ShieldServer::new(...)` and `get_alive_shields()` API
+- Added ShieldService RPC handlers for `Heartbeat`, `RenewCert`, `Goodbye`, and `Enroll` returning UNIMPLEMENTED
+- Updated connector proto generation to include `proto/shield/v1/shield.proto`
+- Exposed `agent_server` and `shield_proto` modules from `connector/src/main.rs` without starting the server
+
+**Key decisions:**
+- Kept Connector `:9091` startup wiring out of scope because M4 owns `connector/src/main.rs` startup in Phase 7
+- Left the M3 Phase 5 checklist incomplete because real mTLS peer-certificate SPIFFE verification and cert-expiry renewal signaling still need to be completed
+
+**What's next:**
+- `cd connector && cargo build` now passes with warnings only
+- Complete real peer-certificate SPIFFE extraction/validation and `not_after` renewal-window logic before marking M3 Phase 5 done
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M3 Phase 5 `connector/src/agent_server.rs`
+- Implemented real mTLS peer certificate extraction via Tonic request `peer_certs()`
+- Parsed Shield certificate URI SAN and verified exact SPIFFE identity `spiffe://<trust_domain>/shield/<shield_id>`
+- Parsed peer certificate `not_after` and set `HeartbeatResponse.re_enroll=true` when inside the renewal window
+- Added `ShieldServer::serve(...)` helper with Connector cert/key, `workspace_ca.crt` trust root, and required Shield client auth for M4 wiring
+- Reran `cd connector && cargo build` successfully
+- Marked `M3-F1` done in `Sprint4/path.md` and Phase 5 frontmatter
+
+**Key decisions:**
+- Kept actual startup/binding out of `main.rs` beyond module exposure, because M4 owns Connector startup wiring
+- Added a callable `serve(...)` helper so M4 can start the server without reimplementing mTLS setup
+
+**What's next:**
+- M4 can wire `ShieldServer::new(...).serve(...)` into `connector/src/main.rs` and pass `get_alive_shields()` data into the Connector heartbeat flow as planned
 
 ---
 
