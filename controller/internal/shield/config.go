@@ -1,6 +1,7 @@
 package shield
 
 import (
+	"context"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -37,3 +38,9 @@ func NewService(cfg Config, db *pgxpool.Pool, pkiSvc pki.Service, redis *redis.C
 }
 
 var _ shieldpb.ShieldServiceServer = (*service)(nil)
+
+// Service is the interface the GraphQL resolver uses to interact with shield logic.
+type Service interface {
+	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
+	RunDisconnectWatcher(ctx context.Context)
+}

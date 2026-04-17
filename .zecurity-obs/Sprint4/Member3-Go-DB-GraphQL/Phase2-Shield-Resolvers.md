@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M3
 phase: 2
@@ -40,19 +40,20 @@ Implement all GraphQL resolvers for the Shield feature plus the `NetworkHealth` 
 
 ### shield.resolvers.go — Mutations
 
-- [ ] `GenerateShieldToken(ctx, remoteNetworkID, shieldName)`:
+- [x] `GenerateShieldToken(ctx, remoteNetworkID, shieldName)`:
   1. Authenticate caller (JWT middleware — workspace from context)
   2. Create shield row in DB: `INSERT INTO shields (tenant_id, remote_network_id, name, status) VALUES (?, ?, ?, 'pending') RETURNING id`
   3. Call `shieldSvc.GenerateShieldToken(ctx, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName)`
   4. Return `ShieldToken{ ShieldId: shieldID, InstallCommand: installCmd }`
   - **IMPORTANT:** `installCommand` is returned here and **never stored in DB**
+  - **NOTE:** INSERT includes `connector_id` placeholder (active connector); token.go overwrites with least-loaded on UPDATE
 
-- [ ] `RevokeShield(ctx, id)`:
+- [x] `RevokeShield(ctx, id)`:
   1. Verify caller owns the shield (tenant_id check)
-  2. `UPDATE shields SET status='revoked' WHERE id=$1 AND tenant_id=$2`
+  2. `UPDATE shields SET status='revoked' WHERE id=$1 AND tenant_id=$2 AND status IN ('active','disconnected')`
   3. Return `true`
 
-- [ ] `DeleteShield(ctx, id)`:
+- [x] `DeleteShield(ctx, id)`:
   1. Verify caller owns the shield
   2. Only allow delete for `status IN ('pending', 'revoked')` — return error for active/disconnected
   3. `DELETE FROM shields WHERE id=$1 AND tenant_id=$2`
@@ -60,34 +61,22 @@ Implement all GraphQL resolvers for the Shield feature plus the `NetworkHealth` 
 
 ### shield.resolvers.go — Queries
 
-- [ ] `Shields(ctx, remoteNetworkID)`:
-  - `SELECT * FROM shields WHERE remote_network_id=$1 AND tenant_id=$2 ORDER BY created_at DESC`
-  - Map DB rows to `model.Shield` structs
+- [x] `Shields(ctx, remoteNetworkID)`:
+  - Uses `loadShields` helper in helpers.go
+  - `SELECT ... FROM shields WHERE remote_network_id=$1 AND tenant_id=$2 ORDER BY created_at DESC`
 
-- [ ] `Shield(ctx, id)`:
-  - `SELECT * FROM shields WHERE id=$1 AND tenant_id=$2`
+- [x] `Shield(ctx, id)`:
+  - `SELECT ... FROM shields WHERE id=$1 AND tenant_id=$2`
   - Return `nil` if not found (not an error)
 
 ### connector.resolvers.go — NetworkHealth
 
-- [ ] Add `NetworkHealth` field resolver on `RemoteNetwork`:
-  ```go
-  func (r *remoteNetworkResolver) NetworkHealth(ctx context.Context, obj *model.RemoteNetwork) (model.NetworkHealth, error) {
-      // Query: SELECT COUNT(*), COUNT(CASE WHEN status='active' THEN 1 END)
-      //        FROM connectors WHERE remote_network_id=$1
-      // Logic:
-      //   total == 0      → OFFLINE
-      //   active_count > 0 → ONLINE
-      //   else             → DEGRADED
-  }
-  ```
-
-- [ ] Add `Shields` field resolver on `RemoteNetwork`:
-  ```go
-  func (r *remoteNetworkResolver) Shields(ctx context.Context, obj *model.RemoteNetwork) ([]*model.Shield, error) {
-      // SELECT * FROM shields WHERE remote_network_id=$1 AND tenant_id=$2
-  }
-  ```
+- [x] `NetworkHealth` and `Shields` are direct struct fields (not field resolvers) — populated inline in `RemoteNetworks` and `RemoteNetwork` queries
+- [x] `computeNetworkHealth(connectors)` helper added to helpers.go: total==0 → OFFLINE, active>0 → ONLINE, else → DEGRADED
+- [x] `scanShield` and `loadShields` helpers added to helpers.go
+- [x] `scanRemoteNetwork` initializes `Shields: []*graph.Shield{}` and `NetworkHealth: NetworkHealthOffline`
+- [x] `RemoteNetworks` batch-loads shields (ANY($1)) and computes health after connector load
+- [x] `RemoteNetwork` loads shields and computes health after connector load
 
 ---
 
