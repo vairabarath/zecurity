@@ -12,6 +12,31 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Claude Code (Opus 4) — M1 Phase 4
+
+**Member:** M1 (Frontend)
+**Phase:** Phase 4 — RemoteNetworks NetworkHealth + Shield Count — **DONE**
+**Branch:** `sprint-4-m1`
+
+**What was done:**
+- Extended `GetRemoteNetworks` query with `networkHealth` and `shields { id, status }` fields; re-ran `npm run codegen`
+- `RemoteNetworks.tsx`: added `healthConfig` map (Online/Degraded/Offline dot + label classes); rendered pulsing health dot + label inside each card's name column
+- Updated count line to spec format: `"X / Y connectors active · Z shields active"` (active counts derived by filtering on `ConnectorStatus.Active` / `ShieldStatus.Active`)
+- Tightened delete-button guard: now shown only when **both** `connectorCount === 0` AND `shieldCount === 0` (previously only connectors), preventing 4xx when shields exist
+- Sidebar: confirmed Phase 1 link in place (`Shield` icon → `/remote-networks`). Per-route contextual target deferred (see decisions)
+- `cd admin && npm run build` → 0 errors
+
+**Key decisions:**
+- **Sidebar stays global-static** — making it route-aware (useLocation + param parse) is unnecessary complexity for Sprint 4; per-network drill-through already happens through RemoteNetworks card click. Same call as Phase 1.
+- **Delete guard now also checks shields** — matches the server-side constraint that a network can't be deleted while resources exist. Previously only blocked on connectors; Phase 4 adds shield coverage to prevent a UX trap.
+- Used Tailwind `animate-pulse` for the health dot. Degrades gracefully to solid if class unavailable.
+
+**What's next:**
+- Commit + push `sprint-4-m1`; open PR to main
+- Sprint 4 frontend now complete (per phase-4 `unlocks` field)
+
+---
+
 ## 2026-04-17 — Claude Code (Sonnet 4.6) — M3 Phases 2–4
 
 **What was done:**

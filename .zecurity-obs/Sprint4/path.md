@@ -194,10 +194,10 @@ These must be committed to the shared branch **before** anyone else starts their
 ### PHASE N — M1 Frontend Wire-up (Depends on: Day 1 codegen done)
 
 - [x] **M1-N1** `admin/src/pages/Shields.tsx` — New page at `/remote-networks/<id>/shields`; table with columns: Name, Status, Interface (zecurity0 IP), Via (connector), Last Seen, Version, Hostname; 30s auto-poll; "Add Shield" → `InstallCommandModal`
-- [ ] **M1-N2** `admin/src/pages/RemoteNetworks.tsx` — Add NetworkHealth indicator (🟢/🟡/🔴) + shield count to each network card
-- [ ] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
-- [ ] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
-- [ ] **M1-N5** `admin/src/graphql/queries.graphql` — Add `GetShields`
+- [x] **M1-N2** `admin/src/pages/RemoteNetworks.tsx` — Add NetworkHealth indicator (🟢/🟡/🔴) + shield count to each network card
+- [x] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
+- [x] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
+- [x] **M1-N5** `admin/src/graphql/queries.graphql` — Add `GetShields`
 - [x] **M1-N6** Run `cd admin && npm run codegen` — generates TypeScript hooks from final schema
 
 > Coordination: M1 can build layout + routing immediately. Only N1–N3 wiring needs the generated hooks (N6). Run codegen after Day 1 schema is committed for initial hooks, then re-run after all schema changes are final.

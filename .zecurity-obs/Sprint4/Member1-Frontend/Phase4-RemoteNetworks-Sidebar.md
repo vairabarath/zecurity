@@ -1,9 +1,10 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M1
 phase: 4
+completed: 2026-04-17
 depends_on:
   - Phase2-GraphQL-Operations (NetworkHealth enum generated)
 unlocks:
