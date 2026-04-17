@@ -4,21 +4,21 @@
     "type": "split",
     "children": [
       {
-        "id": "main-tabs",
+        "id": "fc45b9786a3cec16",
         "type": "tabs",
         "children": [
           {
-            "id": "home-leaf",
+            "id": "01673fd5434e31d9",
             "type": "leaf",
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Sprint4/team-workflow.md",
+                "file": "Sprint4/Member3-Go-DB-GraphQL/Phase5-AgentServer-Rust.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "team-workflow"
+              "title": "Phase5-AgentServer-Rust"
             }
           }
         ]
@@ -184,11 +184,15 @@
       "obsidian-excalidraw-plugin:New drawing": false
     }
   },
-  "active": "home-leaf",
+  "active": "01673fd5434e31d9",
   "lastOpenFiles": [
+    "Sprint4/Member4-Rust-Shield-CI/Phase4-Heartbeat-Renewal.md",
+    "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
+    "Sprint4/Member3-Go-DB-GraphQL/Phase5-AgentServer-Rust.md",
     "Sprint4/path.md",
     "Sprint4/team-workflow.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
+    "Sprint4/Member3-Go-DB-GraphQL/Phase3-Connector-Goodbye.md",
+    "Sprint4/Member3-Go-DB-GraphQL/Phase4-Connector-Heartbeat.md",
     "Sprint4/Member2-Go-Proto-Shield/Phase2-Shield-Package.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase2-Core-Modules.md",
     "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",

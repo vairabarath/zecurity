@@ -149,7 +149,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE I — M4 Enrollment (Depends on: M2-A3 Enroll handler live in dev env)
 
-- [ ] **M4-I1** `shield/src/enrollment.rs` — Full enrollment flow: parse JWT → fetch + verify CA fingerprint → keygen → build CSR (SPIFFE SAN: `spiffe://ws-<slug>.zecurity.in/shield/<id>`) → call Controller Enroll RPC → save certs + state.json → call `network::setup()`
+- [x] **M4-I1** `shield/src/enrollment.rs` — Full enrollment flow: parse JWT → fetch + verify CA fingerprint → keygen → build CSR (SPIFFE SAN: `spiffe://ws-<slug>.zecurity.in/shield/<id>`) → call Controller Enroll RPC → save certs + state.json → call `network::setup()`
 
 > Integration check: Run enrollment against dev controller. Shield should appear in DB with `status='active'`.
 
