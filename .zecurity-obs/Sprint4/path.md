@@ -53,13 +53,13 @@ The following files are touched by **multiple members**. Coordinate before commi
 
 These must be committed to the shared branch **before** anyone else starts their implementation work.
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — NEW proto file (unblocks M3 buf generate + M4 crate)
-- [ ] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `Goodbye` RPC + `ShieldHealth` message + `shields` field in `HeartbeatRequest`
-- [ ] **M2-D1-C** `controller/internal/appmeta/identity.go` — Add `SPIFFERoleShield`, `PKIShieldCNPrefix`, `ShieldInterfaceName`, `ShieldInterfaceCIDR`, `ShieldSPIFFEID()` (unblocks M3 resolvers + M4 appmeta)
+- [x] **M2-D1-A** `proto/shield/v1/shield.proto` — NEW proto file (unblocks M3 buf generate + M4 crate)
+- [x] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `Goodbye` RPC + `ShieldHealth` message + `shields` field in `HeartbeatRequest`
+- [x] **M2-D1-C** `controller/internal/appmeta/identity.go` — Add `SPIFFERoleShield`, `PKIShieldCNPrefix`, `ShieldInterfaceName`, `ShieldInterfaceCIDR`, `ShieldSPIFFEID()` (unblocks M3 resolvers + M4 appmeta)
 - [x] **M3-D1-A** `controller/migrations/003_shield_schema.sql` — Shield table, indexes, unique interface_addr constraint (unblocks M2 token.go DB calls)
 - [x] **M3-D1-B** `controller/graph/shield.graphqls` — Shield type, ShieldToken, Mutation + Query extensions (unblocks M1 codegen)
 - [x] **M3-D1-C** `controller/graph/connector.graphqls` — Add `networkHealth`, `shields` field to `RemoteNetwork` type; add `NetworkHealth` enum (unblocks M1 codegen)
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs generated under `controller/gen/go/proto/shield/v1/` and connector stubs updated
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs generated under `controller/gen/go/proto/shield/v1/` and connector stubs updated
 - [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
 
 > After Day 1 checkboxes are done: M1 can start Shields page layout, M4 can scaffold the crate.
