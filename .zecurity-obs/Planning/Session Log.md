@@ -162,3 +162,23 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - what the next session should pick up
 ```
+
+## 2026-04-17 — Codex
+
+**What was done:**
+- Completed Sprint 4 M2 Phase 1 Day 1 unblockers
+- Created `proto/shield/v1/shield.proto` with `ShieldService` and all enrollment, heartbeat, renewal, and goodbye messages
+- Updated `proto/connector/v1/connector.proto` with `Goodbye`, `GoodbyeRequest`, `GoodbyeResponse`, `ShieldHealth`, and `HeartbeatRequest.shields = 5`
+- Added Shield SPIFFE and networking constants plus `ShieldSPIFFEID()` in `controller/internal/appmeta/identity.go`
+- Ran `buf generate` from repo root and verified `controller/gen/go/proto/shield/v1/` plus updated connector stubs
+- Ran `cd controller && go build ./...` successfully
+- Marked M2 Day 1 items and the team `buf generate` step done in `Sprint4/path.md`
+
+**Key decisions:**
+- Kept existing connector proto field numbers unchanged and assigned the new repeated `shields` field to `HeartbeatRequest = 5`
+- Used the repo's actual Go module path (`github.com/yourorg/ztna/controller/...`) for the new shield proto `go_package` so generated imports stay consistent with the existing controller module
+
+**What's next:**
+- Coordinate with M3 on `controller/migrations/003_shield_schema.sql`
+- Start M2 shield service implementation under `controller/internal/shield/`
+- Watch the dependency mismatch between `path.md` and `Phase2-Shield-Package.md` about whether the DB migration is required before all of Phase 2 or only the DB-backed parts
