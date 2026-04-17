@@ -12,6 +12,23 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-17 — Kiro — Member 4
+
+**What was done:**
+- Moved Sprint 3 planning files (`agent-instructions/`, `cert-renewal-plan.md`, `cert-renewal-phased-plan.md`, `connector-sprint-plan-v3.md`, `sprint4-shield-plan.md`, `implementation-report-connector-phase.md`) to `completed/` (gitignored, local backup only)
+- Deleted unused `Dockerfile.aarch64-unknown-linux-musl-custom` and `Dockerfile.x86_64-unknown-linux-musl-custom` (superseded by `Cross.toml` `pre-build` commands)
+- Merged `ui_fixed` branch into `main` (no conflicts) — adds `AllConnectors.tsx`, `ConnectorDetail.tsx`, updated `InstallCommandModal.tsx`, new `dialog.tsx` UI component, `token_handler.go`, updated connector resolvers and main wiring
+- Pushed `main` to `origin/main`
+
+**Key decisions:**
+- Sprint 3 planning docs kept locally in `completed/` rather than deleted — safe local backup, hidden from team via `.gitignore`
+- `ui_fixed` merged directly into `main` after confirming clean merge and reviewing diff
+
+**What's next:**
+- Sprint 4 execution — Member 4 starts with Phase 1 (Rust Shield crate scaffold) per `path.md`
+
+---
+
 ## 2026-04-16 — Claude Code (Sonnet 4.6) — Sprint 4 Planning
 
 **What was done:**
