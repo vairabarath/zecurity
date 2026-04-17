@@ -2,9 +2,15 @@ import { useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
   GenerateConnectorTokenDocument,
+  GenerateShieldTokenDocument,
   GetRemoteNetworksDocument,
 } from '@/generated/graphql'
-import type { GenerateConnectorTokenMutationVariables } from '@/generated/graphql'
+import {
+  type GenerateConnectorTokenMutationVariables,
+  type GenerateShieldTokenMutationVariables,
+  type GetShieldsQueryVariables,
+  GetShieldsDocument,
+} from '@/generated/graphql'
 import {
   Dialog,
   DialogContent,
@@ -26,12 +32,18 @@ import {
 interface InstallCommandModalProps {
   // If provided, skips network selection and uses this network directly
   remoteNetworkId?: string
+  variant?: 'connector' | 'shield'
   open: boolean
   onClose: () => void
 }
 
-export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onClose }: InstallCommandModalProps) {
-  const [connectorName, setConnectorName] = useState('')
+export function InstallCommandModal({
+  remoteNetworkId: fixedNetworkId,
+  variant = 'connector',
+  open,
+  onClose,
+}: InstallCommandModalProps) {
+  const [agentName, setAgentName] = useState('')
   const [selectedNetworkId, setSelectedNetworkId] = useState('')
   const [installCommand, setInstallCommand] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -42,24 +54,59 @@ export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onC
     fetchPolicy: 'cache-and-network',
   })
 
-  const [generateToken, { loading }] = useMutation(GenerateConnectorTokenDocument)
-
   const networkId = fixedNetworkId ?? selectedNetworkId
   const networks = networksData?.remoteNetworks ?? []
+  const isShield = variant === 'shield'
+  const title = installCommand
+    ? `Install ${isShield ? 'Shield' : 'Connector'}`
+    : `Add ${isShield ? 'Shield' : 'Connector'}`
+  const description = installCommand
+    ? 'Copy and run the command below on your server.'
+    : `Register a ${isShield ? 'shield' : 'connector'} and assign it to a remote network.`
+  const nameLabel = `${isShield ? 'Shield' : 'Connector'} Name`
+  const namePlaceholder = isShield ? 'e.g. prod-shield-01' : 'e.g. prod-connector-01'
+  const submitLabel = loadingText(false, isShield)
+  const submittingLabel = loadingText(true, isShield)
+  const expirySubject = isShield ? 'shield' : 'connector'
+
+  const [generateConnectorToken, connectorState] = useMutation(GenerateConnectorTokenDocument)
+  const [generateShieldToken, shieldState] = useMutation(GenerateShieldTokenDocument)
+  const loading = isShield ? shieldState.loading : connectorState.loading
+
+  function loadingText(isLoading: boolean, shieldMode: boolean) {
+    if (isLoading) return `Generating${shieldMode ? '...' : '...'}`
+    return `Add ${shieldMode ? 'Shield' : 'Connector'}`
+  }
 
   async function handleGenerate() {
-    if (!connectorName.trim() || !networkId) return
+    if (!agentName.trim() || !networkId) return
     setError(null)
     try {
-      const result = await generateToken({
-        variables: {
-          remoteNetworkId: networkId,
-          connectorName: connectorName.trim(),
-        } as GenerateConnectorTokenMutationVariables,
-        refetchQueries: [{ query: GetRemoteNetworksDocument }],
-      })
-      if (result.data?.generateConnectorToken.installCommand) {
-        setInstallCommand(result.data.generateConnectorToken.installCommand)
+      const nextInstallCommand = isShield
+        ? (
+            await generateShieldToken({
+              variables: {
+                remoteNetworkId: networkId,
+                shieldName: agentName.trim(),
+              } as GenerateShieldTokenMutationVariables,
+              refetchQueries: [
+                { query: GetRemoteNetworksDocument },
+                { query: GetShieldsDocument, variables: { remoteNetworkId: networkId } as GetShieldsQueryVariables },
+              ],
+            })
+          ).data?.generateShieldToken.installCommand
+        : (
+            await generateConnectorToken({
+              variables: {
+                remoteNetworkId: networkId,
+                connectorName: agentName.trim(),
+              } as GenerateConnectorTokenMutationVariables,
+              refetchQueries: [{ query: GetRemoteNetworksDocument }],
+            })
+          ).data?.generateConnectorToken.installCommand
+
+      if (nextInstallCommand) {
+        setInstallCommand(nextInstallCommand)
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to generate token')
@@ -74,7 +121,7 @@ export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onC
   }
 
   function handleClose() {
-    setConnectorName('')
+    setAgentName('')
     setSelectedNetworkId('')
     setInstallCommand(null)
     setCopied(false)
@@ -82,31 +129,25 @@ export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onC
     onClose()
   }
 
-  const canSubmit = !!connectorName.trim() && !!networkId && !loading
+  const canSubmit = !!agentName.trim() && !!networkId && !loading
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && handleClose()}>
       <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
-          <DialogTitle>
-            {installCommand ? 'Install Connector' : 'Add Connector'}
-          </DialogTitle>
-          <DialogDescription>
-            {installCommand
-              ? 'Copy and run the command below on your server.'
-              : 'Register a connector and assign it to a remote network.'}
-          </DialogDescription>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
 
         {!installCommand && (
           <div className="grid gap-4 py-2">
             <div className="grid gap-2">
-              <Label htmlFor="connectorName">Connector Name</Label>
+              <Label htmlFor="agentName">{nameLabel}</Label>
               <Input
-                id="connectorName"
-                placeholder="e.g. prod-connector-01"
-                value={connectorName}
-                onChange={(e) => setConnectorName(e.target.value)}
+                id="agentName"
+                placeholder={namePlaceholder}
+                value={agentName}
+                onChange={(e) => setAgentName(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && canSubmit && handleGenerate()}
                 className="font-mono text-sm"
                 autoFocus
@@ -151,7 +192,7 @@ export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onC
               <p className="text-xs text-amber-700 leading-relaxed">
                 This token expires in{' '}
                 <span className="font-semibold text-amber-800">24 hours</span> and works only once.
-                Save the install command now.
+                Save the {expirySubject} install command now.
               </p>
             </div>
 
@@ -189,7 +230,7 @@ export function InstallCommandModal({ remoteNetworkId: fixedNetworkId, open, onC
               </Button>
               <Button onClick={handleGenerate} disabled={!canSubmit}>
                 {loading && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
-                {loading ? 'Generating...' : 'Add Connector'}
+                {loading ? submittingLabel : submitLabel}
               </Button>
             </>
           ) : (

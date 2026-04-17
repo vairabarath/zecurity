@@ -193,7 +193,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE N — M1 Frontend Wire-up (Depends on: Day 1 codegen done)
 
-- [ ] **M1-N1** `admin/src/pages/Shields.tsx` — New page at `/remote-networks/<id>/shields`; table with columns: Name, Status, Interface (zecurity0 IP), Via (connector), Last Seen, Version, Hostname; 30s auto-poll; "Add Shield" → `InstallCommandModal`
+- [x] **M1-N1** `admin/src/pages/Shields.tsx` — New page at `/remote-networks/<id>/shields`; table with columns: Name, Status, Interface (zecurity0 IP), Via (connector), Last Seen, Version, Hostname; 30s auto-poll; "Add Shield" → `InstallCommandModal`
 - [ ] **M1-N2** `admin/src/pages/RemoteNetworks.tsx` — Add NetworkHealth indicator (🟢/🟡/🔴) + shield count to each network card
 - [ ] **M1-N3** `admin/src/components/layout/Sidebar.tsx` — Add "Shields" nav link under "Connectors"
 - [ ] **M1-N4** `admin/src/graphql/mutations.graphql` — Add `GenerateShieldToken`, `RevokeShield`, `DeleteShield`
