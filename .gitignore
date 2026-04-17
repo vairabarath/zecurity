@@ -50,3 +50,4 @@ completed/
 
 # Rust / Cargo
 connector/target/
+shield/target/
