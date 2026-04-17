@@ -48,8 +48,8 @@ use x509_parser::prelude::*;
 use crate::appmeta;
 use crate::config::ShieldConfig;
 use crate::crypto;
-use crate::types::ShieldState;
 use crate::proto;
+use crate::types::ShieldState;
 use crate::util;
 
 // ── JWT claims ────────────────────────────────────────────────────────────────
@@ -149,7 +149,8 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // rooted in it. This is plain TLS (no client cert yet — we don't have one).
     // The controller's cert must chain up to this CA.
     let grpc_addr = format!("https://{}", cfg.controller_addr);
-    let grpc_host = cfg.controller_addr
+    let grpc_host = cfg
+        .controller_addr
         .rsplit_once(':')
         .map(|(h, _)| h.to_string())
         .unwrap_or_else(|| cfg.controller_addr.clone());
@@ -241,9 +242,9 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         .context("failed to format enrollment timestamp")?;
 
     let state = ShieldState {
-        shield_id:      response.shield_id,
-        trust_domain:   claims.trust_domain,
-        connector_id:   response.connector_id,
+        shield_id: response.shield_id,
+        trust_domain: claims.trust_domain,
+        connector_id: response.connector_id,
         connector_addr: response.connector_addr,
         interface_addr: response.interface_addr,
         enrolled_at,
@@ -263,13 +264,15 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
 
     // ── Step 12: Network setup ────────────────────────────────────────────────
     //
-    // Create the zecurity0 TUN interface and set up nftables rules.
-    // This is implemented in Phase K (network.rs). For now we log a TODO.
-    // When network.rs lands, uncomment:
-    //   if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
-    //       warn!(error = %e, "network setup failed (non-fatal for now)");
-    //   }
-    warn!("network::setup() not yet implemented (Phase K) — zecurity0 interface not created");
+    // Create the local `zecurity0` TUN interface and install the base nftables
+    // table. This is intentionally best-effort for Sprint 4:
+    //   - enrollment already succeeded at this point
+    //   - certs/state are safely on disk
+    //   - if Linux networking setup fails, the operator can still inspect logs,
+    //     fix host permissions, and restart the service without re-enrolling
+    if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
+        warn!(error = %e, "network setup failed (non-fatal for now)");
+    }
 
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)
@@ -314,7 +317,9 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
         bail!("CA cert fetch failed: HTTP {} from {}", resp.status(), url);
     }
 
-    let pem = resp.text().await
+    let pem = resp
+        .text()
+        .await
         .context("failed to read CA cert response body")?;
 
     if !pem.contains("-----BEGIN CERTIFICATE-----") {
@@ -335,7 +340,9 @@ fn verify_ca_fingerprint(ca_pem: &str, expected: &str) -> Result<()> {
         .collect::<Result<Vec<_>, _>>()
         .context("failed to parse CA PEM")?;
 
-    let der = der_certs.first().context("no certificate found in CA PEM")?;
+    let der = der_certs
+        .first()
+        .context("no certificate found in CA PEM")?;
 
     // SHA-256 of DER bytes
     let fingerprint = hex::encode(Sha256::digest(der.as_ref()));
@@ -362,8 +369,8 @@ fn parse_cert_not_after(cert_pem: &[u8]) -> Result<i64> {
 
     let der = der_certs.first().context("no certificate in PEM")?;
 
-    let (_, cert) = X509Certificate::from_der(der.as_ref())
-        .context("failed to parse certificate DER")?;
+    let (_, cert) =
+        X509Certificate::from_der(der.as_ref()).context("failed to parse certificate DER")?;
 
     Ok(cert.validity().not_after.timestamp())
 }

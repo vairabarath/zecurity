@@ -37,17 +37,16 @@ mod appmeta;
 mod config;
 mod crypto;
 mod enrollment;
+mod network;
 mod tls;
 mod types;
+mod updater;
 mod util;
 
 // These modules are implemented in later phases.
 // Declared here so main.rs compiles now and wires them in as they land.
 // mod heartbeat;  // Phase J
 // mod renewal;    // Phase J
-// mod network;    // Phase K
-// mod updater;    // Phase L
-
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.
 ///
 /// build.rs compiles the proto via tonic_prost_build and writes the
@@ -66,7 +65,7 @@ pub mod proto {
 use std::path::Path;
 
 use anyhow::Context;
-use tracing::info;
+use tracing::{error, info};
 use types::ShieldState;
 
 #[tokio::main]
@@ -79,6 +78,21 @@ async fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls ring crypto provider");
+
+    // Handle --check-update flag (used by the systemd oneshot update service).
+    // Runs a single update check and exits — it does not start enrollment,
+    // heartbeats, or any long-running daemon behavior.
+    if std::env::args().any(|a| a == "--check-update") {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .init();
+
+        info!(
+            version = env!("CARGO_PKG_VERSION"),
+            "running single update check"
+        );
+        return updater::run_single_check().await;
+    }
 
     // Step 2: Load configuration from environment variables.
     //
@@ -153,16 +167,15 @@ async fn main() -> anyhow::Result<()> {
     // updater::run() checks GitHub releases on a weekly timer and
     // replaces /usr/local/bin/zecurity-shield if a newer version exists.
     //
-    // TODO: uncomment when Phase L (updater.rs) is implemented
-    // if cfg.auto_update_enabled {
-    //     let upd_cfg = cfg.clone();
-    //     tokio::spawn(async move {
-    //         if let Err(e) = updater::run(&upd_cfg).await {
-    //             error!(error = %e, "auto-updater failed");
-    //         }
-    //     });
-    //     info!("auto-updater spawned");
-    // }
+    if cfg.auto_update_enabled {
+        let upd_cfg = cfg.clone();
+        tokio::spawn(async move {
+            if let Err(e) = updater::run_update_loop(&upd_cfg).await {
+                error!(error = %e, "auto-updater failed");
+            }
+        });
+        info!("auto-updater spawned");
+    }
 
     info!("shield running — waiting for SIGTERM");
 
@@ -173,8 +186,8 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate())
-            .context("failed to register SIGTERM handler")?;
+        let mut sigterm =
+            signal(SignalKind::terminate()).context("failed to register SIGTERM handler")?;
         tokio::select! {
             _ = sigterm.recv() => { info!("received SIGTERM"); }
             _ = tokio::signal::ctrl_c() => { info!("received Ctrl+C"); }
