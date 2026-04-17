@@ -7,6 +7,9 @@ import {
   DeleteRemoteNetworkDocument,
   NetworkLocation,
   RemoteNetworkStatus,
+  NetworkHealth,
+  ConnectorStatus,
+  ShieldStatus,
 } from '@/generated/graphql'
 import type {
   CreateRemoteNetworkMutationVariables,
@@ -44,6 +47,12 @@ const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home
   [NetworkLocation.Gcp]: { label: 'GCP', icon: Cloud, color: 'text-sky-400 bg-sky-400/10 border-sky-400/20' },
   [NetworkLocation.Azure]: { label: 'Azure', icon: Cloud, color: 'text-cyan-400 bg-cyan-400/10 border-cyan-400/20' },
   [NetworkLocation.Other]: { label: 'Other', icon: MapPin, color: 'text-gray-400 bg-gray-400/10 border-gray-400/20' },
+}
+
+const healthConfig: Record<NetworkHealth, { label: string; dotClass: string; textClass: string }> = {
+  [NetworkHealth.Online]:   { label: 'Online',   dotClass: 'bg-emerald-500', textClass: 'text-emerald-400' },
+  [NetworkHealth.Degraded]: { label: 'Degraded', dotClass: 'bg-amber-500',   textClass: 'text-amber-400'   },
+  [NetworkHealth.Offline]:  { label: 'Offline',  dotClass: 'bg-red-500',     textClass: 'text-red-400'     },
 }
 
 export default function RemoteNetworks() {
@@ -197,6 +206,10 @@ export default function RemoteNetworks() {
           {networks.map((network, i) => {
             const loc = locationConfig[network.location]
             const connectorCount = network.connectors.length
+            const activeConnectorCount = network.connectors.filter((c) => c.status === ConnectorStatus.Active).length
+            const shieldCount = network.shields.length
+            const activeShieldCount = network.shields.filter((s) => s.status === ShieldStatus.Active).length
+            const health = healthConfig[network.networkHealth]
             const isActive = network.status === RemoteNetworkStatus.Active
 
             return (
@@ -210,9 +223,9 @@ export default function RemoteNetworks() {
                 <CardContent className="p-5 space-y-4">
                   {/* Name + Status */}
                   <div className="flex items-start justify-between">
-                    <div className="space-y-1 min-w-0">
+                    <div className="space-y-1.5 min-w-0">
                       <h3 className="font-display font-semibold text-base truncate">{network.name}</h3>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <Badge
                           variant="outline"
                           className={cn(
@@ -235,13 +248,22 @@ export default function RemoteNetworks() {
                           {isActive ? 'Active' : 'Inactive'}
                         </Badge>
                       </div>
+                      {/* Network health indicator */}
+                      <div className="flex items-center gap-2 pt-0.5">
+                        <span className={cn('w-2 h-2 rounded-full animate-pulse', health.dotClass)} />
+                        <span className={cn('text-[10px] font-mono uppercase tracking-wider', health.textClass)}>
+                          {health.label}
+                        </span>
+                      </div>
                     </div>
                   </div>
 
-                  {/* Connector count */}
+                  {/* Connector + Shield counts */}
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">
-                      {connectorCount} connector{connectorCount !== 1 ? 's' : ''}
+                      {activeConnectorCount} / {connectorCount} connector{connectorCount !== 1 ? 's' : ''} active
+                      {' · '}
+                      {activeShieldCount} shield{activeShieldCount !== 1 ? 's' : ''} active
                     </span>
                   </div>
 
@@ -256,7 +278,7 @@ export default function RemoteNetworks() {
                         <ArrowRight className="w-3 h-3 transition-transform group-hover/btn:translate-x-0.5" />
                       </Button>
                     </Link>
-                    {connectorCount === 0 && (
+                    {connectorCount === 0 && shieldCount === 0 && (
                       <Button
                         variant="outline"
                         size="sm"
