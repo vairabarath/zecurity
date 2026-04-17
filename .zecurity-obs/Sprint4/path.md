@@ -115,7 +115,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE F — M3 Rust Agent Server (Depends on: M2-D1-A proto done + M4 has NOT committed agent_server.rs yet)
 
-- [ ] **M3-F1** `connector/src/agent_server.rs` — NEW: Shield-facing gRPC server on :9091. Implements `ShieldService`: `Heartbeat` (update local shields map, check cert expiry), `RenewCert` (proxy to Controller), `Goodbye` (remove from map), `Enroll` (returns UNIMPLEMENTED — Shield enrolls with Controller directly)
+- [x] **M3-F1** `connector/src/agent_server.rs` — NEW: Shield-facing gRPC server on :9091. Implements `ShieldService`: `Heartbeat` (update local shields map, check cert expiry), `RenewCert` (proxy to Controller), `Goodbye` (remove from map), `Enroll` (returns UNIMPLEMENTED — Shield enrolls with Controller directly)
 
 > Coordination: M4 writes `connector/src/main.rs` to START the server — M3 writes the server itself. Agree on the public API (`ShieldServer::new()` signature) before M3 starts F1.
 
