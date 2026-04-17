@@ -34,12 +34,34 @@ type Query struct {
 }
 
 type RemoteNetwork struct {
-	ID         string              `json:"id"`
-	Name       string              `json:"name"`
-	Location   NetworkLocation     `json:"location"`
-	Status     RemoteNetworkStatus `json:"status"`
-	Connectors []*Connector        `json:"connectors"`
-	CreatedAt  string              `json:"createdAt"`
+	ID            string              `json:"id"`
+	Name          string              `json:"name"`
+	Location      NetworkLocation     `json:"location"`
+	Status        RemoteNetworkStatus `json:"status"`
+	Connectors    []*Connector        `json:"connectors"`
+	NetworkHealth NetworkHealth       `json:"networkHealth"`
+	Shields       []*Shield           `json:"shields"`
+	CreatedAt     string              `json:"createdAt"`
+}
+
+type Shield struct {
+	ID              string       `json:"id"`
+	Name            string       `json:"name"`
+	Status          ShieldStatus `json:"status"`
+	RemoteNetworkID string       `json:"remoteNetworkId"`
+	ConnectorID     string       `json:"connectorId"`
+	LastSeenAt      *string      `json:"lastSeenAt,omitempty"`
+	Version         *string      `json:"version,omitempty"`
+	Hostname        *string      `json:"hostname,omitempty"`
+	PublicIP        *string      `json:"publicIp,omitempty"`
+	InterfaceAddr   *string      `json:"interfaceAddr,omitempty"`
+	CertNotAfter    *string      `json:"certNotAfter,omitempty"`
+	CreatedAt       string       `json:"createdAt"`
+}
+
+type ShieldToken struct {
+	ShieldID       string `json:"shieldId"`
+	InstallCommand string `json:"installCommand"`
 }
 
 type WorkspaceListResult struct {
@@ -111,6 +133,63 @@ func (e *ConnectorStatus) UnmarshalJSON(b []byte) error {
 }
 
 func (e ConnectorStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type NetworkHealth string
+
+const (
+	NetworkHealthOnline   NetworkHealth = "ONLINE"
+	NetworkHealthDegraded NetworkHealth = "DEGRADED"
+	NetworkHealthOffline  NetworkHealth = "OFFLINE"
+)
+
+var AllNetworkHealth = []NetworkHealth{
+	NetworkHealthOnline,
+	NetworkHealthDegraded,
+	NetworkHealthOffline,
+}
+
+func (e NetworkHealth) IsValid() bool {
+	switch e {
+	case NetworkHealthOnline, NetworkHealthDegraded, NetworkHealthOffline:
+		return true
+	}
+	return false
+}
+
+func (e NetworkHealth) String() string {
+	return string(e)
+}
+
+func (e *NetworkHealth) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = NetworkHealth(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid NetworkHealth", str)
+	}
+	return nil
+}
+
+func (e NetworkHealth) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *NetworkHealth) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e NetworkHealth) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil
@@ -286,6 +365,65 @@ func (e *Role) UnmarshalJSON(b []byte) error {
 }
 
 func (e Role) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type ShieldStatus string
+
+const (
+	ShieldStatusPending      ShieldStatus = "PENDING"
+	ShieldStatusActive       ShieldStatus = "ACTIVE"
+	ShieldStatusDisconnected ShieldStatus = "DISCONNECTED"
+	ShieldStatusRevoked      ShieldStatus = "REVOKED"
+)
+
+var AllShieldStatus = []ShieldStatus{
+	ShieldStatusPending,
+	ShieldStatusActive,
+	ShieldStatusDisconnected,
+	ShieldStatusRevoked,
+}
+
+func (e ShieldStatus) IsValid() bool {
+	switch e {
+	case ShieldStatusPending, ShieldStatusActive, ShieldStatusDisconnected, ShieldStatusRevoked:
+		return true
+	}
+	return false
+}
+
+func (e ShieldStatus) String() string {
+	return string(e)
+}
+
+func (e *ShieldStatus) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = ShieldStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid ShieldStatus", str)
+	}
+	return nil
+}
+
+func (e ShieldStatus) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *ShieldStatus) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e ShieldStatus) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil

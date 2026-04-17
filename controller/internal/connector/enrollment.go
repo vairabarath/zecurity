@@ -11,6 +11,7 @@ import (
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -24,6 +25,7 @@ type EnrollmentHandler struct {
 	Pool       *pgxpool.Pool
 	Redis      *redis.Client
 	PKIService pki.Service
+	ShieldSvc  shield.Service
 }
 
 // Enroll implements the ConnectorService.Enroll gRPC handler.
