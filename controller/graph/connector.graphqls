@@ -32,13 +32,21 @@ extend type Mutation {
   deleteConnector(id: ID!): Boolean!
 }
 
+enum NetworkHealth {
+  ONLINE    # ≥1 connector ACTIVE
+  DEGRADED  # connectors exist but none ACTIVE
+  OFFLINE   # no connectors at all
+}
+
 type RemoteNetwork {
-  id:         ID!
-  name:       String!
-  location:   NetworkLocation!
-  status:     RemoteNetworkStatus!
-  connectors: [Connector!]!
-  createdAt:  String!
+  id:            ID!
+  name:          String!
+  location:      NetworkLocation!
+  status:        RemoteNetworkStatus!
+  connectors:    [Connector!]!
+  networkHealth: NetworkHealth!
+  shields:       [Shield!]!
+  createdAt:     String!
 }
 
 enum NetworkLocation {

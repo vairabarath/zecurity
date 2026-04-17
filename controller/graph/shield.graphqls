@@ -1,0 +1,39 @@
+# controller/graph/shield.graphqls — Shield types for Sprint 4
+
+type Shield {
+  id:              ID!
+  name:            String!
+  status:          ShieldStatus!
+  remoteNetworkId: ID!
+  connectorId:     ID!
+  lastSeenAt:      String
+  version:         String
+  hostname:        String
+  publicIp:        String
+  interfaceAddr:   String
+  certNotAfter:    String
+  createdAt:       String!
+}
+
+enum ShieldStatus {
+  PENDING
+  ACTIVE
+  DISCONNECTED
+  REVOKED
+}
+
+type ShieldToken {
+  shieldId:       ID!
+  installCommand: String!
+}
+
+extend type Mutation {
+  generateShieldToken(remoteNetworkId: ID!, shieldName: String!): ShieldToken!
+  revokeShield(id: ID!): Boolean!
+  deleteShield(id: ID!): Boolean!
+}
+
+extend type Query {
+  shields(remoteNetworkId: ID!): [Shield!]!
+  shield(id: ID!): Shield
+}
