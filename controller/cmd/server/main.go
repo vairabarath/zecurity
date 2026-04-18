@@ -98,6 +98,8 @@ func main() {
 		log.Fatalf("connector valkey init: %v", err)
 	}
 
+	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -106,6 +108,7 @@ func main() {
 				ConnectorCfg: connectorCfg,
 				Redis:        valkeycompat.NewAdapter(connectorValkey),
 				Pool:         db.Pool,
+				ShieldSvc:    shieldSvc,
 			},
 		}),
 	)
@@ -165,7 +168,6 @@ func main() {
 		Redis:      valkeycompat.NewAdapter(connectorValkey),
 		PKIService: pkiService,
 	}
-	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
 
