@@ -8,7 +8,7 @@ import (
 )
 
 func TestCallbackHandler_MissingParams(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.CallbackHandler()
 
@@ -41,7 +41,7 @@ func TestCallbackHandler_MissingParams(t *testing.T) {
 }
 
 func TestCallbackHandler_InvalidState(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.CallbackHandler()
 
@@ -56,7 +56,7 @@ func TestCallbackHandler_InvalidState(t *testing.T) {
 }
 
 func TestCallbackHandler_StateExpired(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.CallbackHandler()
 
@@ -77,7 +77,7 @@ func TestCallbackHandler_StateExpired(t *testing.T) {
 }
 
 func TestCallbackHandler_TokenExchangeFails(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.CallbackHandler()
 

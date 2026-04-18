@@ -75,7 +75,7 @@ func TestVerifySignedState_InvalidFormat(t *testing.T) {
 }
 
 func TestInitiateAuth_UnsupportedProvider(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{
 		cfg:         testConfig(),
 		redisClient: rc,
@@ -91,7 +91,7 @@ func TestInitiateAuth_UnsupportedProvider(t *testing.T) {
 }
 
 func TestInitiateAuth_Google_Success(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{
 		cfg:         testConfig(),
 		redisClient: rc,
@@ -128,7 +128,7 @@ func TestInitiateAuth_Google_Success(t *testing.T) {
 }
 
 func TestInitiateAuth_StoresVerifierInRedis(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{
 		cfg:         testConfig(),
 		redisClient: rc,

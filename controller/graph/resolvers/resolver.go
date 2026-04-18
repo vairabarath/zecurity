@@ -2,7 +2,7 @@ package resolvers
 
 import (
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
@@ -15,6 +15,6 @@ type Resolver struct {
 	AuthService  auth.Service
 	ConnectorCfg connector.Config
 	ShieldSvc    shield.Service
-	Redis        *redis.Client
+	Redis        valkeycompat.Cmdable
 	Pool         *pgxpool.Pool
 }

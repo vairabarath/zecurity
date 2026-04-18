@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
@@ -23,7 +23,7 @@ type EnrollmentHandler struct {
 	pb.UnimplementedConnectorServiceServer
 	Cfg        Config
 	Pool       *pgxpool.Pool
-	Redis      *redis.Client
+	Redis      valkeycompat.Cmdable
 	PKIService pki.Service
 	ShieldSvc  shield.Service
 }

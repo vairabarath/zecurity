@@ -44,9 +44,10 @@ type Config struct {
 	// Used in: oidc.go (auth URL) and exchange.go (token exchange).
 	RedirectURI string
 
-	// RedisURL is the connection string for Redis, e.g. "redis://localhost:6379".
+	// ValkeyURL is the connection string for Valkey, e.g. "redis://localhost:6379".
+	// Note: URL scheme is "redis://" — that is the wire protocol name, not the product.
 	// Used by: redis.go for PKCE state and refresh token storage.
-	RedisURL string
+	ValkeyURL string
 
 	// AllowedOrigin is the allowed CORS origin for the callback redirect.
 	// Used by: main.go for CORS middleware configuration.
@@ -63,7 +64,7 @@ type Config struct {
 // Methods implemented in: oidc.go, callback.go, refresh.go, session.go, exchange.go.
 type serviceImpl struct {
 	cfg          Config
-	redisClient  *redisClient
+	redisClient  *valkeyClient
 	bootstrapSvc *bootstrap.Service
 }
 
@@ -99,9 +100,9 @@ func NewService(cfg Config) (Service, error) {
 		cfg.JWTRefreshTTL = "168h"
 	}
 
-	// Connect to Redis — verifies connectivity with a PING.
-	// Called: redis.go → newRedisClient()
-	rc, err := newRedisClient(cfg.RedisURL)
+	// Connect to Valkey — verifies connectivity with a PING.
+	// Called: valkey.go → newValkeyClient()
+	rc, err := newValkeyClient(cfg.ValkeyURL)
 	if err != nil {
 		return nil, fmt.Errorf("auth: redis init: %w", err)
 	}

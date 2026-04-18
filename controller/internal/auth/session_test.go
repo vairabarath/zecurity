@@ -9,7 +9,7 @@ import (
 )
 
 func TestIssueAccessToken_ValidJWT(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{
 		cfg:         testConfig(),
 		redisClient: rc,
@@ -41,7 +41,7 @@ func TestIssueAccessToken_ValidJWT(t *testing.T) {
 }
 
 func TestIssueAccessToken_Issuer(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{
 		cfg:         testConfig(),
 		redisClient: rc,
@@ -57,7 +57,7 @@ func TestIssueAccessToken_Issuer(t *testing.T) {
 }
 
 func TestIssueAccessToken_Expiry(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	cfg := testConfig()
 	cfg.JWTAccessTTL = "15m"
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
@@ -78,7 +78,7 @@ func TestIssueAccessToken_Expiry(t *testing.T) {
 }
 
 func TestIssueAccessToken_HS256(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
 	tokenStr, _ := svc.issueAccessToken("u", "t", "r")
@@ -95,7 +95,7 @@ func TestIssueAccessToken_HS256(t *testing.T) {
 }
 
 func TestVerifyAccessToken_WrongSecret(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
 	token, _ := svc.issueAccessToken("u", "t", "r")
@@ -116,7 +116,7 @@ func TestVerifyAccessToken_WrongSecret(t *testing.T) {
 
 func TestVerifyAccessToken_WrongIssuer(t *testing.T) {
 	cfg := testConfig()
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
 
 	token, _ := svc.issueAccessToken("u", "t", "r")
@@ -136,7 +136,7 @@ func TestVerifyAccessToken_WrongIssuer(t *testing.T) {
 }
 
 func TestIssueRefreshToken_StoredInRedis(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
 	token, err := svc.issueRefreshToken(context.Background(), "user-rt")
@@ -161,7 +161,7 @@ func TestIssueRefreshToken_StoredInRedis(t *testing.T) {
 }
 
 func TestIssueRefreshToken_Unique(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	ctx := context.Background()
 

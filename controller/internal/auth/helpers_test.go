@@ -6,11 +6,13 @@ import (
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 )
 
-// newTestRedis spins up an in-memory Redis (no Docker required).
-// Called by: every test that needs a redisClient.
-func newTestRedis(t *testing.T) (*redisClient, *miniredis.Miniredis) {
+// newTestValkey spins up an in-memory Valkey (no Docker required).
+// The *miniredis.Miniredis return allows callers to use FastForward for TTL tests.
+func newTestValkey(t *testing.T) (*valkeyClient, *miniredis.Miniredis) {
 	t.Helper()
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -18,15 +20,19 @@ func newTestRedis(t *testing.T) (*redisClient, *miniredis.Miniredis) {
 	}
 	t.Cleanup(mr.Close)
 
-	rc, err := newRedisClient("redis://" + mr.Addr())
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress:  []string{mr.Addr()},
+		DisableCache: true,
+	})
 	if err != nil {
-		t.Fatalf("connect to miniredis: %v", err)
+		t.Fatalf("create valkey test client: %v", err)
 	}
-	return rc, mr
+	t.Cleanup(client.Close)
+
+	return &valkeyClient{rdb: valkeycompat.NewAdapter(client)}, mr
 }
 
 // testConfig returns a Config with sensible test defaults.
-// Called by: tests that need a serviceImpl.
 func testConfig() Config {
 	return Config{
 		JWTSecret:          "test-jwt-secret-32-bytes-long!!!",
@@ -36,13 +42,12 @@ func testConfig() Config {
 		GoogleClientID:     "test-client-id.apps.googleusercontent.com",
 		GoogleClientSecret: "test-client-secret",
 		RedirectURI:        "https://localhost/auth/callback",
-		RedisURL:           "redis://localhost:6379",
+		ValkeyURL:          "redis://localhost:6379",
 		AllowedOrigin:      "https://localhost",
 	}
 }
 
 // assertJSONError checks that the response body contains a JSON error with the expected message.
-// Called by: refresh and callback handler tests.
 func assertJSONError(t *testing.T, w *httptest.ResponseRecorder, expectedMsg string) {
 	t.Helper()
 	var body map[string]string
