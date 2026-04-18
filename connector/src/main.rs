@@ -48,11 +48,13 @@ pub mod shield_proto {
 }
 
 use std::fs;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::Context;
 use config::ConnectorConfig;
 use enrollment::EnrollmentState;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{error, info};
 
 #[tokio::main]
@@ -132,10 +134,50 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", state_path.display(), e))?
     };
 
-    // Step 5: Spawn heartbeat loop on mTLS channel.
+    // Step 5: Build controller channel for ShieldServer (proxies RenewCert to controller).
+    let state_dir = Path::new(&cfg.state_dir);
+    let cert_pem = fs::read(state_dir.join("connector.crt"))
+        .context("failed to read connector.crt for ShieldServer channel")?;
+    let key_pem = fs::read(state_dir.join("connector.key"))
+        .context("failed to read connector.key for ShieldServer channel")?;
+    let ca_pem = fs::read(state_dir.join("workspace_ca.crt"))
+        .context("failed to read workspace_ca.crt for ShieldServer channel")?;
+
+    let tls = ClientTlsConfig::new()
+        .identity(Identity::from_pem(&cert_pem, &key_pem))
+        .ca_certificate(Certificate::from_pem(&ca_pem));
+
+    let grpc_addr = format!("https://{}", cfg.controller_addr);
+    let controller_channel = Channel::from_shared(grpc_addr)
+        .context("invalid controller gRPC address")?
+        .tls_config(tls)
+        .context("failed to configure TLS for controller channel")?
+        .connect()
+        .await
+        .context("failed to connect to controller for ShieldServer")?;
+
+    // Build Shield-facing gRPC server (ShieldServer clones share the same in-memory health map).
+    let shield_server = agent_server::ShieldServer::new(
+        controller_channel,
+        enrollment_state.trust_domain.clone(),
+        enrollment_state.connector_id.clone(),
+    );
+
+    // Spawn ShieldServer on :9091 — shield agents heartbeat here.
+    let shield_serve = shield_server.clone();
+    let shield_state_dir = cfg.state_dir.clone();
+    let shield_addr: SocketAddr = "0.0.0.0:9091".parse().unwrap();
+    tokio::spawn(async move {
+        if let Err(e) = shield_serve.serve(shield_addr, &shield_state_dir).await {
+            error!(error = %e, "Shield gRPC server on :9091 failed");
+        }
+    });
+    info!("Shield gRPC server starting on :9091");
+
+    // Step 5b: Spawn heartbeat loop — passes shield health map to controller.
     let hb_cfg = cfg.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        if let Err(e) = heartbeat::run_heartbeat(&hb_cfg, &enrollment_state).await {
+        if let Err(e) = heartbeat::run_heartbeat(&hb_cfg, &enrollment_state, shield_server).await {
             error!(error = %e, "heartbeat loop failed");
         }
     });

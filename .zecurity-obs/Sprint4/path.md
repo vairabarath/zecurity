@@ -157,8 +157,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE J — M4 Heartbeat + Renewal (Depends on: M3-F1 agent_server.rs live)
 
-- [ ] **M4-J1** `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091; interval `SHIELD_HEARTBEAT_INTERVAL_SECS`; exponential backoff on failure; calls `renewal::renew_cert()` when `re_enroll=true`
-- [ ] **M4-J2** `shield/src/renewal.rs` — RenewCert flow: read shield.key → build CSR → call RenewCert on Connector :9091 → save new shield.crt → update state.json
+- [x] **M4-J1** `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091; interval `SHIELD_HEARTBEAT_INTERVAL_SECS`; exponential backoff on failure; calls `renewal::renew_cert()` when `re_enroll=true`
+- [x] **M4-J2** `shield/src/renewal.rs` — RenewCert flow: read shield.key → build CSR → call RenewCert on Connector :9091 → save new shield.crt → update state.json
 
 > Integration check: Heartbeat appears in Connector logs. Shield shows ACTIVE in dashboard within 30s.
 
@@ -184,8 +184,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE M — M4 CI + Connector Main (Depends on: M3-F1 done)
 
-- [ ] **M4-M1** `.github/workflows/shield-release.yml` — CI: triggers on `shield-v*` tags; cross builds amd64 + arm64 musl; uploads binaries + checksums + install script + systemd units
-- [ ] **M4-M2** `connector/src/main.rs` — MODIFY: instantiate `ShieldServer::new(controller_channel, trust_domain)` and `tokio::spawn` it on :9091
+- [x] **M4-M1** `.github/workflows/shield-release.yml` — CI: triggers on `shield-v*` tags; cross builds amd64 + arm64 musl; uploads binaries + checksums + install script + systemd units
+- [x] **M4-M2** `connector/src/main.rs` — MODIFY: instantiate `ShieldServer::new(controller_channel, trust_domain)` and `tokio::spawn` it on :9091
 
 > Build check: `cd connector && cargo build` must pass. Connector starts and binds :9091.
 
