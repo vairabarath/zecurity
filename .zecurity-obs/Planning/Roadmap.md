@@ -57,6 +57,7 @@ Three sprints complete. The connector is fully operational with automatic cert r
 - Shield heartbeats to Connector `:9091` (NOT Controller directly)
 - Connector gets a new Shield-facing gRPC server on `:9091`
 - Interface: `zecurity0` (TUN, CGNAT 100.64.0.0/10)
+- Shield network setup uses `rtnetlink` for interface configuration and typed nftables ruleset generation in Rust
 - Connector gets `Goodbye` RPC for clean shutdown → immediate DISCONNECTED
 
 **Tracking:** [[Sprint4/path.md]] — full dependency map with checkboxes

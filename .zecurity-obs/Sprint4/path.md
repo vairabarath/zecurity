@@ -115,7 +115,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE F — M3 Rust Agent Server (Depends on: M2-D1-A proto done + M4 has NOT committed agent_server.rs yet)
 
-- [ ] **M3-F1** `connector/src/agent_server.rs` — NEW: Shield-facing gRPC server on :9091. Implements `ShieldService`: `Heartbeat` (update local shields map, check cert expiry), `RenewCert` (proxy to Controller), `Goodbye` (remove from map), `Enroll` (returns UNIMPLEMENTED — Shield enrolls with Controller directly)
+- [x] **M3-F1** `connector/src/agent_server.rs` — NEW: Shield-facing gRPC server on :9091. Implements `ShieldService`: `Heartbeat` (update local shields map, check cert expiry), `RenewCert` (proxy to Controller), `Goodbye` (remove from map), `Enroll` (returns UNIMPLEMENTED — Shield enrolls with Controller directly)
 
 > Coordination: M4 writes `connector/src/main.rs` to START the server — M3 writes the server itself. Agree on the public API (`ShieldServer::new()` signature) before M3 starts F1.
 
@@ -125,10 +125,10 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE G — M4 Crate Scaffold (Depends on: M2-D1-A proto landed + buf generate done)
 
-- [ ] **M4-G1** `shield/Cargo.toml` — Full dependency list (tokio, tonic, prost, rcgen, rustls, figment, rtnetlink, nftables, etc.)
-- [ ] **M4-G2** `shield/build.rs` — `tonic_build::compile_protos("../proto/shield/v1/shield.proto")`
-- [ ] **M4-G3** `shield/Cross.toml` — pre-build apt-get protobuf-compiler
-- [ ] **M4-G4** `shield/Dockerfile` — mirrors connector Dockerfile
+- [x] **M4-G1** `shield/Cargo.toml` — Full dependency list (tokio, tonic, prost, rcgen, rustls, figment, rtnetlink, nftables, etc.)
+- [x] **M4-G2** `shield/build.rs` — `tonic_build::compile_protos("../proto/shield/v1/shield.proto")`
+- [x] **M4-G3** `shield/Cross.toml` — pre-build apt-get protobuf-compiler
+- [x] **M4-G4** `shield/Dockerfile` — mirrors connector Dockerfile
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must compile (even if main is empty).
 
@@ -136,12 +136,12 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE H — M4 Core Modules (Depends on: M4-G done)
 
-- [ ] **M4-H1** `shield/src/appmeta.rs` — Mirror `connector/src/appmeta.rs` + Shield constants (`SPIFFE_ROLE_SHIELD`, `PKI_SHIELD_CN_PREFIX`, `SHIELD_INTERFACE_NAME`, `SHIELD_INTERFACE_CIDR_RANGE`)
-- [ ] **M4-H2** `shield/src/config.rs` — figment config: `CONTROLLER_ADDR`, `CONTROLLER_HTTP_ADDR`, `ENROLLMENT_TOKEN`, `AUTO_UPDATE_ENABLED`, `LOG_LEVEL`, `SHIELD_HEARTBEAT_INTERVAL_SECS`; state dir `/var/lib/zecurity-shield/`
-- [ ] **M4-H3** `shield/src/main.rs` — Startup: init tracing → load config → check state.json → enrollment or heartbeat loop → SIGTERM handler calls Goodbye
-- [ ] **M4-H4** `shield/src/crypto.rs` — EC P-384 keygen, CSR builder, PEM/DER helpers (mirror `connector/src/crypto.rs`)
-- [ ] **M4-H5** `shield/src/tls.rs` — `verify_connector_spiffe()`: verifies Connector's SPIFFE ID during mTLS handshake (checks full URI: `spiffe://<trust_domain>/connector/<connector_id>`)
-- [ ] **M4-H6** `shield/src/util.rs` — hostname reader, public IP helper (mirror connector)
+- [x] **M4-H1** `shield/src/appmeta.rs` — Mirror `connector/src/appmeta.rs` + Shield constants (`SPIFFE_ROLE_SHIELD`, `PKI_SHIELD_CN_PREFIX`, `SHIELD_INTERFACE_NAME`, `SHIELD_INTERFACE_CIDR_RANGE`)
+- [x] **M4-H2** `shield/src/config.rs` — figment config: `CONTROLLER_ADDR`, `CONTROLLER_HTTP_ADDR`, `ENROLLMENT_TOKEN`, `AUTO_UPDATE_ENABLED`, `LOG_LEVEL`, `SHIELD_HEARTBEAT_INTERVAL_SECS`; state dir `/var/lib/zecurity-shield/`
+- [x] **M4-H3** `shield/src/main.rs` — Startup: init tracing → load config → check state.json → enrollment or heartbeat loop → SIGTERM handler calls Goodbye
+- [x] **M4-H4** `shield/src/crypto.rs` — EC P-384 keygen, CSR builder, PEM/DER helpers (mirror `connector/src/crypto.rs`)
+- [x] **M4-H5** `shield/src/tls.rs` — `verify_connector_spiffe()`: verifies Connector's SPIFFE ID during mTLS handshake (checks full URI: `spiffe://<trust_domain>/connector/<connector_id>`)
+- [x] **M4-H6** `shield/src/util.rs` — hostname reader, public IP helper (mirror connector)
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
@@ -149,7 +149,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE I — M4 Enrollment (Depends on: M2-A3 Enroll handler live in dev env)
 
-- [ ] **M4-I1** `shield/src/enrollment.rs` — Full enrollment flow: parse JWT → fetch + verify CA fingerprint → keygen → build CSR (SPIFFE SAN: `spiffe://ws-<slug>.zecurity.in/shield/<id>`) → call Controller Enroll RPC → save certs + state.json → call `network::setup()`
+- [x] **M4-I1** `shield/src/enrollment.rs` — Full enrollment flow: parse JWT → fetch + verify CA fingerprint → keygen → build CSR (SPIFFE SAN: `spiffe://ws-<slug>.zecurity.in/shield/<id>`) → call Controller Enroll RPC → save certs + state.json → call `network::setup()`
 
 > Integration check: Run enrollment against dev controller. Shield should appear in DB with `status='active'`.
 
@@ -157,8 +157,8 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE J — M4 Heartbeat + Renewal (Depends on: M3-F1 agent_server.rs live)
 
-- [ ] **M4-J1** `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091; interval `SHIELD_HEARTBEAT_INTERVAL_SECS`; exponential backoff on failure; calls `renewal::renew_cert()` when `re_enroll=true`
-- [ ] **M4-J2** `shield/src/renewal.rs` — RenewCert flow: read shield.key → build CSR → call RenewCert on Connector :9091 → save new shield.crt → update state.json
+- [x] **M4-J1** `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091; interval `SHIELD_HEARTBEAT_INTERVAL_SECS`; exponential backoff on failure; calls `renewal::renew_cert()` when `re_enroll=true`
+- [x] **M4-J2** `shield/src/renewal.rs` — RenewCert flow: read shield.key → build CSR → call RenewCert on Connector :9091 → save new shield.crt → update state.json
 
 > Integration check: Heartbeat appears in Connector logs. Shield shows ACTIVE in dashboard within 30s.
 
@@ -166,7 +166,7 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE K — M4 Network Setup (Independent — no external dependencies)
 
-- [ ] **M4-K1** `shield/src/network.rs` — `setup(interface_addr, connector_addr)`: creates `zecurity0` TUN interface via rtnetlink, assigns interface_addr (/32), brings UP; writes nftables table `inet zecurity` with chain `input` (ACCEPT lo, ACCEPT connector_ip, DROP on zecurity0)
+- [x] **M4-K1** `shield/src/network.rs` — `setup(interface_addr, connector_addr)`: creates `zecurity0` TUN interface via rtnetlink, assigns interface_addr (/32), brings UP; writes nftables table `inet zecurity` with chain `input` (ACCEPT lo, ACCEPT connector_ip, DROP on zecurity0)
 
 > Test check: After enrollment, `ip link show zecurity0` shows interface. `nft list ruleset` shows `table inet zecurity`.
 
@@ -174,18 +174,18 @@ These must be committed to the shared branch **before** anyone else starts their
 
 ### PHASE L — M4 Updater + Systemd + Install Script (Depends on: M4-H done)
 
-- [ ] **M4-L1** `shield/src/updater.rs` — Mirror connector updater; check `shield-v*` releases; replace `/usr/local/bin/zecurity-shield`
-- [ ] **M4-L2** `shield/systemd/zecurity-shield.service` — Service unit with `CAP_NET_ADMIN` + `CAP_NET_RAW` capabilities
-- [ ] **M4-L3** `shield/systemd/zecurity-shield-update.service` — Update service unit
-- [ ] **M4-L4** `shield/systemd/zecurity-shield-update.timer` — Weekly update timer
-- [ ] **M4-L5** `shield/scripts/shield-install.sh` — One-line install script (mirrors connector-install.sh)
+- [x] **M4-L1** `shield/src/updater.rs` — Mirror connector updater; check `shield-v*` releases; replace `/usr/local/bin/zecurity-shield`
+- [x] **M4-L2** `shield/systemd/zecurity-shield.service` — Service unit with `CAP_NET_ADMIN` + `CAP_NET_RAW` capabilities
+- [x] **M4-L3** `shield/systemd/zecurity-shield-update.service` — Update service unit
+- [x] **M4-L4** `shield/systemd/zecurity-shield-update.timer` — Weekly update timer
+- [x] **M4-L5** `shield/scripts/shield-install.sh` — One-line install script (mirrors connector-install.sh)
 
 ---
 
 ### PHASE M — M4 CI + Connector Main (Depends on: M3-F1 done)
 
-- [ ] **M4-M1** `.github/workflows/shield-release.yml` — CI: triggers on `shield-v*` tags; cross builds amd64 + arm64 musl; uploads binaries + checksums + install script + systemd units
-- [ ] **M4-M2** `connector/src/main.rs` — MODIFY: instantiate `ShieldServer::new(controller_channel, trust_domain)` and `tokio::spawn` it on :9091
+- [x] **M4-M1** `.github/workflows/shield-release.yml` — CI: triggers on `shield-v*` tags; cross builds amd64 + arm64 musl; uploads binaries + checksums + install script + systemd units
+- [x] **M4-M2** `connector/src/main.rs` — MODIFY: instantiate `ShieldServer::new(controller_channel, trust_domain)` and `tokio::spawn` it on :9091
 
 > Build check: `cd connector && cargo build` must pass. Connector starts and binds :9091.
 

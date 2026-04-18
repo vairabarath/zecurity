@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 4
 member: M3
 phase: 5
@@ -42,13 +42,13 @@ Implement the Shield-facing gRPC server that runs on Connector `:9091`. This ser
 
 ### Module setup
 
-- [ ] Add `pub mod agent_server;` to `connector/src/main.rs` (coordinate with M4)
-- [ ] Import shield proto: `include_proto!("shield.v1")` in the module
-- [ ] Add tonic `ShieldService` trait implementation
+- [x] Add `pub mod agent_server;` to `connector/src/main.rs` (coordinate with M4)
+- [x] Import shield proto: `include_proto!("shield.v1")` in the module
+- [x] Add tonic `ShieldService` trait implementation
 
 ### ShieldServer struct
 
-- [ ] `pub struct ShieldServer` with:
+- [x] `pub struct ShieldServer` with:
   ```rust
   pub struct ShieldServer {
       // shield_id → ShieldEntry { status, version, last_seen: Instant, cert_not_after: DateTime }
@@ -63,39 +63,39 @@ Implement the Shield-facing gRPC server that runs on Connector `:9091`. This ser
       renewal_window_secs: u64,
   }
   ```
-- [ ] `pub fn new(controller_channel: Channel, trust_domain: String, connector_id: String) -> Self`
-- [ ] `pub fn get_alive_shields(&self) -> Vec<ShieldHealth>` — returns snapshot for Connector's HeartbeatRequest
+- [x] `pub fn new(controller_channel: Channel, trust_domain: String, connector_id: String) -> Self`
+- [x] `pub fn get_alive_shields(&self) -> Vec<ShieldHealth>` — returns snapshot for Connector's HeartbeatRequest
 
 ### Heartbeat handler
 
-- [ ] Extract Shield SPIFFE identity from mTLS peer cert:
+- [x] Extract Shield SPIFFE identity from mTLS peer cert:
   - Verify: `spiffe://<trust_domain>/shield/<shield_id>`
   - Verify `trust_domain` matches Connector's own trust domain
   - Return `PERMISSION_DENIED` if mismatch
-- [ ] Update `shields` map: `shield_id → ShieldEntry { last_seen: now(), status: "active" }`
-- [ ] Check peer cert `not_after` — if within `renewal_window_secs` → `re_enroll = true`
-- [ ] Return `HeartbeatResponse { ok: true, re_enroll, latest_version: "" }`
+- [x] Update `shields` map: `shield_id → ShieldEntry { last_seen: now(), status: "active" }`
+- [x] Check peer cert `not_after` — if within `renewal_window_secs` → `re_enroll = true`
+- [x] Return `HeartbeatResponse { ok: true, re_enroll, latest_version: "" }`
 
 ### RenewCert handler
 
-- [ ] Verify Shield SPIFFE identity (same as Heartbeat)
-- [ ] Forward `RenewCertRequest` to Controller via `controller_channel` (existing mTLS channel)
-- [ ] Return Controller's `RenewCertResponse` to Shield
-- [ ] The Connector is a transparent proxy — no PKI work here
+- [x] Verify Shield SPIFFE identity (same as Heartbeat)
+- [x] Forward `RenewCertRequest` to Controller via `controller_channel` (existing mTLS channel)
+- [x] Return Controller's `RenewCertResponse` to Shield
+- [x] The Connector is a transparent proxy — no PKI work here
 
 ### Goodbye handler
 
-- [ ] Verify Shield SPIFFE identity
-- [ ] Remove Shield from `shields` map (it will be absent from next ShieldHealth batch)
-- [ ] Return `GoodbyeResponse { ok: true }`
+- [x] Verify Shield SPIFFE identity
+- [x] Remove Shield from `shields` map (it will be absent from next ShieldHealth batch)
+- [x] Return `GoodbyeResponse { ok: true }`
 
 ### Enroll handler (UNIMPLEMENTED)
 
-- [ ] Return `Status::unimplemented("Shield enrolls directly with Controller, not through Connector")`
+- [x] Return `Status::unimplemented("Shield enrolls directly with Controller, not through Connector")`
 
 ### get_alive_shields()
 
-- [ ] Returns `Vec<ShieldHealth>` for use in `heartbeat.rs`:
+- [x] Returns `Vec<ShieldHealth>` for use in `heartbeat.rs`:
   ```rust
   pub fn get_alive_shields(&self) -> Vec<ShieldHealth> {
       self.shields.lock().unwrap()
@@ -112,9 +112,9 @@ Implement the Shield-facing gRPC server that runs on Connector `:9091`. This ser
 
 ### mTLS setup (for the :9091 server itself)
 
-- [ ] Server uses Connector's own cert (`connector.crt`) for mTLS
-- [ ] Trust root: `workspace_ca.crt` (same CA that signed Shield certs)
-- [ ] Require client auth — Shield must present its SPIFFE cert
+- [x] Server uses Connector's own cert (`connector.crt`) for mTLS
+- [x] Trust root: `workspace_ca.crt` (same CA that signed Shield certs)
+- [x] Require client auth — Shield must present its SPIFFE cert
 
 ---
 
