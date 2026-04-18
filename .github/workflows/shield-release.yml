@@ -1,0 +1,112 @@
+name: Build & Release Shield
+
+on:
+  push:
+    tags:
+      - "shield-v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset_name: shield-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            asset_name: shield-linux-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('shield/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Build release binary
+        run: cross build --manifest-path shield/Cargo.toml --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp shield/target/${{ matrix.target }}/release/zecurity-shield ${{ matrix.asset_name }}
+          chmod +x ${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          cp build-artifacts/shield-linux-amd64/shield-linux-amd64 release-assets/
+          cp build-artifacts/shield-linux-arm64/shield-linux-arm64 release-assets/
+
+          cp shield/scripts/shield-install.sh release-assets/shield-install.sh
+          cp shield/systemd/zecurity-shield.service release-assets/
+          cp shield/systemd/zecurity-shield-update.service release-assets/
+          cp shield/systemd/zecurity-shield-update.timer release-assets/
+
+          chmod +x release-assets/shield-linux-amd64
+          chmod +x release-assets/shield-linux-arm64
+          chmod +x release-assets/shield-install.sh
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum shield-linux-amd64 shield-linux-arm64 > checksums.txt
+
+      - name: List release assets
+        run: ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Shield ${{ github.ref_name }}
+          body: |
+            ## Zecurity Shield ${{ github.ref_name }}
+
+            ### Install (Linux resource hosts)
+            ```bash
+            curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/shield-install.sh | \
+              sudo CONTROLLER_ADDR=host:9090 CONTROLLER_HTTP_ADDR=host:8080 ENROLLMENT_TOKEN=eyJ... bash
+            ```
+          files: |
+            release-assets/shield-linux-amd64
+            release-assets/shield-linux-arm64
+            release-assets/checksums.txt
+            release-assets/shield-install.sh
+            release-assets/zecurity-shield.service
+            release-assets/zecurity-shield-update.service
+            release-assets/zecurity-shield-update.timer

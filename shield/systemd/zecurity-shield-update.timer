@@ -1,0 +1,17 @@
+# zecurity-shield-update.timer — Weekly trigger for auto-update check
+#
+# Runs zecurity-shield-update.service once per week with up to 1 hour
+# of random jitter. This matches the Shield updater's startup delay logic.
+
+[Unit]
+Description=Weekly ZECURITY Shield update check
+Documentation=https://github.com/vairabarath/zecurity
+Requires=zecurity-shield-update.service
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

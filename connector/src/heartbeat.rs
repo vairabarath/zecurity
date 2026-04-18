@@ -170,7 +170,7 @@ fn parse_host_port(addr: &str) -> Result<(String, u16)> {
 ///
 /// Called from main.rs after enrollment succeeds.
 /// Blocks indefinitely — spawn on a tokio task.
-pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState) -> Result<()> {
+pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shield_server: crate::agent_server::ShieldServer) -> Result<()> {
     info!("starting mTLS heartbeat pre-flight check");
 
     // Pre-flight: verify controller SPIFFE identity
@@ -207,7 +207,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState) -> Re
             version: version.clone(),
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
-            shields: vec![],
+            shields: shield_server.get_alive_shields(),
         });
 
         match client.heartbeat(request).await {
