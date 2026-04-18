@@ -46,6 +46,7 @@ query GetRemoteNetworks {
     location
     status
     createdAt
+    networkHealth
     connectors {
       id
       name
