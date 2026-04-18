@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql/handler"
@@ -18,7 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
@@ -65,7 +68,7 @@ func main() {
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
 		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
-		RedisURL:           mustEnv("REDIS_URL"),
+		ValkeyURL:          mustEnv("VALKEY_URL"),
 		AllowedOrigin:      mustEnv("ALLOWED_ORIGIN"),
 	})
 	if err != nil {
@@ -90,11 +93,10 @@ func main() {
 		JWTSecret:           mustEnv("JWT_SECRET"),
 	}
 
-	connectorRedis, err := newConnectorRedisClient(ctx, mustEnv("REDIS_URL"))
+	connectorValkey, err := newConnectorValkeyClient(ctx, mustEnv("VALKEY_URL"))
 	if err != nil {
-		log.Fatalf("connector redis init: %v", err)
+		log.Fatalf("connector valkey init: %v", err)
 	}
-	defer connectorRedis.Close()
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
@@ -102,7 +104,7 @@ func main() {
 				TenantDB:     tenantDB,
 				AuthService:  authSvc,
 				ConnectorCfg: connectorCfg,
-				Redis:        connectorRedis,
+				Redis:        valkeycompat.NewAdapter(connectorValkey),
 				Pool:         db.Pool,
 			},
 		}),
@@ -127,7 +129,7 @@ func main() {
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
 		middleware.WorkspaceGuard(db.Pool)(
-			connector.RegenerateTokenHandler(db.Pool, connectorCfg, connectorRedis),
+			connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
 		),
 	)
 	mux.Handle("/api/connectors/", connectorTokenRoute)
@@ -160,10 +162,10 @@ func main() {
 	connectorSvc := &connector.EnrollmentHandler{
 		Cfg:        connectorCfg,
 		Pool:       db.Pool,
-		Redis:      connectorRedis,
+		Redis:      valkeycompat.NewAdapter(connectorValkey),
 		PKIService: pkiService,
 	}
-	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, connectorRedis)
+	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
 
@@ -247,22 +249,87 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 	return d
 }
 
-func newConnectorRedisClient(ctx context.Context, redisURL string) (*redis.Client, error) {
-	opts, err := redis.ParseURL(redisURL)
+func newConnectorValkeyClient(ctx context.Context, valkeyURL string) (valkey.Client, error) {
+	addr, err := parseValkeyAddr(valkeyURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse redis URL: %w", err)
+		return nil, fmt.Errorf("parse valkey URL: %w", err)
 	}
 
-	rdb := redis.NewClient(opts)
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress: []string{addr},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create valkey client: %w", err)
+	}
 
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := rdb.Ping(pingCtx).Err(); err != nil {
-		_ = rdb.Close()
-		return nil, fmt.Errorf("ping redis: %w", err)
+	if err := client.Do(pingCtx, client.B().Ping().Build()).Error(); err != nil {
+		return nil, fmt.Errorf("ping valkey: %w", err)
 	}
 
-	return rdb, nil
+	checkValkeyVersion(ctx, client)
+
+	return client, nil
+}
+
+func checkValkeyVersion(ctx context.Context, client valkey.Client) {
+	resp := client.Do(ctx, client.B().Info().Section("server").Build())
+	info, err := resp.ToString()
+	if err != nil {
+		log.Fatalf("valkey: cannot get server info: %v", err)
+	}
+
+	if strings.Contains(info, "valkey_version:") {
+		version := parseVersionFromInfo(info, "valkey_version")
+		log.Printf("✓ Valkey %s connected", version)
+		return
+	}
+
+	if strings.Contains(info, "redis_version:") {
+		version := parseVersionFromInfo(info, "redis_version")
+		log.Printf("✓ Redis %s connected (Valkey recommended)", version)
+		if !versionAtLeast(version, 6, 2) {
+			log.Fatalf("Redis %s too old. Requires 6.2+ for GETDEL. "+
+				"Switch to Valkey 7.2+", version)
+		}
+		return
+	}
+
+	log.Fatal("cache: unrecognized server. Expected Valkey 7.2+ or Redis 6.2+")
+}
+
+func parseVersionFromInfo(info, key string) string {
+	for _, line := range strings.Split(info, "\r\n") {
+		if strings.HasPrefix(line, key+":") {
+			return strings.TrimSpace(strings.TrimPrefix(line, key+":"))
+		}
+	}
+	return "unknown"
+}
+
+func versionAtLeast(version string, major, minor int) bool {
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return maj > major || (maj == major && min >= minor)
+}
+
+func parseValkeyAddr(rawURL string) (string, error) {
+	after, found := strings.CutPrefix(rawURL, "redis://")
+	if !found {
+		return "", fmt.Errorf("expected redis:// URL, got: %s", rawURL)
+	}
+	if idx := strings.LastIndex(after, "@"); idx != -1 {
+		after = after[idx+1:]
+	}
+	return after, nil
 }
 
 type connectorWorkspaceStore struct {

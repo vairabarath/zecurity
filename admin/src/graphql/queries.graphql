@@ -57,6 +57,16 @@ query GetRemoteNetworks {
       certNotAfter
       createdAt
     }
+    shields {
+      id
+      name
+      status
+      lastSeenAt
+      version
+      hostname
+      interfaceAddr
+      connectorId
+    }
   }
 }
 

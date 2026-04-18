@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,17 +17,52 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// testValkeyRDB is a shared Valkey client for the entire test suite.
+// Initialised once in TestMain so Docker startup cost is paid once, not per test.
+var testValkeyRDB valkeycompat.Cmdable
+
+func TestMain(m *testing.M) {
+	ctx := context.Background()
+
+	ctr, err := tcvalkey.Run(ctx, "valkey/valkey:7.2-alpine")
+	if err != nil {
+		log.Fatalf("start valkey container: %v", err)
+	}
+	defer func() { _ = ctr.Terminate(ctx) }()
+
+	connStr, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		log.Fatalf("valkey connection string: %v", err)
+	}
+
+	// ConnectionString returns "redis://host:port" — strip the scheme for valkey-go.
+	addr := strings.TrimPrefix(connStr, "redis://")
+
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress: []string{addr},
+	})
+	if err != nil {
+		log.Fatalf("create valkey client: %v", err)
+	}
+	defer client.Close()
+
+	testValkeyRDB = valkeycompat.NewAdapter(client)
+
+	os.Exit(m.Run())
+}
 
 // ── Unit tests (no database required) ───────────────────────────────────────
 
@@ -48,7 +84,6 @@ func TestEnroll_InvalidJWT(t *testing.T) {
 }
 
 func TestEnroll_ExpiredJWT(t *testing.T) {
-	// Create an expired JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, EnrollmentClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.NewString(),
@@ -111,7 +146,6 @@ func TestEnroll_WrongIssuer(t *testing.T) {
 }
 
 func TestEnroll_MissingClaims(t *testing.T) {
-	// JWT with missing required claims
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, EnrollmentClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.NewString(),
@@ -124,8 +158,8 @@ func TestEnroll_MissingClaims(t *testing.T) {
 	tokenString, _ := token.SignedString([]byte("test-secret"))
 
 	handler := &EnrollmentHandler{
-		Cfg: Config{JWTSecret: "test-secret", CertTTL: 7 * 24 * time.Hour},
-		Redis: redis.NewClient(&redis.Options{Addr: "localhost:6379"}), // won't be reached
+		Cfg:   Config{JWTSecret: "test-secret", CertTTL: 7 * 24 * time.Hour},
+		Redis: testValkeyRDB, // validation fails before Redis is reached
 	}
 
 	_, err := handler.Enroll(context.Background(), &pb.EnrollRequest{
@@ -141,21 +175,11 @@ func TestEnroll_MissingClaims(t *testing.T) {
 }
 
 func TestEnroll_JTINotFound(t *testing.T) {
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-
-	// Create a valid JWT but don't store the JTI in Redis
 	connectorID := uuid.NewString()
 	workspaceID := uuid.NewString()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, EnrollmentClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			ID:        uuid.NewString(), // JTI not stored in Redis
+			ID:        uuid.NewString(), // JTI not stored in Valkey
 			Issuer:    appmeta.ControllerIssuer,
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(1 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -168,10 +192,10 @@ func TestEnroll_JTINotFound(t *testing.T) {
 
 	handler := &EnrollmentHandler{
 		Cfg:   Config{JWTSecret: "test-secret", CertTTL: 7 * 24 * time.Hour},
-		Redis: rdb,
+		Redis: testValkeyRDB,
 	}
 
-	_, err = handler.Enroll(context.Background(), &pb.EnrollRequest{
+	_, err := handler.Enroll(context.Background(), &pb.EnrollRequest{
 		EnrollmentToken: tokenString,
 	})
 
@@ -187,9 +211,6 @@ func TestEnroll_JTINotFound(t *testing.T) {
 }
 
 func TestEnroll_CSRSignatureInvalid(t *testing.T) {
-	// This test requires a database to reach the CSR signature validation step
-	// (it must pass JWT verification, JTI burn, connector lookup, and workspace lookup first).
-	// Without a DB, the handler panics on nil Pool. Skip in unit tests — covered by integration tests.
 	t.Skip("requires database to reach CSR signature validation step")
 }
 
@@ -228,7 +249,6 @@ func TestCSRHasSPIFFEURI(t *testing.T) {
 		t.Fatal("expected csrHasSPIFFEURI to return true")
 	}
 
-	// Test with wrong URI
 	if csrHasSPIFFEURI(csr, "spiffe://ws-bad.zecurity.in/connector/wrong-id") {
 		t.Fatal("expected csrHasSPIFFEURI to return false for wrong URI")
 	}
@@ -323,7 +343,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 	}
 	defer testPool.Close()
 
-	// Apply both migrations
 	if err := applyEnrollmentMigration(ctx, testPool, "001_schema.sql"); err != nil {
 		t.Fatalf("apply 001 migration: %v", err)
 	}
@@ -331,7 +350,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("apply 002 migration: %v", err)
 	}
 
-	// Set up PKI
 	t.Setenv("PKI_MASTER_SECRET", "enrollment-test-secret")
 
 	pkiSvc, err := pki.Init(ctx, testPool)
@@ -339,7 +357,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("pki.Init: %v", err)
 	}
 
-	// Bootstrap: create workspace + generate workspace CA
 	workspaceID := uuid.NewString()
 	workspaceSlug := "acme-corp"
 	connectorID := uuid.NewString()
@@ -353,13 +370,11 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("insert workspace: %v", err)
 	}
 
-	// Generate workspace CA
 	caResult, err := pkiSvc.GenerateWorkspaceCA(ctx, workspaceID)
 	if err != nil {
 		t.Fatalf("GenerateWorkspaceCA: %v", err)
 	}
 
-	// Store workspace CA keys
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO workspace_ca_keys
 		 (tenant_id, encrypted_private_key, nonce, certificate_pem, key_algorithm, not_before, not_after)
@@ -376,7 +391,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
-	// Insert connector row with status='pending'
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')`,
@@ -386,17 +400,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("insert connector: %v", err)
 	}
 
-	// Set up Redis
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-
-	// Generate enrollment token
 	jwtSecret := "test-jwt-secret"
 	cfg := Config{
 		JWTSecret:          jwtSecret,
@@ -409,25 +412,20 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("GenerateEnrollmentToken: %v", err)
 	}
 
-	// Store JTI in Redis
-	err = StoreEnrollmentJTI(ctx, rdb, jti, connectorID, 5*time.Minute)
-	if err != nil {
+	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
 
-	// Generate connector CSR with SPIFFE SAN
 	trustDomain := appmeta.WorkspaceTrustDomain(workspaceSlug)
 	csrDER := generateConnectorCSR(t, connectorID, trustDomain)
 
-	// Create handler
 	handler := &EnrollmentHandler{
 		Cfg:        cfg,
 		Pool:       testPool,
-		Redis:      rdb,
+		Redis:      testValkeyRDB,
 		PKIService: pkiSvc,
 	}
 
-	// Execute enrollment
 	resp, err := handler.Enroll(ctx, &pb.EnrollRequest{
 		EnrollmentToken: tokenString,
 		CsrDer:          csrDER,
@@ -438,7 +436,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("Enroll: %v", err)
 	}
 
-	// Verify response
 	if resp.ConnectorId != connectorID {
 		t.Fatalf("expected connector ID %s, got %s", connectorID, resp.ConnectorId)
 	}
@@ -452,19 +449,18 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatal("expected non-empty intermediate CA PEM")
 	}
 
-	// Verify connector was updated in DB
-	var status, connTrustDomain, certSerial, version, hostname string
+	var connStatus, connTrustDomain, certSerial, version, hostname string
 	err = testPool.QueryRow(ctx,
 		`SELECT status, trust_domain, cert_serial, version, hostname
 		   FROM connectors WHERE id = $1`,
 		connectorID,
-	).Scan(&status, &connTrustDomain, &certSerial, &version, &hostname)
+	).Scan(&connStatus, &connTrustDomain, &certSerial, &version, &hostname)
 	if err != nil {
 		t.Fatalf("query connector after enrollment: %v", err)
 	}
 
-	if status != "active" {
-		t.Fatalf("expected status 'active', got %q", status)
+	if connStatus != "active" {
+		t.Fatalf("expected status 'active', got %q", connStatus)
 	}
 	if connTrustDomain != trustDomain {
 		t.Fatalf("expected trust domain %q, got %q", trustDomain, connTrustDomain)
@@ -480,7 +476,7 @@ func TestEnroll_FullFlow(t *testing.T) {
 	}
 
 	// Verify JTI was burned (single-use token)
-	_, found, err := BurnEnrollmentJTI(ctx, rdb, jti)
+	_, found, err := BurnEnrollmentJTI(ctx, testValkeyRDB, jti)
 	if err != nil {
 		t.Fatalf("BurnEnrollmentJTI after enrollment: %v", err)
 	}
@@ -488,7 +484,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatal("expected JTI to be burned after enrollment")
 	}
 
-	// Verify the signed certificate is valid
 	certPEM := string(resp.CertificatePem)
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
@@ -500,7 +495,6 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("parse signed certificate: %v", err)
 	}
 
-	// Verify certificate has the correct SPIFFE URI
 	expectedSPIFFE := appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
 	if len(cert.URIs) != 1 {
 		t.Fatalf("expected 1 URI SAN, got %d", len(cert.URIs))
@@ -509,12 +503,10 @@ func TestEnroll_FullFlow(t *testing.T) {
 		t.Fatalf("expected SPIFFE URI %s, got %s", expectedSPIFFE, cert.URIs[0].String())
 	}
 
-	// Verify certificate is not a CA
 	if cert.IsCA {
 		t.Fatal("connector certificate should not be a CA")
 	}
 
-	// Verify certificate has correct key usage
 	if cert.KeyUsage != x509.KeyUsageDigitalSignature {
 		t.Fatalf("expected KeyUsageDigitalSignature, got %v", cert.KeyUsage)
 	}
@@ -612,15 +604,6 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 		t.Fatalf("insert connector: %v", err)
 	}
 
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-
 	cfg := Config{
 		JWTSecret:          "replay-secret",
 		CertTTL:            7 * 24 * time.Hour,
@@ -632,8 +615,7 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 		t.Fatalf("GenerateEnrollmentToken: %v", err)
 	}
 
-	err = StoreEnrollmentJTI(ctx, rdb, jti, connectorID, 5*time.Minute)
-	if err != nil {
+	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
 
@@ -642,11 +624,10 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 	handler := &EnrollmentHandler{
 		Cfg:        cfg,
 		Pool:       testPool,
-		Redis:      rdb,
+		Redis:      testValkeyRDB,
 		PKIService: pkiSvc,
 	}
 
-	// First enrollment should succeed
 	_, err = handler.Enroll(ctx, &pb.EnrollRequest{
 		EnrollmentToken: tokenString,
 		CsrDer:          csrDER,
@@ -657,8 +638,7 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 		t.Fatalf("first Enroll: %v", err)
 	}
 
-	// Second enrollment with same token should fail (JTI already burned)
-	// Need to re-insert connector as 'pending' since first enrollment set it to 'active'
+	// Reset connector to pending so we can attempt replay
 	_, err = testPool.Exec(ctx,
 		`UPDATE connectors SET status = 'pending', trust_domain = NULL,
 		        cert_serial = NULL, cert_not_after = NULL,
@@ -767,7 +747,7 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 		t.Fatalf("store workspace CA keys: %v", err)
 	}
 
-	// Insert connector with status='active' (not pending)
+	// Connector is already active — not pending
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO connectors (id, tenant_id, remote_network_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'active')`,
@@ -776,15 +756,6 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert connector: %v", err)
 	}
-
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
 
 	cfg := Config{
 		JWTSecret:          "pending-secret",
@@ -797,8 +768,7 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 		t.Fatalf("GenerateEnrollmentToken: %v", err)
 	}
 
-	err = StoreEnrollmentJTI(ctx, rdb, jti, connectorID, 5*time.Minute)
-	if err != nil {
+	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
 
@@ -807,7 +777,7 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 	handler := &EnrollmentHandler{
 		Cfg:        cfg,
 		Pool:       testPool,
-		Redis:      rdb,
+		Redis:      testValkeyRDB,
 		PKIService: pkiSvc,
 	}
 
@@ -881,7 +851,6 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 	workspaceSlug := "suspended-ws"
 	connectorID := uuid.NewString()
 
-	// Create workspace with 'suspended' status
 	_, err = testPool.Exec(ctx,
 		`INSERT INTO workspaces (id, slug, name, status, trust_domain)
 		 VALUES ($1, $2, 'Suspended WS', 'suspended', $3)`,
@@ -921,15 +890,6 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 		t.Fatalf("insert connector: %v", err)
 	}
 
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-
 	cfg := Config{
 		JWTSecret:          "suspended-secret",
 		CertTTL:            7 * 24 * time.Hour,
@@ -941,8 +901,7 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 		t.Fatalf("GenerateEnrollmentToken: %v", err)
 	}
 
-	err = StoreEnrollmentJTI(ctx, rdb, jti, connectorID, 5*time.Minute)
-	if err != nil {
+	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
 
@@ -951,7 +910,7 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 	handler := &EnrollmentHandler{
 		Cfg:        cfg,
 		Pool:       testPool,
-		Redis:      rdb,
+		Redis:      testValkeyRDB,
 		PKIService: pkiSvc,
 	}
 
@@ -1064,15 +1023,6 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 		t.Fatalf("insert connector: %v", err)
 	}
 
-	mr, err := miniredis.Run()
-	if err != nil {
-		t.Fatalf("start miniredis: %v", err)
-	}
-	defer mr.Close()
-
-	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	defer rdb.Close()
-
 	cfg := Config{
 		JWTSecret:          "mismatch-secret",
 		CertTTL:            7 * 24 * time.Hour,
@@ -1084,12 +1034,11 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 		t.Fatalf("GenerateEnrollmentToken: %v", err)
 	}
 
-	err = StoreEnrollmentJTI(ctx, rdb, jti, connectorID, 5*time.Minute)
-	if err != nil {
+	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
 
-	// Generate CSR with WRONG SPIFFE ID (different connector ID)
+	// CSR uses a different connector ID — SPIFFE mismatch
 	wrongConnectorID := uuid.NewString()
 	wrongTrustDomain := appmeta.WorkspaceTrustDomain(workspaceSlug)
 	csrDER := generateConnectorCSR(t, wrongConnectorID, wrongTrustDomain)
@@ -1097,7 +1046,7 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 	handler := &EnrollmentHandler{
 		Cfg:        cfg,
 		Pool:       testPool,
-		Redis:      rdb,
+		Redis:      testValkeyRDB,
 		PKIService: pkiSvc,
 	}
 
@@ -1120,7 +1069,6 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
-// generateConnectorCSR creates a valid EC P-384 CSR with the connector's SPIFFE ID as URI SAN.
 func generateConnectorCSR(t *testing.T, connectorID, trustDomain string) []byte {
 	t.Helper()
 

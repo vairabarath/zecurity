@@ -9,7 +9,7 @@ import (
 )
 
 func TestRefreshHandler_MissingCookie(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 
@@ -24,7 +24,7 @@ func TestRefreshHandler_MissingCookie(t *testing.T) {
 }
 
 func TestRefreshHandler_MissingAuthHeader(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 
@@ -40,7 +40,7 @@ func TestRefreshHandler_MissingAuthHeader(t *testing.T) {
 }
 
 func TestRefreshHandler_InvalidAccessToken(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 
@@ -57,7 +57,7 @@ func TestRefreshHandler_InvalidAccessToken(t *testing.T) {
 }
 
 func TestRefreshHandler_RefreshTokenExpired(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 
@@ -77,7 +77,7 @@ func TestRefreshHandler_RefreshTokenExpired(t *testing.T) {
 }
 
 func TestRefreshHandler_RefreshTokenMismatch(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 
@@ -99,7 +99,7 @@ func TestRefreshHandler_RefreshTokenMismatch(t *testing.T) {
 }
 
 func TestRefreshHandler_Success(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()
 

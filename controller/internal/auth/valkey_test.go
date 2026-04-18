@@ -8,46 +8,44 @@ import (
 	"github.com/alicebob/miniredis/v2"
 )
 
-func TestNewRedisClient_Success(t *testing.T) {
+func TestNewValkeyClient_Success(t *testing.T) {
 	mr, err := miniredis.Run()
 	if err != nil {
 		t.Fatalf("start miniredis: %v", err)
 	}
 	defer mr.Close()
 
-	rc, err := newRedisClient("redis://" + mr.Addr())
+	rc, err := newValkeyClient("redis://" + mr.Addr())
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 	if rc == nil {
-		t.Fatal("expected non-nil redisClient")
+		t.Fatal("expected non-nil valkeyClient")
 	}
 }
 
-func TestNewRedisClient_BadURL(t *testing.T) {
-	_, err := newRedisClient("not-a-url")
+func TestNewValkeyClient_BadURL(t *testing.T) {
+	_, err := newValkeyClient("not-a-url")
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}
 }
 
-func TestNewRedisClient_Unreachable(t *testing.T) {
-	_, err := newRedisClient("redis://127.0.0.1:1") // nothing listening
+func TestNewValkeyClient_Unreachable(t *testing.T) {
+	_, err := newValkeyClient("redis://127.0.0.1:1") // nothing listening
 	if err == nil {
-		t.Fatal("expected error for unreachable Redis")
+		t.Fatal("expected error for unreachable Valkey")
 	}
 }
 
 func TestSetAndGetPKCEState(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	// Store a PKCE state.
 	if err := rc.SetPKCEState(ctx, "state-abc", "verifier-xyz", nil); err != nil {
 		t.Fatalf("SetPKCEState: %v", err)
 	}
 
-	// Retrieve it — should return the verifier and delete the key.
 	val, workspaceName, found, err := rc.GetAndDeletePKCEState(ctx, "state-abc")
 	if err != nil {
 		t.Fatalf("GetAndDeletePKCEState: %v", err)
@@ -73,7 +71,7 @@ func TestSetAndGetPKCEState(t *testing.T) {
 }
 
 func TestGetAndDeletePKCEState_Expired(t *testing.T) {
-	rc, mr := newTestRedis(t)
+	rc, mr := newTestValkey(t)
 	ctx := context.Background()
 
 	if err := rc.SetPKCEState(ctx, "state-exp", "verifier-exp", nil); err != nil {
@@ -93,7 +91,7 @@ func TestGetAndDeletePKCEState_Expired(t *testing.T) {
 }
 
 func TestSetAndGetPKCEState_WithWorkspaceName(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 	workspaceName := "Acme Workspace"
 
@@ -117,15 +115,13 @@ func TestSetAndGetPKCEState_WithWorkspaceName(t *testing.T) {
 }
 
 func TestSetAndGetRefreshToken(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	// Store a refresh token.
 	if err := rc.SetRefreshToken(ctx, "user-1", "token-abc", 7*24*time.Hour); err != nil {
 		t.Fatalf("SetRefreshToken: %v", err)
 	}
 
-	// Retrieve it.
 	val, found, err := rc.GetRefreshToken(ctx, "user-1")
 	if err != nil {
 		t.Fatalf("GetRefreshToken: %v", err)
@@ -139,7 +135,7 @@ func TestSetAndGetRefreshToken(t *testing.T) {
 }
 
 func TestGetRefreshToken_NotFound(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
 	_, found, err := rc.GetRefreshToken(ctx, "nonexistent-user")
@@ -152,19 +148,17 @@ func TestGetRefreshToken_NotFound(t *testing.T) {
 }
 
 func TestDeleteRefreshToken(t *testing.T) {
-	rc, _ := newTestRedis(t)
+	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
 	if err := rc.SetRefreshToken(ctx, "user-del", "token-del", time.Hour); err != nil {
 		t.Fatalf("SetRefreshToken: %v", err)
 	}
 
-	// Delete it.
 	if err := rc.DeleteRefreshToken(ctx, "user-del"); err != nil {
 		t.Fatalf("DeleteRefreshToken: %v", err)
 	}
 
-	// Should be gone.
 	_, found, err := rc.GetRefreshToken(ctx, "user-del")
 	if err != nil {
 		t.Fatalf("GetRefreshToken after delete: %v", err)
@@ -175,7 +169,7 @@ func TestDeleteRefreshToken(t *testing.T) {
 }
 
 func TestRefreshToken_Expired(t *testing.T) {
-	rc, mr := newTestRedis(t)
+	rc, mr := newTestValkey(t)
 	ctx := context.Background()
 
 	if err := rc.SetRefreshToken(ctx, "user-ttl", "token-ttl", time.Hour); err != nil {

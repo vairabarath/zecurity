@@ -13,7 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
@@ -27,15 +28,14 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Skip("AUTH_TEST_DATABASE_URL or PKI_TEST_DATABASE_URL not set")
 	}
 
-	redisURL := os.Getenv("AUTH_TEST_REDIS_URL")
-	if redisURL == "" {
-		redisURL = "redis://localhost:6379/15"
+	valkeyURL := os.Getenv("AUTH_TEST_VALKEY_URL")
+	if valkeyURL == "" {
+		valkeyURL = "redis://localhost:6379/15"
 	}
 
 	ctx := context.Background()
-	redisClient := mustConnectAuthTestRedis(t, ctx, redisURL)
-	defer redisClient.Close()
-	redisClient.FlushDB(ctx)
+	valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
+	valkeyClient.FlushDB(ctx)
 
 	dbName := uniqueAuthTestDatabaseName(t)
 	adminPool := mustConnectAuthTestPool(t, ctx, adminDSN)
@@ -82,7 +82,7 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		GoogleClientID:     "test-google-client-id",
 		GoogleClientSecret: "test-google-client-secret",
 		RedirectURI:        "http://localhost:8080/auth/callback",
-		RedisURL:           redisURL,
+		ValkeyURL:          valkeyURL,
 		JWTAccessTTL:       "15m",
 		JWTRefreshTTL:      "168h",
 	})
@@ -284,21 +284,30 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 	return token, refreshCookie
 }
 
-func mustConnectAuthTestRedis(t *testing.T, ctx context.Context, redisURL string) *redis.Client {
+func mustConnectAuthTestValkey(t *testing.T, ctx context.Context, valkeyURL string) valkeycompat.Cmdable {
 	t.Helper()
 
-	opts, err := redis.ParseURL(redisURL)
+	addr, err := parseValkeyAddr(valkeyURL)
 	if err != nil {
-		t.Fatalf("parse redis URL: %v", err)
+		t.Skipf("valkey: bad URL %s: %v", valkeyURL, err)
 	}
 
-	client := redis.NewClient(opts)
-	if err := client.Ping(ctx).Err(); err != nil {
+	client, err := valkey.NewClient(valkey.ClientOption{
+		InitAddress: []string{addr},
+	})
+	if err != nil {
+		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
+	}
+
+	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if err := client.Do(pingCtx, client.B().Ping().Build()).Error(); err != nil {
 		client.Close()
-		t.Skipf("redis not available at %s: %v", redisURL, err)
+		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
 	}
 
-	return client
+	t.Cleanup(client.Close)
+	return valkeycompat.NewAdapter(client)
 }
 
 func mustConnectAuthTestPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {

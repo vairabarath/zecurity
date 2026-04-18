@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -22,7 +22,7 @@ type regenerateResponse struct {
 // RegenerateTokenHandler handles POST /connectors/{id}/token.
 // Generates a fresh enrollment token for an existing pending connector.
 // Requires JWT auth + workspace middleware already applied upstream.
-func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb *redis.Client) http.Handler {
+func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb valkeycompat.Cmdable) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

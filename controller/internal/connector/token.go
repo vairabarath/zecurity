@@ -7,7 +7,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
@@ -75,15 +75,15 @@ func VerifyEnrollmentToken(cfg Config, tokenString string) (*EnrollmentClaims, e
 	return claims, nil
 }
 
-// StoreEnrollmentJTI stores an enrollment token JTI with a TTL in Redis.
-func StoreEnrollmentJTI(ctx context.Context, rdb *redis.Client, jti, connectorID string, ttl time.Duration) error {
+// StoreEnrollmentJTI stores an enrollment token JTI with a TTL in Valkey.
+func StoreEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti, connectorID string, ttl time.Duration) error {
 	return rdb.Set(ctx, enrollmentJTIPrefix+jti, connectorID, ttl).Err()
 }
 
 // BurnEnrollmentJTI atomically fetches and deletes an enrollment token JTI.
-func BurnEnrollmentJTI(ctx context.Context, rdb *redis.Client, jti string) (connectorID string, found bool, err error) {
+func BurnEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (connectorID string, found bool, err error) {
 	val, err := rdb.GetDel(ctx, enrollmentJTIPrefix+jti).Result()
-	if err == redis.Nil {
+	if err == valkeycompat.Nil {
 		return "", false, nil
 	}
 	if err != nil {

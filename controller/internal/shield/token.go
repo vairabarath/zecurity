@@ -14,7 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/redis/go-redis/v9"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
@@ -157,13 +157,13 @@ func VerifyShieldToken(cfg Config, tokenString string) (*EnrollmentClaims, error
 	return claims, nil
 }
 
-func StoreShieldJTI(ctx context.Context, rdb *redis.Client, jti, shieldID string, ttl time.Duration) error {
+func StoreShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti, shieldID string, ttl time.Duration) error {
 	return rdb.Set(ctx, enrollmentJTIPrefix+jti, shieldID, ttl).Err()
 }
 
-func BurnShieldJTI(ctx context.Context, rdb *redis.Client, jti string) (shieldID string, found bool, err error) {
+func BurnShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (shieldID string, found bool, err error) {
 	val, err := rdb.GetDel(ctx, enrollmentJTIPrefix+jti).Result()
-	if err == redis.Nil {
+	if err == valkeycompat.Nil {
 		return "", false, nil
 	}
 	if err != nil {
