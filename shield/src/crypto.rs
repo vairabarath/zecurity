@@ -139,6 +139,15 @@ pub fn parse_cert_not_after(cert_pem: &[u8]) -> Result<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(ts).context("invalid NotAfter timestamp in certificate")
 }
 
+/// Extract the public key as CSR DER bytes (proof of possession for renewal).
+///
+/// Mirrors connector/src/crypto.rs::extract_public_key_der(). The field is
+/// named `public_key_der` in the proto but the controller expects CSR bytes.
+pub fn extract_public_key_der(private_key_pem: &str) -> Result<Vec<u8>> {
+    let key_pair = KeyPair::from_pem(private_key_pem).context("failed to parse PEM key")?;
+    build_csr(&key_pair, "renewal", "spiffe://renewal/renewal")
+}
+
 /// Compute SHA-256 hex digest of raw bytes.
 ///
 /// Used by enrollment.rs to verify the CA certificate fingerprint
