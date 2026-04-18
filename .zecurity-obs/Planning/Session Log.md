@@ -439,3 +439,30 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Wait for M3 Phase 5 before starting M4 Phase 4 heartbeat/renewal
 - M4 Phase 7 can start after that for connector main wiring and shield release CI
+
+---
+
+## 2026-04-18 — Claude Code (M4 Phase 4 + Phase 7)
+
+**What was done:**
+- Implemented `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091 with exponential backoff, cert renewal on `re_enroll=true`, and best-effort `goodbye()` on SIGTERM
+- Implemented `shield/src/renewal.rs` — RenewCert flow via Connector proxy: reads existing key, builds CSR DER, saves renewed `shield.crt` + `workspace_ca.crt`, updates `state.json`
+- Added `SpiffeConnectorVerifier` to `shield/src/tls.rs` — custom rustls `ServerCertVerifier` that handles connector certs (clientAuth-only EKU, URI SANs) without requiring serverAuth EKU
+- Added `build_connector_channel()` to `shield/src/tls.rs` — bypasses tonic 0.14 (no `rustls_client_config()`) via `connect_with_connector()` with a custom `SpiffeConnectorService` tower service
+- Added `extract_public_key_der()` to `shield/src/crypto.rs` — mirrors connector pattern for renewal proof-of-possession
+- Wired `mod heartbeat` and `mod renewal` in `shield/src/main.rs`; spawned heartbeat task; wired `goodbye()` on shutdown
+- Created `.github/workflows/shield-release.yml` — mirrors connector CI; triggers on `shield-v*`; cross-builds amd64 + arm64 musl; uploads binaries, checksums, install script, systemd units
+- Updated `connector/src/heartbeat.rs` — `run_heartbeat` now accepts `ShieldServer`; populates `shields` field via `get_alive_shields()` so the controller sees live shields in each heartbeat
+- Updated `connector/src/main.rs` — builds controller mTLS channel, instantiates `ShieldServer::new()`, spawns Shield gRPC server on :9091, passes clone to heartbeat loop
+- Checked M4-J1, M4-J2, M4-M1, M4-M2 in Sprint4/path.md
+- Both `cargo build --manifest-path shield/Cargo.toml` and `cd connector && cargo build` pass clean
+
+**Key decisions:**
+- Used custom rustls `ServerCertVerifier` (`SpiffeConnectorVerifier`) instead of tonic's `ClientTlsConfig` because tonic 0.14 has no `rustls_client_config()` escape hatch and connector certs only have clientAuth EKU (not serverAuth), which WebPkiServerVerifier rejects
+- Skipped the pre-flight raw-TLS step (connector heartbeat pattern) because the custom verifier is embedded directly in the tonic channel — SPIFFE verification fires on every (re)connect automatically
+- Added `tower-service = "0.3"`, `hyper-util = { version = "0.1", features = ["tokio"] }`, `http = "1"` to `shield/Cargo.toml` as direct deps for the custom tower connector
+
+**What's next:**
+- M4 is fully done for Sprint 4
+- Tag `shield-v0.1.0` after PR merges to trigger the CI release workflow
+- Sprint 5: Resource discovery (RDE, per-resource nftables rules)

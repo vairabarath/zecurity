@@ -43,10 +43,8 @@ mod types;
 mod updater;
 mod util;
 
-// These modules are implemented in later phases.
-// Declared here so main.rs compiles now and wires them in as they land.
-// mod heartbeat;  // Phase J
-// mod renewal;    // Phase J
+mod heartbeat;
+mod renewal;
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.
 ///
 /// build.rs compiles the proto via tonic_prost_build and writes the
@@ -122,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     // state.json missing → first run, perform enrollment
     let state_path = Path::new(&cfg.state_dir).join("state.json");
 
-    let _state: ShieldState = if state_path.exists() {
+    let state: ShieldState = if state_path.exists() {
         // Already enrolled — load state from disk
         let state = ShieldState::load(&cfg.state_dir)?;
         info!(
@@ -148,19 +146,13 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Step 5: Spawn heartbeat loop (Phase J)
-    //
-    // heartbeat::run() connects to connector_addr:9091 via mTLS,
-    // sends HeartbeatRequest every shield_heartbeat_interval_secs,
-    // and calls renewal::renew_cert() when HeartbeatResponse.re_enroll=true.
-    //
-    // TODO: uncomment when Phase J (heartbeat.rs) is implemented
-    // let hb_cfg = cfg.clone();
-    // let hb_state = _state.clone();
-    // let heartbeat_handle = tokio::spawn(async move {
-    //     if let Err(e) = heartbeat::run(&hb_state, &hb_cfg).await {
-    //         error!(error = %e, "heartbeat loop failed");
-    //     }
-    // });
+    let hb_cfg = cfg.clone();
+    let hb_state = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = heartbeat::run(hb_state, hb_cfg).await {
+            error!(error = %e, "heartbeat loop failed");
+        }
+    });
 
     // Step 6: Spawn auto-updater if enabled (Phase L)
     //
@@ -200,17 +192,8 @@ async fn main() -> anyhow::Result<()> {
             .context("failed to wait for Ctrl+C")?;
     }
 
-    // Step 8: Graceful shutdown
-    //
-    // Send Goodbye RPC to connector so it marks us DISCONNECTED immediately
-    // rather than waiting for the disconnect threshold timeout.
-    // This is best-effort — if it fails, the connector will detect absence
-    // of heartbeats and mark us disconnected after SHIELD_DISCONNECT_THRESHOLD.
-    //
-    // TODO: uncomment when Phase J (heartbeat.rs) is implemented
-    // if let Err(e) = heartbeat::goodbye(&_state, &cfg).await {
-    //     error!(error = %e, "goodbye RPC failed (non-fatal)");
-    // }
+    // Step 8: Graceful shutdown — best-effort Goodbye RPC
+    heartbeat::goodbye(&state, &cfg).await;
 
     info!("shield shut down gracefully");
     Ok(())
