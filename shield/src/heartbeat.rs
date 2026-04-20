@@ -37,6 +37,7 @@ pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
 
     let hostname = util::read_hostname();
     let public_ip = util::get_public_ip().await.unwrap_or_default();
+    let lan_ip = util::detect_lan_ip().unwrap_or_default();
     let version = env!("CARGO_PKG_VERSION").to_string();
     let interval_secs = cfg.shield_heartbeat_interval_secs;
 
@@ -58,6 +59,7 @@ pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
             version: version.clone(),
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
+            lan_ip: lan_ip.clone(),
         });
 
         match client.heartbeat(req).await {

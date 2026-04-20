@@ -86,13 +86,11 @@ pub struct ConnectorConfig {
     #[serde(default = "default_update_check_interval_secs")]
     pub update_check_interval_secs: u64,
 
-    /// Address that shields use to reach this connector's agent server (:9091).
-    /// Set this to the connector's LAN IP or internal hostname so shields on
-    /// the same network don't try to route through the public ISP IP.
-    /// Example: "192.168.1.10:9091"
-    /// If unset, the controller falls back to public_ip from the OS.
+    /// LAN address shields use to reach this connector's gRPC server (:9091).
+    /// Set this to override auto-detection (e.g. "192.168.1.10:9091").
+    /// If unset, the connector auto-detects its RFC-1918 LAN IP at startup.
     #[serde(default)]
-    pub agent_addr: Option<String>,
+    pub lan_addr: Option<String>,
 
     /// Directory for persistent state files:
     ///   connector.key      — EC P-384 private key (mode 0600)

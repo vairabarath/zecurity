@@ -27,6 +27,7 @@ semver             = "1"
 reqwest            = { version = "0.13", features = ["json", "rustls"] }
 base64             = "0.22"
 time               = { version = "0.3", features = ["formatting", "macros"] }
+if-addrs           = "0.13"
 tokio-retry        = "0.3"
 tower-service      = "0.3"
 hyper-util         = { version = "0.1", features = ["tokio"] }

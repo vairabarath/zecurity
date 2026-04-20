@@ -255,7 +255,7 @@ func (r *queryResolver) RemoteNetworks(ctx context.Context) ([]*graph.RemoteNetw
 	}
 	cRows, err := r.TenantDB.Query(ctx,
 		`SELECT id, name, status, remote_network_id,
-		        last_heartbeat_at, version, hostname, public_ip,
+		        last_heartbeat_at, version, hostname, public_ip, lan_addr,
 		        cert_not_after, created_at
 		   FROM connectors
 		  WHERE remote_network_id = ANY($1)

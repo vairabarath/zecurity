@@ -203,10 +203,10 @@ func (s *service) loadCAFingerprint(ctx context.Context) (string, error) {
 }
 
 func (s *service) selectConnector(ctx context.Context, remoteNetworkID, tenantID string) (connectorID, connectorAddr string, err error) {
-	var agentAddr, publicIP *string
+	var lanAddr, publicIP *string
 
 	err = s.db.QueryRow(ctx,
-		`SELECT c.id, c.agent_addr, c.public_ip
+		`SELECT c.id, c.lan_addr, c.public_ip
 		   FROM connectors c
 		   LEFT JOIN shields s
 		     ON s.connector_id = c.id
@@ -215,21 +215,21 @@ func (s *service) selectConnector(ctx context.Context, remoteNetworkID, tenantID
 		  WHERE c.remote_network_id = $1
 		    AND c.tenant_id = $2
 		    AND c.status = 'active'
-		    AND (c.agent_addr IS NOT NULL OR c.public_ip IS NOT NULL)
-		  GROUP BY c.id, c.agent_addr, c.public_ip, c.last_heartbeat_at
+		    AND (c.lan_addr IS NOT NULL OR c.public_ip IS NOT NULL)
+		  GROUP BY c.id, c.lan_addr, c.public_ip, c.last_heartbeat_at
 		  ORDER BY COUNT(s.id) ASC, c.last_heartbeat_at DESC NULLS LAST
 		  LIMIT 1`,
 		remoteNetworkID,
 		tenantID,
-	).Scan(&connectorID, &agentAddr, &publicIP)
+	).Scan(&connectorID, &lanAddr, &publicIP)
 	if err != nil {
 		return "", "", fmt.Errorf("select active connector: %w", err)
 	}
 
-	// Prefer agent_addr (operator-configured LAN/internal address) over public_ip.
+	// Prefer lan_addr (auto-detected or operator-configured LAN address) over public_ip.
 	switch {
-	case agentAddr != nil && *agentAddr != "":
-		connectorAddr = *agentAddr
+	case lanAddr != nil && *lanAddr != "":
+		connectorAddr = *lanAddr
 	case publicIP != nil && *publicIP != "":
 		connectorAddr = net.JoinHostPort(*publicIP, "9091")
 	default:

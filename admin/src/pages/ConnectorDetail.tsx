@@ -436,6 +436,11 @@ export default function ConnectorDetail() {
               value={<span className="font-mono text-muted-foreground text-xs">{connector!.publicIp ?? '—'}</span>}
             />
             <InfoRow
+              icon={<Wifi className="w-3.5 h-3.5" />}
+              label="LAN Address"
+              value={<span className="font-mono text-muted-foreground text-xs">{connector!.lanAddr ?? '—'}</span>}
+            />
+            <InfoRow
               icon={<Calendar className="w-3.5 h-3.5" />}
               label="Cert Expires"
               value={

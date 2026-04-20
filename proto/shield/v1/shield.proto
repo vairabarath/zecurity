@@ -44,6 +44,7 @@ message HeartbeatRequest {
   string version   = 2;  // CARGO_PKG_VERSION
   string hostname  = 3;
   string public_ip = 4;  // optional
+  string lan_ip    = 5;  // RFC-1918 address auto-detected on this host, empty if not found
 }
 
 message HeartbeatResponse {
