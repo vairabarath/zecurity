@@ -208,6 +208,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
             shields: shield_server.get_alive_shields(),
+            agent_addr: cfg.agent_addr.clone().unwrap_or_default(),
         });
 
         match client.heartbeat(request).await {

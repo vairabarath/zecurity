@@ -44,6 +44,7 @@ message HeartbeatRequest {
   string hostname     = 3;
   string public_ip    = 4;  // optional
   repeated ShieldHealth shields = 5;
+  string agent_addr   = 6;  // address shields use to reach this connector (e.g. LAN IP:9091)
 }
 
 message HeartbeatResponse {
