@@ -46,14 +46,14 @@ ProtectProc=invisible
 ReadWritePaths=/var/lib/zecurity-connector /etc/zecurity
 
 # Only allow network sockets needed for gRPC + HTTP.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 # Namespace and privilege restrictions
 RestrictNamespaces=true
 RemoveIPC=true
 
 # System call filtering — allow standard service calls, deny privileged ones.
-SystemCallFilter=@system-service ~@privileged
+SystemCallFilter=@system-service
 
 # Capabilities — only what the connector needs for future network tunneling.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
