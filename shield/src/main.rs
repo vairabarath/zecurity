@@ -150,7 +150,7 @@ async fn main() -> anyhow::Result<()> {
     let hb_state = state.clone();
     tokio::spawn(async move {
         if let Err(e) = heartbeat::run(hb_state, hb_cfg).await {
-            error!(error = %e, "heartbeat loop failed");
+            error!("heartbeat loop failed: {:#}", e);
         }
     });
 
