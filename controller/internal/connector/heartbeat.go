@@ -74,7 +74,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		        version = $1,
 		        hostname = $2,
 		        public_ip = $3,
-		        agent_addr = NULLIF($5, ''),
+		        lan_addr = NULLIF($5, ''),
 		        status = 'active',
 		        updated_at = NOW()
 		  WHERE id = $4`,
@@ -82,7 +82,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		req.Hostname,
 		req.PublicIp,
 		connectorID,
-		req.AgentAddr,
+		req.LanAddr,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update connector: %v", err)
@@ -90,7 +90,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 
 	// Step 6 — Process shield health reports from this connector.
 	for _, sh := range req.Shields {
-		if err := h.ShieldSvc.UpdateShieldHealth(ctx, sh.ShieldId, connectorID, sh.Status, sh.Version, sh.LastHeartbeatAt); err != nil {
+		if err := h.ShieldSvc.UpdateShieldHealth(ctx, sh.ShieldId, connectorID, sh.Status, sh.Version, sh.LanIp, sh.LastHeartbeatAt); err != nil {
 			log.Printf("heartbeat: update shield health shield_id=%s: %v", sh.ShieldId, err)
 		}
 	}

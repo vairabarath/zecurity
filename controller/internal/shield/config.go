@@ -14,7 +14,7 @@ import (
 // Used by connector/heartbeat.go and graph resolvers without depending on the concrete type.
 type Service interface {
 	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
-	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version string, lastHeartbeatAt int64) error
+	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) error
 	RunDisconnectWatcher(ctx context.Context)
 }
 

@@ -66,7 +66,7 @@ func scanConnector(s scanner) (*graph.Connector, error) {
 	)
 	if err := s.Scan(
 		&c.ID, &c.Name, &status, &c.RemoteNetworkID,
-		&lastSeenAt, &c.Version, &c.Hostname, &c.PublicIP,
+		&lastSeenAt, &c.Version, &c.Hostname, &c.PublicIP, &c.LanAddr,
 		&certNotAfter, &createdAt,
 	); err != nil {
 		return nil, err
@@ -154,7 +154,7 @@ func (r *queryResolver) loadShields(ctx context.Context, tenantID, remoteNetwork
 func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetworkID string) ([]*graph.Connector, error) {
 	rows, err := r.TenantDB.Query(ctx,
 		`SELECT id, name, status, remote_network_id,
-		        last_heartbeat_at, version, hostname, public_ip,
+		        last_heartbeat_at, version, hostname, public_ip, lan_addr,
 		        cert_not_after, created_at
 		   FROM connectors
 		  WHERE remote_network_id = $1

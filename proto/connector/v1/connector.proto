@@ -44,7 +44,7 @@ message HeartbeatRequest {
   string hostname     = 3;
   string public_ip    = 4;  // optional
   repeated ShieldHealth shields = 5;
-  string agent_addr   = 6;  // address shields use to reach this connector (e.g. LAN IP:9091)
+  string lan_addr     = 6;  // connector's LAN address shields use to connect (e.g. 192.168.1.10:9091)
 }
 
 message HeartbeatResponse {
@@ -77,4 +77,5 @@ message ShieldHealth {
   string status            = 2;
   string version           = 3;
   int64 last_heartbeat_at  = 4;
+  string lan_ip            = 5;  // shield's auto-detected LAN IP (RFC-1918), empty if unknown
 }

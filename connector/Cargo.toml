@@ -26,6 +26,7 @@ semver             = "1"
 reqwest            = { version = "0.13", features = ["json", "rustls"] }
 base64             = "0.22"
 time               = { version = "0.3", features = ["formatting"] }
+if-addrs           = "0.13"
 
 [build-dependencies]
 tonic-build       = "0.14"

@@ -16,7 +16,7 @@
 #   ENROLLMENT_TOKEN      — single-use JWT from the admin UI
 #
 # Optional:
-#   AGENT_ADDR            — address shields use to reach this connector (e.g. "192.168.1.10:9091")
+#   CONNECTOR_LAN_ADDR            — address shields use to reach this connector (e.g. "192.168.1.10:9091")
 #                           Set this to the LAN/internal IP when shields are on the same network.
 #                           If unset, the controller falls back to the connector's public IP.
 #   GITHUB_REPO           — override release source (default: vairabarath/zecurity)
@@ -234,7 +234,7 @@ ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
 AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}
 LOG_LEVEL=info
 STATE_DIR=${STATE_DIR}
-$([ -n "${AGENT_ADDR:-}" ] && echo "AGENT_ADDR=${AGENT_ADDR}")
+$([ -n "${CONNECTOR_LAN_ADDR:-}" ] && echo "CONNECTOR_LAN_ADDR=${CONNECTOR_LAN_ADDR}")
 EOF
 
 # 0660 = root owner can read/write, zecurity group can read/write.

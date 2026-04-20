@@ -186,6 +186,19 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
     let version = env!("CARGO_PKG_VERSION").to_string();
     let interval_secs = cfg.heartbeat_interval_secs;
 
+    let lan_addr = cfg.lan_addr.clone().unwrap_or_else(|| {
+        util::detect_lan_ip()
+            .map(|ip| format!("{}:9091", ip))
+            .unwrap_or_default()
+    });
+    if cfg.lan_addr.is_some() {
+        info!(lan_addr = %lan_addr, "using configured CONNECTOR_LAN_ADDR");
+    } else if !lan_addr.is_empty() {
+        info!(lan_addr = %lan_addr, "auto-detected LAN address");
+    } else {
+        warn!("could not detect LAN address — shields on the same network may be unable to connect");
+    }
+
     info!(
         connector_id = %state.connector_id,
         interval_secs = interval_secs,
@@ -208,7 +221,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
             shields: shield_server.get_alive_shields(),
-            agent_addr: cfg.agent_addr.clone().unwrap_or_default(),
+            lan_addr: lan_addr.clone(),
         });
 
         match client.heartbeat(request).await {

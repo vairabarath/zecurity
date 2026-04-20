@@ -27,6 +27,7 @@ struct ShieldEntry {
     version: String,
     last_seen_unix: i64,
     cert_not_after_unix: i64,
+    lan_ip: String,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +60,7 @@ impl ShieldServer {
                 status: entry.status.clone(),
                 version: entry.version.clone(),
                 last_heartbeat_at: entry.last_seen_unix,
+                lan_ip: entry.lan_ip.clone(),
             })
             .collect()
     }
@@ -200,6 +202,7 @@ impl ShieldService for ShieldServer {
                     version: req.version.clone(),
                     last_seen_unix: now,
                     cert_not_after_unix: verified.cert_not_after_unix,
+                    lan_ip: req.lan_ip.clone(),
                 },
             );
         }
@@ -209,6 +212,7 @@ impl ShieldService for ShieldServer {
             version = %req.version,
             hostname = %req.hostname,
             public_ip = %req.public_ip,
+            lan_ip = %req.lan_ip,
             cert_not_after_unix = verified.cert_not_after_unix,
             "shield heartbeat received"
         );
