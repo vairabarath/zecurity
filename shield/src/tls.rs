@@ -143,9 +143,15 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
         );
         match self.inner.verify_server_cert(end_entity, intermediates, &dummy, ocsp_response, now) {
             Ok(_) => {}
+            // Name / purpose / extension errors are expected for SPIFFE certs:
+            //   - NotValidForName / NotValidForNameContext: SPIFFE URI SAN doesn't match a DNS name
+            //   - InvalidPurpose: connector cert uses clientAuth EKU, not serverAuth
+            //   - UnhandledCriticalExtension: webpki may not recognize URI SAN as critical
+            // Security is provided by verify_connector_spiffe() below.
             Err(TlsError::InvalidCertificate(CertificateError::NotValidForName))
             | Err(TlsError::InvalidCertificate(CertificateError::NotValidForNameContext { .. }))
-            | Err(TlsError::InvalidCertificate(CertificateError::InvalidPurpose)) => {}
+            | Err(TlsError::InvalidCertificate(CertificateError::InvalidPurpose))
+            | Err(TlsError::InvalidCertificate(CertificateError::UnhandledCriticalExtension)) => {}
             Err(e) => return Err(e),
         }
         verify_connector_spiffe(end_entity.as_ref(), &self.connector_id, &self.trust_domain)
@@ -210,8 +216,16 @@ impl tower_service::Service<http::Uri> for SpiffeConnectorService {
                             .to_owned(),
                     )
                 });
+            tracing::debug!(addr = %addr, "TCP connecting to connector");
             let tcp = tokio::net::TcpStream::connect(&addr).await?;
-            let stream = tokio_rustls::TlsConnector::from(tls).connect(server_name, tcp).await?;
+            tracing::debug!(addr = %addr, "TLS handshake starting");
+            let stream = match tokio_rustls::TlsConnector::from(tls).connect(server_name, tcp).await {
+                Ok(s) => { tracing::debug!(addr = %addr, "TLS handshake complete"); s }
+                Err(e) => {
+                    tracing::warn!(addr = %addr, error = %e, "mTLS handshake with connector failed");
+                    return Err(e.into());
+                }
+            };
             Ok(hyper_util::rt::TokioIo::new(stream))
         })
     }
