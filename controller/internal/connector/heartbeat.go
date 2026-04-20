@@ -74,6 +74,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		        version = $1,
 		        hostname = $2,
 		        public_ip = $3,
+		        agent_addr = NULLIF($5, ''),
 		        status = 'active',
 		        updated_at = NOW()
 		  WHERE id = $4`,
@@ -81,6 +82,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		req.Hostname,
 		req.PublicIp,
 		connectorID,
+		req.AgentAddr,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update connector: %v", err)
