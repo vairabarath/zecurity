@@ -55,6 +55,7 @@ query GetRemoteNetworks {
       version
       hostname
       publicIp
+      lanAddr
       certNotAfter
       createdAt
     }
@@ -80,6 +81,7 @@ query GetConnectors($remoteNetworkId: ID!) {
     version
     hostname
     publicIp
+    lanAddr
     certNotAfter
     createdAt
   }
