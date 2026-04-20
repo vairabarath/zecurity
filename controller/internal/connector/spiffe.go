@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -173,10 +174,10 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
-		// Skip Enroll — the connector has no certificate during enrollment.
-		// It authenticates via JWT instead. The exact string must match the
-		// proto-generated constant.
-		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName {
+		// Skip Enroll RPCs — neither connector nor shield has a certificate
+		// during enrollment; both authenticate via JWT instead.
+		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
+			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName {
 			return handler(ctx, req)
 		}
 
@@ -261,4 +262,5 @@ func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trust
 // Compile-time check: ensure the Enroll method name matches expectations.
 // If the proto definition changes, this will fail at compile time.
 var _ = pb.ConnectorService_Enroll_FullMethodName
+var _ = shieldpb.ShieldService_Enroll_FullMethodName
 var _ = appmeta.SPIFFEGlobalTrustDomain
