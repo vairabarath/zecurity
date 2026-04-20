@@ -49,6 +49,7 @@ type ComplexityRoot struct {
 		CreatedAt       func(childComplexity int) int
 		Hostname        func(childComplexity int) int
 		ID              func(childComplexity int) int
+		LanAddr         func(childComplexity int) int
 		LastSeenAt      func(childComplexity int) int
 		Name            func(childComplexity int) int
 		PublicIP        func(childComplexity int) int
@@ -232,6 +233,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Connector.ID(childComplexity), true
+	case "Connector.lanAddr":
+		if e.ComplexityRoot.Connector.LanAddr == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Connector.LanAddr(childComplexity), true
 	case "Connector.lastSeenAt":
 		if e.ComplexityRoot.Connector.LastSeenAt == nil {
 			break
@@ -1345,6 +1352,35 @@ func (ec *executionContext) fieldContext_Connector_publicIp(_ context.Context, f
 	return fc, nil
 }
 
+func (ec *executionContext) _Connector_lanAddr(ctx context.Context, field graphql.CollectedField, obj *Connector) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Connector_lanAddr,
+		func(ctx context.Context) (any, error) {
+			return obj.LanAddr, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Connector_lanAddr(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Connector",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Connector_certNotAfter(ctx context.Context, field graphql.CollectedField, obj *Connector) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -2187,6 +2223,8 @@ func (ec *executionContext) fieldContext_Query_connectors(ctx context.Context, f
 				return ec.fieldContext_Connector_hostname(ctx, field)
 			case "publicIp":
 				return ec.fieldContext_Connector_publicIp(ctx, field)
+			case "lanAddr":
+				return ec.fieldContext_Connector_lanAddr(ctx, field)
 			case "certNotAfter":
 				return ec.fieldContext_Connector_certNotAfter(ctx, field)
 			case "createdAt":
@@ -2607,6 +2645,8 @@ func (ec *executionContext) fieldContext_RemoteNetwork_connectors(_ context.Cont
 				return ec.fieldContext_Connector_hostname(ctx, field)
 			case "publicIp":
 				return ec.fieldContext_Connector_publicIp(ctx, field)
+			case "lanAddr":
+				return ec.fieldContext_Connector_lanAddr(ctx, field)
 			case "certNotAfter":
 				return ec.fieldContext_Connector_certNotAfter(ctx, field)
 			case "createdAt":
@@ -5154,6 +5194,8 @@ func (ec *executionContext) _Connector(ctx context.Context, sel ast.SelectionSet
 			out.Values[i] = ec._Connector_hostname(ctx, field, obj)
 		case "publicIp":
 			out.Values[i] = ec._Connector_publicIp(ctx, field, obj)
+		case "lanAddr":
+			out.Values[i] = ec._Connector_lanAddr(ctx, field, obj)
 		case "certNotAfter":
 			out.Values[i] = ec._Connector_certNotAfter(ctx, field, obj)
 		case "createdAt":

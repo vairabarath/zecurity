@@ -18,6 +18,7 @@ type Connector struct {
 	Version         *string         `json:"version,omitempty"`
 	Hostname        *string         `json:"hostname,omitempty"`
 	PublicIP        *string         `json:"publicIp,omitempty"`
+	LanAddr         *string         `json:"lanAddr,omitempty"`
 	CertNotAfter    *string         `json:"certNotAfter,omitempty"`
 	CreatedAt       string          `json:"createdAt"`
 }
