@@ -145,10 +145,13 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 if [[ "$CONNECTOR_VERSION" == "latest" ]]; then
-    RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download"
-else
-    RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${CONNECTOR_VERSION}"
+    CONNECTOR_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases" \
+        | grep '"tag_name"' | grep '"connector-v' | head -1 \
+        | sed 's/.*"tag_name": "\(.*\)".*/\1/')"
+    [[ -n "$CONNECTOR_VERSION" ]] || err "could not resolve latest connector release from GitHub API"
+    log "resolved latest connector release: ${CONNECTOR_VERSION}"
 fi
+RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${CONNECTOR_VERSION}"
 
 log "downloading binary: ${RELEASE_URL}/${BINARY_NAME}"
 if ! curl -fsSL --max-time 300 "${RELEASE_URL}/${BINARY_NAME}" -o "${TMP_DIR}/${BINARY_NAME}"; then

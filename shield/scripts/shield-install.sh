@@ -213,10 +213,13 @@ download_release() {
     trap 'rm -rf "$TMP_DIR"' EXIT
 
     if [[ "$SHIELD_VERSION" == "latest" ]]; then
-        RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download"
-    else
-        RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${SHIELD_VERSION}"
+        SHIELD_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases" \
+            | grep '"tag_name"' | grep '"shield-v' | head -1 \
+            | sed 's/.*"tag_name": "\(.*\)".*/\1/')"
+        [[ -n "$SHIELD_VERSION" ]] || err "could not resolve latest shield release from GitHub API"
+        log "resolved latest shield release: ${SHIELD_VERSION}"
     fi
+    RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/download/${SHIELD_VERSION}"
 
     log "downloading binary: ${RELEASE_URL}/${BINARY_NAME}"
     curl -fsSL --max-time 300 "${RELEASE_URL}/${BINARY_NAME}" -o "${TMP_DIR}/${BINARY_NAME}" \
