@@ -45,12 +45,31 @@ message HeartbeatRequest {
   string hostname  = 3;
   string public_ip = 4;  // optional
   string lan_ip    = 5;  // RFC-1918 address auto-detected on this host, empty if not found
+  repeated ResourceAck resource_acks = 6;  // Shield reports back results of resource instructions
 }
 
 message HeartbeatResponse {
   bool ok             = 1;
   string latest_version = 2;  // controller/connector informs shield of latest release
   bool re_enroll      = 3;    // true when cert expiring soon, shield should call RenewCert
+  repeated ResourceInstruction resources = 4;  // pending resource instructions from Controller
+}
+
+message ResourceInstruction {
+  string resource_id = 1;
+  string host        = 2;  // must match shield's lan_ip
+  string protocol    = 3;  // "tcp", "udp", "any"
+  int32  port_from   = 4;
+  int32  port_to     = 5;
+  string action      = 6;  // "apply" or "remove"
+}
+
+message ResourceAck {
+  string resource_id    = 1;
+  string status         = 2;  // "protected", "failed", "removed"
+  string error          = 3;  // set only on failure
+  int64  verified_at    = 4;  // unix timestamp of last port check
+  bool   port_reachable = 5;
 }
 
 message RenewCertRequest {

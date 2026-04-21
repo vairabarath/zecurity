@@ -2,6 +2,7 @@ schema:
   - graph/schema.graphqls
   - graph/connector.graphqls
   - graph/shield.graphqls
+  - graph/resource.graphqls
 
 exec:
   filename: graph/generated.go
