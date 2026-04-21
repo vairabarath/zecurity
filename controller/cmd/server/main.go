@@ -167,6 +167,7 @@ func main() {
 		Pool:       db.Pool,
 		Redis:      valkeycompat.NewAdapter(connectorValkey),
 		PKIService: pkiService,
+		ShieldSvc: shieldSvc,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
