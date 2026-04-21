@@ -48,3 +48,38 @@ mutation RevokeShield($id: ID!) {
 mutation DeleteShield($id: ID!) {
   deleteShield(id: $id)
 }
+
+mutation CreateResource($input: CreateResourceInput!) {
+  createResource(input: $input) {
+    id
+    name
+    description
+    host
+    protocol
+    portFrom
+    portTo
+    status
+    shield {
+      id
+      name
+    }
+  }
+}
+
+mutation ProtectResource($id: ID!) {
+  protectResource(id: $id) {
+    id
+    status
+  }
+}
+
+mutation UnprotectResource($id: ID!) {
+  unprotectResource(id: $id) {
+    id
+    status
+  }
+}
+
+mutation DeleteResource($id: ID!) {
+  deleteResource(id: $id)
+}
