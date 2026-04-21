@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/resource"
 )
 
 const rfc3339 = "2006-01-02T15:04:05Z07:00"
@@ -149,6 +150,35 @@ func (r *queryResolver) loadShields(ctx context.Context, tenantID, remoteNetwork
 		result = []*graph.Shield{}
 	}
 	return result, nil
+}
+
+func toResourceGQL(row *resource.Row) *graph.Resource {
+	res := &graph.Resource{
+		ID:             row.ID,
+		Name:           row.Name,
+		Description:    row.Description,
+		Host:           row.Host,
+		Protocol:       row.Protocol,
+		PortFrom:       row.PortFrom,
+		PortTo:         row.PortTo,
+		Status:         row.Status,
+		ErrorMessage:   row.ErrorMessage,
+		AppliedAt:      fmtTimePtr(row.AppliedAt),
+		LastVerifiedAt: fmtTimePtr(row.LastVerifiedAt),
+		CreatedAt:      fmtTime(row.CreatedAt),
+		RemoteNetwork: &graph.RemoteNetwork{
+			ID:   row.RemoteNetworkID,
+			Name: row.NetworkName,
+		},
+	}
+	if row.ShieldName != nil {
+		res.Shield = &graph.Shield{
+			ID:     row.ShieldID,
+			Name:   *row.ShieldName,
+			Status: graph.ShieldStatus(strings.ToUpper(*row.ShieldStatus)),
+		}
+	}
+	return res
 }
 
 func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetworkID string) ([]*graph.Connector, error) {

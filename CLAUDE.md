@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 4 is the active sprint.** The team is building the Shield agent (resource host binary with SPIFFE identity, heartbeat through Connector, zecurity0 TUN interface, nftables base table).
+**Sprint 5 is the active sprint.** The team is building resource protection — Admin defines resources on a Shield host, Shield applies nftables rules to make services invisible on LAN but accessible via zecurity0. Status tracked through `pending → managing → protecting → protected` lifecycle via heartbeat piggyback.
 
 ---
 
@@ -17,7 +17,7 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint4/path.md` — dependency map and progress checkboxes
+2. Read `.zecurity-obs/Sprint5/path.md` — dependency map and progress checkboxes
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
 4. Brief them: what they're building, which files to touch, and the build check command
 
@@ -30,8 +30,8 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint4/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint4/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint5/path.md` | Dependency map + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint5/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
@@ -53,6 +53,9 @@ cd admin && npm run codegen                                  # Frontend TS hooks
 
 - Build gate passes before proceeding to next phase
 - Never change proto field numbers
-- Check `Sprint4/path.md` conflict zone table before editing shared files
+- Check `Sprint5/path.md` conflict zone table before editing shared files
 - `appmeta` constants must be identical in Go and Rust
 - Shield heartbeats to Connector `:9091` only — never directly to Controller
+- Shield validates `resource.host == detect_lan_ip()` before applying nftables
+- nftables `chain resource_protect` always flushed + rebuilt atomically — never appended
+- Resource instructions delivered via heartbeat piggyback only — no new RPCs
