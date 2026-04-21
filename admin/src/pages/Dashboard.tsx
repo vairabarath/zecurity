@@ -230,7 +230,7 @@ export default function Dashboard() {
         >
           <div className="rounded-xl border border-border bg-white overflow-hidden h-full">
             <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
-              <Plug className="w-4 h-4 text-primary" />
+              <img src="/icons/workspace_svg.svg" className="w-7 h-7 text-primary" alt="Workspace" />
               <h2 className="font-semibold text-foreground">Workspace</h2>
             </div>
             <div className="p-5 space-y-4">
