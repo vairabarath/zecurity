@@ -10,9 +10,9 @@ tags:
 
 ---
 
-## Current State (2026-04-16)
+## Current State (2026-04-21)
 
-Three sprints complete. The connector is fully operational with automatic cert renewal. Sprint 4 is now planned and underway — deploying the Shield agent on resource hosts with SPIFFE identity, zecurity0 interface, and nftables-based network protection.
+Four sprints complete. Shield agent is fully deployed — SPIFFE identity, zecurity0 interface, nftables base table, heartbeat via Connector. Sprint 5 is now active — resource protection: Admin defines resources, Shield applies nftables to make services invisible on LAN but accessible via zecurity0.
 
 ---
 
@@ -40,27 +40,40 @@ Three sprints complete. The connector is fully operational with automatic cert r
 - Zero downtime, zero admin action
 - `CONNECTOR_RENEWAL_WINDOW` env var (default 48h)
 
-### 🚧 Sprint 4 — Shield Deployment (In Progress)
+### ✅ Sprint 4 — Shield Deployment (Complete)
 
 **Goal:** Deploy a Shield on any resource host, see it appear ACTIVE in the dashboard, watch it go DISCONNECTED if the server goes offline, and have its `zecurity0` interface + base nftables table set up automatically on enrollment.
-
-**Team split:**
-- **M1 (Frontend):** Shields page, NetworkHealth indicator, Sidebar nav, GraphQL operations
-- **M2 (Go — Proto + Shield + PKI):** shield.proto, appmeta constants, `internal/shield/` package, `SignShieldCert`, main.go wiring
-- **M3 (Go — DB + GraphQL + Connector):** DB migration, GraphQL schema + resolvers, Connector Goodbye RPC, ShieldHealth processing, `agent_server.rs`
-- **M4 (Rust — Shield + CI):** `shield/` crate, enrollment, heartbeat, `network.rs` (zecurity0 + nftables), systemd, CI
 
 **Key decisions locked:**
 - Shield binary: `zecurity-shield`, service: `zecurity-shield.service`
 - Shield SPIFFE: `spiffe://ws-<slug>.zecurity.in/shield/<id>`
 - Shield cert TTL: 7 days, renewal window: 48h
 - Shield heartbeats to Connector `:9091` (NOT Controller directly)
-- Connector gets a new Shield-facing gRPC server on `:9091`
 - Interface: `zecurity0` (TUN, CGNAT 100.64.0.0/10)
-- Shield network setup uses `rtnetlink` for interface configuration and typed nftables ruleset generation in Rust
-- Connector gets `Goodbye` RPC for clean shutdown → immediate DISCONNECTED
+- lan_addr (connector) + lan_ip (shield) auto-detected via if_addrs crate
 
-**Tracking:** [[Sprint4/path.md]] — full dependency map with checkboxes
+**Tracking:** [[Sprint4/path.md]]
+
+---
+
+### 🚧 Sprint 5 — Resource Protection (In Progress)
+
+**Goal:** Admin defines a resource (IP + port) on a Shield host → Shield applies nftables rules to make the service invisible on LAN but accessible via `zecurity0` → status tracked through `pending → managing → protecting → protected` lifecycle via heartbeat piggyback.
+
+**Team split:**
+- **M1 (Frontend):** Resources page, CreateResourceModal, Protect/Unprotect buttons
+- **M2 (Go — Proto + DB + Schema):** ResourceInstruction/Ack proto messages, migration 007, `graph/resource.graphqls`
+- **M3 (Go — Controller + Connector relay):** resource package, resolvers, heartbeat injection + ack processing, connector relay
+- **M4 (Rust — Shield):** `resources.rs`, nftables `chain resource_protect`, 30s port health check loop, heartbeat ack
+
+**Key decisions locked:**
+- Shield auto-matched by `lan_ip == resource.host` — admin never picks shield manually
+- Shield validates host IP before applying nftables (defense in depth)
+- Resource check interval: 30s (separate from 60s heartbeat)
+- nftables chain flushed + rebuilt atomically on every change
+- No new RPCs — instructions ride on existing HeartbeatResponse (heartbeat piggyback)
+
+**Tracking:** [[Sprint5/path.md]] — full dependency map with checkboxes
 
 ---
 
@@ -89,13 +102,12 @@ CONNECTOR_HEARTBEAT_INTERVAL=5s
 
 ---
 
-## Sprint 5 — Resource Discovery (Planned)
+## Sprint 6 — Connector Fallback (Planned)
 
-After Shield is deployed and active:
-- RDE: Connector scans network, reports reachable services
-- Admin adds resource definitions (IP/port/protocol)
-- Per-resource nftables DROP rules delivered via Shield
-- "Protect" button in admin UI triggers rule push
+After resource protection is stable:
+- Shield can failover to a secondary Connector if primary goes offline
+- Join table for M:N shield-connector assignments
+- Admin assigns fallback connector per shield
 
 ---
 
