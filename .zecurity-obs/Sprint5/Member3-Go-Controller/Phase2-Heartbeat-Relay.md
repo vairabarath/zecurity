@@ -1,6 +1,6 @@
 ---
 type: task
-status: pending
+status: done
 sprint: 5
 member: M3
 phase: 2

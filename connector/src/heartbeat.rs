@@ -215,6 +215,9 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
     loop {
         heartbeat_interval.tick().await;
 
+        // Drain any ResourceAcks collected from shield heartbeats since last cycle.
+        let resource_acks = shield_server.drain_resource_acks();
+
         let request = tonic::Request::new(proto::HeartbeatRequest {
             connector_id: current_state.connector_id.clone(),
             version: version.clone(),
@@ -222,6 +225,7 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
             public_ip: public_ip.clone(),
             shields: shield_server.get_alive_shields(),
             lan_addr: lan_addr.clone(),
+            resource_acks,
         });
 
         match client.heartbeat(request).await {
@@ -229,8 +233,19 @@ pub async fn run_heartbeat(cfg: &ConnectorConfig, state: &EnrollmentState, shiel
                 let resp = response.into_inner();
                 backoff_secs = BACKOFF_INITIAL_SECS; // reset on success
 
+                // Forward resource instructions to each shield via the cached map.
+                for (shield_id, instructions) in &resp.shield_resources {
+                    shield_server.update_resource_instructions(
+                        shield_id,
+                        instructions.instructions.clone(),
+                    );
+                }
+
                 if resp.ok {
-                    info!("heartbeat ok");
+                    info!(
+                        pending_shield_resources = resp.shield_resources.len(),
+                        "heartbeat ok"
+                    );
                 } else {
                     warn!("heartbeat returned ok=false");
                 }

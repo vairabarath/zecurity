@@ -28,6 +28,16 @@ type ConnectorToken struct {
 	InstallCommand string `json:"installCommand"`
 }
 
+type CreateResourceInput struct {
+	RemoteNetworkID string  `json:"remoteNetworkId"`
+	Name            string  `json:"name"`
+	Description     *string `json:"description,omitempty"`
+	Host            string  `json:"host"`
+	Protocol        string  `json:"protocol"`
+	PortFrom        int     `json:"portFrom"`
+	PortTo          int     `json:"portTo"`
+}
+
 type Mutation struct {
 }
 
@@ -43,6 +53,23 @@ type RemoteNetwork struct {
 	NetworkHealth NetworkHealth       `json:"networkHealth"`
 	Shields       []*Shield           `json:"shields"`
 	CreatedAt     string              `json:"createdAt"`
+}
+
+type Resource struct {
+	ID             string         `json:"id"`
+	Name           string         `json:"name"`
+	Description    *string        `json:"description,omitempty"`
+	Host           string         `json:"host"`
+	Protocol       string         `json:"protocol"`
+	PortFrom       int            `json:"portFrom"`
+	PortTo         int            `json:"portTo"`
+	Status         string         `json:"status"`
+	ErrorMessage   *string        `json:"errorMessage,omitempty"`
+	AppliedAt      *string        `json:"appliedAt,omitempty"`
+	LastVerifiedAt *string        `json:"lastVerifiedAt,omitempty"`
+	CreatedAt      string         `json:"createdAt"`
+	Shield         *Shield        `json:"shield,omitempty"`
+	RemoteNetwork  *RemoteNetwork `json:"remoteNetwork"`
 }
 
 type Shield struct {

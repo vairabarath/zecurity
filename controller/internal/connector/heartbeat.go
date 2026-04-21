@@ -8,7 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/resource"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -95,11 +97,49 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 		}
 	}
 
-	// Step 7 — Return success.
-	// re_enroll = true when cert expiring within the renewal window.
+	// Step 7 — Process ResourceAcks forwarded from shields via this connector.
+	for _, ack := range req.ResourceAcks {
+		if err := resource.RecordAck(ctx, h.Pool, ack.ResourceId, ack.Status, ack.Error, ack.VerifiedAt, ack.PortReachable); err != nil {
+			log.Printf("heartbeat: record resource ack resource_id=%s: %v", ack.ResourceId, err)
+		}
+	}
+
+	// Step 8 — Inject pending resource instructions for each active shield.
+	shieldResources := make(map[string]*pb.ShieldResourceInstructions)
+	for _, sh := range req.Shields {
+		pending, err := resource.GetPendingForShield(ctx, h.Pool, sh.ShieldId)
+		if err != nil {
+			log.Printf("heartbeat: get pending resources shield_id=%s: %v", sh.ShieldId, err)
+			continue
+		}
+		if len(pending) == 0 {
+			continue
+		}
+		instructions := make([]*shieldpb.ResourceInstruction, 0, len(pending))
+		for _, r := range pending {
+			action := "apply"
+			if r.Status == "removing" {
+				action = "remove"
+			}
+			instructions = append(instructions, &shieldpb.ResourceInstruction{
+				ResourceId: r.ID,
+				Host:       r.Host,
+				Protocol:   r.Protocol,
+				PortFrom:   int32(r.PortFrom),
+				PortTo:     int32(r.PortTo),
+				Action:     action,
+			})
+		}
+		shieldResources[sh.ShieldId] = &pb.ShieldResourceInstructions{
+			Instructions: instructions,
+		}
+	}
+
+	// Step 9 — Return success.
 	return &pb.HeartbeatResponse{
-		Ok:       true,
-		ReEnroll: reEnroll,
+		Ok:              true,
+		ReEnroll:        reEnroll,
+		ShieldResources: shieldResources,
 	}, nil
 }
 

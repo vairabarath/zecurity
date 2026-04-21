@@ -64,12 +64,12 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### DAY 1 — Unblocking Work (Must land before anyone fans out)
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `ResourceInstruction` + `ResourceAck` messages; add `resources` to `HeartbeatResponse`; add `resource_acks` to `HeartbeatRequest`
-- [ ] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `ShieldResourceInstructions` wrapper; add `shield_resources` map to `HeartbeatResponse`; add `resource_acks` to `HeartbeatRequest`
-- [ ] **M2-D1-C** `controller/migrations/007_resources.sql` — `resources` table with all columns + partial indexes
-- [ ] **M2-D1-D** `controller/graph/resource.graphqls` — `Resource` type, `CreateResource` mutation, `GetResources` + `GetAllResources` queries, `ProtectResource` + `UnprotectResource` + `DeleteResource` mutations
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `ResourceInstruction` + `ResourceAck` messages; add `resources` to `HeartbeatResponse`; add `resource_acks` to `HeartbeatRequest`
+- [x] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `ShieldResourceInstructions` wrapper; add `shield_resources` map to `HeartbeatResponse`; add `resource_acks` to `HeartbeatRequest`
+- [x] **M2-D1-C** `controller/migrations/007_resources.sql` — `resources` table with all columns + partial indexes
+- [x] **M2-D1-D** `controller/graph/resource.graphqls` — `Resource` type, `CreateResource` mutation, `GetResources` + `GetAllResources` queries, `ProtectResource` + `UnprotectResource` + `DeleteResource` mutations
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
+- [x] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
 
 > After Day 1 checkboxes are done: M1 can start layout, M3 can start resource package, M4 can start resources.rs scaffold.
 
@@ -77,8 +77,8 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### PHASE A — M2 Resource Package (Depends on: Day 1 done)
 
-- [ ] **M2-A1** `controller/internal/resource/config.go` — `ResourceConfig` struct, `NewConfig()`, duration constants
-- [ ] **M2-A2** `controller/internal/resource/store.go` — DB helpers: `CreateResource` (auto-match shield by lan_ip), `GetPendingForShield`, `UpdateStatus`, `RecordAck`, `MarkRemoving`, `SoftDelete`
+- [x] **M2-A1** `controller/internal/resource/config.go` — `ResourceConfig` struct, `NewConfig()`, duration constants
+- [x] **M2-A2** `controller/internal/resource/store.go` — DB helpers: `CreateResource` (auto-match shield by lan_ip), `GetPendingForShield`, `UpdateStatus`, `RecordAck`, `MarkRemoving`, `SoftDelete`
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -86,8 +86,8 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### PHASE B — M3 Resolvers (Depends on: Day 1 done + M2-A done)
 
-- [ ] **M3-B1** `controller/graph/resolvers/resource.resolvers.go` — `CreateResource` (auto-match shield), `ProtectResource` (status → managing), `UnprotectResource` (status → removing), `DeleteResource` (soft delete), `GetResources(shieldId)`, `GetAllResources`
-- [ ] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toResourceGQL()` mapper
+- [x] **M3-B1** `controller/graph/resolvers/resource.resolvers.go` — `CreateResource` (auto-match shield), `ProtectResource` (status → managing), `UnprotectResource` (status → removing), `DeleteResource` (soft delete), `GetResources(shieldId)`, `GetAllResources`
+- [x] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toResourceGQL()` mapper
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -95,9 +95,9 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### PHASE C — M3 Connector Heartbeat Relay (Depends on: Day 1 proto done + M3-B done)
 
-- [ ] **M3-C1** `controller/internal/connector/heartbeat.go` — MODIFY: after updating connector row, query `GetPendingForShield` for each active shield → inject into `HeartbeatResponse.shield_resources`; process `req.resource_acks` → call `resource.RecordAck()`
-- [ ] **M3-C2** `connector/src/agent_server.rs` — MODIFY: cache `Vec<ResourceInstruction>` per shield_id from Connector HeartbeatResponse; return cached instructions in Shield `HeartbeatResponse.resources`; collect Shield `ResourceAck`s and store in `ShieldHealth`
-- [ ] **M3-C3** `connector/src/heartbeat.rs` — MODIFY: collect `resource_acks` from all `ShieldHealth` entries → forward in `HeartbeatRequest.resource_acks` to Controller
+- [x] **M3-C1** `controller/internal/connector/heartbeat.go` — MODIFY: after updating connector row, query `GetPendingForShield` for each active shield → inject into `HeartbeatResponse.shield_resources`; process `req.resource_acks` → call `resource.RecordAck()`
+- [x] **M3-C2** `connector/src/agent_server.rs` — MODIFY: cache `Vec<ResourceInstruction>` per shield_id from Connector HeartbeatResponse; return cached instructions in Shield `HeartbeatResponse.resources`; collect Shield `ResourceAck`s and store in `ShieldHealth`
+- [x] **M3-C3** `connector/src/heartbeat.rs` — MODIFY: collect `resource_acks` from all `ShieldHealth` entries → forward in `HeartbeatRequest.resource_acks` to Controller
 
 > Build check: `cd controller && go build ./...` + `cd connector && cargo build` must pass.
 
