@@ -9,6 +9,7 @@ import {
   Plug,
   Plus,
   CheckCircle2,
+  Box,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -26,6 +27,7 @@ const sections = [
       { to: '/remote-networks', label: 'Remote Networks', icon: Network },
       { to: '/connectors', label: 'Connectors', icon: Plug },
       { to: '/shields', label: 'Shields', icon: Shield },
+      { to: '/resources', label: 'Resources', icon: Box },
     ],
   },
   {

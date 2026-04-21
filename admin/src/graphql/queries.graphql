@@ -139,3 +139,52 @@ query GetShield($id: ID!) {
     remoteNetworkId
   }
 }
+
+query GetAllResources {
+  allResources {
+    id
+    name
+    description
+    host
+    protocol
+    portFrom
+    portTo
+    status
+    errorMessage
+    appliedAt
+    lastVerifiedAt
+    createdAt
+    shield {
+      id
+      name
+      status
+      lanIp
+    }
+    remoteNetwork {
+      id
+      name
+    }
+  }
+}
+
+query GetResources($remoteNetworkId: String!) {
+  resources(remoteNetworkId: $remoteNetworkId) {
+    id
+    name
+    description
+    host
+    protocol
+    portFrom
+    portTo
+    status
+    errorMessage
+    lastVerifiedAt
+    appliedAt
+    createdAt
+    shield {
+      id
+      name
+      status
+    }
+  }
+}
