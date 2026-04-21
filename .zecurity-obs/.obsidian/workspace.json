@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Sprint5/Member3-Go-Controller/Phase2-Heartbeat-Relay.md",
+                "file": "Sprint5/path.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Phase2-Heartbeat-Relay"
+              "title": "path"
             }
           }
         ]
@@ -186,15 +186,17 @@
   },
   "active": "01673fd5434e31d9",
   "lastOpenFiles": [
+    "Sprint4/path.md",
+    "Sprint4/team-workflow.md",
+    "Sprint5/path.md",
+    "Home.md",
+    "Sprint5/Member3-Go-Controller/Phase2-Heartbeat-Relay.md",
     "Sprint5/Member3-Go-Controller/Phase1-Resolvers.md",
     "Sprint5/Member4-Rust-Shield/Phase2-Heartbeat-Ack.md",
     "Sprint5/Member4-Rust-Shield/Phase1-Resources-Module.md",
-    "Sprint5/Member3-Go-Controller/Phase2-Heartbeat-Relay.md",
     "Sprint5/Member2-Go-Proto-DB/Phase2-Resource-Package.md",
     "Sprint5/Member2-Go-Proto-DB/Phase1-Proto-Migration-Schema.md",
     "Sprint5/Member1-Frontend/Phase1-Resources-Page.md",
-    "Sprint4/path.md",
-    "Sprint4/team-workflow.md",
     "Sprint4/Member3-Go-DB-GraphQL/Phase5-AgentServer-Rust.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase4-Heartbeat-Renewal.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
@@ -205,13 +207,11 @@
     "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",
     "Sprint4/Member2-Go-Proto-Shield/Phase4-Main-Wiring.md",
     "Services/Shield.md",
-    "Home.md",
     "Services/PKI.md",
     "Services/Controller.md",
     "Architecture/Connector Lifecycle.excalidraw.md",
     "Sprint4/Member2-Go-Proto-Shield/Phase1-Proto-appmeta.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase1-Crate-Scaffold.md",
-    "Planning/Session Log.md",
     "Architecture/Connector Lifecycle.canvas",
     "Architecture/System Overview.canvas",
     "Architecture/Connector Lifecycle.excalidraw.md.tmp.10855.1776310006594",
