@@ -38,14 +38,27 @@ mod util;
 ///   proto::connector_service_client::ConnectorServiceClient  — gRPC client
 ///   proto::EnrollRequest, proto::EnrollResponse              — enrollment types
 ///   proto::HeartbeatRequest, proto::HeartbeatResponse        — heartbeat types
-pub mod proto {
-    tonic::include_proto!("connector.v1");
+/// Generated Shield gRPC stubs — nested as shield::v1 so the connector.v1
+/// generated code can reach them via super::super::shield::v1 from within
+/// the connector::v1 module below.
+pub mod shield {
+    pub mod v1 {
+        tonic::include_proto!("shield.v1");
+    }
 }
+/// Alias so existing agent_server.rs code can use `crate::shield_proto::*`.
+pub use shield::v1 as shield_proto;
 
-/// Generated Shield gRPC stubs used by the Shield-facing Connector server.
-pub mod shield_proto {
-    tonic::include_proto!("shield.v1");
+/// Generated connector gRPC stubs — nested as connector::v1 so that the
+/// super::super::shield::v1 cross-package paths in generated code resolve
+/// correctly (super = connector, super::super = crate root → shield::v1).
+pub mod connector {
+    pub mod v1 {
+        tonic::include_proto!("connector.v1");
+    }
 }
+/// Alias so existing heartbeat.rs / enrollment.rs code can use `proto::*`.
+pub use connector::v1 as proto;
 
 use std::fs;
 use std::net::SocketAddr;
