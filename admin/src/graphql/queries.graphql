@@ -64,10 +64,8 @@ query GetRemoteNetworks {
       name
       status
       lastSeenAt
-      version
       hostname
       interfaceAddr
-      connectorId
     }
   }
 }
@@ -84,6 +82,22 @@ query GetConnectors($remoteNetworkId: ID!) {
     lanAddr
     certNotAfter
     createdAt
+  }
+}
+
+query GetConnector($id: ID!) {
+  connector(id: $id) {
+    id
+    name
+    status
+    lastSeenAt
+    version
+    hostname
+    publicIp
+    lanAddr
+    certNotAfter
+    createdAt
+    remoteNetworkId
   }
 }
 
@@ -104,10 +118,24 @@ query GetShields($remoteNetworkId: ID!) {
     lastSeenAt
     version
     hostname
-    publicIp
+    interfaceAddr
+    connectorId
+  }
+}
+
+query GetShield($id: ID!) {
+  shield(id: $id) {
+    id
+    name
+    status
+    lastSeenAt
+    version
+    hostname
+    lanIp
     interfaceAddr
     certNotAfter
     createdAt
     connectorId
+    remoteNetworkId
   }
 }

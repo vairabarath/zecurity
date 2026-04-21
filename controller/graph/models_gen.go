@@ -54,7 +54,7 @@ type Shield struct {
 	LastSeenAt      *string      `json:"lastSeenAt,omitempty"`
 	Version         *string      `json:"version,omitempty"`
 	Hostname        *string      `json:"hostname,omitempty"`
-	PublicIP        *string      `json:"publicIp,omitempty"`
+	LanIP           *string      `json:"lanIp,omitempty"`
 	InterfaceAddr   *string      `json:"interfaceAddr,omitempty"`
 	CertNotAfter    *string      `json:"certNotAfter,omitempty"`
 	CreatedAt       string       `json:"createdAt"`

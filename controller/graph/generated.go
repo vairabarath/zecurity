@@ -76,6 +76,7 @@ type ComplexityRoot struct {
 	}
 
 	Query struct {
+		Connector               func(childComplexity int, id string) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
@@ -105,9 +106,9 @@ type ComplexityRoot struct {
 		Hostname        func(childComplexity int) int
 		ID              func(childComplexity int) int
 		InterfaceAddr   func(childComplexity int) int
+		LanIP           func(childComplexity int) int
 		LastSeenAt      func(childComplexity int) int
 		Name            func(childComplexity int) int
-		PublicIP        func(childComplexity int) int
 		RemoteNetworkID func(childComplexity int) int
 		Status          func(childComplexity int) int
 		Version         func(childComplexity int) int
@@ -169,6 +170,7 @@ type QueryResolver interface {
 	RemoteNetworks(ctx context.Context) ([]*RemoteNetwork, error)
 	RemoteNetwork(ctx context.Context, id string) (*RemoteNetwork, error)
 	Connectors(ctx context.Context, remoteNetworkID string) ([]*Connector, error)
+	Connector(ctx context.Context, id string) (*Connector, error)
 	Shields(ctx context.Context, remoteNetworkID string) ([]*Shield, error)
 	Shield(ctx context.Context, id string) (*Shield, error)
 }
@@ -389,6 +391,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Mutation.RevokeShield(childComplexity, args["id"].(string)), true
 
+	case "Query.connector":
+		if e.ComplexityRoot.Query.Connector == nil {
+			break
+		}
+
+		args, err := ec.field_Query_connector_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Connector(childComplexity, args["id"].(string)), true
 	case "Query.connectors":
 		if e.ComplexityRoot.Query.Connectors == nil {
 			break
@@ -560,6 +573,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Shield.InterfaceAddr(childComplexity), true
+	case "Shield.lanIp":
+		if e.ComplexityRoot.Shield.LanIP == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Shield.LanIP(childComplexity), true
 	case "Shield.lastSeenAt":
 		if e.ComplexityRoot.Shield.LastSeenAt == nil {
 			break
@@ -572,12 +591,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Shield.Name(childComplexity), true
-	case "Shield.publicIp":
-		if e.ComplexityRoot.Shield.PublicIP == nil {
-			break
-		}
-
-		return e.ComplexityRoot.Shield.PublicIP(childComplexity), true
 	case "Shield.remoteNetworkId":
 		if e.ComplexityRoot.Shield.RemoteNetworkID == nil {
 			break
@@ -941,6 +954,17 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 		return nil, err
 	}
 	args["name"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_connector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
 	return args, nil
 }
 
@@ -2247,6 +2271,71 @@ func (ec *executionContext) fieldContext_Query_connectors(ctx context.Context, f
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_connector(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_connector,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Connector(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnector,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_connector(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Connector_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Connector_name(ctx, field)
+			case "status":
+				return ec.fieldContext_Connector_status(ctx, field)
+			case "remoteNetworkId":
+				return ec.fieldContext_Connector_remoteNetworkId(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_Connector_lastSeenAt(ctx, field)
+			case "version":
+				return ec.fieldContext_Connector_version(ctx, field)
+			case "hostname":
+				return ec.fieldContext_Connector_hostname(ctx, field)
+			case "publicIp":
+				return ec.fieldContext_Connector_publicIp(ctx, field)
+			case "lanAddr":
+				return ec.fieldContext_Connector_lanAddr(ctx, field)
+			case "certNotAfter":
+				return ec.fieldContext_Connector_certNotAfter(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Connector_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Connector", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_connector_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_shields(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -2288,8 +2377,8 @@ func (ec *executionContext) fieldContext_Query_shields(ctx context.Context, fiel
 				return ec.fieldContext_Shield_version(ctx, field)
 			case "hostname":
 				return ec.fieldContext_Shield_hostname(ctx, field)
-			case "publicIp":
-				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "lanIp":
+				return ec.fieldContext_Shield_lanIp(ctx, field)
 			case "interfaceAddr":
 				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
 			case "certNotAfter":
@@ -2355,8 +2444,8 @@ func (ec *executionContext) fieldContext_Query_shield(ctx context.Context, field
 				return ec.fieldContext_Shield_version(ctx, field)
 			case "hostname":
 				return ec.fieldContext_Shield_hostname(ctx, field)
-			case "publicIp":
-				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "lanIp":
+				return ec.fieldContext_Shield_lanIp(ctx, field)
 			case "interfaceAddr":
 				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
 			case "certNotAfter":
@@ -2727,8 +2816,8 @@ func (ec *executionContext) fieldContext_RemoteNetwork_shields(_ context.Context
 				return ec.fieldContext_Shield_version(ctx, field)
 			case "hostname":
 				return ec.fieldContext_Shield_hostname(ctx, field)
-			case "publicIp":
-				return ec.fieldContext_Shield_publicIp(ctx, field)
+			case "lanIp":
+				return ec.fieldContext_Shield_lanIp(ctx, field)
 			case "interfaceAddr":
 				return ec.fieldContext_Shield_interfaceAddr(ctx, field)
 			case "certNotAfter":
@@ -3003,14 +3092,14 @@ func (ec *executionContext) fieldContext_Shield_hostname(_ context.Context, fiel
 	return fc, nil
 }
 
-func (ec *executionContext) _Shield_publicIp(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
+func (ec *executionContext) _Shield_lanIp(ctx context.Context, field graphql.CollectedField, obj *Shield) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
 		ec.OperationContext,
 		field,
-		ec.fieldContext_Shield_publicIp,
+		ec.fieldContext_Shield_lanIp,
 		func(ctx context.Context) (any, error) {
-			return obj.PublicIP, nil
+			return obj.LanIP, nil
 		},
 		nil,
 		ec.marshalOString2ᚖstring,
@@ -3019,7 +3108,7 @@ func (ec *executionContext) _Shield_publicIp(ctx context.Context, field graphql.
 	)
 }
 
-func (ec *executionContext) fieldContext_Shield_publicIp(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_Shield_lanIp(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "Shield",
 		Field:      field,
@@ -5545,6 +5634,25 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "connector":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_connector(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "shields":
 			field := field
 
@@ -5733,8 +5841,8 @@ func (ec *executionContext) _Shield(ctx context.Context, sel ast.SelectionSet, o
 			out.Values[i] = ec._Shield_version(ctx, field, obj)
 		case "hostname":
 			out.Values[i] = ec._Shield_hostname(ctx, field, obj)
-		case "publicIp":
-			out.Values[i] = ec._Shield_publicIp(ctx, field, obj)
+		case "lanIp":
+			out.Values[i] = ec._Shield_lanIp(ctx, field, obj)
 		case "interfaceAddr":
 			out.Values[i] = ec._Shield_interfaceAddr(ctx, field, obj)
 		case "certNotAfter":
@@ -7010,6 +7118,13 @@ func (ec *executionContext) marshalOBoolean2ᚖbool(ctx context.Context, sel ast
 	_ = ctx
 	res := graphql.MarshalBoolean(*v)
 	return res
+}
+
+func (ec *executionContext) marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnector(ctx context.Context, sel ast.SelectionSet, v *Connector) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._Connector(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v *RemoteNetwork) graphql.Marshaler {

@@ -18,7 +18,6 @@ import {
   Globe,
   Network,
   Clock,
-  Server,
   Plug,
   ArrowRight,
   Inbox,
@@ -196,7 +195,7 @@ export default function Dashboard() {
                     className="flex items-center gap-3 p-3 rounded-xl bg-muted/40 hover:bg-muted transition-colors"
                   >
                     <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/10 text-primary shrink-0">
-                      <Server className="w-4 h-4" />
+                      <Plug className="w-4 h-4" />
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
@@ -231,7 +230,7 @@ export default function Dashboard() {
         >
           <div className="rounded-xl border border-border bg-white overflow-hidden h-full">
             <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
-              <Server className="w-4 h-4 text-primary" />
+              <Plug className="w-4 h-4 text-primary" />
               <h2 className="font-semibold text-foreground">Workspace</h2>
             </div>
             <div className="p-5 space-y-4">
