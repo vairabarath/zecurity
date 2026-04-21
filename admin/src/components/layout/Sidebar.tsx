@@ -1,12 +1,12 @@
 import { NavLink } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { 
-  LayoutDashboard, 
-  Network, 
-  Settings, 
+  LayoutDashboard,
+  Network,
+  Settings,
   Shield,
   Activity,
-  Globe,
+  Plug,
   Plus,
   CheckCircle2,
 } from 'lucide-react'
@@ -24,7 +24,7 @@ const sections = [
     label: 'Infrastructure',
     items: [
       { to: '/remote-networks', label: 'Remote Networks', icon: Network },
-      { to: '/connectors', label: 'Connectors', icon: Globe },
+      { to: '/connectors', label: 'Connectors', icon: Plug },
       { to: '/shields', label: 'Shields', icon: Shield },
     ],
   },
