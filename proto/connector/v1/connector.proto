@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package connector.v1;
 
+import "proto/shield/v1/shield.proto";
+
 option go_package = "github.com/yourorg/ztna/controller/gen/go/connector/v1;connectorv1";
 
 service ConnectorService {
@@ -45,12 +47,19 @@ message HeartbeatRequest {
   string public_ip    = 4;  // optional
   repeated ShieldHealth shields = 5;
   string lan_addr     = 6;  // connector's LAN address shields use to connect (e.g. 192.168.1.10:9091)
+  repeated shield.v1.ResourceAck resource_acks = 7;  // forwarded from all shields on this connector
 }
 
 message HeartbeatResponse {
   bool   ok             = 1;
   string latest_version = 2;  // controller informs connector of latest release
   bool   re_enroll      = 3;  // true when cert expiring soon, connector should call RenewCert
+  // keyed by shield_id → list of pending resource instructions for that shield
+  map<string, ShieldResourceInstructions> shield_resources = 4;
+}
+
+message ShieldResourceInstructions {
+  repeated shield.v1.ResourceInstruction instructions = 1;
 }
 
 message RenewCertRequest {
