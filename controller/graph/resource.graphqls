@@ -1,0 +1,38 @@
+type Resource {
+  id:             ID!
+  name:           String!
+  description:    String
+  host:           String!
+  protocol:       String!
+  portFrom:       Int!
+  portTo:         Int!
+  status:         String!
+  errorMessage:   String
+  appliedAt:      String
+  lastVerifiedAt: String
+  createdAt:      String!
+  shield:         Shield         # auto-matched — null if no shield on this host
+  remoteNetwork:  RemoteNetwork!
+}
+
+input CreateResourceInput {
+  remoteNetworkId: String!
+  name:            String!
+  description:     String
+  host:            String!       # IP of the resource host — must match a shield's lan_ip
+  protocol:        String!       # "tcp", "udp", "any"
+  portFrom:        Int!
+  portTo:          Int!
+}
+
+extend type Query {
+  resources(remoteNetworkId: String!): [Resource!]!
+  allResources: [Resource!]!
+}
+
+extend type Mutation {
+  createResource(input: CreateResourceInput!): Resource!
+  protectResource(id: ID!): Resource!
+  unprotectResource(id: ID!): Resource!
+  deleteResource(id: ID!): Boolean!
+}
