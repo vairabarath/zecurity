@@ -1,57 +1,88 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
+import { apolloClient } from '@/apollo/client'
+import { MeDocument, type MeQuery } from '@/generated/graphql'
 
-// useRequireAuth checks for a valid access token.
-// If none exists, attempts a silent refresh via the httpOnly cookie.
-// If refresh fails, redirects to /login.
+// useRequireAuth guards protected routes.
 //
-// Returns { isReady: true } when auth state is confirmed.
-// Protected pages should render nothing until isReady is true.
+// On mount it always probes the session by running MeQuery:
+//   - no token in store       → silent refresh via httpOnly cookie, then probe
+//   - probe succeeds          → hydrate user, mark ready
+//   - probe 401s              → errorLink refreshes and retries; if that fails
+//                               it clears auth and redirects itself
+//   - probe fails for any
+//     other reason             → clearAuth + redirect to /login
+//
+// This fixes two bugs that shared a root cause:
+//   1. After a browser reload the Zustand `user` was null (in-memory only),
+//      so Header rendered "??" instead of the email initials.
+//   2. A stale access token in sessionStorage kept the user on the dashboard
+//      even when the session was actually dead.
 export function useRequireAuth() {
   const navigate = useNavigate()
   const { accessToken, isRefreshing } = useAuthStore()
   const [isReady, setIsReady] = useState(false)
 
   useEffect(() => {
-    if (accessToken) {
-      // Already have a token — ready immediately
-      setIsReady(true)
-      return
+    let cancelled = false
+
+    async function probeMe() {
+      try {
+        const result = await apolloClient.query<MeQuery>({
+          query: MeDocument,
+          fetchPolicy: 'network-only',
+        })
+        if (cancelled) return
+        if (!result.data?.me) {
+          useAuthStore.getState().clearAuth()
+          navigate('/login', { replace: true })
+          return
+        }
+        useAuthStore.getState().setUser(result.data.me)
+        setIsReady(true)
+      } catch {
+        if (cancelled) return
+        // errorLink handles the 401 → refresh path on its own. If we still
+        // reach this catch, refresh failed or some other error occurred.
+        useAuthStore.getState().clearAuth()
+        navigate('/login', { replace: true })
+      }
     }
 
-    // No token in memory. Try silent refresh.
-    // This handles the page reload case:
-    //   - User had a valid session
-    //   - Page was refreshed (memory cleared)
-    //   - Refresh cookie still valid
-    //   - Silent refresh restores the session
     async function trySilentRefresh() {
       try {
         const resp = await fetch('/auth/refresh', {
           method: 'POST',
           credentials: 'include',
           headers: {
-            // No Authorization header here — we have no token yet.
-            // Member 2's refresh handler handles missing token gracefully.
             Authorization: 'Bearer ',
           },
         })
-
-        if (resp.ok) {
-          const data = await resp.json()
-          useAuthStore.getState().setAccessToken(data.access_token)
-          setIsReady(true)
-        } else {
-          // Cookie expired or invalid — go to login
+        if (!resp.ok) {
+          if (cancelled) return
           navigate('/login', { replace: true })
+          return
         }
+        const data = await resp.json()
+        if (cancelled) return
+        useAuthStore.getState().setAccessToken(data.access_token)
+        await probeMe()
       } catch {
+        if (cancelled) return
         navigate('/login', { replace: true })
       }
     }
 
-    trySilentRefresh()
+    if (accessToken) {
+      probeMe()
+    } else {
+      trySilentRefresh()
+    }
+
+    return () => {
+      cancelled = true
+    }
   }, [accessToken, navigate])
 
   return { isReady: isReady && !isRefreshing }
