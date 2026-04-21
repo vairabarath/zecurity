@@ -91,13 +91,18 @@ export function Header() {
               <ChevronDown className="w-4 h-4 text-muted-foreground" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56">
+          <DropdownMenuContent align="end" sideOffset={8} className="w-72 z-[60]">
             <div className="px-3 py-2.5 border-b border-border">
-              <div className="flex items-center gap-2">
-                <Shield className="w-4 h-4 text-primary" />
-                <p className="text-sm font-medium text-foreground">{user?.email}</p>
+              <div className="flex items-center gap-2 min-w-0">
+                <Shield className="w-4 h-4 text-primary shrink-0" />
+                <p
+                  className="text-sm font-medium text-foreground truncate"
+                  title={user?.email ?? undefined}
+                >
+                  {user?.email}
+                </p>
               </div>
-              <p className="text-xs text-muted-foreground mt-0.5 ml-6">{user?.role}</p>
+              <p className="text-xs text-muted-foreground mt-0.5 ml-6 capitalize">{user?.role}</p>
             </div>
             <DropdownMenuItem 
               onClick={() => navigate('/settings')}
