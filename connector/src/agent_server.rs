@@ -16,7 +16,7 @@ use crate::shield_proto::shield_service_client::ShieldServiceClient;
 use crate::shield_proto::shield_service_server::{ShieldService, ShieldServiceServer};
 use crate::shield_proto::{
     EnrollRequest, EnrollResponse, GoodbyeRequest, GoodbyeResponse, HeartbeatRequest,
-    HeartbeatResponse, RenewCertRequest, RenewCertResponse,
+    HeartbeatResponse, RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction,
 };
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
@@ -33,6 +33,10 @@ struct ShieldEntry {
 #[derive(Debug, Clone)]
 pub struct ShieldServer {
     shields: Arc<Mutex<HashMap<String, ShieldEntry>>>,
+    // resource_instructions: keyed by shield_id → instructions from Controller heartbeat
+    resource_instructions: Arc<Mutex<HashMap<String, Vec<ResourceInstruction>>>>,
+    // pending_acks: collected from shield heartbeats, drained on connector heartbeat
+    pending_acks: Arc<Mutex<Vec<ResourceAck>>>,
     controller_channel: Channel,
     trust_domain: String,
     connector_id: String,
@@ -43,6 +47,8 @@ impl ShieldServer {
     pub fn new(controller_channel: Channel, trust_domain: String, connector_id: String) -> Self {
         Self {
             shields: Arc::new(Mutex::new(HashMap::new())),
+            resource_instructions: Arc::new(Mutex::new(HashMap::new())),
+            pending_acks: Arc::new(Mutex::new(Vec::new())),
             controller_channel,
             trust_domain,
             connector_id,
@@ -63,6 +69,23 @@ impl ShieldServer {
                 lan_ip: entry.lan_ip.clone(),
             })
             .collect()
+    }
+
+    /// Called by connector heartbeat after receiving HeartbeatResponse from Controller.
+    /// Updates the cached resource instructions for the given shield.
+    pub fn update_resource_instructions(&self, shield_id: &str, instructions: Vec<ResourceInstruction>) {
+        self.resource_instructions
+            .lock()
+            .expect("resource instructions mutex poisoned")
+            .insert(shield_id.to_string(), instructions);
+    }
+
+    /// Called by connector heartbeat to collect and clear all pending shield acks.
+    pub fn drain_resource_acks(&self) -> Vec<ResourceAck> {
+        let mut acks = self.pending_acks
+            .lock()
+            .expect("pending acks mutex poisoned");
+        std::mem::take(&mut *acks)
     }
 
     pub async fn serve(self, addr: SocketAddr, state_dir: impl AsRef<Path>) -> Result<()> {
@@ -207,12 +230,29 @@ impl ShieldService for ShieldServer {
             );
         }
 
+        // Collect ResourceAcks from this shield into pending_acks for next connector heartbeat.
+        if !req.resource_acks.is_empty() {
+            let mut acks = self.pending_acks
+                .lock()
+                .map_err(|_| Status::internal("pending acks mutex poisoned"))?;
+            acks.extend(req.resource_acks);
+        }
+
+        // Retrieve cached resource instructions for this shield.
+        let resources = self.resource_instructions
+            .lock()
+            .map_err(|_| Status::internal("resource instructions mutex poisoned"))?
+            .get(&verified.shield_id)
+            .cloned()
+            .unwrap_or_default();
+
         info!(
             shield_id = %verified.shield_id,
             version = %req.version,
             hostname = %req.hostname,
             public_ip = %req.public_ip,
             lan_ip = %req.lan_ip,
+            pending_instructions = resources.len(),
             cert_not_after_unix = verified.cert_not_after_unix,
             "shield heartbeat received"
         );
@@ -221,6 +261,7 @@ impl ShieldService for ShieldServer {
             ok: true,
             latest_version: String::new(),
             re_enroll: self.cert_needs_renewal(verified.cert_not_after_unix),
+            resources,
         }))
     }
 
