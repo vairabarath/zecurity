@@ -6,6 +6,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 )
 
@@ -15,6 +16,7 @@ type Resolver struct {
 	AuthService  auth.Service
 	ConnectorCfg connector.Config
 	ShieldSvc    shield.Service
+	ResourceCfg  resource.Config
 	Redis        valkeycompat.Cmdable
 	Pool         *pgxpool.Pool
 }

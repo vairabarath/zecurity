@@ -33,6 +33,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -109,6 +110,7 @@ func main() {
 				Redis:        valkeycompat.NewAdapter(connectorValkey),
 				Pool:         db.Pool,
 				ShieldSvc:    shieldSvc,
+				ResourceCfg:  resource.NewConfig(db.Pool),
 			},
 		}),
 	)

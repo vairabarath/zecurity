@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "../proto/connector/v1/connector.proto",
             "../proto/shield/v1/shield.proto",
         ],
-        &["../proto"],
+        &[".."],
     )?;
 
     Ok(())
