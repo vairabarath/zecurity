@@ -11,7 +11,7 @@ A team member will tell you their member number. When they do, execute this sequ
 
 ```
 1. Read this file (agent.md) fully
-2. Read .zecurity-obs/Sprint4/path.md
+2. Read .zecurity-obs/Sprint5/path.md
 3. Find the first unchecked phase for this member where all depends_on are checked
 4. Read that phase file
 5. Tell the member: what they're building, which files to touch, the build check command
@@ -19,7 +19,8 @@ A team member will tell you their member number. When they do, execute this sequ
 
 If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), M3 (Go+Rust), or M4 (Rust)?"*
 
-**Team workflow guide (human-readable):** `.zecurity-obs/Sprint4/team-workflow.md`
+**Team workflow guide (human-readable):** `.zecurity-obs/Sprint4/team-workflow.md`  
+**Active sprint plan:** `.zecurity-obs/Sprint5/path.md`
 
 ---
 
@@ -41,11 +42,11 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - Sprint 2: PKI, connector enrollment, mTLS heartbeat, SPIFFE interceptor, auto-update
 - Sprint 3: Automatic cert renewal (RenewCert RPC, proof-of-possession CSR, channel rebuild)
 
-**What's active:**
-- Sprint 4: Shield deployment — see `.zecurity-obs/Sprint4/path.md` for the full execution plan
+**What's complete:**
+- Sprint 4: Shield deployment — zecurity0 TUN, nftables base table, heartbeat via Connector, SPIFFE identity
 
-**What's next:**
-- Sprint 5: Resource discovery (RDE, Connector scans network, per-resource nftables rules)
+**What's active:**
+- Sprint 5: Resource protection — see `.zecurity-obs/Sprint5/path.md` for the full execution plan
 
 ---
 
@@ -62,7 +63,7 @@ Claude Code (Lead)
   └── Codex / OpenCode / Other models (Specialists)
         ├── Execute implementation tasks assigned per member role
         ├── Follow conventions defined here
-        ├── Check Sprint4/path.md BEFORE touching any file
+        ├── Check Sprint5/path.md BEFORE touching any file
         └── Log their work in the session log
 ```
 
@@ -100,12 +101,13 @@ The shared brain. All agents should read relevant notes before working on a subs
   Planning/
     Roadmap.md                  — sprint status, current priorities, what's next
     Session Log.md              — running log of all work sessions
-  Sprint4/                      — Sprint 4 execution plan and phase files
+  Sprint4/                      — Sprint 4 execution plan (complete)
+  Sprint5/                      — Sprint 5 execution plan and phase files (ACTIVE)
     path.md                     — MASTER dependency map + ordered checklist (read first!)
-    Member1-Frontend/           — M1 phase files (React + GraphQL)
-    Member2-Go-Proto-Shield/    — M2 phase files (Proto + Shield service + PKI)
-    Member3-Go-DB-GraphQL/      — M3 phase files (DB + resolvers + Connector improvements)
-    Member4-Rust-Shield-CI/     — M4 phase files (Shield crate + CI)
+    Member1-Frontend/           — M1 phase files (Resources page + UI)
+    Member2-Go-Proto-DB/        — M2 phase files (Proto + migration + GraphQL schema)
+    Member3-Go-Controller/      — M3 phase files (resolvers + heartbeat relay)
+    Member4-Rust-Shield/        — M4 phase files (resources.rs + nftables + ack)
   Decisions/
     (architecture decision records — why X over Y)
   Research/
@@ -129,7 +131,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 1. Read `agent.md` (this file)
 2. Read `.zecurity-obs/Planning/Session Log.md` for recent context
 3. Read `.zecurity-obs/Planning/Roadmap.md` for current priorities
-4. **If Sprint 4:** Read `.zecurity-obs/Sprint4/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
+4. **If Sprint 5:** Read `.zecurity-obs/Sprint5/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
 5. Read relevant service note(s) if touching a specific subsystem
 
 ### During Work
@@ -138,7 +140,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 - Controller: `go build ./...` must pass before committing
 - Connector: `cargo build` must pass (warnings OK, errors not)
 - Shield: `cargo build --manifest-path shield/Cargo.toml` must pass
-- **Sprint 4:** After completing a phase, check its box in `Sprint4/path.md` and update the phase file `status:` frontmatter to `done`
+- **Sprint 5:** After completing a phase, check its box in `Sprint5/path.md` and update the phase file `status:` frontmatter to `done`
 - If making an architecture decision, document it or flag it for Claude Code
 - Do not touch files owned by other members — see conflict zone table in `Sprint4/path.md`
 
@@ -229,16 +231,18 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 | Release connector binary | `git tag connector-vX.Y.Z && git push origin connector-vX.Y.Z` |
 | Release shield binary | `git tag shield-vX.Y.Z && git push origin shield-vX.Y.Z` |
 | Open vault | Open `.zecurity-obs/` in Obsidian |
-| Sprint 4 dependency map | Read `.zecurity-obs/Sprint4/path.md` |
+| Sprint 5 dependency map | Read `.zecurity-obs/Sprint5/path.md` |
 
 ---
 
-## Sprint 4 Quick Rules (for any AI agent)
+## Sprint 5 Quick Rules (for any AI agent)
 
-1. **Read `Sprint4/path.md` first.** Find your member's phases. Confirm all `depends_on` are checked.
+1. **Read `Sprint5/path.md` first.** Find your member's phases. Confirm all `depends_on` are checked.
 2. **Build gates are mandatory.** Every phase file has a "Build Check" section. Do not proceed until it passes.
 3. **Conflict zones.** Files multiple members touch are listed in `path.md`. Coordinate before editing them.
 4. **Proto is immutable once published.** Never change field numbers. Never remove fields.
 5. **appmeta constants must match exactly.** Go `identity.go` and Rust `appmeta.rs` strings must be identical.
 6. **Shield heartbeats to Connector :9091 only.** Never to Controller directly (post-enrollment).
-7. **Enrollment token is single-use.** Redis JTI burn is atomic GET+DEL — race conditions are not possible.
+7. **Shield only protects its own host.** Validate `resource.host == detect_lan_ip()` before applying nftables.
+8. **nftables chain is atomic.** Always flush + rebuild `chain resource_protect` — never append incrementally.
+9. **No new RPCs for resource delivery.** Instructions ride on existing HeartbeatResponse (heartbeat piggyback).
