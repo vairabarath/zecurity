@@ -25,6 +25,15 @@ input CreateResourceInput {
   portTo:          Int!
 }
 
+input UpdateResourceInput {
+  remoteNetworkId: String
+  name:            String
+  description:     String
+  protocol:        String
+  portFrom:        Int
+  portTo:          Int
+}
+
 extend type Query {
   resources(remoteNetworkId: String!): [Resource!]!
   allResources: [Resource!]!
@@ -32,6 +41,7 @@ extend type Query {
 
 extend type Mutation {
   createResource(input: CreateResourceInput!): Resource!
+  updateResource(id: ID!, input: UpdateResourceInput!): Resource!
   protectResource(id: ID!): Resource!
   unprotectResource(id: ID!): Resource!
   deleteResource(id: ID!): Boolean!
