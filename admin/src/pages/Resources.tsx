@@ -76,6 +76,11 @@ const statusConfig: Record<string, { label: string; className: string; icon: Rea
     className: 'text-orange-600 bg-orange-500/10 border-orange-500/20',
     icon: <Loader2 className="h-3 w-3 animate-spin text-orange-500" />,
   },
+  unprotected: {
+    label: 'Unprotected',
+    className: 'text-slate-600 bg-slate-500/10 border-slate-500/20',
+    icon: <Unlock className="h-3 w-3 text-slate-500" />,
+  },
   deleted: {
     label: 'Deleted',
     className: 'text-gray-400 bg-gray-200/30 border-gray-300/30 line-through',
@@ -340,7 +345,7 @@ export default function Resources() {
                                 Edit
                               </DropdownMenuItem>
                             )}
-                            {!noShield && !shieldOffline && (r.status === 'pending' || r.status === 'failed') && (
+                            {!noShield && !shieldOffline && (r.status === 'pending' || r.status === 'failed' || r.status === 'unprotected') && (
                               <DropdownMenuItem
                                 disabled={protecting}
                                 onClick={() => protectResource({ variables: { id: r.id } })}
@@ -358,7 +363,7 @@ export default function Resources() {
                                 Unprotect
                               </DropdownMenuItem>
                             )}
-                            {!noShield && r.status !== 'deleted' && (
+                            {(r.status === 'pending' || r.status === 'unprotected' || r.status === 'failed') && (
                               <>
                                 <DropdownMenuSeparator />
                                 <DropdownMenuItem

@@ -206,7 +206,7 @@ async fn handle_remove(instruction: &proto::ResourceInstruction, state: &Arc<Sha
     info!(resource_id = %instruction.resource_id, "resource removed from nftables");
     push_ack(state, proto::ResourceAck {
         resource_id: instruction.resource_id.clone(),
-        status: "removed".to_string(),
+        status: "unprotected".to_string(),
         error: String::new(),
         verified_at: now_unix(),
         port_reachable: false,
