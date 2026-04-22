@@ -223,10 +223,13 @@ async fn check_and_update(client: &reqwest::Client) -> Result<()> {
 
 // ── Helper functions ────────────────────────────────────────────────────────
 
-/// Fetch the latest release metadata from GitHub.
+/// Fetch the latest connector release metadata from GitHub.
+///
+/// Do not use `/releases/latest`: this repository publishes connector and
+/// shield independently, and GitHub's global "latest" can point at either one.
 async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease> {
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
+        "https://api.github.com/repos/{}/{}/releases?per_page=100",
         GITHUB_OWNER, GITHUB_REPO
     );
 
@@ -241,9 +244,16 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease>
         bail!("GitHub API returned HTTP {}", resp.status());
     }
 
-    let release: GitHubRelease = resp.json().await.context("parse GitHub release JSON")?;
-
-    Ok(release)
+    let releases: Vec<GitHubRelease> = resp.json().await.context("parse GitHub releases JSON")?;
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            let version = parse_version_from_tag(&release.tag_name).ok()?;
+            Some((version, release))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
+        .context("no connector release found")
 }
 
 /// Extract a semver::Version from a tag like "connector-v0.2.0".

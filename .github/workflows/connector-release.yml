@@ -101,7 +101,7 @@ jobs:
 
             ### Install (Linux hosts)
             ```bash
-            curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | \
+            curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/connector/scripts/connector-install.sh | \
               sudo CONTROLLER_ADDR=host:9090 CONTROLLER_HTTP_ADDR=host:8080 ENROLLMENT_TOKEN=eyJ... bash
             ```
           files: |
