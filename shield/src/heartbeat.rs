@@ -150,12 +150,14 @@ async fn handle_apply(instruction: &proto::ResourceInstruction, state: &Arc<Shar
         let mut active = state.active.lock().unwrap();
         // Replace if already present, otherwise push.
         if let Some(existing) = active.iter_mut().find(|r| r.resource_id == instruction.resource_id) {
+            existing.host      = instruction.host.clone();
             existing.protocol  = instruction.protocol.clone();
             existing.port_from = instruction.port_from as u16;
             existing.port_to   = instruction.port_to as u16;
         } else {
             active.push(ActiveResource {
                 resource_id: instruction.resource_id.clone(),
+                host:        instruction.host.clone(),
                 protocol:    instruction.protocol.clone(),
                 port_from:   instruction.port_from as u16,
                 port_to:     instruction.port_to as u16,
@@ -166,7 +168,7 @@ async fn handle_apply(instruction: &proto::ResourceInstruction, state: &Arc<Shar
     let snapshot = state.active.lock().unwrap().clone();
     match resources::apply_nftables(&snapshot).await {
         Ok(()) => {
-            let reachable = resources::check_port(instruction.port_from as u16);
+            let reachable = resources::check_port(&instruction.host, instruction.port_from as u16);
             info!(
                 resource_id = %instruction.resource_id,
                 port = instruction.port_from,

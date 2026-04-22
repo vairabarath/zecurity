@@ -99,7 +99,7 @@ func (h *EnrollmentHandler) Heartbeat(ctx context.Context, req *pb.HeartbeatRequ
 
 	// Step 7 — Process ResourceAcks forwarded from shields via this connector.
 	for _, ack := range req.ResourceAcks {
-		if err := resource.RecordAck(ctx, h.Pool, ack.ResourceId, ack.Status, ack.Error, ack.VerifiedAt, ack.PortReachable); err != nil {
+		if err := resource.RecordAck(ctx, h.Pool, tenantID, ack.ResourceId, ack.Status, ack.Error, ack.VerifiedAt, ack.PortReachable); err != nil {
 			log.Printf("heartbeat: record resource ack resource_id=%s: %v", ack.ResourceId, err)
 		}
 	}
