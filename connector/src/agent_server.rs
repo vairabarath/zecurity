@@ -20,6 +20,8 @@ use crate::shield_proto::{
 };
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
+// 3 missed heartbeats (shield default is 30s) before treating a shield as offline.
+const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 
 #[derive(Debug, Clone)]
 struct ShieldEntry {
@@ -57,10 +59,17 @@ impl ShieldServer {
     }
 
     pub fn get_alive_shields(&self) -> Vec<ShieldHealth> {
+        let cutoff = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+            - SHIELD_STALE_THRESHOLD_SECS;
+
         self.shields
             .lock()
             .expect("shield health map mutex poisoned")
             .iter()
+            .filter(|(_, entry)| entry.last_seen_unix >= cutoff)
             .map(|(id, entry)| ShieldHealth {
                 shield_id: id.clone(),
                 status: entry.status.clone(),
@@ -238,12 +247,12 @@ impl ShieldService for ShieldServer {
             acks.extend(req.resource_acks);
         }
 
-        // Retrieve cached resource instructions for this shield.
+        // Retrieve and clear cached resource instructions for this shield.
+        // Clearing on delivery ensures each instruction is sent exactly once.
         let resources = self.resource_instructions
             .lock()
             .map_err(|_| Status::internal("resource instructions mutex poisoned"))?
-            .get(&verified.shield_id)
-            .cloned()
+            .remove(&verified.shield_id)
             .unwrap_or_default();
 
         info!(
