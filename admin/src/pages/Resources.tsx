@@ -11,11 +11,19 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import {
   ProtectResourceDocument,
   UnprotectResourceDocument,
   DeleteResourceDocument,
 } from '@/generated/graphql'
 import { CreateResourceModal } from '@/components/CreateResourceModal'
+import { EditResourceModal } from '@/components/EditResourceModal'
 import { cn } from '@/lib/utils'
 import {
   Box,
@@ -30,6 +38,8 @@ import {
   Loader2,
   Wifi,
   WifiOff,
+  Pencil,
+  MoreHorizontal,
 } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -90,6 +100,7 @@ function relativeTime(dateStr: string | null | undefined): string {
 
 export default function Resources() {
   const [showAdd, setShowAdd] = useState(false)
+  const [editingResource, setEditingResource] = useState<Resource | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworksDocument)
@@ -201,7 +212,7 @@ export default function Resources() {
       >
         <div className="overflow-x-auto">
           <div className="grid grid-cols-[1.2fr_100px_90px_100px_130px_110px_110px_80px] gap-4 px-5 py-3 border-b border-border/50 bg-muted/20 min-w-[960px]">
-            {['Name', 'Host IP', 'Protocol', 'Port', 'Shield', 'Status', 'Last Verified', ''].map((col, i) => (
+            {['Name', 'Host IP', 'Protocol', 'Port', 'Shield', 'Status', 'Last Verified', 'Actions'].map((col, i) => (
               <span
                 key={i}
                 className={cn(
@@ -310,55 +321,58 @@ export default function Resources() {
                       {relativeTime(r.lastVerifiedAt)}
                     </span>
 
-                    <div className="flex items-center gap-1 ml-auto">
-                      {!noShield && !shieldOffline && (
-                        <>
-                          {(r.status === 'pending' || r.status === 'failed') && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 gap-1 text-[11px]"
-                              disabled={protecting}
-                              onClick={() => protectResource({ variables: { id: r.id } })}
-                            >
-                              <Lock className="h-3 w-3" />
-                              Protect
-                            </Button>
-                          )}
-                          {r.status === 'protected' && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 gap-1 text-[11px]"
-                              disabled={unprotecting}
-                              onClick={() => unprotectResource({ variables: { id: r.id } })}
-                            >
-                              <Unlock className="h-3 w-3" />
-                              Unprotect
-                            </Button>
-                          )}
-                        </>
-                      )}
-                      {(r.status === 'managing' ||
-                        r.status === 'protecting' ||
-                        r.status === 'removing') && (
-                          <Button size="sm" variant="ghost" className="h-7" disabled>
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          </Button>
-                        )}
-                      {noShield && (
-                        <span className="text-xs text-muted-foreground/50">—</span>
-                      )}
-                      {!noShield && r.status !== 'deleted' && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="h-7 text-red-500 hover:text-red-600"
-                          disabled={deletingId === r.id}
-                          onClick={() => handleDelete(r.id)}
-                        >
-                          <Trash2 className="h-3 w-3" />
+                    <div className="flex justify-end">
+                      {(r.status === 'managing' || r.status === 'protecting' || r.status === 'removing') ? (
+                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" disabled>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                         </Button>
+                      ) : (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
+                              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-44">
+                            {r.status !== 'deleted' && (
+                              <DropdownMenuItem onClick={() => setEditingResource(r)}>
+                                <Pencil className="mr-2 h-3.5 w-3.5" />
+                                Edit
+                              </DropdownMenuItem>
+                            )}
+                            {!noShield && !shieldOffline && (r.status === 'pending' || r.status === 'failed') && (
+                              <DropdownMenuItem
+                                disabled={protecting}
+                                onClick={() => protectResource({ variables: { id: r.id } })}
+                              >
+                                <Lock className="mr-2 h-3.5 w-3.5" />
+                                Protect
+                              </DropdownMenuItem>
+                            )}
+                            {r.status === 'protected' && (
+                              <DropdownMenuItem
+                                disabled={unprotecting}
+                                onClick={() => unprotectResource({ variables: { id: r.id } })}
+                              >
+                                <Unlock className="mr-2 h-3.5 w-3.5" />
+                                Unprotect
+                              </DropdownMenuItem>
+                            )}
+                            {!noShield && r.status !== 'deleted' && (
+                              <>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem
+                                  disabled={deletingId === r.id}
+                                  onClick={() => handleDelete(r.id)}
+                                  className="text-red-500 focus:text-red-600 focus:bg-red-50"
+                                >
+                                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                                  Delete
+                                </DropdownMenuItem>
+                              </>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       )}
                     </div>
                   </motion.div>
@@ -376,6 +390,13 @@ export default function Resources() {
           refetch()
           setShowAdd(false)
         }}
+      />
+
+      <EditResourceModal
+        open={editingResource !== null}
+        onOpenChange={(open) => { if (!open) setEditingResource(null) }}
+        resource={editingResource}
+        onSuccess={refetch}
       />
     </div>
   )

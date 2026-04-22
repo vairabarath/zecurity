@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	pgx "github.com/jackc/pgx/v5"
@@ -85,7 +86,6 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID strin
 		   FROM shields
 		  WHERE lan_ip = $1
 		    AND tenant_id = $2
-		    AND deleted_at IS NULL
 		    AND status NOT IN ('revoked', 'deleted')
 		  LIMIT 1`,
 		host, tenantID,
@@ -195,6 +195,75 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 	return result, rows.Err()
 }
 
+// UpdateInput holds the fields that can be changed on an existing resource.
+// Only non-nil fields are written to the database.
+type UpdateInput struct {
+	RemoteNetworkID *string
+	Name            *string
+	Description     *string
+	Protocol        *string
+	PortFrom        *int
+	PortTo          *int
+}
+
+// Update modifies editable fields on a resource. Only non-nil fields are applied.
+func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*Row, error) {
+	args := []any{id, tenantID}
+	sets := []string{"updated_at = NOW()"}
+
+	add := func(col string, val any) {
+		args = append(args, val)
+		sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
+	}
+
+	if input.RemoteNetworkID != nil {
+		add("remote_network_id", *input.RemoteNetworkID)
+	}
+	if input.Name != nil {
+		add("name", *input.Name)
+	}
+	if input.Description != nil {
+		add("description", *input.Description)
+	}
+	if input.Protocol != nil {
+		add("protocol", *input.Protocol)
+	}
+	if input.PortFrom != nil {
+		add("port_from", *input.PortFrom)
+	}
+	if input.PortTo != nil {
+		add("port_to", *input.PortTo)
+	}
+
+	query := fmt.Sprintf(
+		`UPDATE resources SET %s
+		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		  RETURNING id`,
+		joinSets(sets),
+	)
+
+	var discardedID string
+	err := db.QueryRow(ctx, query, args...).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("resource not found")
+		}
+		return nil, fmt.Errorf("update resource: %w", err)
+	}
+	return GetByID(ctx, db, tenantID, id)
+}
+
+func joinSets(sets []string) string {
+	var b strings.Builder
+	for i, s := range sets {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
 // MarkManaging transitions a resource to managing status (Shield will apply nftables).
 func MarkManaging(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	return updateStatus(ctx, db, tenantID, id, "managing", nil,
@@ -215,7 +284,6 @@ func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) erro
 		    SET deleted_at = NOW(), updated_at = NOW()
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status NOT IN ('managing', 'protecting', 'removing')
-		    AND deleted_at IS NULL
 		 RETURNING id`,
 		id, tenantID,
 	).Scan(&discardedID)
@@ -254,7 +322,6 @@ func updateStatus(ctx context.Context, db *pgxpool.Pool, tenantID, id, newStatus
 		    SET status = $3, error_message = $4, updated_at = NOW()
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status = ANY($5)
-		    AND deleted_at IS NULL
 		 RETURNING id`,
 		id, tenantID, newStatus, errMsg, allowedFrom,
 	).Scan(&discardedID)

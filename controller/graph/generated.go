@@ -77,6 +77,7 @@ type ComplexityRoot struct {
 		RevokeConnector        func(childComplexity int, id string) int
 		RevokeShield           func(childComplexity int, id string) int
 		UnprotectResource      func(childComplexity int, id string) int
+		UpdateResource         func(childComplexity int, id string, input UpdateResourceInput) int
 	}
 
 	Query struct {
@@ -185,6 +186,7 @@ type MutationResolver interface {
 	RevokeShield(ctx context.Context, id string) (bool, error)
 	DeleteShield(ctx context.Context, id string) (bool, error)
 	CreateResource(ctx context.Context, input CreateResourceInput) (*Resource, error)
+	UpdateResource(ctx context.Context, id string, input UpdateResourceInput) (*Resource, error)
 	ProtectResource(ctx context.Context, id string) (*Resource, error)
 	UnprotectResource(ctx context.Context, id string) (*Resource, error)
 	DeleteResource(ctx context.Context, id string) (bool, error)
@@ -463,6 +465,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UnprotectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.updateResource":
+		if e.ComplexityRoot.Mutation.UpdateResource == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateResource_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateResource(childComplexity, args["id"].(string), args["input"].(UpdateResourceInput)), true
 
 	case "Query.allResources":
 		if e.ComplexityRoot.Query.AllResources == nil {
@@ -908,6 +921,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	ec := newExecutionContext(opCtx, e, make(chan graphql.DeferredResult))
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
 		ec.unmarshalInputCreateResourceInput,
+		ec.unmarshalInputUpdateResourceInput,
 	)
 	first := true
 
@@ -1165,6 +1179,22 @@ func (ec *executionContext) field_Mutation_unprotectResource_args(ctx context.Co
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "input", ec.unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput)
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg1
 	return args, nil
 }
 
@@ -2224,6 +2254,77 @@ func (ec *executionContext) fieldContext_Mutation_createResource(ctx context.Con
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_createResource_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateResource(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_updateResource,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateResource(ctx, fc.Args["id"].(string), fc.Args["input"].(UpdateResourceInput))
+		},
+		nil,
+		ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_updateResource(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Resource_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Resource_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Resource_description(ctx, field)
+			case "host":
+				return ec.fieldContext_Resource_host(ctx, field)
+			case "protocol":
+				return ec.fieldContext_Resource_protocol(ctx, field)
+			case "portFrom":
+				return ec.fieldContext_Resource_portFrom(ctx, field)
+			case "portTo":
+				return ec.fieldContext_Resource_portTo(ctx, field)
+			case "status":
+				return ec.fieldContext_Resource_status(ctx, field)
+			case "errorMessage":
+				return ec.fieldContext_Resource_errorMessage(ctx, field)
+			case "appliedAt":
+				return ec.fieldContext_Resource_appliedAt(ctx, field)
+			case "lastVerifiedAt":
+				return ec.fieldContext_Resource_lastVerifiedAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Resource_createdAt(ctx, field)
+			case "shield":
+				return ec.fieldContext_Resource_shield(ctx, field)
+			case "remoteNetwork":
+				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateResource_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -6331,6 +6432,71 @@ func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Contex
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Context, obj any) (UpdateResourceInput, error) {
+	var it UpdateResourceInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "protocol", "portFrom", "portTo"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "remoteNetworkId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("remoteNetworkId"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.RemoteNetworkID = data
+		case "name":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("name"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Name = data
+		case "description":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("description"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Description = data
+		case "protocol":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("protocol"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Protocol = data
+		case "portFrom":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("portFrom"))
+			data, err := ec.unmarshalOInt2ᚖint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.PortFrom = data
+		case "portTo":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("portTo"))
+			data, err := ec.unmarshalOInt2ᚖint(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.PortTo = data
+		}
+	}
+	return it, nil
+}
+
 // endregion **************************** input.gotpl *****************************
 
 // region    ************************** interface.gotpl ***************************
@@ -6583,6 +6749,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "createResource":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createResource(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateResource":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateResource(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -8208,6 +8381,11 @@ func (ec *executionContext) marshalNString2string(ctx context.Context, sel ast.S
 	return res
 }
 
+func (ec *executionContext) unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput(ctx context.Context, v any) (UpdateResourceInput, error) {
+	res, err := ec.unmarshalInputUpdateResourceInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
 func (ec *executionContext) marshalNUser2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUser(ctx context.Context, sel ast.SelectionSet, v models.User) graphql.Marshaler {
 	return ec._User(ctx, sel, &v)
 }
@@ -8476,6 +8654,24 @@ func (ec *executionContext) marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztna�
 		return graphql.Null
 	}
 	return ec._Connector(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalOInt2ᚖint(ctx context.Context, v any) (*int, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := graphql.UnmarshalInt(v)
+	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalOInt2ᚖint(ctx context.Context, sel ast.SelectionSet, v *int) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	_ = sel
+	_ = ctx
+	res := graphql.MarshalInt(*v)
+	return res
 }
 
 func (ec *executionContext) marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v *RemoteNetwork) graphql.Marshaler {
