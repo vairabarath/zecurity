@@ -267,7 +267,7 @@ func joinSets(sets []string) string {
 // MarkManaging transitions a resource to managing status (Shield will apply nftables).
 func MarkManaging(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	return updateStatus(ctx, db, tenantID, id, "managing", nil,
-		[]string{"pending", "failed"}, "protect resource")
+		[]string{"pending", "failed", "unprotected"}, "protect resource")
 }
 
 // MarkRemoving transitions a resource to removing status (Shield will remove nftables rule).
