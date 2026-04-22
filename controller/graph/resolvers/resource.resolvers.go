@@ -33,6 +33,25 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 	return toResourceGQL(row), nil
 }
 
+// UpdateResource is the resolver for the updateResource field.
+func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input graph.UpdateResourceInput) (*graph.Resource, error) {
+	tc := tenant.MustGet(ctx)
+
+	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, resource.UpdateInput{
+		RemoteNetworkID: input.RemoteNetworkID,
+		Name:            input.Name,
+		Description:     input.Description,
+		Protocol:        input.Protocol,
+		PortFrom:        input.PortFrom,
+		PortTo:          input.PortTo,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("updateResource: %w", err)
+	}
+
+	return toResourceGQL(row), nil
+}
+
 // ProtectResource is the resolver for the protectResource field.
 func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
