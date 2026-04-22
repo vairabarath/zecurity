@@ -12,6 +12,22 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-22 — Claude Code (Sonnet 4.6) — M1 Sprint 5 (Hard Delete Fix)
+
+**Member:** M1 (Frontend)
+**Branch:** `sprint5-member1`
+
+**What was done:**
+- Changed `SoftDelete` in `controller/internal/resource/store.go` from `UPDATE ... SET deleted_at` to `DELETE FROM resources` — hard delete so the `(shield_id, name)` unique constraint is immediately freed and the same name can be reused right after deletion
+
+**Key decisions:**
+- Hard delete is correct here — soft delete was causing duplicate key errors when recreating a resource with the same name; since nftables state is managed by Shield heartbeat acks (not by the DB row), hard delete is safe
+
+**What's next:**
+- Full integration test: create → protect → unprotect → delete → recreate with same name
+
+---
+
 ## 2026-04-17 — Claude Code (Opus 4) — M1 Phase 4
 
 **Member:** M1 (Frontend)
@@ -34,6 +50,36 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Commit + push `sprint-4-m1`; open PR to main
 - Sprint 4 frontend now complete (per phase-4 `unlocks` field)
+---
+
+## 2026-04-22 — Claude Code (Sonnet 4.6) — M1 Sprint 5 (Edit Resource + Store Fix)
+
+**Member:** M1 (Frontend)
+**Branch:** `sprint5-member1`
+
+**What was done:**
+- Pulled latest `origin/main` twice — picked up M4 Shield nftables work and Cargo.toml bumps
+- Fixed `AutoMatchShield` in `controller/internal/resource/store.go` — removed invalid `AND deleted_at IS NULL` on the `shields` table (shields have no such column; filtered by `status NOT IN ('revoked','deleted')` instead)
+- Added three-dot (`MoreHorizontal`) Actions dropdown to Resources table — replaced inline buttons with a `DropdownMenu` per row; options: Edit, Protect, Unprotect, Delete (with separator + red style); spinner shown for in-progress states
+- Renamed last column header from empty string to `"Actions"`
+- Created `admin/src/components/EditResourceModal.tsx` — pre-populated form with Remote Network, Name, Description, Protocol, Port From/To; calls `updateResource` mutation
+- Added `UpdateResourceInput` + `updateResource` mutation to `controller/graph/resource.graphqls`
+- Added `UpdateResource` mutation to `admin/src/graphql/mutations.graphql`
+- Re-ran `make gqlgen` → gqlgen generated stub resolver; re-ran `npm run codegen` → TS types updated
+- Implemented `resource.Update()` in `store.go` — dynamic SET clause (only non-nil fields written), returns updated row
+- Implemented `UpdateResource` resolver in `resource.resolvers.go` — wired to `resource.Update()` with tenant context
+- Updated `Phase1-Resources-Page.md` with full record of what was built and M3 action note
+- `cd admin && npm run build` and `cd controller && go build ./...` both pass
+
+**Key decisions:**
+- Edit allowed on all non-deleted resources (not just `pending`) — more flexible for name/description changes
+- `Update()` uses dynamic SET via `strings.Builder` — only non-nil fields written, safe for partial updates
+- Host IP intentionally excluded from editable fields — it's tied to shield auto-match and cannot change safely
+
+**What's next:**
+- Integration test Edit modal end-to-end once controller is running
+- M4 nftables `failed to apply resource_protect chain` error needs fix — table `inet zecurity` may not exist on shield restart; M4 should add `add table inet zecurity` guard before chain flush in `resources.rs`
+
 ---
 
 ## 2026-04-22 — Claude Code (Sonnet 4.6) — M4 Sprint 5 Phase D (Resources + Heartbeat Ack)
