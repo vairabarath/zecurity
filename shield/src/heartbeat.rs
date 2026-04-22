@@ -184,6 +184,10 @@ async fn handle_apply(instruction: &proto::ResourceInstruction, state: &Arc<Shar
             });
         }
         Err(e) => {
+            // Roll back state.active so the health check loop does not falsely
+            // report this resource as protected while nftables has no rules for it.
+            state.active.lock().unwrap()
+                .retain(|r| r.resource_id != instruction.resource_id);
             error!(resource_id = %instruction.resource_id, error = %e, "nftables apply failed");
             push_ack(state, proto::ResourceAck {
                 resource_id: instruction.resource_id.clone(),
