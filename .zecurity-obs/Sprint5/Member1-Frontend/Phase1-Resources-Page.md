@@ -128,9 +128,11 @@ Host IP is intentionally not editable (tied to shield auto-match).
 
 Calls `updateResource(id, input)` mutation — **requires M3 backend implementation to function**.
 
-### Bug Fixed (store.go)
+### Bugs Fixed (store.go)
 
-`AutoMatchShield` queried `shields` table with `AND deleted_at IS NULL` but `shields` has no `deleted_at` column — removed that condition. Shields use `status NOT IN ('revoked', 'deleted')` instead.
+**Bug 1 — AutoMatchShield:** queried `shields` table with `AND deleted_at IS NULL` but `shields` has no `deleted_at` column — removed that condition. Shields use `status NOT IN ('revoked', 'deleted')` instead.
+
+**Bug 2 — Duplicate key on recreate:** `SoftDelete` used `UPDATE ... SET deleted_at = NOW()` which kept the row in place, causing `duplicate key value violates unique constraint "resources_shield_id_name_key"` when recreating a resource with the same name. Changed to a hard `DELETE FROM resources` so the row is fully removed and the name is immediately reusable.
 
 ---
 
