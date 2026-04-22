@@ -213,9 +213,11 @@ download_release() {
     trap 'rm -rf "$TMP_DIR"' EXIT
 
     if [[ "$SHIELD_VERSION" == "latest" ]]; then
-        SHIELD_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases" \
-            | grep '"tag_name"' | grep '"shield-v' | head -1 \
-            | sed 's/.*"tag_name": "\(.*\)".*/\1/')"
+        SHIELD_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=50" \
+            | grep '"tag_name"' | grep '"shield-v' \
+            | sed 's/.*"tag_name": "shield-v\([^"]*\)".*/\1/' \
+            | sort -V | tail -1 \
+            | sed 's/^/shield-v/')"
         [[ -n "$SHIELD_VERSION" ]] || err "could not resolve latest shield release from GitHub API"
         log "resolved latest shield release: ${SHIELD_VERSION}"
     fi
