@@ -121,13 +121,13 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### PHASE E — M1 Frontend (Depends on: Day 1 codegen done)
 
-- [ ] **M1-E1** `admin/src/pages/Resources.tsx` — Global resources page at `/resources`; columns: Name, Host IP, Protocol, Port, Shield (auto-matched), Status, Last Active; Protect/Unprotect/Delete buttons per row
-- [ ] **M1-E2** `admin/src/components/CreateResourceModal.tsx` — Form: Name, Host IP, Protocol (tcp/udp/any), Port From, Port To; no shield selector (auto-matched)
-- [ ] **M1-E3** `admin/src/graphql/queries.graphql` — Add `GetAllResources` + `GetResources(shieldId)`
-- [ ] **M1-E4** `admin/src/graphql/mutations.graphql` — Add `CreateResource`, `ProtectResource`, `UnprotectResource`, `DeleteResource`
-- [ ] **M1-E5** `admin/src/App.tsx` — Add `/resources` route
-- [ ] **M1-E6** `admin/src/components/layout/Sidebar.tsx` — Add "Resources" nav link
-- [ ] **M1-E7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks
+- [x] **M1-E1** `admin/src/pages/Resources.tsx` — Global resources page at `/resources`; columns: Name, Host IP, Protocol, Port, Shield (auto-matched), Status, Last Active; Protect/Unprotect/Delete buttons per row
+- [x] **M1-E2** `admin/src/components/CreateResourceModal.tsx` — Form: Name, Host IP, Protocol (tcp/udp/any), Port From, Port To; no shield selector (auto-matched)
+- [x] **M1-E3** `admin/src/graphql/queries.graphql` — Add `GetAllResources` + `GetResources(shieldId)`
+- [x] **M1-E4** `admin/src/graphql/mutations.graphql` — Add `CreateResource`, `ProtectResource`, `UnprotectResource`, `DeleteResource`
+- [x] **M1-E5** `admin/src/App.tsx` — Add `/resources` route
+- [x] **M1-E6** `admin/src/components/layout/Sidebar.tsx` — Add "Resources" nav link
+- [x] **M1-E7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks
 
 > Build check: `cd admin && npm run build` must pass.
 

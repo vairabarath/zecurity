@@ -3,12 +3,15 @@ import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
 import RemoteNetworks from '@/pages/RemoteNetworks'
+import RemoteNetworkDetail from '@/pages/RemoteNetworkDetail'
 import Connectors from '@/pages/Connectors'
 import Shields from '@/pages/Shields'
 import AllShields from '@/pages/AllShields'
 import AllConnectors from '@/pages/AllConnectors'
 import ConnectorDetail from '@/pages/ConnectorDetail'
+import ShieldDetail from '@/pages/ShieldDetail'
 import Settings from '@/pages/Settings'
+import Resources from '@/pages/Resources'
 import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
 import Step3Auth from '@/pages/signup/Step3Auth'
@@ -40,12 +43,15 @@ export default function App() {
         <Route path="/"          element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/remote-networks" element={<RemoteNetworks />} />
+        <Route path="/remote-networks/:id" element={<RemoteNetworkDetail />} />
         <Route path="/remote-networks/:id/connectors" element={<Connectors />} />
         <Route path="/remote-networks/:id/shields" element={<Shields />} />
         <Route path="/shields" element={<AllShields />} />
+        <Route path="/shields/:shieldId" element={<ShieldDetail />} />
         <Route path="/connectors" element={<AllConnectors />} />
         <Route path="/connectors/:connectorId" element={<ConnectorDetail />} />
         <Route path="/settings"  element={<Settings />} />
+        <Route path="/resources" element={<Resources />} />
       </Route>
     </Routes>
   )

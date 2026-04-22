@@ -13,9 +13,7 @@ import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
 import { cn } from '@/lib/utils'
 import {
-  Globe,
   Zap,
-  Server,
   Clock,
   ArrowRight,
   Inbox,
@@ -24,6 +22,7 @@ import {
   CircleDot,
   CircleDotDashed,
   Ban,
+  Plug,
 } from 'lucide-react'
 
 type NetworkConnector = GetRemoteNetworksQuery['remoteNetworks'][number]['connectors'][number] & {
@@ -94,7 +93,7 @@ export default function AllConnectors() {
       >
         <div className="flex items-center gap-4">
           <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 ring-1 ring-primary/20">
-            <Globe className="h-5 w-5 text-primary" />
+            <Plug className="h-5 w-5 text-primary" />
           </div>
           <div>
             <h1 className="font-display text-xl font-bold tracking-wide">Connectors</h1>
@@ -205,7 +204,7 @@ export default function AllConnectors() {
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <div className="flex items-center justify-center h-8 w-8 rounded-lg bg-primary/10 border border-primary/20 shrink-0">
-                        <Server className="h-4 w-4 text-primary" />
+                        <Plug className="h-4 w-4 text-primary" />
                       </div>
                       <span className="text-sm font-medium truncate">{c.name}</span>
                     </div>

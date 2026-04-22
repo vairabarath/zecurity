@@ -21,7 +21,6 @@ import {
   ChevronRight,
   ShieldOff,
   Trash2,
-  Server,
   Plug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -196,7 +195,7 @@ export default function Connectors() {
                 >
                   {/* Name */}
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <Server className="w-4 h-4 text-muted-foreground shrink-0" />
+                    <Plug className="w-4 h-4 text-muted-foreground shrink-0" />
                     <span className="text-sm font-medium truncate">{connector.name}</span>
                   </div>
 

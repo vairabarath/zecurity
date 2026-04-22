@@ -270,11 +270,11 @@ export default function RemoteNetworks() {
                   {/* Actions */}
                   <div className="flex items-center gap-2 pt-1 border-t border-border/30">
                     <Link
-                      to={`/remote-networks/${network.id}/connectors`}
+                      to={`/remote-networks/${network.id}`}
                       className="flex-1"
                     >
                       <Button variant="outline" size="sm" className="w-full gap-2 text-xs group/btn">
-                        View Connectors
+                        View Details
                         <ArrowRight className="w-3 h-3 transition-transform group-hover/btn:translate-x-0.5" />
                       </Button>
                     </Link>
