@@ -203,7 +203,12 @@ export default function Shields() {
                   <div className="flex items-center gap-2.5 min-w-0">
                     <Shield className="w-4 h-4 text-muted-foreground shrink-0" />
                     <div className="min-w-0">
-                      <span className="text-sm font-medium truncate block">{shield.name}</span>
+                      <Link
+                        to={`/shields/${shield.id}`}
+                        className="text-sm font-medium truncate block hover:text-primary transition-colors"
+                      >
+                        {shield.name}
+                      </Link>
                       <span className="text-xs text-muted-foreground font-mono truncate block">
                         {shield.hostname ?? '-'}
                       </span>

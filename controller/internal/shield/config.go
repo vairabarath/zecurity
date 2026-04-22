@@ -2,6 +2,7 @@ package shield
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +17,7 @@ type Service interface {
 	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
 	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) error
 	RunDisconnectWatcher(ctx context.Context)
+	TokenHandler() http.Handler
 }
 
 type Config struct {

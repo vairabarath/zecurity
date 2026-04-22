@@ -206,7 +206,9 @@ export default function AllShields() {
                       <div className="flex items-center justify-center h-8 w-8 rounded-lg bg-primary/10 border border-primary/20 shrink-0">
                         <Shield className="h-4 w-4 text-primary" />
                       </div>
-                      <span className="text-sm font-medium truncate">{s.name}</span>
+                      <Link to={`/shields/${s.id}`} className="text-sm font-medium truncate hover:text-primary transition-colors">
+                        {s.name}
+                      </Link>
                     </div>
 
                     <div>
@@ -242,7 +244,7 @@ export default function AllShields() {
 
                     <div className="flex justify-end">
                       <Link
-                        to={`/remote-networks/${s.networkId}/shields`}
+                        to={`/shields/${s.id}`}
                         className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 font-medium transition-colors"
                       >
                         Manage
