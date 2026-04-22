@@ -363,3 +363,26 @@ func (r *queryResolver) Connectors(ctx context.Context, remoteNetworkID string) 
 
 	return connectors, nil
 }
+
+// Connector is the resolver for the connector field.
+func (r *queryResolver) Connector(ctx context.Context, id string) (*graph.Connector, error) {
+	tc := tenant.MustGet(ctx)
+
+	c, err := scanConnector(r.TenantDB.QueryRow(ctx,
+		`SELECT id, name, status, remote_network_id,
+		        last_heartbeat_at, version, hostname, public_ip, lan_addr,
+		        cert_not_after, created_at
+		   FROM connectors
+		  WHERE id = $1
+		    AND tenant_id = $2`,
+		id, tc.TenantID,
+	))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("connector: %w", err)
+	}
+
+	return c, nil
+}

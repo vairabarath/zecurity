@@ -12,6 +12,10 @@ extend type Query {
   # List all connectors for a given remote network.
   # Scoped to tenant_id — never crosses tenants.
   connectors(remoteNetworkId: ID!): [Connector!]!
+
+  # Get a single connector by ID.
+  # Scoped to tenant_id — never crosses tenants.
+  connector(id: ID!): Connector
 }
 
 extend type Mutation {

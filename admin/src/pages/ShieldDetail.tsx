@@ -3,14 +3,17 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { motion } from 'framer-motion'
 import {
+  GetShieldDocument,
+  GetRemoteNetworkDocument,
+  GetConnectorDocument,
+  RevokeShieldDocument,
+  DeleteShieldDocument,
+  ShieldStatus,
   GetRemoteNetworksDocument,
-  RevokeConnectorDocument,
-  DeleteConnectorDocument,
-  ConnectorStatus,
 } from '@/generated/graphql'
 import type {
-  RevokeConnectorMutationVariables,
-  DeleteConnectorMutationVariables,
+  RevokeShieldMutationVariables,
+  DeleteShieldMutationVariables,
 } from '@/generated/graphql'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -20,6 +23,7 @@ import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
 import {
   ArrowLeft,
+  Shield,
   Terminal,
   ShieldOff,
   Trash2,
@@ -38,7 +42,7 @@ import {
   Calendar,
   Wifi,
   Network,
-  Plug,
+  Server,
 } from 'lucide-react'
 
 function relativeTime(dateStr: string | null | undefined): string {
@@ -57,22 +61,22 @@ function relativeTime(dateStr: string | null | undefined): string {
 }
 
 const statusConfig = {
-  [ConnectorStatus.Active]: {
+  [ShieldStatus.Active]: {
     label: 'Active',
     className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
     icon: <CircleDot className="h-3 w-3 fill-emerald-500 text-emerald-500" />,
   },
-  [ConnectorStatus.Disconnected]: {
+  [ShieldStatus.Disconnected]: {
     label: 'Disconnected',
     className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
     icon: <CircleDotDashed className="h-3 w-3 fill-amber-500 text-amber-500" />,
   },
-  [ConnectorStatus.Pending]: {
+  [ShieldStatus.Pending]: {
     label: 'Pending',
     className: 'text-gray-600 bg-gray-500/10 border-gray-500/20',
     icon: <CircleDotDashed className="h-3 w-3 fill-gray-400 text-gray-400" />,
   },
-  [ConnectorStatus.Revoked]: {
+  [ShieldStatus.Revoked]: {
     label: 'Revoked',
     className: 'text-red-600 bg-red-500/10 border-red-500/20',
     icon: <Ban className="h-3 w-3 text-red-500" />,
@@ -97,23 +101,33 @@ function InfoRow({ icon, label, value }: InfoRowProps) {
   )
 }
 
-export default function ConnectorDetail() {
-  const { connectorId } = useParams<{ connectorId: string }>()
+export default function ShieldDetail() {
+  const { shieldId } = useParams<{ shieldId: string }>()
   const navigate = useNavigate()
   const accessToken = useAuthStore((s) => s.accessToken)
 
-  const { data, loading } = useQuery(GetRemoteNetworksDocument, {
+  const { data, loading } = useQuery(GetShieldDocument, {
+    variables: { id: shieldId! },
+    skip: !shieldId,
     pollInterval: 10000,
     fetchPolicy: 'cache-and-network',
   })
 
-  const found = data?.remoteNetworks
-    .flatMap((n) => n.connectors.map((c) => ({ ...c, networkId: n.id, networkName: n.name })))
-    .find((c) => c.id === connectorId)
+  const shield = data?.shield
 
-  const connector = found
-  const networkId = found?.networkId
-  const networkName = found?.networkName ?? 'Network'
+  const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
+    variables: { id: shield?.remoteNetworkId ?? '' },
+    skip: !shield?.remoteNetworkId,
+  })
+
+  const networkName = networkData?.remoteNetwork?.name ?? 'Network'
+
+  const { data: connectorData } = useQuery(GetConnectorDocument, {
+    variables: { id: shield?.connectorId ?? '' },
+    skip: !shield?.connectorId,
+  })
+
+  const connectorName = connectorData?.connector?.name ?? shield?.connectorId ?? 'Connector'
 
   // Install command state
   const [tokenLoading, setTokenLoading] = useState(false)
@@ -123,11 +137,11 @@ export default function ConnectorDetail() {
   const didFetch = useRef(false)
 
   const fetchInstallCommand = async () => {
-    if (!connectorId || !accessToken) return
+    if (!shieldId || !accessToken) return
     setTokenLoading(true)
     setTokenError(null)
     try {
-      const resp = await fetch(`/api/connectors/${connectorId}/token`, {
+      const resp = await fetch(`/api/shields/${shieldId}/token`, {
         method: 'POST',
         credentials: 'include',
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -146,11 +160,13 @@ export default function ConnectorDetail() {
   }
 
   useEffect(() => {
-    if (connector?.status === ConnectorStatus.Pending && !didFetch.current) {
+    if (shield?.status === ShieldStatus.Pending && !didFetch.current) {
       didFetch.current = true
       fetchInstallCommand()
     }
-  }, [connector?.status])
+    // fetchInstallCommand is stable; didFetch ref guards against re-runs
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shield?.status])
 
   function handleCopy() {
     if (!installCommand) return
@@ -159,26 +175,28 @@ export default function ConnectorDetail() {
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const [revokeConnector, { loading: revoking }] = useMutation(RevokeConnectorDocument, {
-    refetchQueries: [{ query: GetRemoteNetworksDocument }],
+  const [revokeShield, { loading: revoking }] = useMutation(RevokeShieldDocument, {
+    refetchQueries: [{ query: GetShieldDocument, variables: { id: shieldId } }],
   })
 
-  const [deleteConnector, { loading: deleting }] = useMutation(DeleteConnectorDocument, {
+  const [deleteShield, { loading: deleting }] = useMutation(DeleteShieldDocument, {
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
-    onCompleted: () => navigate(networkId ? `/remote-networks/${networkId}/connectors` : '/connectors'),
+    onCompleted: () => navigate(shield?.remoteNetworkId ? `/remote-networks/${shield.remoteNetworkId}/shields` : '/shields'),
   })
 
   async function handleRevoke() {
-    if (!connectorId) return
-    await revokeConnector({ variables: { id: connectorId } as RevokeConnectorMutationVariables })
+    if (!shieldId) return
+    if (!window.confirm(`Revoke shield "${shield?.name}"?`)) return
+    await revokeShield({ variables: { id: shieldId } as RevokeShieldMutationVariables })
   }
 
   async function handleDelete() {
-    if (!connectorId) return
-    await deleteConnector({ variables: { id: connectorId } as DeleteConnectorMutationVariables })
+    if (!shieldId) return
+    if (!window.confirm(`Delete shield "${shield?.name}"? This cannot be undone.`)) return
+    await deleteShield({ variables: { id: shieldId } as DeleteShieldMutationVariables })
   }
 
-  // Install card (shared between "not found" and "pending" states)
+  // Install card
   const installCard = (
     <Card className="mt-8 mx-auto max-w-2xl text-left">
       <CardHeader>
@@ -187,7 +205,7 @@ export default function ConnectorDetail() {
           Installation Command
         </CardTitle>
         <CardDescription>
-          Copy and run the command below on your server.
+          Copy and run the command below on your resource host.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -246,54 +264,54 @@ export default function ConnectorDetail() {
       <div className="flex items-center justify-center p-16">
         <div className="flex flex-col items-center gap-3">
           <Loader2 className="h-6 w-6 animate-spin text-primary" />
-          <p className="text-xs text-muted-foreground font-mono tracking-wider">Loading connector...</p>
+          <p className="text-xs text-muted-foreground font-mono tracking-wider">Loading shield...</p>
         </div>
       </div>
     )
   }
 
-  if (!loading && !connector) {
+  if (!loading && !shield) {
     return (
       <div className="space-y-6">
         <Link
-          to="/connectors"
+          to="/shields"
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Connectors
+          Back to Shields
         </Link>
         <div className="text-center py-20">
           <AlertTriangle className="mx-auto h-16 w-16 text-destructive/40" />
-          <h2 className="mt-4 text-2xl font-bold">Connector Not Found</h2>
+          <h2 className="mt-4 text-2xl font-bold">Shield Not Found</h2>
           <p className="mt-2 text-muted-foreground">
-            This connector no longer exists or was deleted.
+            This shield no longer exists or was deleted.
           </p>
         </div>
       </div>
     )
   }
 
-  const st = statusConfig[connector!.status]
-  const isPending = connector!.status === ConnectorStatus.Pending
-  const isRevoked = connector!.status === ConnectorStatus.Revoked
-  const canRevoke = connector!.status === ConnectorStatus.Active || connector!.status === ConnectorStatus.Disconnected
+  const st = statusConfig[shield!.status]
+  const isPending = shield!.status === ShieldStatus.Pending
+  const isRevoked = shield!.status === ShieldStatus.Revoked
+  const canRevoke = shield!.status === ShieldStatus.Active || shield!.status === ShieldStatus.Disconnected
   const canDelete = isPending || isRevoked
 
   if (isPending) {
     return (
       <div className="space-y-6">
         <Link
-          to="/connectors"
+          to="/shields"
           className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
-          Back to Connectors
+          Back to Shields
         </Link>
         <div className="text-center py-12">
           <AlertTriangle className="mx-auto h-16 w-16 text-muted-foreground/30" />
-          <h2 className="mt-4 text-2xl font-bold">Connector Added, Not Installed</h2>
+          <h2 className="mt-4 text-2xl font-bold">Shield Added, Not Installed</h2>
           <p className="mt-2 text-muted-foreground">
-            This connector is registered but not installed yet. Run the command below on your server.
+            This shield is registered but not installed yet. Run the command below on your resource host.
           </p>
           <div className="mt-4 flex justify-center gap-2">
             <Button
@@ -304,7 +322,7 @@ export default function ConnectorDetail() {
               disabled={deleting}
             >
               <Trash2 className="w-4 h-4" />
-              {deleting ? 'Deleting...' : 'Delete Connector'}
+              {deleting ? 'Deleting...' : 'Delete Shield'}
             </Button>
           </div>
           {installCard}
@@ -321,11 +339,11 @@ export default function ConnectorDetail() {
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.3 }}
       >
-        <Link to="/connectors" className="hover:text-foreground transition-colors">
-          Connectors
+        <Link to="/shields" className="hover:text-foreground transition-colors">
+          Shields
         </Link>
         <ChevronRight className="w-3.5 h-3.5 opacity-40" />
-        <span className="text-foreground font-medium">{connector!.name}</span>
+        <span className="text-foreground font-medium">{shield!.name}</span>
       </motion.div>
 
       <motion.div
@@ -337,14 +355,14 @@ export default function ConnectorDetail() {
         <div className="space-y-1">
           <div className="flex items-center gap-2.5">
             <h1 className="text-2xl font-display font-bold tracking-tight">
-              {connector!.name}
+              {shield!.name}
             </h1>
             <Badge variant="outline" className={cn('gap-1', st.className)}>
               {st.icon}
               {st.label}
             </Badge>
           </div>
-          <p className="text-xs text-muted-foreground font-mono">{connector!.id}</p>
+          <p className="text-xs text-muted-foreground font-mono">{shield!.id}</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -381,16 +399,16 @@ export default function ConnectorDetail() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <Plug className="h-5 w-5" />
-              Connector Details
+              <Shield className="h-5 w-5 text-primary" />
+              Shield Details
             </CardTitle>
-            <CardDescription>Information about this connector.</CardDescription>
+            <CardDescription>Information about this shield agent.</CardDescription>
           </CardHeader>
           <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-6">
             <InfoRow
-              icon={<Plug className="w-3.5 h-3.5" />}
+              icon={<Shield className="w-3.5 h-3.5" />}
               label="Name"
-              value={connector!.name}
+              value={shield!.name}
             />
             <InfoRow
               icon={<CircleDot className="w-3.5 h-3.5" />}
@@ -405,19 +423,19 @@ export default function ConnectorDetail() {
             <InfoRow
               icon={<Cpu className="w-3.5 h-3.5" />}
               label="Version"
-              value={<span className="font-mono text-muted-foreground text-xs">{connector!.version ?? '—'}</span>}
+              value={<span className="font-mono text-muted-foreground text-xs">{shield!.version ?? '—'}</span>}
             />
             <InfoRow
               icon={<Clock className="w-3.5 h-3.5" />}
               label="Last Seen"
-              value={<span className="text-muted-foreground text-xs">{relativeTime(connector!.lastSeenAt)}</span>}
+              value={<span className="text-muted-foreground text-xs">{relativeTime(shield!.lastSeenAt)}</span>}
             />
             <InfoRow
               icon={<Network className="w-3.5 h-3.5" />}
               label="Remote Network"
               value={
                 <Link
-                  to={`/remote-networks/${networkId}/connectors`}
+                  to={`/remote-networks/${shield!.remoteNetworkId}/shields`}
                   className="text-primary hover:underline flex items-center gap-1 text-sm"
                 >
                   <Globe className="w-3.5 h-3.5" />
@@ -426,26 +444,39 @@ export default function ConnectorDetail() {
               }
             />
             <InfoRow
+              icon={<Terminal className="w-3.5 h-3.5" />}
+              label="Connected Via"
+              value={
+                <Link
+                  to={`/connectors/${shield!.connectorId}`}
+                  className="text-primary hover:underline flex items-center gap-1 text-sm font-mono truncate"
+                >
+                  <Server className="w-3.5 h-3.5" />
+                  {connectorName}
+                </Link>
+              }
+            />
+            <InfoRow
               icon={<Wifi className="w-3.5 h-3.5" />}
               label="Hostname"
-              value={<span className="font-mono text-muted-foreground text-xs">{connector!.hostname ?? '—'}</span>}
+              value={<span className="font-mono text-muted-foreground text-xs">{shield!.hostname ?? '—'}</span>}
             />
             <InfoRow
               icon={<Globe className="w-3.5 h-3.5" />}
-              label="Public IP"
-              value={<span className="font-mono text-muted-foreground text-xs">{connector!.publicIp ?? '—'}</span>}
+              label="LAN IP"
+              value={<span className="font-mono text-muted-foreground text-xs">{shield!.lanIp ?? '—'}</span>}
             />
             <InfoRow
               icon={<Wifi className="w-3.5 h-3.5" />}
-              label="LAN IP"
-              value={<span className="font-mono text-muted-foreground text-xs">{connector!.lanAddr ? connector!.lanAddr.split(':')[0] : '—'}</span>}
+              label="Interface Addr"
+              value={<span className="font-mono text-muted-foreground text-xs">{shield!.interfaceAddr ?? '—'}</span>}
             />
             <InfoRow
               icon={<Calendar className="w-3.5 h-3.5" />}
               label="Cert Expires"
               value={
                 <span className="font-mono text-muted-foreground text-xs">
-                  {connector!.certNotAfter ? new Date(connector!.certNotAfter).toLocaleString() : '—'}
+                  {shield!.certNotAfter ? new Date(shield!.certNotAfter).toLocaleString() : '—'}
                 </span>
               }
             />
@@ -454,7 +485,7 @@ export default function ConnectorDetail() {
               label="Created"
               value={
                 <span className="font-mono text-muted-foreground text-xs">
-                  {new Date(connector!.createdAt).toLocaleString()}
+                  {new Date(shield!.createdAt).toLocaleString()}
                 </span>
               }
             />

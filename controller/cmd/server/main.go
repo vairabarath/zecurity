@@ -139,6 +139,14 @@ func main() {
 	)
 	mux.Handle("/api/connectors/", connectorTokenRoute)
 
+	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
+	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.WorkspaceGuard(db.Pool)(
+			shieldSvc.TokenHandler(),
+		),
+	)
+	mux.Handle("/api/shields/", shieldTokenRoute)
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
