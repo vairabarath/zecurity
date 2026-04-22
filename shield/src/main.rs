@@ -45,6 +45,7 @@ mod util;
 
 mod heartbeat;
 mod renewal;
+mod resources;
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.
 ///
 /// build.rs compiles the proto via tonic_prost_build and writes the
@@ -61,6 +62,7 @@ pub mod proto {
 }
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Context;
 use tracing::{error, info};
@@ -145,11 +147,20 @@ async fn main() -> anyhow::Result<()> {
         enrollment::enroll(&cfg).await?
     };
 
-    // Step 5: Spawn heartbeat loop (Phase J)
+    // Step 5: Spawn resource health check loop + heartbeat loop
+    let resource_state = Arc::new(resources::SharedResourceState::new());
+
+    let health_state = Arc::clone(&resource_state);
+    tokio::spawn(resources::run_health_check_loop(
+        cfg.resource_check_interval_secs,
+        health_state,
+    ));
+
     let hb_cfg = cfg.clone();
     let hb_state = state.clone();
+    let hb_resource_state = Arc::clone(&resource_state);
     tokio::spawn(async move {
-        if let Err(e) = heartbeat::run(hb_state, hb_cfg).await {
+        if let Err(e) = heartbeat::run(hb_state, hb_cfg, hb_resource_state).await {
             error!("heartbeat loop failed: {:#}", e);
         }
     });

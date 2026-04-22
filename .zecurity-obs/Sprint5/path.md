@@ -105,15 +105,15 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 ### PHASE D — M4 Shield Resources (Depends on: Day 1 proto done)
 
-- [ ] **M4-D1** `shield/src/resources.rs` — NEW file:
+- [x] **M4-D1** `shield/src/resources.rs` — NEW file:
   - `validate_host(resource_host)` → checks `resource_host == detect_lan_ip()`
   - `check_port(port)` → `TcpStream::connect("127.0.0.1:{port}")` → bool
   - `apply_nftables(resources)` → flush + rebuild `chain resource_protect` atomically
   - `remove_nftables(resource_id)` → remove rule for this resource
   - `run_health_check_loop(interval_secs, shared_state)` → every 30s check all protected ports
-- [ ] **M4-D2** `shield/src/config.rs` — Add `resource_check_interval_secs: u64` (default 30)
-- [ ] **M4-D3** `shield/src/heartbeat.rs` — MODIFY: handle `resp.resources` → validate host → apply nftables → build `ResourceAck`; send `resource_acks` in `HeartbeatRequest`
-- [ ] **M4-D4** `shield/src/main.rs` — MODIFY: `tokio::spawn(resources::run_health_check_loop(cfg, shared_acks))`
+- [x] **M4-D2** `shield/src/config.rs` — Add `resource_check_interval_secs: u64` (default 30)
+- [x] **M4-D3** `shield/src/heartbeat.rs` — MODIFY: handle `resp.resources` → validate host → apply nftables → build `ResourceAck`; send `resource_acks` in `HeartbeatRequest`
+- [x] **M4-D4** `shield/src/main.rs` — MODIFY: `tokio::spawn(resources::run_health_check_loop(cfg, shared_acks))`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
