@@ -8,15 +8,18 @@
 // Loop:
 //   1. Build mTLS channel to connector_addr :9091 via SpiffeConnectorVerifier
 //   2. Send HeartbeatRequest every shield_heartbeat_interval_secs
-//   3. On ok=true: reset backoff; if re_enroll=true → call renewal::renew_cert()
-//      and rebuild the channel with the renewed cert
+//      - Drains pending ResourceAcks from SharedResourceState into the request
+//   3. On ok=true: reset backoff
+//      - Process resp.resources: validate host, apply/remove nftables, push acks
+//      - If re_enroll=true → call renewal::renew_cert() and rebuild channel
 //   4. On error: exponential backoff (5s → 10s → 20s → 40s → 60s cap)
 //
 // goodbye(): best-effort Goodbye RPC sent on SIGTERM so the connector marks
 // the shield DISCONNECTED immediately rather than waiting for the threshold.
 
 use std::path::Path;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use tokio::time::{interval, sleep};
@@ -24,6 +27,7 @@ use tracing::{error, info, warn};
 
 use crate::config::ShieldConfig;
 use crate::proto;
+use crate::resources::{self, ActiveResource, SharedResourceState};
 use crate::tls;
 use crate::types::ShieldState;
 use crate::util;
@@ -31,7 +35,11 @@ use crate::util;
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
 
-pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
+pub async fn run(
+    state: ShieldState,
+    cfg: ShieldConfig,
+    resource_state: Arc<SharedResourceState>,
+) -> Result<()> {
     let mut current_state = state;
     let mut client = build_client(&current_state, &cfg).await?;
 
@@ -54,12 +62,15 @@ pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
     loop {
         hb_interval.tick().await;
 
+        let pending_acks = resource_state.acks.lock().unwrap().drain(..).collect::<Vec<_>>();
+
         let req = tonic::Request::new(proto::HeartbeatRequest {
             shield_id: current_state.shield_id.clone(),
             version: version.clone(),
             hostname: hostname.clone(),
             public_ip: public_ip.clone(),
             lan_ip: lan_ip.clone(),
+            resource_acks: pending_acks,
         });
 
         match client.heartbeat(req).await {
@@ -68,6 +79,8 @@ pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
                 backoff_secs = BACKOFF_INITIAL_SECS;
 
                 info!(shield_id = %current_state.shield_id, "heartbeat ok");
+
+                process_resource_instructions(&resp.resources, &resource_state).await;
 
                 if resp.re_enroll {
                     info!(shield_id = %current_state.shield_id, "connector requested cert renewal");
@@ -99,6 +112,118 @@ pub async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()> {
             }
         }
     }
+}
+
+async fn process_resource_instructions(
+    instructions: &[proto::ResourceInstruction],
+    state: &Arc<SharedResourceState>,
+) {
+    for instruction in instructions {
+        match instruction.action.as_str() {
+            "apply" => handle_apply(instruction, state).await,
+            "remove" => handle_remove(instruction, state).await,
+            other => warn!(action = other, resource_id = %instruction.resource_id, "unknown resource action"),
+        }
+    }
+}
+
+async fn handle_apply(instruction: &proto::ResourceInstruction, state: &Arc<SharedResourceState>) {
+    let now = now_unix();
+
+    if !resources::validate_host(&instruction.host) {
+        warn!(
+            resource_id = %instruction.resource_id,
+            host = %instruction.host,
+            "resource host does not match this shield's LAN IP — rejecting"
+        );
+        push_ack(state, proto::ResourceAck {
+            resource_id: instruction.resource_id.clone(),
+            status: "failed".to_string(),
+            error: "resource host does not match this shield's IP".to_string(),
+            verified_at: now,
+            port_reachable: false,
+        });
+        return;
+    }
+
+    {
+        let mut active = state.active.lock().unwrap();
+        // Replace if already present, otherwise push.
+        if let Some(existing) = active.iter_mut().find(|r| r.resource_id == instruction.resource_id) {
+            existing.protocol  = instruction.protocol.clone();
+            existing.port_from = instruction.port_from as u16;
+            existing.port_to   = instruction.port_to as u16;
+        } else {
+            active.push(ActiveResource {
+                resource_id: instruction.resource_id.clone(),
+                protocol:    instruction.protocol.clone(),
+                port_from:   instruction.port_from as u16,
+                port_to:     instruction.port_to as u16,
+            });
+        }
+    }
+
+    let snapshot = state.active.lock().unwrap().clone();
+    match resources::apply_nftables(&snapshot).await {
+        Ok(()) => {
+            let reachable = resources::check_port(instruction.port_from as u16);
+            info!(
+                resource_id = %instruction.resource_id,
+                port = instruction.port_from,
+                port_reachable = reachable,
+                "resource applied — nftables chain rebuilt"
+            );
+            push_ack(state, proto::ResourceAck {
+                resource_id: instruction.resource_id.clone(),
+                status: "protecting".to_string(),
+                error: String::new(),
+                verified_at: now,
+                port_reachable: reachable,
+            });
+        }
+        Err(e) => {
+            error!(resource_id = %instruction.resource_id, error = %e, "nftables apply failed");
+            push_ack(state, proto::ResourceAck {
+                resource_id: instruction.resource_id.clone(),
+                status: "failed".to_string(),
+                error: e.to_string(),
+                verified_at: now,
+                port_reachable: false,
+            });
+        }
+    }
+}
+
+async fn handle_remove(instruction: &proto::ResourceInstruction, state: &Arc<SharedResourceState>) {
+    state.active.lock().unwrap()
+        .retain(|r| r.resource_id != instruction.resource_id);
+
+    let snapshot = state.active.lock().unwrap().clone();
+    if let Err(e) = resources::apply_nftables(&snapshot).await {
+        error!(resource_id = %instruction.resource_id, error = %e, "nftables rebuild after remove failed");
+    }
+
+    info!(resource_id = %instruction.resource_id, "resource removed from nftables");
+    push_ack(state, proto::ResourceAck {
+        resource_id: instruction.resource_id.clone(),
+        status: "removed".to_string(),
+        error: String::new(),
+        verified_at: now_unix(),
+        port_reachable: false,
+    });
+}
+
+fn push_ack(state: &Arc<SharedResourceState>, ack: proto::ResourceAck) {
+    let mut acks = state.acks.lock().unwrap();
+    acks.retain(|a| a.resource_id != ack.resource_id);
+    acks.push(ack);
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 /// Best-effort Goodbye RPC on SIGTERM — lets connector mark us DISCONNECTED
