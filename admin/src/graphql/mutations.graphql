@@ -66,6 +66,18 @@ mutation CreateResource($input: CreateResourceInput!) {
   }
 }
 
+mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {
+  updateResource(id: $id, input: $input) {
+    id
+    name
+    description
+    protocol
+    portFrom
+    portTo
+    status
+  }
+}
+
 mutation ProtectResource($id: ID!) {
   protectResource(id: $id) {
     id

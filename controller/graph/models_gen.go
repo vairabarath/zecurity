@@ -92,6 +92,15 @@ type ShieldToken struct {
 	InstallCommand string `json:"installCommand"`
 }
 
+type UpdateResourceInput struct {
+	RemoteNetworkID *string `json:"remoteNetworkId,omitempty"`
+	Name            *string `json:"name,omitempty"`
+	Description     *string `json:"description,omitempty"`
+	Protocol        *string `json:"protocol,omitempty"`
+	PortFrom        *int    `json:"portFrom,omitempty"`
+	PortTo          *int    `json:"portTo,omitempty"`
+}
+
 type WorkspaceListResult struct {
 	Workspaces []*WorkspacePublic `json:"workspaces"`
 }
