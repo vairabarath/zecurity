@@ -12,6 +12,22 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-22 — Claude Code (Sonnet 4.6) — M1 Sprint 5 (Hard Delete Fix)
+
+**Member:** M1 (Frontend)
+**Branch:** `sprint5-member1`
+
+**What was done:**
+- Changed `SoftDelete` in `controller/internal/resource/store.go` from `UPDATE ... SET deleted_at` to `DELETE FROM resources` — hard delete so the `(shield_id, name)` unique constraint is immediately freed and the same name can be reused right after deletion
+
+**Key decisions:**
+- Hard delete is correct here — soft delete was causing duplicate key errors when recreating a resource with the same name; since nftables state is managed by Shield heartbeat acks (not by the DB row), hard delete is safe
+
+**What's next:**
+- Full integration test: create → protect → unprotect → delete → recreate with same name
+
+---
+
 ## 2026-04-17 — Claude Code (Opus 4) — M1 Phase 4
 
 **Member:** M1 (Frontend)

@@ -276,12 +276,11 @@ func MarkRemoving(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*
 		[]string{"protected"}, "unprotect resource")
 }
 
-// SoftDelete marks a resource as deleted.
+// SoftDelete hard-deletes a resource row so the name can be reused immediately.
 func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error {
 	var discardedID string
 	err := db.QueryRow(ctx,
-		`UPDATE resources
-		    SET deleted_at = NOW(), updated_at = NOW()
+		`DELETE FROM resources
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status NOT IN ('managing', 'protecting', 'removing')
 		 RETURNING id`,
