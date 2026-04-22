@@ -22,6 +22,7 @@ const PROTECT_CHAIN: &str = "resource_protect";
 #[derive(Clone)]
 pub struct ActiveResource {
     pub resource_id: String,
+    pub host: String,
     pub protocol: String,
     pub port_from: u16,
     pub port_to: u16,
@@ -51,9 +52,9 @@ pub fn validate_host(resource_host: &str) -> bool {
     }
 }
 
-pub fn check_port(port: u16) -> bool {
+pub fn check_port(host: &str, port: u16) -> bool {
     std::net::TcpStream::connect_timeout(
-        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        &format!("{}:{}", host, port).parse().unwrap(),
         Duration::from_secs(2),
     )
     .is_ok()
@@ -149,7 +150,7 @@ pub async fn run_health_check_loop(interval_secs: u64, state: Arc<SharedResource
         let mut fresh_acks: Vec<ResourceAck> = resources
             .iter()
             .map(|res| {
-                let reachable = check_port(res.port_from);
+                let reachable = check_port(&res.host, res.port_from);
                 ResourceAck {
                     resource_id: res.resource_id.clone(),
                     status: if reachable {
