@@ -1,6 +1,6 @@
 [package]
 name = "zecurity-connector"
-version = "1.0.10"
+version = "1.0.0"
 edition = "2021"
 description = "ZECURITY connector — enrollment, heartbeat, and auto-update agent"
 
