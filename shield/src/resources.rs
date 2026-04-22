@@ -11,7 +11,7 @@ use nftables::{
     stmt::{Accept, Drop, Match, Operator, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
-use tracing::info;
+use tracing::{error, info, warn};
 
 use crate::proto::ResourceAck;
 use crate::{appmeta, util};
@@ -39,6 +39,17 @@ impl SharedResourceState {
             active: Mutex::new(Vec::new()),
             acks: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn store_ack(&self, ack: ResourceAck) {
+        let mut acks = self.acks.lock().unwrap();
+        acks.retain(|a| a.resource_id != ack.resource_id);
+        acks.push(ack);
+    }
+
+    pub fn drain_acks(&self) -> Vec<ResourceAck> {
+        let mut acks = self.acks.lock().unwrap();
+        std::mem::take(&mut *acks)
     }
 }
 
@@ -121,7 +132,11 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         for proto in protos {
             let port_expr = port_expression(res.port_from, res.port_to);
             // Allow loopback and zecurity0 (ZTNA tunnel); drop everything else.
-            batch.add(NfListObject::Rule(iif_accept_rule(proto, port_expr.clone(), "lo")));
+            batch.add(NfListObject::Rule(iif_accept_rule(
+                proto,
+                port_expr.clone(),
+                "lo",
+            )));
             batch.add(NfListObject::Rule(iif_accept_rule(
                 proto,
                 port_expr.clone(),
@@ -135,7 +150,10 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         .await
         .context("failed to apply resource_protect chain")?;
 
-    info!(resource_count = resources.len(), "rebuilt nftables resource_protect chain");
+    info!(
+        resource_count = resources.len(),
+        "rebuilt nftables resource_protect chain"
+    );
     Ok(())
 }
 
@@ -182,6 +200,153 @@ pub async fn run_health_check_loop(interval_secs: u64, state: Arc<SharedResource
             acks.push(ack);
         }
     }
+}
+
+pub async fn handle_instruction(
+    instruction: &crate::proto::ResourceInstruction,
+    state: &Arc<SharedResourceState>,
+) -> Option<ResourceAck> {
+    match instruction.action.as_str() {
+        "apply" => Some(handle_apply(instruction, state).await),
+        "remove" => Some(handle_remove(instruction, state).await),
+        other => {
+            warn!(
+                action = other,
+                resource_id = %instruction.resource_id,
+                "unknown resource action"
+            );
+            None
+        }
+    }
+}
+
+pub async fn handle_apply(
+    instruction: &crate::proto::ResourceInstruction,
+    state: &Arc<SharedResourceState>,
+) -> ResourceAck {
+    let now = now_unix();
+
+    if !validate_host(&instruction.host) {
+        warn!(
+            resource_id = %instruction.resource_id,
+            host = %instruction.host,
+            "resource host does not match this shield's LAN IP — rejecting"
+        );
+        return ResourceAck {
+            resource_id: instruction.resource_id.clone(),
+            status: "failed".to_string(),
+            error: "resource host does not match this shield's IP".to_string(),
+            verified_at: now,
+            port_reachable: false,
+        };
+    }
+
+    {
+        let mut active = state.active.lock().unwrap();
+        if let Some(existing) = active
+            .iter_mut()
+            .find(|r| r.resource_id == instruction.resource_id)
+        {
+            existing.host = instruction.host.clone();
+            existing.protocol = instruction.protocol.clone();
+            existing.port_from = instruction.port_from as u16;
+            existing.port_to = instruction.port_to as u16;
+        } else {
+            active.push(ActiveResource {
+                resource_id: instruction.resource_id.clone(),
+                host: instruction.host.clone(),
+                protocol: instruction.protocol.clone(),
+                port_from: instruction.port_from as u16,
+                port_to: instruction.port_to as u16,
+            });
+        }
+    }
+
+    let snapshot = state.active.lock().unwrap().clone();
+    match apply_nftables(&snapshot).await {
+        Ok(()) => {
+            let reachable = check_port(&instruction.host, instruction.port_from as u16);
+            info!(
+                resource_id = %instruction.resource_id,
+                port = instruction.port_from,
+                port_reachable = reachable,
+                "resource applied — nftables chain rebuilt"
+            );
+            ResourceAck {
+                resource_id: instruction.resource_id.clone(),
+                status: if reachable {
+                    "protected".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                error: if reachable {
+                    String::new()
+                } else {
+                    "port not listening".to_string()
+                },
+                verified_at: now,
+                port_reachable: reachable,
+            }
+        }
+        Err(e) => {
+            state
+                .active
+                .lock()
+                .unwrap()
+                .retain(|r| r.resource_id != instruction.resource_id);
+            error!(
+                resource_id = %instruction.resource_id,
+                error = %e,
+                "nftables apply failed"
+            );
+            ResourceAck {
+                resource_id: instruction.resource_id.clone(),
+                status: "failed".to_string(),
+                error: e.to_string(),
+                verified_at: now,
+                port_reachable: false,
+            }
+        }
+    }
+}
+
+pub async fn handle_remove(
+    instruction: &crate::proto::ResourceInstruction,
+    state: &Arc<SharedResourceState>,
+) -> ResourceAck {
+    state
+        .active
+        .lock()
+        .unwrap()
+        .retain(|r| r.resource_id != instruction.resource_id);
+
+    let snapshot = state.active.lock().unwrap().clone();
+    if let Err(e) = apply_nftables(&snapshot).await {
+        error!(
+            resource_id = %instruction.resource_id,
+            error = %e,
+            "nftables rebuild after remove failed"
+        );
+    }
+
+    info!(
+        resource_id = %instruction.resource_id,
+        "resource removed from nftables"
+    );
+    ResourceAck {
+        resource_id: instruction.resource_id.clone(),
+        status: "unprotected".to_string(),
+        error: String::new(),
+        verified_at: now_unix(),
+        port_reachable: false,
+    }
+}
+
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 fn port_expression(port_from: u16, port_to: u16) -> Expression<'static> {

@@ -1,8 +1,8 @@
 [package]
 name = "zecurity-connector"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
-description = "ZECURITY connector — enrollment, heartbeat, and auto-update agent"
+description = "ZECURITY connector — enrollment, control streaming, and auto-update agent"
 
 [dependencies]
 tokio              = { version = "1", features = ["full"] }
@@ -27,6 +27,7 @@ reqwest            = { version = "0.13", features = ["json", "rustls"] }
 base64             = "0.22"
 time               = { version = "0.3", features = ["formatting"] }
 if-addrs           = "0.13"
+tokio-stream       = "0.1"
 
 [build-dependencies]
 tonic-build       = "0.14"

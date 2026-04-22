@@ -562,3 +562,72 @@ Most recent first. Every agent appends an entry after their session.
 - M4 is fully done for Sprint 4
 - Tag `shield-v0.1.0` after PR merges to trigger the CI release workflow
 - Sprint 5: Resource discovery (RDE, per-resource nftables rules)
+
+---
+
+## 2026-04-22 — Codex (Phase E — Shield Control Stream)
+
+**What was done:**
+- Added `shield/src/control_stream.rs` with the Shield → Connector bidirectional `Control` stream, reconnect backoff, health reports, immediate resource acks, pong handling, and cert renewal reconnect flow
+- Switched `shield/src/main.rs` from spawning the legacy heartbeat loop to spawning the new control stream
+- Moved resource instruction apply/remove handling into `shield/src/resources.rs` so both streaming and legacy heartbeat paths share one implementation
+- Added `SharedResourceState::store_ack()` and `drain_acks()` for immediate stream sends plus periodic health-loop ack flushing
+- Set the default resource health check interval to 15 seconds for the streaming path
+- Added `tokio-stream` to the Shield crate for tonic streaming request bodies
+- Verified `cargo build --manifest-path shield/Cargo.toml` passes
+
+**Key decisions:**
+- Kept `shield/src/heartbeat.rs` compiled for rollback and for the existing best-effort `Goodbye` RPC, but it is no longer the active runtime path
+- Immediate apply acks now report `protected` or `failed` based on the port probe result, matching the streaming `pending_action` guard in the controller
+- Stored immediate acks in shared state after sending them so the periodic flush can converge with health-check status if the stream send/reconnect timing changes
+
+**What's next:**
+- Run the full streaming integration gate: `buf generate`, `cd controller && go build ./...`, `cd connector && cargo build`, and `cargo build --manifest-path shield/Cargo.toml`
+- Exercise protect/unprotect end to end and confirm sub-2-second transitions through the Controller → Connector → Shield streams
+
+---
+
+## 2026-04-22 — Codex (Streaming Build Gate)
+
+**What was done:**
+- Ran `buf generate` successfully after allowing Buf remote module access
+- Ran `GOCACHE=/tmp/zecurity-go-build go build ./...` in `controller/` successfully
+- Ran `cargo build` in `connector/` successfully
+- Ran `cargo build --manifest-path shield/Cargo.toml` successfully
+- Confirmed local Postgres and Valkey containers are healthy
+- Confirmed `zecurity-connector.service` and `zecurity-shield.service` are currently running, but they are installed heartbeat binaries rather than the newly built streaming binaries
+
+**Key decisions:**
+- Used `/tmp/zecurity-go-build` for the controller Go build because the sandbox cannot write to the default Go cache under `~/.cache`
+- Did not replace or restart systemd services because `/usr/local/bin` and service restart require sudo, and passwordless sudo is not available
+
+**What's next:**
+- Install/restart the newly built connector and shield binaries with root privileges, then run the protect/unprotect latency test against the live services
+
+---
+
+## 2026-04-22 — Codex (Phase F — Streaming Cleanup)
+
+**What was done:**
+- Removed deprecated `Heartbeat` RPCs and `HeartbeatRequest` / `HeartbeatResponse` messages from `proto/connector/v1/connector.proto` and `proto/shield/v1/shield.proto`
+- Regenerated proto stubs with `buf generate`
+- Deleted `connector/src/heartbeat.rs` and moved its controller mTLS helper logic into `connector/src/controller_client.rs`
+- Deleted `shield/src/heartbeat.rs` and moved best-effort `Goodbye` into `shield/src/control_stream.rs`
+- Replaced `controller/internal/connector/heartbeat.go` with `disconnect_watcher.go`, keeping the watcher as a safety net for broken streams
+- Updated connector Shield registry cleanup: buffered instructions now flush when a shield reconnects on the Control stream, and expiring shield certs receive `ReEnrollSignal`
+- Bumped `connector` and `shield` crate versions to `1.1.0`
+
+**Key decisions:**
+- Kept the controller disconnect watcher because stream close handles normal disconnects, but the watcher still protects against abrupt process/network failures
+- Kept DB column names like `last_heartbeat_at`; changing those names would be a larger migration with no behavioral benefit for this cutover
+
+**Verification:**
+- `buf generate`
+- `GOCACHE=/tmp/zecurity-go-build go build ./...`
+- `cd connector && cargo build`
+- `cargo build --manifest-path shield/Cargo.toml`
+- `git diff --check`
+
+**What's next:**
+- Install/restart the v1.1.0 connector and shield binaries with root privileges
+- Run live protect/unprotect latency tests and then tag `connector-v1.1.0` / `shield-v1.1.0` when verified

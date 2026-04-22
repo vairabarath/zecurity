@@ -20,7 +20,7 @@
 //   enrollment.rs (Phase 5) — builds CSR CN and SAN URI using PKI_CONNECTOR_CN_PREFIX,
 //                              SPIFFE_ROLE_CONNECTOR, workspace_trust_domain(), connector_spiffe_id()
 //   tls.rs (Phase 6)        — verifies controller cert contains SPIFFE_CONTROLLER_ID
-//   heartbeat.rs (Phase 6)  — uses connector_spiffe_id() for identity context
+//   control_stream.rs       — uses connector_spiffe_id() for identity context
 
 // ── Product identity ────────────────────────────────────────────────────────
 
@@ -34,7 +34,7 @@ pub const PRODUCT_NAME: &str = "ZECURITY";
 pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.in";
 
 /// Full SPIFFE URI of the controller. The Rust connector verifies this
-/// in the controller's TLS cert on every mTLS heartbeat handshake (Phase 6 tls.rs).
+/// in the controller's TLS cert on every mTLS Control stream handshake.
 /// Go equivalent: appmeta.SPIFFEControllerID
 pub const SPIFFE_CONTROLLER_ID: &str = "spiffe://zecurity.in/controller/global";
 

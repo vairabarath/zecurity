@@ -13,10 +13,11 @@ zecurity/
 ├── proto/               Shared protobuf definitions (single source of truth)
 ├── controller/          Go backend (GraphQL API + gRPC server + PKI)
 ├── connector/           Rust agent (enrollment + heartbeat + cert renewal + auto-update)
+├── shield/              Rust agent (enrollment + heartbeat + cert renewal + resource protection)
 ├── admin/               React frontend (dashboard + remote networks + connectors)
 ├── buf.yaml             Buf lint/breaking config (repo root)
 ├── buf.gen.yaml         Buf codegen config → controller/gen/go
-└── .github/workflows/   CI/CD (connector binary release)
+└── .github/workflows/   CI/CD (connector and shield binary releases)
 ```
 
 ## Controller (Go)
@@ -27,8 +28,11 @@ zecurity/
 ### GraphQL API
 - `graph/schema.graphqls` — sprint 1 types (User, Workspace, auth, lookups)
 - `graph/connector.graphqls` — connector types (RemoteNetwork, Connector, mutations)
+- `graph/shield.graphqls` — shield types
+- `graph/resource.graphqls` — resource types (Resource, mutations for Create/Protect/Unprotect/Delete)
 - `graph/resolvers/schema.resolvers.go` — auth + user + workspace resolvers
 - `graph/resolvers/connector.resolvers.go` — connector CRUD + token generation
+- `graph/resolvers/resource.resolvers.go` — resource CRUD and lifecycle management
 - `graph/gqlgen.yml` — codegen config (follow-schema layout)
 
 ### PKI (3-tier certificate hierarchy)
@@ -38,6 +42,10 @@ zecurity/
 - `internal/pki/controller.go` — Controller TLS cert (ephemeral, SPIFFE SAN)
 - `internal/pki/crypto.go` — Key encryption (AES-256-GCM via HKDF), PEM helpers
 - `internal/pki/service.go` — Service interface + initialization
+
+### Resource Protection
+- `internal/resource/config.go` — `ResourceConfig` struct, `NewConfig()`, duration constants
+- `internal/resource/store.go` — DB helpers for resource lifecycle: `CreateResource`, `GetPendingForShield`, `UpdateStatus`, `RecordAck`, `MarkRemoving`, `SoftDelete`
 
 ### Connector Subsystem
 - `internal/connector/config.go` — ConnectorConfig struct (CertTTL, HeartbeatInterval, RenewalWindow, etc.)
@@ -59,6 +67,7 @@ zecurity/
 ### Database
 - `migrations/001_schema.sql` — users, workspaces (sprint 1)
 - `migrations/002_connector_schema.sql` — remote_networks, connectors, trust_domain column
+- `migrations/007_resources.sql` — resources table for shield resource protection
 
 ## Connector (Rust)
 
@@ -89,17 +98,47 @@ zecurity/
 - `Cross.toml` — cross-compilation config (installs protoc via pre-build apt-get)
 - `Dockerfile` — multi-stage build for containerized deployment
 
+## Shield (Rust)
+
+### Entry Point
+- `src/main.rs` — load config, check state, enroll or heartbeat, shutdown handling
+
+### Modules
+- `src/appmeta.rs` — SPIFFE constants
+- `src/config.rs` — ShieldConfig via figment
+- `src/enrollment.rs` — Enrollment flow (similar to connector)
+- `src/heartbeat.rs` — mTLS heartbeat loop, sends `resource_acks`, receives `resource_instructions`
+- `src/renewal.rs` — Certificate renewal flow
+- `src/crypto.rs` — Key generation, CSRs
+- `src/tls.rs` — Controller SPIFFE SAN verification
+- `src/updater.rs` — GitHub release checker
+- `src/resources.rs` — Manages protected resources, applies `nftables` rules, and performs health checks.
+- `src/network.rs` — Network utilities, including LAN IP detection.
+
+### Proto
+- `proto/shield/v1/shield.proto` — ShieldService (Enroll + Heartbeat + RenewCert RPCs), package `shield.v1`
+- `build.rs` — tonic-prost-build proto compilation
+
+### Deployment
+- `scripts/shield-install.sh` — Linux installer
+- `systemd/zecurity-shield.service` — Main daemon
+- `systemd/zecurity-shield-update.service` + `zecurity-shield-update.timer` — Auto-updater
+- `Cross.toml` — Cross-compilation configuration
+- `Dockerfile` — Multi-stage build
+
 ## Admin Frontend (React + TypeScript)
 
 ### Pages
 - `src/pages/Dashboard.tsx` — overview with workspace info and connector stats
 - `src/pages/RemoteNetworks.tsx` — create/delete networks, location picker, connector count
 - `src/pages/Connectors.tsx` — list connectors, status badges, revoke/delete, 30s auto-poll
+- `src/pages/Resources.tsx` — list resources, status, and manage protection state.
 - `src/pages/Login.tsx` — Google OAuth login flow
 - `src/pages/Settings.tsx` — workspace settings
 
 ### Components
 - `src/components/InstallCommandModal.tsx` — two-step modal (name input -> copy install command)
+- `src/components/CreateResourceModal.tsx` — Form for creating new resources.
 - `src/components/layout/Sidebar.tsx` — navigation sidebar
 
 ### GraphQL
@@ -110,19 +149,21 @@ zecurity/
 
 ## Proto
 
-- **Location:** `proto/connector/v1/connector.proto` (repo root — single source of truth)
-- **Package:** `connector.v1`
-- **RPCs:** `Enroll`, `Heartbeat`, `RenewCert`
-- **Go generated:** `controller/gen/go/proto/connector/v1/` (via Buf)
-- **Rust:** `build.rs` reads `../proto/connector/v1/connector.proto` directly
+- **Location:** `proto/` (repo root — single source of truth)
+- **Packages:**
+  - `connector.v1`: Connector service. `HeartbeatResponse` now includes `shield_resources` to relay resource instructions. `HeartbeatRequest` includes `resource_acks`.
+  - `shield.v1`: Shield service. Defines `ResourceInstruction` and `ResourceAck` messages.
+- **RPCs:** `Enroll`, `Heartbeat`, `RenewCert` in both services.
+- **Go generated:** `controller/gen/go/proto/` (via Buf)
+- **Rust:** `build.rs` in `connector` and `shield` projects read from `proto/` directly.
 - **Regenerate:** `buf generate` or `make generate-proto` from repo root
 
 ## CI/CD
 
-### `.github/workflows/connector-release.yml`
-- Triggers on `connector-v*` tags
+### `.github/workflows/connector-release.yml` and `.github/workflows/shield-release.yml`
+- Triggers on `connector-v*` or `shield-v*` tags
 - Uses `cross` (Docker-based) for musl static binaries (amd64 + arm64)
-- Runs from repo root: `cross build --manifest-path connector/Cargo.toml` (ensures full repo mounted in Docker, proto accessible)
+- Runs from repo root: `cross build --manifest-path <component>/Cargo.toml`
 - `Cross.toml` installs protoc via `pre-build` apt-get inside the cross container
 - Uploads: binaries, checksums.txt, install script, systemd units
 - Creates GitHub Release via softprops/action-gh-release
@@ -138,6 +179,9 @@ zecurity/
 - **Zero-downtime renewal**: Connector rebuilds mTLS channel after renewal without dropping heartbeat loop
 - **Disconnect detection**: Background goroutine marks connectors DISCONNECTED after 90s without heartbeat
 - **Repo-root proto**: `proto/` at repo root — neither Go nor Rust "owns" the contract
+- **Resource instruction piggybacking**: No new RPCs for resource management. Instructions are piggybacked on the existing Connector <-> Controller heartbeat.
+- **Atomic nftables updates**: The shield agent flushes and rebuilds its `nftables` chain atomically on each update, preventing intermediate broken states.
+- **Controller-led, ack-driven delivery**: The controller repeatedly sends resource instructions until the shield acknowledges receipt, ensuring eventual consistency.
 
 ## Environment Variables
 
@@ -156,4 +200,11 @@ CONNECTOR_RENEWAL_WINDOW
 ```
 CONTROLLER_ADDR, CONTROLLER_HTTP_ADDR, ENROLLMENT_TOKEN
 AUTO_UPDATE_ENABLED, LOG_LEVEL, STATE_DIR, CONNECTOR_ID
+```
+
+### Shield (/etc/zecurity/shield.conf)
+```
+CONTROLLER_ADDR, CONTROLLER_HTTP_ADDR, ENROLLMENT_TOKEN
+AUTO_UPDATE_ENABLED, LOG_LEVEL, STATE_DIR, SHIELD_ID
+RESOURCE_CHECK_INTERVAL_SECS
 ```

@@ -20,7 +20,7 @@
 // USED BY:
 //   enrollment.rs  — builds CSR CN ("shield-<id>") and SAN URI using shield_spiffe_id()
 //   tls.rs         — verifies connector cert contains expected SPIFFE URI
-//   heartbeat.rs   — builds expected connector SPIFFE ID for mTLS verification
+//   control_stream.rs — builds expected connector SPIFFE ID for mTLS verification
 
 // ── Product identity ─────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ pub const SPIFFE_TRUST_DOMAIN_SUFFIX: &str = ".zecurity.in";
 pub const SPIFFE_ROLE_SHIELD: &str = "shield";
 
 /// SPIFFE role segment for connectors. Used in tls.rs to verify the
-/// connector's certificate during mTLS heartbeat handshake.
+/// connector's certificate during mTLS control-stream handshake.
 /// Go equivalent: appmeta.SPIFFERoleConnector
 pub const SPIFFE_ROLE_CONNECTOR: &str = "connector";
 
@@ -119,7 +119,7 @@ pub fn shield_spiffe_id(trust_domain: &str, shield_id: &str) -> String {
 /// Example: `connector_spiffe_id("ws-acme.zecurity.in", "xyz-456")`
 ///        → `"spiffe://ws-acme.zecurity.in/connector/xyz-456"`
 ///
-/// Used by tls.rs to verify the connector's identity during mTLS heartbeat.
+/// Used by tls.rs to verify the connector's identity during mTLS control streams.
 pub fn connector_spiffe_id(trust_domain: &str, connector_id: &str) -> String {
     format!(
         "spiffe://{}/{}/{}",

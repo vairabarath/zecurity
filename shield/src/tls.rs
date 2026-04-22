@@ -18,16 +18,18 @@
 //   6. If mismatch → reject connection (could be a rogue server)
 //
 // CALLED BY:
-//   heartbeat.rs (Phase J) — after establishing mTLS channel to connector :9091
+//   control_stream.rs — while establishing mTLS channel to connector :9091
 
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::client::WebPkiServerVerifier;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{CertificateError, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme};
+use rustls::{
+    CertificateError, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme,
+};
 use tonic::transport::{Channel, Endpoint};
 use x509_parser::prelude::*;
 
@@ -96,7 +98,7 @@ pub fn verify_connector_spiffe(
     );
 }
 
-// ── SPIFFE-aware mTLS connector for heartbeat/renewal to Connector :9091 ─────
+// ── SPIFFE-aware mTLS connector for Control/RenewCert to Connector :9091 ─────
 //
 // The connector cert only has clientAuth EKU (not serverAuth) because it was
 // signed for connector→controller use. WebPkiServerVerifier enforces serverAuth,
@@ -117,12 +119,18 @@ impl SpiffeConnectorVerifier {
         let mut roots = RootCertStore::empty();
         for cert in CertificateDer::pem_slice_iter(ca_pem) {
             let cert = cert.context("failed to parse CA cert from PEM")?;
-            roots.add(cert).context("failed to add cert to root store")?;
+            roots
+                .add(cert)
+                .context("failed to add cert to root store")?;
         }
         let inner = WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build WebPki verifier: {}", e))?;
-        Ok(Self { inner, connector_id, trust_domain })
+        Ok(Self {
+            inner,
+            connector_id,
+            trust_domain,
+        })
     }
 }
 
@@ -141,7 +149,10 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
                 .map_err(|e| TlsError::General(e.to_string()))?
                 .to_owned(),
         );
-        match self.inner.verify_server_cert(end_entity, intermediates, &dummy, ocsp_response, now) {
+        match self
+            .inner
+            .verify_server_cert(end_entity, intermediates, &dummy, ocsp_response, now)
+        {
             Ok(_) => {}
             // Name / purpose / extension errors are expected for SPIFFE certs:
             //   - NotValidForName / NotValidForNameContext: SPIFFE URI SAN doesn't match a DNS name
@@ -149,7 +160,9 @@ impl ServerCertVerifier for SpiffeConnectorVerifier {
             //   - UnhandledCriticalExtension: webpki may not recognize URI SAN as critical
             // Security is provided by verify_connector_spiffe() below.
             Err(TlsError::InvalidCertificate(CertificateError::NotValidForName))
-            | Err(TlsError::InvalidCertificate(CertificateError::NotValidForNameContext { .. }))
+            | Err(TlsError::InvalidCertificate(CertificateError::NotValidForNameContext {
+                ..
+            }))
             | Err(TlsError::InvalidCertificate(CertificateError::InvalidPurpose))
             | Err(TlsError::InvalidCertificate(CertificateError::UnhandledCriticalExtension)) => {}
             Err(e) => return Err(e),
@@ -196,9 +209,17 @@ struct SpiffeConnectorService {
 impl tower_service::Service<http::Uri> for SpiffeConnectorService {
     type Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>;
     type Error = Box<dyn std::error::Error + Send + Sync>;
-    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+    type Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>>
+                + Send,
+        >,
+    >;
 
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -219,8 +240,14 @@ impl tower_service::Service<http::Uri> for SpiffeConnectorService {
             tracing::debug!(addr = %addr, "TCP connecting to connector");
             let tcp = tokio::net::TcpStream::connect(&addr).await?;
             tracing::debug!(addr = %addr, "TLS handshake starting");
-            let stream = match tokio_rustls::TlsConnector::from(tls).connect(server_name, tcp).await {
-                Ok(s) => { tracing::debug!(addr = %addr, "TLS handshake complete"); s }
+            let stream = match tokio_rustls::TlsConnector::from(tls)
+                .connect(server_name, tcp)
+                .await
+            {
+                Ok(s) => {
+                    tracing::debug!(addr = %addr, "TLS handshake complete");
+                    s
+                }
                 Err(e) => {
                     tracing::warn!(addr = %addr, error = %e, "mTLS handshake with connector failed");
                     return Err(e.into());
@@ -244,7 +271,8 @@ pub async fn build_connector_channel(
     trust_domain: &str,
     connector_addr: &str,
 ) -> Result<Channel> {
-    let verifier = SpiffeConnectorVerifier::new(ca_pem, connector_id.to_string(), trust_domain.to_string())?;
+    let verifier =
+        SpiffeConnectorVerifier::new(ca_pem, connector_id.to_string(), trust_domain.to_string())?;
 
     let client_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(cert_pem)
         .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))

@@ -1,6 +1,6 @@
 // renewal.rs — Certificate renewal for the ZECURITY connector
 //
-// Called when heartbeat response contains re_enroll=true.
+// Called when Control stream receives re_enroll.
 // The connector keeps its existing EC P-384 keypair.
 // We just get a fresh cert for the same key + same SPIFFE identity.
 //
@@ -13,17 +13,10 @@
 //   6. Update state.json with new cert_not_after
 
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rustls::pki_types::{pem::PemObject, CertificateDer, ServerName};
-use rustls::{ClientConfig, RootCertStore};
-// use time::format;
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::config::ConnectorConfig;
 use crate::crypto;
@@ -32,7 +25,7 @@ use crate::proto;
 
 /// Renew the connector's certificate.
 ///
-/// Called from heartbeat.rs when HeartbeatResponse.re_enroll=true.
+/// Called from control_stream.rs when ReEnrollSignal arrives.
 /// Returns the updated enrollment state (with new cert_not_after).
 pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Result<EnrollmentState> {
     info!("starting certificate renewal");
@@ -44,11 +37,12 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
         .with_context(|| format!("failed to read {}", key_path.display()))?;
 
     // 2. Extract public key in DER format
-    let public_key_der = crypto::extract_public_key_der(&key_pem)
-        .context("failed to extract public key")?;
+    let public_key_der =
+        crypto::extract_public_key_der(&key_pem).context("failed to extract public key")?;
 
     // 3. Build mTLS channel (uses existing cert — still valid)
-    let channel = build_mtls_channel(cfg).await
+    let channel = build_mtls_channel(cfg)
+        .await
         .context("failed to build mTLS channel")?;
 
     let mut client = proto::connector_service_client::ConnectorServiceClient::new(channel);
@@ -59,7 +53,9 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
         public_key_der,
     };
 
-    let resp = client.renew_cert(req).await
+    let resp = client
+        .renew_cert(req)
+        .await
         .with_context(|| "renew_cert RPC failed")?
         .into_inner();
 
@@ -95,8 +91,7 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
     };
 
     let state_path = Path::new(&cfg.state_dir).join("state.json");
-    let json = serde_json::to_string_pretty(&new_state)
-        .context("failed to serialize state")?;
+    let json = serde_json::to_string_pretty(&new_state).context("failed to serialize state")?;
     tokio::fs::write(&state_path, json)
         .await
         .with_context(|| format!("failed to write {}", state_path.display()))?;
@@ -120,9 +115,7 @@ async fn build_mtls_channel(cfg: &ConnectorConfig) -> Result<Channel> {
     let identity = Identity::from_pem(&cert_pem, &key_pem);
     let ca = Certificate::from_pem(&ca_pem);
 
-    let tls = ClientTlsConfig::new()
-        .identity(identity)
-        .ca_certificate(ca);
+    let tls = ClientTlsConfig::new().identity(identity).ca_certificate(ca);
 
     let grpc_addr = format!("https://{}", cfg.controller_addr);
     let channel = Channel::from_shared(grpc_addr.clone())?

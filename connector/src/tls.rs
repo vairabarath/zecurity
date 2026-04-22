@@ -1,6 +1,6 @@
 // tls.rs — SPIFFE-based controller certificate verification
 //
-// Used by heartbeat.rs after the mTLS handshake to verify that the
+// Used by controller_client.rs after the mTLS handshake to verify that the
 // controller's presented certificate contains the expected SPIFFE URI.
 //
 // This prevents a rogue server signed by the same CA from impersonating
@@ -13,7 +13,7 @@ use crate::appmeta;
 
 /// Verify that a certificate's SAN URI matches the expected controller SPIFFE ID.
 ///
-/// Called post-handshake in heartbeat.rs after establishing an mTLS connection.
+/// Called post-handshake in controller_client.rs after establishing an mTLS connection.
 /// The `cert_der` parameter is the DER-encoded peer certificate from the TLS handshake.
 ///
 /// Returns `Ok(())` if the SPIFFE ID matches, `Err` otherwise.

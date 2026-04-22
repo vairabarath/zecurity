@@ -1,6 +1,6 @@
 // renewal.rs — Certificate renewal for the ZECURITY Shield
 //
-// Called from heartbeat.rs when HeartbeatResponse.re_enroll=true.
+// Called from control_stream.rs when ReEnrollSignal arrives.
 // Keeps the same EC P-384 keypair — sends existing public key to controller
 // (via connector proxy) and receives a fresh cert for the same identity.
 //
@@ -11,7 +11,7 @@
 //   4. Call RenewCert RPC (connector proxies to controller)
 //   5. Save new shield.crt + updated workspace_ca.crt
 //   6. Update cert_not_after in state.json
-//   7. Return updated ShieldState (heartbeat.rs rebuilds channel with new cert)
+//   7. Return updated ShieldState (control_stream.rs reconnects with new cert)
 
 use std::path::Path;
 
@@ -41,7 +41,7 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
         .context("failed to extract public key DER for renewal")?;
 
     // Step 3: Build mTLS channel to connector :9091
-    let ca_pem  = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
+    let ca_pem = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
     let cert_pem = tokio::fs::read(state_dir.join("shield.crt")).await?;
     let key_bytes = tokio::fs::read(state_dir.join("shield.key")).await?;
 
@@ -94,8 +94,13 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
     let cert_not_after = parse_cert_not_after(&resp.certificate_pem)?;
 
     // Step 7: Update state.json
-    let new_state = ShieldState { cert_not_after, ..state.clone() };
-    new_state.save(&cfg.state_dir).context("failed to save state.json after renewal")?;
+    let new_state = ShieldState {
+        cert_not_after,
+        ..state.clone()
+    };
+    new_state
+        .save(&cfg.state_dir)
+        .context("failed to save state.json after renewal")?;
 
     info!(
         shield_id = %state.shield_id,

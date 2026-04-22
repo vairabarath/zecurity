@@ -254,9 +254,7 @@ fn cleanup_config_after_enrollment(connector_id: &str) {
         .map(|l| l.to_string())
         .collect();
 
-    let has_connector_id = lines
-        .iter()
-        .any(|l| l.trim().starts_with("CONNECTOR_ID="));
+    let has_connector_id = lines.iter().any(|l| l.trim().starts_with("CONNECTOR_ID="));
     if !has_connector_id {
         lines.push(format!("CONNECTOR_ID={}", connector_id));
     }
@@ -418,4 +416,3 @@ fn controller_host(grpc_addr: &str) -> String {
         .map(|(host, _)| host.to_string())
         .unwrap_or_else(|| grpc_addr.to_string())
 }
-

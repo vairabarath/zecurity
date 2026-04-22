@@ -19,7 +19,7 @@
 // OPTIONAL FIELDS (have sensible defaults):
 //   AUTO_UPDATE_ENABLED           — false
 //   LOG_LEVEL                     — "info"
-//   SHIELD_HEARTBEAT_INTERVAL_SECS — 30
+//   RESOURCE_CHECK_INTERVAL_SECS    — 15
 //
 // STATE DIRECTORY (/var/lib/zecurity-shield/):
 //   shield.key    — EC P-384 private key (mode 0600, written by crypto.rs)
@@ -34,7 +34,6 @@ use serde::Deserialize;
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/zecurity-shield";
 const DEFAULT_LOG_LEVEL: &str = "info";
-const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 /// Shield configuration.
 ///
@@ -72,12 +71,6 @@ pub struct ShieldConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
-    /// How often the shield sends a heartbeat to the connector (in seconds).
-    /// The connector uses heartbeat absence to detect disconnected shields.
-    /// Must be less than the controller's SHIELD_DISCONNECT_THRESHOLD.
-    #[serde(default = "default_heartbeat_interval_secs")]
-    pub shield_heartbeat_interval_secs: u64,
-
     /// How often the health check loop probes each protected port (in seconds).
     #[serde(default = "default_resource_check_interval")]
     pub resource_check_interval_secs: u64,
@@ -92,12 +85,8 @@ fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.to_owned()
 }
 
-fn default_heartbeat_interval_secs() -> u64 {
-    DEFAULT_HEARTBEAT_INTERVAL_SECS
-}
-
 fn default_resource_check_interval() -> u64 {
-    30
+    15
 }
 
 fn default_state_dir() -> String {

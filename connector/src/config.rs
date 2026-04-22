@@ -22,7 +22,6 @@
 //   connector_id                — None until enrollment completes (Phase 5 writes it)
 //   auto_update_enabled         — false (Phase 7 updater checks this)
 //   log_level                   — "info"
-//   heartbeat_interval_secs     — 30 seconds (Phase 6 heartbeat loop)
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
 //   state_dir                   — /var/lib/zecurity-connector (where certs, keys, state.json are saved)
 //
@@ -37,7 +36,6 @@ pub const CONFIG_FILE_PATH: &str = "/etc/zecurity/connector.conf";
 
 const DEFAULT_STATE_DIR: &str = "/var/lib/zecurity-connector";
 const DEFAULT_LOG_LEVEL: &str = "info";
-const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
 
 /// Connector configuration.
@@ -47,7 +45,7 @@ const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConnectorConfig {
     /// gRPC address of the controller (e.g., "controller.example.com:9090").
-    /// Used by enrollment.rs (Phase 5) and heartbeat.rs (Phase 6) to connect.
+    /// Used by enrollment.rs and control_stream.rs to connect.
     pub controller_addr: String,
 
     /// HTTP address of the controller for the /ca.crt endpoint.
@@ -77,11 +75,6 @@ pub struct ConnectorConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
 
-    /// Heartbeat interval in seconds. The connector sends a heartbeat to the
-    /// controller every N seconds to prove it's alive (Phase 6).
-    #[serde(default = "default_heartbeat_interval_secs")]
-    pub heartbeat_interval_secs: u64,
-
     /// How often to check GitHub releases for updates, in seconds (Phase 7).
     #[serde(default = "default_update_check_interval_secs")]
     pub update_check_interval_secs: u64,
@@ -103,10 +96,6 @@ pub struct ConnectorConfig {
 
 fn default_log_level() -> String {
     DEFAULT_LOG_LEVEL.to_owned()
-}
-
-fn default_heartbeat_interval_secs() -> u64 {
-    DEFAULT_HEARTBEAT_INTERVAL_SECS
 }
 
 fn default_update_check_interval_secs() -> u64 {

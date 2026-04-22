@@ -21,25 +21,27 @@ type Row struct {
 	PortFrom        int
 	PortTo          int
 	Status          string
+	PendingAction   string // "apply" or "remove" — meaningful only when status="protecting"
 	ErrorMessage    *string
 	AppliedAt       *time.Time
 	LastVerifiedAt  *time.Time
 	CreatedAt       time.Time
 	ShieldID        string
+	ConnectorID     string // connector that manages this shield — needed for stream push
 	ShieldName      *string
 	ShieldStatus    *string
 	RemoteNetworkID string
 	NetworkName     string
 }
 
-// PendingRow is a minimal resource record used in heartbeat delivery.
+// PendingRow is a minimal resource record used in stream instruction delivery.
 type PendingRow struct {
-	ID       string
-	Host     string
-	Protocol string
-	PortFrom int
-	PortTo   int
-	Status   string // "managing" or "removing"
+	ID            string
+	Host          string
+	Protocol      string
+	PortFrom      int
+	PortTo        int
+	PendingAction string // "apply" or "remove"
 }
 
 // CreateInput holds fields provided by the admin when creating a resource.
@@ -54,9 +56,9 @@ type CreateInput struct {
 
 const resourceSelectCols = `
 	r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
-	r.status, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
+	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
 	r.shield_id, r.remote_network_id,
-	s.name, s.status,
+	s.name, s.status, COALESCE(s.connector_id, ''),
 	rn.name`
 
 const resourceJoins = `
@@ -68,10 +70,10 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 	var row Row
 	if err := s.Scan(
 		&row.ID, &row.Name, &row.Description, &row.Host, &row.Protocol,
-		&row.PortFrom, &row.PortTo, &row.Status, &row.ErrorMessage,
+		&row.PortFrom, &row.PortTo, &row.Status, &row.PendingAction, &row.ErrorMessage,
 		&row.AppliedAt, &row.LastVerifiedAt, &row.CreatedAt,
 		&row.ShieldID, &row.RemoteNetworkID,
-		&row.ShieldName, &row.ShieldStatus,
+		&row.ShieldName, &row.ShieldStatus, &row.ConnectorID,
 		&row.NetworkName,
 	); err != nil {
 		return nil, err
@@ -168,14 +170,14 @@ func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, err
 	return collectRows(rows)
 }
 
-// GetPendingForShield returns resources in managing/removing state for a shield.
-// Called from the heartbeat handler — no tenant context needed (shield_id is tenant-scoped).
+// GetPendingForShield returns resources in the protecting state for a shield.
+// Called on stream connect to deliver any queued instructions to a reconnecting connector.
 func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
-		`SELECT id, host, protocol, port_from, port_to, status
+		`SELECT id, host, protocol, port_from, port_to, pending_action
 		   FROM resources
 		  WHERE shield_id = $1
-		    AND status IN ('managing', 'removing')
+		    AND status = 'protecting'
 		    AND deleted_at IS NULL`,
 		shieldID,
 	)
@@ -187,7 +189,7 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 	var result []*PendingRow
 	for rows.Next() {
 		var r PendingRow
-		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo, &r.Status); err != nil {
+		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo, &r.PendingAction); err != nil {
 			return nil, err
 		}
 		result = append(result, &r)
@@ -264,14 +266,15 @@ func joinSets(sets []string) string {
 	return b.String()
 }
 
-// MarkManaging transitions a resource to managing status (Shield will apply nftables).
-// Rejects if the assigned shield is not active — prevents resources getting stuck in
-// managing indefinitely when the shield is offline at the moment of the request.
-func MarkManaging(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+// MarkProtecting transitions a resource to protecting status with pending_action='apply'.
+// Rejects if the assigned shield is not active — prevents instructions going to an
+// offline shield where they would sit until the shield reconnects anyway.
+func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`UPDATE resources
-		    SET status = 'managing', error_message = NULL, updated_at = NOW()
+		    SET status = 'protecting', pending_action = 'apply',
+		        error_message = NULL, updated_at = NOW()
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status = ANY($3)
 		    AND (SELECT status FROM shields WHERE id = resources.shield_id) = 'active'
@@ -287,10 +290,25 @@ func MarkManaging(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*
 	return GetByID(ctx, db, tenantID, id)
 }
 
-// MarkRemoving transitions a resource to removing status (Shield will remove nftables rule).
-func MarkRemoving(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
-	return updateStatus(ctx, db, tenantID, id, "removing", nil,
-		[]string{"protected"}, "unprotect resource")
+// MarkUnprotecting transitions a resource to protecting status with pending_action='remove'.
+func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+	var discardedID string
+	err := db.QueryRow(ctx,
+		`UPDATE resources
+		    SET status = 'protecting', pending_action = 'remove',
+		        updated_at = NOW()
+		  WHERE id = $1 AND tenant_id = $2
+		    AND status = 'protected'
+		 RETURNING id`,
+		id, tenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("unprotect resource: resource not found or not in protected state")
+		}
+		return nil, fmt.Errorf("unprotect resource: %w", err)
+	}
+	return GetByID(ctx, db, tenantID, id)
 }
 
 // SoftDelete hard-deletes a resource row so the name can be reused immediately.
@@ -299,7 +317,7 @@ func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) erro
 	err := db.QueryRow(ctx,
 		`DELETE FROM resources
 		  WHERE id = $1 AND tenant_id = $2
-		    AND status NOT IN ('managing', 'protecting', 'removing')
+		    AND status != 'protecting'
 		 RETURNING id`,
 		id, tenantID,
 	).Scan(&discardedID)
@@ -316,15 +334,16 @@ func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) erro
 func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
 	_, err := db.Exec(ctx,
 		`UPDATE resources
-		    SET status          = $2,
-		        error_message   = NULLIF($3, ''),
+		    SET status           = $2,
+		        error_message    = NULLIF($3, ''),
 		        last_verified_at = to_timestamp($4),
-		        applied_at      = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
-		        updated_at      = NOW()
+		        applied_at       = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
+		        updated_at       = NOW()
 		  WHERE id = $1
 		    AND tenant_id = $5
 		    AND deleted_at IS NULL
-		    AND NOT (status = 'removing' AND $2 != 'unprotected')`,
+		    AND NOT (status = 'protecting' AND pending_action = 'remove' AND $2 != 'unprotected')
+		    AND NOT (status = 'protecting' AND pending_action = 'apply'  AND $2 = 'unprotected')`,
 		resourceID, status, errMsg, verifiedAt, tenantID,
 	)
 	if err != nil {
@@ -333,25 +352,6 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 	return nil
 }
 
-// updateStatus is the shared helper for MarkManaging / MarkRemoving.
-func updateStatus(ctx context.Context, db *pgxpool.Pool, tenantID, id, newStatus string, errMsg *string, allowedFrom []string, op string) (*Row, error) {
-	var discardedID string
-	err := db.QueryRow(ctx,
-		`UPDATE resources
-		    SET status = $3, error_message = $4, updated_at = NOW()
-		  WHERE id = $1 AND tenant_id = $2
-		    AND status = ANY($5)
-		 RETURNING id`,
-		id, tenantID, newStatus, errMsg, allowedFrom,
-	).Scan(&discardedID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("%s: resource not found or invalid status transition", op)
-		}
-		return nil, fmt.Errorf("%s: %w", op, err)
-	}
-	return GetByID(ctx, db, tenantID, id)
-}
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {
 	var result []*Row
