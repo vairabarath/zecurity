@@ -9,7 +9,7 @@ type Shield {
   lastSeenAt:      String
   version:         String
   hostname:        String
-  publicIp:        String
+  lanIp:           String
   interfaceAddr:   String
   certNotAfter:    String
   createdAt:       String!

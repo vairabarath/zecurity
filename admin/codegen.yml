@@ -2,6 +2,7 @@ schema:
   - '../controller/graph/schema.graphqls'
   - '../controller/graph/connector.graphqls'
   - '../controller/graph/shield.graphqls'
+  - '../controller/graph/resource.graphqls'
 documents: 'src/graphql/**/*.graphql'
 generates:
   src/generated/:
