@@ -123,7 +123,9 @@ async fn main() -> anyhow::Result<()> {
     let state_path = Path::new(&cfg.state_dir).join("state.json");
 
     let state: ShieldState = if state_path.exists() {
-        // Already enrolled — load state from disk
+        // Already enrolled — load state from disk, then restore network.
+        // nftables rules and TUN interfaces don't survive reboots, so
+        // network::setup() must run on every startup, not just enrollment.
         let state = ShieldState::load(&cfg.state_dir)?;
         info!(
             shield_id    = %state.shield_id,
@@ -132,6 +134,9 @@ async fn main() -> anyhow::Result<()> {
             interface_addr = %state.interface_addr,
             "shield already enrolled, resuming"
         );
+        network::setup(&state.interface_addr, &state.connector_addr)
+            .await
+            .context("failed to restore network on startup")?;
         state
     } else {
         // First run — enrollment flow (Phase I)

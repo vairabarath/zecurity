@@ -304,7 +304,9 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, resourceID, status, errMsg
 		        last_verified_at = to_timestamp($4),
 		        applied_at      = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
 		        updated_at      = NOW()
-		  WHERE id = $1 AND deleted_at IS NULL`,
+		  WHERE id = $1
+		    AND deleted_at IS NULL
+		    AND NOT (status = 'removing' AND $2 IN ('protected', 'failed'))`,
 		resourceID, status, errMsg, verifiedAt,
 	)
 	if err != nil {
