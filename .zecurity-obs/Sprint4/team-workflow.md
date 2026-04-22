@@ -153,14 +153,14 @@ cd admin && npm run codegen
 
 ## Conflict Zones (Memorize These)
 
-| File | Owner | Rule |
-|------|-------|------|
-| `proto/connector/v1/connector.proto` | M2 writes | Everyone else waits for buf generate |
-| `connector/src/agent_server.rs` | M3 writes | M4 starts server in main.rs only after M3 is done |
-| `connector/src/main.rs` | M4 modifies | M4 only, coordinate ShieldServer::new() signature with M3 first |
-| `connector/src/heartbeat.rs` | M3 modifies | M3 only |
-| `cmd/server/main.go` | M2 modifies | M2 only |
-| `graph/connector.graphqls` | M3 modifies | M3 first, M1 consumes via codegen |
+| File                                 | Owner       | Rule                                                            |
+| ------------------------------------ | ----------- | --------------------------------------------------------------- |
+| `proto/connector/v1/connector.proto` | M2 writes   | Everyone else waits for buf generate                            |
+| `connector/src/agent_server.rs`      | M3 writes   | M4 starts server in main.rs only after M3 is done               |
+| `connector/src/main.rs`              | M4 modifies | M4 only, coordinate ShieldServer::new() signature with M3 first |
+| `connector/src/heartbeat.rs`         | M3 modifies | M3 only                                                         |
+| `cmd/server/main.go`                 | M2 modifies | M2 only                                                         |
+| `graph/connector.graphqls`           | M3 modifies | M3 first, M1 consumes via codegen                               |
 
 ---
 

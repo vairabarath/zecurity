@@ -36,6 +36,32 @@ Most recent first. Every agent appends an entry after their session.
 - Sprint 4 frontend now complete (per phase-4 `unlocks` field)
 ---
 
+## 2026-04-22 — Claude Code (Sonnet 4.6) — M4 Sprint 5 Phase D (Resources + Heartbeat Ack)
+
+**Member:** M4 (Rust — Shield)
+**Phases:** Phase D (M4-D1 → M4-D4) — **DONE**
+
+**What was done:**
+- Created `shield/src/resources.rs` — `ActiveResource`, `SharedResourceState`, `validate_host`, `check_port`, `apply_nftables` (flush + atomic rebuild of `chain resource_protect` via nftables crate), `run_health_check_loop` (30s ticker, replaces acks per resource_id, no duplicates)
+- Modified `shield/src/config.rs` — added `resource_check_interval_secs: u64` (default 30) with figment serde default
+- Modified `shield/src/main.rs` — registered `mod resources`, created `Arc<SharedResourceState>`, spawned health check loop, wired `resource_state` into `heartbeat::run`
+- Modified `shield/src/heartbeat.rs` — added `Arc<SharedResourceState>` param to `run`; drains pending acks into `HeartbeatRequest.resource_acks` each tick; processes `HeartbeatResponse.resources` via `handle_apply` / `handle_remove`; `handle_apply` validates host, upserts active list, rebuilds nftables, pushes `protecting` ack; `handle_remove` drops from active list, rebuilds nftables, pushes `removed` ack; `push_ack` replaces existing ack for same resource_id
+- `cargo build --manifest-path shield/Cargo.toml` passes (warnings only, all pre-existing)
+- Checked M4-D1 → M4-D4 in `Sprint5/path.md`; set Phase 1 and Phase 2 status to `done`
+
+**Key decisions:**
+- Used `nftables` crate (already a dependency from `network.rs`) instead of shelling out — consistent with existing code, typed rule construction, no string injection risk
+- `resource_protect` chain at priority 10 (after `input` at priority 0) — lo and connector traffic already accepted by input chain before resource_protect fires; LAN traffic falls through to the drop rules
+- Port range expressed as `Expression::Range` for multi-port, `Expression::Number` for single-port
+- "apply" action upserts (replace-if-present) so re-delivered instructions are idempotent
+- Phase 1 build gate achieved by adding `resource_acks: vec![]` placeholder to heartbeat.rs, replaced by real drain logic in Phase 2
+
+**What's next:**
+- M4 Sprint 5 work is complete — integration testing once M1 frontend and M3 connector relay are also merged
+- Run full integration checklist from `Sprint5/path.md` once all phases land
+
+---
+
 ## 2026-04-17 — Kiro — Member 4 (Sprint 4 Phases 1–3)
 
 **What was done:**
