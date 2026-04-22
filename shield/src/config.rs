@@ -78,6 +78,10 @@ pub struct ShieldConfig {
     #[serde(default = "default_heartbeat_interval_secs")]
     pub shield_heartbeat_interval_secs: u64,
 
+    /// How often the health check loop probes each protected port (in seconds).
+    #[serde(default = "default_resource_check_interval")]
+    pub resource_check_interval_secs: u64,
+
     /// Directory for persistent state files (key, cert, CA chain, state.json).
     /// The systemd service unit grants write access to this directory.
     #[serde(default = "default_state_dir")]
@@ -90,6 +94,10 @@ fn default_log_level() -> String {
 
 fn default_heartbeat_interval_secs() -> u64 {
     DEFAULT_HEARTBEAT_INTERVAL_SECS
+}
+
+fn default_resource_check_interval() -> u64 {
+    30
 }
 
 fn default_state_dir() -> String {
