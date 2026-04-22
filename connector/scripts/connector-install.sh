@@ -28,7 +28,7 @@
 #   -h    Show help
 #
 # Typical usage (from the install command shown in the admin UI):
-#   curl -fsSL https://github.com/vairabarath/zecurity/releases/latest/download/connector-install.sh | \
+#   curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/connector/scripts/connector-install.sh | \
 #     sudo CONTROLLER_ADDR=host:9090 ENROLLMENT_TOKEN=eyJ... bash
 
 set -euo pipefail

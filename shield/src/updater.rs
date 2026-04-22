@@ -165,9 +165,13 @@ async fn check_and_update(client: &reqwest::Client) -> Result<()> {
     Ok(())
 }
 
+/// Fetch the latest shield release metadata from GitHub.
+///
+/// Do not use `/releases/latest`: this repository publishes connector and
+/// shield independently, and GitHub's global "latest" can point at either one.
 async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease> {
     let url = format!(
-        "https://api.github.com/repos/{}/{}/releases/latest",
+        "https://api.github.com/repos/{}/{}/releases?per_page=100",
         GITHUB_OWNER, GITHUB_REPO
     );
 
@@ -182,7 +186,16 @@ async fn fetch_latest_release(client: &reqwest::Client) -> Result<GitHubRelease>
         bail!("GitHub API returned HTTP {}", resp.status());
     }
 
-    resp.json().await.context("parse GitHub release JSON")
+    let releases: Vec<GitHubRelease> = resp.json().await.context("parse GitHub releases JSON")?;
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            let version = parse_version_from_tag(&release.tag_name).ok()?;
+            Some((version, release))
+        })
+        .max_by(|(a, _), (b, _)| a.cmp(b))
+        .map(|(_, release)| release)
+        .context("no shield release found")
 }
 
 fn parse_version_from_tag(tag: &str) -> Result<semver::Version> {
