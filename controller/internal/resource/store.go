@@ -265,9 +265,26 @@ func joinSets(sets []string) string {
 }
 
 // MarkManaging transitions a resource to managing status (Shield will apply nftables).
+// Rejects if the assigned shield is not active — prevents resources getting stuck in
+// managing indefinitely when the shield is offline at the moment of the request.
 func MarkManaging(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
-	return updateStatus(ctx, db, tenantID, id, "managing", nil,
-		[]string{"pending", "failed", "unprotected"}, "protect resource")
+	var discardedID string
+	err := db.QueryRow(ctx,
+		`UPDATE resources
+		    SET status = 'managing', error_message = NULL, updated_at = NOW()
+		  WHERE id = $1 AND tenant_id = $2
+		    AND status = ANY($3)
+		    AND (SELECT status FROM shields WHERE id = resources.shield_id) = 'active'
+		 RETURNING id`,
+		id, tenantID, []string{"pending", "failed", "unprotected"},
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("protect resource: resource not found, invalid state, or shield is offline")
+		}
+		return nil, fmt.Errorf("protect resource: %w", err)
+	}
+	return GetByID(ctx, db, tenantID, id)
 }
 
 // MarkRemoving transitions a resource to removing status (Shield will remove nftables rule).
@@ -296,7 +313,7 @@ func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) erro
 }
 
 // RecordAck processes a ResourceAck from Shield and updates the resource status.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
 	_, err := db.Exec(ctx,
 		`UPDATE resources
 		    SET status          = $2,
@@ -305,9 +322,10 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, resourceID, status, errMsg
 		        applied_at      = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
 		        updated_at      = NOW()
 		  WHERE id = $1
+		    AND tenant_id = $5
 		    AND deleted_at IS NULL
-		    AND NOT (status = 'removing' AND $2 IN ('protected', 'failed'))`,
-		resourceID, status, errMsg, verifiedAt,
+		    AND NOT (status = 'removing' AND $2 != 'unprotected')`,
+		resourceID, status, errMsg, verifiedAt, tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("record ack: %w", err)
