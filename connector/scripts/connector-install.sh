@@ -148,9 +148,11 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 if [[ "$CONNECTOR_VERSION" == "latest" ]]; then
-    CONNECTOR_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases" \
-        | grep '"tag_name"' | grep '"connector-v' | head -1 \
-        | sed 's/.*"tag_name": "\(.*\)".*/\1/')"
+    CONNECTOR_VERSION="$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=50" \
+        | grep '"tag_name"' | grep '"connector-v' \
+        | sed 's/.*"tag_name": "connector-v\([^"]*\)".*/\1/' \
+        | sort -V | tail -1 \
+        | sed 's/^/connector-v/')"
     [[ -n "$CONNECTOR_VERSION" ]] || err "could not resolve latest connector release from GitHub API"
     log "resolved latest connector release: ${CONNECTOR_VERSION}"
 fi
