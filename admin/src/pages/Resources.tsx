@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { motion } from 'framer-motion'
 import {
@@ -111,10 +111,24 @@ export default function Resources() {
   const { data: networkData } = useQuery(GetRemoteNetworksDocument)
   const networks = networkData?.remoteNetworks ?? []
 
-  const { data, loading, refetch } = useQuery(GetAllResourcesDocument, {
+  const TRANSITIONAL = new Set(['managing', 'protecting', 'removing'])
+
+  const { data, loading, refetch, startPolling, stopPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
   })
+
+  const resources: Resource[] = data?.allResources ?? []
+
+  // Poll fast while any resource is transitioning, back off when stable.
+  useEffect(() => {
+    const hasTransitional = resources.some(r => TRANSITIONAL.has(r.status))
+    if (hasTransitional) {
+      startPolling(3000)
+    } else {
+      startPolling(30000)
+    }
+  }, [resources.map(r => r.status).join(',')])
 
   const [protectResource, { loading: protecting }] = useMutation(ProtectResourceDocument, {
     onCompleted: () => {
@@ -144,7 +158,6 @@ export default function Resources() {
     },
   })
 
-  const resources: Resource[] = data?.allResources ?? []
   const protectedCount = resources.filter((r) => r.status === 'protected').length
 
   const handleDelete = (id: string) => {
