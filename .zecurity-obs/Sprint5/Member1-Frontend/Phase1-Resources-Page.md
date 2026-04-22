@@ -11,6 +11,7 @@ depends_on:
   - npm run codegen done
 unlocks:
   - Full end-to-end UI test
+  - M3 must implement updateResource resolver (see M3 action below)
 tags:
   - react
   - typescript
@@ -22,196 +23,152 @@ tags:
 
 ---
 
-## Files to Create / Modify
+## ⚠️ Action Required — M3 (Go Controller)
 
-| File                                           | Action                                     |
-| ---------------------------------------------- | ------------------------------------------ |
-| `admin/src/pages/Resources.tsx`                | CREATE                                     |
-| `admin/src/components/CreateResourceModal.tsx` | CREATE                                     |
-| `admin/src/graphql/queries.graphql`            | MODIFY — add GetAllResources, GetResources |
-| `admin/src/graphql/mutations.graphql`          | MODIFY — add resource mutations            |
-| `admin/src/App.tsx`                            | MODIFY — add /resources route              |
-| `admin/src/components/layout/Sidebar.tsx`      | MODIFY — add Resources nav link            |
+> M1 has added `updateResource` to the GraphQL schema and wired up the full frontend Edit flow.
+> **M3 must implement the backend resolver and store function** before the Edit modal saves successfully.
+
+### What M3 needs to do:
+
+**1. `controller/graph/resource.graphqls`** — already updated by M1, no changes needed.
+
+**2. `controller/internal/resource/store.go`** — add an `Update` function:
+
+```go
+// UpdateInput holds fields that can be changed on an existing resource.
+type UpdateInput struct {
+    RemoteNetworkID *string
+    Name            *string
+    Description     *string
+    Protocol        *string
+    PortFrom        *int
+    PortTo          *int
+}
+
+func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input UpdateInput) (*Row, error) {
+    // Build dynamic SET clause from non-nil fields
+    // Only allow update if status = 'pending' (optional enforcement)
+    // UPDATE resources SET ... WHERE id = $n AND tenant_id = $n AND deleted_at IS NULL
+    // Return updated row via GetByID
+}
+```
+
+**3. `controller/graph/resolvers/resource.resolvers.go`** — replace the stub:
+
+```go
+func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input graph.UpdateResourceInput) (*graph.Resource, error) {
+    claims := middleware.ClaimsFromCtx(ctx)
+    row, err := resource.Update(ctx, r.DB, claims.TenantID, id, resource.UpdateInput{
+        RemoteNetworkID: input.RemoteNetworkID,
+        Name:            input.Name,
+        Description:     input.Description,
+        Protocol:        input.Protocol,
+        PortFrom:        input.PortFrom,
+        PortTo:          input.PortTo,
+    })
+    if err != nil {
+        return nil, err
+    }
+    return toResourceGQL(row), nil
+}
+```
+
+**4. Run build gate:** `cd controller && go build ./...` must pass.
 
 ---
 
-## Checklist
+## Files Created / Modified
 
-### 1. Add GraphQL operations
+| File | Action |
+|------|--------|
+| `admin/src/pages/Resources.tsx` | CREATE — global resources table with three-dot Actions dropdown |
+| `admin/src/components/CreateResourceModal.tsx` | CREATE — create form (Name, Host IP, Protocol, Port From/To, Remote Network) |
+| `admin/src/components/EditResourceModal.tsx` | CREATE — edit form (Remote Network, Name, Description, Protocol, Port From/To) |
+| `admin/src/graphql/queries.graphql` | MODIFY — add GetAllResources, GetResources |
+| `admin/src/graphql/mutations.graphql` | MODIFY — add CreateResource, UpdateResource, ProtectResource, UnprotectResource, DeleteResource |
+| `controller/graph/resource.graphqls` | MODIFY — add UpdateResourceInput + updateResource mutation |
+| `admin/src/App.tsx` | MODIFY — add /resources route |
+| `admin/src/components/layout/Sidebar.tsx` | MODIFY — add Resources nav link |
 
-#### `admin/src/graphql/queries.graphql` — add:
-```graphql
-query GetAllResources {
-  allResources {
-    id
-    name
-    description
-    host
-    protocol
-    portFrom
-    portTo
-    status
-    errorMessage
-    appliedAt
-    lastVerifiedAt
-    createdAt
-    shield {
-      id
-      name
-      status
-      lanIp
-    }
-    remoteNetwork {
-      id
-      name
-    }
-  }
-}
+---
 
-query GetResources($remoteNetworkId: String!) {
-  resources(remoteNetworkId: $remoteNetworkId) {
-    id
-    name
-    host
-    protocol
-    portFrom
-    portTo
-    status
-    errorMessage
-    lastVerifiedAt
-    shield { id name status }
-  }
-}
-```
+## What Was Built
 
-#### `admin/src/graphql/mutations.graphql` — add:
-```graphql
-mutation CreateResource($input: CreateResourceInput!) {
-  createResource(input: $input) {
-    id name host protocol portFrom portTo status
-    shield { id name }
-  }
-}
+### Resources Table (`/resources`)
 
-mutation ProtectResource($id: ID!) {
-  protectResource(id: $id) { id status }
-}
+- Columns: Name, Host IP, Protocol, Port, Shield, Status, Last Verified, **Actions**
+- 30s poll interval
+- Status badges: `pending` (grey), `managing`/`protecting` (yellow + spinner), `protected` (green), `failed` (red), `removing` (orange + spinner), `deleted` (strikethrough)
+- Shield column shows online (green wifi), offline (amber wifi-off), or "No shield" (alert icon)
 
-mutation UnprotectResource($id: ID!) {
-  unprotectResource(id: $id) { id status }
-}
+### Actions — Three-dot Dropdown (⋯)
 
-mutation DeleteResource($id: ID!) {
-  deleteResource(id: $id)
-}
-```
+Each row has a `MoreHorizontal` icon button. Clicking opens a dropdown with:
 
-- [ ] All queries + mutations added
-- [ ] Run `cd admin && npm run codegen` — generates TypeScript hooks
+| Option | Shown when |
+|--------|-----------|
+| **Edit** | resource is not `deleted` |
+| **Protect** | shield online + status is `pending` or `failed` |
+| **Unprotect** | status is `protected` |
+| **Delete** | shield exists + status is not `deleted` (red, separated) |
 
-### 2. Create `admin/src/components/CreateResourceModal.tsx`
+In-progress states (`managing`, `protecting`, `removing`) show a spinner instead of the menu.
 
-Form fields:
+### Edit Modal (`EditResourceModal.tsx`)
+
+Fields (all pre-populated from current resource):
+- **Remote Network** (select, required)
 - **Name** (text, required)
 - **Description** (text, optional)
-- **Host IP** (text, required) — tooltip: "IP of the resource host. A shield must be installed on this machine."
-- **Protocol** (select: tcp / udp / any, default: tcp)
+- **Protocol** (select: tcp / udp / any)
 - **Port From** (number, 1–65535)
-- **Port To** (number, ≥ Port From, defaults to same as Port From)
+- **Port To** (number, ≥ Port From)
 
-On submit:
-```tsx
-createResource({ variables: { input: { remoteNetworkId, name, description, host, protocol, portFrom, portTo } } })
-```
+Host IP is intentionally not editable (tied to shield auto-match).
 
-Error handling:
-- Show error toast if mutation returns "no shield installed on this host"
+Calls `updateResource(id, input)` mutation — **requires M3 backend implementation to function**.
 
-- [ ] Modal created following existing modal patterns (see `InstallCommandModal` or similar)
-- [ ] No shield selector — host IP is all that's needed
-- [ ] Port To defaults to Port From value
-- [ ] Error toast on "no shield on this host" response
+### Bugs Fixed (store.go)
 
-### 3. Create `admin/src/pages/Resources.tsx`
+**Bug 1 — AutoMatchShield:** queried `shields` table with `AND deleted_at IS NULL` but `shields` has no `deleted_at` column — removed that condition. Shields use `status NOT IN ('revoked', 'deleted')` instead.
 
-```tsx
-// Route: /resources
-// useQuery(GET_ALL_RESOURCES, { pollInterval: 30000 })
-```
-
-**Table columns:**
-| Column | Detail |
-|--------|--------|
-| Name | resource name |
-| Host IP | resource.host |
-| Protocol | tcp / udp / any badge |
-| Port | portFrom === portTo ? portFrom : `portFrom–portTo` |
-| Shield | shield.name if exists, else "No shield ⚠️" |
-| Status | badge: pending / managing / protecting / protected / failed / removing |
-| Last Active | lastVerifiedAt formatted, or "—" |
-| Actions | context-dependent buttons (see below) |
-
-**Action button logic:**
-```tsx
-// Show Protect button if:
-shield != null && (status === 'pending' || status === 'failed')
-
-// Show Unprotect button if:
-status === 'protected'
-
-// Show spinner if:
-status === 'managing' || status === 'protecting' || status === 'removing'
-
-// Show "No shield" (greyed, no button) if:
-shield == null
-
-// Show shield offline badge if:
-shield != null && shield.status === 'disconnected'
-```
-
-**Status badge colors:**
-- `pending` → grey
-- `managing` / `protecting` → yellow + spinner
-- `protected` → green
-- `failed` → red + error tooltip
-- `removing` → orange + spinner
-- `deleted` → grey strikethrough
-
-- [ ] `Resources.tsx` page created
-- [ ] 30s poll interval
-- [ ] All status badge states handled
-- [ ] Protect/Unprotect buttons show/hide correctly
-- [ ] "No shield" greyed out with tooltip
-- [ ] Shield offline shows badge on resource row
-- [ ] "Add Resource" button → opens `CreateResourceModal`
-- [ ] Delete button with confirmation dialog
-
-### 4. Modify `admin/src/App.tsx`
-
-- [ ] Add route: `<Route path="/resources" element={<Resources />} />`
-- [ ] Import `Resources` page
-
-### 5. Modify `admin/src/components/layout/Sidebar.tsx`
-
-- [ ] Add "Resources" nav link pointing to `/resources`
-- [ ] Position: after "Shields" in nav order
+**Bug 2 — Duplicate key on recreate:** `SoftDelete` used `UPDATE ... SET deleted_at = NOW()` which kept the row in place, causing `duplicate key value violates unique constraint "resources_shield_id_name_key"` when recreating a resource with the same name. Changed to a hard `DELETE FROM resources` so the row is fully removed and the name is immediately reusable.
 
 ---
 
-## Build Check
+## GraphQL Schema additions (resource.graphqls)
+
+```graphql
+input UpdateResourceInput {
+  remoteNetworkId: String
+  name:            String
+  description:     String
+  protocol:        String
+  portFrom:        Int
+  portTo:          Int
+}
+
+# Added to Mutation:
+updateResource(id: ID!, input: UpdateResourceInput!): Resource!
+```
+
+---
+
+## Build Checks
 
 ```bash
-cd admin && npm run build   # must pass, no TypeScript errors
+cd admin && npm run codegen     # regenerate TS types
+cd admin && npm run build       # must pass, no TypeScript errors
+cd controller && go build ./... # must pass after gqlgen re-run
 ```
 
 ---
 
 ## Notes
 
-- Mirror the `AllShields.tsx` pattern for global view — same polling, same table structure.
-- `lastVerifiedAt` shown as relative time ("2 min ago") or absolute — pick whichever matches existing date formatting in the codebase.
-- Port display: if `portFrom === portTo` show single port, else show range `80–443`.
-- The `shield.lanIp` field in the query is for display only (matches resource.host visually confirming the assignment).
+- `lastVerifiedAt` shown as relative time ("2 min ago").
+- Port display: single port if `portFrom === portTo`, else range `80–443`.
+- `shield.lanIp` in query confirms auto-match visually.
 
 ---
 
@@ -219,3 +176,4 @@ cd admin && npm run build   # must pass, no TypeScript errors
 
 - [[Sprint5/path.md]] — dependency map
 - [[Sprint5/Member2-Go-Proto-DB/Phase1-Proto-Migration-Schema]] — graphqls schema this depends on
+- [[Sprint5/Member3-Go-Controller/Phase1-Resolvers]] — M3 must add updateResource resolver
