@@ -29,28 +29,28 @@ type trustDomainKey struct{}
 // The interceptor injects the values; handlers consume them via these helpers.
 
 // SPIFFEIDFromContext returns the full SPIFFE URI from the context.
-// Called by: enrollment.go, heartbeat.go
+// Called by: enrollment.go, control_stream.go
 func SPIFFEIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(spiffeIDKey{}).(string)
 	return v
 }
 
 // SPIFFERoleFromContext returns the SPIFFE role ("connector", "agent", "controller").
-// Called by: heartbeat.go (Phase 4 — verifies role == "connector")
+// Called by: control_stream.go (verifies role == "connector")
 func SPIFFERoleFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(spiffeRoleKey{}).(string)
 	return v
 }
 
 // SPIFFEEntityIDFromContext returns the entity-specific ID (e.g. connector UUID).
-// Called by: heartbeat.go (Phase 4 — used as connectorID)
+// Called by: control_stream.go (used as connectorID)
 func SPIFFEEntityIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(spiffeEntityIDKey{}).(string)
 	return v
 }
 
 // TrustDomainFromContext returns the trust domain from the context.
-// Called by: heartbeat.go (Phase 4 — used for tenant resolution)
+// Called by: control_stream.go (used for tenant resolution)
 func TrustDomainFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(trustDomainKey{}).(string)
 	return v

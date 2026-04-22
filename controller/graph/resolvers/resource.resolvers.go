@@ -56,11 +56,12 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	row, err := resource.MarkManaging(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+	row, err := resource.MarkProtecting(ctx, r.ResourceCfg.DB, tc.TenantID, id)
 	if err != nil {
 		return nil, fmt.Errorf("protectResource: %w", err)
 	}
 
+	r.ConnectorRegistry.PushInstruction(row)
 	return toResourceGQL(row), nil
 }
 
@@ -68,11 +69,12 @@ func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*gra
 func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	row, err := resource.MarkRemoving(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+	row, err := resource.MarkUnprotecting(ctx, r.ResourceCfg.DB, tc.TenantID, id)
 	if err != nil {
 		return nil, fmt.Errorf("unprotectResource: %w", err)
 	}
 
+	r.ConnectorRegistry.PushInstruction(row)
 	return toResourceGQL(row), nil
 }
 

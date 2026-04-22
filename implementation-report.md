@@ -595,11 +595,36 @@ ALLOWED_ORIGIN=http://localhost:5173
 - gRPC service for Linux client communication
 - Device/client certificate issuance (signed by WorkspaceCA)
 - User invitation flow (admin invites members)
-- Resource management (defining protected resources)
 - Policy engine (access rules)
 - **Sprint 4: Traffic proxying (WireGuard / tun)** — next sprint
 - Workspace management (rename, suspend, delete)
 - Multi-workspace support for same Google account
+
+## What Was Added Since This Report (Sprint 5 — Resource Protection)
+
+Sprint 5 implements the core functionality for protecting resources on a shield host. This includes a new `shield` agent, updates to the `controller` and `connector`, a new UI in the `admin` frontend, and new protobuf definitions.
+
+**Controller:**
+- **Resource Management:** A new `resource` package (`internal/resource`) was added to manage the lifecycle of resources. This includes a `store.go` with functions to create, read, and update resources in the database.
+- **GraphQL API:** The GraphQL API was extended with a new `resource.graphqls` schema, defining the `Resource` type and mutations for creating, protecting, unprotecting, and deleting resources. The corresponding resolvers were implemented in `resource.resolvers.go`.
+- **Heartbeat:** The `heartbeat.go` logic was updated to piggyback resource instructions onto the existing heartbeat mechanism, sending instructions to the `connector` and processing acknowledgements back from it.
+
+**Connector:**
+- **Heartbeat Relay:** The connector's `heartbeat.rs` and `agent_server.rs` were modified to relay resource instructions from the controller to the shield and to forward acknowledgements from the shield back to the controller.
+
+**Shield:**
+- **New Agent:** A new Rust-based `shield` agent was created. This agent is responsible for managing resource protection on the host.
+- **Resource Protection:** The `resources.rs` module contains the core logic for applying and removing `nftables` rules to protect resources. It also includes a health checking mechanism to monitor the status of protected services.
+- **Heartbeat:** The shield's `heartbeat.rs` communicates with the connector, receiving resource instructions and sending back acknowledgements.
+
+**Admin Frontend:**
+- **Resources Page:** A new `Resources.tsx` page was added to the admin UI, allowing users to view and manage protected resources.
+- **Create Resource Modal:** A `CreateResourceModal.tsx` component was created to provide a user-friendly way to define new resources.
+- **GraphQL:** New queries and mutations were added to `queries.graphql` and `mutations.graphql` to interact with the new resource management backend.
+
+**Proto:**
+- **shield.v1:** A new `shield.v1` protobuf package was created with `ResourceInstruction` and `ResourceAck` messages.
+- **connector.v1:** The `connector.v1` protobuf was updated to include `shield_resources` in the `HeartbeatResponse` and `resource_acks` in the `HeartbeatRequest`.
 
 ## What Was Added Since This Report (Sprint 3 — Cert Renewal)
 

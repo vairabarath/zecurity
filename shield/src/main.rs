@@ -5,7 +5,7 @@
 //   (a server, VM, or device you want to protect). It:
 //     1. Enrolls with the controller to get a SPIFFE certificate
 //     2. Sets up a TUN interface (zecurity0) for Zero Trust routing
-//     3. Sends heartbeats to its assigned connector every N seconds
+//     3. Opens a control stream to its assigned connector
 //     4. Renews its certificate before it expires
 //     5. Optionally auto-updates itself from GitHub releases
 //
@@ -16,10 +16,10 @@
 //   4. Check state.json in state_dir:
 //      - Not exists → first run → call enrollment::enroll()
 //      - Exists     → already enrolled → load ShieldState from state.json
-//   5. Spawn heartbeat loop (sends heartbeats to connector :9091 via mTLS)
+//   5. Spawn control stream (bidirectional stream to connector :9091 via mTLS)
 //   6. Spawn auto-updater if AUTO_UPDATE_ENABLED=true
 //   7. Wait for SIGTERM (systemd sends this on `systemctl stop`)
-//   8. On SIGTERM: call heartbeat::goodbye() so connector marks us offline immediately
+//   8. On SIGTERM: call control_stream::goodbye() so connector marks us offline immediately
 //
 // MODULE LAYOUT:
 //   appmeta    — SPIFFE/PKI constants (mirrors Go appmeta/identity.go)
@@ -28,7 +28,7 @@
 //   tls        — connector SPIFFE verification for mTLS handshake
 //   util       — hostname reader, public IP helper
 //   enrollment — (Phase I) full enrollment flow with controller
-//   heartbeat  — (Phase J) mTLS heartbeat loop to connector :9091
+//   control_stream — bidirectional mTLS stream to connector :9091
 //   renewal    — (Phase J) cert renewal via connector RenewCert RPC
 //   network    — (Phase K) zecurity0 TUN interface + nftables setup
 //   updater    — (Phase L) GitHub release checker + binary self-update
@@ -43,7 +43,7 @@ mod types;
 mod updater;
 mod util;
 
-mod heartbeat;
+mod control_stream;
 mod renewal;
 mod resources;
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.
@@ -54,7 +54,6 @@ mod resources;
 /// Available types after Phase I:
 ///   proto::shield_service_client::ShieldServiceClient — gRPC client
 ///   proto::EnrollRequest / EnrollResponse
-///   proto::HeartbeatRequest / HeartbeatResponse
 ///   proto::RenewCertRequest / RenewCertResponse
 ///   proto::GoodbyeRequest / GoodbyeResponse
 pub mod proto {
@@ -81,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Handle --check-update flag (used by the systemd oneshot update service).
     // Runs a single update check and exits — it does not start enrollment,
-    // heartbeats, or any long-running daemon behavior.
+    // control streams, or any long-running daemon behavior.
     if std::env::args().any(|a| a == "--check-update") {
         tracing_subscriber::fmt()
             .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
@@ -152,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         enrollment::enroll(&cfg).await?
     };
 
-    // Step 5: Spawn resource health check loop + heartbeat loop
+    // Step 5: Spawn resource health check loop + control stream
     let resource_state = Arc::new(resources::SharedResourceState::new());
 
     let health_state = Arc::clone(&resource_state);
@@ -161,12 +160,15 @@ async fn main() -> anyhow::Result<()> {
         health_state,
     ));
 
-    let hb_cfg = cfg.clone();
-    let hb_state = state.clone();
-    let hb_resource_state = Arc::clone(&resource_state);
+    let stream_cfg = cfg.clone();
+    let stream_state = state.clone();
+    let stream_resource_state = Arc::clone(&resource_state);
     tokio::spawn(async move {
-        if let Err(e) = heartbeat::run(hb_state, hb_cfg, hb_resource_state).await {
-            error!("heartbeat loop failed: {:#}", e);
+        if let Err(e) =
+            control_stream::run_control_stream(stream_state, stream_cfg, stream_resource_state)
+                .await
+        {
+            error!("control stream failed: {:#}", e);
         }
     });
 
@@ -209,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Step 8: Graceful shutdown — best-effort Goodbye RPC
-    heartbeat::goodbye(&state, &cfg).await;
+    control_stream::goodbye(&state, &cfg).await;
 
     info!("shield shut down gracefully");
     Ok(())

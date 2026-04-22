@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// WHY WE SAVE THIS:
 ///   After enrollment, the shield has a certificate, a connector address,
 ///   and a network interface. On restart, we don't re-enroll — we just
-///   load this state and resume heartbeating. Re-enrollment would burn
+///   load this state and resume the control stream. Re-enrollment would burn
 ///   the enrollment token and create a new shield record in the DB.
 ///
 /// FILE LOCATION: <state_dir>/state.json (default: /var/lib/zecurity-shield/state.json)
@@ -22,7 +22,7 @@ pub struct ShieldState {
     /// Workspace trust domain (e.g. "ws-acme.zecurity.in").
     pub trust_domain: String,
 
-    /// UUID of the connector this shield heartbeats through.
+    /// UUID of the connector this shield streams through.
     pub connector_id: String,
 
     /// gRPC address of the assigned connector (e.g. "connector.example.com:9091").
@@ -35,7 +35,7 @@ pub struct ShieldState {
     pub enrolled_at: String,
 
     /// Unix timestamp of the certificate's NotAfter field.
-    /// heartbeat.rs checks this to decide when to call RenewCert.
+    /// Updated after RenewCert so the next control stream uses fresh credentials.
     pub cert_not_after: i64,
 }
 

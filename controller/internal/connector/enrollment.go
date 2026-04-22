@@ -16,9 +16,8 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// EnrollmentHandler holds the dependencies for the Enroll gRPC handler.
+// EnrollmentHandler holds the dependencies for the ConnectorService gRPC handlers.
 // Created in main.go and registered with the gRPC server.
-// Called by: main.go (Member 2 wires this up)
 type EnrollmentHandler struct {
 	pb.UnimplementedConnectorServiceServer
 	Cfg        Config
@@ -26,6 +25,7 @@ type EnrollmentHandler struct {
 	Redis      valkeycompat.Cmdable
 	PKIService pki.Service
 	ShieldSvc  shield.Service
+	Registry   *ConnectorRegistry // tracks active Control streams
 }
 
 // Enroll implements the ConnectorService.Enroll gRPC handler.

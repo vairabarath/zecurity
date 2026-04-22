@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "zecurity-shield"
-version = "1.0.5"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3275,6 +3275,7 @@ dependencies = [
  "tokio",
  "tokio-retry",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tonic-prost",

@@ -1,8 +1,8 @@
 [package]
 name        = "zecurity-shield"
-version     = "1.0.0"
+version     = "1.1.0"
 edition     = "2021"
-description = "ZECURITY shield — enrollment, heartbeat, network setup, and auto-update agent"
+description = "ZECURITY shield — enrollment, control streaming, network setup, and auto-update agent"
 
 [dependencies]
 tokio              = { version = "1", features = ["full"] }
@@ -18,6 +18,7 @@ sha2               = "0.11"
 hex                = "0.4"
 anyhow             = "1"
 futures-util       = "0.3"
+tokio-stream       = "0.1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 figment            = { version = "0.10", features = ["env", "toml"] }

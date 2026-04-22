@@ -13,13 +13,14 @@ service ConnectorService {
   // Connector presents enrollment JWT + PKCS#10 CSR.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 
-  // Called every CONNECTOR_HEARTBEAT_INTERVAL seconds after enrollment.
+  // Persistent bidirectional control stream.
+  // Connector establishes stream on startup; controller pushes resource
+  // instructions in real time; connector streams health and acks back.
   // Uses mTLS — connector presents its SPIFFE-certified cert.
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Control(stream ConnectorControlMessage) returns (stream ConnectorControlMessage);
 
-  // Called by connector when HeartbeatResponse.re_enroll=true.
+  // Called when re_enroll arrives on the Control stream.
   // Uses mTLS — connector presents its current (still-valid) cert.
-  // Issues a fresh cert for the same SPIFFE ID, no new keypair needed.
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 
   // Called by connector during best-effort graceful shutdown.
@@ -38,24 +39,6 @@ message EnrollResponse {
   bytes  workspace_ca_pem     = 2;  // WorkspaceCA cert (PEM)
   bytes  intermediate_ca_pem  = 3;  // Intermediate CA cert (PEM)
   string connector_id         = 4;  // confirmed connector UUID
-}
-
-message HeartbeatRequest {
-  string connector_id = 1;  // for logging only — NOT authoritative identity
-  string version      = 2;  // CARGO_PKG_VERSION
-  string hostname     = 3;
-  string public_ip    = 4;  // optional
-  repeated ShieldHealth shields = 5;
-  string lan_addr     = 6;  // connector's LAN address shields use to connect (e.g. 192.168.1.10:9091)
-  repeated shield.v1.ResourceAck resource_acks = 7;  // forwarded from all shields on this connector
-}
-
-message HeartbeatResponse {
-  bool   ok             = 1;
-  string latest_version = 2;  // controller informs connector of latest release
-  bool   re_enroll      = 3;  // true when cert expiring soon, connector should call RenewCert
-  // keyed by shield_id → list of pending resource instructions for that shield
-  map<string, ShieldResourceInstructions> shield_resources = 4;
 }
 
 message ShieldResourceInstructions {
@@ -81,10 +64,46 @@ message GoodbyeResponse {
   bool ok = 1;
 }
 
-message ShieldHealth {
-  string shield_id         = 1;
-  string status            = 2;
-  string version           = 3;
-  int64 last_heartbeat_at  = 4;
-  string lan_ip            = 5;  // shield's auto-detected LAN IP (RFC-1918), empty if unknown
+// ── Control stream messages ──────────────────────────────────────────────────
+
+message ConnectorControlMessage {
+  oneof body {
+    // Controller → Connector
+    ResourceInstructionBatch  resource_instructions = 1;
+    shield.v1.ReEnrollSignal  re_enroll             = 2;
+    shield.v1.Ping            ping                  = 3;
+    // Connector → Controller
+    ConnectorHealthReport     connector_health      = 4;
+    ShieldStatusBatch         shield_status         = 5;
+    ResourceAckBatch          resource_acks         = 6;
+    shield.v1.Pong            pong                  = 7;
+  }
+}
+
+message ResourceInstructionBatch {
+  // keyed by shield_id → instructions for that shield
+  map<string, ShieldResourceInstructions> shield_resources = 1;
+}
+
+message ConnectorHealthReport {
+  string version   = 1;
+  string hostname  = 2;
+  string public_ip = 3;
+  string lan_addr  = 4;
+}
+
+message ShieldStatusUpdate {
+  string shield_id      = 1;
+  string status         = 2;
+  string version        = 3;
+  string lan_ip         = 4;
+  int64  last_seen_unix = 5;
+}
+
+message ShieldStatusBatch {
+  repeated ShieldStatusUpdate shields = 1;
+}
+
+message ResourceAckBatch {
+  repeated shield.v1.ResourceAck acks = 1;
 }

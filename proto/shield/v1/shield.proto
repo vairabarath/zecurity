@@ -10,11 +10,13 @@ service ShieldService {
   // Shield presents enrollment JWT + PKCS#10 CSR.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
 
-  // Called every SHIELD_HEARTBEAT_INTERVAL seconds after enrollment.
+  // Persistent bidirectional control stream.
+  // Shield establishes stream on startup; connector pushes resource
+  // instructions in real time; shield streams health reports and acks back.
   // Uses mTLS — shield presents its SPIFFE-certified cert.
-  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Control(stream ShieldControlMessage) returns (stream ShieldControlMessage);
 
-  // Called by shield when HeartbeatResponse.re_enroll=true.
+  // Called when re_enroll arrives on the Control stream.
   // Uses mTLS — shield presents its current (still-valid) cert.
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 
@@ -37,22 +39,6 @@ message EnrollResponse {
   string interface_addr     = 5;  // assigned zecurity0 /32
   string connector_addr     = 6;  // selected connector Shield gRPC addr
   string connector_id       = 7;  // confirmed connector UUID
-}
-
-message HeartbeatRequest {
-  string shield_id = 1;  // for logging only — NOT authoritative identity
-  string version   = 2;  // CARGO_PKG_VERSION
-  string hostname  = 3;
-  string public_ip = 4;  // optional
-  string lan_ip    = 5;  // RFC-1918 address auto-detected on this host, empty if not found
-  repeated ResourceAck resource_acks = 6;  // Shield reports back results of resource instructions
-}
-
-message HeartbeatResponse {
-  bool ok             = 1;
-  string latest_version = 2;  // controller/connector informs shield of latest release
-  bool re_enroll      = 3;    // true when cert expiring soon, shield should call RenewCert
-  repeated ResourceInstruction resources = 4;  // pending resource instructions from Controller
 }
 
 message ResourceInstruction {
@@ -89,4 +75,36 @@ message GoodbyeRequest {
 
 message GoodbyeResponse {
   bool ok = 1;
+}
+
+// ── Control stream messages ──────────────────────────────────────────────────
+
+message ShieldControlMessage {
+  oneof body {
+    // Connector → Shield
+    ResourceInstruction resource_instruction = 1;
+    ReEnrollSignal      re_enroll            = 2;
+    Ping                ping                 = 3;
+    // Shield → Connector
+    ShieldHealthReport  health_report        = 4;
+    ResourceAck         resource_ack         = 5;
+    Pong                pong                 = 6;
+  }
+}
+
+message ShieldHealthReport {
+  string version   = 1;
+  string hostname  = 2;
+  string public_ip = 3;
+  string lan_ip    = 4;
+}
+
+message ReEnrollSignal {}
+
+message Ping {
+  int64 timestamp_unix = 1;
+}
+
+message Pong {
+  int64 timestamp_unix = 1;
 }

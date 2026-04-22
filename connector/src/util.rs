@@ -1,7 +1,7 @@
 // util.rs — Shared utility functions used across multiple connector modules.
 
-use std::fs;
 use if_addrs::IfAddr;
+use std::fs;
 
 /// Read the system hostname from /etc/hostname.
 /// Falls back to "unknown" if the file is missing or unreadable.
@@ -16,9 +16,7 @@ const PREFERRED_PREFIXES: &[&str] = &["eth", "en", "wlan", "wl"];
 
 fn is_rfc1918(ip: std::net::Ipv4Addr) -> bool {
     let o = ip.octets();
-    o[0] == 10
-        || (o[0] == 172 && (16..=31).contains(&o[1]))
-        || (o[0] == 192 && o[1] == 168)
+    o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
 }
 
 /// Detect the best RFC-1918 LAN IP on this host.

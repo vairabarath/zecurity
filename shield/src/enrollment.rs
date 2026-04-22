@@ -4,7 +4,7 @@
 //   Enrollment is the one-time process where the shield:
 //     1. Proves it has a valid invitation (the JWT enrollment token)
 //     2. Gets a signed SPIFFE certificate from the controller
-//     3. Learns which connector to heartbeat through
+//     3. Learns which connector to open a control stream through
 //     4. Gets assigned a /32 IP address for the zecurity0 interface
 //     5. Saves all of this to disk so future restarts skip enrollment
 //
@@ -27,7 +27,7 @@
 //   9.  Save workspace_ca.crt (CA chain for future mTLS)
 //   10. Write state.json (shield_id, connector_addr, interface_addr, etc.)
 //   11. Remove ENROLLMENT_TOKEN from config file (best-effort)
-//   12. Return ShieldState (main.rs uses this to start heartbeat loop)
+//   12. Return ShieldState (main.rs uses this to start the control stream)
 //
 // CALLED BY: main.rs when state.json does not exist (first run)
 
@@ -62,7 +62,7 @@ use crate::util;
 ///   - trust_domain    — e.g. "ws-acme.zecurity.in" (used in SPIFFE URI)
 ///   - ca_fingerprint  — SHA-256 hex of the workspace CA DER (MITM detection)
 ///   - connector_id    — which connector was selected (least-loaded)
-///   - connector_addr  — where to send heartbeats after enrollment
+///   - connector_addr  — where to open the control stream after enrollment
 ///   - interface_addr  — the /32 IP assigned to zecurity0
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
@@ -80,7 +80,7 @@ struct JwtClaims {
 /// Run the full enrollment flow.
 ///
 /// Called from main.rs when state.json does not exist (first run).
-/// On success, returns a ShieldState that main.rs uses to start the heartbeat loop.
+/// On success, returns a ShieldState that main.rs uses to start the control stream.
 /// On fatal error (MITM, bad token, controller rejection), returns Err.
 pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     let token = cfg
@@ -225,7 +225,7 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // ── Step 9: Save workspace_ca.crt ────────────────────────────────────────
     //
     // The CA chain (workspace CA + intermediate CA) is used by the mTLS client
-    // to verify the connector's certificate during heartbeat.
+    // to verify the connector's certificate during the control stream.
     let int_ca_pem = String::from_utf8(response.intermediate_ca_pem)
         .context("intermediate_ca_pem is not valid UTF-8")?;
     let ca_chain_path = state_dir.join("workspace_ca.crt");
@@ -236,7 +236,7 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // ── Step 10: Write state.json ─────────────────────────────────────────────
     //
     // state.json is the "enrolled" marker. On next startup, main.rs checks for
-    // this file. If it exists → skip enrollment, load state, start heartbeat.
+    // this file. If it exists → skip enrollment, load state, start control stream.
     let enrolled_at = ::time::OffsetDateTime::now_utc()
         .format(&::time::format_description::well_known::Rfc3339)
         .context("failed to format enrollment timestamp")?;
@@ -361,7 +361,7 @@ fn verify_ca_fingerprint(ca_pem: &str, expected: &str) -> Result<()> {
 /// Parse the NotAfter timestamp from a PEM certificate.
 ///
 /// Returns a Unix timestamp (i64) stored in state.json.
-/// heartbeat.rs uses this to decide when to call RenewCert.
+/// control_stream.rs uses this to reconnect with renewed credentials.
 fn parse_cert_not_after(cert_pem: &[u8]) -> Result<i64> {
     let der_certs = certs(&mut cert_pem.as_ref())
         .collect::<Result<Vec<_>, _>>()

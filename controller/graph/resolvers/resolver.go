@@ -12,11 +12,12 @@ import (
 
 // Resolver holds shared dependencies for all resolvers.
 type Resolver struct {
-	TenantDB     *db.TenantDB
-	AuthService  auth.Service
-	ConnectorCfg connector.Config
-	ShieldSvc    shield.Service
-	ResourceCfg  resource.Config
-	Redis        valkeycompat.Cmdable
-	Pool         *pgxpool.Pool
+	TenantDB          *db.TenantDB
+	AuthService       auth.Service
+	ConnectorCfg      connector.Config
+	ConnectorRegistry *connector.ConnectorRegistry
+	ShieldSvc         shield.Service
+	ResourceCfg       resource.Config
+	Redis             valkeycompat.Cmdable
+	Pool              *pgxpool.Pool
 }

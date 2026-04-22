@@ -4,23 +4,23 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use ::time::OffsetDateTime;
+use anyhow::{Context, Result};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, Identity, Server, ServerTlsConfig};
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
 use x509_parser::prelude::*;
 
-use crate::proto::ShieldHealth;
 use crate::shield_proto::shield_service_client::ShieldServiceClient;
 use crate::shield_proto::shield_service_server::{ShieldService, ShieldServiceServer};
 use crate::shield_proto::{
-    EnrollRequest, EnrollResponse, GoodbyeRequest, GoodbyeResponse, HeartbeatRequest,
-    HeartbeatResponse, RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction,
+    EnrollRequest, EnrollResponse, GoodbyeRequest, GoodbyeResponse, ReEnrollSignal,
+    RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction, ShieldControlMessage,
 };
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
-// 3 missed heartbeats (shield default is 30s) before treating a shield as offline.
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 
 #[derive(Debug, Clone)]
@@ -28,29 +28,37 @@ struct ShieldEntry {
     status: String,
     version: String,
     last_seen_unix: i64,
-    cert_not_after_unix: i64,
     lan_ip: String,
 }
 
+/// Shared state for Shield-facing Control streams.
 #[derive(Debug, Clone)]
-pub struct ShieldServer {
-    shields: Arc<Mutex<HashMap<String, ShieldEntry>>>,
-    // resource_instructions: keyed by shield_id → instructions from Controller heartbeat
+pub struct ShieldRegistry {
+    // Stream-connected shields: shield_id → instruction sender
+    instruction_txs: Arc<Mutex<HashMap<String, mpsc::Sender<ResourceInstruction>>>>,
+    // Buffered instructions for shields that reconnect after the connector already received work.
     resource_instructions: Arc<Mutex<HashMap<String, Vec<ResourceInstruction>>>>,
-    // pending_acks: collected from shield heartbeats, drained on connector heartbeat
-    pending_acks: Arc<Mutex<Vec<ResourceAck>>>,
+    // Unified ack sink — consumed by control_stream.rs which forwards to controller
+    pub ack_tx: mpsc::Sender<(String, ResourceAck)>,
+    health: Arc<Mutex<HashMap<String, ShieldEntry>>>,
     controller_channel: Channel,
     trust_domain: String,
     connector_id: String,
     renewal_window_secs: u64,
 }
 
-impl ShieldServer {
-    pub fn new(controller_channel: Channel, trust_domain: String, connector_id: String) -> Self {
+impl ShieldRegistry {
+    pub fn new(
+        controller_channel: Channel,
+        trust_domain: String,
+        connector_id: String,
+        ack_tx: mpsc::Sender<(String, ResourceAck)>,
+    ) -> Self {
         Self {
-            shields: Arc::new(Mutex::new(HashMap::new())),
+            instruction_txs: Arc::new(Mutex::new(HashMap::new())),
             resource_instructions: Arc::new(Mutex::new(HashMap::new())),
-            pending_acks: Arc::new(Mutex::new(Vec::new())),
+            ack_tx,
+            health: Arc::new(Mutex::new(HashMap::new())),
             controller_channel,
             trust_domain,
             connector_id,
@@ -58,51 +66,70 @@ impl ShieldServer {
         }
     }
 
-    pub fn get_alive_shields(&self) -> Vec<ShieldHealth> {
-        let cutoff = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-            - SHIELD_STALE_THRESHOLD_SECS;
-
-        self.shields
+    /// Deliver instructions to a shield via Control stream, or buffer until the shield reconnects.
+    pub fn push_instructions(&self, shield_id: &str, instructions: Vec<ResourceInstruction>) {
+        if instructions.is_empty() {
+            return;
+        }
+        let maybe_tx = self
+            .instruction_txs
             .lock()
-            .expect("shield health map mutex poisoned")
+            .expect("instruction_txs poisoned")
+            .get(shield_id)
+            .cloned();
+
+        if let Some(tx) = maybe_tx {
+            let id = shield_id.to_string();
+            tokio::spawn(async move {
+                for instr in instructions {
+                    if tx.send(instr).await.is_err() {
+                        warn!(shield_id = %id, "shield instruction channel closed during push");
+                        break;
+                    }
+                }
+            });
+        } else {
+            self.resource_instructions
+                .lock()
+                .expect("resource_instructions poisoned")
+                .insert(shield_id.to_string(), instructions);
+        }
+    }
+
+    /// Snapshot of alive shields for the health report sent to controller.
+    pub fn get_shield_status_batch(&self) -> crate::proto::ShieldStatusBatch {
+        let cutoff = unix_now() - SHIELD_STALE_THRESHOLD_SECS;
+        let shields = self
+            .health
+            .lock()
+            .expect("health map poisoned")
             .iter()
-            .filter(|(_, entry)| entry.last_seen_unix >= cutoff)
-            .map(|(id, entry)| ShieldHealth {
+            .filter(|(_, e)| e.last_seen_unix >= cutoff)
+            .map(|(id, e)| crate::proto::ShieldStatusUpdate {
                 shield_id: id.clone(),
-                status: entry.status.clone(),
-                version: entry.version.clone(),
-                last_heartbeat_at: entry.last_seen_unix,
-                lan_ip: entry.lan_ip.clone(),
+                status: e.status.clone(),
+                version: e.version.clone(),
+                lan_ip: e.lan_ip.clone(),
+                last_seen_unix: e.last_seen_unix,
             })
-            .collect()
-    }
-
-    /// Called by connector heartbeat after receiving HeartbeatResponse from Controller.
-    /// Updates the cached resource instructions for the given shield.
-    pub fn update_resource_instructions(&self, shield_id: &str, instructions: Vec<ResourceInstruction>) {
-        self.resource_instructions
-            .lock()
-            .expect("resource instructions mutex poisoned")
-            .insert(shield_id.to_string(), instructions);
-    }
-
-    /// Called by connector heartbeat to collect and clear all pending shield acks.
-    pub fn drain_resource_acks(&self) -> Vec<ResourceAck> {
-        let mut acks = self.pending_acks
-            .lock()
-            .expect("pending acks mutex poisoned");
-        std::mem::take(&mut *acks)
+            .collect();
+        crate::proto::ShieldStatusBatch { shields }
     }
 
     pub async fn serve(self, addr: SocketAddr, state_dir: impl AsRef<Path>) -> Result<()> {
         let state_dir = state_dir.as_ref();
-        let cert_pem = std::fs::read(state_dir.join("connector.crt"))
-            .with_context(|| format!("failed to read {}", state_dir.join("connector.crt").display()))?;
-        let key_pem = std::fs::read(state_dir.join("connector.key"))
-            .with_context(|| format!("failed to read {}", state_dir.join("connector.key").display()))?;
+        let cert_pem = std::fs::read(state_dir.join("connector.crt")).with_context(|| {
+            format!(
+                "failed to read {}",
+                state_dir.join("connector.crt").display()
+            )
+        })?;
+        let key_pem = std::fs::read(state_dir.join("connector.key")).with_context(|| {
+            format!(
+                "failed to read {}",
+                state_dir.join("connector.key").display()
+            )
+        })?;
         let ca_pem = std::fs::read(state_dir.join("workspace_ca.crt")).with_context(|| {
             format!(
                 "failed to read {}",
@@ -126,6 +153,58 @@ impl ShieldServer {
             .context("Shield-facing Connector gRPC server failed")
     }
 
+    /// Extract and verify shield identity purely from the peer certificate SPIFFE URI.
+    /// Used by the Control stream handler (no claimed_id in the request body).
+    fn extract_shield_identity<T>(
+        &self,
+        request: &Request<T>,
+    ) -> Result<VerifiedShieldIdentity, Status> {
+        let expected_prefix = format!("spiffe://{}/shield/", self.trust_domain);
+
+        let peer_certs = request
+            .peer_certs()
+            .ok_or_else(|| Status::permission_denied("missing mTLS peer certificate"))?;
+        let leaf_cert = peer_certs
+            .first()
+            .ok_or_else(|| Status::permission_denied("empty mTLS certificate chain"))?;
+
+        let (_, cert) = X509Certificate::from_der(leaf_cert.as_ref())
+            .map_err(|_| Status::permission_denied("invalid shield peer certificate"))?;
+
+        let san = cert
+            .subject_alternative_name()
+            .map_err(|_| Status::permission_denied("invalid shield certificate SAN"))?
+            .ok_or_else(|| Status::permission_denied("shield certificate missing SAN"))?;
+
+        let mut found_id: Option<String> = None;
+        for name in &san.value.general_names {
+            if let GeneralName::URI(uri) = name {
+                if let Some(id) = uri.strip_prefix(&expected_prefix) {
+                    if !id.is_empty() && !id.contains('/') {
+                        found_id = Some(id.to_string());
+                        break;
+                    }
+                }
+            }
+        }
+
+        let shield_id = found_id.ok_or_else(|| {
+            Status::permission_denied("shield cert SPIFFE identity not in expected trust domain")
+        })?;
+
+        let cert_not_after_unix = cert.validity().not_after.timestamp();
+        info!(
+            shield_id = %shield_id,
+            connector_id = %self.connector_id,
+            "verified shield mTLS identity on Control stream"
+        );
+        Ok(VerifiedShieldIdentity {
+            shield_id,
+            cert_not_after_unix,
+        })
+    }
+
+    /// Verify shield identity for unary RPCs that carry a claimed shield_id.
     fn verify_shield_identity(
         &self,
         request: &Request<impl Sized>,
@@ -170,14 +249,12 @@ impl ShieldServer {
         })?;
 
         let cert_not_after_unix = cert.validity().not_after.timestamp();
-
         info!(
             shield_id = %claimed_shield_id,
             spiffe_id = %spiffe_id,
             connector_id = %self.connector_id,
             "verified shield mTLS SPIFFE identity"
         );
-
         Ok(VerifiedShieldIdentity {
             shield_id: claimed_shield_id.to_string(),
             cert_not_after_unix,
@@ -204,7 +281,9 @@ fn unix_now() -> i64 {
 }
 
 #[tonic::async_trait]
-impl ShieldService for ShieldServer {
+impl ShieldService for ShieldRegistry {
+    type ControlStream = ReceiverStream<Result<ShieldControlMessage, Status>>;
+
     async fn enroll(
         &self,
         _request: Request<EnrollRequest>,
@@ -214,64 +293,108 @@ impl ShieldService for ShieldServer {
         ))
     }
 
-    async fn heartbeat(
+    async fn control(
         &self,
-        request: Request<HeartbeatRequest>,
-    ) -> Result<Response<HeartbeatResponse>, Status> {
-        let verified = self.verify_shield_identity(&request, &request.get_ref().shield_id)?;
-        let req = request.into_inner();
-        let now = unix_now();
+        request: Request<Streaming<ShieldControlMessage>>,
+    ) -> Result<Response<Self::ControlStream>, Status> {
+        let identity = self.extract_shield_identity(&request)?;
+        let mut in_stream = request.into_inner();
+
+        let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
+        let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(32);
 
         {
-            let mut shields = self
-                .shields
+            self.instruction_txs
                 .lock()
-                .map_err(|_| Status::internal("shield health map mutex poisoned"))?;
-            shields.insert(
-                verified.shield_id.clone(),
-                ShieldEntry {
-                    status: "active".to_string(),
-                    version: req.version.clone(),
-                    last_seen_unix: now,
-                    cert_not_after_unix: verified.cert_not_after_unix,
-                    lan_ip: req.lan_ip.clone(),
-                },
-            );
+                .expect("instruction_txs poisoned")
+                .insert(identity.shield_id.clone(), instr_tx);
         }
 
-        // Collect ResourceAcks from this shield into pending_acks for next connector heartbeat.
-        if !req.resource_acks.is_empty() {
-            let mut acks = self.pending_acks
+        let registry = self.clone();
+        let shield_id = identity.shield_id.clone();
+        let cert_not_after = identity.cert_not_after_unix;
+
+        tokio::spawn(async move {
+            info!(shield_id = %shield_id, "shield Control stream connected");
+
+            let buffered = registry
+                .resource_instructions
                 .lock()
-                .map_err(|_| Status::internal("pending acks mutex poisoned"))?;
-            acks.extend(req.resource_acks);
-        }
+                .expect("resource_instructions poisoned")
+                .remove(&shield_id)
+                .unwrap_or_default();
+            for instr in buffered {
+                use crate::shield_proto::shield_control_message::Body;
+                if out_tx
+                    .send(Ok(ShieldControlMessage {
+                        body: Some(Body::ResourceInstruction(instr)),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
 
-        // Retrieve and clear cached resource instructions for this shield.
-        // Clearing on delivery ensures each instruction is sent exactly once.
-        let resources = self.resource_instructions
-            .lock()
-            .map_err(|_| Status::internal("resource instructions mutex poisoned"))?
-            .remove(&verified.shield_id)
-            .unwrap_or_default();
+            loop {
+                tokio::select! {
+                    msg = in_stream.message() => {
+                        match msg {
+                            Ok(Some(m)) => {
+                                use crate::shield_proto::shield_control_message::Body;
+                                match m.body {
+                                    Some(Body::HealthReport(hr)) => {
+                                        registry.health
+                                            .lock()
+                                            .expect("health map poisoned")
+                                            .insert(shield_id.clone(), ShieldEntry {
+                                                status: "active".to_string(),
+                                                version: hr.version,
+                                                last_seen_unix: unix_now(),
+                                                lan_ip: hr.lan_ip,
+                                            });
+                                        if registry.cert_needs_renewal(cert_not_after) {
+                                            let _ = out_tx
+                                                .send(Ok(ShieldControlMessage {
+                                                    body: Some(Body::ReEnroll(ReEnrollSignal {})),
+                                                }))
+                                                .await;
+                                        }
+                                    }
+                                    Some(Body::ResourceAck(ack)) => {
+                                        let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
+                                    }
+                                    Some(Body::Pong(_)) => {}
+                                    _ => {}
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                warn!(shield_id = %shield_id, error = %e, "shield Control stream error");
+                                break;
+                            }
+                        }
+                    }
+                    Some(instr) = instr_rx.recv() => {
+                        use crate::shield_proto::shield_control_message::Body;
+                        let msg = ShieldControlMessage {
+                            body: Some(Body::ResourceInstruction(instr)),
+                        };
+                        if out_tx.send(Ok(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            registry
+                .instruction_txs
+                .lock()
+                .expect("instruction_txs poisoned")
+                .remove(&shield_id);
+            info!(shield_id = %shield_id, "shield Control stream disconnected");
+        });
 
-        info!(
-            shield_id = %verified.shield_id,
-            version = %req.version,
-            hostname = %req.hostname,
-            public_ip = %req.public_ip,
-            lan_ip = %req.lan_ip,
-            pending_instructions = resources.len(),
-            cert_not_after_unix = verified.cert_not_after_unix,
-            "shield heartbeat received"
-        );
-
-        Ok(Response::new(HeartbeatResponse {
-            ok: true,
-            latest_version: String::new(),
-            re_enroll: self.cert_needs_renewal(verified.cert_not_after_unix),
-            resources,
-        }))
+        Ok(Response::new(ReceiverStream::new(out_rx)))
     }
 
     async fn renew_cert(
@@ -284,13 +407,10 @@ impl ShieldService for ShieldServer {
         info!(shield_id = %verified.shield_id, "proxying shield cert renewal to controller");
 
         let mut client = ShieldServiceClient::new(self.controller_channel.clone());
-        client
-            .renew_cert(Request::new(req))
-            .await
-            .map_err(|err| {
-                warn!(shield_id = %verified.shield_id, error = %err, "shield cert renewal proxy failed");
-                Status::unavailable("failed to proxy shield cert renewal to controller")
-            })
+        client.renew_cert(Request::new(req)).await.map_err(|err| {
+            warn!(shield_id = %verified.shield_id, error = %err, "shield cert renewal proxy failed");
+            Status::unavailable("failed to proxy shield cert renewal to controller")
+        })
     }
 
     async fn goodbye(
@@ -301,9 +421,9 @@ impl ShieldService for ShieldServer {
         let req = request.into_inner();
 
         let removed = self
-            .shields
+            .health
             .lock()
-            .map_err(|_| Status::internal("shield health map mutex poisoned"))?
+            .map_err(|_| Status::internal("health map mutex poisoned"))?
             .remove(&verified.shield_id)
             .is_some();
 

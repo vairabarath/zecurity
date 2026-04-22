@@ -100,17 +100,19 @@ func main() {
 	}
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
+	connectorRegistry := connector.NewConnectorRegistry()
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
-				TenantDB:     tenantDB,
-				AuthService:  authSvc,
-				ConnectorCfg: connectorCfg,
-				Redis:        valkeycompat.NewAdapter(connectorValkey),
-				Pool:         db.Pool,
-				ShieldSvc:    shieldSvc,
-				ResourceCfg:  resource.NewConfig(db.Pool),
+				TenantDB:          tenantDB,
+				AuthService:       authSvc,
+				ConnectorCfg:      connectorCfg,
+				ConnectorRegistry: connectorRegistry,
+				Redis:             valkeycompat.NewAdapter(connectorValkey),
+				Pool:              db.Pool,
+				ShieldSvc:         shieldSvc,
+				ResourceCfg:       resource.NewConfig(db.Pool),
 			},
 		}),
 	)
@@ -163,6 +165,7 @@ func main() {
 	}
 
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
+
 	grpcServer := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
 			Certificates: []tls.Certificate{controllerCert},
@@ -170,6 +173,7 @@ func main() {
 			MinVersion:   tls.VersionTLS13,
 		})),
 		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore)),
+		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore)),
 	)
 
 	connectorSvc := &connector.EnrollmentHandler{
@@ -177,7 +181,8 @@ func main() {
 		Pool:       db.Pool,
 		Redis:      valkeycompat.NewAdapter(connectorValkey),
 		PKIService: pkiService,
-		ShieldSvc: shieldSvc,
+		ShieldSvc:  shieldSvc,
+		Registry:   connectorRegistry,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
