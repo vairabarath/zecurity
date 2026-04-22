@@ -7,7 +7,7 @@ use nftables::{
     batch::Batch,
     expr::{Expression, Meta, MetaKey, NamedExpression, Payload, PayloadField, Range},
     helper,
-    schema::{Chain, NfListObject, NfObject, Rule},
+    schema::{Chain, NfListObject, NfObject, Rule, Table},
     stmt::{Accept, Drop, Match, Operator, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
@@ -94,6 +94,13 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
     }
 
     let mut batch = Batch::new();
+    // Ensure the parent table exists. `add table` is idempotent — no-op if
+    // network::setup() already created it, but recovers if setup() failed.
+    batch.add(NfListObject::Table(Table {
+        family: NfFamily::INet,
+        name: TABLE.into(),
+        ..Table::default()
+    }));
     batch.add(NfListObject::Chain(Chain {
         family: NfFamily::INet,
         table: TABLE.into(),

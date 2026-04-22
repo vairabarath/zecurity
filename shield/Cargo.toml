@@ -1,6 +1,6 @@
 [package]
 name        = "zecurity-shield"
-version     = "1.0.7"
+version     = "1.0.8"
 edition     = "2021"
 description = "ZECURITY shield — enrollment, heartbeat, network setup, and auto-update agent"
 
