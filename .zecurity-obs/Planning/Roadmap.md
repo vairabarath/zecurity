@@ -10,9 +10,9 @@ tags:
 
 ---
 
-## Current State (2026-04-21)
+## Current State (2026-04-24)
 
-Four sprints complete. Shield agent is fully deployed — SPIFFE identity, zecurity0 interface, nftables base table, heartbeat via Connector. Sprint 5 is now active — resource protection: Admin defines resources, Shield applies nftables to make services invisible on LAN but accessible via zecurity0.
+Five sprints complete. Sprint 5 resource protection is done — Admin defines resources, Shield applies nftables rules, lifecycle tracked through `pending → managing → protecting → protected`. Sprint 6 is now active — discovery: Shield scans its own host for listening services and reports via Control stream; Connector executes admin-triggered TCP network scans.
 
 ---
 
@@ -56,24 +56,40 @@ Four sprints complete. Shield agent is fully deployed — SPIFFE identity, zecur
 
 ---
 
-### 🚧 Sprint 5 — Resource Protection (In Progress)
+### ✅ Sprint 5 — Resource Protection (Complete)
 
-**Goal:** Admin defines a resource (IP + port) on a Shield host → Shield applies nftables rules to make the service invisible on LAN but accessible via `zecurity0` → status tracked through `pending → managing → protecting → protected` lifecycle via heartbeat piggyback.
-
-**Team split:**
-- **M1 (Frontend):** Resources page, CreateResourceModal, Protect/Unprotect buttons
-- **M2 (Go — Proto + DB + Schema):** ResourceInstruction/Ack proto messages, migration 007, `graph/resource.graphqls`
-- **M3 (Go — Controller + Connector relay):** resource package, resolvers, heartbeat injection + ack processing, connector relay
-- **M4 (Rust — Shield):** `resources.rs`, nftables `chain resource_protect`, 30s port health check loop, heartbeat ack
+**Goal:** Admin defines a resource (IP + port) on a Shield host → Shield applies nftables rules to make the service invisible on LAN but accessible via `zecurity0` → status tracked through `pending → managing → protecting → protected` lifecycle via Control stream piggyback.
 
 **Key decisions locked:**
 - Shield auto-matched by `lan_ip == resource.host` — admin never picks shield manually
 - Shield validates host IP before applying nftables (defense in depth)
 - Resource check interval: 30s (separate from 60s heartbeat)
-- nftables chain flushed + rebuilt atomically on every change
-- No new RPCs — instructions ride on existing HeartbeatResponse (heartbeat piggyback)
+- nftables `chain resource_protect` flushed + rebuilt atomically on every change
+- No new RPCs — instructions ride on existing Control stream
 
-**Tracking:** [[Sprint5/path.md]] — full dependency map with checkboxes
+**Tracking:** [[Sprint5/path.md]] — all phases complete
+
+---
+
+### 🚧 Sprint 6 — Discovery (Active)
+
+**Goal:** Two discovery features: **(1) Shield Discovery** — Shield scans its own host's listening TCP ports via `/proc/net/tcp`, sends differential `DiscoveryReport` messages up the Control stream → Connector relays to Controller → Admin sees discovered services per Shield host and can promote any to a resource in one click. **(2) Connector Network Discovery** — Admin defines a scan scope (CIDR/IP list + ports) → Controller sends `ScanCommand` to Connector → Connector TCP-pings targets → Admin sees live services and can create resources from results.
+
+**Team split:**
+- **M1 (Frontend):** Discovered services tab on Shields page, Scan modal on Remote Networks page
+- **M2 (Go — Proto + DB + Schema):** `DiscoveryReport` / `ScanCommand` / `ScanReport` proto messages, migration 008, `graph/discovery.graphqls`
+- **M3 (Go+Rust — Controller + Connector):** discovery store + resolvers, control stream handlers, connector `discovery/` scan module
+- **M4 (Rust — Shield):** `shield/src/discovery.rs`, `/proc/net/tcp` parser, Control stream wiring
+
+**Key decisions locked:**
+- Discovery rides existing Control streams — no new RPCs
+- `ShieldControlMessage` field 7 = `DiscoveryReport`; `ConnectorControlMessage` fields 8/9/10 = `ShieldDiscoveryBatch` / `ScanReport` / `ScanCommand`
+- Shield scans only its own host (reads `/proc/net/tcp`) — no network scanning from Shield side
+- Connector scanner: max 512 targets, 16 ports, 32 concurrent probes, 5s per-target timeout
+- Scan results TTL: 24h (purged by background goroutine in controller)
+- M4 can start `discovery.rs` scaffold immediately on Day 1 — no proto dependency for the core logic
+
+**Tracking:** [[Sprint6/path.md]] — full dependency map with checkboxes
 
 ---
 
@@ -100,9 +116,7 @@ CONNECTOR_HEARTBEAT_INTERVAL=5s
 
 ---
 
----
-
-## Sprint 6 — Connector Fallback (Planned)
+## Sprint 6 — Connector Fallback (Deferred)
 
 After resource protection is stable:
 - Shield can failover to a secondary Connector if primary goes offline
@@ -115,10 +129,10 @@ After resource protection is stable:
 
 | Sprint | Feature |
 |--------|---------|
-| Sprint 6 | Client enrollment (end-user device cert + SPIFFE identity) |
-| Sprint 7 | Access policies (workspace ACLs: who can reach what resource) |
-| Sprint 8 | Policy enforcement at Shield (nftables rules from ACL) |
-| Sprint 9 | Traffic proxying (WireGuard or tun, full packet path) |
+| Sprint 7 | Client enrollment (end-user device cert + SPIFFE identity) |
+| Sprint 8 | Access policies (workspace ACLs: who can reach what resource) |
+| Sprint 9 | Policy enforcement at Shield (nftables rules from ACL) |
+| Sprint 10 | Traffic proxying (WireGuard or tun, full packet path) |
 
 ---
 
@@ -132,3 +146,4 @@ After resource protection is stable:
 | Renewal failure alerting | Agent retries on next heartbeat |
 | Admin notification on renewal | No UI change needed, fully automatic |
 | WireGuard integration | Sprint 9 — after ACL enforcement is solid |
+| Shield connector failover | After discovery is stable |

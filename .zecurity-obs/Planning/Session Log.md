@@ -651,3 +651,34 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Install/restart the v1.1.0 connector and shield binaries with root privileges
 - Run live protect/unprotect latency tests and then tag `connector-v1.1.0` / `shield-v1.1.0` when verified
+
+---
+
+## 2026-04-24 — Claude Code (Sprint 6 Planning)
+
+**What was done:**
+- Created full Sprint 6 execution plan at `.zecurity-obs/Sprint6/` — Shield Discovery + Connector Network Discovery
+- `Sprint6/path.md` — master dependency map with Day 1 protocol, all phases, conflict zones, integration checklist, dependency graph
+- `Sprint6/team-workflow.md` — member starter prompts + workflow guide
+- `Sprint6/Member2-Go-Proto-DB/Phase1-Proto-Schema.md` — proto changes (DiscoveredService, DiscoveryReport in shield.proto; ShieldDiscoveryBatch, ScanCommand, ScanReport in connector.proto), migration 008, discovery.graphqls
+- `Sprint6/Member2-Go-Proto-DB/Phase2-Discovery-Store.md` — controller/internal/discovery/ package (UpsertDiscoveredServices, ReplaceDiscoveredServices, GetDiscoveredServices, UpsertScanResults, GetScanResults, PurgeScanResults)
+- `Sprint6/Member3-Go-Connector/Phase1-Discovery-Resolvers.md` — GetDiscoveredServices, PromoteDiscoveredService, TriggerScan, GetScanResults resolvers
+- `Sprint6/Member3-Go-Connector/Phase2-Controller-Control-Handler.md` — ShieldDiscoveryBatch + ScanReport handlers in control.go + purge goroutine
+- `Sprint6/Member3-Go-Connector/Phase3-Connector-Discovery.md` — connector/src/discovery/ module (scan.rs, tcp_ping.rs, scope.rs, service_detect.rs) + agent_server relay + control_plane scan dispatch
+- `Sprint6/Member4-Rust-Shield/Phase1-Discovery-Module.md` — shield/src/discovery.rs (/proc/net/tcp parser, fingerprint, diff/full-sync logic)
+- `Sprint6/Member4-Rust-Shield/Phase2-Control-Stream-Wiring.md` — heartbeat.rs wiring, full sync on connect, diffs every 60s
+- `Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md` — discovered services panel on Shields page + PromoteServiceModal
+- `Sprint6/Member1-Frontend/Phase2-Scan-UI.md` — ScanModal with CIDR input, 3s result polling, Create Resource per row
+- Updated `agent.md`, `AGENTS.md`, `CLAUDE.md` — all sprint references updated to Sprint 6
+- Updated `Home.md` — Sprint 6 Active navigation block added (Sprint 4 links preserved)
+- Updated `Planning/Roadmap.md` — Sprint 5 marked complete, Sprint 6 Active section added with full key decisions
+
+**Key decisions:**
+- Discovery rides existing Control streams — no new RPCs (DiscoveryReport on ShieldControlMessage field 7; ShieldDiscoveryBatch/ScanReport/ScanCommand on ConnectorControlMessage fields 8/9/10)
+- Shield scans only its own host via /proc/net/tcp; Connector handles network-wide TCP scanning
+- M4 can start discovery.rs scaffold on Day 1 with no proto dependency
+
+**What's next:**
+- M2 commits Day 1 proto + migration 008 + discovery.graphqls to unblock the team
+- M4 can start shield/src/discovery.rs immediately (no proto needed for core logic)
+- M1 can start page layout immediately (no codegen needed for structure)
