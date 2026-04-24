@@ -7,12 +7,14 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  Waypoints,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
 const items = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/topology', label: 'Topology', icon: Waypoints },
   { to: '/remote-networks', label: 'Remote Networks', icon: Network },
   { to: '/connectors', label: 'Connectors', icon: Plug },
   { to: '/shields', label: 'Shields', icon: Shield },

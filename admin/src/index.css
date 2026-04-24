@@ -386,6 +386,470 @@
   }
 }
 
+/* ── Topology page ───────────────────────────────────── */
+@layer components {
+  /* SVG node transition: smooth drill-in/out morph */
+  .topo-node {
+    transition: transform 0.55s cubic-bezier(0.65, 0.02, 0.25, 1), opacity 0.25s;
+  }
+
+  /* Dotted-grid full-bleed stage */
+  .topo-stage {
+    background:
+      radial-gradient(circle at 50% 40%, oklch(0.22 0.022 255) 0%, oklch(0.15 0.018 255) 60%, oklch(0.12 0.015 255) 100%);
+  }
+  .topo-stage::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle, oklch(0.35 0.014 255) 1px, transparent 1.6px);
+    background-size: 22px 22px;
+    opacity: 0.65;
+    pointer-events: none;
+    mask-image: radial-gradient(ellipse at 50% 50%, black 55%, transparent 95%);
+    -webkit-mask-image: radial-gradient(ellipse at 50% 50%, black 55%, transparent 95%);
+  }
+
+  /* HUD top bar */
+  .topo-hud-top {
+    position: absolute;
+    top: 20px; left: 22px; right: 22px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    z-index: 10;
+    pointer-events: none;
+  }
+  .topo-hud-top > * { pointer-events: auto; }
+
+  /* Brand pill */
+  .topo-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 13px 8px 9px;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    flex: none;
+  }
+  .topo-brand-mark {
+    width: 28px; height: 28px; border-radius: 8px;
+    display: grid; place-items: center;
+    background: linear-gradient(135deg, oklch(0.86 0.095 175) 0%, oklch(0.70 0.10 175) 100%);
+    color: oklch(0.18 0.02 200);
+    box-shadow: 0 4px 14px oklch(0.86 0.095 175 / 0.22);
+    flex: none;
+  }
+  .topo-brand-mark svg { width: 14px; height: 14px; }
+  .topo-brand-txt { line-height: 1.1; }
+  .topo-brand-name { font-weight: 700; font-size: 13px; letter-spacing: -0.01em; color: oklch(0.97 0.005 250); }
+  .topo-brand-sub  { font-size: 10px; color: oklch(0.62 0.012 250); margin-top: 2px; letter-spacing: 0.02em; }
+
+  /* Breadcrumbs */
+  .topo-crumbs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 4px;
+    background: oklch(0.18 0.015 255 / 0.75);
+    border: 1px solid oklch(0.30 0.02 255 / 0.7);
+    border-radius: 13px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    flex: none;
+  }
+  .topo-crumb {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: inherit;
+    background: transparent;
+    border: none;
+    color: oklch(0.82 0.010 250);
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    padding: 5px 10px;
+    border-radius: 9px;
+    cursor: pointer;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s;
+  }
+  .topo-crumb:hover { background: oklch(0.25 0.02 255 / 0.55); color: oklch(0.97 0.005 250); }
+  .topo-crumb.active {
+    background: oklch(0.24 0.02 255 / 0.85);
+    color: oklch(0.97 0.005 250);
+    box-shadow: inset 0 0 0 1px oklch(0.42 0.03 255 / 0.8);
+  }
+  .topo-crumb-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    box-shadow: 0 0 0 2px oklch(0.18 0.015 255 / 0.6);
+    flex: 0 0 auto;
+  }
+  .topo-crumb-sep {
+    color: oklch(0.62 0.012 250);
+    font-size: 12px; font-weight: 600;
+    padding: 0 1px;
+    user-select: none;
+  }
+
+  /* Titlebar */
+  .topo-titlebar {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 16px;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    flex: none;
+  }
+  .topo-kicker {
+    font-size: 9.5px;
+    font-weight: 700;
+    color: oklch(0.86 0.095 175);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  .topo-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: oklch(0.97 0.005 250);
+  }
+
+  /* Search */
+  .topo-search-wrap {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    flex: none;
+    min-width: 0;
+    width: 180px;
+  }
+  .topo-search-icon {
+    width: 13px; height: 13px;
+    color: oklch(0.62 0.012 250);
+    flex: none;
+  }
+  .topo-search {
+    background: transparent;
+    border: none;
+    outline: none;
+    color: oklch(0.97 0.005 250);
+    font-size: 12px;
+    font-weight: 500;
+    width: 100%;
+    min-width: 0;
+  }
+  .topo-search::placeholder { color: oklch(0.50 0.010 250); }
+
+  /* Stat strip */
+  .topo-stat-strip {
+    display: flex;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    overflow: hidden;
+    flex: none;
+  }
+  .topo-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 14px;
+    border-right: 1px solid oklch(0.33 0.016 255);
+  }
+  .topo-stat:last-child { border-right: none; }
+  .topo-k {
+    font-size: 9px;
+    color: oklch(0.62 0.012 250);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+  }
+  .topo-v {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 14px;
+    font-weight: 600;
+    color: oklch(0.97 0.005 250);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .topo-dot-s {
+    width: 6px; height: 6px; border-radius: 999px;
+    display: inline-block;
+  }
+
+  /* Filter chips */
+  .topo-filter-chips {
+    display: flex;
+    gap: 3px;
+    padding: 4px;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    flex: none;
+  }
+  .topo-chip {
+    font-family: inherit;
+    background: transparent;
+    border: none;
+    color: oklch(0.62 0.012 250);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 11px;
+    border-radius: 8px;
+    cursor: pointer;
+    letter-spacing: 0.01em;
+    transition: background 0.12s, color 0.12s;
+  }
+  .topo-chip:hover { color: oklch(0.97 0.005 250); }
+  .topo-chip.active { background: oklch(0.86 0.095 175); color: oklch(0.20 0.02 200); }
+
+  /* Pan/zoom */
+  .topo-pz-wrap {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+  }
+  .topo-pz-wrap:active { cursor: grabbing; }
+  .topo-pz-controls {
+    position: absolute;
+    right: 22px;
+    bottom: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    background: oklch(0.23 0.018 255 / 0.92);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    padding: 5px;
+    z-index: 6;
+    box-shadow: 0 10px 30px oklch(0 0 0 / 0.35);
+  }
+  .topo-pz-btn {
+    width: 32px; height: 32px; border-radius: 8px;
+    background: transparent;
+    border: none;
+    color: oklch(0.82 0.010 250);
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    font-family: inherit;
+    transition: background 0.12s, color 0.12s;
+  }
+  .topo-pz-btn:hover { background: oklch(0.32 0.018 255); color: oklch(0.97 0.005 250); }
+  .topo-pz-zoom {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10px;
+    font-weight: 600;
+    color: oklch(0.62 0.012 250);
+    text-align: center;
+    padding: 4px 0 2px;
+    border-top: 1px solid oklch(0.33 0.016 255);
+    margin-top: 2px;
+  }
+  .topo-pz-hint {
+    position: absolute;
+    left: 22px;
+    bottom: 26px;
+    font-size: 10px;
+    font-weight: 600;
+    color: oklch(0.62 0.012 250);
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    padding: 5px 11px;
+    border-radius: 8px;
+    pointer-events: none;
+    letter-spacing: 0.04em;
+    z-index: 5;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    text-transform: lowercase;
+  }
+
+  /* Legend */
+  .topo-legend {
+    position: absolute;
+    right: 22px;
+    top: 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    background: oklch(0.23 0.018 255 / 0.88);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 12px;
+    z-index: 5;
+  }
+  .topo-legend-head {
+    font-size: 9px;
+    font-weight: 700;
+    color: oklch(0.62 0.012 250);
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    margin-bottom: 2px;
+  }
+  .topo-legend-k {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    color: oklch(0.82 0.010 250);
+    font-weight: 500;
+  }
+  .topo-legend-sw {
+    width: 8px; height: 8px; border-radius: 999px;
+    box-shadow: 0 0 0 3px currentColor;
+    display: inline-block;
+    color: transparent;
+  }
+
+  /* Inspector */
+  .topo-inspector {
+    position: absolute;
+    right: 22px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 300px;
+    max-height: calc(100% - 180px);
+    background: oklch(0.23 0.018 255 / 0.94);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid oklch(0.42 0.016 255);
+    border-radius: 16px;
+    box-shadow: 0 30px 80px oklch(0 0 0 / 0.45);
+    z-index: 8;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    animation: topo-ins-in 0.18s ease-out;
+  }
+  @keyframes topo-ins-in {
+    from { opacity: 0; transform: translateY(-48%); }
+    to   { opacity: 1; transform: translateY(-50%); }
+  }
+  .topo-inspector-empty { width: 240px; }
+  .topo-inspector-empty .topo-ins-body { align-items: center; text-align: center; }
+  .topo-inspector-empty .topo-ins-title { font-family: inherit; font-size: 14px; }
+
+  .topo-ins-strip { height: 3px; opacity: 0.9; }
+  .topo-ins-body  { padding: 15px 17px 17px; display: flex; flex-direction: column; gap: 11px; overflow: auto; }
+  .topo-ins-head  { display: flex; align-items: center; justify-content: space-between; }
+  .topo-ins-kind  {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.14em;
+  }
+  .topo-ins-dot   { width: 6px; height: 6px; border-radius: 999px; box-shadow: 0 0 0 3px currentColor; color: transparent; }
+  .topo-ins-icon  {
+    width: 40px; height: 40px; border-radius: 11px;
+    background: oklch(0.27 0.018 255); border: 1px solid oklch(0.33 0.016 255);
+    color: oklch(0.86 0.095 175);
+    display: grid; place-items: center; margin-bottom: 2px;
+  }
+  .topo-ins-icon svg { width: 18px; height: 18px; }
+  .topo-ins-close {
+    width: 26px; height: 26px; border-radius: 7px;
+    background: oklch(0.27 0.018 255); border: 1px solid oklch(0.33 0.016 255);
+    color: oklch(0.62 0.012 250); cursor: pointer;
+    display: grid; place-items: center; font-family: inherit;
+    transition: background 0.12s, color 0.12s;
+  }
+  .topo-ins-close:hover { color: oklch(0.97 0.005 250); background: oklch(0.32 0.018 255); }
+
+  .topo-ins-title {
+    font-size: 18px; font-weight: 700; letter-spacing: -0.02em;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    word-break: break-all; line-height: 1.2;
+    color: oklch(0.97 0.005 250);
+  }
+  .topo-ins-sub {
+    font-size: 11.5px; color: oklch(0.62 0.012 250);
+    line-height: 1.5; max-width: 200px;
+  }
+  .topo-ins-sub b { color: oklch(0.82 0.010 250); font-weight: 600; }
+
+  .topo-ins-status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 10.5px; font-weight: 700;
+    padding: 3px 9px; border-radius: 999px; align-self: flex-start;
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .topo-ins-status-dot { width: 6px; height: 6px; border-radius: 999px; }
+  .topo-ins-status-ok   { background: oklch(0.82 0.12 160 / 0.16); color: oklch(0.82 0.12 160); }
+  .topo-ins-status-ok   .topo-ins-status-dot { background: oklch(0.82 0.12 160); box-shadow: 0 0 8px oklch(0.82 0.12 160); }
+  .topo-ins-status-warn { background: oklch(0.85 0.13 80 / 0.16); color: oklch(0.85 0.13 80); }
+  .topo-ins-status-warn .topo-ins-status-dot { background: oklch(0.85 0.13 80); box-shadow: 0 0 8px oklch(0.85 0.13 80); }
+  .topo-ins-status-err  { background: oklch(0.72 0.17 25 / 0.16); color: oklch(0.72 0.17 25); }
+  .topo-ins-status-err  .topo-ins-status-dot { background: oklch(0.72 0.17 25); box-shadow: 0 0 8px oklch(0.72 0.17 25); }
+  .topo-ins-status-pend { background: oklch(0.27 0.018 255); color: oklch(0.62 0.012 250); }
+  .topo-ins-status-pend .topo-ins-status-dot { background: oklch(0.62 0.012 250); }
+
+  .topo-ins-meta {
+    display: flex; flex-direction: column;
+    background: oklch(0.18 0.016 255 / 0.6);
+    border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 10px; overflow: hidden;
+  }
+  .topo-ins-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 10px; padding: 8px 11px;
+    border-bottom: 1px solid oklch(0.33 0.016 255);
+    font-size: 12px;
+  }
+  .topo-ins-row:last-child { border-bottom: none; }
+  .topo-ins-k {
+    color: oklch(0.62 0.012 250);
+    text-transform: uppercase; letter-spacing: 0.10em;
+    font-size: 9.5px; font-weight: 700;
+  }
+  .topo-ins-v {
+    color: oklch(0.97 0.005 250); font-weight: 600;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px;
+  }
+
+  .topo-ins-hint {
+    font-size: 10px; color: oklch(0.62 0.012 250); font-weight: 500;
+    text-align: center; padding: 5px 0 0;
+    border-top: 1px dashed oklch(0.33 0.016 255); letter-spacing: 0.02em;
+  }
+  .topo-ins-kbd {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    background: oklch(0.27 0.018 255); border: 1px solid oklch(0.33 0.016 255);
+    padding: 1px 5px; border-radius: 4px;
+    font-size: 9.5px; color: oklch(0.82 0.010 250); margin: 0 2px;
+  }
+}
+
 @media (max-width: 980px) {
   @layer components {
     .admin-shell {

@@ -38,8 +38,11 @@ function TopologyCard({
         <StatusPill label="Live" tone="ok" />
       </div>
 
-      <div className="relative h-[280px] rounded-[18px] border border-border bg-[linear-gradient(180deg,oklch(0.20_0.018_255/0.9),oklch(0.17_0.018_255/0.96))]">
-        <div className="absolute inset-0 opacity-50" style={{ backgroundImage: 'radial-gradient(circle at center, oklch(0.86 0.095 175 / 0.12) 0, transparent 55%)' }} />
+      <Link
+        to="/topology"
+        className="group relative block h-[280px] rounded-[18px] border border-border bg-[linear-gradient(180deg,oklch(0.20_0.018_255/0.9),oklch(0.17_0.018_255/0.96))] transition-all duration-200 hover:border-primary/50 hover:shadow-[0_0_28px_oklch(0.86_0.095_175/0.12)]"
+      >
+        <div className="absolute inset-0 rounded-[18px] opacity-50" style={{ backgroundImage: 'radial-gradient(circle at center, oklch(0.86 0.095 175 / 0.12) 0, transparent 55%)' }} />
         <svg viewBox="0 0 760 300" className="h-full w-full">
           <defs>
             <radialGradient id="mintGlow" cx="50%" cy="50%" r="50%">
@@ -65,12 +68,21 @@ function TopologyCard({
           <text x="642" y="106" fill="oklch(0.80 0.010 250)" fontSize="11" fontWeight="700">shield</text>
         </svg>
 
+        {/* Hover overlay — click to open full topology */}
+        <div className="absolute inset-0 flex items-center justify-center rounded-[18px] opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+          style={{ background: 'oklch(0.15 0.018 255 / 0.55)', backdropFilter: 'blur(3px)' }}>
+          <div className="flex items-center gap-2 rounded-xl border border-primary/30 bg-primary/10 px-5 py-2.5 text-sm font-semibold text-primary shadow-[0_0_20px_oklch(0.86_0.095_175/0.15)]">
+            Open Full Topology
+            <ArrowRight className="h-4 w-4" />
+          </div>
+        </div>
+
         <div className="absolute bottom-4 left-4 flex flex-wrap gap-2">
           <span className="metric-chip"><strong>{networks}</strong> networks</span>
           <span className="metric-chip"><strong>{connectors}</strong> connectors</span>
           <span className="metric-chip"><strong>{shields}</strong> shields</span>
         </div>
-      </div>
+      </Link>
     </div>
   )
 }
