@@ -131,7 +131,7 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         };
         for proto in protos {
             let port_expr = port_expression(res.port_from, res.port_to);
-            // Allow loopback and zecurity0 (ZTNA tunnel); drop everything else.
+            // Allow loopback and zecurity0 (ZTNA tunnel); drop everything else for this port.
             batch.add(NfListObject::Rule(iif_accept_rule(
                 proto,
                 port_expr.clone(),

@@ -165,6 +165,7 @@ async fn run_once(
             }
 
             _ = health_ticker.tick() => {
+                info!("health tick — sending ConnectorHealthReport");
                 // Drain any pending acks into a batch alongside the health tick.
                 let mut acks = Vec::new();
                 while let Ok((_, ack)) = ack_rx.try_recv() {

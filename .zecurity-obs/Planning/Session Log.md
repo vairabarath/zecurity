@@ -12,6 +12,26 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-23 — Codex (GPT-5) — Admin Design Handoff Implementation
+
+**What was done:**
+- Re-themed the admin app to the dark mint handoff design system by replacing the shared CSS tokens, shell layout, navigation, and header treatment in `admin/src/index.css` and the layout components
+- Rebuilt the auth and signup flow screens around reusable handoff-style auth primitives so `/login`, `/signup`, `/signup/workspace`, and `/signup/auth` now match the exported design language
+- Restyled the main admin surfaces (`Dashboard`, `RemoteNetworks`, `Connectors`, `Shields`, `AllConnectors`, `AllShields`, `Resources`) while preserving existing GraphQL data flows, install actions, and resource management behavior
+- Added `admin/src/lib/console.tsx` and `admin/src/components/auth/AuthLayout.tsx` to centralize status pills, relative-time formatting, empty states, and auth layout primitives
+- Ran `cd admin && npm run build` successfully after fixing TypeScript issues introduced during the redesign
+
+**Key decisions:**
+- Kept the implementation inside the existing route/data architecture instead of porting the prototype files literally, so the result remains compatible with the current GraphQL hooks and route structure
+- Avoided editing already-dirty user-touched files (`InstallCommandModal.tsx`, `ConnectorDetail.tsx`, `ShieldDetail.tsx`) to prevent overwriting unrelated in-progress work
+- Applied the handoff primarily to the shared shell plus the main dashboard/list/auth surfaces first, since those are the screens directly represented by the exported prototype bundle
+
+**What's next:**
+- Extend the same design language into `RemoteNetworkDetail.tsx`, `ConnectorDetail.tsx`, and `ShieldDetail.tsx` once the existing in-progress local edits on those pages are settled
+- Consider route-level code splitting in the admin app if the current Vite chunk-size warning needs to be addressed
+
+---
+
 ## 2026-04-22 — Claude Code (Sonnet 4.6) — M1 Sprint 5 (Hard Delete Fix)
 
 **Member:** M1 (Frontend)

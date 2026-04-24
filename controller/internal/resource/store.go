@@ -58,7 +58,7 @@ const resourceSelectCols = `
 	r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
 	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
 	r.shield_id, r.remote_network_id,
-	s.name, s.status, COALESCE(s.connector_id, ''),
+	s.name, s.status, COALESCE(s.connector_id::text, ''),
 	rn.name`
 
 const resourceJoins = `

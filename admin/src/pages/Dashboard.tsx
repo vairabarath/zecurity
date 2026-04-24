@@ -1,351 +1,296 @@
-import { Link } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
-import { motion } from 'framer-motion'
+import { Link } from 'react-router-dom'
 import {
-  MeDocument,
-  GetWorkspaceDocument,
-  GetRemoteNetworksDocument,
-  WorkspaceStatus,
-  ConnectorStatus,
-  RemoteNetworkStatus,
-  type MeQuery,
-  type GetWorkspaceQuery,
-  type GetRemoteNetworksQuery,
-} from '@/generated/graphql'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import {
+  Clock3,
   Globe,
   Network,
-  Clock,
   Plug,
+  Shield,
   ArrowRight,
-  Inbox,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import {
+  ConnectorStatus,
+  GetRemoteNetworksDocument,
+  GetWorkspaceDocument,
+  MeDocument,
+  RemoteNetworkStatus,
+  type GetRemoteNetworksQuery,
+} from '@/generated/graphql'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
-const statusVariant: Record<WorkspaceStatus, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  [WorkspaceStatus.Active]: 'default',
-  [WorkspaceStatus.Provisioning]: 'secondary',
-  [WorkspaceStatus.Suspended]: 'destructive',
-  [WorkspaceStatus.Deleted]: 'outline',
-}
-
-interface StatCardProps {
-  title: string
-  value: string | number
-  loading?: boolean
-  delay?: number
-}
-
-function StatCard({ title, value, loading, delay = 0 }: StatCardProps) {
+function TopologyCard({
+  networks,
+  connectors,
+  shields,
+}: {
+  networks: number
+  connectors: number
+  shields: number
+}) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 16 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ delay, duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-      className="group relative rounded-xl border border-border bg-white p-5 hover:border-primary/30 hover:shadow-md transition-all duration-300"
-    >
-      <div className="mb-3 text-xs font-medium text-muted-foreground">{title}</div>
-      {loading ? (
-        <Skeleton className="h-9 w-16" />
-      ) : (
-        <div className="text-3xl font-semibold text-foreground">{value}</div>
-      )}
-    </motion.div>
+    <div className="surface-card relative overflow-hidden p-6">
+      <div className="mb-4 flex items-center justify-between">
+        <div>
+          <div className="text-sm font-semibold">Topology Overview</div>
+          <div className="mt-1 text-xs text-muted-foreground">Networks, connectors, and shields in one plane.</div>
+        </div>
+        <StatusPill label="Live" tone="ok" />
+      </div>
+
+      <div className="relative h-[280px] rounded-[18px] border border-border bg-[linear-gradient(180deg,oklch(0.20_0.018_255/0.9),oklch(0.17_0.018_255/0.96))]">
+        <div className="absolute inset-0 opacity-50" style={{ backgroundImage: 'radial-gradient(circle at center, oklch(0.86 0.095 175 / 0.12) 0, transparent 55%)' }} />
+        <svg viewBox="0 0 760 300" className="h-full w-full">
+          <defs>
+            <radialGradient id="mintGlow" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor="oklch(0.86 0.095 175)" stopOpacity="0.36" />
+              <stop offset="100%" stopColor="oklch(0.86 0.095 175)" stopOpacity="0" />
+            </radialGradient>
+          </defs>
+          <circle cx="220" cy="120" r="22" fill="url(#mintGlow)" />
+          <circle cx="220" cy="120" r="18" fill="oklch(0.86 0.095 175 / 0.14)" stroke="oklch(0.86 0.095 175)" />
+          <circle cx="390" cy="150" r="28" fill="oklch(0.86 0.095 175 / 0.14)" stroke="oklch(0.86 0.095 175)" />
+          <circle cx="540" cy="105" r="14" fill="oklch(0.78 0.10 235 / 0.18)" stroke="oklch(0.78 0.10 235)" />
+          <circle cx="560" cy="185" r="14" fill="oklch(0.78 0.10 235 / 0.18)" stroke="oklch(0.78 0.10 235)" />
+          <circle cx="660" cy="120" r="12" fill="oklch(0.83 0.11 55 / 0.18)" stroke="oklch(0.83 0.11 55)" />
+          <circle cx="670" cy="205" r="12" fill="oklch(0.83 0.11 55 / 0.18)" stroke="oklch(0.83 0.11 55)" />
+          <line x1="238" y1="120" x2="362" y2="150" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.5" />
+          <line x1="418" y1="144" x2="526" y2="109" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.5" />
+          <line x1="418" y1="158" x2="546" y2="181" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.5" />
+          <line x1="554" y1="113" x2="648" y2="122" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.5" />
+          <line x1="572" y1="191" x2="658" y2="202" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.5" />
+          <text x="198" y="153" fill="oklch(0.80 0.010 250)" fontSize="12" fontWeight="700">edge</text>
+          <text x="360" y="196" fill="oklch(0.97 0.005 250)" fontSize="12" fontWeight="700">workspace</text>
+          <text x="512" y="94" fill="oklch(0.80 0.010 250)" fontSize="11" fontWeight="700">connector</text>
+          <text x="642" y="106" fill="oklch(0.80 0.010 250)" fontSize="11" fontWeight="700">shield</text>
+        </svg>
+
+        <div className="absolute bottom-4 left-4 flex flex-wrap gap-2">
+          <span className="metric-chip"><strong>{networks}</strong> networks</span>
+          <span className="metric-chip"><strong>{connectors}</strong> connectors</span>
+          <span className="metric-chip"><strong>{shields}</strong> shields</span>
+        </div>
+      </div>
+    </div>
   )
 }
 
-function relativeTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return 'Never'
-  const now = Date.now()
-  const then = new Date(dateStr).getTime()
-  const diff = now - then
-  if (diff < 0) return 'just now'
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
-  const months = Math.floor(days / 30)
-  return `${months}mo ago`
-}
-
-const connectorStatusClass: Record<ConnectorStatus, string> = {
-  [ConnectorStatus.Pending]: 'text-gray-500 bg-gray-500/10 border-gray-500/20',
-  [ConnectorStatus.Active]: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
-  [ConnectorStatus.Disconnected]: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
-  [ConnectorStatus.Revoked]: 'text-red-600 bg-red-500/10 border-red-500/20',
+type RecentConnector = GetRemoteNetworksQuery['remoteNetworks'][number]['connectors'][number] & {
+  networkId: string
+  networkName: string
 }
 
 export default function Dashboard() {
-  const { data: meData, loading: meLoading } = useQuery<MeQuery>(MeDocument)
-  const { data: wsData, loading: wsLoading } = useQuery<GetWorkspaceQuery>(GetWorkspaceDocument)
-  const { data: rnData, loading: rnLoading } = useQuery<GetRemoteNetworksQuery>(
-    GetRemoteNetworksDocument,
-    { fetchPolicy: 'cache-and-network', pollInterval: 30000 },
+  const { data: meData } = useQuery(MeDocument)
+  const { data: workspaceData, loading: workspaceLoading } = useQuery(GetWorkspaceDocument)
+  const { data: networksData, loading: networkLoading } = useQuery(GetRemoteNetworksDocument, {
+    fetchPolicy: 'cache-and-network',
+    pollInterval: 30000,
+  })
+
+  const networks = networksData?.remoteNetworks ?? []
+  const activeNetworks = networks.filter((network) => network.status === RemoteNetworkStatus.Active)
+  const connectors: RecentConnector[] = networks.flatMap((network) =>
+    network.connectors.map((connector) => ({
+      ...connector,
+      networkId: network.id,
+      networkName: network.name,
+    })),
   )
+  const activeConnectors = connectors.filter((connector) => connector.status === ConnectorStatus.Active)
+  const shields = networks.flatMap((network) => network.shields)
 
-  const networks = rnData?.remoteNetworks ?? []
-  const activeNetworks = networks.filter((n) => n.status === RemoteNetworkStatus.Active)
-
-  const allConnectors = networks.flatMap((n) =>
-    n.connectors.map((c) => ({ ...c, networkId: n.id, networkName: n.name })),
-  )
-  const activeConnectors = allConnectors.filter((c) => c.status === ConnectorStatus.Active)
-
-  // Most recently seen connectors first; fall back to created_at-style ordering by name
-  const recentConnectors = [...allConnectors]
+  const recentConnectors = [...connectors]
     .sort((a, b) => {
       const aTime = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0
       const bTime = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0
       return bTime - aTime
     })
-    .slice(0, 6)
+    .slice(0, 5)
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <motion.div
-        className="flex items-center justify-between"
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-      >
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-semibold text-foreground">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Monitor your zero trust network</p>
+          <h2 className="page-title">Workspace Pulse</h2>
+          <p className="page-subtitle">
+            {workspaceData?.workspace?.name ?? 'Your workspace'} is under active observation.
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-secure opacity-50 animate-ping" />
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-secure" />
-            </span>
-            Live
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="metric-chip">
+            <Globe className="h-3.5 w-3.5 text-primary" />
+            <strong>{meData?.me?.email ?? 'operator'}</strong>
+          </span>
+          <span className="metric-chip">
+            <Clock3 className="h-3.5 w-3.5 text-primary" />
+            <strong>30s</strong> polling
           </span>
         </div>
-      </motion.div>
-
-      {/* Stats — all derived from real GraphQL data */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <StatCard
-          title="Active Networks"
-          value={activeNetworks.length}
-          loading={rnLoading && !rnData}
-          delay={0.1}
-        />
-        <StatCard
-          title="Total Connectors"
-          value={allConnectors.length}
-          loading={rnLoading && !rnData}
-          delay={0.15}
-        />
-        <StatCard
-          title="Active Connectors"
-          value={activeConnectors.length}
-          loading={rnLoading && !rnData}
-          delay={0.2}
-        />
       </div>
 
-      {/* Main Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Recent Connectors */}
-        <motion.div
-          className="lg:col-span-2 rounded-xl border border-border bg-white overflow-hidden"
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3, duration: 0.4 }}
-        >
-          <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-            <div className="flex items-center gap-2">
-              <Plug className="w-4 h-4 text-primary" />
-              <h2 className="font-semibold text-foreground">Recent Connectors</h2>
-            </div>
-            <Link to="/remote-networks" className="text-xs text-primary hover:underline">
-              View networks
-            </Link>
-          </div>
-          <div className="p-4">
-            {rnLoading && !rnData ? (
-              <div className="space-y-2">
-                {Array.from({ length: 4 }).map((_, i) => (
-                  <Skeleton key={i} className="h-14 w-full rounded-xl" />
-                ))}
-              </div>
-            ) : recentConnectors.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 text-center">
-                <div className="rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
-                  <Inbox className="w-6 h-6 text-primary/40" />
-                </div>
-                <p className="text-sm text-foreground/70">No connectors yet</p>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Add a remote network and deploy a connector to get started.
-                </p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {recentConnectors.map((c) => (
-                  <div
-                    key={c.id}
-                    className="flex items-center gap-3 p-3 rounded-xl bg-muted/40 hover:bg-muted transition-colors"
-                  >
-                    <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/10 text-primary shrink-0">
-                      <Plug className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-medium text-foreground truncate">{c.name}</p>
-                        <Badge
-                          variant="outline"
-                          className={cn('text-[10px] font-mono border', connectorStatusClass[c.status])}
-                        >
-                          {c.status.toLowerCase()}
-                        </Badge>
-                      </div>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {c.networkName} · {c.hostname ?? 'no hostname'}
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-                      <Clock className="w-3 h-3" />
-                      {relativeTime(c.lastSeenAt)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </motion.div>
-
-        {/* Workspace */}
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.35, duration: 0.4 }}
-        >
-          <div className="rounded-xl border border-border bg-white overflow-hidden h-full">
-            <div className="flex items-center gap-2 px-5 py-4 border-b border-border">
-              <img src="/icons/workspace_svg.svg" className="w-7 h-7 text-primary" alt="Workspace" />
-              <h2 className="font-semibold text-foreground">Workspace</h2>
-            </div>
-            <div className="p-5 space-y-4">
-              {wsLoading && !wsData ? (
-                <div className="space-y-3">
-                  <Skeleton className="h-5 w-32" />
-                  <Skeleton className="h-4 w-24" />
-                </div>
-              ) : (
-                <>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Name</p>
-                    <p className="font-semibold text-foreground">{wsData?.workspace.name}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Endpoint</p>
-                    <p className="text-sm font-mono text-primary">
-                      {wsData?.workspace.slug}.zecurity.in
-                    </p>
-                  </div>
-                  <div>
-                    {wsData?.workspace.status && (
-                      <Badge variant={statusVariant[wsData.workspace.status] ?? 'outline'}>
-                        {wsData.workspace.status}
-                      </Badge>
-                    )}
-                  </div>
-                  <div className="pt-3 border-t border-border">
-                    <p className="text-xs text-muted-foreground mb-1">Account</p>
-                    {meLoading && !meData ? (
-                      <Skeleton className="h-4 w-40" />
-                    ) : (
-                      <p className="text-sm text-foreground truncate">{meData?.me.email}</p>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </motion.div>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="kpi-card">
+          <div className="kpi-label">Active Networks</div>
+          <div className="kpi-value">{networkLoading && !networksData ? '...' : activeNetworks.length}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-label">Connectors</div>
+          <div className="kpi-value">{networkLoading && !networksData ? '...' : connectors.length}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-label">Active Connectors</div>
+          <div className="kpi-value">{networkLoading && !networksData ? '...' : activeConnectors.length}</div>
+        </div>
+        <div className="kpi-card">
+          <div className="kpi-label">Shields</div>
+          <div className="kpi-value">{networkLoading && !networksData ? '...' : shields.length}</div>
+        </div>
       </div>
 
-      {/* Networks */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.4, duration: 0.4 }}
-      >
-        <div className="flex items-center justify-between mb-4">
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
+        <TopologyCard networks={networks.length} connectors={connectors.length} shields={shields.length} />
+
+        <div className="surface-card p-6">
+          <div className="mb-4 flex items-center gap-2">
+            <Network className="h-4 w-4 text-primary" />
+            <div className="text-sm font-semibold">Workspace</div>
+          </div>
+
+          {workspaceLoading && !workspaceData ? (
+            <div className="space-y-3">
+              <Skeleton className="h-5 w-32 bg-secondary" />
+              <Skeleton className="h-4 w-24 bg-secondary" />
+              <Skeleton className="h-20 w-full rounded-2xl bg-secondary" />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="section-card p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Workspace</div>
+                <div className="mt-2 text-lg font-semibold">{workspaceData?.workspace.name}</div>
+                <div className="mt-1 font-mono text-sm text-primary">{workspaceData?.workspace.slug}.zecurity.in</div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="section-card p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Networks</div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <EntityIcon type="network" />
+                    <div className="text-sm font-semibold">{networks.length} registered</div>
+                  </div>
+                </div>
+                <div className="section-card p-4">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Protected Services</div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <EntityIcon type="resource" />
+                    <div className="text-sm font-semibold">Route via Resources</div>
+                  </div>
+                </div>
+              </div>
+
+              <Link
+                to="/remote-networks"
+                className="inline-flex items-center gap-2 text-sm font-semibold text-primary transition hover:opacity-80"
+              >
+                View remote networks
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="surface-card overflow-hidden">
+        <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <div className="flex items-center gap-2">
-            <Network className="w-4 h-4 text-primary" />
-            <h2 className="font-semibold text-foreground">Networks</h2>
+            <Plug className="h-4 w-4 text-primary" />
+            <div className="text-sm font-semibold">Recent Connectors</div>
           </div>
-          <Link to="/remote-networks" className="text-xs text-primary hover:underline">
-            Manage networks
+          <Link to="/connectors" className="text-sm font-semibold text-primary">
+            Open inventory
           </Link>
         </div>
-        {rnLoading && !rnData ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <Skeleton key={i} className="h-24 w-full rounded-xl" />
+
+        {networkLoading && !networksData ? (
+          <div className="space-y-3 p-5">
+            {Array.from({ length: 4 }).map((_, index) => (
+              <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
             ))}
           </div>
-        ) : networks.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-border bg-muted/20 p-8 text-center">
-            <div className="inline-flex rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
-              <Globe className="w-6 h-6 text-primary/40" />
+        ) : recentConnectors.length === 0 ? (
+          <div className="px-5 py-16 text-center">
+            <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-full border border-primary/20 bg-primary/10">
+              <Shield className="h-6 w-6 text-primary" />
             </div>
-            <p className="text-sm text-foreground/70">No remote networks yet</p>
-            <Link
-              to="/remote-networks"
-              className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-2"
-            >
-              Create your first network <ArrowRight className="w-3 h-3" />
-            </Link>
+            <h3 className="text-lg font-semibold">No connectors yet</h3>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Create a remote network and deploy your first connector to begin heartbeat flow.
+            </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {networks.map((n, i) => (
-              <motion.div
-                key={n.id}
-                className="group relative rounded-xl border border-border bg-white p-4 hover:border-primary/30 hover:shadow-md transition-all duration-300"
-                initial={{ opacity: 0, scale: 0.98 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: i * 0.05, duration: 0.3 }}
-                whileHover={{ scale: 1.01 }}
+          <div className="space-y-3 p-5">
+            {recentConnectors.map((connector) => (
+              <Link
+                key={connector.id}
+                to={`/connectors/${connector.id}`}
+                className="section-card flex items-center gap-4 p-4 transition hover:border-primary/40 hover:bg-accent/50"
               >
-                <Link to={`/remote-networks/${n.id}/connectors`} className="block">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <Globe className="w-4 h-4 text-primary shrink-0" />
-                      <span className="font-medium text-foreground truncate">{n.name}</span>
-                    </div>
-                    <Badge
-                      variant={n.status === RemoteNetworkStatus.Active ? 'default' : 'secondary'}
-                      className="text-[10px]"
-                    >
-                      {n.status.toLowerCase()}
-                    </Badge>
+                <EntityIcon type="connector" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="truncate text-sm font-semibold">{connector.name}</div>
+                    <StatusPill
+                      label={connector.status.toLowerCase()}
+                      tone={connector.status === ConnectorStatus.Active ? 'ok' : connector.status === ConnectorStatus.Disconnected ? 'warn' : 'muted'}
+                    />
                   </div>
-                  <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                    <span className="flex items-center gap-1">
-                      <Plug className="w-3 h-3" /> {n.connectors.length} connector
-                      {n.connectors.length !== 1 ? 's' : ''}
-                    </span>
-                    <span className="font-mono text-[10px] uppercase tracking-wider">
-                      {n.location.toLowerCase()}
-                    </span>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>{connector.networkName}</span>
+                    <span>{connector.hostname ?? 'hostname unavailable'}</span>
+                    <span>{connector.version ?? 'version unavailable'}</span>
                   </div>
-                </Link>
-              </motion.div>
+                </div>
+                <div className="text-right text-xs text-muted-foreground">
+                  <div className="inline-flex items-center gap-1">
+                    <Clock3 className="h-3.5 w-3.5" />
+                    {relativeTime(connector.lastSeenAt)}
+                  </div>
+                </div>
+              </Link>
             ))}
           </div>
         )}
-      </motion.div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Link to="/remote-networks" className="section-card p-4 transition hover:border-primary/40">
+          <div className="flex items-center gap-3">
+            <EntityIcon type="network" />
+            <div>
+              <div className="text-sm font-semibold">Remote Networks</div>
+              <div className="text-xs text-muted-foreground">Open topology and lifecycle status.</div>
+            </div>
+          </div>
+        </Link>
+        <Link to="/shields" className="section-card p-4 transition hover:border-primary/40">
+          <div className="flex items-center gap-3">
+            <EntityIcon type="shield" />
+            <div>
+              <div className="text-sm font-semibold">Shields</div>
+              <div className="text-xs text-muted-foreground">Review host agents and interface addresses.</div>
+            </div>
+          </div>
+        </Link>
+        <Link to="/resources" className="section-card p-4 transition hover:border-primary/40">
+          <div className="flex items-center gap-3">
+            <EntityIcon type="resource" />
+            <div>
+              <div className="text-sm font-semibold">Resources</div>
+              <div className="text-xs text-muted-foreground">See what is currently protected.</div>
+            </div>
+          </div>
+        </Link>
+      </div>
     </div>
   )
 }

@@ -1,141 +1,65 @@
-import { useState, useEffect } from 'react'
-import { useQuery, useMutation } from '@apollo/client/react'
-import { motion } from 'framer-motion'
+import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useMutation, useQuery } from '@apollo/client/react'
+import { AlertCircle, Loader2, Lock, MoreHorizontal, Plus, Unlock, Wifi, WifiOff } from 'lucide-react'
 import {
+  DeleteResourceDocument,
   GetAllResourcesDocument,
   GetRemoteNetworksDocument,
-  type GetAllResourcesQuery,
-  ShieldStatus,
-} from '@/generated/graphql'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import {
   ProtectResourceDocument,
+  ShieldStatus,
   UnprotectResourceDocument,
-  DeleteResourceDocument,
+  type GetAllResourcesQuery,
 } from '@/generated/graphql'
+import { Button } from '@/components/ui/button'
 import { CreateResourceModal } from '@/components/CreateResourceModal'
-import { EditResourceModal } from '@/components/EditResourceModal'
-import { cn } from '@/lib/utils'
-import {
-  Box,
-  Lock,
-  Unlock,
-  Trash2,
-  Plus,
-  Inbox,
-  AlertCircle,
-  CircleDot,
-  CircleDotDashed,
-  Loader2,
-  Wifi,
-  WifiOff,
-  Pencil,
-  MoreHorizontal,
-} from 'lucide-react'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 import { toast } from 'sonner'
 
 type Resource = GetAllResourcesQuery['allResources'][number]
 
-const statusConfig: Record<string, { label: string; className: string; icon: React.ReactNode }> = {
-  pending: {
-    label: 'Pending',
-    className: 'text-gray-600 bg-gray-500/10 border-gray-500/20',
-    icon: <CircleDotDashed className="h-3 w-3 fill-gray-400 text-gray-400" />,
-  },
-  managing: {
-    label: 'Managing',
-    className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
-    icon: <Loader2 className="h-3 w-3 animate-spin text-amber-500" />,
-  },
-  protecting: {
-    label: 'Protecting',
-    className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
-    icon: <Loader2 className="h-3 w-3 animate-spin text-amber-500" />,
-  },
-  protected: {
-    label: 'Protected',
-    className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
-    icon: <CircleDot className="h-3 w-3 fill-emerald-500 text-emerald-500" />,
-  },
-  failed: {
-    label: 'Failed',
-    className: 'text-red-600 bg-red-500/10 border-red-500/20',
-    icon: <AlertCircle className="h-3 w-3 text-red-500" />,
-  },
-  removing: {
-    label: 'Removing',
-    className: 'text-orange-600 bg-orange-500/10 border-orange-500/20',
-    icon: <Loader2 className="h-3 w-3 animate-spin text-orange-500" />,
-  },
-  unprotected: {
-    label: 'Unprotected',
-    className: 'text-slate-600 bg-slate-500/10 border-slate-500/20',
-    icon: <Unlock className="h-3 w-3 text-slate-500" />,
-  },
-  deleted: {
-    label: 'Deleted',
-    className: 'text-gray-400 bg-gray-200/30 border-gray-300/30 line-through',
-    icon: <CircleDotDashed className="h-3 w-3 text-gray-400" />,
-  },
+const transitionalStates = new Set(['managing', 'protecting', 'removing'])
+
+function resourceTone(status: string): 'ok' | 'warn' | 'danger' | 'muted' | 'info' {
+  if (status === 'protected') return 'ok'
+  if (status === 'failed') return 'danger'
+  if (status === 'protecting' || status === 'managing' || status === 'removing') return 'warn'
+  if (status === 'unprotected' || status === 'deleted') return 'muted'
+  return 'info'
 }
 
-function relativeTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return '—'
-  const diff = Date.now() - new Date(dateStr).getTime()
-  if (diff < 0) return 'just now'
-  const s = Math.floor(diff / 1000)
-  if (s < 60) return `${s}s ago`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  const d = Math.floor(h / 24)
-  if (d < 30) return `${d}d ago`
-  return `${Math.floor(d / 30)}mo ago`
+function formatPort(from: number, to: number) {
+  return from === to ? `${from}` : `${from}-${to}`
 }
 
 export default function Resources() {
+  const navigate = useNavigate()
   const [showAdd, setShowAdd] = useState(false)
-  const [editingResource, setEditingResource] = useState<Resource | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworksDocument)
   const networks = networkData?.remoteNetworks ?? []
 
-  const TRANSITIONAL = new Set(['managing', 'protecting', 'removing'])
-
-  const { data, loading, refetch, startPolling, stopPolling } = useQuery(GetAllResourcesDocument, {
+  const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
   })
 
-  const resources: Resource[] = data?.allResources ?? []
+  const resources = data?.allResources ?? []
+  const protectedCount = resources.filter((resource) => resource.status === 'protected').length
 
-  // Poll fast while any resource is transitioning, back off when stable.
   useEffect(() => {
-    const hasTransitional = resources.some(r => TRANSITIONAL.has(r.status))
-    if (hasTransitional) {
-      startPolling(3000)
-    } else {
-      startPolling(30000)
-    }
-  }, [resources.map(r => r.status).join(',')])
+    const hasTransition = resources.some((resource) => transitionalStates.has(resource.status))
+    startPolling(hasTransition ? 3000 : 30000)
+  }, [resources, startPolling])
 
   const [protectResource, { loading: protecting }] = useMutation(ProtectResourceDocument, {
     onCompleted: () => {
       toast.success('Resource protection started')
       refetch()
     },
-    onError: (err) => toast.error(err.message),
+    onError: (error) => toast.error(error.message),
   })
 
   const [unprotectResource, { loading: unprotecting }] = useMutation(UnprotectResourceDocument, {
@@ -143,279 +67,135 @@ export default function Resources() {
       toast.success('Resource unprotected')
       refetch()
     },
-    onError: (err) => toast.error(err.message),
+    onError: (error) => toast.error(error.message),
   })
 
-  const [deleteResourceMut] = useMutation(DeleteResourceDocument, {
+  const [deleteResource] = useMutation(DeleteResourceDocument, {
     onCompleted: () => {
       toast.success('Resource deleted')
       refetch()
       setDeletingId(null)
     },
-    onError: (err) => {
-      toast.error(err.message)
+    onError: (error) => {
+      toast.error(error.message)
       setDeletingId(null)
     },
   })
 
-  const protectedCount = resources.filter((r) => r.status === 'protected').length
-
-  const handleDelete = (id: string) => {
-    if (window.confirm('Are you sure you want to delete this resource?')) {
-      setDeletingId(id)
-      deleteResourceMut({ variables: { id } })
-    }
-  }
-
-  const formatPort = (from: number, to: number) => {
-    if (from === to) return from.toString()
-    return `${from}–${to}`
+  function handleDelete(id: string) {
+    if (!window.confirm('Delete this resource?')) return
+    setDeletingId(id)
+    void deleteResource({ variables: { id } })
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <motion.div
-        className="flex items-center justify-between"
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-      >
-        <div className="flex items-center gap-4">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 ring-1 ring-primary/20">
-            <Box className="h-5 w-5 text-primary" />
-          </div>
-          <div>
-            <h1 className="font-display text-xl font-bold tracking-wide">Resources</h1>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Managed resources protected by shields
-            </p>
-          </div>
+      <div className="page-header">
+        <div>
+          <h2 className="page-title">Resources</h2>
+          <p className="page-subtitle">Managed services protected and relayed through shields.</p>
         </div>
-
-        <div className="flex items-center gap-3">
-          {!loading && (
-            <>
-              <div className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-3 py-1.5 ring-1 ring-border/30">
-                <Lock className="h-3 w-3 text-emerald-500" />
-                <span className="text-[11px] font-mono text-muted-foreground">
-                  {protectedCount} protected
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-3 py-1.5 ring-1 ring-border/30">
-                <span className="text-[11px] font-mono text-muted-foreground">
-                  {resources.length} total
-                </span>
-              </div>
-            </>
-          )}
-          <Button
-            onClick={() => setShowAdd(true)}
-            disabled={networks.length === 0}
-            className="gap-2 text-[12px]"
-            size="sm"
-          >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-[oklch(0.82_0.12_160)]">
+            <span className="status-pill-dot bg-[oklch(0.82_0.12_160)]" />
+            <span className="font-bold">{protectedCount}</span> protected
+          </span>
+          <span className="status-pill border-border bg-secondary text-muted-foreground">
+            <span className="font-bold text-foreground">{resources.length}</span> total
+          </span>
+          <Button onClick={() => setShowAdd(true)} disabled={networks.length === 0} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Resource
           </Button>
         </div>
-      </motion.div>
+      </div>
 
-      {/* Table */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1, duration: 0.4 }}
-        className="rounded-xl border border-border bg-white overflow-hidden"
-      >
-        <div className="overflow-x-auto">
-          <div className="grid grid-cols-[1.2fr_100px_90px_100px_130px_110px_110px_80px] gap-4 px-5 py-3 border-b border-border/50 bg-muted/20 min-w-[960px]">
-            {['Name', 'Host IP', 'Protocol', 'Port', 'Shield', 'Status', 'Last Verified', 'Actions'].map((col, i) => (
-              <span
-                key={i}
-                className={cn(
-                  'text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60',
-                  i === 7 && 'text-right',
-                )}
-              >
-                {col}
-              </span>
+      <div className="table-shell">
+        <div className="table-scroll">
+          <div className="table-head grid min-w-[1080px] items-center grid-cols-[1.3fr_130px_90px_100px_180px_120px_130px_100px] gap-4 px-5 py-4">
+            {['Name', 'Host', 'Proto', 'Port', 'Shield', 'Status', 'Last Verified', 'Actions'].map((label, index) => (
+              <div key={label + index} className={`table-head-label ${index === 7 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[960px]">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="grid grid-cols-[1.2fr_100px_90px_100px_130px_110px_110px_80px] gap-4 items-center px-5 py-3.5 border-b border-border/20 last:border-0"
-                >
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-4 w-20" />
-                  <Skeleton className="h-5 w-16" />
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-5 w-20" />
-                  <Skeleton className="h-5 w-20" />
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-6 w-16 ml-auto" />
-                </div>
+            <div className="min-w-[1080px] p-5 space-y-3">
+              {Array.from({ length: 5 }).map((_, index) => (
+                <Skeleton key={index} className="h-14 rounded-2xl bg-secondary" />
               ))}
             </div>
           ) : resources.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
-                <Inbox className="w-6 h-6 text-primary/40" />
-              </div>
-              <p className="text-sm text-foreground/70">No resources defined</p>
-              <p className="text-xs text-muted-foreground mt-0.5 max-w-xs">
-                {networks.length === 0
-                  ? 'Create a remote network first, then add a resource to protect.'
-                  : 'Click "Add Resource" to define a protected resource.'}
-              </p>
-            </div>
+            <EmptyState
+              title="No resources defined"
+              description={
+                networks.length === 0
+                  ? 'Create a remote network first, then map a resource onto a shield.'
+                  : 'Add the first resource and start protection from the console.'
+              }
+              action={networks.length > 0 ? <Button onClick={() => setShowAdd(true)}>Add Resource</Button> : undefined}
+            />
           ) : (
-            <div className="min-w-[960px]">
-              {resources.map((r) => {
-                const st = statusConfig[r.status] || statusConfig.pending
-                const shieldOffline = r.shield?.status === ShieldStatus.Disconnected
-                const noShield = !r.shield
+            <div className="min-w-[1080px]">
+              {resources.map((resource) => {
+                const shield = resource.shield
+                const shieldOffline = resource.shield?.status === ShieldStatus.Disconnected
+                const noShield = !shield
 
                 return (
-                  <motion.div
-                    key={r.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="grid grid-cols-[1.2fr_100px_90px_100px_130px_110px_110px_80px] gap-4 items-center px-5 py-3.5 border-b border-border/20 last:border-0 hover:bg-muted/10 transition-colors"
-                  >
-                    <div className="flex flex-col">
-                      <span className="font-medium text-sm">{r.name}</span>
-                      {r.description && (
-                        <span className="text-xs text-muted-foreground truncate max-w-[200px]">
-                          {r.description}
+                  <div key={resource.id} className="admin-table-row group grid items-center grid-cols-[1.3fr_130px_90px_100px_180px_120px_130px_100px] gap-4 px-5 py-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <EntityIcon type="resource" />
+                      <div className="min-w-0">
+                        <div className="truncate text-[15px] font-bold leading-tight">{resource.name}</div>
+                        <div className="truncate font-mono text-[11px] font-medium text-muted-foreground">
+                          {resource.description || resource.remoteNetwork.name}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="font-mono text-[13px] text-muted-foreground">{resource.host}</div>
+                    <div className="text-[13px] font-bold uppercase text-muted-foreground">{resource.protocol}</div>
+                    <div className="font-mono text-[13px] text-muted-foreground">{formatPort(resource.portFrom, resource.portTo)}</div>
+                    <div className="text-sm font-semibold text-primary">
+                      {noShield && (
+                        <span className="inline-flex items-center gap-1.5 opacity-60">
+                          <AlertCircle className="h-3.5 w-3.5" />
+                          Unassigned
+                        </span>
+                      )}
+                      {!noShield && shieldOffline && shield && (
+                        <span className="inline-flex items-center gap-1.5 text-[oklch(0.85_0.13_80)]">
+                          <WifiOff className="h-3.5 w-3.5" />
+                          {shield.name}
+                        </span>
+                      )}
+                      {!noShield && !shieldOffline && shield && (
+                        <span className="inline-flex items-center gap-1.5 text-[oklch(0.82_0.12_160)]">
+                          <Wifi className="h-3.5 w-3.5" />
+                          {shield.name}
                         </span>
                       )}
                     </div>
-
-                    <span className="font-mono text-sm">{r.host}</span>
-
-                    <Badge variant="outline" className="w-fit text-[10px] uppercase">
-                      {r.protocol}
-                    </Badge>
-
-                    <span className="font-mono text-sm">{formatPort(r.portFrom, r.portTo)}</span>
-
-                    {noShield ? (
-                      <div className="flex items-center gap-1.5 text-muted-foreground">
-                        <AlertCircle className="h-3 w-3" />
-                        <span className="text-xs">No shield</span>
-                      </div>
-                    ) : shieldOffline ? (
-                      <div className="flex items-center gap-1.5 text-amber-600">
-                        <WifiOff className="h-3 w-3" />
-                        <span className="text-xs">{r.shield?.name}</span>
-                      </div>
-                    ) : (
-                      <div className="flex items-center gap-1.5 text-emerald-600">
-                        <Wifi className="h-3 w-3" />
-                        <span className="text-xs">{r.shield?.name}</span>
-                      </div>
-                    )}
-
                     <div>
-                      <Badge
-                        className={cn('gap-1.5 text-[10px]', st.className)}
+                      <StatusPill label={resource.status} tone={resourceTone(resource.status)} />
+                    </div>
+                    <div className="font-mono text-[13px] text-muted-foreground">{relativeTime(resource.lastVerifiedAt)}</div>
+                    <div className="text-right">
+                      <button
+                        onClick={() => navigate(`/resources/${resource.id}`)}
+                        className="inline-flex items-center gap-1 text-[13px] font-bold text-primary transition hover:opacity-80"
                       >
-                        {st.icon}
-                        {st.label}
-                      </Badge>
-                      {r.errorMessage && (
-                        <p className="text-[10px] text-red-500 mt-0.5 truncate max-w-[100px]" title={r.errorMessage}>
-                          {r.errorMessage}
-                        </p>
-                      )}
+                        Manage <span className="transition-transform group-hover:translate-x-0.5">→</span>
+                      </button>
                     </div>
-
-                    <span className="text-xs text-muted-foreground">
-                      {relativeTime(r.lastVerifiedAt)}
-                    </span>
-
-                    <div className="flex justify-end">
-                      {(r.status === 'managing' || r.status === 'protecting' || r.status === 'removing') ? (
-                        <Button size="sm" variant="ghost" className="h-7 w-7 p-0" disabled>
-                          <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-                        </Button>
-                      ) : (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button size="sm" variant="ghost" className="h-7 w-7 p-0">
-                              <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-44">
-                            {r.status !== 'deleted' && (
-                              <DropdownMenuItem onClick={() => setEditingResource(r)}>
-                                <Pencil className="mr-2 h-3.5 w-3.5" />
-                                Edit
-                              </DropdownMenuItem>
-                            )}
-                            {!noShield && !shieldOffline && (r.status === 'pending' || r.status === 'failed' || r.status === 'unprotected') && (
-                              <DropdownMenuItem
-                                disabled={protecting}
-                                onClick={() => protectResource({ variables: { id: r.id } })}
-                              >
-                                <Lock className="mr-2 h-3.5 w-3.5" />
-                                Protect
-                              </DropdownMenuItem>
-                            )}
-                            {r.status === 'protected' && (
-                              <DropdownMenuItem
-                                disabled={unprotecting}
-                                onClick={() => unprotectResource({ variables: { id: r.id } })}
-                              >
-                                <Unlock className="mr-2 h-3.5 w-3.5" />
-                                Unprotect
-                              </DropdownMenuItem>
-                            )}
-                            {(r.status === 'pending' || r.status === 'unprotected' || r.status === 'failed') && (
-                              <>
-                                <DropdownMenuSeparator />
-                                <DropdownMenuItem
-                                  disabled={deletingId === r.id}
-                                  onClick={() => handleDelete(r.id)}
-                                  className="text-red-500 focus:text-red-600 focus:bg-red-50"
-                                >
-                                  <Trash2 className="mr-2 h-3.5 w-3.5" />
-                                  Delete
-                                </DropdownMenuItem>
-                              </>
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
-                  </motion.div>
+                  </div>
                 )
               })}
             </div>
           )}
         </div>
-      </motion.div>
+      </div>
 
-      <CreateResourceModal
-        open={showAdd}
-        onOpenChange={setShowAdd}
-        onSuccess={() => {
-          refetch()
-          setShowAdd(false)
-        }}
-      />
-
-      <EditResourceModal
-        open={editingResource !== null}
-        onOpenChange={(open) => { if (!open) setEditingResource(null) }}
-        resource={editingResource}
-        onSuccess={refetch}
-      />
+      <CreateResourceModal open={showAdd} onOpenChange={setShowAdd} onSuccess={() => refetch()} />
     </div>
   )
 }

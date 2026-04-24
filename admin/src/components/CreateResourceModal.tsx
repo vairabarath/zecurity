@@ -12,7 +12,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { AlertTriangle, Loader2, Info } from 'lucide-react'
+import { AlertTriangle, Info, Loader2, X, Server } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface CreateResourceModalProps {
@@ -112,28 +112,45 @@ export function CreateResourceModal({
   const networks = networksData?.remoteNetworks ?? []
   const isValid = name.trim() && host.trim() && portFrom && remoteNetworkId
 
-  return (
-    <div>
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/50"
-            onClick={() => handleClose(false)}
-          />
-          <div className="relative z-10 w-full max-w-md rounded-lg bg-background p-6 shadow-lg">
-            <h2 className="text-lg font-semibold">Add Resource</h2>
-            <p className="text-sm text-muted-foreground mb-4">
-              Define a resource to protect. A shield on this host will automatically match.
-            </p>
+  if (!open) return null
 
-            <form onSubmit={handleSubmit} className="space-y-4">
+  return (
+    <div className="fixed inset-0 z-50">
+      <div
+        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        onClick={() => handleClose(false)}
+      />
+      <div className="absolute right-0 top-0 h-full w-full max-w-md app-panel animate-slide-in">
+        <div className="flex h-full flex-col">
+          <div className="flex items-center gap-4 border-b border-border p-5">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[oklch(0.78_0.10_235/0.16)] text-[oklch(0.78_0.10_235)]">
+              <Server className="h-5 w-5" />
+            </div>
+            <div className="flex-1">
+              <h2 className="text-lg font-semibold">Add Resource</h2>
+              <p className="text-sm text-muted-foreground">
+                Register a resource. Enable protection manually from its detail page.
+              </p>
+            </div>
+            <button
+              onClick={() => handleClose(false)}
+              className="flex h-9 w-9 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
               <div className="space-y-2">
-                <Label>Remote Network *</Label>
+                <Label className="text-sm font-semibold">
+                  Remote Network <span className="text-destructive">*</span>
+                </Label>
                 <select
                   value={remoteNetworkId}
                   onChange={(e) => setRemoteNetworkId(e.target.value)}
                   disabled={networksLoading}
-                  className="flex h-10 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex h-11 w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <option value="" disabled>
                     {networksLoading ? 'Loading...' : 'Select network'}
@@ -147,27 +164,31 @@ export function CreateResourceModal({
               </div>
 
               <div className="space-y-2">
-                <Label>Name *</Label>
+                <Label className="text-sm font-semibold">
+                  Name <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. prod-web-01"
+                  className="h-11 font-medium"
                 />
               </div>
 
               <div className="space-y-2">
-                <Label>Description</Label>
+                <Label className="text-sm font-semibold">Description</Label>
                 <Input
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   placeholder="Optional description"
+                  className="h-11 font-medium"
                 />
               </div>
 
               <div className="space-y-2">
-                <Label>
-                  Host IP *
-                  <span className="ml-1 text-muted-foreground text-xs font-normal">
+                <Label className="flex items-center gap-2 text-sm font-semibold">
+                  Host IP <span className="text-destructive">*</span>
+                  <span className="text-xs font-normal text-muted-foreground">
                     (must match a shield's LAN IP)
                   </span>
                 </Label>
@@ -175,8 +196,9 @@ export function CreateResourceModal({
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
                   placeholder="e.g. 192.168.1.100"
+                  className="h-11 font-mono text-sm"
                 />
-                <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
                   <Info className="h-3 w-3" />
                   <span>A shield must be installed on this machine.</span>
                 </div>
@@ -184,11 +206,11 @@ export function CreateResourceModal({
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-2">
-                  <Label>Protocol</Label>
+                  <Label className="text-sm font-semibold">Protocol</Label>
                   <select
                     value={protocol}
                     onChange={(e) => setProtocol(e.target.value)}
-                    className="flex h-10 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    className="flex h-11 w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30"
                   >
                     <option value="tcp">TCP</option>
                     <option value="udp">UDP</option>
@@ -197,7 +219,9 @@ export function CreateResourceModal({
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Port From *</Label>
+                  <Label className="text-sm font-semibold">
+                    Port From <span className="text-destructive">*</span>
+                  </Label>
                   <Input
                     type="number"
                     min={1}
@@ -205,11 +229,12 @@ export function CreateResourceModal({
                     value={portFrom}
                     onChange={(e) => setPortFrom(e.target.value)}
                     placeholder="80"
+                    className="h-11 font-mono text-sm"
                   />
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Port To</Label>
+                  <Label className="text-sm font-semibold">Port To</Label>
                   <Input
                     type="number"
                     min={1}
@@ -217,43 +242,63 @@ export function CreateResourceModal({
                     value={portTo}
                     onChange={(e) => setPortTo(e.target.value)}
                     placeholder="Same"
+                    className="h-11 font-mono text-sm"
                   />
                 </div>
               </div>
 
               {error && (
-                <div className="flex items-center gap-2 text-sm text-red-500 bg-red-50 p-2 rounded-md">
-                  <AlertTriangle className="h-4 w-4" />
+                <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
                   <span>{error}</span>
                 </div>
               )}
-
-              <div className="flex justify-end gap-2 pt-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => handleClose(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={!isValid || creating}
-                >
-                  {creating ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    'Add Resource'
-                  )}
-                </Button>
-              </div>
             </form>
           </div>
+
+          <div className="flex items-center justify-between gap-3 border-t border-border p-5">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => handleClose(false)}
+              className="h-11 flex-1"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={!isValid || creating}
+              className="h-11 flex-1 gap-2"
+            >
+              {creating ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Creating...
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  <Server className="h-4 w-4" />
+                  Add Resource
+                </span>
+              )}
+            </Button>
+          </div>
         </div>
-      )}
+      </div>
+
+      <style>{`
+        @keyframes slide-in {
+          from {
+            transform: translateX(100%);
+          }
+          to {
+            transform: translateX(0);
+          }
+        }
+        .animate-slide-in {
+          animation: slide-in 0.3s ease-out;
+        }
+      `}</style>
     </div>
   )
 }

@@ -1,67 +1,28 @@
 import { useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation } from '@apollo/client/react'
+import { Link, useParams } from 'react-router-dom'
+import { useMutation, useQuery } from '@apollo/client/react'
+import { ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
 import {
-  GetRemoteNetworkDocument,
-  GetConnectorsDocument,
-  RevokeConnectorDocument,
-  DeleteConnectorDocument,
   ConnectorStatus,
+  DeleteConnectorDocument,
+  GetConnectorsDocument,
+  GetRemoteNetworkDocument,
+  RevokeConnectorDocument,
 } from '@/generated/graphql'
 import type {
-  RevokeConnectorMutationVariables,
   DeleteConnectorMutationVariables,
+  RevokeConnectorMutationVariables,
 } from '@/generated/graphql'
-import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import {
-  Plus,
-  ChevronRight,
-  ShieldOff,
-  Trash2,
-  Plug,
-} from 'lucide-react'
-import { cn } from '@/lib/utils'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
-function relativeTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return 'Never'
-  const now = Date.now()
-  const then = new Date(dateStr).getTime()
-  const diff = now - then
-  if (diff < 0) return 'Just now'
-
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days}d ago`
-  const months = Math.floor(days / 30)
-  return `${months}mo ago`
-}
-
-const statusConfig: Record<ConnectorStatus, { label: string; className: string }> = {
-  [ConnectorStatus.Pending]: {
-    label: 'Pending',
-    className: 'text-gray-600 bg-gray-500/10 border-gray-500/20',
-  },
-  [ConnectorStatus.Active]: {
-    label: 'Active',
-    className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
-  },
-  [ConnectorStatus.Disconnected]: {
-    label: 'Disconnected',
-    className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
-  },
-  [ConnectorStatus.Revoked]: {
-    label: 'Revoked',
-    className: 'text-red-600 bg-red-500/10 border-red-500/20',
-  },
+function statusTone(status: ConnectorStatus): 'ok' | 'warn' | 'danger' | 'muted' {
+  if (status === ConnectorStatus.Active) return 'ok'
+  if (status === ConnectorStatus.Disconnected) return 'warn'
+  if (status === ConnectorStatus.Revoked) return 'danger'
+  return 'muted'
 }
 
 export default function Connectors() {
@@ -82,7 +43,6 @@ export default function Connectors() {
   const [revokeConnector] = useMutation(RevokeConnectorDocument, {
     refetchQueries: [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }],
   })
-
   const [deleteConnector] = useMutation(DeleteConnectorDocument, {
     refetchQueries: [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }],
   })
@@ -100,163 +60,100 @@ export default function Connectors() {
 
   return (
     <div className="space-y-6">
-      {/* Breadcrumb */}
-      <div className="flex items-center gap-2 text-sm">
-        <Link to="/remote-networks" className="text-muted-foreground hover:text-foreground transition-colors">
-          Remote Networks
-        </Link>
-        <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />
-        <span className="text-foreground font-medium">{networkName}</span>
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Link to="/remote-networks" className="transition hover:text-foreground">Remote Networks</Link>
+        <ChevronRight className="h-4 w-4" />
+        <span>{networkName}</span>
+        <ChevronRight className="h-4 w-4" />
+        <span className="text-foreground">Connectors</span>
       </div>
 
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-display font-bold tracking-tight">Connectors</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage connectors for <span className="text-foreground/80">{networkName}</span>.
-          </p>
+          <h2 className="page-title">Connectors</h2>
+          <p className="page-subtitle">Connectors currently assigned to {networkName}.</p>
         </div>
         <Button onClick={() => setShowInstall(true)} className="gap-2">
-          <Plus className="w-4 h-4" />
+          <Plus className="h-4 w-4" />
           Add Connector
         </Button>
       </div>
 
-      {/* Install Modal */}
-      {id && (
-        <InstallCommandModal
-          remoteNetworkId={id}
-          open={showInstall}
-          onClose={() => setShowInstall(false)}
-        />
-      )}
+      {id ? (
+        <InstallCommandModal remoteNetworkId={id} open={showInstall} onClose={() => setShowInstall(false)} />
+      ) : null}
 
-      {/* Loading Skeletons */}
-      {loading && !data && (
-        <Card className="bg-card/60">
-          <CardContent className="p-0">
-            {Array.from({ length: 4 }).map((_, i) => (
-              <div key={i} className="flex items-center gap-4 px-5 py-4 border-b border-border/30 last:border-0">
-                <Skeleton className="h-4 w-40" />
-                <Skeleton className="h-5 w-20" />
-                <Skeleton className="h-4 w-24" />
-                <Skeleton className="h-4 w-32 ml-auto" />
-              </div>
+      <div className="table-shell">
+        <div className="table-scroll">
+          <div className="table-head grid min-w-[930px] grid-cols-[1.2fr_130px_130px_180px_110px_120px_160px] gap-4 px-5 py-3">
+            {['Name', 'Status', 'Last Seen', 'Hostname', 'Version', 'Public IP', 'Actions'].map((label, index) => (
+              <div key={label + index} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
             ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Empty State */}
-      {!loading && connectors.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="rounded-full p-4 bg-primary/5 border border-primary/10 mb-4">
-            <Plug className="w-8 h-8 text-primary/40" />
           </div>
-          <h3 className="text-lg font-display font-semibold text-foreground/80">No connectors yet</h3>
-          <p className="text-sm text-muted-foreground mt-1 max-w-sm">
-            Deploy a connector to establish a secure tunnel to this network.
-          </p>
-          <Button onClick={() => setShowInstall(true)} className="gap-2 mt-4" variant="outline">
-            <Plus className="w-4 h-4" />
-            Add your first connector
-          </Button>
-        </div>
-      )}
 
-      {/* Connector Rows */}
-      {connectors.length > 0 && (
-        <Card className="bg-card/60 backdrop-blur-sm border-border/50 overflow-hidden">
-          <CardContent className="p-0 overflow-x-auto">
-            {/* Table Header */}
-            <div className="grid grid-cols-[1fr_100px_100px_1fr_100px_120px] gap-4 px-5 py-3 border-b border-border/50 bg-muted/20">
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Name</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Status</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Last Seen</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Hostname</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Version</span>
-              <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60 text-right">Actions</span>
+          {loading && !data ? (
+            <div className="min-w-[930px] p-5 space-y-3">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <Skeleton key={index} className="h-14 rounded-2xl bg-secondary" />
+              ))}
             </div>
+          ) : connectors.length === 0 ? (
+            <EmptyState
+              title="No connectors for this network"
+              description="Generate the first install command to start receiving heartbeat traffic."
+              action={<Button onClick={() => setShowInstall(true)}>Add Connector</Button>}
+            />
+          ) : (
+            <div className="min-w-[930px]">
+              {connectors.map((connector) => {
+                const canRevoke = connector.status === ConnectorStatus.Active || connector.status === ConnectorStatus.Disconnected
+                const canDelete = connector.status === ConnectorStatus.Pending || connector.status === ConnectorStatus.Revoked
 
-            {/* Rows */}
-            {connectors.map((connector, i) => {
-              const status = statusConfig[connector.status]
-              const canRevoke = connector.status === ConnectorStatus.Active || connector.status === ConnectorStatus.Disconnected
-              const canDelete = connector.status === ConnectorStatus.Revoked || connector.status === ConnectorStatus.Pending
-
-              return (
-                <div
-                  key={connector.id}
-                  className={cn(
-                    'grid grid-cols-[1fr_100px_100px_1fr_100px_120px] gap-4 items-center px-5 py-3.5 border-b border-border/20 last:border-0 transition-colors hover:bg-muted/10',
-                  )}
-                  style={{ animationDelay: `${i * 50}ms` }}
-                >
-                  {/* Name */}
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <Plug className="w-4 h-4 text-muted-foreground shrink-0" />
-                    <span className="text-sm font-medium truncate">{connector.name}</span>
+                return (
+                  <div key={connector.id} className="admin-table-row grid grid-cols-[1.2fr_130px_130px_180px_110px_120px_160px] gap-4 px-5 py-4">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <EntityIcon type="connector" />
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">{connector.name}</div>
+                        <div className="truncate text-xs text-muted-foreground">{connector.lanAddr ?? 'LAN unavailable'}</div>
+                      </div>
+                    </div>
+                    <div><StatusPill label={connector.status.toLowerCase()} tone={statusTone(connector.status)} /></div>
+                    <div className="text-sm text-muted-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        <Clock3 className="h-3.5 w-3.5" />
+                        {relativeTime(connector.lastSeenAt)}
+                      </span>
+                    </div>
+                    <div className="truncate text-sm text-muted-foreground">{connector.hostname ?? '—'}</div>
+                    <div className="text-sm text-muted-foreground">{connector.version ?? '—'}</div>
+                    <div className="text-sm text-muted-foreground">{connector.publicIp ?? '—'}</div>
+                    <div className="flex items-center justify-end gap-2">
+                      <Link to={`/connectors/${connector.id}`} className="text-sm font-semibold text-primary">Manage</Link>
+                      {canRevoke ? (
+                        <button
+                          onClick={() => handleRevoke(connector.id)}
+                          className="rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] p-2 text-[oklch(0.85_0.13_80)]"
+                        >
+                          <ShieldOff className="h-4 w-4" />
+                        </button>
+                      ) : null}
+                      {canDelete ? (
+                        <button
+                          onClick={() => handleDelete(connector.id)}
+                          className="rounded-xl border border-[oklch(0.75_0.16_25/0.28)] bg-[oklch(0.75_0.16_25/0.12)] p-2 text-[oklch(0.75_0.16_25)]"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-
-                  {/* Status */}
-                  <div>
-                    <Badge variant="outline" className={cn('text-[10px] font-mono border', status.className)}>
-                      {status.label}
-                    </Badge>
-                  </div>
-
-                  {/* Last Seen */}
-                  <span className="text-xs text-muted-foreground font-mono">
-                    {relativeTime(connector.lastSeenAt)}
-                  </span>
-
-                  {/* Hostname */}
-                  <span className="text-xs text-muted-foreground font-mono truncate">
-                    {connector.hostname ?? '-'}
-                  </span>
-
-                  {/* Version */}
-                  <span className="text-xs text-muted-foreground font-mono">
-                    {connector.version ?? '-'}
-                  </span>
-
-                  {/* Actions */}
-                  <div className="flex items-center justify-end gap-1.5">
-                    <Link
-                      to={`/connectors/${connector.id}`}
-                      className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 font-medium transition-colors mr-1"
-                    >
-                      Manage
-                    </Link>
-                    {canRevoke && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-[10px] text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 border-amber-500/20"
-                        onClick={() => handleRevoke(connector.id)}
-                      >
-                        <ShieldOff className="w-3 h-3 mr-1" />
-                        Revoke
-                      </Button>
-                    )}
-                    {canDelete && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-[10px] text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
-                        onClick={() => handleDelete(connector.id)}
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              )
-            })}
-          </CardContent>
-        </Card>
-      )}
+                )
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

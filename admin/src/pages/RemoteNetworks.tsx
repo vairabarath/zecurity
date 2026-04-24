@@ -1,62 +1,58 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery, useMutation } from '@apollo/client/react'
+import { useMutation, useQuery } from '@apollo/client/react'
 import {
-  GetRemoteNetworksDocument,
+  ArrowRight,
+  Building2,
+  ChevronDown,
+  Cloud,
+  Home,
+  MapPin,
+  Plus,
+  Trash2,
+} from 'lucide-react'
+import {
+  ConnectorStatus,
   CreateRemoteNetworkDocument,
   DeleteRemoteNetworkDocument,
+  GetRemoteNetworksDocument,
+  NetworkHealth,
   NetworkLocation,
   RemoteNetworkStatus,
-  NetworkHealth,
-  ConnectorStatus,
   ShieldStatus,
 } from '@/generated/graphql'
 import type {
   CreateRemoteNetworkMutationVariables,
   DeleteRemoteNetworkMutationVariables,
 } from '@/generated/graphql'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Plus,
-  Network,
-  Trash2,
-  ArrowRight,
-  Home,
-  Building2,
-  Cloud,
-  MapPin,
-  ChevronDown,
-  X,
-} from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, EntityIcon, StatusPill } from '@/lib/console'
 
-const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home; color: string }> = {
-  [NetworkLocation.Home]: { label: 'Home', icon: Home, color: 'text-blue-400 bg-blue-400/10 border-blue-400/20' },
-  [NetworkLocation.Office]: { label: 'Office', icon: Building2, color: 'text-violet-400 bg-violet-400/10 border-violet-400/20' },
-  [NetworkLocation.Aws]: { label: 'AWS', icon: Cloud, color: 'text-amber-400 bg-amber-400/10 border-amber-400/20' },
-  [NetworkLocation.Gcp]: { label: 'GCP', icon: Cloud, color: 'text-sky-400 bg-sky-400/10 border-sky-400/20' },
-  [NetworkLocation.Azure]: { label: 'Azure', icon: Cloud, color: 'text-cyan-400 bg-cyan-400/10 border-cyan-400/20' },
-  [NetworkLocation.Other]: { label: 'Other', icon: MapPin, color: 'text-gray-400 bg-gray-400/10 border-gray-400/20' },
+const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home }> = {
+  [NetworkLocation.Home]: { label: 'Home', icon: Home },
+  [NetworkLocation.Office]: { label: 'Office', icon: Building2 },
+  [NetworkLocation.Aws]: { label: 'AWS', icon: Cloud },
+  [NetworkLocation.Gcp]: { label: 'GCP', icon: Cloud },
+  [NetworkLocation.Azure]: { label: 'Azure', icon: Cloud },
+  [NetworkLocation.Other]: { label: 'Other', icon: MapPin },
 }
 
-const healthConfig: Record<NetworkHealth, { label: string; dotClass: string; textClass: string }> = {
-  [NetworkHealth.Online]:   { label: 'Online',   dotClass: 'bg-emerald-500', textClass: 'text-emerald-400' },
-  [NetworkHealth.Degraded]: { label: 'Degraded', dotClass: 'bg-amber-500',   textClass: 'text-amber-400'   },
-  [NetworkHealth.Offline]:  { label: 'Offline',  dotClass: 'bg-red-500',     textClass: 'text-red-400'     },
+const healthTone: Record<NetworkHealth, 'ok' | 'warn' | 'danger'> = {
+  [NetworkHealth.Online]: 'ok',
+  [NetworkHealth.Degraded]: 'warn',
+  [NetworkHealth.Offline]: 'danger',
 }
 
 export default function RemoteNetworks() {
-  const [showAdd, setShowAdd] = useState(false)
+  const [showComposer, setShowComposer] = useState(false)
   const [name, setName] = useState('')
   const [location, setLocation] = useState<NetworkLocation>(NetworkLocation.Office)
 
@@ -68,10 +64,12 @@ export default function RemoteNetworks() {
   const [createNetwork, { loading: creating }] = useMutation(CreateRemoteNetworkDocument, {
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
   })
-
   const [deleteNetwork] = useMutation(DeleteRemoteNetworkDocument, {
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
   })
+
+  const networks = data?.remoteNetworks ?? []
+  const selectedLocation = locationConfig[location]
 
   async function handleCreate() {
     if (!name.trim()) return
@@ -80,217 +78,176 @@ export default function RemoteNetworks() {
     })
     setName('')
     setLocation(NetworkLocation.Office)
-    setShowAdd(false)
+    setShowComposer(false)
   }
 
   async function handleDelete(id: string) {
+    if (!window.confirm('Delete this remote network?')) return
     await deleteNetwork({
       variables: { id } as DeleteRemoteNetworkMutationVariables,
     })
   }
 
-  const networks = data?.remoteNetworks ?? []
-  const selectedLoc = locationConfig[location]
-
   return (
     <div className="space-y-6">
-      {/* Page Header */}
-      <div className="flex items-center justify-between">
+      <div className="page-header">
         <div>
-          <h1 className="text-2xl font-display font-bold tracking-tight">Remote Networks</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage your network locations and connected infrastructure.
-          </p>
+          <h2 className="page-title">Remote Networks</h2>
+          <p className="page-subtitle">Segmented locations, connector coverage, and shield posture.</p>
         </div>
-        <Button
-          onClick={() => setShowAdd(!showAdd)}
-          className="gap-2"
-          variant={showAdd ? 'outline' : 'default'}
-        >
-          {showAdd ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
-          {showAdd ? 'Cancel' : 'Add Network'}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="metric-chip"><strong>{networks.length}</strong> total</span>
+          <Button
+            onClick={() => setShowComposer((open) => !open)}
+            variant={showComposer ? 'outline' : 'default'}
+            className="gap-2"
+          >
+            <Plus className="h-4 w-4" />
+            {showComposer ? 'Close' : 'Add Network'}
+          </Button>
+        </div>
       </div>
 
-      {/* Add Network Panel */}
-      {showAdd && (
-        <Card className="border-primary/20 bg-card/80 backdrop-blur-sm animate-fade-up">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-display">New Remote Network</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex items-end gap-3">
-              <div className="flex-1 space-y-1.5">
-                <label className="text-xs text-muted-foreground font-mono uppercase tracking-wider">
-                  Network Name
-                </label>
-                <Input
-                  placeholder="e.g. Production VPC"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                  className="bg-background/50"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className="text-xs text-muted-foreground font-mono uppercase tracking-wider">
-                  Location
-                </label>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="outline" className="gap-2 min-w-[140px] justify-between">
-                      <span className="flex items-center gap-2">
-                        <selectedLoc.icon className="w-3.5 h-3.5" />
-                        {selectedLoc.label}
-                      </span>
-                      <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent>
-                    {Object.entries(locationConfig).map(([key, cfg]) => (
-                      <DropdownMenuItem
-                        key={key}
-                        onClick={() => setLocation(key as NetworkLocation)}
-                        className="gap-2"
-                      >
-                        <cfg.icon className="w-3.5 h-3.5" />
-                        {cfg.label}
-                      </DropdownMenuItem>
-                    ))}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-              <Button onClick={handleCreate} disabled={!name.trim() || creating} className="gap-2">
-                {creating ? 'Creating...' : 'Create'}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {showComposer ? (
+        <div className="surface-card p-5">
+          <div className="mb-4">
+            <div className="text-sm font-semibold">Create Remote Network</div>
+            <div className="mt-1 text-xs text-muted-foreground">Start a new edge segment and enroll connectors against it.</div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_180px_auto]">
+            <Input
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              onKeyDown={(event) => event.key === 'Enter' && handleCreate()}
+              placeholder="Production VPC"
+              className="h-11 rounded-xl border-border bg-secondary px-4"
+            />
 
-      {/* Loading Skeletons */}
-      {loading && !data && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <Card key={i} className="bg-card/60">
-              <CardContent className="p-5 space-y-3">
-                <Skeleton className="h-5 w-3/4" />
-                <Skeleton className="h-4 w-1/2" />
-                <div className="flex gap-2">
-                  <Skeleton className="h-5 w-16" />
-                  <Skeleton className="h-5 w-20" />
-                </div>
-                <Skeleton className="h-8 w-full mt-2" />
-              </CardContent>
-            </Card>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="h-11 justify-between rounded-xl bg-secondary">
+                  <span className="flex items-center gap-2">
+                    <selectedLocation.icon className="h-4 w-4" />
+                    {selectedLocation.label}
+                  </span>
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent className="w-48">
+                {Object.entries(locationConfig).map(([key, config]) => (
+                  <DropdownMenuItem
+                    key={key}
+                    onClick={() => setLocation(key as NetworkLocation)}
+                    className="cursor-pointer gap-2"
+                  >
+                    <config.icon className="h-4 w-4" />
+                    {config.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <Button onClick={handleCreate} disabled={!name.trim() || creating} className="h-11 rounded-xl">
+              {creating ? 'Creating...' : 'Create'}
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {loading && !data ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className="surface-card p-5">
+              <Skeleton className="h-6 w-40 bg-secondary" />
+              <Skeleton className="mt-3 h-4 w-24 bg-secondary" />
+              <Skeleton className="mt-6 h-24 w-full rounded-2xl bg-secondary" />
+            </div>
           ))}
         </div>
-      )}
-
-      {/* Empty State */}
-      {!loading && networks.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="rounded-full p-4 bg-primary/5 border border-primary/10 mb-4">
-            <Network className="w-8 h-8 text-primary/40" />
-          </div>
-          <h3 className="text-lg font-display font-semibold text-foreground/80">No remote networks</h3>
-          <p className="text-sm text-muted-foreground mt-1 max-w-sm">
-            Create your first remote network to start connecting your infrastructure.
-          </p>
+      ) : networks.length === 0 ? (
+        <div className="surface-card">
+          <EmptyState
+            title="No remote networks yet"
+            description="Create the first network to start enrolling connectors and shields."
+            action={<Button onClick={() => setShowComposer(true)}>Add Network</Button>}
+          />
         </div>
-      )}
-
-      {/* Network Cards */}
-      {networks.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {networks.map((network, i) => {
-            const loc = locationConfig[network.location]
-            const connectorCount = network.connectors.length
-            const activeConnectorCount = network.connectors.filter((c) => c.status === ConnectorStatus.Active).length
-            const shieldCount = network.shields.length
-            const activeShieldCount = network.shields.filter((s) => s.status === ShieldStatus.Active).length
-            const health = healthConfig[network.networkHealth]
+      ) : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {networks.map((network) => {
+            const locationMeta = locationConfig[network.location]
+            const activeConnectors = network.connectors.filter((connector) => connector.status === ConnectorStatus.Active).length
+            const activeShields = network.shields.filter((shield) => shield.status === ShieldStatus.Active).length
+            const canDelete = network.connectors.length === 0 && network.shields.length === 0
             const isActive = network.status === RemoteNetworkStatus.Active
 
             return (
-              <Card
-                key={network.id}
-                className={cn(
-                  'group relative bg-card/60 backdrop-blur-sm border-border/50 transition-all duration-300 hover:border-primary/20 hover:scale-[1.01]',
-                )}
-                style={{ animationDelay: `${i * 80}ms` }}
-              >
-                <CardContent className="p-5 space-y-4">
-                  {/* Name + Status */}
-                  <div className="flex items-start justify-between">
-                    <div className="space-y-1.5 min-w-0">
-                      <h3 className="font-display font-semibold text-base truncate">{network.name}</h3>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            'text-[10px] font-mono border',
-                            loc.color,
-                          )}
-                        >
-                          <loc.icon className="w-3 h-3 mr-1" />
-                          {loc.label}
-                        </Badge>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            'text-[10px] font-mono',
-                            isActive
-                              ? 'text-emerald-400 bg-emerald-400/10 border-emerald-400/20'
-                              : 'text-gray-400 bg-gray-400/10 border-gray-400/20',
-                          )}
-                        >
-                          {isActive ? 'Active' : 'Inactive'}
-                        </Badge>
-                      </div>
-                      {/* Network health indicator */}
-                      <div className="flex items-center gap-2 pt-0.5">
-                        <span className={cn('w-2 h-2 rounded-full animate-pulse', health.dotClass)} />
-                        <span className={cn('text-[10px] font-mono uppercase tracking-wider', health.textClass)}>
-                          {health.label}
-                        </span>
+              <div key={network.id} className="surface-card flex flex-col p-5">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-3">
+                      <EntityIcon type="network" />
+                      <div className="min-w-0">
+                        <div className="truncate text-base font-semibold">{network.name}</div>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <StatusPill label={locationMeta.label} tone="info" />
+                          <StatusPill label={network.networkHealth.toLowerCase()} tone={healthTone[network.networkHealth]} />
+                          <StatusPill label={isActive ? 'active' : 'inactive'} tone={isActive ? 'ok' : 'muted'} />
+                        </div>
                       </div>
                     </div>
                   </div>
 
-                  {/* Connector + Shield counts */}
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">
-                      {activeConnectorCount} / {connectorCount} connector{connectorCount !== 1 ? 's' : ''} active
-                      {' · '}
-                      {activeShieldCount} shield{activeShieldCount !== 1 ? 's' : ''} active
-                    </span>
-                  </div>
+                  <button
+                    onClick={() => handleDelete(network.id)}
+                    disabled={!canDelete}
+                    className="rounded-xl border border-border bg-secondary p-2 text-muted-foreground transition hover:text-destructive disabled:cursor-not-allowed disabled:opacity-40"
+                    title={canDelete ? 'Delete network' : 'Delete disabled while connectors or shields still exist'}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 pt-1 border-t border-border/30">
-                    <Link
-                      to={`/remote-networks/${network.id}`}
-                      className="flex-1"
-                    >
-                      <Button variant="outline" size="sm" className="w-full gap-2 text-xs group/btn">
-                        View Details
-                        <ArrowRight className="w-3 h-3 transition-transform group-hover/btn:translate-x-0.5" />
-                      </Button>
-                    </Link>
-                    {connectorCount === 0 && shieldCount === 0 && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
-                        onClick={() => handleDelete(network.id)}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
-                    )}
+                <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                  <div className="section-card p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Connectors</div>
+                    <div className="mt-2 text-lg font-semibold">{activeConnectors} / {network.connectors.length}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">active coverage</div>
                   </div>
-                </CardContent>
-              </Card>
+                  <div className="section-card p-4">
+                    <div className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">Shields</div>
+                    <div className="mt-2 text-lg font-semibold">{activeShields} / {network.shields.length}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">host agents online</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 section-card p-4 text-sm">
+                  <div className="font-semibold">Topology</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <span>{locationMeta.label} segment</span>
+                    <span>•</span>
+                    <span>{network.connectors.length} connectors</span>
+                    <span>•</span>
+                    <span>{network.shields.length} shields</span>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <Link
+                    to={`/remote-networks/${network.id}`}
+                    className="inline-flex items-center gap-2 text-sm font-semibold text-primary"
+                  >
+                    Open topology
+                    <ArrowRight className="h-4 w-4" />
+                  </Link>
+                  <Link to={`/remote-networks/${network.id}/connectors`} className="text-sm text-muted-foreground transition hover:text-foreground">
+                    Connectors
+                  </Link>
+                  <Link to={`/remote-networks/${network.id}/shields`} className="text-sm text-muted-foreground transition hover:text-foreground">
+                    Shields
+                  </Link>
+                </div>
+              </div>
             )
           })}
         </div>

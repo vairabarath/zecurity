@@ -136,7 +136,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	defer h.Registry.remove(connectorID)
 
 	_, _ = h.Pool.Exec(ctx,
-		`UPDATE connectors SET status = 'active', updated_at = NOW() WHERE id = $1`,
+		`UPDATE connectors SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1`,
 		connectorID,
 	)
 	defer func() {
@@ -150,22 +150,39 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 
 	log.Printf("control stream: connector %s connected", connectorID)
 
+	// Flush gRPC headers by sending an initial Ping. This ensures the client-side
+	// .control().await call resolves immediately.
+	if err := client.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_Ping{
+			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
+		},
+	}); err != nil {
+		log.Printf("control stream: initial ping to connector %s failed: %v", connectorID, err)
+		return err
+	}
+
 	// Deliver any instructions that queued while the connector was offline.
+	log.Printf("control stream: pushing pending instructions for connector %s", connectorID)
 	if err := h.pushPendingInstructions(ctx, client); err != nil {
 		log.Printf("control stream: push pending for connector %s: %v", connectorID, err)
 	}
+	log.Printf("control stream: entering message loop for connector %s", connectorID)
 
 	for {
-		msg, err := stream.Recv()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+	        log.Printf("control stream: waiting for message from connector %s", connectorID)
+	        msg, err := stream.Recv()
+	        if err == io.EOF {
+	                log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
+	                return nil
+	        }
+	        if err != nil {
+	                log.Printf("control stream: connector %s stream error: %v", connectorID, err)
+	                return err
+	        }
 
-		switch body := msg.Body.(type) {
-		case *pb.ConnectorControlMessage_ConnectorHealth:
+	        log.Printf("control stream: received message from connector %s, body type: %T", connectorID, msg.Body)
+
+	        switch body := msg.Body.(type) {		case *pb.ConnectorControlMessage_ConnectorHealth:
 			h.handleConnectorHealth(ctx, connectorID, body.ConnectorHealth)
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, connectorID, body.ShieldStatus)
@@ -225,13 +242,15 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 }
 
 func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, connectorID string, r *pb.ConnectorHealthReport) {
+	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s", connectorID, r.Version, r.Hostname, r.LanAddr)
 	_, err := h.Pool.Exec(ctx,
 		`UPDATE connectors
-		    SET version     = $1,
-		        hostname    = $2,
-		        public_ip   = $3,
-		        lan_addr    = NULLIF($4, ''),
-		        updated_at  = NOW()
+		    SET version           = $1,
+		        hostname          = $2,
+		        public_ip         = $3,
+		        lan_addr          = NULLIF($4, ''),
+		        last_heartbeat_at = NOW(),
+		        updated_at        = NOW()
 		  WHERE id = $5`,
 		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID,
 	)

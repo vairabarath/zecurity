@@ -193,10 +193,10 @@ async fn setup_nftables(connector_addr: &str) -> Result<()> {
         ..Chain::default()
     }));
     batch.add(NfListObject::Rule(loopback_accept_rule()));
-    batch.add(NfListObject::Rule(connector_accept_rule(connector_ip)));
-    batch.add(NfListObject::Rule(interface_drop_rule(
+    batch.add(NfListObject::Rule(interface_accept_rule(
         appmeta::SHIELD_INTERFACE_NAME,
     )));
+    batch.add(NfListObject::Rule(connector_accept_rule(connector_ip)));
 
     helper::apply_ruleset_async(&batch.to_nftables())
         .await
@@ -323,7 +323,7 @@ fn connector_accept_rule(connector_ip: Ipv4Addr) -> Rule<'static> {
     }
 }
 
-fn interface_drop_rule(interface_name: &str) -> Rule<'static> {
+fn interface_accept_rule(interface_name: &str) -> Rule<'static> {
     Rule {
         family: NfFamily::INet,
         table: TABLE_NAME.into(),
@@ -336,7 +336,7 @@ fn interface_drop_rule(interface_name: &str) -> Rule<'static> {
                 right: Expression::String(interface_name.to_string().into()),
                 op: Operator::EQ,
             }),
-            Statement::Drop(Some(Drop {})),
+            Statement::Accept(Some(Accept {})),
         ]),
         ..Rule::default()
     }
