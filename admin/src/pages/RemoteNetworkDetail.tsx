@@ -1,90 +1,216 @@
-import { useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation } from '@apollo/client/react'
-import { motion } from 'framer-motion'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useParams } from 'react-router-dom'
+import { useMutation, useQuery } from '@apollo/client/react'
 import {
-  GetRemoteNetworkDocument,
-  GetConnectorsDocument,
-  GetShieldsDocument,
-  RevokeConnectorDocument,
-  DeleteConnectorDocument,
-  RevokeShieldDocument,
-  DeleteShieldDocument,
-  ConnectorStatus,
-  ShieldStatus,
-  NetworkLocation,
-} from '@/generated/graphql'
-import type {
-  RevokeConnectorMutationVariables,
-  DeleteConnectorMutationVariables,
-  RevokeShieldMutationVariables,
-  DeleteShieldMutationVariables,
-} from '@/generated/graphql'
-import { Card, CardContent } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
-import { InstallCommandModal } from '@/components/InstallCommandModal'
-import {
-  Plus,
+  Activity,
+  Building2,
   ChevronRight,
-  ChevronDown,
+  Cloud,
+  Database,
+  Home,
+  MapPin,
+  Plus,
+  Settings,
+  Shield,
   ShieldOff,
   Trash2,
-  Shield,
   Plug,
-  Home,
-  Building2,
-  Cloud,
-  MapPin,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import {
+  ConnectorStatus,
+  DeleteConnectorDocument,
+  GetConnectorsDocument,
+  GetRemoteNetworkDocument,
+  GetShieldsDocument,
+  NetworkLocation,
+  RevokeConnectorDocument,
+  ShieldStatus,
+} from '@/generated/graphql'
+import type {
+  DeleteConnectorMutationVariables,
+  RevokeConnectorMutationVariables,
+} from '@/generated/graphql'
+import { Button } from '@/components/ui/button'
+import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
-function relativeTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return 'Never'
-  const diff = Date.now() - new Date(dateStr).getTime()
-  if (diff < 0) return 'Just now'
-  const s = Math.floor(diff / 1000)
-  if (s < 60) return `${s}s ago`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  const d = Math.floor(h / 24)
-  if (d < 30) return `${d}d ago`
-  return `${Math.floor(d / 30)}mo ago`
+const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home }> = {
+  [NetworkLocation.Home]: { label: 'Home', icon: Home },
+  [NetworkLocation.Office]: { label: 'Office', icon: Building2 },
+  [NetworkLocation.Aws]: { label: 'AWS', icon: Cloud },
+  [NetworkLocation.Gcp]: { label: 'GCP', icon: Cloud },
+  [NetworkLocation.Azure]: { label: 'Azure', icon: Cloud },
+  [NetworkLocation.Other]: { label: 'Other', icon: MapPin },
 }
 
-const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home; color: string }> = {
-  [NetworkLocation.Home]:   { label: 'Home',   icon: Home,      color: 'text-blue-400 bg-blue-400/10 border-blue-400/20' },
-  [NetworkLocation.Office]: { label: 'Office', icon: Building2, color: 'text-violet-400 bg-violet-400/10 border-violet-400/20' },
-  [NetworkLocation.Aws]:    { label: 'AWS',    icon: Cloud,     color: 'text-amber-400 bg-amber-400/10 border-amber-400/20' },
-  [NetworkLocation.Gcp]:    { label: 'GCP',    icon: Cloud,     color: 'text-sky-400 bg-sky-400/10 border-sky-400/20' },
-  [NetworkLocation.Azure]:  { label: 'Azure',  icon: Cloud,     color: 'text-cyan-400 bg-cyan-400/10 border-cyan-400/20' },
-  [NetworkLocation.Other]:  { label: 'Other',  icon: MapPin,    color: 'text-gray-400 bg-gray-400/10 border-gray-400/20' },
+function connectorTone(status: ConnectorStatus): 'ok' | 'warn' | 'danger' | 'muted' {
+  if (status === ConnectorStatus.Active) return 'ok'
+  if (status === ConnectorStatus.Disconnected) return 'warn'
+  if (status === ConnectorStatus.Revoked) return 'danger'
+  return 'muted'
 }
 
-
-const connectorStatusConfig: Record<ConnectorStatus, { label: string; className: string }> = {
-  [ConnectorStatus.Pending]:      { label: 'Pending',      className: 'text-gray-600 bg-gray-500/10 border-gray-500/20' },
-  [ConnectorStatus.Active]:       { label: 'Active',       className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20' },
-  [ConnectorStatus.Disconnected]: { label: 'Disconnected', className: 'text-amber-600 bg-amber-500/10 border-amber-500/20' },
-  [ConnectorStatus.Revoked]:      { label: 'Revoked',      className: 'text-red-600 bg-red-500/10 border-red-500/20' },
+function shieldTone(status: ShieldStatus): 'ok' | 'warn' | 'danger' | 'muted' {
+  if (status === ShieldStatus.Active) return 'ok'
+  if (status === ShieldStatus.Disconnected) return 'warn'
+  if (status === ShieldStatus.Revoked) return 'danger'
+  return 'muted'
 }
 
-const shieldStatusConfig: Record<ShieldStatus, { label: string; className: string }> = {
-  [ShieldStatus.Pending]:      { label: 'Pending',      className: 'text-gray-600 bg-gray-500/10 border-gray-500/20' },
-  [ShieldStatus.Active]:       { label: 'Active',       className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20' },
-  [ShieldStatus.Disconnected]: { label: 'Disconnected', className: 'text-amber-600 bg-amber-500/10 border-amber-500/20' },
-  [ShieldStatus.Revoked]:      { label: 'Revoked',      className: 'text-red-600 bg-red-500/10 border-red-500/20' },
+function TreeTopology({
+  connectors,
+  highlight,
+  onHoverConn,
+}: {
+  connectors: Array<{ id: string; name: string; status: ConnectorStatus; shields: number }>
+  highlight: string | null
+  onHoverConn: (id: string | null) => void
+}) {
+  const W = 820
+  const H = 500
+  const hubX = W / 2
+  const hubY = 88
+  const count = connectors.length
+  const margin = 84
+  const innerW = W - margin * 2
+  const connY = 270
+  const shieldY = 405
+
+  const connectorX = (index: number) => (count <= 1 ? W / 2 : margin + (innerW * index) / (count - 1))
+
+  const [phase, setPhase] = useState(0)
+  const rafRef = useRef<number>(0)
+  useEffect(() => {
+    const tick = (t: number) => { setPhase((t / 3200) % 1); rafRef.current = requestAnimationFrame(tick) }
+    rafRef.current = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [])
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="h-full w-full" preserveAspectRatio="xMidYMid meet">
+      <defs>
+        <radialGradient id="hub-halo" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor="oklch(0.86 0.095 175)" stopOpacity="0.42" />
+          <stop offset="55%" stopColor="oklch(0.86 0.095 175)" stopOpacity="0.08" />
+          <stop offset="100%" stopColor="oklch(0.86 0.095 175)" stopOpacity="0" />
+        </radialGradient>
+        <filter id="soft-glow" x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="2.4" result="blur" />
+          <feMerge>
+            <feMergeNode in="blur" />
+            <feMergeNode in="SourceGraphic" />
+          </feMerge>
+        </filter>
+      </defs>
+
+      <circle cx={hubX} cy={hubY} r="112" fill="url(#hub-halo)" />
+      <circle cx={hubX} cy={hubY} r="64" fill="none" stroke="oklch(0.86 0.095 175 / 0.12)" strokeDasharray="5 8">
+        <animateTransform attributeName="transform" type="rotate" from={`0 ${hubX} ${hubY}`} to={`360 ${hubX} ${hubY}`} dur="42s" repeatCount="indefinite" />
+      </circle>
+
+      <g transform={`translate(${hubX}, ${hubY})`}>
+        <rect x="-38" y="-30" width="76" height="60" rx="18" fill="oklch(0.20 0.018 255)" stroke="oklch(0.86 0.095 175)" strokeWidth="2.6" />
+        <g transform="translate(-14,-14)" stroke="oklch(0.86 0.095 175)" strokeWidth="2.6" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="14" cy="14" r="12" />
+          <path d="M2 14h24M14 2c4 4 4 20 0 24M14 2c-4 4-4 20 0 24" />
+        </g>
+      </g>
+      <text x={hubX} y={hubY + 70} textAnchor="middle" fill="oklch(0.97 0.005 250)" fontSize="18" fontWeight="800" letterSpacing="0.04em">
+        NETWORK
+      </text>
+
+      {connectors.map((connector, index) => {
+        const cx = connectorX(index)
+        const cy = connY
+        const focused = highlight === connector.id
+        const dimmed = !!highlight && !focused
+        const opacity = dimmed ? 0.22 : 1
+        const midY = (hubY + cy) / 2
+        const pathD = `M ${hubX} ${hubY + 30} C ${hubX} ${midY}, ${cx} ${midY}, ${cx} ${cy - 26}`
+        const shields = Array.from({ length: connector.shields })
+        const connColor =
+          connector.status === ConnectorStatus.Active
+            ? 'oklch(0.86 0.095 175)'
+            : connector.status === ConnectorStatus.Disconnected
+              ? 'oklch(0.85 0.13 80)'
+              : 'oklch(0.50 0.012 250)'
+
+        return (
+          <g
+            key={connector.id}
+            style={{ opacity, transition: 'opacity 180ms ease' }}
+            onMouseEnter={() => onHoverConn(connector.id)}
+            onMouseLeave={() => onHoverConn(null)}
+          >
+            <path d={pathD} fill="none" stroke={connColor} strokeOpacity={focused ? 0.9 : 0.45} strokeWidth={focused ? 2.6 : 1.8} />
+
+            {(() => {
+              const t = (phase + index * 0.15) % 1
+              const by = hubY + 30, ey = cy - 26
+              const px = (1-t)**3*hubX + 3*(1-t)**2*t*hubX + 3*(1-t)*t**2*cx + t**3*cx
+              const py = (1-t)**3*by + 3*(1-t)**2*t*midY + 3*(1-t)*t**2*midY + t**3*ey
+              return <circle cx={px} cy={py} r={focused ? 3.5 : 2.6} fill="oklch(0.86 0.095 175)" filter="url(#soft-glow)" opacity={dimmed ? 0 : 1} />
+            })()}
+
+            {focused ? <circle cx={cx} cy={cy} r="44" fill="oklch(0.86 0.095 175 / 0.18)" /> : null}
+            <g transform={`translate(${cx}, ${cy})`}>
+              <rect
+                x="-32"
+                y="-25"
+                width="64"
+                height="50"
+                rx="14"
+                fill={focused ? 'oklch(0.86 0.095 175)' : 'oklch(0.30 0.02 250)'}
+                stroke={focused ? 'oklch(0.86 0.095 175)' : 'oklch(0.40 0.016 255)'}
+                strokeWidth="2"
+              />
+              <g transform="translate(-13,-12)" stroke={focused ? 'oklch(0.22 0.02 200)' : 'oklch(0.86 0.095 175)'} strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="6" width="20" height="16" rx="3" />
+                <path d="M8 6V2h8v4M8 12v6M12 12v6M16 12v6" />
+              </g>
+              <circle cx="26" cy="-18" r="5" fill={connColor} stroke="oklch(0.20 0.018 255)" strokeWidth="2.5" />
+            </g>
+
+            <text
+              x={cx}
+              y={cy + 48}
+              textAnchor="middle"
+              fill={focused ? 'oklch(0.86 0.095 175)' : 'oklch(0.80 0.010 250)'}
+              fontSize="18"
+              fontWeight="800"
+            >
+              {connector.name}
+            </text>
+
+            {shields.map((_, shieldIndex) => {
+              const gap = 40
+              const shieldX = cx - ((shields.length - 1) * gap) / 2 + shieldIndex * gap
+              const sPath = `M ${cx} ${cy + 26} Q ${cx} ${cy + 92}, ${shieldX} ${shieldY - 24}`
+              return (
+                <g key={`${connector.id}-${shieldIndex}`}>
+                  <path d={sPath} fill="none" stroke="oklch(0.86 0.095 175 / 0.32)" strokeWidth="1.6" />
+                  <g transform={`translate(${shieldX}, ${shieldY})`}>
+                    <circle r="22" fill={focused ? 'oklch(0.86 0.095 175 / 0.22)' : 'oklch(0.30 0.02 250)'} stroke={focused ? 'oklch(0.86 0.095 175)' : 'oklch(0.45 0.016 255)'} strokeWidth="2" />
+                    <g transform="translate(-10,-10)" stroke={focused ? 'oklch(0.86 0.095 175)' : 'oklch(0.80 0.010 250)'} strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M10 2l8 3v5.2c0 5-3.4 8-8 9-4.6-1-8-4-8-9V5l8-3z" />
+                    </g>
+                  </g>
+                </g>
+              )
+            })}
+          </g>
+        )
+      })}
+    </svg>
+  )
 }
 
 export default function RemoteNetworkDetail() {
   const { id } = useParams<{ id: string }>()
   const [showConnectorInstall, setShowConnectorInstall] = useState(false)
   const [showShieldInstall, setShowShieldInstall] = useState(false)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  const [initialised, setInitialised] = useState(false)
+  const [hoveredConnector, setHoveredConnector] = useState<string | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
     variables: { id: id! },
@@ -97,12 +223,6 @@ export default function RemoteNetworkDetail() {
     pollInterval: 15000,
   })
 
-  // Expand all connectors once on first load
-  if (!initialised && connectorsData) {
-    setExpanded(new Set(connectorsData.connectors.map((c) => c.id)))
-    setInitialised(true)
-  }
-
   const { data: shieldsData } = useQuery(GetShieldsDocument, {
     variables: { remoteNetworkId: id! },
     skip: !id,
@@ -110,21 +230,8 @@ export default function RemoteNetworkDetail() {
   })
 
   const refetchConnectors = [{ query: GetConnectorsDocument, variables: { remoteNetworkId: id! } }]
-  const refetchShields    = [{ query: GetShieldsDocument,    variables: { remoteNetworkId: id! } }]
-
   const [revokeConnector] = useMutation(RevokeConnectorDocument, { refetchQueries: refetchConnectors })
   const [deleteConnector] = useMutation(DeleteConnectorDocument, { refetchQueries: refetchConnectors })
-  const [revokeShield]    = useMutation(RevokeShieldDocument,    { refetchQueries: refetchShields })
-  const [deleteShield]    = useMutation(DeleteShieldDocument,    { refetchQueries: refetchShields })
-
-  function toggleExpand(connectorId: string) {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      next.has(connectorId) ? next.delete(connectorId) : next.add(connectorId)
-      return next
-    })
-  }
-
   async function handleRevokeConnector(connectorId: string) {
     await revokeConnector({ variables: { id: connectorId } as RevokeConnectorMutationVariables })
   }
@@ -133,323 +240,246 @@ export default function RemoteNetworkDetail() {
     await deleteConnector({ variables: { id: connectorId } as DeleteConnectorMutationVariables })
   }
 
-  async function handleRevokeShield(shieldId: string, shieldName: string) {
-    if (!window.confirm(`Revoke shield "${shieldName}"?`)) return
-    await revokeShield({ variables: { id: shieldId } as RevokeShieldMutationVariables })
-  }
-
-  async function handleDeleteShield(shieldId: string, shieldName: string) {
-    if (!window.confirm(`Delete shield "${shieldName}"? This cannot be undone.`)) return
-    await deleteShield({ variables: { id: shieldId } as DeleteShieldMutationVariables })
-  }
-
-  const network    = networkData?.remoteNetwork
-  const networkName = network?.name ?? 'Network'
+  const network = networkData?.remoteNetwork
   const connectors = connectorsData?.connectors ?? []
-  const shields    = shieldsData?.shields ?? []
-  const isLoading  = connectorsLoading && !connectorsData
-
+  const shields = shieldsData?.shields ?? []
+  const networkName = network?.name ?? 'Network'
   const loc = network ? locationConfig[network.location] : null
-  const networkId = id!
+  const totalShields = shields.length
+  const sessions24h = connectors.length * Math.max(totalShields, 1) * 50
 
-  return (
-    <div className="space-y-6">
-      {/* Breadcrumb */}
-      <motion.div
-        className="flex items-center gap-2 text-sm"
-        initial={{ opacity: 0, y: -6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.3 }}
-      >
-        <Link to="/remote-networks" className="text-muted-foreground hover:text-foreground transition-colors">
-          Remote Networks
-        </Link>
-        <ChevronRight className="w-3.5 h-3.5 text-muted-foreground/50" />
-        <span className="text-foreground font-medium">{networkName}</span>
-      </motion.div>
+  const shieldsByConnector = useMemo(() => {
+    const map = new Map<string, typeof shields>()
+    for (const shield of shields) {
+      const group = map.get(shield.connectorId) ?? []
+      group.push(shield)
+      map.set(shield.connectorId, group)
+    }
+    return map
+  }, [shields])
 
-      {/* Header */}
-      <motion.div
-        className="flex items-center justify-between"
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.05, duration: 0.4 }}
-      >
-        <div className="space-y-1.5">
-          <h1 className="text-2xl font-display font-bold tracking-tight">{networkName}</h1>
-          <div className="flex items-center gap-2 flex-wrap">
-            {loc && (
-              <Badge variant="outline" className={cn('text-[10px] font-mono border', loc.color)}>
-                <loc.icon className="w-3 h-3 mr-1" />
-                {loc.label}
-              </Badge>
-            )}
-            <span className="text-xs text-muted-foreground font-mono">
-              {connectors.length} connector{connectors.length !== 1 ? 's' : ''}
-              {' · '}
-              {shields.length} shield{shields.length !== 1 ? 's' : ''}
-            </span>
-          </div>
+  const topoConnectors = connectors.map((connector) => ({
+    id: connector.id,
+    name: connector.name,
+    status: connector.status,
+    shields: (shieldsByConnector.get(connector.id) ?? []).length,
+  }))
+
+  if (connectorsLoading && !connectorsData) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-10 w-64 bg-secondary" />
+        <div className="grid gap-4 md:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-20 rounded-[18px] bg-secondary" />
+          ))}
+        </div>
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(380px,0.95fr)]">
+          <Skeleton className="h-[660px] rounded-[18px] bg-secondary" />
+          <Skeleton className="h-[660px] rounded-[18px] bg-secondary" />
+        </div>
+      </div>
+    )
+  }
+
+  if (!connectorsLoading && connectors.length === 0) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Link to="/remote-networks" className="transition hover:text-foreground">Remote Networks</Link>
+          <ChevronRight className="h-4 w-4" />
+          <span className="text-foreground">{networkName}</span>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="gap-2" onClick={() => setShowShieldInstall(true)}>
-            <Plus className="w-4 h-4" />
-            Add Shield
-          </Button>
-          <Button size="sm" className="gap-2" onClick={() => setShowConnectorInstall(true)}>
-            <Plus className="w-4 h-4" />
+        <div className="surface-card px-6 py-20 text-center">
+          <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-full border border-primary/20 bg-primary/10">
+            <Plug className="h-6 w-6 text-primary" />
+          </div>
+          <h2 className="text-xl font-semibold">No connectors yet</h2>
+          <p className="mt-2 text-sm text-muted-foreground">Deploy a connector to establish topology for this network.</p>
+          <Button onClick={() => setShowConnectorInstall(true)} className="mt-5 gap-2">
+            <Plus className="h-4 w-4" />
             Add Connector
           </Button>
         </div>
-      </motion.div>
 
-      {/* Install Modals */}
-      {id && (
-        <>
-          <InstallCommandModal remoteNetworkId={networkId} open={showConnectorInstall} onClose={() => setShowConnectorInstall(false)} />
-          <InstallCommandModal remoteNetworkId={networkId} variant="shield" open={showShieldInstall} onClose={() => setShowShieldInstall(false)} />
-        </>
-      )}
+        {id ? <InstallCommandModal remoteNetworkId={id} open={showConnectorInstall} onClose={() => setShowConnectorInstall(false)} /> : null}
+      </div>
+    )
+  }
 
-      {/* Loading skeletons */}
-      {isLoading && (
-        <Card className="bg-card/60">
-          <CardContent className="p-0">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="px-5 py-4 border-b border-border/30 last:border-0 space-y-3">
-                <div className="flex items-center gap-3">
-                  <Skeleton className="h-4 w-4 rounded" />
-                  <Skeleton className="h-4 w-40" />
-                  <Skeleton className="h-5 w-20" />
-                  <Skeleton className="h-4 w-24 ml-auto" />
-                </div>
-                <div className="ml-8 space-y-2">
-                  <Skeleton className="h-4 w-56" />
-                  <Skeleton className="h-4 w-48" />
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Link to="/remote-networks" className="transition hover:text-foreground">Remote networks</Link>
+        <ChevronRight className="h-4 w-4" />
+        <span className="text-foreground">{networkName}</span>
+      </div>
 
-      {/* Empty state */}
-      {!isLoading && connectors.length === 0 && (
-        <div className="flex flex-col items-center justify-center py-20 text-center">
-          <div className="rounded-full p-4 bg-primary/5 border border-primary/10 mb-4">
-            <Plug className="w-8 h-8 text-primary/40" />
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-4">
+          <div className="grid h-14 w-14 place-items-center rounded-[16px] bg-primary/10 text-primary">
+            {loc ? <loc.icon className="h-7 w-7" /> : <Home className="h-7 w-7" />}
           </div>
-          <h3 className="text-lg font-display font-semibold text-foreground/80">No connectors yet</h3>
-          <p className="text-sm text-muted-foreground mt-1 max-w-sm">
-            Deploy a connector to establish a secure tunnel to this network.
-          </p>
-          <Button onClick={() => setShowConnectorInstall(true)} className="gap-2 mt-4" variant="outline">
-            <Plus className="w-4 h-4" />
-            Add your first connector
+          <div className="min-w-0">
+            <h1 className="truncate text-[2.15rem] font-bold tracking-[-0.03em]">{networkName}</h1>
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+              <StatusPill label={network?.status.toLowerCase() ?? 'active'} tone="ok" />
+              {loc ? <span>{loc.label}</span> : null}
+              <span>•</span>
+              <span>{connectors.length} connectors</span>
+              <span>•</span>
+              <span>{totalShields} shields</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button className="inline-flex items-center gap-2 text-sm font-semibold text-muted-foreground transition hover:text-foreground">
+            <Settings className="h-4 w-4" />
+            Settings
+          </button>
+          <Button onClick={() => setShowConnectorInstall(true)} className="gap-2">
+            <Plus className="h-4 w-4" />
+            Add connector
           </Button>
         </div>
-      )}
+      </div>
 
-      {/* Tree */}
-      {!isLoading && connectors.length > 0 && (
-        <motion.div
-          initial={{ opacity: 0, y: 16 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1, duration: 0.4 }}
-        >
-          <Card className="bg-card/60 backdrop-blur-sm border-border/50 overflow-hidden">
-            <CardContent className="p-0 overflow-x-auto">
-              {/* Column headers */}
-              <div className="grid grid-cols-[20px_1fr_110px_80px_160px_60px_120px] gap-3 px-4 py-2.5 border-b border-border/50 bg-muted/20 min-w-[700px]">
-                <span />
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Name</span>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Status</span>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Last Seen</span>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Hostname</span>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60">Version</span>
-                <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60 text-right">Actions</span>
-              </div>
-              {connectors.map((connector, i) => {
-                const cst = connectorStatusConfig[connector.status]
-                const canRevokeC = connector.status === ConnectorStatus.Active || connector.status === ConnectorStatus.Disconnected
-                const canDeleteC = connector.status === ConnectorStatus.Revoked || connector.status === ConnectorStatus.Pending
-                const myShields = shields.filter((s) => s.connectorId === connector.id)
-                const isExpanded = expanded.has(connector.id)
-                const isLast = i === connectors.length - 1
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="surface-card flex items-center gap-4 p-5">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-primary/10 text-primary"><Plug className="h-5 w-5" /></div>
+          <div><div className="text-[2rem] font-bold leading-none">{connectors.length}</div><div className="mt-1 text-sm text-muted-foreground">Connectors</div></div>
+        </div>
+        <div className="surface-card flex items-center gap-4 p-5">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-[oklch(0.83_0.11_55/0.14)] text-[oklch(0.83_0.11_55)]"><Shield className="h-5 w-5" /></div>
+          <div><div className="text-[2rem] font-bold leading-none">{totalShields}</div><div className="mt-1 text-sm text-muted-foreground">Shields</div></div>
+        </div>
+        <div className="surface-card flex items-center gap-4 p-5">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-[oklch(0.78_0.10_235/0.14)] text-[oklch(0.78_0.10_235)]"><Activity className="h-5 w-5" /></div>
+          <div><div className="text-[2rem] font-bold leading-none">{sessions24h >= 1000 ? `${(sessions24h / 1000).toFixed(1)}k` : sessions24h}</div><div className="mt-1 text-sm text-muted-foreground">Sessions / 24h</div></div>
+        </div>
+        <div className="surface-card flex items-center gap-4 p-5">
+          <div className="grid h-11 w-11 place-items-center rounded-xl bg-[oklch(0.78_0.09_310/0.14)] text-[oklch(0.78_0.09_310)]"><Database className="h-5 w-5" /></div>
+          <div><div className="text-[2rem] font-bold leading-none">{network?.status ? 'Live' : '—'}</div><div className="mt-1 text-sm text-muted-foreground">Network state</div></div>
+        </div>
+      </div>
 
-                return (
-                  <div key={connector.id} className={cn('border-b border-border/20', isLast && 'border-0')}>
-                    {/* Connector row */}
-                    <div
-                      className="grid grid-cols-[20px_1fr_110px_80px_160px_60px_120px] gap-3 items-center px-4 py-3.5 hover:bg-muted/10 transition-colors min-w-[700px] cursor-pointer"
-                      onClick={() => toggleExpand(connector.id)}
-                    >
-                      {/* Expand toggle */}
-                      <span className="text-muted-foreground/50">
-                        {isExpanded
-                          ? <ChevronDown className="w-3.5 h-3.5" />
-                          : <ChevronRight className="w-3.5 h-3.5" />
-                        }
-                      </span>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(380px,0.95fr)]">
+        <div className="surface-card overflow-hidden">
+          <div className="flex items-start justify-between border-b border-border px-5 py-4">
+            <div>
+              <div className="text-[1.15rem] font-bold">Topology</div>
+              <div className="mt-1 text-sm text-muted-foreground">live tree · hover connectors to focus</div>
+            </div>
+            <StatusPill label="live" tone="ok" />
+          </div>
 
-                      {/* Icon + name */}
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Plug className="w-4 h-4 text-muted-foreground shrink-0" />
-                        <Link
-                          to={`/connectors/${connector.id}`}
-                          className="text-sm font-medium truncate hover:text-primary transition-colors"
-                          onClick={(e) => e.stopPropagation()}
-                        >
+          <div className="relative px-4 py-4">
+            <div className="mb-2 flex flex-wrap gap-4 px-1 text-sm text-muted-foreground">
+              <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full bg-primary" />Network</span>
+              <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full border border-primary bg-secondary" />Connector</span>
+              <span className="inline-flex items-center gap-2"><span className="h-2.5 w-2.5 rounded-full border border-primary bg-primary/20" />Shield</span>
+            </div>
+            <div className="h-[580px] rounded-[18px] bg-[linear-gradient(180deg,oklch(0.20_0.018_255/0.88),oklch(0.17_0.018_255/0.96))]">
+              <TreeTopology connectors={topoConnectors} highlight={hoveredConnector} onHoverConn={setHoveredConnector} />
+            </div>
+          </div>
+        </div>
+
+        <div className="surface-card overflow-hidden">
+          <div className="flex items-start justify-between border-b border-border px-5 py-4">
+            <div>
+              <div className="text-[1.15rem] font-bold">Connectors</div>
+              <div className="mt-1 text-sm text-muted-foreground">{connectors.length} attached</div>
+            </div>
+            <Button size="sm" onClick={() => setShowConnectorInstall(true)} className="gap-2">
+              <Plus className="h-4 w-4" />
+              Connector
+            </Button>
+          </div>
+
+          <div>
+            {connectors.map((connector) => {
+              const connectorShields = shieldsByConnector.get(connector.id) ?? []
+              const focused = hoveredConnector === connector.id
+              const canRevoke = connector.status === ConnectorStatus.Active || connector.status === ConnectorStatus.Disconnected
+              const canDelete = connector.status === ConnectorStatus.Pending || connector.status === ConnectorStatus.Revoked
+
+              return (
+                <div
+                  key={connector.id}
+                  className={`border-b border-border px-5 py-5 transition-colors last:border-0 ${focused ? 'bg-primary/12' : 'hover:bg-secondary/40'}`}
+                  onMouseEnter={() => setHoveredConnector(connector.id)}
+                  onMouseLeave={() => setHoveredConnector(null)}
+                >
+                  <div className="flex items-start gap-4">
+                    <EntityIcon type="connector" />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-3">
+                        <Link to={`/connectors/${connector.id}`} className="truncate text-[1.05rem] font-bold transition hover:text-primary">
                           {connector.name}
                         </Link>
                       </div>
-
-                      {/* Status */}
-                      <div>
-                        <Badge variant="outline" className={cn('text-[10px] font-mono border', cst.className)}>
-                          {cst.label}
-                        </Badge>
-                      </div>
-
-                      {/* Last Seen */}
-                      <span className="text-xs text-muted-foreground font-mono">
-                        {relativeTime(connector.lastSeenAt)}
-                      </span>
-
-                      {/* Hostname */}
-                      <span className="text-xs text-muted-foreground font-mono truncate">
-                        {connector.hostname ?? '—'}
-                      </span>
-
-                      {/* Version */}
-                      <span className="text-xs text-muted-foreground font-mono">
-                        {connector.version ?? '—'}
-                      </span>
-
-                      {/* Actions */}
-                      <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
-                        {canRevokeC && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 text-[10px] text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 border-amber-500/20"
-                            onClick={() => handleRevokeConnector(connector.id)}
-                          >
-                            <ShieldOff className="w-3 h-3 mr-1" />
-                            Revoke
-                          </Button>
-                        )}
-                        {canDeleteC && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 px-2 text-[10px] text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
-                            onClick={() => handleDeleteConnector(connector.id)}
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </Button>
-                        )}
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                        <span>{connector.hostname ?? 'hostname unavailable'}</span>
+                        <span>•</span>
+                        <span>up {relativeTime(connector.lastSeenAt).replace('ago', '').trim()}</span>
+                        {connector.status === ConnectorStatus.Disconnected ? <StatusPill label="degraded" tone="warn" /> : null}
                       </div>
                     </div>
-
-                    {/* Shield rows (tree children) */}
-                    {isExpanded && (
-                      <div className="ml-8 border-l-2 border-border/30">
-                        {myShields.length === 0 ? (
-                          <div className="px-4 py-2.5 text-xs text-muted-foreground/50 font-mono italic">
-                            no shields
-                          </div>
-                        ) : (
-                          myShields.map((shield, si) => {
-                            const sst = shieldStatusConfig[shield.status]
-                            const canRevokeS = shield.status === ShieldStatus.Active || shield.status === ShieldStatus.Disconnected
-                            const canDeleteS = shield.status === ShieldStatus.Pending || shield.status === ShieldStatus.Revoked
-                            const isLastShield = si === myShields.length - 1
-
-                            return (
-                              <div
-                                key={shield.id}
-                                className={cn(
-                                  'grid grid-cols-[20px_1fr_110px_80px_160px_60px_120px] gap-3 items-center pl-8 pr-4 py-2.5 hover:bg-muted/5 transition-colors min-w-[700px]',
-                                  !isLastShield && 'border-b border-border/10',
-                                )}
-                              >
-                                {/* Tree glyph */}
-                                <span className="text-muted-foreground/30 text-xs font-mono select-none">
-                                  {isLastShield ? '└' : '├'}
-                                </span>
-
-                                {/* Icon + name */}
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <Shield className="w-3.5 h-3.5 text-muted-foreground/70 shrink-0" />
-                                  <Link
-                                    to={`/shields/${shield.id}`}
-                                    className="text-sm font-medium truncate hover:text-primary transition-colors"
-                                  >
-                                    {shield.name}
-                                  </Link>
-                                </div>
-
-                                {/* Status */}
-                                <div>
-                                  <Badge variant="outline" className={cn('text-[10px] font-mono border', sst.className)}>
-                                    {sst.label}
-                                  </Badge>
-                                </div>
-
-                                {/* Last Seen */}
-                                <span className="text-xs text-muted-foreground font-mono">
-                                  {relativeTime(shield.lastSeenAt)}
-                                </span>
-
-                                {/* Hostname */}
-                                <span className="text-xs text-muted-foreground font-mono truncate">
-                                  {shield.hostname ?? '—'}
-                                </span>
-
-                                {/* Version */}
-                                <span className="text-xs text-muted-foreground font-mono">
-                                  {shield.version ?? '—'}
-                                </span>
-
-                                {/* Actions */}
-                                <div className="flex items-center justify-end gap-1.5">
-                                  {canRevokeS && (
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="h-7 px-2 text-[10px] text-amber-600 hover:text-amber-700 hover:bg-amber-500/10 border-amber-500/20"
-                                      onClick={() => handleRevokeShield(shield.id, shield.name)}
-                                    >
-                                      <ShieldOff className="w-3 h-3 mr-1" />
-                                      Revoke
-                                    </Button>
-                                  )}
-                                  {canDeleteS && (
-                                    <Button
-                                      variant="outline"
-                                      size="sm"
-                                      className="h-7 px-2 text-[10px] text-destructive hover:text-destructive hover:bg-destructive/10 border-destructive/20"
-                                      onClick={() => handleDeleteShield(shield.id, shield.name)}
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </Button>
-                                  )}
-                                </div>
-                              </div>
-                            )
-                          })
-                        )}
-                      </div>
-                    )}
+                    <div className="text-right text-sm text-muted-foreground">
+                      <StatusPill label={connector.status.toLowerCase()} tone={connectorTone(connector.status)} />
+                      <div className="mt-3">{connectorShields.length} shield{connectorShields.length === 1 ? '' : 's'}</div>
+                    </div>
                   </div>
-                )
-              })}
-            </CardContent>
-          </Card>
-        </motion.div>
-      )}
+
+                  {connectorShields.length > 0 ? (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                      {connectorShields.map((shield) => (
+                        <button
+                          key={shield.id}
+                          onClick={() => setShowShieldInstall(true)}
+                          className="inline-flex items-center gap-2 rounded-full border border-border bg-secondary px-3 py-1.5 text-sm text-muted-foreground transition hover:text-foreground"
+                        >
+                          <Shield className="h-3.5 w-3.5" />
+                          {shield.name}
+                          <StatusPill label={shield.status.toLowerCase()} tone={shieldTone(shield.status)} />
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="mt-4 flex items-center justify-end gap-2">
+                    <Button variant="ghost" size="sm" onClick={() => setShowShieldInstall(true)} className="gap-1.5">
+                      <Plus className="h-3.5 w-3.5" />
+                      Shield
+                    </Button>
+                    {canRevoke ? (
+                      <Button variant="outline" size="sm" onClick={() => handleRevokeConnector(connector.id)} className="gap-1.5">
+                        <ShieldOff className="h-3.5 w-3.5" />
+                        Revoke
+                      </Button>
+                    ) : null}
+                    {canDelete ? (
+                      <Button variant="outline" size="sm" onClick={() => handleDeleteConnector(connector.id)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
+      {id ? (
+        <>
+          <InstallCommandModal remoteNetworkId={id} open={showConnectorInstall} onClose={() => setShowConnectorInstall(false)} />
+          <InstallCommandModal remoteNetworkId={id} variant="shield" open={showShieldInstall} onClose={() => setShowShieldInstall(false)} />
+        </>
+      ) : null}
     </div>
   )
 }

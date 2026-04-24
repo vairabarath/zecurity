@@ -1,71 +1,27 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
-import { motion } from 'framer-motion'
+import { Clock3, Plus } from 'lucide-react'
 import {
   GetRemoteNetworksDocument,
   ShieldStatus,
   type GetRemoteNetworksQuery,
 } from '@/generated/graphql'
-import { Badge } from '@/components/ui/badge'
-import { Skeleton } from '@/components/ui/skeleton'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
-import { cn } from '@/lib/utils'
-import {
-  Shield,
-  Zap,
-  Clock,
-  ArrowRight,
-  Inbox,
-  Plus,
-  Network,
-  CircleDot,
-  CircleDotDashed,
-  Ban,
-} from 'lucide-react'
+import { Skeleton } from '@/components/ui/skeleton'
+import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
 type NetworkShield = GetRemoteNetworksQuery['remoteNetworks'][number]['shields'][number] & {
   networkId: string
   networkName: string
 }
 
-const statusConfig: Record<ShieldStatus, { label: string; className: string; icon: React.ReactNode }> = {
-  [ShieldStatus.Active]: {
-    label: 'Active',
-    className: 'text-emerald-600 bg-emerald-500/10 border-emerald-500/20',
-    icon: <CircleDot className="h-3 w-3 fill-emerald-500 text-emerald-500" />,
-  },
-  [ShieldStatus.Disconnected]: {
-    label: 'Disconnected',
-    className: 'text-amber-600 bg-amber-500/10 border-amber-500/20',
-    icon: <CircleDotDashed className="h-3 w-3 fill-amber-500 text-amber-500" />,
-  },
-  [ShieldStatus.Pending]: {
-    label: 'Pending',
-    className: 'text-gray-600 bg-gray-500/10 border-gray-500/20',
-    icon: <CircleDotDashed className="h-3 w-3 fill-gray-400 text-gray-400" />,
-  },
-  [ShieldStatus.Revoked]: {
-    label: 'Revoked',
-    className: 'text-red-600 bg-red-500/10 border-red-500/20',
-    icon: <Ban className="h-3 w-3 text-red-500" />,
-  },
-}
-
-function relativeTime(dateStr: string | null | undefined): string {
-  if (!dateStr) return 'Never'
-  const diff = Date.now() - new Date(dateStr).getTime()
-  if (diff < 0) return 'just now'
-  const s = Math.floor(diff / 1000)
-  if (s < 60) return `${s}s ago`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  const d = Math.floor(h / 24)
-  if (d < 30) return `${d}d ago`
-  return `${Math.floor(d / 30)}mo ago`
+function statusTone(status: ShieldStatus): 'ok' | 'warn' | 'danger' | 'muted' {
+  if (status === ShieldStatus.Active) return 'ok'
+  if (status === ShieldStatus.Disconnected) return 'warn'
+  if (status === ShieldStatus.Revoked) return 'danger'
+  return 'muted'
 }
 
 export default function AllShields() {
@@ -77,193 +33,107 @@ export default function AllShields() {
   })
 
   const networks = data?.remoteNetworks ?? []
-  const allShields: NetworkShield[] = networks.flatMap((n) =>
-    n.shields.map((s) => ({ ...s, networkId: n.id, networkName: n.name })),
+  const allShields: NetworkShield[] = networks.flatMap((network) =>
+    (network.shields ?? []).map((shield) => ({
+      ...shield,
+      networkId: network.id,
+      networkName: network.name,
+    })),
   )
-  const activeCount = allShields.filter((s) => s.status === ShieldStatus.Active).length
+  const activeCount = allShields.filter((shield) => shield.status === ShieldStatus.Active).length
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <motion.div
-        className="flex items-center justify-between"
-        initial={{ opacity: 0, y: -8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4 }}
-      >
-        <div className="flex items-center gap-4">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 ring-1 ring-primary/20">
-            <Shield className="h-5 w-5 text-primary" />
-          </div>
-          <div>
-            <h1 className="font-display text-xl font-bold tracking-wide">Shields</h1>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Resource host agents enforcing zero-trust access
-            </p>
-          </div>
+      <div className="page-header">
+        <div>
+          <h2 className="page-title">Shields</h2>
+          <p className="page-subtitle">Host agents enforcing access at the resource edge.</p>
         </div>
-
-        <div className="flex items-center gap-3">
-          {!loading && (
-            <>
-              <div className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-3 py-1.5 ring-1 ring-border/30">
-                <Zap className="h-3 w-3 text-emerald-500" />
-                <span className="text-[11px] font-mono text-muted-foreground">
-                  {activeCount} active
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-3 py-1.5 ring-1 ring-border/30">
-                <span className="text-[11px] font-mono text-muted-foreground">
-                  {allShields.length} total
-                </span>
-              </div>
-            </>
-          )}
-          <Button
-            onClick={() => setShowAdd(true)}
-            disabled={networks.length === 0}
-            className="gap-2 text-[12px]"
-            size="sm"
-          >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-[oklch(0.82_0.12_160)]">
+            <span className="status-pill-dot bg-[oklch(0.82_0.12_160)]" />
+            <span className="font-bold">{activeCount}</span> active
+          </span>
+          <span className="status-pill border-border bg-secondary text-muted-foreground">
+            <span className="font-bold text-foreground">{allShields.length}</span> total
+          </span>
+          <Button onClick={() => setShowAdd(true)} disabled={networks.length === 0} className="gap-2">
             <Plus className="h-4 w-4" />
             Add Shield
           </Button>
         </div>
-      </motion.div>
+      </div>
 
-      {/* Table */}
-      <motion.div
-        initial={{ opacity: 0, y: 16 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.1, duration: 0.4 }}
-        className="rounded-xl border border-border bg-white overflow-hidden"
-      >
-        <div className="overflow-x-auto">
-          <div className="grid grid-cols-[1fr_110px_140px_130px_110px_110px_80px] gap-4 px-5 py-3 border-b border-border/50 bg-muted/20 min-w-[860px]">
-            {['Name', 'Status', 'Network', 'Interface', 'Hostname', 'Last Seen', ''].map((col, i) => (
-              <span
-                key={i}
-                className={cn(
-                  'text-[10px] font-mono uppercase tracking-wider text-muted-foreground/60',
-                  i === 6 && 'text-right',
-                )}
-              >
-                {col}
-              </span>
+      <div className="table-shell">
+        <div className="table-scroll">
+          <div className="table-head grid min-w-[920px] items-center grid-cols-[1.15fr_130px_170px_160px_150px_130px_100px] gap-4 px-5 py-4">
+            {['Name', 'Status', 'Network', 'Interface', 'Hostname', 'Last Seen', 'Actions'].map((label, index) => (
+              <div key={label + index} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[860px]">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div
-                  key={i}
-                  className="grid grid-cols-[1fr_110px_140px_130px_110px_110px_80px] gap-4 items-center px-5 py-3.5 border-b border-border/20 last:border-0"
-                >
-                  <Skeleton className="h-4 w-32" />
-                  <Skeleton className="h-5 w-20" />
-                  <Skeleton className="h-4 w-28" />
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-4 w-24" />
-                  <Skeleton className="h-4 w-16" />
-                  <Skeleton className="h-6 w-16 ml-auto" />
-                </div>
+            <div className="min-w-[920px] p-5 space-y-3">
+              {Array.from({ length: 5 }).map((_, index) => (
+                <Skeleton key={index} className="h-14 rounded-2xl bg-secondary" />
               ))}
             </div>
           ) : allShields.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="rounded-full p-3 bg-primary/5 border border-primary/10 mb-3">
-                <Inbox className="w-6 h-6 text-primary/40" />
-              </div>
-              <p className="text-sm text-foreground/70">No shields enrolled</p>
-              <p className="text-xs text-muted-foreground mt-0.5 max-w-xs">
-                {networks.length === 0
-                  ? 'Create a remote network first, then deploy a shield to it.'
-                  : 'Click "Add Shield" to deploy one.'}
-              </p>
-              {networks.length === 0 && (
-                <Link
-                  to="/remote-networks"
-                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline mt-3"
-                >
-                  Create a remote network <ArrowRight className="w-3 h-3" />
-                </Link>
-              )}
-            </div>
-          ) : (
-            <div className="min-w-[860px]">
-              {allShields.map((s, i) => {
-                const st = statusConfig[s.status]
-                return (
-                  <motion.div
-                    key={s.id}
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ delay: i * 0.03 }}
-                    className="grid grid-cols-[1fr_110px_140px_130px_110px_110px_80px] gap-4 items-center px-5 py-3.5 border-b border-border/20 last:border-0 hover:bg-muted/20 transition-colors"
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="flex items-center justify-center h-8 w-8 rounded-lg bg-primary/10 border border-primary/20 shrink-0">
-                        <Shield className="h-4 w-4 text-primary" />
-                      </div>
-                      <Link to={`/shields/${s.id}`} className="text-sm font-medium truncate hover:text-primary transition-colors">
-                        {s.name}
-                      </Link>
-                    </div>
-
-                    <div>
-                      <Badge
-                        variant="outline"
-                        className={cn('text-[10px] font-mono border gap-1', st.className)}
-                      >
-                        {st.icon}
-                        {st.label}
-                      </Badge>
-                    </div>
-
-                    <Link
-                      to={`/remote-networks/${s.networkId}/shields`}
-                      className="flex items-center gap-1 text-xs text-primary hover:underline truncate font-mono"
-                    >
-                      <Network className="h-3 w-3 shrink-0" />
-                      <span className="truncate">{s.networkName}</span>
-                    </Link>
-
-                    <span className="text-xs text-muted-foreground font-mono">
-                      {s.interfaceAddr ?? '—'}
-                    </span>
-
-                    <span className="text-xs text-muted-foreground font-mono truncate">
-                      {s.hostname ?? '—'}
-                    </span>
-
-                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                      <Clock className="w-3 h-3 shrink-0" />
-                      {relativeTime(s.lastSeenAt)}
-                    </div>
-
-                    <div className="flex justify-end">
-                      <Link
-                        to={`/shields/${s.id}`}
-                        className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 font-medium transition-colors"
-                      >
-                        Manage
-                        <ArrowRight className="w-3 h-3" />
-                      </Link>
-                    </div>
-                  </motion.div>
+            <EmptyState
+              title="No shields enrolled"
+              description={
+                networks.length === 0
+                  ? 'Create a remote network first, then issue a shield install command.'
+                  : 'Issue the first shield install command to bring a host under protection.'
+              }
+              action={
+                networks.length === 0 ? (
+                  <Link to="/remote-networks" className="text-sm font-semibold text-primary">Create a remote network</Link>
+                ) : (
+                  <Button onClick={() => setShowAdd(true)}>Add Shield</Button>
                 )
-              })}
+              }
+            />
+          ) : (
+            <div className="min-w-[920px]">
+              {allShields.map((shield) => (
+                <div key={shield.id} className="admin-table-row group grid items-center grid-cols-[1.15fr_130px_170px_160px_150px_130px_100px] gap-4 px-5 py-4">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <EntityIcon type="shield" />
+                    <div className="min-w-0">
+                      <div className="truncate text-[15px] font-bold leading-tight">{shield.name}</div>
+                      <div className="truncate font-mono text-[11px] font-medium text-muted-foreground">{shield.hostname ?? 'pending'}</div>
+                    </div>
+                  </div>
+                  <div>
+                    <StatusPill label={shield.status.toLowerCase()} tone={statusTone(shield.status)} />
+                  </div>
+                  <div className="truncate text-sm font-semibold text-primary">
+                    <Link to={`/remote-networks/${shield.networkId}`} className="transition hover:opacity-80">
+                      {shield.networkName}
+                    </Link>
+                  </div>
+                  <div className="font-mono text-[13px] text-muted-foreground">{shield.interfaceAddr ?? '—'}</div>
+                  <div className="truncate font-mono text-[13px] text-muted-foreground">{shield.hostname ?? '—'}</div>
+                  <div className="font-mono text-[13px] text-muted-foreground">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Clock3 className="h-3.5 w-3.5" />
+                      {relativeTime(shield.lastSeenAt)}
+                    </span>
+                  </div>
+                  <div className="text-right">
+                    <Link to={`/shields/${shield.id}`} className="inline-flex items-center gap-1 text-[13px] font-bold text-primary transition hover:opacity-80">
+                      Manage <span className="transition-transform group-hover:translate-x-0.5">→</span>
+                    </Link>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>
-      </motion.div>
+      </div>
 
-      <InstallCommandModal
-        open={showAdd}
-        onClose={() => setShowAdd(false)}
-        variant="shield"
-      />
+      <InstallCommandModal open={showAdd} onClose={() => setShowAdd(false)} variant="shield" />
     </div>
   )
 }

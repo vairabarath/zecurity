@@ -125,16 +125,14 @@ func (s *service) GenerateShieldToken(
 		}
 	}
 
-	installCommand = fmt.Sprintf(
-		"curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/shield/scripts/shield-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s bash",
-		controllerAddr,
-		controllerHTTPAddr,
-		tokenString,
+	installCmd := fmt.Sprintf(
+		"curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/shield/scripts/shield-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s SHIELD_NAME=%s bash",
+		controllerAddr, controllerHTTPAddr, tokenString, shieldName,
 	)
 
 	_ = workspaceSlug
 
-	return tokenString, installCommand, nil
+	return tokenString, installCmd, nil
 }
 
 func VerifyShieldToken(cfg Config, tokenString string) (*EnrollmentClaims, error) {

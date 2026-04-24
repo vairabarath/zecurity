@@ -51,3 +51,7 @@ completed/
 # Rust / Cargo
 connector/target/
 shield/target/
+
+# Design handoff
+zecurity-handoff/
+zecurity-handoff.zip

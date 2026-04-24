@@ -1,7 +1,6 @@
 import { useState } from 'react'
-import { useNavigate, useLocation } from 'react-router-dom'
-import { useAuthStore } from '@/store/auth'
-import { apolloClient } from '@/apollo/client'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { Bell, ChevronDown, LogOut, Search, Settings, Shield } from 'lucide-react'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import {
   DropdownMenu,
@@ -9,20 +8,40 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { 
-  LogOut, 
-  ChevronDown, 
-  Search,
-  Bell,
-  Settings,
-  Shield,
-} from 'lucide-react'
+import { apolloClient } from '@/apollo/client'
+import { useAuthStore } from '@/store/auth'
+
+const titles: Record<string, { title: string; subtitle: string }> = {
+  '/dashboard': { title: 'Dashboard', subtitle: 'Live posture across your zero-trust edge.' },
+  '/remote-networks': { title: 'Remote Networks', subtitle: 'Track networks, connectors, and shield coverage.' },
+  '/connectors': { title: 'Connectors', subtitle: 'Gateways carrying heartbeat and tunnel traffic.' },
+  '/shields': { title: 'Shields', subtitle: 'Resource agents enforcing protected access.' },
+  '/resources': { title: 'Resources', subtitle: 'Protected services currently managed by shields.' },
+  '/settings': { title: 'Settings', subtitle: 'Workspace and operator controls.' },
+}
+
+function getHeaderCopy(pathname: string) {
+  const direct = titles[pathname]
+  if (direct) return direct
+  if (pathname.startsWith('/remote-networks/')) {
+    return { title: 'Remote Network', subtitle: 'Topology, connectors, and shields for a single segment.' }
+  }
+  if (pathname.startsWith('/connectors/')) {
+    return { title: 'Connector', subtitle: 'Gateway details, install state, and lifecycle actions.' }
+  }
+  if (pathname.startsWith('/shields/')) {
+    return { title: 'Shield', subtitle: 'Resource host identity, install state, and lifecycle actions.' }
+  }
+  return { title: 'Zecurity', subtitle: 'Zero Trust Network Access console.' }
+}
 
 export function Header() {
   const navigate = useNavigate()
   const location = useLocation()
   const { user, clearAuth } = useAuthStore()
-  const [searchFocused, setSearchFocused] = useState(false)
+  const [search, setSearch] = useState('')
+  const copy = getHeaderCopy(location.pathname)
+  const initials = user?.email?.slice(0, 2).toUpperCase() ?? 'ZT'
 
   async function handleSignOut() {
     await apolloClient.clearStore()
@@ -30,97 +49,67 @@ export function Header() {
     navigate('/login', { replace: true })
   }
 
-  const initials = user?.email?.slice(0, 2).toUpperCase() ?? '??'
-  const pageName = location.pathname.split('/')[1] || 'Dashboard'
-
   return (
-    <header className="relative h-14 flex items-center justify-between px-6 bg-card/80 border-b border-border">
-      <div className="flex items-center gap-3">
-        <span className="text-sm font-semibold text-foreground capitalize">
-          {pageName.replace('-', ' ')}
-        </span>
+    <header className="app-panel col-start-2 row-start-1 flex items-center gap-4 px-5 max-[980px]:col-start-1 max-[980px]:row-start-2">
+      <div className="min-w-0">
+        <h1 className="truncate text-[18px] font-bold tracking-[-0.015em]">{copy.title}</h1>
+        <p className="truncate text-[12px] text-muted-foreground">{copy.subtitle}</p>
       </div>
 
-      {!searchFocused && (
-        <button
-          onClick={() => setSearchFocused(true)}
-          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border bg-muted text-muted-foreground hover:text-foreground hover:bg-muted/80 transition-all text-sm"
-        >
-          <Search className="w-4 h-4" />
-          Search...
-          <kbd className="ml-1 px-1.5 py-0.5 text-xs font-mono bg-background rounded border border-border">
-            ⌘K
-          </kbd>
-        </button>
-      )}
+      <div className="flex-1" />
 
-      {searchFocused && (
-        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-          <input
-            placeholder="Search..."
-            className="w-64 px-3 py-1.5 rounded-lg border border-primary bg-white text-sm outline-none focus:ring-2 focus:ring-primary/30"
-            autoFocus
-            onBlur={() => setSearchFocused(false)}
-          />
-        </div>
-      )}
+      <label className="toolbar-input hidden max-w-[320px] md:flex">
+        <Search className="h-4 w-4 shrink-0" />
+        <input
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search networks, connectors, shields..."
+        />
+        <span className="rounded-md bg-accent px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">/</span>
+      </label>
 
-      <div className="flex items-center gap-3">
-        <button className="relative flex items-center justify-center w-9 h-9 rounded-lg hover:bg-muted transition-colors">
-          <Bell className="w-4 h-4 text-muted-foreground" />
-          <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-primary" />
-        </button>
+      <button className="grid h-9 w-9 place-items-center rounded-[10px] bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
+        <Bell className="h-4 w-4" />
+      </button>
 
-        <button 
-          onClick={() => navigate('/settings')}
-          className="flex items-center justify-center w-9 h-9 rounded-lg hover:bg-muted transition-colors"
-        >
-          <Settings className="w-4 h-4 text-muted-foreground" />
-        </button>
+      <button
+        onClick={() => navigate('/settings')}
+        className="grid h-9 w-9 place-items-center rounded-[10px] bg-secondary text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <Settings className="h-4 w-4" />
+      </button>
 
-        <div className="h-6 w-px bg-border" />
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-muted transition-colors outline-none">
-              <Avatar className="h-7 w-7 border border-border">
-                <AvatarFallback className="text-xs font-medium bg-primary/10 text-primary">
-                  {initials}
-                </AvatarFallback>
-              </Avatar>
-              <ChevronDown className="w-4 h-4 text-muted-foreground" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" sideOffset={8} className="w-72 z-[60]">
-            <div className="px-3 py-2.5 border-b border-border">
-              <div className="flex items-center gap-2 min-w-0">
-                <Shield className="w-4 h-4 text-primary shrink-0" />
-                <p
-                  className="text-sm font-medium text-foreground truncate"
-                  title={user?.email ?? undefined}
-                >
-                  {user?.email}
-                </p>
-              </div>
-              <p className="text-xs text-muted-foreground mt-0.5 ml-6 capitalize">{user?.role}</p>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button className="flex items-center gap-2 rounded-[12px] bg-secondary px-2 py-1.5 text-left transition-colors hover:bg-accent">
+            <Avatar className="h-8 w-8 border border-border">
+              <AvatarFallback className="bg-primary/15 text-[11px] font-bold text-primary">{initials}</AvatarFallback>
+            </Avatar>
+            <div className="hidden min-w-0 md:block">
+              <div className="max-w-[160px] truncate text-[12px] font-semibold">{user?.email ?? 'Workspace user'}</div>
+              <div className="text-[10.5px] capitalize text-muted-foreground">{user?.role ?? 'admin'}</div>
             </div>
-            <DropdownMenuItem 
-              onClick={() => navigate('/settings')}
-              className="cursor-pointer"
-            >
-              <Settings className="w-4 h-4 mr-2" />
-              Settings
-            </DropdownMenuItem>
-            <DropdownMenuItem 
-              onClick={handleSignOut} 
-              className="text-destructive cursor-pointer"
-            >
-              <LogOut className="w-4 h-4 mr-2" />
-              Sign out
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" sideOffset={8} className="w-72">
+          <div className="border-b border-border px-3 py-2.5">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Shield className="h-4 w-4 text-primary" />
+              <span className="truncate">{user?.email}</span>
+            </div>
+            <div className="ml-6 mt-0.5 text-xs capitalize text-muted-foreground">{user?.role}</div>
+          </div>
+          <DropdownMenuItem onClick={() => navigate('/settings')} className="cursor-pointer">
+            <Settings className="mr-2 h-4 w-4" />
+            Settings
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={handleSignOut} className="cursor-pointer text-destructive">
+            <LogOut className="mr-2 h-4 w-4" />
+            Sign out
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </header>
   )
 }
