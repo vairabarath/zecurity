@@ -13,6 +13,7 @@ import ShieldDetail from '@/pages/ShieldDetail'
 import Settings from '@/pages/Settings'
 import Resources from '@/pages/Resources'
 import ResourceDetail from '@/pages/ResourceDetail'
+import TopologyPage from '@/pages/Topology'
 import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
 import Step3Auth from '@/pages/signup/Step3Auth'
@@ -54,6 +55,7 @@ export default function App() {
         <Route path="/settings"  element={<Settings />} />
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
+        <Route path="/topology" element={<TopologyPage />} />
       </Route>
     </Routes>
   )
