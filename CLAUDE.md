@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 5 is the active sprint.** The team is building resource protection — Admin defines resources on a Shield host, Shield applies nftables rules to make services invisible on LAN but accessible via zecurity0. Status tracked through `pending → managing → protecting → protected` lifecycle via heartbeat piggyback.
+**Sprint 6 is the active sprint.** The team is building two discovery features — Shield Discovery (Shield scans `/proc/net/tcp` and reports services via Control stream) and Connector Network Discovery (Admin triggers a TCP scan across a CIDR/IP scope via Connector, results appear in the UI for resource creation).
 
 ---
 
@@ -17,7 +17,7 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint5/path.md` — dependency map and progress checkboxes
+2. Read `.zecurity-obs/Sprint6/path.md` — dependency map and progress checkboxes
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
 4. Brief them: what they're building, which files to touch, and the build check command
 
@@ -30,8 +30,8 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint5/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint5/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint6/path.md` | Dependency map + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint6/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
