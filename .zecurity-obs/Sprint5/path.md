@@ -11,8 +11,7 @@ tags:
 
 # Sprint 5 — Execution Path & Dependency Map
 
-> **Read this before writing a single line of code.**
-> This file is the source of truth for execution order. Following it prevents merge conflicts, broken builds, and blocked teammates.
+> **Note:** This sprint predates the control_stream refactor (commit 722995c). All `heartbeat.rs` references reflect the state of Sprint 5 when it completed. The old heartbeat modules were replaced by persistent bidirectional `control_stream.rs` in a later sprint.
 
 ---
 
@@ -55,8 +54,8 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 | `proto/connector/v1/connector.proto` | M2 adds shield_resources + resource_acks to heartbeat | M2 commits first |
 | `controller/internal/connector/heartbeat.go` | M3 adds resource injection + ack processing | M3 only |
 | `connector/src/agent_server.rs` | M3 adds resource cache + relay | M3 only |
-| `connector/src/heartbeat.rs` | M3 adds resource_acks forwarding | M3 only |
-| `shield/src/heartbeat.rs` | M4 adds resource handling | M4 only |
+| `connector/src/heartbeat.rs` | M3 adds resource_acks forwarding | M3 only (historical — now control_stream.rs) |
+| `shield/src/heartbeat.rs` | M4 adds resource handling | M4 only (historical — now control_stream.rs) |
 
 ---
 
@@ -98,6 +97,7 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 - [x] **M3-C1** `controller/internal/connector/heartbeat.go` — MODIFY: after updating connector row, query `GetPendingForShield` for each active shield → inject into `HeartbeatResponse.shield_resources`; process `req.resource_acks` → call `resource.RecordAck()`
 - [x] **M3-C2** `connector/src/agent_server.rs` — MODIFY: cache `Vec<ResourceInstruction>` per shield_id from Connector HeartbeatResponse; return cached instructions in Shield `HeartbeatResponse.resources`; collect Shield `ResourceAck`s and store in `ShieldHealth`
 - [x] **M3-C3** `connector/src/heartbeat.rs` — MODIFY: collect `resource_acks` from all `ShieldHealth` entries → forward in `HeartbeatRequest.resource_acks` to Controller
+*(historical — now `connector/src/control_stream.rs`)*
 
 > Build check: `cd controller && go build ./...` + `cd connector && cargo build` must pass.
 
@@ -113,6 +113,7 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
   - `run_health_check_loop(interval_secs, shared_state)` → every 30s check all protected ports
 - [x] **M4-D2** `shield/src/config.rs` — Add `resource_check_interval_secs: u64` (default 30)
 - [x] **M4-D3** `shield/src/heartbeat.rs` — MODIFY: handle `resp.resources` → validate host → apply nftables → build `ResourceAck`; send `resource_acks` in `HeartbeatRequest`
+*(historical — now `shield/src/control_stream.rs`)*
 - [x] **M4-D4** `shield/src/main.rs` — MODIFY: `tokio::spawn(resources::run_health_check_loop(cfg, shared_acks))`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.

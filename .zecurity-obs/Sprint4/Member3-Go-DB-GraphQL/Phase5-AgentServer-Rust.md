@@ -95,7 +95,7 @@ Implement the Shield-facing gRPC server that runs on Connector `:9091`. This ser
 
 ### get_alive_shields()
 
-- [x] Returns `Vec<ShieldHealth>` for use in `heartbeat.rs`:
+- [x] Returns `Vec<ShieldHealth>` for use in `connector/src/heartbeat.rs` (now `control_stream.rs`):
   ```rust
   pub fn get_alive_shields(&self) -> Vec<ShieldHealth> {
       self.shields.lock().unwrap()

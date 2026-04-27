@@ -34,14 +34,14 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
 
 | File | Purpose |
 |------|---------|
-| `shield/src/heartbeat.rs` | mTLS heartbeat loop to Connector :9091 |
+| `shield/src/heartbeat.rs` | mTLS heartbeat loop to Connector :9091 (historical — now control_stream.rs) |
 | `shield/src/renewal.rs` | RenewCert flow (proof-of-possession CSR) |
 
 ---
 
 ## Checklist
 
-### heartbeat.rs
+### heartbeat.rs (historical — now `shield/src/control_stream.rs`)
 
 - [ ] `pub async fn run(state: ShieldState, cfg: ShieldConfig) -> anyhow::Result<()>`
 - [ ] Build mTLS config:

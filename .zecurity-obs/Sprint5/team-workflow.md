@@ -158,8 +158,8 @@ cd admin && npm run codegen
 | `proto/connector/v1/connector.proto` | M2 owns | Already done — do not modify |
 | `controller/internal/connector/heartbeat.go` | M3 modifies | M3 only |
 | `connector/src/agent_server.rs` | M3 modifies | M3 only |
-| `connector/src/heartbeat.rs` | M3 modifies | M3 only |
-| `shield/src/heartbeat.rs` | M4 modifies | M4 only |
+| `connector/src/heartbeat.rs` | M3 modifies | M3 only (historical — now control_stream.rs) |
+| `shield/src/heartbeat.rs` | M4 modifies | M4 only (historical — now control_stream.rs) |
 
 ---
 
