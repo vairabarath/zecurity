@@ -11,8 +11,7 @@ tags:
 
 # Sprint 4 — Execution Path & Dependency Map
 
-> **Read this before writing a single line of code.**
-> This file is the source of truth for execution order. Following it prevents merge conflicts, broken builds, and blocked teammates.
+> **Note:** This sprint predates the control_stream refactor (commit 722995c). All `heartbeat.rs` references here reflect the state of Sprint 4 when it completed. The old heartbeat modules in both Connector and Shield were replaced by persistent bidirectional `control_stream.rs` in a later sprint.
 
 ---
 
@@ -42,7 +41,7 @@ The following files are touched by **multiple members**. Coordinate before commi
 | `proto/connector/v1/connector.proto` | M2 writes, M3+M4 consume | M2 commits first — everyone else waits for buf generate |
 | `graph/connector.graphqls` | M3 writes NetworkHealth + shields, M1 consumes | M3 commits Day 1, M1 waits for codegen |
 | `connector/src/main.rs` | M4 adds agent_server start | M4 only, after M3's `agent_server.rs` exists |
-| `connector/src/heartbeat.rs` | M3 adds ShieldHealth processing | M3 only — M4's shield binary sends to M3's server |
+| `connector/src/heartbeat.rs` | M3 adds ShieldHealth processing | M3 only — M4's shield binary sends to M3's server (historical — now control_stream.rs) |
 | `cmd/server/main.go` | M2 adds ShieldConfig + ShieldService registration | M2 only, after all M2 services are done |
 
 ---
@@ -158,6 +157,7 @@ These must be committed to the shared branch **before** anyone else starts their
 ### PHASE J — M4 Heartbeat + Renewal (Depends on: M3-F1 agent_server.rs live)
 
 - [x] **M4-J1** `shield/src/heartbeat.rs` — mTLS heartbeat loop to Connector :9091; interval `SHIELD_HEARTBEAT_INTERVAL_SECS`; exponential backoff on failure; calls `renewal::renew_cert()` when `re_enroll=true`
+*(historical — now `shield/src/control_stream.rs` in subsequent sprints)*
 - [x] **M4-J2** `shield/src/renewal.rs` — RenewCert flow: read shield.key → build CSR → call RenewCert on Connector :9091 → save new shield.crt → update state.json
 
 > Integration check: Heartbeat appears in Connector logs. Shield shows ACTIVE in dashboard within 30s.

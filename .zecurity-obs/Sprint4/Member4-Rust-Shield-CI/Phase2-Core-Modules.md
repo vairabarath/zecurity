@@ -98,7 +98,7 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
   - Extract URI SAN
   - Compare against `expected_spiffe_id`
   - Return error if mismatch
-- [ ] The expected ID is built in `heartbeat.rs`:
+- [ ] The expected ID is built in `heartbeat.rs` (now `control_stream.rs`):
   ```rust
   let expected = format!("spiffe://{}/{}/{}",
       state.trust_domain,
