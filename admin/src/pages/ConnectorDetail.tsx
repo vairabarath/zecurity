@@ -129,7 +129,6 @@ export default function ConnectorDetail() {
     })))
     .find((connector) => connector.id === connectorId)
 
-  const connector = found
   const networkId = found?.networkId
   const networkName = found?.networkName ?? 'Network'
 

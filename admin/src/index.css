@@ -785,6 +785,12 @@
   }
   .topo-ins-close:hover { color: oklch(0.97 0.005 250); background: oklch(0.32 0.018 255); }
 
+  .topo-ins-preview-badge {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
+    color: oklch(0.62 0.012 250); border: 1px solid oklch(0.33 0.016 255);
+    border-radius: 5px; padding: 2px 6px; background: oklch(0.22 0.016 255);
+  }
+
   .topo-ins-title {
     font-size: 18px; font-weight: 700; letter-spacing: -0.02em;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
