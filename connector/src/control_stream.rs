@@ -208,6 +208,11 @@ async fn run_once(
 
             _ = discovery_ticker.tick() => {
                 if let Some(batch_msg) = shield_registry.drain_discovery_batch() {
+                    let report_count = match &batch_msg.body {
+                        Some(crate::proto::connector_control_message::Body::ShieldDiscovery(b)) => b.reports.len(),
+                        _ => 0,
+                    };
+                    info!(report_count, "flushing ShieldDiscoveryBatch upstream");
                     if out_tx.send(batch_msg).await.is_err() {
                         return Err(anyhow::anyhow!("outbound channel closed sending discovery batch"));
                     }
