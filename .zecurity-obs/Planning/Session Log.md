@@ -12,6 +12,28 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-27 — Claude Code — M1 Phase 1 (Shield Discovery Tab)
+
+**What was done:**
+- Added `discovery.graphqls` to `admin/codegen.yml` schema list
+- Added `GetDiscoveredServices` query and `PromoteDiscoveredService` mutation to admin GraphQL ops
+- Ran `npm run codegen` — typed Apollo docs generated
+- New `admin/src/components/DiscoveredServicesPanel.tsx` — polled table (30s), empty/loading states, Promote button per row
+- New `admin/src/components/PromoteServiceModal.tsx` — confirmation modal calling `PromoteDiscoveredService`, success toast, error inline
+- Modified `admin/src/pages/Shields.tsx` — per-row chevron toggle to expand/collapse `DiscoveredServicesPanel`; added 36px column for the toggle
+- `npm run build` passes clean
+
+**Key decisions:**
+- Used `cache-and-network` fetch policy on the query so the panel paints from cache while Apollo refetches
+- Toggle state held as a `Set<string>` keyed by shield id rather than per-row state, to keep Shields.tsx flat
+- Modal calls `refetchQueries: GetAllResourcesDocument` on success so the Resources page reflects the new pending resource immediately
+
+**What's next:**
+- M1 Phase 2 (Scan UI on RemoteNetworks page) — `TriggerScan` + `GetScanResults` ops, `ScanModal` component
+- Backend wiring: M3 still needs to implement the `getDiscoveredServices` / `promoteDiscoveredService` resolvers (currently panic stubs in `controller/graph/resolvers/discovery.resolvers.go`); UI cannot be exercised end-to-end until that lands
+
+---
+
 ## 2026-04-23 — Codex (GPT-5) — Admin Design Handoff Implementation
 
 **What was done:**
