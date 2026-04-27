@@ -44,6 +44,7 @@ mod updater;
 mod util;
 
 mod control_stream;
+mod discovery;
 mod renewal;
 mod resources;
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.

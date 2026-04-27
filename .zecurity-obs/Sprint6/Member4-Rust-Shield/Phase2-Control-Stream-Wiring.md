@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 6
 member: M4
 phase: Phase2-Control-Stream-Wiring
@@ -41,7 +41,9 @@ Wire from figment/env: `DISCOVERY_INTERVAL_SECS` env var, fallback 60.
 
 ---
 
-### 2. `shield/src/heartbeat.rs` (MODIFY)
+### 2. `shield/src/control_stream.rs` (MODIFY)
+
+> **Note:** There is no `heartbeat.rs` in the shield codebase. The heartbeat / Control stream loop lives entirely in `control_stream.rs` (`run_once` function). All changes described below go there.
 
 Add discovery state variables before the heartbeat loop:
 
