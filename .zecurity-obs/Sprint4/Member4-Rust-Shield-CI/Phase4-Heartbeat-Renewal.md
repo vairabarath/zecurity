@@ -96,7 +96,7 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
 - [ ] Step 5: Parse new `cert_not_after` from new cert PEM
 - [ ] Step 6: Update `state.cert_not_after` + save `state.json`
 - [ ] Step 7: Rebuild mTLS channel in heartbeat loop with new cert
-  - Return updated state to heartbeat.rs which rebuilds channel
+  - Return updated state to heartbeat.rs (now `control_stream.rs`) which rebuilds channel
 - [ ] Log `info!("cert renewed shield_id={} new_expiry={}", ...)`
 
 ---
