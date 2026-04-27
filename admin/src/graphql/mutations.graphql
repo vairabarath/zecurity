@@ -103,3 +103,7 @@ mutation PromoteDiscoveredService($shieldId: ID!, $protocol: String!, $port: Int
     status
   }
 }
+
+mutation TriggerScan($connectorId: ID!, $targets: [String!]!, $ports: [Int!]!) {
+  triggerScan(connectorId: $connectorId, targets: $targets, ports: $ports)
+}
