@@ -18,13 +18,13 @@ tags:
 
 ## Sprint Goal
 
-Three features land together:
+Two features land together:
 
 **Shield Discovery** — Shield scans its own host's listening TCP ports via `/proc/net/tcp`, sends differential discovery reports up the Control stream to the Connector. Connector batches and relays to Controller. Admin sees all services running on each Shield host and can promote any of them to a resource with one click.
 
 **Connector Network Discovery** — Admin defines a scan scope (CIDR or IP list + ports) from the UI. Controller sends a `ScanCommand` down the Control stream to the Connector. Connector TCP-pings every target (two-phase: alive check + banner grab), returns a `ScanReport`. Admin sees discovered live services across the remote network and can create resources from the results.
 
-**RDE (Remote Device Extension)** — Devices connect to the Connector's TLS listener (`:9092`) with a token + destination. For protected resources the Connector relays through the Shield via `TunnelOpen/Data/Close` messages on the Control stream. QUIC/UDP on the same port is advertised for clients that support it. CRL revocation checking and systemd watchdog keepalives round out connector reliability.
+> **RDE (Remote Device Extension)** is Sprint 7. See `.zecurity-obs/Sprint7/path.md`.
 
 ---
 
@@ -41,13 +41,8 @@ Three features land together:
 | **Discovered services DB** | `shield_discovered_services` table — upsert on (shield_id, protocol, port); `last_seen` updated each report |
 | **Scan results DB** | `connector_scan_results` table — keyed by (request_id, connector_id, ip, port); TTL-purged after 24h |
 | **Promote to resource** | `PromoteDiscoveredService` mutation creates a resource row with host=shield.lan_ip — same auto-match logic as Sprint 5 |
-| **Shield field numbers** | `DiscoveryReport = 7`, `TunnelOpen = 8`, `TunnelOpened = 9`, `TunnelData = 10`, `TunnelClose = 11` in ShieldControlMessage oneof (pong=6 is current max) |
+| **Shield field numbers** | `DiscoveryReport = 7` in ShieldControlMessage oneof (pong=6 is current max). Fields 8–11 are reserved for Sprint 7 RDE tunnel messages — do NOT assign. |
 | **Connector field numbers** | `ShieldDiscoveryBatch = 8`, `ScanReport = 9`, `ScanCommand = 10` in ConnectorControlMessage oneof (pong=7 is current max) |
-| **RDE transport** | TLS listener `:9092` (TCP) + QUIC listener `:9092` (UDP) on Connector; JSON handshake `TunnelRequest`/`TunnelResponse`; protected path relays via Shield Control stream; direct path via `copy_bidirectional` |
-| **QUIC advertise** | `quic_addr` in every `TunnelResponse` (even failures) — client uses this to pre-warm QUIC connection |
-| **CRL refresh** | Connector fetches `/ca.crl` from controller every 5min; revoked serial → reject with "certificate revoked" |
-| **Systemd watchdog** | `READY=1` on startup; `WATCHDOG=1` every `WATCHDOG_USEC/2`; connector only |
-| **Shield tunnel relay** | Shield opens local TCP to resource destination, streams data via `TunnelData` — bypasses nftables because `zecurity0` is whitelisted |
 
 ---
 
@@ -57,8 +52,8 @@ Three features land together:
 |--------|------|------|
 | **M1** | Frontend | Discovery tab on Shields page, Scan UI on Remote Networks page, promote-to-resource flows |
 | **M2** | Go (Proto + DB + GraphQL) | proto messages (both protos), migration 008, GraphQL schema |
-| **M3** | Go+Rust (Controller + Connector) | discovery store, resolvers, connector control stream handlers, scan executor, RDE device tunnel, QUIC listener, CRL manager, watchdog, `check_access` endpoint |
-| **M4** | Rust (Shield) | `shield/src/discovery.rs`, Control stream wiring, discovery interval loop, tunnel relay (`tunnel.rs`) |
+| **M3** | Go+Rust (Controller + Connector) | discovery store, resolvers, connector control stream handlers, scan executor |
+| **M4** | Rust (Shield) | `shield/src/discovery.rs`, Control stream wiring, discovery interval loop |
 
 ---
 
@@ -66,18 +61,12 @@ Three features land together:
 
 | File | Who Touches It | Rule |
 |------|---------------|------|
-| `proto/shield/v1/shield.proto` | M2 adds DiscoveryReport + DiscoveredService | M2 commits first — everyone waits for buf generate |
+| `proto/shield/v1/shield.proto` | M2 adds DiscoveryReport (field 7 only) | M2 commits first — everyone waits for buf generate. Do NOT add fields 8–11 (Sprint 7). |
 | `proto/connector/v1/connector.proto` | M2 adds ShieldDiscoveryBatch + ScanCommand/ScanReport | M2 commits first |
 | `controller/internal/connector/control.go` | M3 adds discovery batch + scan handlers | M3 only |
 | `connector/src/agent_server.rs` | M3 adds discovery buffering + relay | M3 only |
 | `connector/src/control_plane.rs` | M3 adds scan command dispatch + result relay | M3 only |
-| `shield/src/heartbeat.rs` | M4 adds discovery loop calls + tunnel message dispatch | M4 only |
-| `connector/src/device_tunnel.rs` | M3 — new file | M3 only |
-| `connector/src/quic_listener.rs` | M3 — new file | M3 only |
-| `connector/src/agent_tunnel.rs` | M3 modifies TunnelHub + Control stream wiring | M3 only |
-| `connector/src/main.rs` | M3 wires all listeners + watchdog | M3 only |
-| `shield/src/tunnel.rs` | M4 — new file | M4 only |
-| `controller/internal/device/check_access.go` | M3 — new file, `/api/device/check-access` endpoint | M3 only |
+| `shield/src/heartbeat.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). |
 
 ---
 
@@ -85,7 +74,7 @@ Three features land together:
 
 ### DAY 1 — Unblocking Work (Must land before anyone fans out)
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `DiscoveredService` + `DiscoveryReport` messages; add `discovery_report = 7` to `ShieldControlMessage.oneof`
+- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `DiscoveredService` + `DiscoveryReport` messages; add `discovery_report = 7` to `ShieldControlMessage.oneof`. **Stop at field 7** — fields 8–11 are reserved for Sprint 7.
 - [ ] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `ShieldDiscoveryBatch = 8`, `ScanCommand = 9`, `ScanReport = 10` to `ConnectorControlMessage.oneof`; add `DiscoveredResource` + `ScanResult` messages
 - [ ] **M2-D1-C** `controller/migrations/008_discovery.sql` — `shield_discovered_services` table + `connector_scan_results` table + indexes
 - [ ] **M2-D1-D** `controller/graph/discovery.graphqls` — `DiscoveredService` type, `ScanResult` type, queries + mutations
@@ -168,33 +157,6 @@ Three features land together:
 
 ---
 
-### PHASE G — M3 RDE Device Tunnel + Connector Reliability (Depends on: Day 1 proto done — TunnelOpen/Opened/Data/Close fields 8-11)
-
-- [ ] **M3-G1** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, `check_access()` HTTP fallback, protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`
-- [ ] **M3-G2** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
-- [ ] **M3-G3** `connector/src/agent_tunnel.rs` — MODIFY: dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
-- [ ] **M3-G4** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
-- [ ] **M3-G5** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5min
-- [ ] **M3-G6** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
-- [ ] **M3-G7** `connector/src/main.rs` — MODIFY: wire all listeners in correct order, `notify_ready()`, `spawn_watchdog()`
-- [ ] **M3-G8** `controller/internal/device/check_access.go` — NEW: `POST /api/device/check-access` — validate Bearer JWT, look up resource, return `{ok, shield_id, connector_id, protocol}`
-
-> Build check: `cd connector && cargo build` and `cd controller && go build ./...` must pass.
-
----
-
-### PHASE H — M4 Shield Tunnel Relay (Depends on: Day 1 proto done + M4-E done)
-
-- [ ] **M4-H1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open()` (connect TCP locally, register session), `handle_tunnel_data()` (forward bytes to local TCP), `handle_tunnel_close()` (drop session)
-- [ ] **M4-H2** `shield/src/heartbeat.rs` — MODIFY: dispatch `TunnelOpen/Data/Close` from incoming Control stream messages to `tunnel::` handlers
-- [ ] **M4-H3** `shield/src/main.rs` — Add `mod tunnel`
-
-> Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
-
----
-
-
-
 Run these once all phases are complete:
 
 - [ ] `buf generate` (from repo root) — clean, no errors
@@ -210,20 +172,13 @@ Run these once all phases are complete:
 - [ ] Trigger Scan from UI → results appear within 10s for reachable hosts
 - [ ] Scan result "Create Resource" → resource row created correctly
 - [ ] Scan results purged after 24h (background goroutine)
-- [ ] Device connects to `:9092` with valid token → reaches resource through Shield tunnel relay
-- [ ] Device connects to `:9092` with valid token → reaches unprotected resource directly
-- [ ] Device connects with revoked certificate → rejected with "certificate revoked"
-- [ ] Device connects with invalid token → rejected with HTTP 401 from `check_access`
-- [ ] QUIC `quic_addr` present in every `TunnelResponse`
-- [ ] Systemd watchdog: `WATCHDOG=1` notifications appear in `journalctl` for connector service
-- [ ] Shield host: TCP to a port the Shield nftables blocks → still reachable through tunnel relay (via `zecurity0` interface)
 
 ---
 
 ## Dependency Graph (Visual)
 
 ```
-       M2-D1-A (shield.proto: DiscoveryReport=7, TunnelOpen=8..TunnelClose=11)
+       M2-D1-A (shield.proto: DiscoveryReport=7 only — fields 8-11 reserved for Sprint 7)
        M2-D1-B (connector.proto: ShieldDiscoveryBatch=8, ScanReport=9, ScanCommand=10)
        M2-D1-C (008_discovery.sql)                                   Day 1 — FIRST
        M2-D1-D (graph/discovery.graphqls)
@@ -231,16 +186,16 @@ Run these once all phases are complete:
               ▼
        buf generate + go generate
               │
-      ┌───────┼─────────────┬──────────────┬──────────────┐
-      ▼       ▼             ▼              ▼              ▼
-    M2-A    M3-B          M4-E           M1-F           M3-G
-  (discovery (resolvers)  (discovery.rs  (layout)       (RDE tunnel
-   store)                  + wiring)                     QUIC, CRL,
-      │       │                │                         watchdog)
-      ▼       ▼                ▼                              │
-    M2-A2   M3-C            M4-E3                             ▼
-  (config)  (controller      (heartbeat               M4-H (Shield
-             control.go)      wiring)                  tunnel relay)
+      ┌───────┼─────────────┬──────────────┐
+      ▼       ▼             ▼              ▼
+    M2-A    M3-B          M4-E           M1-F
+  (discovery (resolvers)  (discovery.rs  (layout)
+   store)                  + wiring)
+      │       │
+      ▼       ▼
+    M2-A2   M3-C
+  (config)  (controller
+             control.go)
               │
               ▼
             M3-D
@@ -255,15 +210,13 @@ Run these once all phases are complete:
 ## Notes for AI Agents Working on This Sprint
 
 1. **Always check this file first.** Before touching any file, confirm dependency checkboxes are checked.
-2. **Proto field numbers are permanent.** Never reuse or renumber. Sprint 6 assigned: ShieldControlMessage 7–11; ConnectorControlMessage 8–10.
+2. **Proto field numbers are permanent.** Never reuse or renumber. Sprint 6 assigns: ShieldControlMessage 7; ConnectorControlMessage 8–10. Fields 8–11 on ShieldControlMessage are reserved for Sprint 7.
 3. **Discovery rides existing streams.** No new RPCs. DiscoveryReport on Shield Control stream; ShieldDiscoveryBatch/ScanCommand/ScanReport on Connector Control stream.
-4. **Tunnel messages ride existing streams.** No new RPCs. TunnelOpen=8..TunnelClose=11 on Shield Control stream. Connector initiates, Shield relays.
-5. **Shield scans only its own host.** `/proc/net/tcp` — no network scanning from Shield.
-6. **Connector scanner is network-wide.** Controller triggers via ScanCommand; connector TCP-pings targets.
-7. **Build gates are not optional.** Each phase has a build check. Do not proceed until it passes.
-8. **Scan limits are hard caps.** Max 512 targets, 16 ports, 32 concurrent probes — enforced in `scope.rs` and `scan.rs`.
-9. **RDE protected path.** For resources with `shield_id` set, Connector MUST relay via `AgentTunnelHub` → Shield Control stream. Direct connect will fail due to nftables.
-10. **QUIC is on same port as TLS.** `:9092` — UDP for QUIC, TCP for TLS. OS demuxes by transport protocol.
+4. **Shield scans only its own host.** `/proc/net/tcp` — no network scanning from Shield.
+5. **Connector scanner is network-wide.** Controller triggers via ScanCommand; connector TCP-pings targets.
+6. **Build gates are not optional.** Each phase has a build check. Do not proceed until it passes.
+7. **Scan limits are hard caps.** Max 512 targets, 16 ports, 32 concurrent probes — enforced in `scope.rs` and `scan.rs`.
+8. **RDE is Sprint 7.** Do not implement device_tunnel.rs, quic_listener.rs, tunnel.rs, crl.rs, watchdog.rs, or check_access.go in this sprint.
 
 See individual member phase files for detailed specs:
 - [[Sprint6/Member1-Frontend/Phase1-Discovery-Tab]]
@@ -273,8 +226,5 @@ See individual member phase files for detailed specs:
 - [[Sprint6/Member3-Go-Connector/Phase1-Discovery-Resolvers]]
 - [[Sprint6/Member3-Go-Connector/Phase2-Controller-Control-Handler]]
 - [[Sprint6/Member3-Go-Connector/Phase3-Connector-Discovery]]
-- [[Sprint6/Member3-Go-Connector/Phase4-RDE-Device-Tunnel]]
-- [[Sprint6/Member3-Go-Connector/Phase5-Connector-Extras]]
 - [[Sprint6/Member4-Rust-Shield/Phase1-Discovery-Module]]
 - [[Sprint6/Member4-Rust-Shield/Phase2-Control-Stream-Wiring]]
-- [[Sprint6/Member4-Rust-Shield/Phase3-Shield-Tunnel-Relay]]
