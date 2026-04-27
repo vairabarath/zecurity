@@ -89,7 +89,25 @@ message ShieldControlMessage {
     ShieldHealthReport  health_report        = 4;
     ResourceAck         resource_ack         = 5;
     Pong                pong                 = 6;
+    DiscoveryReport     discovery_report     = 7;
+    // Fields 8–11 reserved for Sprint 7 RDE tunnel messages
   }
+}
+
+message DiscoveredService {
+  string protocol     = 1;  // "tcp"
+  uint32 port         = 2;
+  string bound_ip     = 3;
+  string service_name = 4;  // empty string if unknown port
+}
+
+message DiscoveryReport {
+  string shield_id                   = 1;
+  uint64 seq                         = 2;  // monotonically increasing per shield session
+  repeated DiscoveredService added   = 3;  // services that appeared since last report
+  repeated DiscoveredService removed = 4;  // only port + protocol are meaningful here
+  uint64 fingerprint                 = 5;  // hash over current full port set
+  bool   full_sync                   = 6;  // true = replace-all, false = diff
 }
 
 message ShieldHealthReport {

@@ -38,6 +38,16 @@ type CreateResourceInput struct {
 	PortTo          int     `json:"portTo"`
 }
 
+type DiscoveredService struct {
+	ShieldID    string `json:"shieldId"`
+	Protocol    string `json:"protocol"`
+	Port        int    `json:"port"`
+	BoundIP     string `json:"boundIp"`
+	ServiceName string `json:"serviceName"`
+	FirstSeen   string `json:"firstSeen"`
+	LastSeen    string `json:"lastSeen"`
+}
+
 type Mutation struct {
 }
 
@@ -70,6 +80,16 @@ type Resource struct {
 	CreatedAt      string         `json:"createdAt"`
 	Shield         *Shield        `json:"shield,omitempty"`
 	RemoteNetwork  *RemoteNetwork `json:"remoteNetwork"`
+}
+
+type ScanResult struct {
+	RequestID     string `json:"requestId"`
+	IP            string `json:"ip"`
+	Port          int    `json:"port"`
+	Protocol      string `json:"protocol"`
+	ServiceName   string `json:"serviceName"`
+	ReachableFrom string `json:"reachableFrom"`
+	FirstSeen     string `json:"firstSeen"`
 }
 
 type Shield struct {
