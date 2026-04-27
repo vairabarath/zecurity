@@ -66,7 +66,7 @@ Two features land together:
 | `controller/internal/connector/control.go` | M3 adds discovery batch + scan handlers | M3 only |
 | `connector/src/agent_server.rs` | M3 adds discovery buffering + relay | M3 only |
 | `connector/src/control_plane.rs` | M3 adds scan command dispatch + result relay | M3 only |
-| `shield/src/heartbeat.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). |
+| `shield/src/control_stream.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). Note: heartbeat logic lives here, not in heartbeat.rs. |
 
 ---
 
@@ -129,15 +129,15 @@ Two features land together:
 
 ### PHASE E — M4 Shield Discovery (Depends on: Day 1 proto done)
 
-- [ ] **M4-E1** `shield/src/discovery.rs` — NEW file:
+- [x] **M4-E1** `shield/src/discovery.rs` — NEW file:
   - `discover_sync()` — Linux: parse `/proc/net/tcp` + `/proc/net/tcp6` for LISTEN (state 0A) sockets; filter loopback, ephemeral, ignored ports (5355 LLMNR, 631 IPP, 5353 mDNS)
   - `service_from_port(port)` — well-known port → service name lookup
   - `compute_fingerprint(ports)` — hash over sorted (port, protocol) set
   - `run_discovery_diff(shield_id, sent, last_fp, seq)` — computes diff, returns `DiscoveryReport` or `None` if unchanged
   - `run_discovery_full_sync(shield_id, sent, last_fp, seq)` — full snapshot, always returns `DiscoveryReport`
-- [ ] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
-- [ ] **M4-E3** `shield/src/heartbeat.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream
-- [ ] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
+- [x] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
+- [x] **M4-E3** `shield/src/control_stream.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream. Note: heartbeat logic lives in `control_stream.rs`, not a separate `heartbeat.rs`.
+- [x] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 

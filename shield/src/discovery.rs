@@ -1,37 +1,6 @@
----
-type: phase
-status: done
-sprint: 6
-member: M4
-phase: Phase1-Discovery-Module
-depends_on: []
-tags:
-  - rust
-  - shield
-  - discovery
----
-
-# M4 Phase 1 — Shield Discovery Module
-
-> **This phase has no external dependencies — you can start immediately on Day 1.**
-> Proto types are NOT needed yet for this file. Write the structs in plain Rust first.
-
----
-
-## What You're Building
-
-`shield/src/discovery.rs` — scans the local host's listening TCP ports via `/proc/net/tcp` and computes differential reports.
-
----
-
-## File to Create
-
-### `shield/src/discovery.rs`
-
-```rust
 use anyhow::Result;
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use tracing::{info, warn};
 
@@ -40,10 +9,10 @@ const IGNORED_PORTS: &[(u16, &str)] = &[
     (5355, "LLMNR"),
     (631,  "IPP"),
     (5353, "mDNS"),
-    (9091, "zecurity-connector"),  // skip our own gRPC port
+    (9091, "zecurity-connector"),
 ];
 
-/// Ephemeral port range start.
+/// Ephemeral port range start (Linux default).
 const EPHEMERAL_PORT_START: u16 = 32768;
 
 #[derive(Debug, Clone)]
@@ -103,7 +72,7 @@ fn should_include_port(port: u16) -> bool {
     if is_ignored_port(port) {
         return false;
     }
-    // Include ephemeral ports only if they map to a well-known service
+    // Include ephemeral ports only if they map to a well-known service.
     if port >= EPHEMERAL_PORT_START {
         return !service_from_port(port).is_empty();
     }
@@ -114,11 +83,14 @@ fn should_include_port(port: u16) -> bool {
 
 fn parse_proc_ipv4(hex: &str) -> Option<Ipv4Addr> {
     let n = u32::from_str_radix(hex, 16).ok()?;
+    // /proc/net/tcp stores addresses in little-endian host byte order.
     Some(Ipv4Addr::from(n.to_be()))
 }
 
 fn parse_proc_ipv6(hex: &str) -> Option<Ipv6Addr> {
-    if hex.len() != 32 { return None; }
+    if hex.len() != 32 {
+        return None;
+    }
     let mut octets = [0u8; 16];
     for i in 0..4 {
         let word = u32::from_str_radix(&hex[i * 8..(i + 1) * 8], 16).ok()?;
@@ -128,19 +100,28 @@ fn parse_proc_ipv6(hex: &str) -> Option<Ipv6Addr> {
     Some(Ipv6Addr::from(octets))
 }
 
-/// Parse /proc/net/tcp{,6} for LISTEN sockets (state 0A).
+/// Parse /proc/net/tcp or /proc/net/tcp6 for LISTEN sockets (state 0A).
 fn parse_proc_tcp(path: &str, is_v6: bool) -> Vec<SocketAddr> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            warn!(path, error = %e, "could not read proc tcp file");
+            return vec![];
+        }
     };
     let mut results = vec![];
     for line in content.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 4 { continue; }
-        if fields[3] != "0A" { continue; }  // 0A = TCP_LISTEN
+        if fields.len() < 4 {
+            continue;
+        }
+        if fields[3] != "0A" {
+            continue; // only TCP_LISTEN
+        }
         let parts: Vec<&str> = fields[1].split(':').collect();
-        if parts.len() != 2 { continue; }
+        if parts.len() != 2 {
+            continue;
+        }
         let port = match u16::from_str_radix(parts[1], 16) {
             Ok(p) => p,
             Err(_) => continue,
@@ -161,7 +142,7 @@ fn parse_proc_tcp(path: &str, is_v6: bool) -> Vec<SocketAddr> {
     results
 }
 
-/// Synchronous discovery scan — called via spawn_blocking.
+/// Synchronous discovery scan — called via spawn_blocking from async context.
 pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
     let mut addrs = parse_proc_tcp("/proc/net/tcp", false);
     addrs.extend(parse_proc_tcp("/proc/net/tcp6", true));
@@ -169,9 +150,13 @@ pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
 
     let mut exposed = Vec::new();
     for addr in &addrs {
-        if !is_externally_listening(addr) { continue; }
+        if !is_externally_listening(addr) {
+            continue;
+        }
         let port = addr.port();
-        if !should_include_port(port) { continue; }
+        if !should_include_port(port) {
+            continue;
+        }
         exposed.push(DiscoveredService {
             protocol:     "tcp",
             port,
@@ -187,7 +172,7 @@ pub async fn discover_exposed_services() -> Result<Vec<DiscoveredService>> {
     tokio::task::spawn_blocking(discover_sync).await?
 }
 
-/// Hash over sorted (port, protocol) set — used to detect changes without full diff.
+/// Hash over sorted (port, protocol) set — used to detect changes without a full diff.
 pub fn compute_fingerprint(ports: &HashSet<(u16, String)>) -> u64 {
     let mut sorted: Vec<_> = ports.iter().collect();
     sorted.sort();
@@ -198,12 +183,12 @@ pub fn compute_fingerprint(ports: &HashSet<(u16, String)>) -> u64 {
     std::hash::Hasher::finish(&hasher)
 }
 
-/// Result of a discovery scan — ready to convert to proto DiscoveryReport.
+/// Result of a discovery scan — ready to be converted to proto DiscoveryReport in Phase 2.
 pub struct DiscoveryDiff {
     pub shield_id:   String,
     pub seq:         u64,
     pub added:       Vec<DiscoveredService>,
-    pub removed:     Vec<(u16, String)>,  // (port, protocol)
+    pub removed:     Vec<(u16, String)>, // (port, protocol)
     pub fingerprint: u64,
     pub full_sync:   bool,
 }
@@ -236,7 +221,7 @@ pub async fn run_discovery_diff(
 
     let removed: Vec<(u16, String)> = sent_services
         .iter()
-        .filter(|p| !current_ports.contains(p))
+        .filter(|p| !current_ports.contains(*p))
         .cloned()
         .collect();
 
@@ -265,6 +250,7 @@ pub async fn run_discovery_diff(
 }
 
 /// Run a full sync — always returns a report (full_sync=true).
+/// Called on first connect and whenever a fingerprint gap is detected.
 pub async fn run_discovery_full_sync(
     shield_id: &str,
     sent_services: &mut HashSet<(u16, String)>,
@@ -296,14 +282,3 @@ pub async fn run_discovery_full_sync(
         full_sync: true,
     })
 }
-```
-
----
-
-## Build Check
-
-```bash
-cargo build --manifest-path shield/Cargo.toml
-```
-
-Warnings OK. Errors not. The proto types (`DiscoveryReport`) are wired in Phase 2.
