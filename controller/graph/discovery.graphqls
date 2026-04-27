@@ -1,0 +1,29 @@
+type DiscoveredService {
+  shieldId:    ID!
+  protocol:    String!
+  port:        Int!
+  boundIp:     String!
+  serviceName: String!
+  firstSeen:   String!
+  lastSeen:    String!
+}
+
+type ScanResult {
+  requestId:     String!
+  ip:            String!
+  port:          Int!
+  protocol:      String!
+  serviceName:   String!
+  reachableFrom: String!
+  firstSeen:     String!
+}
+
+extend type Query {
+  getDiscoveredServices(shieldId: ID!): [DiscoveredService!]!
+  getScanResults(requestId: String!): [ScanResult!]!
+}
+
+extend type Mutation {
+  promoteDiscoveredService(shieldId: ID!, protocol: String!, port: Int!): Resource!
+  triggerScan(connectorId: ID!, targets: [String!]!, ports: [Int!]!): String!
+}
