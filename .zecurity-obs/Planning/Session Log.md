@@ -707,3 +707,30 @@ Most recent first. Every agent appends an entry after their session.
 - M4 to wire shield/src/heartbeat.rs discovery calls (Phase E3/E4) if not done
 - M1 to complete frontend discovery tab + scan UI (Phase F)
 - Final integration: buf generate clean, all five build gates green, migration 010 runs
+
+---
+
+## 2026-04-27 — M3 (Go+Rust / Connector)
+
+**What was done:**
+- All M3 Sprint 6 phases already complete (B1/B2/C1/C2/D1/D2/D3) — verified path.md checkboxes
+- Merged main into sprint6-member3; resolved add/add conflicts in `controller/internal/discovery/config.go` and `controller/internal/discovery/store.go` (took origin/main versions — had `Config` struct, transactions, `ReachableFrom` field)
+- Committed as `95ba36c` and `66f99f9`
+- Pushed branch to origin
+
+**Docs sweep — heartbeat.rs → control_stream.rs rename across all Obsidian notes:**
+- Updated `Services/Shield.md`, `Services/Connector.md`, `Architecture/System Overview.excalidraw.md` — module maps, startup flows, control stream sections
+- Updated `Sprint6/path.md` and `Sprint7/path.md` — conflict zones, team assignments, M4-E phase items
+- Updated `Sprint7/Member4/Phase1-Shield-Tunnel-Relay.md` — file references, section header
+- Added historical notes to `Sprint4/path.md`, `Sprint5/path.md` — header notes + conflict zone annotations + phase item footnotes
+- Updated Sprint4/Sprint5 team-workflow files, phase spec files (`Phase2-Heartbeat-Ack.md`, `Phase2-Heartbeat-Relay.md`, `Phase4-Heartbeat-Renewal.md`, `Phase2-Core-Modules.md`, `Phase5-AgentServer-Rust.md`)
+- Updated `codebase.md`, `implementation-report.md`, `improvements.md`, `studyplan.md` — module listings, section headers, call chain refs
+
+**Key decisions:**
+- Historical sprints (4/5) preserved as-is with footnotes — rewriting would lose accuracy of what was actually built at that time
+- Session Log.md left unchanged — accurately records what was done in each past session
+- `connector/build.rs` comment left as-is — describes proto generation, not runtime module
+
+**What's next:**
+- Sprint 6 fully complete on this branch; ready for PR to main when other members finish
+- Sprint 7 planning available in `.zecurity-obs/Sprint7/path.md`
