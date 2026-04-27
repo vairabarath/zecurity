@@ -64,7 +64,8 @@ main.rs
   ├── appmeta.rs     SPIFFE + PKI constants (mirrors connector/src/appmeta.rs)
   ├── crypto.rs      EC P-384 keygen, CSR builder, PEM/DER helpers
   ├── enrollment.rs  JWT verification + CA fingerprint + Enroll RPC + state.json
-  ├── heartbeat.rs   mTLS loop to Connector :9091, SIGTERM Goodbye
+  ├── control_stream.rs mTLS bidirectional stream to Connector :9091 (health, discovery, tunnel)
+  ├── discovery.rs    /proc/net/tcp scan, service detection, fingerprint diff
   ├── renewal.rs     RenewCert RPC (proof-of-possession), saves new cert
   ├── network.rs     zecurity0 TUN interface + nftables base table  ← UNIQUE
   ├── updater.rs     GitHub release binary self-update (shield-v* tags)
@@ -81,10 +82,10 @@ main.rs
 2. state.json exists?
    ├── No  → enrollment::enroll() → save state + certs + network setup
    └── Yes → load ShieldState
-3. tokio::spawn(heartbeat::run(state, cfg))
+3. tokio::spawn(control_stream::run_once(state, cfg))   [reconnects on cert change]
 4. tokio::spawn(updater::run(cfg))     [if auto_update_enabled]
 5. Wait for SIGTERM
-6. heartbeat::goodbye(&state)          [best-effort]
+6. control_stream::goodbye(&state)      [best-effort]
 7. Graceful shutdown
 ```
 
@@ -106,17 +107,21 @@ main.rs
 
 ---
 
-## Heartbeat Loop
+## Control Stream (control_stream.rs)
 
 ```
-mTLS to Connector :9091 every SHIELD_HEARTBEAT_INTERVAL_SECS (30s)
+mTLS bidirectional stream to Connector :9091
   Client cert: shield.crt
   Trust root:  workspace_ca.crt
   Post-handshake: verify Connector SPIFFE ID = spiffe://<td>/connector/<connector_id>
 
-HeartbeatRequest { shield_id, version, hostname, public_ip }
+Stream carries (oneof):
+  ShieldHealth — every heartbeat_interval_secs
+  DiscoveryReport — every discovery_interval_secs (60s differential)
+  TunnelOpen/Data/Close — only on demand (Sprint 7)
+
 HeartbeatResponse { ok, re_enroll }
-  → re_enroll=true → call renewal::renew_cert()
+  → re_enroll=true → call renewal::renew_cert() → reconnect stream
   → error → exponential backoff (5s→60s cap)
 ```
 
