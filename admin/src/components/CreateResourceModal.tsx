@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
   CreateResourceDocument,
@@ -15,16 +15,27 @@ import { Label } from '@/components/ui/label'
 import { AlertTriangle, Info, Loader2, X, Server } from 'lucide-react'
 import { toast } from 'sonner'
 
+interface CreateResourceDefaults {
+  remoteNetworkId?: string
+  name?: string
+  host?: string
+  protocol?: string
+  portFrom?: number
+  portTo?: number
+}
+
 interface CreateResourceModalProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSuccess?: () => void
+  defaults?: CreateResourceDefaults | null
 }
 
 export function CreateResourceModal({
   open,
   onOpenChange,
   onSuccess,
+  defaults,
 }: CreateResourceModalProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -42,8 +53,8 @@ export function CreateResourceModal({
   const [createResource, { loading: creating }] = useMutation(CreateResourceDocument, {
     onCompleted: (data) => {
       toast.success(`Resource "${data.createResource.name}" created`)
-      resetForm()
       onSuccess?.()
+      handleClose(false)
     },
     onError: (err) => {
       const msg = err.message
@@ -56,15 +67,23 @@ export function CreateResourceModal({
   })
 
   function resetForm() {
-    setName('')
+    setName(defaults?.name ?? '')
     setDescription('')
-    setHost('')
-    setProtocol('tcp')
-    setPortFrom('')
-    setPortTo('')
-    setRemoteNetworkId('')
+    setHost(defaults?.host ?? '')
+    setProtocol(defaults?.protocol ?? 'tcp')
+    setPortFrom(defaults?.portFrom ? String(defaults.portFrom) : '')
+    setPortTo(defaults?.portTo ? String(defaults.portTo) : '')
+    setRemoteNetworkId(defaults?.remoteNetworkId ?? '')
     setError(null)
   }
+
+  useEffect(() => {
+    resetForm()
+  }, [defaults])
+
+  useEffect(() => {
+    if (open) resetForm()
+  }, [defaults, open])
 
   const handleClose = (isOpen: boolean) => {
     if (!isOpen) resetForm()
