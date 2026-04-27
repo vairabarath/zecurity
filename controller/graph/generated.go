@@ -63,27 +63,41 @@ type ComplexityRoot struct {
 		InstallCommand func(childComplexity int) int
 	}
 
+	DiscoveredService struct {
+		BoundIP     func(childComplexity int) int
+		FirstSeen   func(childComplexity int) int
+		LastSeen    func(childComplexity int) int
+		Port        func(childComplexity int) int
+		Protocol    func(childComplexity int) int
+		ServiceName func(childComplexity int) int
+		ShieldID    func(childComplexity int) int
+	}
+
 	Mutation struct {
-		CreateRemoteNetwork    func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource         func(childComplexity int, input CreateResourceInput) int
-		DeleteConnector        func(childComplexity int, id string) int
-		DeleteRemoteNetwork    func(childComplexity int, id string) int
-		DeleteResource         func(childComplexity int, id string) int
-		DeleteShield           func(childComplexity int, id string) int
-		GenerateConnectorToken func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken    func(childComplexity int, remoteNetworkID string, shieldName string) int
-		InitiateAuth           func(childComplexity int, provider string, workspaceName *string) int
-		ProtectResource        func(childComplexity int, id string) int
-		RevokeConnector        func(childComplexity int, id string) int
-		RevokeShield           func(childComplexity int, id string) int
-		UnprotectResource      func(childComplexity int, id string) int
-		UpdateResource         func(childComplexity int, id string, input UpdateResourceInput) int
+		CreateRemoteNetwork      func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource           func(childComplexity int, input CreateResourceInput) int
+		DeleteConnector          func(childComplexity int, id string) int
+		DeleteRemoteNetwork      func(childComplexity int, id string) int
+		DeleteResource           func(childComplexity int, id string) int
+		DeleteShield             func(childComplexity int, id string) int
+		GenerateConnectorToken   func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken      func(childComplexity int, remoteNetworkID string, shieldName string) int
+		InitiateAuth             func(childComplexity int, provider string, workspaceName *string) int
+		PromoteDiscoveredService func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource          func(childComplexity int, id string) int
+		RevokeConnector          func(childComplexity int, id string) int
+		RevokeShield             func(childComplexity int, id string) int
+		TriggerScan              func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnprotectResource        func(childComplexity int, id string) int
+		UpdateResource           func(childComplexity int, id string, input UpdateResourceInput) int
 	}
 
 	Query struct {
 		AllResources            func(childComplexity int) int
 		Connector               func(childComplexity int, id string) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
+		GetDiscoveredServices   func(childComplexity int, shieldID string) int
+		GetScanResults          func(childComplexity int, requestID string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
 		Me                      func(childComplexity int) int
@@ -121,6 +135,16 @@ type ComplexityRoot struct {
 		RemoteNetwork  func(childComplexity int) int
 		Shield         func(childComplexity int) int
 		Status         func(childComplexity int) int
+	}
+
+	ScanResult struct {
+		FirstSeen     func(childComplexity int) int
+		IP            func(childComplexity int) int
+		Port          func(childComplexity int) int
+		Protocol      func(childComplexity int) int
+		ReachableFrom func(childComplexity int) int
+		RequestID     func(childComplexity int) int
+		ServiceName   func(childComplexity int) int
 	}
 
 	Shield struct {
@@ -190,6 +214,8 @@ type MutationResolver interface {
 	ProtectResource(ctx context.Context, id string) (*Resource, error)
 	UnprotectResource(ctx context.Context, id string) (*Resource, error)
 	DeleteResource(ctx context.Context, id string) (bool, error)
+	PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*Resource, error)
+	TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -204,6 +230,8 @@ type QueryResolver interface {
 	Shield(ctx context.Context, id string) (*Shield, error)
 	Resources(ctx context.Context, remoteNetworkID string) ([]*Resource, error)
 	AllResources(ctx context.Context) ([]*Resource, error)
+	GetDiscoveredServices(ctx context.Context, shieldID string) ([]*DiscoveredService, error)
+	GetScanResults(ctx context.Context, requestID string) ([]*ScanResult, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -322,6 +350,49 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.ConnectorToken.InstallCommand(childComplexity), true
 
+	case "DiscoveredService.boundIp":
+		if e.ComplexityRoot.DiscoveredService.BoundIP == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.BoundIP(childComplexity), true
+	case "DiscoveredService.firstSeen":
+		if e.ComplexityRoot.DiscoveredService.FirstSeen == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.FirstSeen(childComplexity), true
+	case "DiscoveredService.lastSeen":
+		if e.ComplexityRoot.DiscoveredService.LastSeen == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.LastSeen(childComplexity), true
+	case "DiscoveredService.port":
+		if e.ComplexityRoot.DiscoveredService.Port == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.Port(childComplexity), true
+	case "DiscoveredService.protocol":
+		if e.ComplexityRoot.DiscoveredService.Protocol == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.Protocol(childComplexity), true
+	case "DiscoveredService.serviceName":
+		if e.ComplexityRoot.DiscoveredService.ServiceName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.ServiceName(childComplexity), true
+	case "DiscoveredService.shieldId":
+		if e.ComplexityRoot.DiscoveredService.ShieldID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DiscoveredService.ShieldID(childComplexity), true
+
 	case "Mutation.createRemoteNetwork":
 		if e.ComplexityRoot.Mutation.CreateRemoteNetwork == nil {
 			break
@@ -421,6 +492,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.InitiateAuth(childComplexity, args["provider"].(string), args["workspaceName"].(*string)), true
+	case "Mutation.promoteDiscoveredService":
+		if e.ComplexityRoot.Mutation.PromoteDiscoveredService == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_promoteDiscoveredService_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.PromoteDiscoveredService(childComplexity, args["shieldId"].(string), args["protocol"].(string), args["port"].(int)), true
 	case "Mutation.protectResource":
 		if e.ComplexityRoot.Mutation.ProtectResource == nil {
 			break
@@ -454,6 +536,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeShield(childComplexity, args["id"].(string)), true
+	case "Mutation.triggerScan":
+		if e.ComplexityRoot.Mutation.TriggerScan == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_triggerScan_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.TriggerScan(childComplexity, args["connectorId"].(string), args["targets"].([]string), args["ports"].([]int)), true
 	case "Mutation.unprotectResource":
 		if e.ComplexityRoot.Mutation.UnprotectResource == nil {
 			break
@@ -505,6 +598,28 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Connectors(childComplexity, args["remoteNetworkId"].(string)), true
+	case "Query.getDiscoveredServices":
+		if e.ComplexityRoot.Query.GetDiscoveredServices == nil {
+			break
+		}
+
+		args, err := ec.field_Query_getDiscoveredServices_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.GetDiscoveredServices(childComplexity, args["shieldId"].(string)), true
+	case "Query.getScanResults":
+		if e.ComplexityRoot.Query.GetScanResults == nil {
+			break
+		}
+
+		args, err := ec.field_Query_getScanResults_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.GetScanResults(childComplexity, args["requestId"].(string)), true
 
 	case "Query.lookupWorkspace":
 		if e.ComplexityRoot.Query.LookupWorkspace == nil {
@@ -724,6 +839,49 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.Status(childComplexity), true
+
+	case "ScanResult.firstSeen":
+		if e.ComplexityRoot.ScanResult.FirstSeen == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.FirstSeen(childComplexity), true
+	case "ScanResult.ip":
+		if e.ComplexityRoot.ScanResult.IP == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.IP(childComplexity), true
+	case "ScanResult.port":
+		if e.ComplexityRoot.ScanResult.Port == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.Port(childComplexity), true
+	case "ScanResult.protocol":
+		if e.ComplexityRoot.ScanResult.Protocol == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.Protocol(childComplexity), true
+	case "ScanResult.reachableFrom":
+		if e.ComplexityRoot.ScanResult.ReachableFrom == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.ReachableFrom(childComplexity), true
+	case "ScanResult.requestId":
+		if e.ComplexityRoot.ScanResult.RequestID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.RequestID(childComplexity), true
+	case "ScanResult.serviceName":
+		if e.ComplexityRoot.ScanResult.ServiceName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScanResult.ServiceName(childComplexity), true
 
 	case "Shield.certNotAfter":
 		if e.ComplexityRoot.Shield.CertNotAfter == nil {
@@ -996,7 +1154,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1012,6 +1170,7 @@ var sources = []*ast.Source{
 	{Name: "connector.graphqls", Input: sourceData("connector.graphqls"), BuiltIn: false},
 	{Name: "shield.graphqls", Input: sourceData("shield.graphqls"), BuiltIn: false},
 	{Name: "resource.graphqls", Input: sourceData("resource.graphqls"), BuiltIn: false},
+	{Name: "discovery.graphqls", Input: sourceData("discovery.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -1138,6 +1297,27 @@ func (ec *executionContext) field_Mutation_initiateAuth_args(ctx context.Context
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_promoteDiscoveredService_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "shieldId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["shieldId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "protocol", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["protocol"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "port", ec.unmarshalNInt2int)
+	if err != nil {
+		return nil, err
+	}
+	args["port"] = arg2
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_protectResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -1168,6 +1348,27 @@ func (ec *executionContext) field_Mutation_revokeShield_args(ctx context.Context
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_triggerScan_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "connectorId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["connectorId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "targets", ec.unmarshalNString2ᚕstringᚄ)
+	if err != nil {
+		return nil, err
+	}
+	args["targets"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "ports", ec.unmarshalNInt2ᚕintᚄ)
+	if err != nil {
+		return nil, err
+	}
+	args["ports"] = arg2
 	return args, nil
 }
 
@@ -1228,6 +1429,28 @@ func (ec *executionContext) field_Query_connectors_args(ctx context.Context, raw
 		return nil, err
 	}
 	args["remoteNetworkId"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_getDiscoveredServices_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "shieldId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["shieldId"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_getScanResults_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "requestId", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["requestId"] = arg0
 	return args, nil
 }
 
@@ -1774,6 +1997,209 @@ func (ec *executionContext) _ConnectorToken_installCommand(ctx context.Context, 
 func (ec *executionContext) fieldContext_ConnectorToken_installCommand(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "ConnectorToken",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_shieldId(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_shieldId,
+		func(ctx context.Context) (any, error) {
+			return obj.ShieldID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_shieldId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_protocol(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_protocol,
+		func(ctx context.Context) (any, error) {
+			return obj.Protocol, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_protocol(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_port(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_port,
+		func(ctx context.Context) (any, error) {
+			return obj.Port, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_port(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_boundIp(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_boundIp,
+		func(ctx context.Context) (any, error) {
+			return obj.BoundIP, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_boundIp(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_serviceName(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_serviceName,
+		func(ctx context.Context) (any, error) {
+			return obj.ServiceName, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_serviceName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_firstSeen(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_firstSeen,
+		func(ctx context.Context) (any, error) {
+			return obj.FirstSeen, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_firstSeen(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _DiscoveredService_lastSeen(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_DiscoveredService_lastSeen,
+		func(ctx context.Context) (any, error) {
+			return obj.LastSeen, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_DiscoveredService_lastSeen(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DiscoveredService",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -2514,6 +2940,118 @@ func (ec *executionContext) fieldContext_Mutation_deleteResource(ctx context.Con
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_promoteDiscoveredService(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_promoteDiscoveredService,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().PromoteDiscoveredService(ctx, fc.Args["shieldId"].(string), fc.Args["protocol"].(string), fc.Args["port"].(int))
+		},
+		nil,
+		ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_promoteDiscoveredService(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Resource_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Resource_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Resource_description(ctx, field)
+			case "host":
+				return ec.fieldContext_Resource_host(ctx, field)
+			case "protocol":
+				return ec.fieldContext_Resource_protocol(ctx, field)
+			case "portFrom":
+				return ec.fieldContext_Resource_portFrom(ctx, field)
+			case "portTo":
+				return ec.fieldContext_Resource_portTo(ctx, field)
+			case "status":
+				return ec.fieldContext_Resource_status(ctx, field)
+			case "errorMessage":
+				return ec.fieldContext_Resource_errorMessage(ctx, field)
+			case "appliedAt":
+				return ec.fieldContext_Resource_appliedAt(ctx, field)
+			case "lastVerifiedAt":
+				return ec.fieldContext_Resource_lastVerifiedAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Resource_createdAt(ctx, field)
+			case "shield":
+				return ec.fieldContext_Resource_shield(ctx, field)
+			case "remoteNetwork":
+				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_promoteDiscoveredService_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_triggerScan(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_triggerScan,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().TriggerScan(ctx, fc.Args["connectorId"].(string), fc.Args["targets"].([]string), fc.Args["ports"].([]int))
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_triggerScan(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_triggerScan_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_me(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -3184,6 +3722,120 @@ func (ec *executionContext) fieldContext_Query_allResources(_ context.Context, f
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_getDiscoveredServices(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_getDiscoveredServices,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().GetDiscoveredServices(ctx, fc.Args["shieldId"].(string))
+		},
+		nil,
+		ec.marshalNDiscoveredService2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredServiceᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_getDiscoveredServices(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "shieldId":
+				return ec.fieldContext_DiscoveredService_shieldId(ctx, field)
+			case "protocol":
+				return ec.fieldContext_DiscoveredService_protocol(ctx, field)
+			case "port":
+				return ec.fieldContext_DiscoveredService_port(ctx, field)
+			case "boundIp":
+				return ec.fieldContext_DiscoveredService_boundIp(ctx, field)
+			case "serviceName":
+				return ec.fieldContext_DiscoveredService_serviceName(ctx, field)
+			case "firstSeen":
+				return ec.fieldContext_DiscoveredService_firstSeen(ctx, field)
+			case "lastSeen":
+				return ec.fieldContext_DiscoveredService_lastSeen(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type DiscoveredService", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_getDiscoveredServices_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_getScanResults(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_getScanResults,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().GetScanResults(ctx, fc.Args["requestId"].(string))
+		},
+		nil,
+		ec.marshalNScanResult2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResultᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_getScanResults(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "requestId":
+				return ec.fieldContext_ScanResult_requestId(ctx, field)
+			case "ip":
+				return ec.fieldContext_ScanResult_ip(ctx, field)
+			case "port":
+				return ec.fieldContext_ScanResult_port(ctx, field)
+			case "protocol":
+				return ec.fieldContext_ScanResult_protocol(ctx, field)
+			case "serviceName":
+				return ec.fieldContext_ScanResult_serviceName(ctx, field)
+			case "reachableFrom":
+				return ec.fieldContext_ScanResult_reachableFrom(ctx, field)
+			case "firstSeen":
+				return ec.fieldContext_ScanResult_firstSeen(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type ScanResult", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_getScanResults_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
 	}
 	return fc, nil
 }
@@ -4023,6 +4675,209 @@ func (ec *executionContext) fieldContext_Resource_remoteNetwork(_ context.Contex
 				return ec.fieldContext_RemoteNetwork_createdAt(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type RemoteNetwork", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_requestId(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_requestId,
+		func(ctx context.Context) (any, error) {
+			return obj.RequestID, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_requestId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_ip(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_ip,
+		func(ctx context.Context) (any, error) {
+			return obj.IP, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_ip(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_port(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_port,
+		func(ctx context.Context) (any, error) {
+			return obj.Port, nil
+		},
+		nil,
+		ec.marshalNInt2int,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_port(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_protocol(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_protocol,
+		func(ctx context.Context) (any, error) {
+			return obj.Protocol, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_protocol(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_serviceName(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_serviceName,
+		func(ctx context.Context) (any, error) {
+			return obj.ServiceName, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_serviceName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_reachableFrom(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_reachableFrom,
+		func(ctx context.Context) (any, error) {
+			return obj.ReachableFrom, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_reachableFrom(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ScanResult_firstSeen(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ScanResult_firstSeen,
+		func(ctx context.Context) (any, error) {
+			return obj.FirstSeen, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ScanResult_firstSeen(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ScanResult",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
 		},
 	}
 	return fc, nil
@@ -6664,6 +7519,75 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 	return out
 }
 
+var discoveredServiceImplementors = []string{"DiscoveredService"}
+
+func (ec *executionContext) _DiscoveredService(ctx context.Context, sel ast.SelectionSet, obj *DiscoveredService) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, discoveredServiceImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("DiscoveredService")
+		case "shieldId":
+			out.Values[i] = ec._DiscoveredService_shieldId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "protocol":
+			out.Values[i] = ec._DiscoveredService_protocol(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "port":
+			out.Values[i] = ec._DiscoveredService_port(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "boundIp":
+			out.Values[i] = ec._DiscoveredService_boundIp(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "serviceName":
+			out.Values[i] = ec._DiscoveredService_serviceName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "firstSeen":
+			out.Values[i] = ec._DiscoveredService_firstSeen(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "lastSeen":
+			out.Values[i] = ec._DiscoveredService_lastSeen(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var mutationImplementors = []string{"Mutation"}
 
 func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet) graphql.Marshaler {
@@ -6777,6 +7701,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "deleteResource":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_deleteResource(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "promoteDiscoveredService":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_promoteDiscoveredService(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "triggerScan":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_triggerScan(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -7078,6 +8016,50 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "getDiscoveredServices":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_getDiscoveredServices(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "getScanResults":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_getScanResults(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -7246,6 +8228,75 @@ func (ec *executionContext) _Resource(ctx context.Context, sel ast.SelectionSet,
 			out.Values[i] = ec._Resource_shield(ctx, field, obj)
 		case "remoteNetwork":
 			out.Values[i] = ec._Resource_remoteNetwork(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var scanResultImplementors = []string{"ScanResult"}
+
+func (ec *executionContext) _ScanResult(ctx context.Context, sel ast.SelectionSet, obj *ScanResult) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, scanResultImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ScanResult")
+		case "requestId":
+			out.Values[i] = ec._ScanResult_requestId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "ip":
+			out.Values[i] = ec._ScanResult_ip(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "port":
+			out.Values[i] = ec._ScanResult_port(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "protocol":
+			out.Values[i] = ec._ScanResult_protocol(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "serviceName":
+			out.Values[i] = ec._ScanResult_serviceName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "reachableFrom":
+			out.Values[i] = ec._ScanResult_reachableFrom(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "firstSeen":
+			out.Values[i] = ec._ScanResult_firstSeen(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -8183,6 +9234,32 @@ func (ec *executionContext) unmarshalNCreateResourceInput2githubᚗcomᚋyourorg
 	return res, graphql.ErrorOnPath(ctx, err)
 }
 
+func (ec *executionContext) marshalNDiscoveredService2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredServiceᚄ(ctx context.Context, sel ast.SelectionSet, v []*DiscoveredService) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNDiscoveredService2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredService(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNDiscoveredService2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredService(ctx context.Context, sel ast.SelectionSet, v *DiscoveredService) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._DiscoveredService(ctx, sel, v)
+}
+
 func (ec *executionContext) unmarshalNID2string(ctx context.Context, v any) (string, error) {
 	res, err := graphql.UnmarshalID(v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -8213,6 +9290,36 @@ func (ec *executionContext) marshalNInt2int(ctx context.Context, sel ast.Selecti
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) unmarshalNInt2ᚕintᚄ(ctx context.Context, v any) ([]int, error) {
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]int, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNInt2int(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNInt2ᚕintᚄ(ctx context.Context, sel ast.SelectionSet, v []int) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	for i := range v {
+		ret[i] = ec.marshalNInt2int(ctx, sel, v[i])
+	}
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) unmarshalNNetworkHealth2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkHealth(ctx context.Context, v any) (NetworkHealth, error) {
@@ -8315,6 +9422,32 @@ func (ec *executionContext) marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrol
 	return v
 }
 
+func (ec *executionContext) marshalNScanResult2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResultᚄ(ctx context.Context, sel ast.SelectionSet, v []*ScanResult) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNScanResult2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResult(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNScanResult2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResult(ctx context.Context, sel ast.SelectionSet, v *ScanResult) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ScanResult(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNShield2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldᚄ(ctx context.Context, sel ast.SelectionSet, v []*Shield) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
@@ -8379,6 +9512,36 @@ func (ec *executionContext) marshalNString2string(ctx context.Context, sel ast.S
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) unmarshalNString2ᚕstringᚄ(ctx context.Context, v any) ([]string, error) {
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]string, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNString2string(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel ast.SelectionSet, v []string) graphql.Marshaler {
+	ret := make(graphql.Array, len(v))
+	for i := range v {
+		ret[i] = ec.marshalNString2string(ctx, sel, v[i])
+	}
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput(ctx context.Context, v any) (UpdateResourceInput, error) {
