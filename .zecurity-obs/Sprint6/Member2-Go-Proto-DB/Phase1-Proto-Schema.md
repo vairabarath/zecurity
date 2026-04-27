@@ -50,48 +50,14 @@ message DiscoveryReport {
 }
 ```
 
-**New tunnel messages** (add after `DiscoveryReport`):
-
-```proto
-message TunnelOpen {
-  string connection_id = 1;  // UUID identifying this tunnel session
-  string destination   = 2;  // target IP or hostname
-  uint32 port          = 3;
-  string protocol      = 4;  // "tcp" or "udp"
-}
-
-message TunnelOpened {
-  string connection_id = 1;
-  bool   ok            = 2;
-  string error         = 3;  // set only on failure
-}
-
-message TunnelData {
-  string connection_id = 1;
-  bytes  data          = 2;  // raw TCP bytes (max 16KB chunks)
-}
-
-message TunnelClose {
-  string connection_id = 1;
-  string error         = 2;  // empty = clean close
-}
-```
-
 **Modify `ShieldControlMessage.oneof body`** — add after `pong = 6`:
 
 ```proto
 // Shield → Connector
 DiscoveryReport discovery_report = 7;
-// Connector → Shield
-TunnelOpen      tunnel_open      = 8;
-// Shield → Connector
-TunnelOpened    tunnel_opened    = 9;
-// Bidirectional
-TunnelData      tunnel_data      = 10;
-TunnelClose     tunnel_close     = 11;
 ```
 
-> **Rule:** fields 7–11 are assigned. Never reuse 1–6.
+> **Rule:** field 7 is assigned to this sprint. Fields 8–11 are reserved for Sprint 7 RDE tunnel messages — do NOT define them here. Never reuse 1–6.
 
 ---
 
