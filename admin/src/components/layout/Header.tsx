@@ -13,6 +13,7 @@ import { useAuthStore } from '@/store/auth'
 
 const titles: Record<string, { title: string; subtitle: string }> = {
   '/dashboard': { title: 'Dashboard', subtitle: 'Live posture across your zero-trust edge.' },
+  '/resource-discovery': { title: 'Resource Discovery', subtitle: 'Connector scans and shield-discovered services in one workspace.' },
   '/remote-networks': { title: 'Remote Networks', subtitle: 'Track networks, connectors, and shield coverage.' },
   '/connectors': { title: 'Connectors', subtitle: 'Gateways carrying heartbeat and tunnel traffic.' },
   '/shields': { title: 'Shields', subtitle: 'Resource agents enforcing protected access.' },

@@ -4,6 +4,7 @@ import {
   LayoutDashboard,
   Network,
   Plug,
+  Radar,
   Settings,
   Shield,
   ShieldCheck,
@@ -15,6 +16,7 @@ import { cn } from '@/lib/utils'
 const items = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/topology', label: 'Topology', icon: Waypoints },
+  { to: '/resource-discovery', label: 'Resource Discovery', icon: Radar },
   { to: '/remote-networks', label: 'Remote Networks', icon: Network },
   { to: '/connectors', label: 'Connectors', icon: Plug },
   { to: '/shields', label: 'Shields', icon: Shield },
@@ -49,7 +51,7 @@ export function Sidebar() {
   return (
     <aside className="app-panel col-start-1 row-span-2 flex min-h-0 flex-col p-3 max-[980px]:row-span-1">
       <div className="flex items-center gap-3 px-3 py-2.5">
-        <div className="grid h-10 w-10 place-items-center rounded-xl bg-[linear-gradient(135deg,oklch(0.86_0.095_175)_0%,oklch(0.70_0.10_175)_100%)] text-primary-foreground shadow-[0_6px_16px_oklch(0.86_0.095_175/0.22)]">
+        <div className="grid h-10 w-10 place-items-center rounded-xl bg-[linear-gradient(135deg,oklch(0.86_0.095_175)_0%,oklch(0.70_0.10_175)_100%)] text-[oklch(0.22_0.02_200)] shadow-[0_6px_16px_oklch(0.86_0.095_175/0.22)]">
           <ShieldCheck className="h-5 w-5" />
         </div>
         <div>
