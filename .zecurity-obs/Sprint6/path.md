@@ -66,7 +66,7 @@ Two features land together:
 | `controller/internal/connector/control.go` | M3 adds discovery batch + scan handlers | M3 only |
 | `connector/src/agent_server.rs` | M3 adds discovery buffering + relay | M3 only |
 | `connector/src/control_plane.rs` | M3 adds scan command dispatch + result relay | M3 only |
-| `shield/src/heartbeat.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). |
+| `shield/src/control_stream.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). Note: heartbeat logic lives here, not in heartbeat.rs. |
 
 ---
 
@@ -74,12 +74,12 @@ Two features land together:
 
 ### DAY 1 — Unblocking Work (Must land before anyone fans out)
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `DiscoveredService` + `DiscoveryReport` messages; add `discovery_report = 7` to `ShieldControlMessage.oneof`. **Stop at field 7** — fields 8–11 are reserved for Sprint 7.
-- [ ] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `ShieldDiscoveryBatch = 8`, `ScanCommand = 9`, `ScanReport = 10` to `ConnectorControlMessage.oneof`; add `DiscoveredResource` + `ScanResult` messages
-- [ ] **M2-D1-C** `controller/migrations/008_discovery.sql` — `shield_discovered_services` table + `connector_scan_results` table + indexes
-- [ ] **M2-D1-D** `controller/graph/discovery.graphqls` — `DiscoveredService` type, `ScanResult` type, queries + mutations
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **M2-D1-A** `proto/shield/v1/shield.proto` — Add `DiscoveredService` + `DiscoveryReport` messages; add `discovery_report = 7` to `ShieldControlMessage.oneof`. **Stop at field 7** — fields 8–11 are reserved for Sprint 7.
+- [x] **M2-D1-B** `proto/connector/v1/connector.proto` — Add `ShieldDiscoveryBatch = 8`, `ScanReport = 9`, `ScanCommand = 10` to `ConnectorControlMessage.oneof`; add `ShieldDiscoveryReport`, `ShieldDiscoveryBatch`, `ScanCommand`, `ScanResult`, `ScanReport` messages
+- [x] **M2-D1-C** `controller/migrations/010_discovery.sql` — `shield_discovered_services` table + `connector_scan_results` table + indexes (note: named 010, not 008 — 008 and 009 were already taken)
+- [x] **M2-D1-D** `controller/graph/discovery.graphqls` — `DiscoveredService` type, `ScanResult` type, queries + mutations; added to `gqlgen.yml`
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
+- [x] **TEAM** Run `make gqlgen` → gqlgen regenerates `generated.go` + `discovery.resolvers.go`
 
 > After Day 1 checkboxes are done: M1 can start UI layout, M3 can start discovery package, M4 can start discovery.rs scaffold.
 
@@ -87,8 +87,8 @@ Two features land together:
 
 ### PHASE A — M2 Discovery Store (Depends on: Day 1 done)
 
-- [ ] **M2-A1** `controller/internal/discovery/store.go` — DB helpers: `UpsertDiscoveredServices`, `GetDiscoveredServices(shieldId)`, `DeleteDiscoveredService`, `UpsertScanResults`, `GetScanResults(requestId)`, `PurgeScanResults(olderThan)`
-- [ ] **M2-A2** `controller/internal/discovery/config.go` — `DiscoveryConfig` struct, `ScanResultTTL` constant (24h)
+- [x] **M2-A1** `controller/internal/discovery/store.go` — DB helpers: `UpsertDiscoveredServices`, `ReplaceDiscoveredServices`, `GetDiscoveredServices(shieldId)`, `DeleteDiscoveredService`, `UpsertScanResults`, `GetScanResults(requestId)`, `PurgeScanResults(olderThan)`
+- [x] **M2-A2** `controller/internal/discovery/config.go` — `Config` struct, `ScanResultTTL` 24h default, `NewConfig()`
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -129,15 +129,15 @@ Two features land together:
 
 ### PHASE E — M4 Shield Discovery (Depends on: Day 1 proto done)
 
-- [ ] **M4-E1** `shield/src/discovery.rs` — NEW file:
+- [x] **M4-E1** `shield/src/discovery.rs` — NEW file:
   - `discover_sync()` — Linux: parse `/proc/net/tcp` + `/proc/net/tcp6` for LISTEN (state 0A) sockets; filter loopback, ephemeral, ignored ports (5355 LLMNR, 631 IPP, 5353 mDNS)
   - `service_from_port(port)` — well-known port → service name lookup
   - `compute_fingerprint(ports)` — hash over sorted (port, protocol) set
   - `run_discovery_diff(shield_id, sent, last_fp, seq)` — computes diff, returns `DiscoveryReport` or `None` if unchanged
   - `run_discovery_full_sync(shield_id, sent, last_fp, seq)` — full snapshot, always returns `DiscoveryReport`
-- [ ] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
-- [ ] **M4-E3** `shield/src/heartbeat.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream
-- [ ] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
+- [x] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
+- [x] **M4-E3** `shield/src/control_stream.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream. Note: heartbeat logic lives in `control_stream.rs`, not a separate `heartbeat.rs`.
+- [x] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 

@@ -4,10 +4,10 @@ import "time"
 
 const ScanResultTTL = 24 * time.Hour
 
-type DiscoveryConfig struct {
+type Config struct {
 	ScanResultTTL time.Duration
 }
 
-func DefaultConfig() DiscoveryConfig {
-	return DiscoveryConfig{ScanResultTTL: ScanResultTTL}
+func NewConfig() Config {
+	return Config{ScanResultTTL: ScanResultTTL}
 }
