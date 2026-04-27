@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"log"
 	"sync"
@@ -11,6 +12,7 @@ import (
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -108,6 +110,16 @@ func (r *ConnectorRegistry) PushResourceInstruction(
 	return nil
 }
 
+// PushScanCommand delivers a ScanCommand to a connected connector.
+// Returns an error if the connector is not currently connected.
+func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.ConnectorControlMessage) error {
+	c := r.get(connectorID)
+	if c == nil {
+		return fmt.Errorf("connector %s is not connected", connectorID)
+	}
+	return c.send(msg)
+}
+
 // Control implements ConnectorService.Control — the persistent bidirectional stream.
 func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) error {
 	ctx := stream.Context()
@@ -188,6 +200,10 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			h.handleShieldStatus(ctx, connectorID, body.ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
 			h.handleResourceAcks(ctx, tenantID, body.ResourceAcks)
+		case *pb.ConnectorControlMessage_ShieldDiscovery:
+			h.handleShieldDiscoveryBatch(ctx, body.ShieldDiscovery)
+		case *pb.ConnectorControlMessage_ScanReport:
+			h.handleScanReport(ctx, connectorID, body.ScanReport)
 		case *pb.ConnectorControlMessage_Pong:
 			// keepalive response — no action needed
 		}
@@ -355,4 +371,65 @@ func pingClient(c *connectorStreamClient) error {
 			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
 		},
 	})
+}
+
+func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batch *pb.ShieldDiscoveryBatch) {
+	for _, entry := range batch.Reports {
+		shieldID := entry.ShieldId
+		r := entry.Report
+		if r == nil {
+			continue
+		}
+
+		if r.FullSync {
+			var services []discovery.DiscoveredService
+			for _, svc := range r.Added {
+				services = append(services, protoToDiscoveredService(shieldID, svc))
+			}
+			if err := discovery.ReplaceDiscoveredServices(ctx, h.Pool, shieldID, services); err != nil {
+				log.Printf("discovery: replace failed for shield %s: %v", shieldID, err)
+			}
+		} else {
+			var added, removed []discovery.DiscoveredService
+			for _, svc := range r.Added {
+				added = append(added, protoToDiscoveredService(shieldID, svc))
+			}
+			for _, svc := range r.Removed {
+				removed = append(removed, discovery.DiscoveredService{
+					Protocol: svc.Protocol,
+					Port:     int(svc.Port),
+				})
+			}
+			if err := discovery.UpsertDiscoveredServices(ctx, h.Pool, shieldID, added, removed); err != nil {
+				log.Printf("discovery: upsert failed for shield %s: %v", shieldID, err)
+			}
+		}
+	}
+}
+
+func (h *EnrollmentHandler) handleScanReport(ctx context.Context, connectorID string, rep *pb.ScanReport) {
+	var results []discovery.ScanResult
+	for _, r := range rep.Results {
+		results = append(results, discovery.ScanResult{
+			RequestID:   rep.RequestId,
+			ConnectorID: connectorID,
+			IP:          r.Ip,
+			Port:        int(r.Port),
+			Protocol:    r.Protocol,
+			ServiceName: r.ServiceName,
+		})
+	}
+	if err := discovery.UpsertScanResults(ctx, h.Pool, connectorID, results); err != nil {
+		log.Printf("discovery: scan upsert failed for request %s: %v", rep.RequestId, err)
+	}
+}
+
+func protoToDiscoveredService(shieldID string, svc *shieldpb.DiscoveredService) discovery.DiscoveredService {
+	return discovery.DiscoveredService{
+		ShieldID:    shieldID,
+		Protocol:    svc.Protocol,
+		Port:        int(svc.Port),
+		BoundIP:     svc.BoundIp,
+		ServiceName: svc.ServiceName,
+	}
 }
