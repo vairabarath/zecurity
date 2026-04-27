@@ -12,6 +12,27 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-27 — Claude Code — M1 Phase 2 (Connector Network Scan UI)
+
+**What was done:**
+- Added `TriggerScan` mutation and `GetScanResults` query to admin GraphQL ops; ran `npm run codegen`
+- New `admin/src/components/ScanModal.tsx` — two-step (form → polled results); `parseTargets`/`parsePorts` helpers; ≤16 ports + 1–65535 validation; `startPolling(3000)` with 60s hard stop via `setTimeout` + `stopPolling()`
+- Modified `admin/src/pages/RemoteNetworks.tsx` — per-network connector selector + "Scan Network" button mounting `ScanModal` with `{connectorId, networkId, connectorName}`
+- Modified `admin/src/components/CreateResourceModal.tsx` — accepts a new `defaults` prop and prefills name/host/protocol/port from scan results
+- Modified `admin/src/pages/Resources.tsx` — accepts route-state defaults so navigating from `ScanModal` opens `CreateResourceModal` prefilled
+- `npm run codegen && npm run build` clean (2411 modules, 0 errors)
+
+**Key decisions:**
+- Polling stop uses both `pollingExpired` state + `stopPolling()` so React effect cleanup runs even if user closes the modal mid-scan
+- 512-target cap is enforced server-side only (CIDRs aren't expanded in the browser); ScanModal validates port count and presence, surfaces server errors inline
+- Prefill goes through Resources page route state rather than ScanModal owning a CreateResourceModal — keeps ScanModal focused on scan UX and reuses the existing Create flow
+
+**What's next:**
+- End-to-end smoke test now possible (M3 backend landed in PR #7)
+- Sprint 6 M1 frontend complete (Phase 1 shipped, Phase 2 ready to merge)
+
+---
+
 ## 2026-04-27 — Claude Code — M1 Phase 1 (Shield Discovery Tab)
 
 **What was done:**
