@@ -393,6 +393,7 @@ impl ShieldService for ShieldRegistry {
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
                                     }
                                     Some(Body::DiscoveryReport(report)) => {
+                                        info!(shield_id = %shield_id, added = report.added.len(), removed = report.removed.len(), "discovery: received report from shield");
                                         registry
                                             .pending_discovery
                                             .lock()
