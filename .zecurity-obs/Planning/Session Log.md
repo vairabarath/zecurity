@@ -682,3 +682,28 @@ Most recent first. Every agent appends an entry after their session.
 - M2 commits Day 1 proto + migration 008 + discovery.graphqls to unblock the team
 - M4 can start shield/src/discovery.rs immediately (no proto needed for core logic)
 - M1 can start page layout immediately (no codegen needed for structure)
+
+## 2026-04-27 — M3 (Claude Sonnet 4.6)
+
+**What was done:**
+- Pulled M2's Day 1 updates from main (protos, migration 010, discovery.graphqls, generated stubs)
+- Created `controller/internal/discovery/store.go` — all DB helpers (M2-A work that was missing)
+- Created `controller/internal/discovery/config.go` — DiscoveryConfig + ScanResultTTL constant
+- Implemented all 4 resolvers in `controller/graph/resolvers/discovery.resolvers.go`
+- Added `toDiscoveredServiceGQL()` + `toScanResultGQL()` mappers to `helpers.go`
+- Added `PushScanCommand()`, `handleShieldDiscoveryBatch()`, `handleScanReport()`, `protoToDiscoveredService()` to `controller/internal/connector/control_stream.go`
+- Added hourly purge goroutine in `controller/cmd/server/main.go`
+- Created `connector/src/discovery/` — `mod.rs`, `tcp_ping.rs`, `service_detect.rs`, `scope.rs`, `scan.rs`
+- Modified `connector/src/agent_server.rs` — buffers DiscoveryReport per shield; `drain_discovery_batch()` produces ShieldDiscoveryBatch
+- Modified `connector/src/control_stream.rs` — 5s discovery flush ticker; ScanCommand handler spawns execute_scan and sends ScanReport upstream
+- Updated path.md checkboxes (M3-B1, B2, C1, C2, D1, D2, D3) and phase file statuses to done
+
+**Key decisions:**
+- Discovery store created by M3 since M2 had not implemented it — fills M2-A gap
+- `pending_discovery` keyed by shield_id (latest report per shield wins before flush) — avoids double-sending if shield sends multiple reports within the 5s window
+- `PushScanCommand` returns error if connector is offline — resolver surfaces this to the UI immediately rather than silently dropping
+
+**What's next:**
+- M4 to wire shield/src/heartbeat.rs discovery calls (Phase E3/E4) if not done
+- M1 to complete frontend discovery tab + scan UI (Phase F)
+- Final integration: buf generate clean, all five build gates green, migration 010 runs

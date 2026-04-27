@@ -28,6 +28,7 @@ base64             = "0.22"
 time               = { version = "0.3", features = ["formatting"] }
 if-addrs           = "0.13"
 tokio-stream       = "0.1"
+ipnet              = "2"
 
 [build-dependencies]
 tonic-build       = "0.14"
