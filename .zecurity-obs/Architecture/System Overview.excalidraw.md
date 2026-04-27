@@ -48,7 +48,7 @@ Keypair: EC P-384  ·  Cert TTL: 7 days
 
 Lifecycle Modules:
   enrollment.rs — JWT + CSR → receive cert
-  heartbeat.rs — mTLS loop every 30s
+  control_stream.rs — persistent mTLS bidirectional stream every 30s
   renewal.rs — auto-renew within window
   updater.rs — binary self-update via GH
 
