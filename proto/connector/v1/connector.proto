@@ -77,6 +77,10 @@ message ConnectorControlMessage {
     ShieldStatusBatch         shield_status         = 5;
     ResourceAckBatch          resource_acks         = 6;
     shield.v1.Pong            pong                  = 7;
+    ShieldDiscoveryBatch      shield_discovery      = 8;
+    ScanReport                scan_report           = 9;
+    // Controller → Connector
+    ScanCommand               scan_command          = 10;
   }
 }
 
@@ -106,4 +110,36 @@ message ShieldStatusBatch {
 
 message ResourceAckBatch {
   repeated shield.v1.ResourceAck acks = 1;
+}
+
+message ShieldDiscoveryReport {
+  string                    shield_id = 1;
+  shield.v1.DiscoveryReport report    = 2;
+}
+
+message ShieldDiscoveryBatch {
+  repeated ShieldDiscoveryReport reports = 1;
+}
+
+message ScanCommand {
+  string          request_id  = 1;  // UUID — client uses this to poll results
+  repeated string targets     = 2;  // IPs or CIDRs (e.g. "192.168.1.0/24")
+  repeated uint32 ports       = 3;  // ports to probe (max 16)
+  uint32          max_targets = 4;  // hard cap, default 512
+  uint32          timeout_sec = 5;  // per-target timeout, default 5, max 60
+}
+
+message ScanResult {
+  string ip             = 1;
+  uint32 port           = 2;
+  string protocol       = 3;  // "tcp"
+  string service_name   = 4;
+  uint64 first_seen     = 5;  // unix timestamp
+  string reachable_from = 6;  // connector_id that ran the scan
+}
+
+message ScanReport {
+  string              request_id = 1;
+  repeated ScanResult results    = 2;
+  string              error      = 3;  // set only on scan-level errors
 }
