@@ -108,6 +108,21 @@ function computeLitSet(hoveredId: string | null, tree: TopoNode): Set<string> {
   return new Set([hoveredId])
 }
 
+function findNode(tree: TopoNode, id: string | null): TopoNode | null {
+  if (!id) return null
+  if (tree.id === id) return tree
+  for (const net of tree.children ?? []) {
+    if (net.id === id) return net
+    for (const conn of net.children ?? []) {
+      if (conn.id === id) return conn
+      for (const sh of conn.children ?? []) {
+        if (sh.id === id) return sh
+      }
+    }
+  }
+  return null
+}
+
 // Returns typed pair so TypeScript can narrow correctly — avoids closure narrowing bugs
 function findConnector(tree: TopoNode, id: string | null): { net: TopoNode; conn: TopoNode } | null {
   if (!id) return null
@@ -223,13 +238,15 @@ function TopoGraph({
   const edges: [TopoNode, TopoNode][] = []
   const netWeight = (n: TopoNode) => Math.max((n.children || []).length, 1)
   const shieldR = base * 0.015, shieldGap = shieldR * 2.6
+  const connR = base * 0.022          // connector node half-size (matches rect r below)
+  const shieldOffset = base * 0.062   // gap from connector edge → shield badge/node center
 
   const fanShields = (conn: TopoNode, baseAng: number, radialOffset?: number) => {
     const shields = conn.children || []
     if (!shields.length) return
     const ux = Math.cos(baseAng), uy = Math.sin(baseAng)
     const tx = -uy, ty = ux
-    const r0 = radialOffset ?? (R_conn + base * 0.060)
+    const r0 = radialOffset ?? (R_conn + connR + shieldOffset)
     const n = shields.length
     shields.forEach((sh, i) => {
       const t = (i - (n - 1) / 2) * shieldGap
@@ -497,7 +514,7 @@ function TopoGraph({
           const r = base * 0.022
           const shieldCount = (n.children || []).length
           const showBadge = focusKind === 'home' && shieldCount > 0 && hoveredId !== n.id && selectedId !== n.id
-          const bx = dx * (r + base * 0.028), by = dy * (r + base * 0.028)
+          const bx = dx * (connR + shieldOffset), by = dy * (connR + shieldOffset)
           const bR = base * 0.013
           return (
             <g key={n.id} className="topo-node"
@@ -507,7 +524,7 @@ function TopoGraph({
               <rect x={-r} y={-r} width={r * 2} height={r * 2} rx={r * 0.4}
                 fill={alphaColor(c, 0.18)} stroke={c} strokeWidth={isSelected || isFocused ? 2.6 : 1.6} />
               <Glyph kind="conn" x={0} y={0} size={r * 0.56} color={c} />
-              <text x={dx * (r + 14)} y={dy * (r + 14) - (r + 6)}
+              <text x={dx * (r + 18)} y={dy * (r + 18) + 5}
                 textAnchor={dx > 0.3 ? 'start' : dx < -0.3 ? 'end' : 'middle'}
                 fontSize={base * 0.0115} fill="oklch(0.82 0.010 250)" fontWeight="700"
                 style={{ pointerEvents: 'none' }}>
@@ -645,7 +662,7 @@ function PanZoom({ children, fitSignal }: { children: React.ReactNode; fitSignal
 }
 
 // ── Inspector ─────────────────────────────────────────
-function Inspector({ node, onClose }: { node: TopoNode | null; onClose: () => void }) {
+function Inspector({ node, isPinned, onClose }: { node: TopoNode | null; isPinned: boolean; onClose: () => void }) {
   if (!node) {
     return (
       <div className="topo-inspector topo-inspector-empty">
@@ -656,7 +673,7 @@ function Inspector({ node, onClose }: { node: TopoNode | null; onClose: () => vo
             </svg>
           </div>
           <div className="topo-ins-title">Inspector</div>
-          <div className="topo-ins-sub">Click a <b>network</b> to drill in. Click a <b>connector</b> for the outer shell. Click workspace to reset.</div>
+          <div className="topo-ins-sub"><b>Hover</b> a node to inspect it. <b>Click</b> to pin. Click a <b>network</b> to drill in.</div>
         </div>
       </div>
     )
@@ -676,11 +693,15 @@ function Inspector({ node, onClose }: { node: TopoNode | null; onClose: () => vo
             <span className="topo-ins-dot" style={{ background: c }} />
             {kindLabel}
           </div>
-          <button className="topo-ins-close" onClick={onClose}>
-            <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+          {isPinned ? (
+            <button className="topo-ins-close" onClick={onClose} title="Unpin">
+              <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          ) : (
+            <span className="topo-ins-preview-badge">preview</span>
+          )}
         </div>
         <div className="topo-ins-title">{node.label}</div>
         <div className={`topo-ins-status topo-ins-status-${node.status}`}>
@@ -702,7 +723,10 @@ function Inspector({ node, onClose }: { node: TopoNode | null; onClose: () => vo
           )}
         </div>
         <div className="topo-ins-hint">
-          Drag to pan · <span className="topo-ins-kbd">scroll</span> to zoom · <span className="topo-ins-kbd">Esc</span> to reset
+          {isPinned
+            ? <>Pinned · click empty space or <span className="topo-ins-kbd">Esc</span> to unpin</>
+            : <>Click to pin · <span className="topo-ins-kbd">scroll</span> to zoom</>
+          }
         </div>
       </div>
     </div>
@@ -821,6 +845,8 @@ export default function TopologyPage() {
   }, [networksData, workspaceData])
 
   const counts = topoCounts(tree)
+  const hoveredNode = useMemo(() => findNode(tree, hovered), [tree, hovered])
+  const displayedNode = selected ?? hoveredNode ?? null
 
   return (
     <div
@@ -924,7 +950,7 @@ export default function TopologyPage() {
       </PanZoom>
 
       {/* Inspector */}
-      <Inspector node={selected} onClose={() => setSelected(null)} />
+      <Inspector node={displayedNode} isPinned={!!selected} onClose={() => setSelected(null)} />
     </div>
   )
 }

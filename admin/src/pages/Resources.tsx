@@ -1,23 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useMutation, useQuery } from '@apollo/client/react'
-import { AlertCircle, Loader2, Lock, MoreHorizontal, Plus, Unlock, Wifi, WifiOff } from 'lucide-react'
+import { useQuery } from '@apollo/client/react'
+import { AlertCircle, Plus, Wifi, WifiOff } from 'lucide-react'
 import {
-  DeleteResourceDocument,
   GetAllResourcesDocument,
   GetRemoteNetworksDocument,
-  ProtectResourceDocument,
   ShieldStatus,
-  UnprotectResourceDocument,
-  type GetAllResourcesQuery,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { CreateResourceModal } from '@/components/CreateResourceModal'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
-import { toast } from 'sonner'
-
-type Resource = GetAllResourcesQuery['allResources'][number]
 
 const transitionalStates = new Set(['managing', 'protecting', 'removing'])
 
@@ -36,7 +29,6 @@ function formatPort(from: number, to: number) {
 export default function Resources() {
   const navigate = useNavigate()
   const [showAdd, setShowAdd] = useState(false)
-  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworksDocument)
   const networks = networkData?.remoteNetworks ?? []
@@ -53,40 +45,6 @@ export default function Resources() {
     const hasTransition = resources.some((resource) => transitionalStates.has(resource.status))
     startPolling(hasTransition ? 3000 : 30000)
   }, [resources, startPolling])
-
-  const [protectResource, { loading: protecting }] = useMutation(ProtectResourceDocument, {
-    onCompleted: () => {
-      toast.success('Resource protection started')
-      refetch()
-    },
-    onError: (error) => toast.error(error.message),
-  })
-
-  const [unprotectResource, { loading: unprotecting }] = useMutation(UnprotectResourceDocument, {
-    onCompleted: () => {
-      toast.success('Resource unprotected')
-      refetch()
-    },
-    onError: (error) => toast.error(error.message),
-  })
-
-  const [deleteResource] = useMutation(DeleteResourceDocument, {
-    onCompleted: () => {
-      toast.success('Resource deleted')
-      refetch()
-      setDeletingId(null)
-    },
-    onError: (error) => {
-      toast.error(error.message)
-      setDeletingId(null)
-    },
-  })
-
-  function handleDelete(id: string) {
-    if (!window.confirm('Delete this resource?')) return
-    setDeletingId(id)
-    void deleteResource({ variables: { id } })
-  }
 
   return (
     <div className="space-y-6">
