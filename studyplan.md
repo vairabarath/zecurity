@@ -1,5 +1,7 @@
 Zecurity — Full Codebase Study Plan
-Updated: 2026-04-18 — Sprint 4 fully merged (Shield + Connector agent_server + Admin UI)
+Updated: 2026-04-27 — Sprint 4 fully merged (Shield + Connector agent_server + Admin UI)
+
+> **Note:** This file predates the control_stream refactor (commit 722995c). All `heartbeat.rs` references in the study plan reflect the state of the codebase when each section was written. The old `heartbeat.rs` modules in both Connector and Shield were replaced by persistent bidirectional `control_stream.rs` in a later refactor.
 
 ─────────────────────────────────────────────
 WHAT THIS FILE IS
@@ -342,7 +344,7 @@ Read files in this order:
       11. Write state_dir/state.json { connector_id, trust_domain, workspace_id, enrolled_at }
       12. return EnrollmentState { connector_id, trust_domain, workspace_id, enrolled_at }
 
-⑤ connector/src/heartbeat.rs
+⑤ connector/src/heartbeat.rs (historical — now `connector/src/control_stream.rs`, commit 722995c)
     async fn run_heartbeat(cfg, enrollment_state, shield_server) -> Result<()>
       1. Build mTLS channel: client cert = connector.crt + connector.key, CA = workspace_ca.crt
       2. Pre-flight: raw TLS connection → verify_controller_spiffe()
@@ -473,7 +475,7 @@ Same structure as Connector but heartbeats to Connector and adds kernel networki
           }
       11. return ShieldState
 
-⑥ shield/src/heartbeat.rs
+⑥ shield/src/heartbeat.rs (historical — now `shield/src/control_stream.rs`, commit 722995c)
     async fn run(state: ShieldState, cfg: ShieldConfig) -> Result<()>
       1. Build mTLS channel to state.connector_addr (Shield cert + workspace CA)
       2. Pre-flight: verify_connector_spiffe(peer_cert, trust_domain, connector_id)
@@ -701,23 +703,25 @@ FLOW A: Admin creates a Shield (full trace)
 
 15. shield/src/main.rs → tokio::spawn(heartbeat::run(state, cfg))
 
-16. shield/src/heartbeat.rs → run()
+16. shield/src/control_stream.rs (formerly heartbeat.rs) → run_once()
     → mTLS channel to "192.168.1.10:9091" (shield.crt + workspace_ca.crt)
     → verify_connector_spiffe(peer_cert, "ws-acme.zecurity.in", "xyz")
-    → loop every 60s:
-        ShieldServiceClient.heartbeat(HeartbeatRequest { shield_id: "abc", ... })
+    → persistent bidirectional stream:
+        every 60s: ShieldServiceClient.heartbeat(HeartbeatRequest { shield_id: "abc", ... })
+        on inbound: handle Control stream messages
 
 17. connector/src/agent_server.rs → Heartbeat()
     → alive_shields["abc"] = ShieldHealth { status: ONLINE, version, last_heartbeat_at: now }
     → cert expiry check → re_enroll = false (fresh cert)
     → return HeartbeatResponse { ok: true, re_enroll: false }
 
-18. connector/src/heartbeat.rs → run_heartbeat()
-    → (30s tick): get_alive_shields() → [ShieldHealth { shield_id: "abc", ... }]
-    → ConnectorServiceClient.heartbeat(HeartbeatRequest {
-        connector_id: "xyz",
-        shields: [ShieldHealth{ shield_id: "abc", status: ONLINE, ... }]
-      })
+18. connector/src/control_stream.rs (formerly heartbeat.rs) → run()
+    → (30s tick): get_alive_shields() → [ShieldHealth { shield_id: "abc", status: ONLINE, ... }]
+    → persistent bidirectional stream to Controller:
+        ConnectorServiceClient.heartbeat(HeartbeatRequest {
+            connector_id: "xyz",
+            shields: [ShieldHealth{ shield_id: "abc", status: ONLINE, ... }]
+        })
 
 19. controller/internal/connector/heartbeat.go → Heartbeat()
     → UPDATE connectors SET last_heartbeat_at=NOW() WHERE id='xyz'
@@ -829,7 +833,7 @@ KEY CONCEPTS CHEAT SHEET
   │ CA fingerprint verification     │ enrollment.rs step 2 (prevents MITM on enrollment)     │
   │ Private key never leaves device │ crypto.rs (only CSR/public key goes over wire)         │
   │ Proof-of-possession renewal     │ renewal.rs (CSR self-signed by existing private key)   │
-  │ Shield heartbeats via Connector │ shield/heartbeat.rs → agent_server.rs → heartbeat.rs   │
+  │ Shield heartbeats via Connector │ shield/control_stream.rs → agent_server.rs → control_stream.rs   │
   │ Connector proxies RenewCert     │ agent_server.rs RenewCert → Controller :9090           │
   │ Least-loaded Connector assign   │ shield/token.go selectConnector() (SQL COUNT shields)  │
   │ Interface address pool          │ shield/token.go assignInterfaceAddr() (100.64.0.0/10)  │
@@ -845,10 +849,10 @@ FULL CALL CHAIN REFERENCE
 
 Shield heartbeat reaches Controller:
 
-  shield/heartbeat.rs::run()
+  shield/control_stream.rs::run_once()  (formerly heartbeat.rs)
     → ShieldServiceClient::heartbeat()         [mTLS to Connector :9091]
     → connector/agent_server.rs::Heartbeat()   [updates alive_shields map]
-    → (every 30s tick) connector/heartbeat.rs::run_heartbeat()
+    → (every 30s tick) connector/control_stream.rs::run()
     → ConnectorServiceClient::heartbeat()      [mTLS to Controller :9090]
     → controller/connector/heartbeat.go::Heartbeat()
     → UPDATE connectors SET last_heartbeat_at

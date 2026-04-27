@@ -610,12 +610,12 @@ Sprint 5 implements the core functionality for protecting resources on a shield 
 - **Heartbeat:** The `heartbeat.go` logic was updated to piggyback resource instructions onto the existing heartbeat mechanism, sending instructions to the `connector` and processing acknowledgements back from it.
 
 **Connector:**
-- **Heartbeat Relay:** The connector's `heartbeat.rs` and `agent_server.rs` were modified to relay resource instructions from the controller to the shield and to forward acknowledgements from the shield back to the controller.
+- **Heartbeat Relay:** The connector's `control_stream.rs` and `agent_server.rs` relay resource instructions from the controller to the shield and forward acknowledgements back. (Formerly `heartbeat.rs` — refactored in commit 722995c.)
 
 **Shield:**
 - **New Agent:** A new Rust-based `shield` agent was created. This agent is responsible for managing resource protection on the host.
 - **Resource Protection:** The `resources.rs` module contains the core logic for applying and removing `nftables` rules to protect resources. It also includes a health checking mechanism to monitor the status of protected services.
-- **Heartbeat:** The shield's `heartbeat.rs` communicates with the connector, receiving resource instructions and sending back acknowledgements.
+- **Control Stream:** The shield's `control_stream.rs` communicates with the connector, receiving resource instructions and sending back acknowledgements. (Formerly `heartbeat.rs` — refactored in commit 722995c.)
 
 **Admin Frontend:**
 - **Resources Page:** A new `Resources.tsx` page was added to the admin UI, allowing users to view and manage protected resources.
@@ -635,8 +635,8 @@ Sprint 5 implements the core functionality for protecting resources on a shield 
 - `config.go` — `RenewalWindow` field, `CONNECTOR_RENEWAL_WINDOW` env var (default 48h)
 
 **Connector:**
-- `src/renewal.rs` — NEW: reads key, extracts public key DER, calls RenewCert RPC, saves cert, rebuilds mTLS channel
-- `src/heartbeat.rs` — triggers `renewal::renew_cert()` when `re_enroll=true`
+- `src/renewal.rs` — NEW: reads key, extracts public key DER, calls RenewCert RPC, saves cert, reconnects stream (historical — mTLS channel → persistent stream in later refactor)
+- `src/control_stream.rs` — triggers `renewal::renew_cert()` when re_enroll=true (replaces former `heartbeat.rs` trigger, commit 722995c)
 - `src/crypto.rs` — added `extract_public_key_der()` + `parse_cert_not_after()`
 
 **Proto (`proto/connector/v1/connector.proto`):**
