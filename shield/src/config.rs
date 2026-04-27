@@ -75,6 +75,10 @@ pub struct ShieldConfig {
     #[serde(default = "default_resource_check_interval")]
     pub resource_check_interval_secs: u64,
 
+    /// How often the discovery loop scans /proc/net/tcp for changes (in seconds).
+    #[serde(default = "default_discovery_interval")]
+    pub discovery_interval_secs: u64,
+
     /// Directory for persistent state files (key, cert, CA chain, state.json).
     /// The systemd service unit grants write access to this directory.
     #[serde(default = "default_state_dir")]
@@ -87,6 +91,10 @@ fn default_log_level() -> String {
 
 fn default_resource_check_interval() -> u64 {
     15
+}
+
+fn default_discovery_interval() -> u64 {
+    60
 }
 
 fn default_state_dir() -> String {
