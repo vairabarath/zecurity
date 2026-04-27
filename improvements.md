@@ -478,7 +478,7 @@ Priority legend: 🔴 Critical  🟠 High  🟡 Medium  🟢 Low
        }
 
 🟠 10.2 — Shield has no Connector failover
-  Where: shield/src/heartbeat.rs, controller/internal/shield/token.go
+  Where: shield/src/control_stream.rs (formerly heartbeat.rs), controller/internal/shield/token.go
   Problem: At enrollment time, Shield is assigned ONE Connector. If that
            Connector is permanently decommissioned or crashes without
            recovery, the Shield is stuck — it keeps trying to heartbeat

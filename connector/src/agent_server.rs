@@ -41,6 +41,8 @@ pub struct ShieldRegistry {
     // Unified ack sink — consumed by control_stream.rs which forwards to controller
     pub ack_tx: mpsc::Sender<(String, ResourceAck)>,
     health: Arc<Mutex<HashMap<String, ShieldEntry>>>,
+    // Pending discovery reports, keyed by shield_id — flushed upstream every 5s
+    pending_discovery: Arc<Mutex<HashMap<String, crate::shield_proto::DiscoveryReport>>>,
     controller_channel: Channel,
     trust_domain: String,
     connector_id: String,
@@ -59,6 +61,7 @@ impl ShieldRegistry {
             resource_instructions: Arc::new(Mutex::new(HashMap::new())),
             ack_tx,
             health: Arc::new(Mutex::new(HashMap::new())),
+            pending_discovery: Arc::new(Mutex::new(HashMap::new())),
             controller_channel,
             trust_domain,
             connector_id,
@@ -114,6 +117,31 @@ impl ShieldRegistry {
             })
             .collect();
         crate::proto::ShieldStatusBatch { shields }
+    }
+
+    pub fn connector_id(&self) -> &str {
+        &self.connector_id
+    }
+
+    /// Drain all pending discovery reports into a ShieldDiscoveryBatch message.
+    /// Returns None if there are no pending reports.
+    pub fn drain_discovery_batch(&self) -> Option<crate::proto::ConnectorControlMessage> {
+        let mut map = self.pending_discovery.lock().expect("pending_discovery poisoned");
+        if map.is_empty() {
+            return None;
+        }
+        let reports: Vec<crate::proto::ShieldDiscoveryReport> = map
+            .drain()
+            .map(|(shield_id, report)| crate::proto::ShieldDiscoveryReport {
+                shield_id,
+                report: Some(report),
+            })
+            .collect();
+        Some(crate::proto::ConnectorControlMessage {
+            body: Some(crate::proto::connector_control_message::Body::ShieldDiscovery(
+                crate::proto::ShieldDiscoveryBatch { reports },
+            )),
+        })
     }
 
     pub async fn serve(self, addr: SocketAddr, state_dir: impl AsRef<Path>) -> Result<()> {
@@ -363,6 +391,13 @@ impl ShieldService for ShieldRegistry {
                                     }
                                     Some(Body::ResourceAck(ack)) => {
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
+                                    }
+                                    Some(Body::DiscoveryReport(report)) => {
+                                        registry
+                                            .pending_discovery
+                                            .lock()
+                                            .expect("pending_discovery poisoned")
+                                            .insert(shield_id.clone(), report);
                                     }
                                     Some(Body::Pong(_)) => {}
                                     _ => {}

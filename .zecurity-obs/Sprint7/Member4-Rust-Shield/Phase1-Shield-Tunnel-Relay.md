@@ -7,7 +7,7 @@ phase: Phase1-Shield-Tunnel-Relay
 depends_on:
   - M2-D1-A (TunnelOpen/Opened/Data/Close in shield.proto — Sprint 7 Day 1)
   - buf generate
-  - Sprint 6 M4-E (discovery heartbeat wiring — heartbeat.rs already modified)
+  - Sprint 6 M4-E (discovery control stream wiring — control_stream.rs already has discovery arms)
 tags:
   - rust
   - shield
@@ -173,33 +173,13 @@ fn tunnel_opened_msg(connection_id: &str, ok: bool, error: &str) -> ShieldContro
 
 ---
 
-### 2. `shield/src/heartbeat.rs` (MODIFY)
+### 2. `shield/src/control_stream.rs` (MODIFY)
 
 Add match arms for the three tunnel message types **after the existing Sprint 6 discovery arms**. Do not remove or reorder existing arms.
 
-```rust
-use crate::tunnel::{self, TunnelHub};
+> **Note:** Discovery and tunnel logic live in the same `match` body in `control_stream.rs` (`run_once` function). There is no separate `heartbeat.rs`.
 
-// In the receive loop (match on msg.body), ADD after existing discovery arm:
-Body::TunnelOpen(open) => {
-    tunnel::handle_tunnel_open(
-        tunnel_hub.clone(),
-        open.connection_id,
-        open.destination,
-        open.port,
-        open.protocol,
-        upstream_tx.clone(),
-    ).await;
-}
-Body::TunnelData(data) => {
-    tunnel::handle_tunnel_data(tunnel_hub.clone(), &data.connection_id, data.data).await;
-}
-Body::TunnelClose(close) => {
-    tunnel::handle_tunnel_close(tunnel_hub.clone(), &close.connection_id).await;
-}
-```
-
-Initialize the hub once (in `heartbeat.rs` or passed from `main.rs`):
+Initialize the hub once (in `run_once` or passed from `main.rs`):
 
 ```rust
 let tunnel_hub = tunnel::new_hub();

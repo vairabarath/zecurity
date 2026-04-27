@@ -96,8 +96,8 @@ Two features land together:
 
 ### PHASE B — M3 Resolvers (Depends on: Day 1 done + M2-A done)
 
-- [ ] **M3-B1** `controller/graph/resolvers/discovery.resolvers.go` — `GetDiscoveredServices(shieldId)` query, `PromoteDiscoveredService(shieldId, protocol, port)` mutation, `TriggerScan(connectorId, targets, ports)` mutation, `GetScanResults(requestId)` query
-- [ ] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toDiscoveredServiceGQL()` and `toScanResultGQL()` mappers
+- [x] **M3-B1** `controller/graph/resolvers/discovery.resolvers.go` — `GetDiscoveredServices(shieldId)` query, `PromoteDiscoveredService(shieldId, protocol, port)` mutation, `TriggerScan(connectorId, targets, ports)` mutation, `GetScanResults(requestId)` query
+- [x] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toDiscoveredServiceGQL()` and `toScanResultGQL()` mappers
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -105,8 +105,8 @@ Two features land together:
 
 ### PHASE C — M3 Controller Control Handler (Depends on: Day 1 proto done + M3-B done)
 
-- [ ] **M3-C1** `controller/internal/connector/control.go` — MODIFY: handle `ConnectorControlMessage.ShieldDiscoveryBatch` → call `discovery.UpsertDiscoveredServices()` for each report; handle `ConnectorControlMessage.ScanReport` → call `discovery.UpsertScanResults()`; on `TriggerScan` resolver call → inject `ScanCommand` into outbound Control stream
-- [ ] **M3-C2** `controller/internal/connector/control.go` — Add `PurgeScanResults` background goroutine (runs every hour, purges results older than 24h)
+- [x] **M3-C1** `controller/internal/connector/control.go` — MODIFY: handle `ConnectorControlMessage.ShieldDiscoveryBatch` → call `discovery.UpsertDiscoveredServices()` for each report; handle `ConnectorControlMessage.ScanReport` → call `discovery.UpsertScanResults()`; on `TriggerScan` resolver call → inject `ScanCommand` into outbound Control stream
+- [x] **M3-C2** `controller/internal/connector/control.go` — Add `PurgeScanResults` background goroutine (runs every hour, purges results older than 24h)
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -114,9 +114,9 @@ Two features land together:
 
 ### PHASE D — M3 Connector Control Stream (Depends on: Day 1 proto done)
 
-- [ ] **M3-D1** `connector/src/agent_server.rs` — MODIFY: when a Shield sends `ShieldControlMessage::DiscoveryReport`, buffer it in `ShieldState`; on next upstream flush (every 5s or on content change) batch all pending reports into `ConnectorControlMessage::ShieldDiscoveryBatch` and send upstream
-- [ ] **M3-D2** `connector/src/control_plane.rs` — MODIFY: handle incoming `ConnectorControlMessage::ScanCommand` from Controller → parse into `ScanCommand` struct → spawn `scan::execute_scan()` → send result as `ConnectorControlMessage::ScanReport` upstream
-- [ ] **M3-D3** `connector/src/discovery/` — NEW directory with modules (ported from reference):
+- [x] **M3-D1** `connector/src/agent_server.rs` — MODIFY: when a Shield sends `ShieldControlMessage::DiscoveryReport`, buffer it in `ShieldState`; on next upstream flush (every 5s or on content change) batch all pending reports into `ConnectorControlMessage::ShieldDiscoveryBatch` and send upstream
+- [x] **M3-D2** `connector/src/control_plane.rs` — MODIFY: handle incoming `ConnectorControlMessage::ScanCommand` from Controller → parse into `ScanCommand` struct → spawn `scan::execute_scan()` → send result as `ConnectorControlMessage::ScanReport` upstream
+- [x] **M3-D3** `connector/src/discovery/` — NEW directory with modules (ported from reference):
   - `mod.rs` — pub mod declarations
   - `scan.rs` — `ScanCommand`, `DiscoveredResource`, `ScanReport`, `execute_scan()` (TCP ping with semaphore, max 32 concurrent)
   - `tcp_ping.rs` — async TCP connect with timeout (tokio + timeout)

@@ -26,13 +26,13 @@ tags:
 
 | File | Action |
 |------|--------|
-| `shield/src/heartbeat.rs` | MODIFY — handle resources in response, send acks in request |
+| `shield/src/heartbeat.rs` | MODIFY — handle resources in response, send acks in request (historical — now control_stream.rs) |
 
 ---
 
 ## Checklist
 
-### Modify `shield/src/heartbeat.rs`
+### Modify `shield/src/heartbeat.rs` (historical — now `shield/src/control_stream.rs`)
 
 The heartbeat function signature needs `Arc<SharedResourceState>` added:
 ```rust

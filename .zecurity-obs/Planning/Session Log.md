@@ -704,3 +704,55 @@ Most recent first. Every agent appends an entry after their session.
 - M2 commits Day 1 proto + migration 008 + discovery.graphqls to unblock the team
 - M4 can start shield/src/discovery.rs immediately (no proto needed for core logic)
 - M1 can start page layout immediately (no codegen needed for structure)
+
+## 2026-04-27 — M3 (Claude Sonnet 4.6)
+
+**What was done:**
+- Pulled M2's Day 1 updates from main (protos, migration 010, discovery.graphqls, generated stubs)
+- Created `controller/internal/discovery/store.go` — all DB helpers (M2-A work that was missing)
+- Created `controller/internal/discovery/config.go` — DiscoveryConfig + ScanResultTTL constant
+- Implemented all 4 resolvers in `controller/graph/resolvers/discovery.resolvers.go`
+- Added `toDiscoveredServiceGQL()` + `toScanResultGQL()` mappers to `helpers.go`
+- Added `PushScanCommand()`, `handleShieldDiscoveryBatch()`, `handleScanReport()`, `protoToDiscoveredService()` to `controller/internal/connector/control_stream.go`
+- Added hourly purge goroutine in `controller/cmd/server/main.go`
+- Created `connector/src/discovery/` — `mod.rs`, `tcp_ping.rs`, `service_detect.rs`, `scope.rs`, `scan.rs`
+- Modified `connector/src/agent_server.rs` — buffers DiscoveryReport per shield; `drain_discovery_batch()` produces ShieldDiscoveryBatch
+- Modified `connector/src/control_stream.rs` — 5s discovery flush ticker; ScanCommand handler spawns execute_scan and sends ScanReport upstream
+- Updated path.md checkboxes (M3-B1, B2, C1, C2, D1, D2, D3) and phase file statuses to done
+
+**Key decisions:**
+- Discovery store created by M3 since M2 had not implemented it — fills M2-A gap
+- `pending_discovery` keyed by shield_id (latest report per shield wins before flush) — avoids double-sending if shield sends multiple reports within the 5s window
+- `PushScanCommand` returns error if connector is offline — resolver surfaces this to the UI immediately rather than silently dropping
+
+**What's next:**
+- M4 to wire shield/src/heartbeat.rs discovery calls (Phase E3/E4) if not done
+- M1 to complete frontend discovery tab + scan UI (Phase F)
+- Final integration: buf generate clean, all five build gates green, migration 010 runs
+
+---
+
+## 2026-04-27 — M3 (Go+Rust / Connector)
+
+**What was done:**
+- All M3 Sprint 6 phases already complete (B1/B2/C1/C2/D1/D2/D3) — verified path.md checkboxes
+- Merged main into sprint6-member3; resolved add/add conflicts in `controller/internal/discovery/config.go` and `controller/internal/discovery/store.go` (took origin/main versions — had `Config` struct, transactions, `ReachableFrom` field)
+- Committed as `95ba36c` and `66f99f9`
+- Pushed branch to origin
+
+**Docs sweep — heartbeat.rs → control_stream.rs rename across all Obsidian notes:**
+- Updated `Services/Shield.md`, `Services/Connector.md`, `Architecture/System Overview.excalidraw.md` — module maps, startup flows, control stream sections
+- Updated `Sprint6/path.md` and `Sprint7/path.md` — conflict zones, team assignments, M4-E phase items
+- Updated `Sprint7/Member4/Phase1-Shield-Tunnel-Relay.md` — file references, section header
+- Added historical notes to `Sprint4/path.md`, `Sprint5/path.md` — header notes + conflict zone annotations + phase item footnotes
+- Updated Sprint4/Sprint5 team-workflow files, phase spec files (`Phase2-Heartbeat-Ack.md`, `Phase2-Heartbeat-Relay.md`, `Phase4-Heartbeat-Renewal.md`, `Phase2-Core-Modules.md`, `Phase5-AgentServer-Rust.md`)
+- Updated `codebase.md`, `implementation-report.md`, `improvements.md`, `studyplan.md` — module listings, section headers, call chain refs
+
+**Key decisions:**
+- Historical sprints (4/5) preserved as-is with footnotes — rewriting would lose accuracy of what was actually built at that time
+- Session Log.md left unchanged — accurately records what was done in each past session
+- `connector/build.rs` comment left as-is — describes proto generation, not runtime module
+
+**What's next:**
+- Sprint 6 fully complete on this branch; ready for PR to main when other members finish
+- Sprint 7 planning available in `.zecurity-obs/Sprint7/path.md`

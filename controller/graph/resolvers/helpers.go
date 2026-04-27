@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/resource"
 )
 
@@ -212,4 +213,28 @@ func (r *queryResolver) loadConnectors(ctx context.Context, tenantID, remoteNetw
 		result = []*graph.Connector{}
 	}
 	return result, nil
+}
+
+func toDiscoveredServiceGQL(s discovery.DiscoveredService) *graph.DiscoveredService {
+	return &graph.DiscoveredService{
+		ShieldID:    s.ShieldID,
+		Protocol:    s.Protocol,
+		Port:        s.Port,
+		BoundIP:     s.BoundIP,
+		ServiceName: s.ServiceName,
+		FirstSeen:   s.FirstSeen.Format(rfc3339),
+		LastSeen:    s.LastSeen.Format(rfc3339),
+	}
+}
+
+func toScanResultGQL(r discovery.ScanResult) *graph.ScanResult {
+	return &graph.ScanResult{
+		RequestID:     r.RequestID,
+		IP:            r.IP,
+		Port:          r.Port,
+		Protocol:      r.Protocol,
+		ServiceName:   r.ServiceName,
+		ReachableFrom: r.ReachableFrom,
+		FirstSeen:     r.FirstSeen.Format(rfc3339),
+	}
 }
