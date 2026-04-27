@@ -393,11 +393,21 @@ impl ShieldService for ShieldRegistry {
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
                                     }
                                     Some(Body::DiscoveryReport(report)) => {
+                                        let added = report.added.len();
+                                        let removed = report.removed.len();
+                                        let full_sync = report.full_sync;
                                         registry
                                             .pending_discovery
                                             .lock()
                                             .expect("pending_discovery poisoned")
                                             .insert(shield_id.clone(), report);
+                                        info!(
+                                            shield_id = %shield_id,
+                                            added,
+                                            removed,
+                                            full_sync,
+                                            "received DiscoveryReport from shield (buffered for upstream flush)"
+                                        );
                                     }
                                     Some(Body::Pong(_)) => {}
                                     _ => {}
