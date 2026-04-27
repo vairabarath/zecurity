@@ -176,7 +176,7 @@ Run these once all phases are complete:
       │       │               │
       ▼       ▼               ▼
     M2-A2   M3-C1          M4-D3
-  (store.go) (heartbeat     (heartbeat.rs
+  (store.go) (heartbeat     (heartbeat.rs)
              relay)          ack handling)
               │
               ▼
