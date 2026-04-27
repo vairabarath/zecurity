@@ -14,6 +14,7 @@
 
 pub mod agent_server;
 mod appmeta;
+pub mod discovery;
 mod config;
 mod control_stream;
 mod controller_client;

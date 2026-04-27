@@ -95,7 +95,7 @@ Implement the Shield-facing gRPC server that runs on Connector `:9091`. This ser
 
 ### get_alive_shields()
 
-- [x] Returns `Vec<ShieldHealth>` for use in `heartbeat.rs`:
+- [x] Returns `Vec<ShieldHealth>` for use in `connector/src/heartbeat.rs` (now `control_stream.rs`):
   ```rust
   pub fn get_alive_shields(&self) -> Vec<ShieldHealth> {
       self.shields.lock().unwrap()
@@ -132,7 +132,7 @@ cd connector && cargo build
 
 Before M3 starts this file, agree with M4 on:
 1. `ShieldServer::new()` signature (M4 calls it in `main.rs`)
-2. `get_alive_shields()` return type (M4 uses it in `heartbeat.rs`)
+2. `get_alive_shields()` return type (M4 uses it in `heartbeat.rs`, now `control_stream.rs`)
 3. Module path: `crate::agent_server::ShieldServer`
 
 ---

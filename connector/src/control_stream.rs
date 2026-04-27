@@ -12,11 +12,13 @@ use crate::config::ConnectorConfig;
 use crate::controller_client::{
     build_channel, fetch_public_ip, verify_controller_spiffe_preflight,
 };
+use crate::discovery::scan::{execute_scan, ScanCommand};
 use crate::enrollment::EnrollmentState;
 use crate::proto::connector_control_message::Body as CBody;
 use crate::proto::{
     connector_service_client::ConnectorServiceClient, ConnectorControlMessage,
-    ConnectorHealthReport, ResourceAckBatch,
+    ConnectorHealthReport, ResourceAckBatch, ScanReport as ProtoScanReport,
+    ScanResult as ProtoScanResult,
 };
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
@@ -25,6 +27,7 @@ use crate::util;
 const BACKOFF_INITIAL_SECS: u64 = 2;
 const BACKOFF_MAX_SECS: u64 = 60;
 const HEALTH_INTERVAL_SECS: u64 = 15;
+const DISCOVERY_FLUSH_SECS: u64 = 5;
 
 /// Outer reconnect loop. Blocks indefinitely — run via tokio::spawn or await directly from main.
 pub async fn run_control_stream(
@@ -139,6 +142,9 @@ async fn run_once(
     // Consume the immediate first tick so we don't double-send health on connect.
     health_ticker.tick().await;
 
+    let mut discovery_ticker = interval(Duration::from_secs(DISCOVERY_FLUSH_SECS));
+    discovery_ticker.tick().await; // skip first tick
+
     loop {
         tokio::select! {
             result = inbound.message() => {
@@ -199,6 +205,14 @@ async fn run_once(
                     }
                 }
             }
+
+            _ = discovery_ticker.tick() => {
+                if let Some(batch_msg) = shield_registry.drain_discovery_batch() {
+                    if out_tx.send(batch_msg).await.is_err() {
+                        return Err(anyhow::anyhow!("outbound channel closed sending discovery batch"));
+                    }
+                }
+            }
         }
     }
 }
@@ -216,6 +230,37 @@ async fn handle_controller_msg(
             for (shield_id, instr_batch) in batch.shield_resources {
                 shield_registry.push_instructions(&shield_id, instr_batch.instructions);
             }
+            None
+        }
+        Some(CBody::ScanCommand(cmd)) => {
+            let connector_id = shield_registry.connector_id().to_string();
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                let scan_cmd = ScanCommand {
+                    request_id:  cmd.request_id.clone(),
+                    targets:     cmd.targets,
+                    ports:       cmd.ports.into_iter().map(|p| p as u16).collect(),
+                    max_targets: cmd.max_targets,
+                    timeout_sec: cmd.timeout_sec as u64,
+                };
+                let report = execute_scan(scan_cmd, &connector_id).await;
+                let proto_results: Vec<ProtoScanResult> = report.results.into_iter().map(|r| ProtoScanResult {
+                    ip:              r.ip,
+                    port:            r.port as u32,
+                    protocol:        r.protocol,
+                    service_name:    r.service_name,
+                    reachable_from:  r.reachable_from,
+                    first_seen:      r.first_seen,
+                }).collect();
+                let proto_report = ConnectorControlMessage {
+                    body: Some(CBody::ScanReport(ProtoScanReport {
+                        request_id: report.request_id,
+                        results:    proto_results,
+                        error:      report.error.unwrap_or_default(),
+                    })),
+                };
+                let _ = out_tx.send(proto_report).await;
+            });
             None
         }
         Some(CBody::Ping(p)) => {
