@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@apollo/client/react'
-import { ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock3, Plus, ShieldOff, Trash2 } from 'lucide-react'
 import {
   DeleteShieldDocument,
   GetRemoteNetworkDocument,
@@ -13,6 +13,7 @@ import {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
+import { DiscoveredServicesPanel } from '@/components/DiscoveredServicesPanel'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
@@ -31,6 +32,16 @@ function truncateId(id: string | null | undefined) {
 export default function Shields() {
   const { id } = useParams<{ id: string }>()
   const [showInstall, setShowInstall] = useState(false)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+
+  function toggleExpanded(shieldId: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(shieldId)) next.delete(shieldId)
+      else next.add(shieldId)
+      return next
+    })
+  }
 
   const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
     variables: { id: id! },
@@ -90,9 +101,9 @@ export default function Shields() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[980px] grid-cols-[1.15fr_130px_160px_160px_130px_110px_170px] gap-4 px-5 py-3">
-            {['Name', 'Status', 'Interface', 'Via Connector', 'Last Seen', 'Version', 'Actions'].map((label, index) => (
-              <div key={label + index} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
+          <div className="table-head grid min-w-[980px] grid-cols-[36px_1.15fr_130px_160px_160px_130px_110px_170px] gap-4 px-5 py-3">
+            {['', 'Name', 'Status', 'Interface', 'Via Connector', 'Last Seen', 'Version', 'Actions'].map((label, index) => (
+              <div key={label + index} className={`table-head-label ${index === 7 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
@@ -114,8 +125,18 @@ export default function Shields() {
                 const canRevoke = shield.status === ShieldStatus.Active || shield.status === ShieldStatus.Disconnected
                 const canDelete = shield.status === ShieldStatus.Pending || shield.status === ShieldStatus.Revoked
 
+                const isExpanded = expanded.has(shield.id)
+
                 return (
-                  <div key={shield.id} className="admin-table-row grid grid-cols-[1.15fr_130px_160px_160px_130px_110px_170px] gap-4 px-5 py-4">
+                  <div key={shield.id}>
+                  <div className="admin-table-row grid grid-cols-[36px_1.15fr_130px_160px_160px_130px_110px_170px] gap-4 px-5 py-4">
+                    <button
+                      onClick={() => toggleExpanded(shield.id)}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg border border-border text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+                      aria-label={isExpanded ? 'Hide discovered services' : 'Show discovered services'}
+                    >
+                      {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    </button>
                     <div className="flex min-w-0 items-center gap-3">
                       <EntityIcon type="shield" />
                       <div className="min-w-0">
@@ -154,6 +175,12 @@ export default function Shields() {
                         </button>
                       ) : null}
                     </div>
+                  </div>
+                  {isExpanded ? (
+                    <div className="border-b border-border bg-background/40 px-5 py-4">
+                      <DiscoveredServicesPanel shieldId={shield.id} />
+                    </div>
+                  ) : null}
                   </div>
                 )
               })}
