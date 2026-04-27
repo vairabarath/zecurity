@@ -201,8 +201,10 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case *pb.ConnectorControlMessage_ResourceAcks:
 			h.handleResourceAcks(ctx, tenantID, body.ResourceAcks)
 		case *pb.ConnectorControlMessage_ShieldDiscovery:
+			log.Printf("control stream: connector %s received ShieldDiscoveryBatch reports=%d", connectorID, len(body.ShieldDiscovery.GetReports()))
 			h.handleShieldDiscoveryBatch(ctx, body.ShieldDiscovery)
 		case *pb.ConnectorControlMessage_ScanReport:
+			log.Printf("control stream: connector %s received ScanReport request_id=%s results=%d", connectorID, body.ScanReport.GetRequestId(), len(body.ScanReport.GetResults()))
 			h.handleScanReport(ctx, connectorID, body.ScanReport)
 		case *pb.ConnectorControlMessage_Pong:
 			// keepalive response — no action needed
@@ -381,13 +383,17 @@ func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batc
 			continue
 		}
 
+		log.Printf("discovery: shield %s full_sync=%v added=%d removed=%d", shieldID, r.FullSync, len(r.Added), len(r.Removed))
 		if r.FullSync {
 			var services []discovery.DiscoveredService
 			for _, svc := range r.Added {
 				services = append(services, protoToDiscoveredService(shieldID, svc))
 			}
+			log.Printf("discovery: calling ReplaceDiscoveredServices shield=%s services=%d", shieldID, len(services))
 			if err := discovery.ReplaceDiscoveredServices(ctx, h.Pool, shieldID, services); err != nil {
-				log.Printf("discovery: replace failed for shield %s: %v", shieldID, err)
+				log.Printf("discovery: replace FAILED for shield %s: %v", shieldID, err)
+			} else {
+				log.Printf("discovery: replace OK for shield %s services=%d", shieldID, len(services))
 			}
 		} else {
 			var added, removed []discovery.DiscoveredService
@@ -400,8 +406,11 @@ func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batc
 					Port:     int(svc.Port),
 				})
 			}
+			log.Printf("discovery: calling UpsertDiscoveredServices shield=%s added=%d removed=%d", shieldID, len(added), len(removed))
 			if err := discovery.UpsertDiscoveredServices(ctx, h.Pool, shieldID, added, removed); err != nil {
-				log.Printf("discovery: upsert failed for shield %s: %v", shieldID, err)
+				log.Printf("discovery: upsert FAILED for shield %s: %v", shieldID, err)
+			} else {
+				log.Printf("discovery: upsert OK for shield %s added=%d removed=%d", shieldID, len(added), len(removed))
 			}
 		}
 	}
