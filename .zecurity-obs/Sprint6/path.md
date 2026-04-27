@@ -147,11 +147,11 @@ Two features land together:
 
 - [x] **M1-F1** `admin/src/pages/Shields.tsx` — Add "Discovered Services" expandable panel per shield row; columns: Protocol, Port, Service Name, Bound IP, First Seen, Last Seen, Promote button
 - [x] **M1-F2** `admin/src/components/PromoteServiceModal.tsx` — Confirm modal: "Promote port 22/tcp (SSH) on 192.168.1.5 to a resource?" — prefills CreateResource form
-- [ ] **M1-F3** `admin/src/pages/RemoteNetworks.tsx` — Add "Scan Network" button per network; opens `ScanModal`
-- [ ] **M1-F4** `admin/src/components/ScanModal.tsx` — Form: target IPs/CIDR (textarea), ports (comma-separated); submits `TriggerScan` mutation; polls `GetScanResults(requestId)` every 3s; shows results table with Create Resource button per row
-- [ ] **M1-F5** `admin/src/graphql/queries.graphql` — Add `GetDiscoveredServices` (Phase 1 done); `GetScanResults` pending Phase 2
-- [ ] **M1-F6** `admin/src/graphql/mutations.graphql` — Add `PromoteDiscoveredService` (Phase 1 done); `TriggerScan` pending Phase 2
-- [ ] **M1-F7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks (re-run after Phase 2 ops added)
+- [x] **M1-F3** `admin/src/pages/RemoteNetworks.tsx` — Add "Scan Network" button per network; opens `ScanModal`
+- [x] **M1-F4** `admin/src/components/ScanModal.tsx` — Form: target IPs/CIDR (textarea), ports (comma-separated); submits `TriggerScan` mutation; polls `GetScanResults(requestId)` every 3s; shows results table with Create Resource button per row
+- [x] **M1-F5** `admin/src/graphql/queries.graphql` — `GetDiscoveredServices` + `GetScanResults`
+- [x] **M1-F6** `admin/src/graphql/mutations.graphql` — `PromoteDiscoveredService` + `TriggerScan`
+- [x] **M1-F7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks
 
 > Build check: `cd admin && npm run build` must pass.
 

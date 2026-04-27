@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 6
 member: M1
 phase: Phase2-Scan-UI
