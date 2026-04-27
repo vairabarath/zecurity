@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 6
 member: M2
 phase: Phase2-Discovery-Store
