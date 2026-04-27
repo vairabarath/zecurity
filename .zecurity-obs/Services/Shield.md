@@ -150,6 +150,8 @@ Sprint 5 will add per-resource ACCEPT rules to this table.
 - Interface creation/address/up uses `rtnetlink` directly from the daemon.
 - Firewall rules are constructed with the `nftables` Rust crate.
 - The current `nftables` crate helper still invokes the system `nft` executable when applying the ruleset, so the resource host still needs `nft` installed.
+- `network::setup()` is called on **every startup** (not just first enrollment) because TUN interfaces and nftables rules do not survive process restarts or reboots.
+- `interface_index()` handles `ENODEV` (os error 19) as `Ok(None)` — this is the normal path on restart when `zecurity0` was destroyed. The caller then creates the interface fresh. Prior to this fix the shield crashed on every restart with "failed to restore network on startup".
 
 ---
 

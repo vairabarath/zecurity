@@ -208,6 +208,7 @@ async fn run_once(
 
             _ = discovery_ticker.tick() => {
                 if let Some(batch_msg) = shield_registry.drain_discovery_batch() {
+                    info!("discovery: flushing batch to controller");
                     if out_tx.send(batch_msg).await.is_err() {
                         return Err(anyhow::anyhow!("outbound channel closed sending discovery batch"));
                     }

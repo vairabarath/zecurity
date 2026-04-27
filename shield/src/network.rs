@@ -217,15 +217,18 @@ async fn interface_index(handle: &Handle, interface_name: &str) -> Result<Option
         .match_name(interface_name.to_string())
         .execute();
 
-    if let Some(link) = links
-        .try_next()
-        .await
-        .with_context(|| format!("failed to query interface {}", interface_name))?
-    {
-        return Ok(Some(link.header.index));
+    match links.try_next().await {
+        Ok(Some(link)) => Ok(Some(link.header.index)),
+        Ok(None) => Ok(None),
+        // ENODEV (os error 19) — interface does not exist yet; caller will create it.
+        Err(NetlinkError::NetlinkError(ref msg))
+            if msg.code.map_or(false, |c| c.get() == -19) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(anyhow::Error::new(e))
+            .with_context(|| format!("failed to query interface {}", interface_name)),
     }
-
-    Ok(None)
 }
 
 /// Parse a `<ip>/<prefix>` string for rtnetlink address assignment.
