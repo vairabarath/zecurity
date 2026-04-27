@@ -1,8 +1,10 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use futures_util::FutureExt;
 use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
@@ -10,9 +12,11 @@ use tonic::Request;
 use tracing::{error, info, warn};
 
 use crate::config::ShieldConfig;
+use crate::discovery;
 use crate::proto::shield_control_message::Body;
 use crate::proto::{
-    shield_service_client::ShieldServiceClient, ShieldControlMessage, ShieldHealthReport,
+    shield_service_client::ShieldServiceClient, DiscoveredService as ProtoDiscoveredService,
+    DiscoveryReport, ShieldControlMessage, ShieldHealthReport,
 };
 use crate::resources::SharedResourceState;
 use crate::types::ShieldState;
@@ -64,6 +68,10 @@ async fn run_once(
     let lan_ip = util::detect_lan_ip().unwrap_or_default();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
+    let mut discovery_sent: HashSet<(u16, String)> = HashSet::new();
+    let mut discovery_fingerprint: u64 = 0;
+    let mut discovery_seq: u64 = 0;
+
     let (out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
     let response = client
         .control(Request::new(ReceiverStream::new(out_rx)))
@@ -78,6 +86,24 @@ async fn run_once(
     );
 
     send_health(&out_tx, &version, &hostname, &public_ip, &lan_ip).await?;
+
+    // Discovery: set up interval, consume its immediate first tick, then send full sync.
+    let mut discovery_tick =
+        tokio::time::interval(Duration::from_secs(cfg.discovery_interval_secs));
+    discovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    discovery_tick.tick().await; // consume the immediate first tick
+
+    match discovery::run_discovery_full_sync(
+        &state.shield_id,
+        &mut discovery_sent,
+        &mut discovery_fingerprint,
+        &mut discovery_seq,
+    )
+    .await
+    {
+        Ok(diff) => send_discovery_report(diff, &out_tx).await,
+        Err(e) => warn!("discovery: full sync error: {:#}", e),
+    }
 
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     health_ticker.tick().await;
@@ -111,6 +137,21 @@ async fn run_once(
                         })
                         .await
                         .context("failed to send resource ack")?;
+                }
+                // Non-blocking poll: only runs when discovery_interval_secs have elapsed.
+                if discovery_tick.tick().now_or_never().is_some() {
+                    match discovery::run_discovery_diff(
+                        &state.shield_id,
+                        &mut discovery_sent,
+                        &mut discovery_fingerprint,
+                        &mut discovery_seq,
+                    )
+                    .await
+                    {
+                        Ok(Some(diff)) => send_discovery_report(diff, &out_tx).await,
+                        Ok(None) => {}
+                        Err(e) => warn!("discovery: diff error: {:#}", e),
+                    }
                 }
             }
         }
@@ -219,6 +260,52 @@ async fn build_client(
     .await?;
 
     Ok(ShieldServiceClient::new(channel))
+}
+
+async fn send_discovery_report(
+    diff: discovery::DiscoveryDiff,
+    out_tx: &mpsc::Sender<ShieldControlMessage>,
+) {
+    let seq = diff.seq;
+    let added_len = diff.added.len();
+    let removed_len = diff.removed.len();
+    let full_sync = diff.full_sync;
+
+    let proto_report = DiscoveryReport {
+        shield_id:   diff.shield_id,
+        seq,
+        fingerprint: diff.fingerprint,
+        full_sync,
+        added: diff
+            .added
+            .into_iter()
+            .map(|s| ProtoDiscoveredService {
+                protocol:     s.protocol.to_string(),
+                port:         s.port as u32,
+                bound_ip:     s.bound_ip,
+                service_name: s.service_name,
+            })
+            .collect(),
+        removed: diff
+            .removed
+            .into_iter()
+            .map(|(port, proto)| ProtoDiscoveredService {
+                protocol:     proto,
+                port:         port as u32,
+                bound_ip:     String::new(),
+                service_name: String::new(),
+            })
+            .collect(),
+    };
+
+    let msg = ShieldControlMessage {
+        body: Some(Body::DiscoveryReport(proto_report)),
+    };
+
+    match out_tx.send(msg).await {
+        Ok(()) => info!(seq, added = added_len, removed = removed_len, full_sync, "discovery: report sent"),
+        Err(e) => warn!("discovery: failed to send report: {}", e),
+    }
 }
 
 /// Best-effort Goodbye RPC on SIGTERM so the connector removes this shield
