@@ -151,3 +151,25 @@ mod discovery;
 ```bash
 cargo build --manifest-path shield/Cargo.toml
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix: Network Setup Non-Fatal
+**Issue:** Shield crashed on startup if `zecurity0` TUN interface couldn't be created (e.g., insufficient permissions).
+
+**Fix Applied in `shield/src/main.rs` (line ~137):**
+```rust
+// BEFORE (fatal error):
+if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
+    return Err(anyhow::Error::new(e)).context("failed to restore network");
+}
+
+// AFTER (non-fatal warning):
+if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
+    warn!(error = %e, "network setup failed (non-fatal)");
+}
+```
+
+**Related:** `shield/src/network.rs` also updated to handle errors gracefully.

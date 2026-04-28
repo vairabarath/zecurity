@@ -94,3 +94,12 @@ func toScanResultGQL(r discovery.ScanResult) *model.ScanResult {
 ```bash
 cd controller && go build ./...
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+**Note:** No specific fixes were applied to this phase's files. The resolver implementation was already correct. Fixes were primarily applied to:
+- Member4 (Shield): Network setup non-fatal, IPv6 parsing
+- Member3 (Connector): Scan loop early exit, logging enhancements (Phase2 and Phase3)
+- Member1 (Frontend): New ResourceDiscovery page

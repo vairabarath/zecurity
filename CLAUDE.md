@@ -19,7 +19,8 @@ When a team member starts a session, they will tell you their member number (M1,
 1. Read `agent.md` (project root) — full conventions, code style, build commands
 2. Read `.zecurity-obs/Sprint6/path.md` — dependency map and progress checkboxes
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
-4. Brief them: what they're building, which files to touch, and the build check command
+4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
+5. Brief them: what they're building, which files to touch, and the build check command
 
 If they don't give you a member number, ask: *"Which team member are you? (M1 Frontend / M2 Go / M3 Go+Rust / M4 Rust)"*
 
@@ -33,6 +34,50 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | `.zecurity-obs/Sprint6/path.md` | Dependency map + progress tracker (checkboxes) |
 | `.zecurity-obs/Sprint6/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
+
+---
+
+## Post-Sprint Fixes
+
+After completing a sprint, fixes may be merged from main branch. **Always check for "Post-Phase Fixes" sections** in:
+- The sprint's `path.md` (overview of all fixes)
+- Individual phase files (specific fixes for that phase)
+
+These sections document bugs discovered during testing and their resolutions. Apply these fixes when working on related code.
+
+---
+
+## How to Document Fixes
+
+When you fix a bug during development:
+
+1. **Add fix to the correct phase file** — If the bug is in code that was implemented in a specific phase, add the fix details to that phase file's "Post-Phase Fixes" section.
+
+2. **Include in path.md** — Also add a summary to the sprint's `path.md` "Post-Sprint Fixes" section for overview.
+
+3. **Document the fix with:**
+   - File name and location
+   - Issue description
+   - Root cause (if known)
+   - Fix applied (code snippet or description)
+   - Related files also fixed
+
+Example fix format:
+```markdown
+### Fix: <Bug Name>
+**Issue:** <What was wrong>
+
+**Root Cause:** <Why it happened>
+
+**Fix Applied (line ~XX):**
+// BEFORE:
+<old code>
+
+// AFTER:
+<new code>
+```
+
+**Important:** Add fixes to the phase file where the original implementation was done, not just to path.md. This ensures the phase file contains all knowledge about that implementation.
 
 ---
 
