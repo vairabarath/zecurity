@@ -101,3 +101,15 @@ Button opens `<ScanModal connectorId={selectedConnectorId} onClose={() => setSca
 ```bash
 cd admin && npm run build
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix: Enhanced ScanModal & New Components
+**Updates:**
+- `ScanModal.tsx` - Enhanced with better validation and error handling
+- `DiscoveredServicesPanel.tsx` - New component for displaying discovered services panel
+- `PromoteServiceModal.tsx` - New modal for promoting discovered services to resources
+
+**Note:** The Scan UI functionality is now part of the larger ResourceDiscovery page added in post-sprint fixes.

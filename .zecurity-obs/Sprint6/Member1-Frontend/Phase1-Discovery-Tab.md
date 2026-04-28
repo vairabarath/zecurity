@@ -115,3 +115,19 @@ Use a toggle button "Show discovered services ▾" / "Hide ▴" per shield row. 
 ```bash
 cd admin && npm run build
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix: Added ResourceDiscovery Page
+**New File Added:** `admin/src/pages/ResourceDiscovery.tsx` (367 lines)
+- New dedicated page for resource discovery UI
+- Displays discovered services across all shields
+- Provides scan controls and result visualization
+
+### Related Updates
+- `admin/src/components/ScanModal.tsx` - Enhanced scan modal functionality
+- `admin/src/components/DiscoveredServicesPanel.tsx` - New component for displaying discovered services
+- `admin/src/components/PromoteServiceModal.tsx` - Modal for promoting services to resources
+- `admin/src/generated/graphql.ts` - Updated GraphQL types

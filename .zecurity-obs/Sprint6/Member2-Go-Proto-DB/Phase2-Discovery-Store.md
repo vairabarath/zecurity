@@ -240,3 +240,12 @@ func PurgeScanResults(ctx context.Context, db *sql.DB, olderThan time.Time) erro
 ```bash
 cd controller && go build ./...
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+**Note:** No specific fixes were applied to this phase's files. The discovery store implementation was already correct. Fixes were primarily applied to:
+- Member4 (Shield): Network setup non-fatal, IPv6 parsing
+- Member3 (Connector): Scan loop early exit, logging enhancements
+- Member1 (Frontend): New ResourceDiscovery page

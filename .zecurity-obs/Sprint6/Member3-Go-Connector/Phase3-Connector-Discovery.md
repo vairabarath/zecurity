@@ -371,3 +371,39 @@ cd connector && cargo build
 ```
 
 Warnings OK, errors not.
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix 1: Scan Loop Early Exit
+**Issue:** Scan loop could hang if target was unreachable.
+
+**Fix Applied in `connector/src/discovery/scan.rs`:**
+- Added proper early exit conditions in the TCP ping loop
+- Added timeout handling for unresponsive targets
+
+### Fix 2: Discovery Logging Enhancement
+**Issue:** Needed better observability for debugging discovery flow.
+
+**Fix Applied in `connector/src/agent_server.rs`:**
+```rust
+// Enhanced logging with more context:
+info!(
+    shield_id = %shield_id,
+    added,
+    removed,
+    full_sync,
+    "received DiscoveryReport from shield (buffered for upstream flush)"
+);
+```
+
+**Fix Applied in `connector/src/control_stream.rs`:**
+```rust
+// Added report count to flush log:
+let report_count = match &batch_msg.body {
+    Some(crate::proto::connector_control_message::Body::ShieldDiscovery(b)) => b.reports.len(),
+    _ => 0,
+};
+info!(report_count, "flushing ShieldDiscoveryBatch upstream");
+```
