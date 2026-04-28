@@ -32,7 +32,7 @@ tags:
 |------|--------|
 | `controller/internal/connector/heartbeat.go` | MODIFY — inject resources + process acks |
 | `connector/src/agent_server.rs` | MODIFY — cache + relay per shield |
-| `connector/src/heartbeat.rs` | MODIFY — forward acks to Controller |
+| `connector/src/heartbeat.rs` | MODIFY — forward acks to Controller (historical — now control_stream.rs) |
 
 ---
 
@@ -113,7 +113,7 @@ pub struct ShieldServer {
 - [ ] Shield ResourceAcks collected into `pending_acks`
 - [ ] `update_resource_instructions` and `drain_resource_acks` public methods
 
-### 3. Modify `connector/src/heartbeat.rs`
+### 3. Modify `connector/src/heartbeat.rs` (historical — now `connector/src/control_stream.rs`)
 
 After receiving `HeartbeatResponse` from Controller:
 ```rust

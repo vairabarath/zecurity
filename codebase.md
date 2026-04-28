@@ -79,8 +79,8 @@ zecurity/
 - `src/appmeta.rs` — SPIFFE constants (mirrors Go appmeta exactly)
 - `src/config.rs` — ConnectorConfig via figment (env vars + TOML)
 - `src/enrollment.rs` — 10-step enrollment flow (JWT parse, CA fetch, fingerprint verify, keygen, CSR, gRPC enroll, save certs, config cleanup)
-- `src/heartbeat.rs` — mTLS heartbeat loop (SPIFFE preflight, tonic channel, 30s interval, exponential backoff, triggers renewal on re_enroll=true)
-- `src/renewal.rs` — cert renewal flow (read key, extract public key DER, call RenewCert RPC, save new cert, rebuild mTLS channel)
+- `src/control_stream.rs` — persistent bidirectional mTLS stream to Controller :9090 (health, scan command, discovery batch relay)
+- `src/renewal.rs` — cert renewal flow (read key, extract public key DER, call RenewCert RPC, save new cert, reconnect stream)
 - `src/crypto.rs` — EC P-384 keygen, PEM I/O, CSR building, public key extraction, cert NotAfter parsing
 - `src/tls.rs` — controller SPIFFE SAN verification
 - `src/updater.rs` — GitHub release checker, SHA-256 verify, atomic binary replace, rollback
@@ -101,16 +101,17 @@ zecurity/
 ## Shield (Rust)
 
 ### Entry Point
-- `src/main.rs` — load config, check state, enroll or heartbeat, shutdown handling
+- `src/main.rs` — load config, check state, enroll or run stream, shutdown handling
 
 ### Modules
 - `src/appmeta.rs` — SPIFFE constants
 - `src/config.rs` — ShieldConfig via figment
 - `src/enrollment.rs` — Enrollment flow (similar to connector)
-- `src/heartbeat.rs` — mTLS heartbeat loop, sends `resource_acks`, receives `resource_instructions`
+- `src/control_stream.rs` — persistent bidirectional mTLS stream to Connector :9091 (health, discovery, tunnel relay)
+- `src/discovery.rs`  — /proc/net/tcp scan, service detection, fingerprint diff for change detection
 - `src/renewal.rs` — Certificate renewal flow
 - `src/crypto.rs` — Key generation, CSRs
-- `src/tls.rs` — Controller SPIFFE SAN verification
+- `src/tls.rs` — Connector SPIFFE SAN verification
 - `src/updater.rs` — GitHub release checker
 - `src/resources.rs` — Manages protected resources, applies `nftables` rules, and performs health checks.
 - `src/network.rs` — Network utilities, including LAN IP detection.

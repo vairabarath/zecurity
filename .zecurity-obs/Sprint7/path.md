@@ -52,7 +52,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 | **M1** | Frontend | Device/client management UI (token issuance, device list, access log viewer) |
 | **M2** | Go (Proto) | Activate shield.proto fields 8–11 (TunnelOpen/Opened/Data/Close) |
 | **M3** | Go+Rust (Controller + Connector) | `device_tunnel.rs`, `quic_listener.rs`, `agent_tunnel.rs` modifications, `net_util.rs`, `crl.rs`, `watchdog.rs`, `check_access.go` |
-| **M4** | Rust (Shield) | `shield/src/tunnel.rs`, `heartbeat.rs` tunnel dispatch |
+| **M4** | Rust (Shield) | `shield/src/tunnel.rs`, `control_stream.rs` tunnel dispatch |
 
 ---
 
@@ -69,7 +69,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 | `connector/src/watchdog.rs` | M3 — new file | M3 only |
 | `connector/src/main.rs` | M3 wires all listeners + watchdog | M3 only |
 | `shield/src/tunnel.rs` | M4 — new file | M4 only |
-| `shield/src/heartbeat.rs` | M4 adds tunnel dispatch (TunnelOpen/Data/Close match arms) | M4 only. Sprint 6 discovery arms already present — add after them. |
+| `shield/src/control_stream.rs` | M4 adds tunnel dispatch (TunnelOpen/Data/Close match arms) | M4 only. Sprint 6 discovery arms already present — add after them. |
 | `shield/src/main.rs` | M4 adds `mod tunnel` | M4 only |
 | `controller/internal/device/check_access.go` | M3 — new file, `/api/device/check-access` endpoint | M3 only |
 
@@ -130,7 +130,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 ### PHASE E — M4 Shield Tunnel Relay (Depends on: Day 1 done + Sprint 6 M4-E done)
 
 - [ ] **M4-E1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open()` (connect TCP locally, register session), `handle_tunnel_data()` (forward bytes to local TCP), `handle_tunnel_close()` (drop session)
-- [ ] **M4-E2** `shield/src/heartbeat.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` from incoming Control stream messages → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
+- [ ] **M4-E2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` from incoming Control stream messages → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
 - [ ] **M4-E3** `shield/src/main.rs` — Add `mod tunnel`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
@@ -192,7 +192,7 @@ Run these once all phases are complete:
 1. **Always check this file first.** Before touching any file, confirm dependency checkboxes are checked.
 2. **Proto field numbers are permanent.** Sprint 7 activates ShieldControlMessage fields 8–11 (reserved in Sprint 6). Never reuse or renumber.
 3. **Tunnel messages ride the existing Shield Control stream.** No new RPCs. Connector sends TunnelOpen; Shield replies TunnelOpened/Data/Close on the same stream.
-4. **Sprint 6 heartbeat.rs is already modified** — Sprint 7 M4-E2 adds additional match arms after the existing discovery arms. Do not remove or reorder existing arms.
+4. **Sprint 6 control_stream.rs already has discovery arms** — Sprint 7 M4-E2 adds additional match arms after them. Do not remove or reorder existing arms.
 5. **RDE protected path.** For resources with `shield_id` set, Connector MUST relay via `AgentTunnelHub` → Shield Control stream. Direct connect will fail due to nftables.
 6. **QUIC is on same port as TLS.** `:9092` — UDP for QUIC, TCP for TLS. OS demuxes by transport protocol.
 7. **Build gates are not optional.** Each phase has a build check. Do not proceed until it passes.

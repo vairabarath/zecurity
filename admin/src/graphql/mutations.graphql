@@ -95,3 +95,15 @@ mutation UnprotectResource($id: ID!) {
 mutation DeleteResource($id: ID!) {
   deleteResource(id: $id)
 }
+
+mutation PromoteDiscoveredService($shieldId: ID!, $protocol: String!, $port: Int!) {
+  promoteDiscoveredService(shieldId: $shieldId, protocol: $protocol, port: $port) {
+    id
+    name
+    status
+  }
+}
+
+mutation TriggerScan($connectorId: ID!, $targets: [String!]!, $ports: [Int!]!) {
+  triggerScan(connectorId: $connectorId, targets: $targets, ports: $ports)
+}

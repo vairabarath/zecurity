@@ -12,6 +12,49 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-27 — Claude Code — M1 Phase 2 (Connector Network Scan UI)
+
+**What was done:**
+- Added `TriggerScan` mutation and `GetScanResults` query to admin GraphQL ops; ran `npm run codegen`
+- New `admin/src/components/ScanModal.tsx` — two-step (form → polled results); `parseTargets`/`parsePorts` helpers; ≤16 ports + 1–65535 validation; `startPolling(3000)` with 60s hard stop via `setTimeout` + `stopPolling()`
+- Modified `admin/src/pages/RemoteNetworks.tsx` — per-network connector selector + "Scan Network" button mounting `ScanModal` with `{connectorId, networkId, connectorName}`
+- Modified `admin/src/components/CreateResourceModal.tsx` — accepts a new `defaults` prop and prefills name/host/protocol/port from scan results
+- Modified `admin/src/pages/Resources.tsx` — accepts route-state defaults so navigating from `ScanModal` opens `CreateResourceModal` prefilled
+- `npm run codegen && npm run build` clean (2411 modules, 0 errors)
+
+**Key decisions:**
+- Polling stop uses both `pollingExpired` state + `stopPolling()` so React effect cleanup runs even if user closes the modal mid-scan
+- 512-target cap is enforced server-side only (CIDRs aren't expanded in the browser); ScanModal validates port count and presence, surfaces server errors inline
+- Prefill goes through Resources page route state rather than ScanModal owning a CreateResourceModal — keeps ScanModal focused on scan UX and reuses the existing Create flow
+
+**What's next:**
+- End-to-end smoke test now possible (M3 backend landed in PR #7)
+- Sprint 6 M1 frontend complete (Phase 1 shipped, Phase 2 ready to merge)
+
+---
+
+## 2026-04-27 — Claude Code — M1 Phase 1 (Shield Discovery Tab)
+
+**What was done:**
+- Added `discovery.graphqls` to `admin/codegen.yml` schema list
+- Added `GetDiscoveredServices` query and `PromoteDiscoveredService` mutation to admin GraphQL ops
+- Ran `npm run codegen` — typed Apollo docs generated
+- New `admin/src/components/DiscoveredServicesPanel.tsx` — polled table (30s), empty/loading states, Promote button per row
+- New `admin/src/components/PromoteServiceModal.tsx` — confirmation modal calling `PromoteDiscoveredService`, success toast, error inline
+- Modified `admin/src/pages/Shields.tsx` — per-row chevron toggle to expand/collapse `DiscoveredServicesPanel`; added 36px column for the toggle
+- `npm run build` passes clean
+
+**Key decisions:**
+- Used `cache-and-network` fetch policy on the query so the panel paints from cache while Apollo refetches
+- Toggle state held as a `Set<string>` keyed by shield id rather than per-row state, to keep Shields.tsx flat
+- Modal calls `refetchQueries: GetAllResourcesDocument` on success so the Resources page reflects the new pending resource immediately
+
+**What's next:**
+- M1 Phase 2 (Scan UI on RemoteNetworks page) — `TriggerScan` + `GetScanResults` ops, `ScanModal` component
+- Backend wiring: M3 still needs to implement the `getDiscoveredServices` / `promoteDiscoveredService` resolvers (currently panic stubs in `controller/graph/resolvers/discovery.resolvers.go`); UI cannot be exercised end-to-end until that lands
+
+---
+
 ## 2026-04-23 — Codex (GPT-5) — Admin Design Handoff Implementation
 
 **What was done:**
@@ -682,3 +725,55 @@ Most recent first. Every agent appends an entry after their session.
 - M2 commits Day 1 proto + migration 008 + discovery.graphqls to unblock the team
 - M4 can start shield/src/discovery.rs immediately (no proto needed for core logic)
 - M1 can start page layout immediately (no codegen needed for structure)
+
+## 2026-04-27 — M3 (Claude Sonnet 4.6)
+
+**What was done:**
+- Pulled M2's Day 1 updates from main (protos, migration 010, discovery.graphqls, generated stubs)
+- Created `controller/internal/discovery/store.go` — all DB helpers (M2-A work that was missing)
+- Created `controller/internal/discovery/config.go` — DiscoveryConfig + ScanResultTTL constant
+- Implemented all 4 resolvers in `controller/graph/resolvers/discovery.resolvers.go`
+- Added `toDiscoveredServiceGQL()` + `toScanResultGQL()` mappers to `helpers.go`
+- Added `PushScanCommand()`, `handleShieldDiscoveryBatch()`, `handleScanReport()`, `protoToDiscoveredService()` to `controller/internal/connector/control_stream.go`
+- Added hourly purge goroutine in `controller/cmd/server/main.go`
+- Created `connector/src/discovery/` — `mod.rs`, `tcp_ping.rs`, `service_detect.rs`, `scope.rs`, `scan.rs`
+- Modified `connector/src/agent_server.rs` — buffers DiscoveryReport per shield; `drain_discovery_batch()` produces ShieldDiscoveryBatch
+- Modified `connector/src/control_stream.rs` — 5s discovery flush ticker; ScanCommand handler spawns execute_scan and sends ScanReport upstream
+- Updated path.md checkboxes (M3-B1, B2, C1, C2, D1, D2, D3) and phase file statuses to done
+
+**Key decisions:**
+- Discovery store created by M3 since M2 had not implemented it — fills M2-A gap
+- `pending_discovery` keyed by shield_id (latest report per shield wins before flush) — avoids double-sending if shield sends multiple reports within the 5s window
+- `PushScanCommand` returns error if connector is offline — resolver surfaces this to the UI immediately rather than silently dropping
+
+**What's next:**
+- M4 to wire shield/src/heartbeat.rs discovery calls (Phase E3/E4) if not done
+- M1 to complete frontend discovery tab + scan UI (Phase F)
+- Final integration: buf generate clean, all five build gates green, migration 010 runs
+
+---
+
+## 2026-04-27 — M3 (Go+Rust / Connector)
+
+**What was done:**
+- All M3 Sprint 6 phases already complete (B1/B2/C1/C2/D1/D2/D3) — verified path.md checkboxes
+- Merged main into sprint6-member3; resolved add/add conflicts in `controller/internal/discovery/config.go` and `controller/internal/discovery/store.go` (took origin/main versions — had `Config` struct, transactions, `ReachableFrom` field)
+- Committed as `95ba36c` and `66f99f9`
+- Pushed branch to origin
+
+**Docs sweep — heartbeat.rs → control_stream.rs rename across all Obsidian notes:**
+- Updated `Services/Shield.md`, `Services/Connector.md`, `Architecture/System Overview.excalidraw.md` — module maps, startup flows, control stream sections
+- Updated `Sprint6/path.md` and `Sprint7/path.md` — conflict zones, team assignments, M4-E phase items
+- Updated `Sprint7/Member4/Phase1-Shield-Tunnel-Relay.md` — file references, section header
+- Added historical notes to `Sprint4/path.md`, `Sprint5/path.md` — header notes + conflict zone annotations + phase item footnotes
+- Updated Sprint4/Sprint5 team-workflow files, phase spec files (`Phase2-Heartbeat-Ack.md`, `Phase2-Heartbeat-Relay.md`, `Phase4-Heartbeat-Renewal.md`, `Phase2-Core-Modules.md`, `Phase5-AgentServer-Rust.md`)
+- Updated `codebase.md`, `implementation-report.md`, `improvements.md`, `studyplan.md` — module listings, section headers, call chain refs
+
+**Key decisions:**
+- Historical sprints (4/5) preserved as-is with footnotes — rewriting would lose accuracy of what was actually built at that time
+- Session Log.md left unchanged — accurately records what was done in each past session
+- `connector/build.rs` comment left as-is — describes proto generation, not runtime module
+
+**What's next:**
+- Sprint 6 fully complete on this branch; ready for PR to main when other members finish
+- Sprint 7 planning available in `.zecurity-obs/Sprint7/path.md`

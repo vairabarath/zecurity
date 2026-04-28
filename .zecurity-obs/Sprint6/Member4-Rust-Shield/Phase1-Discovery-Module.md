@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 6
 member: M4
 phase: Phase1-Discovery-Module

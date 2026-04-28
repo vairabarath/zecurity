@@ -28,8 +28,9 @@ main.rs
   ├── appmeta.rs     SPIFFE constants (mirrors Go appmeta.go)
   ├── crypto.rs      EC P-384 keygen, CSR builder, PEM/DER helpers
   ├── enrollment.rs  JWT + CSR → receive cert, save state
-  ├── heartbeat.rs   mTLS loop, rebuild channel after renewal
-  ├── renewal.rs     RenewCert RPC, save new cert + CA chain
+  ├── control_stream.rs bidirectional mTLS stream to Controller :9090 (heartbeat, scan command, discovery batch)
+  ├── agent_server.rs  gRPC server :9091, handles Shield streams + cert renewal
+  ├── renewal.rs       RenewCert RPC, save new cert + CA chain
   ├── updater.rs     GitHub release binary self-update
   ├── tls.rs         SPIFFE preflight verification
   └── util.rs        hostname, misc helpers
@@ -44,7 +45,7 @@ main.rs
 2. Check state.json exists?
    ├── No  → enrollment::enroll() → save state → proceed
    └── Yes → load saved state
-3. Spawn heartbeat::run_heartbeat()  [tokio task, runs forever]
+3. Spawn control_stream::run()  [tokio task, persistent mTLS stream with automatic reconnect]
 4. Spawn updater::run_update_loop()  [if auto_update_enabled]
 5. Wait for Ctrl+C → graceful shutdown (abort tasks)
 ```
@@ -62,14 +63,14 @@ main.rs
 
 ---
 
-## Heartbeat Loop (`heartbeat.rs`)
+## Control Stream (control_stream.rs)
 
 1. SPIFFE preflight: raw TLS → verify controller SPIFFE identity
 2. Build tonic mTLS channel (`connector.crt` + `workspace_ca.crt`)
-3. Loop every `heartbeat_interval_secs`:
-   - Send `HeartbeatRequest` (connector_id, version, hostname, public_ip)
-   - On `re_enroll=true` → call `renewal::renew_cert()` → rebuild channel
-   - On error → exponential backoff (5s → 60s cap)
+3. Persistent bidirectional stream sends health every `heartbeat_interval_secs`:
+   - `ConnectorHealth { connector_id, version, hostname, public_ip, shields }`
+   - Receives `ConnectorControlMessage` oneof: Pong, ScanCommand, ScanReport (from Controller)
+4. Stream handles inbound messages; reconnects on cert renewal
 
 ---
 
@@ -85,7 +86,7 @@ Triggered when controller sends `re_enroll=true` in heartbeat response.
 6. Save updated `workspace_ca.crt` (CA chain)
 7. `crypto::parse_cert_not_after()` — parse new expiry from PEM
 8. Update `state.json` with new `cert_not_after`
-9. Return to heartbeat loop → rebuild main mTLS channel with new cert
+9. Return to stream → reconnect with new cert
 
 ---
 

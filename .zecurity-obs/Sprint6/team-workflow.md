@@ -163,7 +163,7 @@ cd admin && npm run codegen
 | `connector/src/quic_listener.rs` | M3 creates | M3 only |
 | `connector/src/agent_tunnel.rs` | M3 modifies | M3 only |
 | `connector/src/main.rs` | M3 modifies (listener wiring) | M3 only |
-| `shield/src/heartbeat.rs` | M4 modifies | M4 only |
+| `shield/src/control_stream.rs` | M4 modifies (heartbeat loop lives here) | M4 only |
 | `shield/src/tunnel.rs` | M4 creates | M4 only |
 | `controller/internal/device/check_access.go` | M3 creates | M3 only |
 
