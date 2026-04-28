@@ -283,13 +283,13 @@ export function ScanModal({
                     )}
                   </div>
                 ) : (
-                  <div className="min-h-0 overflow-hidden rounded-2xl border border-border">
-                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] gap-4 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border">
+                    <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] gap-4 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                       <div>Host</div>
                       <div>Service</div>
                       <div />
                     </div>
-                    <div className="max-h-full overflow-y-auto">
+                    <div className="flex-1 overflow-y-auto">
                       {results.map((result) => (
                         <div
                           key={`${result.requestId}-${result.ip}-${result.port}`}
