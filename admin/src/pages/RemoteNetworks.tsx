@@ -34,6 +34,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { ScanModal } from '@/components/ScanModal'
 import { EmptyState, EntityIcon, StatusPill } from '@/lib/console'
 
 const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home }> = {
@@ -55,6 +56,8 @@ export default function RemoteNetworks() {
   const [showComposer, setShowComposer] = useState(false)
   const [name, setName] = useState('')
   const [location, setLocation] = useState<NetworkLocation>(NetworkLocation.Office)
+  const [scanTarget, setScanTarget] = useState<{ networkId: string; connectorId: string } | null>(null)
+  const [connectorSelections, setConnectorSelections] = useState<Record<string, string>>({})
 
   const { data, loading } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
@@ -86,6 +89,11 @@ export default function RemoteNetworks() {
     await deleteNetwork({
       variables: { id } as DeleteRemoteNetworkMutationVariables,
     })
+  }
+
+  function getSelectedConnectorId(networkId: string, connectorIds: string[]) {
+    if (connectorIds.length === 0) return ''
+    return connectorSelections[networkId] ?? connectorIds[0]
   }
 
   return (
@@ -180,6 +188,11 @@ export default function RemoteNetworks() {
             const activeShields = network.shields.filter((shield) => shield.status === ShieldStatus.Active).length
             const canDelete = network.connectors.length === 0 && network.shields.length === 0
             const isActive = network.status === RemoteNetworkStatus.Active
+            const selectedConnectorId = getSelectedConnectorId(
+              network.id,
+              network.connectors.map((connector) => connector.id),
+            )
+            const selectedConnector = network.connectors.find((connector) => connector.id === selectedConnectorId) ?? network.connectors[0]
 
             return (
               <div key={network.id} className="surface-card flex flex-col p-5">
@@ -232,6 +245,59 @@ export default function RemoteNetworks() {
                   </div>
                 </div>
 
+                <div className="mt-4 section-card p-4 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">Network Discovery</div>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        Launch connector-side TCP discovery for this segment.
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!selectedConnector}
+                      onClick={() =>
+                        selectedConnector &&
+                        setScanTarget({ networkId: network.id, connectorId: selectedConnector.id })
+                      }
+                    >
+                      Scan Network
+                    </Button>
+                  </div>
+
+                  {network.connectors.length > 1 ? (
+                    <div className="mt-3">
+                      <select
+                        value={selectedConnectorId}
+                        onChange={(event) =>
+                          setConnectorSelections((current) => ({
+                            ...current,
+                            [network.id]: event.target.value,
+                          }))
+                        }
+                        className="flex h-10 w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      >
+                        {network.connectors.map((connector) => (
+                          <option key={connector.id} value={connector.id}>
+                            {connector.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+
+                  {network.connectors.length === 0 ? (
+                    <div className="mt-3 text-xs text-muted-foreground">
+                      Add a connector to enable network scans from this remote network.
+                    </div>
+                  ) : selectedConnector ? (
+                    <div className="mt-3 text-xs text-muted-foreground">
+                      Using connector <span className="font-semibold text-foreground">{selectedConnector.name}</span>.
+                    </div>
+                  ) : null}
+                </div>
+
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                   <Link
                     to={`/remote-networks/${network.id}`}
@@ -252,6 +318,20 @@ export default function RemoteNetworks() {
           })}
         </div>
       )}
+
+      {scanTarget ? (
+        <ScanModal
+          connectorId={scanTarget.connectorId}
+          remoteNetworkId={scanTarget.networkId}
+          connectorName={
+            networks
+              .find((network) => network.id === scanTarget.networkId)
+              ?.connectors.find((connector) => connector.id === scanTarget.connectorId)
+              ?.name ?? 'connector'
+          }
+          onClose={() => setScanTarget(null)}
+        />
+      ) : null}
     </div>
   )
 }

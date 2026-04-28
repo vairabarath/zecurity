@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
 import { AlertCircle, Plus, Wifi, WifiOff } from 'lucide-react'
 import {
@@ -13,6 +13,17 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
 const transitionalStates = new Set(['managing', 'protecting', 'removing'])
+
+interface ResourcePrefillState {
+  createResourceDefaults?: {
+    remoteNetworkId: string
+    name?: string
+    host: string
+    protocol: string
+    portFrom: number
+    portTo: number
+  }
+}
 
 function resourceTone(status: string): 'ok' | 'warn' | 'danger' | 'muted' | 'info' {
   if (status === 'protected') return 'ok'
@@ -28,7 +39,9 @@ function formatPort(from: number, to: number) {
 
 export default function Resources() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [showAdd, setShowAdd] = useState(false)
+  const [prefill, setPrefill] = useState<ResourcePrefillState['createResourceDefaults'] | null>(null)
 
   const { data: networkData } = useQuery(GetRemoteNetworksDocument)
   const networks = networkData?.remoteNetworks ?? []
@@ -45,6 +58,14 @@ export default function Resources() {
     const hasTransition = resources.some((resource) => transitionalStates.has(resource.status))
     startPolling(hasTransition ? 3000 : 30000)
   }, [resources, startPolling])
+
+  useEffect(() => {
+    const state = location.state as ResourcePrefillState | null
+    if (!state?.createResourceDefaults) return
+    setPrefill(state.createResourceDefaults)
+    setShowAdd(true)
+    navigate(location.pathname, { replace: true, state: null })
+  }, [location.pathname, location.state, navigate])
 
   return (
     <div className="space-y-6">
@@ -153,7 +174,15 @@ export default function Resources() {
         </div>
       </div>
 
-      <CreateResourceModal open={showAdd} onOpenChange={setShowAdd} onSuccess={() => refetch()} />
+      <CreateResourceModal
+        open={showAdd}
+        onOpenChange={(open) => {
+          setShowAdd(open)
+          if (!open) setPrefill(null)
+        }}
+        onSuccess={() => refetch()}
+        defaults={prefill}
+      />
     </div>
   )
 }

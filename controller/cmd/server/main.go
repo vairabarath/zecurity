@@ -30,6 +30,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/pki"
@@ -189,6 +190,16 @@ func main() {
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 	go shieldSvc.RunDisconnectWatcher(ctx)
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
+			if err := discovery.PurgeScanResults(context.Background(), db.Pool, cutoff); err != nil {
+				log.Printf("discovery: purge scan results: %v", err)
+			}
+		}
+	}()
 
 	go func() {
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)

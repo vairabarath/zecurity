@@ -168,6 +168,30 @@ query GetAllResources {
   }
 }
 
+query GetDiscoveredServices($shieldId: ID!) {
+  getDiscoveredServices(shieldId: $shieldId) {
+    shieldId
+    protocol
+    port
+    boundIp
+    serviceName
+    firstSeen
+    lastSeen
+  }
+}
+
+query GetScanResults($requestId: String!) {
+  getScanResults(requestId: $requestId) {
+    requestId
+    ip
+    port
+    protocol
+    serviceName
+    reachableFrom
+    firstSeen
+  }
+}
+
 query GetResources($remoteNetworkId: String!) {
   resources(remoteNetworkId: $remoteNetworkId) {
     id

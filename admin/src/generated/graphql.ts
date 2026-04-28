@@ -60,6 +60,17 @@ export type CreateResourceInput = {
   remoteNetworkId: Scalars['String']['input'];
 };
 
+export type DiscoveredService = {
+  __typename?: 'DiscoveredService';
+  boundIp: Scalars['String']['output'];
+  firstSeen: Scalars['String']['output'];
+  lastSeen: Scalars['String']['output'];
+  port: Scalars['Int']['output'];
+  protocol: Scalars['String']['output'];
+  serviceName: Scalars['String']['output'];
+  shieldId: Scalars['ID']['output'];
+};
+
 export type Mutation = {
   __typename?: 'Mutation';
   createRemoteNetwork: RemoteNetwork;
@@ -71,9 +82,11 @@ export type Mutation = {
   generateConnectorToken: ConnectorToken;
   generateShieldToken: ShieldToken;
   initiateAuth: AuthInitPayload;
+  promoteDiscoveredService: Resource;
   protectResource: Resource;
   revokeConnector: Scalars['Boolean']['output'];
   revokeShield: Scalars['Boolean']['output'];
+  triggerScan: Scalars['String']['output'];
   unprotectResource: Resource;
   updateResource: Resource;
 };
@@ -128,6 +141,13 @@ export type MutationInitiateAuthArgs = {
 };
 
 
+export type MutationPromoteDiscoveredServiceArgs = {
+  port: Scalars['Int']['input'];
+  protocol: Scalars['String']['input'];
+  shieldId: Scalars['ID']['input'];
+};
+
+
 export type MutationProtectResourceArgs = {
   id: Scalars['ID']['input'];
 };
@@ -140,6 +160,13 @@ export type MutationRevokeConnectorArgs = {
 
 export type MutationRevokeShieldArgs = {
   id: Scalars['ID']['input'];
+};
+
+
+export type MutationTriggerScanArgs = {
+  connectorId: Scalars['ID']['input'];
+  ports: Array<Scalars['Int']['input']>;
+  targets: Array<Scalars['String']['input']>;
 };
 
 
@@ -173,6 +200,8 @@ export type Query = {
   allResources: Array<Resource>;
   connector?: Maybe<Connector>;
   connectors: Array<Connector>;
+  getDiscoveredServices: Array<DiscoveredService>;
+  getScanResults: Array<ScanResult>;
   lookupWorkspace: WorkspaceLookupResult;
   lookupWorkspacesByEmail: WorkspaceListResult;
   me: User;
@@ -192,6 +221,16 @@ export type QueryConnectorArgs = {
 
 export type QueryConnectorsArgs = {
   remoteNetworkId: Scalars['ID']['input'];
+};
+
+
+export type QueryGetDiscoveredServicesArgs = {
+  shieldId: Scalars['ID']['input'];
+};
+
+
+export type QueryGetScanResultsArgs = {
+  requestId: Scalars['String']['input'];
 };
 
 
@@ -264,6 +303,17 @@ export enum Role {
   Member = 'MEMBER',
   Viewer = 'VIEWER'
 }
+
+export type ScanResult = {
+  __typename?: 'ScanResult';
+  firstSeen: Scalars['String']['output'];
+  ip: Scalars['String']['output'];
+  port: Scalars['Int']['output'];
+  protocol: Scalars['String']['output'];
+  reachableFrom: Scalars['String']['output'];
+  requestId: Scalars['String']['output'];
+  serviceName: Scalars['String']['output'];
+};
 
 export type Shield = {
   __typename?: 'Shield';
@@ -449,6 +499,24 @@ export type DeleteResourceMutationVariables = Exact<{
 
 export type DeleteResourceMutation = { __typename?: 'Mutation', deleteResource: boolean };
 
+export type PromoteDiscoveredServiceMutationVariables = Exact<{
+  shieldId: Scalars['ID']['input'];
+  protocol: Scalars['String']['input'];
+  port: Scalars['Int']['input'];
+}>;
+
+
+export type PromoteDiscoveredServiceMutation = { __typename?: 'Mutation', promoteDiscoveredService: { __typename?: 'Resource', id: string, name: string, status: string } };
+
+export type TriggerScanMutationVariables = Exact<{
+  connectorId: Scalars['ID']['input'];
+  targets: Array<Scalars['String']['input']> | Scalars['String']['input'];
+  ports: Array<Scalars['Int']['input']> | Scalars['Int']['input'];
+}>;
+
+
+export type TriggerScanMutation = { __typename?: 'Mutation', triggerScan: string };
+
 export type LookupWorkspaceQueryVariables = Exact<{
   slug: Scalars['String']['input'];
 }>;
@@ -518,6 +586,20 @@ export type GetAllResourcesQueryVariables = Exact<{ [key: string]: never; }>;
 
 export type GetAllResourcesQuery = { __typename?: 'Query', allResources: Array<{ __typename?: 'Resource', id: string, name: string, description?: string | null, host: string, protocol: string, portFrom: number, portTo: number, status: string, errorMessage?: string | null, appliedAt?: string | null, lastVerifiedAt?: string | null, createdAt: string, shield?: { __typename?: 'Shield', id: string, name: string, status: ShieldStatus, lanIp?: string | null } | null, remoteNetwork: { __typename?: 'RemoteNetwork', id: string, name: string } }> };
 
+export type GetDiscoveredServicesQueryVariables = Exact<{
+  shieldId: Scalars['ID']['input'];
+}>;
+
+
+export type GetDiscoveredServicesQuery = { __typename?: 'Query', getDiscoveredServices: Array<{ __typename?: 'DiscoveredService', shieldId: string, protocol: string, port: number, boundIp: string, serviceName: string, firstSeen: string, lastSeen: string }> };
+
+export type GetScanResultsQueryVariables = Exact<{
+  requestId: Scalars['String']['input'];
+}>;
+
+
+export type GetScanResultsQuery = { __typename?: 'Query', getScanResults: Array<{ __typename?: 'ScanResult', requestId: string, ip: string, port: number, protocol: string, serviceName: string, reachableFrom: string, firstSeen: string }> };
+
 export type GetResourcesQueryVariables = Exact<{
   remoteNetworkId: Scalars['String']['input'];
 }>;
@@ -540,6 +622,8 @@ export const UpdateResourceDocument = {"kind":"Document","definitions":[{"kind":
 export const ProtectResourceDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"ProtectResource"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"protectResource"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]}}]} as unknown as DocumentNode<ProtectResourceMutation, ProtectResourceMutationVariables>;
 export const UnprotectResourceDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"UnprotectResource"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"unprotectResource"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]}}]} as unknown as DocumentNode<UnprotectResourceMutation, UnprotectResourceMutationVariables>;
 export const DeleteResourceDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"DeleteResource"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"deleteResource"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<DeleteResourceMutation, DeleteResourceMutationVariables>;
+export const PromoteDiscoveredServiceDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"PromoteDiscoveredService"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"shieldId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"protocol"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"port"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"Int"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"promoteDiscoveredService"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"shieldId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"shieldId"}}},{"kind":"Argument","name":{"kind":"Name","value":"protocol"},"value":{"kind":"Variable","name":{"kind":"Name","value":"protocol"}}},{"kind":"Argument","name":{"kind":"Name","value":"port"},"value":{"kind":"Variable","name":{"kind":"Name","value":"port"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]}}]} as unknown as DocumentNode<PromoteDiscoveredServiceMutation, PromoteDiscoveredServiceMutationVariables>;
+export const TriggerScanDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"TriggerScan"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"connectorId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"targets"}},"type":{"kind":"NonNullType","type":{"kind":"ListType","type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"ports"}},"type":{"kind":"NonNullType","type":{"kind":"ListType","type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"Int"}}}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"triggerScan"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"connectorId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"connectorId"}}},{"kind":"Argument","name":{"kind":"Name","value":"targets"},"value":{"kind":"Variable","name":{"kind":"Name","value":"targets"}}},{"kind":"Argument","name":{"kind":"Name","value":"ports"},"value":{"kind":"Variable","name":{"kind":"Name","value":"ports"}}}]}]}}]} as unknown as DocumentNode<TriggerScanMutation, TriggerScanMutationVariables>;
 export const LookupWorkspaceDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"LookupWorkspace"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"slug"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"lookupWorkspace"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"slug"},"value":{"kind":"Variable","name":{"kind":"Name","value":"slug"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"found"}},{"kind":"Field","name":{"kind":"Name","value":"workspace"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}}]}}]}}]}}]} as unknown as DocumentNode<LookupWorkspaceQuery, LookupWorkspaceQueryVariables>;
 export const LookupWorkspacesByEmailDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"LookupWorkspacesByEmail"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"email"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"lookupWorkspacesByEmail"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"email"},"value":{"kind":"Variable","name":{"kind":"Name","value":"email"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"workspaces"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"slug"}}]}}]}}]}}]} as unknown as DocumentNode<LookupWorkspacesByEmailQuery, LookupWorkspacesByEmailQueryVariables>;
 export const MeDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"Me"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"me"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"email"}},{"kind":"Field","name":{"kind":"Name","value":"role"}},{"kind":"Field","name":{"kind":"Name","value":"provider"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}}]}}]}}]} as unknown as DocumentNode<MeQuery, MeQueryVariables>;
@@ -551,4 +635,6 @@ export const GetRemoteNetworkDocument = {"kind":"Document","definitions":[{"kind
 export const GetShieldsDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetShields"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"shields"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"remoteNetworkId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"lastSeenAt"}},{"kind":"Field","name":{"kind":"Name","value":"version"}},{"kind":"Field","name":{"kind":"Name","value":"hostname"}},{"kind":"Field","name":{"kind":"Name","value":"interfaceAddr"}},{"kind":"Field","name":{"kind":"Name","value":"connectorId"}}]}}]}}]} as unknown as DocumentNode<GetShieldsQuery, GetShieldsQueryVariables>;
 export const GetShieldDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetShield"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"shield"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"lastSeenAt"}},{"kind":"Field","name":{"kind":"Name","value":"version"}},{"kind":"Field","name":{"kind":"Name","value":"hostname"}},{"kind":"Field","name":{"kind":"Name","value":"lanIp"}},{"kind":"Field","name":{"kind":"Name","value":"interfaceAddr"}},{"kind":"Field","name":{"kind":"Name","value":"certNotAfter"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"connectorId"}},{"kind":"Field","name":{"kind":"Name","value":"remoteNetworkId"}}]}}]}}]} as unknown as DocumentNode<GetShieldQuery, GetShieldQueryVariables>;
 export const GetAllResourcesDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetAllResources"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"allResources"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"description"}},{"kind":"Field","name":{"kind":"Name","value":"host"}},{"kind":"Field","name":{"kind":"Name","value":"protocol"}},{"kind":"Field","name":{"kind":"Name","value":"portFrom"}},{"kind":"Field","name":{"kind":"Name","value":"portTo"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"errorMessage"}},{"kind":"Field","name":{"kind":"Name","value":"appliedAt"}},{"kind":"Field","name":{"kind":"Name","value":"lastVerifiedAt"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"shield"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"lanIp"}}]}},{"kind":"Field","name":{"kind":"Name","value":"remoteNetwork"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}}]}}]}}]}}]} as unknown as DocumentNode<GetAllResourcesQuery, GetAllResourcesQueryVariables>;
+export const GetDiscoveredServicesDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetDiscoveredServices"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"shieldId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"getDiscoveredServices"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"shieldId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"shieldId"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"shieldId"}},{"kind":"Field","name":{"kind":"Name","value":"protocol"}},{"kind":"Field","name":{"kind":"Name","value":"port"}},{"kind":"Field","name":{"kind":"Name","value":"boundIp"}},{"kind":"Field","name":{"kind":"Name","value":"serviceName"}},{"kind":"Field","name":{"kind":"Name","value":"firstSeen"}},{"kind":"Field","name":{"kind":"Name","value":"lastSeen"}}]}}]}}]} as unknown as DocumentNode<GetDiscoveredServicesQuery, GetDiscoveredServicesQueryVariables>;
+export const GetScanResultsDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetScanResults"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"requestId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"getScanResults"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"requestId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"requestId"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"requestId"}},{"kind":"Field","name":{"kind":"Name","value":"ip"}},{"kind":"Field","name":{"kind":"Name","value":"port"}},{"kind":"Field","name":{"kind":"Name","value":"protocol"}},{"kind":"Field","name":{"kind":"Name","value":"serviceName"}},{"kind":"Field","name":{"kind":"Name","value":"reachableFrom"}},{"kind":"Field","name":{"kind":"Name","value":"firstSeen"}}]}}]}}]} as unknown as DocumentNode<GetScanResultsQuery, GetScanResultsQueryVariables>;
 export const GetResourcesDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"query","name":{"kind":"Name","value":"GetResources"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"resources"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"remoteNetworkId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"description"}},{"kind":"Field","name":{"kind":"Name","value":"host"}},{"kind":"Field","name":{"kind":"Name","value":"protocol"}},{"kind":"Field","name":{"kind":"Name","value":"portFrom"}},{"kind":"Field","name":{"kind":"Name","value":"portTo"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"errorMessage"}},{"kind":"Field","name":{"kind":"Name","value":"lastVerifiedAt"}},{"kind":"Field","name":{"kind":"Name","value":"appliedAt"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}},{"kind":"Field","name":{"kind":"Name","value":"shield"},"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"status"}}]}}]}}]}}]} as unknown as DocumentNode<GetResourcesQuery, GetResourcesQueryVariables>;

@@ -66,7 +66,7 @@ Two features land together:
 | `controller/internal/connector/control.go` | M3 adds discovery batch + scan handlers | M3 only |
 | `connector/src/agent_server.rs` | M3 adds discovery buffering + relay | M3 only |
 | `connector/src/control_plane.rs` | M3 adds scan command dispatch + result relay | M3 only |
-| `shield/src/heartbeat.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). |
+| `shield/src/control_stream.rs` | M4 adds discovery loop calls | M4 only. Do NOT add tunnel dispatch (Sprint 7). Note: heartbeat logic lives here, not in heartbeat.rs. |
 
 ---
 
@@ -96,8 +96,8 @@ Two features land together:
 
 ### PHASE B — M3 Resolvers (Depends on: Day 1 done + M2-A done)
 
-- [ ] **M3-B1** `controller/graph/resolvers/discovery.resolvers.go` — `GetDiscoveredServices(shieldId)` query, `PromoteDiscoveredService(shieldId, protocol, port)` mutation, `TriggerScan(connectorId, targets, ports)` mutation, `GetScanResults(requestId)` query
-- [ ] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toDiscoveredServiceGQL()` and `toScanResultGQL()` mappers
+- [x] **M3-B1** `controller/graph/resolvers/discovery.resolvers.go` — `GetDiscoveredServices(shieldId)` query, `PromoteDiscoveredService(shieldId, protocol, port)` mutation, `TriggerScan(connectorId, targets, ports)` mutation, `GetScanResults(requestId)` query
+- [x] **M3-B2** `controller/graph/resolvers/helpers.go` — Add `toDiscoveredServiceGQL()` and `toScanResultGQL()` mappers
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -105,8 +105,8 @@ Two features land together:
 
 ### PHASE C — M3 Controller Control Handler (Depends on: Day 1 proto done + M3-B done)
 
-- [ ] **M3-C1** `controller/internal/connector/control.go` — MODIFY: handle `ConnectorControlMessage.ShieldDiscoveryBatch` → call `discovery.UpsertDiscoveredServices()` for each report; handle `ConnectorControlMessage.ScanReport` → call `discovery.UpsertScanResults()`; on `TriggerScan` resolver call → inject `ScanCommand` into outbound Control stream
-- [ ] **M3-C2** `controller/internal/connector/control.go` — Add `PurgeScanResults` background goroutine (runs every hour, purges results older than 24h)
+- [x] **M3-C1** `controller/internal/connector/control.go` — MODIFY: handle `ConnectorControlMessage.ShieldDiscoveryBatch` → call `discovery.UpsertDiscoveredServices()` for each report; handle `ConnectorControlMessage.ScanReport` → call `discovery.UpsertScanResults()`; on `TriggerScan` resolver call → inject `ScanCommand` into outbound Control stream
+- [x] **M3-C2** `controller/internal/connector/control.go` — Add `PurgeScanResults` background goroutine (runs every hour, purges results older than 24h)
 
 > Build check: `cd controller && go build ./...` must pass.
 
@@ -114,9 +114,9 @@ Two features land together:
 
 ### PHASE D — M3 Connector Control Stream (Depends on: Day 1 proto done)
 
-- [ ] **M3-D1** `connector/src/agent_server.rs` — MODIFY: when a Shield sends `ShieldControlMessage::DiscoveryReport`, buffer it in `ShieldState`; on next upstream flush (every 5s or on content change) batch all pending reports into `ConnectorControlMessage::ShieldDiscoveryBatch` and send upstream
-- [ ] **M3-D2** `connector/src/control_plane.rs` — MODIFY: handle incoming `ConnectorControlMessage::ScanCommand` from Controller → parse into `ScanCommand` struct → spawn `scan::execute_scan()` → send result as `ConnectorControlMessage::ScanReport` upstream
-- [ ] **M3-D3** `connector/src/discovery/` — NEW directory with modules (ported from reference):
+- [x] **M3-D1** `connector/src/agent_server.rs` — MODIFY: when a Shield sends `ShieldControlMessage::DiscoveryReport`, buffer it in `ShieldState`; on next upstream flush (every 5s or on content change) batch all pending reports into `ConnectorControlMessage::ShieldDiscoveryBatch` and send upstream
+- [x] **M3-D2** `connector/src/control_plane.rs` — MODIFY: handle incoming `ConnectorControlMessage::ScanCommand` from Controller → parse into `ScanCommand` struct → spawn `scan::execute_scan()` → send result as `ConnectorControlMessage::ScanReport` upstream
+- [x] **M3-D3** `connector/src/discovery/` — NEW directory with modules (ported from reference):
   - `mod.rs` — pub mod declarations
   - `scan.rs` — `ScanCommand`, `DiscoveredResource`, `ScanReport`, `execute_scan()` (TCP ping with semaphore, max 32 concurrent)
   - `tcp_ping.rs` — async TCP connect with timeout (tokio + timeout)
@@ -129,15 +129,15 @@ Two features land together:
 
 ### PHASE E — M4 Shield Discovery (Depends on: Day 1 proto done)
 
-- [ ] **M4-E1** `shield/src/discovery.rs` — NEW file:
+- [x] **M4-E1** `shield/src/discovery.rs` — NEW file:
   - `discover_sync()` — Linux: parse `/proc/net/tcp` + `/proc/net/tcp6` for LISTEN (state 0A) sockets; filter loopback, ephemeral, ignored ports (5355 LLMNR, 631 IPP, 5353 mDNS)
   - `service_from_port(port)` — well-known port → service name lookup
   - `compute_fingerprint(ports)` — hash over sorted (port, protocol) set
   - `run_discovery_diff(shield_id, sent, last_fp, seq)` — computes diff, returns `DiscoveryReport` or `None` if unchanged
   - `run_discovery_full_sync(shield_id, sent, last_fp, seq)` — full snapshot, always returns `DiscoveryReport`
-- [ ] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
-- [ ] **M4-E3** `shield/src/heartbeat.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream
-- [ ] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
+- [x] **M4-E2** `shield/src/config.rs` — Add `discovery_interval_secs: u64` (default 60)
+- [x] **M4-E3** `shield/src/control_stream.rs` — MODIFY: after existing health report send, call `discovery::run_discovery_diff()`; on first connect call `run_discovery_full_sync()`; send result as `ShieldControlMessage::DiscoveryReport` on the Control stream. Note: heartbeat logic lives in `control_stream.rs`, not a separate `heartbeat.rs`.
+- [x] **M4-E4** `shield/src/main.rs` — Add `mod discovery`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
@@ -145,13 +145,13 @@ Two features land together:
 
 ### PHASE F — M1 Frontend (Depends on: Day 1 codegen done)
 
-- [ ] **M1-F1** `admin/src/pages/Shields.tsx` — Add "Discovered Services" expandable panel per shield row; columns: Protocol, Port, Service Name, Bound IP, First Seen, Last Seen, Promote button
-- [ ] **M1-F2** `admin/src/components/PromoteServiceModal.tsx` — Confirm modal: "Promote port 22/tcp (SSH) on 192.168.1.5 to a resource?" — prefills CreateResource form
-- [ ] **M1-F3** `admin/src/pages/RemoteNetworks.tsx` — Add "Scan Network" button per network; opens `ScanModal`
-- [ ] **M1-F4** `admin/src/components/ScanModal.tsx` — Form: target IPs/CIDR (textarea), ports (comma-separated); submits `TriggerScan` mutation; polls `GetScanResults(requestId)` every 3s; shows results table with Create Resource button per row
-- [ ] **M1-F5** `admin/src/graphql/queries.graphql` — Add `GetDiscoveredServices`, `GetScanResults`
-- [ ] **M1-F6** `admin/src/graphql/mutations.graphql` — Add `PromoteDiscoveredService`, `TriggerScan`
-- [ ] **M1-F7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks
+- [x] **M1-F1** `admin/src/pages/Shields.tsx` — Add "Discovered Services" expandable panel per shield row; columns: Protocol, Port, Service Name, Bound IP, First Seen, Last Seen, Promote button
+- [x] **M1-F2** `admin/src/components/PromoteServiceModal.tsx` — Confirm modal: "Promote port 22/tcp (SSH) on 192.168.1.5 to a resource?" — prefills CreateResource form
+- [x] **M1-F3** `admin/src/pages/RemoteNetworks.tsx` — Add "Scan Network" button per network; opens `ScanModal`
+- [x] **M1-F4** `admin/src/components/ScanModal.tsx` — Form: target IPs/CIDR (textarea), ports (comma-separated); submits `TriggerScan` mutation; polls `GetScanResults(requestId)` every 3s; shows results table with Create Resource button per row
+- [x] **M1-F5** `admin/src/graphql/queries.graphql` — `GetDiscoveredServices` + `GetScanResults`
+- [x] **M1-F6** `admin/src/graphql/mutations.graphql` — `PromoteDiscoveredService` + `TriggerScan`
+- [x] **M1-F7** Run `cd admin && npm run codegen` — regenerate TypeScript hooks
 
 > Build check: `cd admin && npm run build` must pass.
 

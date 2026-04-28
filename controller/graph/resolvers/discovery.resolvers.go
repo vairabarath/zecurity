@@ -9,25 +9,108 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
+	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // PromoteDiscoveredService is the resolver for the promoteDiscoveredService field.
 func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*graph.Resource, error) {
-	panic(fmt.Errorf("not implemented: PromoteDiscoveredService - promoteDiscoveredService"))
+	tc := tenant.MustGet(ctx)
+
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	if err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: get services: %w", err)
+	}
+
+	var target *discovery.DiscoveredService
+	for i := range svcs {
+		if svcs[i].Protocol == protocol && svcs[i].Port == port {
+			target = &svcs[i]
+			break
+		}
+	}
+	if target == nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: service %s/%d not found on shield %s", protocol, port, shieldID)
+	}
+
+	name := fmt.Sprintf("%s on %s", target.ServiceName, shieldID[:8])
+	row, err := resource.Create(ctx, r.Pool, tc.TenantID, resource.CreateInput{
+		Name:     name,
+		Host:     target.BoundIP,
+		Protocol: protocol,
+		PortFrom: port,
+		PortTo:   port,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("promoteDiscoveredService: create resource: %w", err)
+	}
+
+	return toResourceGQL(row), nil
 }
 
 // TriggerScan is the resolver for the triggerScan field.
 func (r *mutationResolver) TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error) {
-	panic(fmt.Errorf("not implemented: TriggerScan - triggerScan"))
+	if len(targets) == 0 {
+		return "", fmt.Errorf("triggerScan: targets must not be empty")
+	}
+	if len(ports) > 16 {
+		return "", fmt.Errorf("triggerScan: too many ports (max 16)")
+	}
+
+	requestID := uuid.New().String()
+
+	portsU32 := make([]uint32, len(ports))
+	for i, p := range ports {
+		portsU32[i] = uint32(p)
+	}
+
+	msg := &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_ScanCommand{
+			ScanCommand: &pb.ScanCommand{
+				RequestId:  requestID,
+				Targets:    targets,
+				Ports:      portsU32,
+				MaxTargets: 512,
+				TimeoutSec: 5,
+			},
+		},
+	}
+
+	if err := r.ConnectorRegistry.PushScanCommand(connectorID, msg); err != nil {
+		return "", fmt.Errorf("triggerScan: connector %s not connected: %w", connectorID, err)
+	}
+
+	return requestID, nil
 }
 
 // GetDiscoveredServices is the resolver for the getDiscoveredServices field.
 func (r *queryResolver) GetDiscoveredServices(ctx context.Context, shieldID string) ([]*graph.DiscoveredService, error) {
-	panic(fmt.Errorf("not implemented: GetDiscoveredServices - getDiscoveredServices"))
+	svcs, err := discovery.GetDiscoveredServices(ctx, r.Pool, shieldID)
+	if err != nil {
+		return nil, fmt.Errorf("getDiscoveredServices: %w", err)
+	}
+
+	result := make([]*graph.DiscoveredService, len(svcs))
+	for i, s := range svcs {
+		result[i] = toDiscoveredServiceGQL(s)
+	}
+	return result, nil
 }
 
 // GetScanResults is the resolver for the getScanResults field.
 func (r *queryResolver) GetScanResults(ctx context.Context, requestID string) ([]*graph.ScanResult, error) {
-	panic(fmt.Errorf("not implemented: GetScanResults - getScanResults"))
+	results, err := discovery.GetScanResults(ctx, r.Pool, requestID)
+	if err != nil {
+		return nil, fmt.Errorf("getScanResults: %w", err)
+	}
+
+	out := make([]*graph.ScanResult, len(results))
+	for i, r := range results {
+		out[i] = toScanResultGQL(r)
+	}
+	return out, nil
 }

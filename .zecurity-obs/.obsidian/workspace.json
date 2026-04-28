@@ -11,13 +11,32 @@
             "id": "01673fd5434e31d9",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "2026-04-27.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "2026-04-27"
+            }
+          },
+          {
+            "id": "626f7b5468941626",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Phase1-Discovery-Tab"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -180,45 +199,46 @@
       "obsidian-excalidraw-plugin:New drawing": false
     }
   },
-  "active": "01673fd5434e31d9",
+  "active": "626f7b5468941626",
   "lastOpenFiles": [
+    "Untitled.canvas",
+    "Untitled.base",
+    "Untitled 1.canvas",
+    "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.md",
+    "Excalidraw",
+    "2026-04-27.md",
+    "Planning/Session Log.md.tmp.132246.1777284598064",
+    "Sprint6/path.md.tmp.132246.1777284587343",
+    "Sprint6/Member1-Frontend/Phase2-Scan-UI.md.tmp.132246.1777284580104",
+    "Sprint6/Member1-Frontend/Phase2-Scan-UI.md",
+    "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md",
+    "Planning/Session Log.md.tmp.118302.1777271562551",
+    "Sprint6/path.md.tmp.118302.1777271541632",
+    "Sprint6/path.md.tmp.118302.1777271538104",
+    "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md.tmp.118302.1777271533206",
+    "improvements.md",
+    "Home.md",
+    "Sprint4/Member1-Frontend/Phase1-Layout-Routing.md",
     "Sprint4/path.md",
     "Sprint4/Member1-Frontend/Phase4-RemoteNetworks-Sidebar.md",
     "Sprint4/Member1-Frontend/Phase3-Shields-Page.md",
     "Sprint4/Member1-Frontend/Phase2-GraphQL-Operations.md",
-    "Sprint4/Member1-Frontend/Phase1-Layout-Routing.md",
     "redis-to-valkey-migration/Checklist.md",
     "redis-to-valkey-migration/Checklist.md.tmp.255972.1776516090606",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776515507134",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776512412302",
     "Planning/Session Log.md",
     "Sprint4/team-workflow.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase1-Crate-Scaffold.md",
     "Sprint4/Member2-Go-Proto-Shield/Phase1-Proto-appmeta.md",
     "redis-to-valkey-migration/Commit1-Infrastructure.md",
     "Planning/Roadmap.md",
-    "Home.md",
     "Architecture/Connector Lifecycle.excalidraw.md",
     "redis-to-valkey-migration/Commit2-EnvVar-Rename.md",
     "redis-to-valkey-migration/Overview.md",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776499863005",
     "redis-to-valkey-migration/Commit3-Client-Swap.md",
-    "redis-to-valkey-migration/Commit3-Client-Swap.md.tmp.255972.1776499853518",
-    "redis-to-valkey-migration/Commit2-EnvVar-Rename.md.tmp.255972.1776499824847",
-    "redis-to-valkey-migration/Commit1-Infrastructure.md.tmp.255972.1776499814277",
-    "redis-to-valkey-migration/Overview.md.tmp.255972.1776499801954",
-    "redis-to-valkey-migration",
     "Sprint4/Member3-Go-DB-GraphQL/Phase5-AgentServer-Rust.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase4-Heartbeat-Renewal.md",
     "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
-    "Sprint4/Member3-Go-DB-GraphQL/Phase3-Connector-Goodbye.md",
-    "Sprint4/Member3-Go-DB-GraphQL/Phase4-Connector-Heartbeat.md",
-    "Sprint4/Member2-Go-Proto-Shield/Phase2-Shield-Package.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase2-Core-Modules.md",
-    "Sprint4/Member2-Go-Proto-Shield/Phase3-PKI-SignShieldCert.md",
-    "Sprint4/Member2-Go-Proto-Shield/Phase4-Main-Wiring.md",
     "Architecture/Connector Lifecycle.canvas",
-    "Architecture/System Overview.canvas",
-    "Architecture/Connector Lifecycle.excalidraw.md.tmp.10855.1776310006594"
+    "Architecture/System Overview.canvas"
   ]
 }
