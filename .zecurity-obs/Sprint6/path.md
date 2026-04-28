@@ -228,3 +228,66 @@ See individual member phase files for detailed specs:
 - [[Sprint6/Member3-Go-Connector/Phase3-Connector-Discovery]]
 - [[Sprint6/Member4-Rust-Shield/Phase1-Discovery-Module]]
 - [[Sprint6/Member4-Rust-Shield/Phase2-Control-Stream-Wiring]]
+
+---
+
+## Post-Sprint 6 Fixes (Merged from main to sprint6-member3)
+
+These fixes were applied after Sprint 6 completion to address bugs discovered during testing.
+
+### Fix 1: Network Setup Non-Fatal
+- **File:** `shield/src/network.rs`
+- **Issue:** Shield crashed on startup if `zecurity0` TUN interface couldn't be created (e.g., insufficient permissions)
+- **Fix:** Changed network setup failures from fatal to non-fatal warning. Shield continues running without the network interface.
+- **File:** `shield/src/main.rs` (line 137) - now logs `warn!` instead of returning error
+
+### Fix 2: Discovery Scan Loop Early Exit
+- **File:** `connector/src/discovery/scan.rs`
+- **Issue:** Scan loop could hang if target was unreachable
+- **Fix:** Added proper early exit conditions
+
+### Fix 3: Wildcard Bound IP Handling
+- **File:** `shield/src/discovery.rs`
+- **Issue:** Services bound to `0.0.0.0` (all interfaces) weren't handled correctly
+- **Fix:** Added wildcard IP handling in discovery
+
+### Fix 4: IPv6 Address Parsing
+- **File:** `shield/src/discovery.rs`
+- **Issue:** `::1` (IPv6 loopback) was incorrectly parsed as `::100:0` due to `word.to_be().to_le_bytes()` 
+- **Fix:** Changed to `word.to_le_bytes()` to correctly recover network-order bytes from kernel's native LE u32 output
+
+### Fix 5: Better Discovery Logging
+- **File:** `connector/src/agent_server.rs`
+- **Change:** Enhanced logging with `added`, `removed`, `full_sync` fields for better observability
+
+- **File:** `connector/src/control_stream.rs`  
+- **Change:** Added `report_count` to flush log message
+
+### Fix 6: Version Bump
+- **Files:** `shield/Cargo.toml`, `connector/Cargo.toml`
+- **Change:** Bumped to v1.0.4
+
+### Fix 7: Frontend ResourceDiscovery Page
+- **File:** `admin/src/pages/ResourceDiscovery.tsx`
+- **Change:** Added new page (367 lines) for discovery UI
+
+### Fix 8: ScanModal Results Table Simplification
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table had 6 columns causing overflow at 960px modal width
+- **Fix:** Collapsed IP+Port into one `host:port` cell, dropped redundant Protocol and Via columns, replaced text button with + icon
+
+### Fix 9: ScanModal Results Table Scrollable
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table wrapper missing `flex-1/min-h-0` caused last rows to be clipped with no scroll handle
+- **Fix:** Switch wrapper to `flex-1 flex-col`, header to `shrink-0`, body to `flex-1 overflow-y-auto`
+
+---
+
+### Commits Merged
+```
+32815a6 fix(admin): make ScanModal results table scrollable to last row
+19002cf feat(admin): simplify ScanModal results table — 6 cols → 3
+53b94de fix(shield): correct IPv6 address parsing from /proc/net/tcp6
+275da31 chore: bump connector and shield to v1.0.4
+40f3261 fix(connector,shield): v1.0.2 — scan loop early exit + wildcard bound IP
+```

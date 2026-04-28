@@ -307,3 +307,35 @@ cargo build --manifest-path shield/Cargo.toml
 ```
 
 Warnings OK. Errors not. The proto types (`DiscoveryReport`) are wired in Phase 2.
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix 1: IPv6 Address Parsing Bug
+**Issue:** `::1` (IPv6 loopback) was incorrectly parsed as `::100:0` due to `word.to_be().to_le_bytes()` 
+
+**Root Cause:** The kernel prints IPv6 addresses as 4 32-bit words in little-endian. Using `to_be().to_le_bytes()` garbled non-zero addresses.
+
+**Fix Applied (line ~125):**
+```rust
+// BEFORE (incorrect):
+let bytes = word.to_be().to_le_bytes();
+
+// AFTER (correct):
+let bytes = word.to_le_bytes();
+```
+
+### Fix 2: Wildcard Bound IP Handling
+**Issue:** Services bound to `0.0.0.0` (all interfaces) weren't handled correctly.
+
+**Fix:** Added wildcard IP handling logic in `discover_sync()` function.
+
+### Fix 3: Scan Loop Early Exit  
+**Issue:** Discovery scan could hang if target was unreachable.
+
+**Fix:** Added proper early exit conditions in the scan logic.
+
+### Related Files Also Fixed
+- `shield/src/main.rs` — Network setup failures now non-fatal (logs warning instead of crashing)
+- `shield/src/network.rs` — Graceful handling when TUN interface can't be created

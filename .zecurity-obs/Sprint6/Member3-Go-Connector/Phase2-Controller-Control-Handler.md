@@ -125,3 +125,23 @@ go func() {
 ```bash
 cd controller && go build ./...
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+### Fix: Enhanced Discovery Logging
+**Issue:** Needed better observability for debugging discovery flow.
+
+**Fix Applied in `controller/internal/connector/control_stream.go`:**
+- Added detailed logging for `handleShieldDiscoveryBatch`:
+  ```go
+  log.Printf("discovery: shield %s full_sync=%v added=%d removed=%d", shieldID, r.FullSync, len(r.Added), len(r.Removed))
+  log.Printf("discovery: calling ReplaceDiscoveredServices shield=%s services=%d", shieldID, len(services))
+  log.Printf("discovery: replace OK for shield %s services=%d", shieldID, len(services))
+  log.Printf("discovery: replace FAILED for shield %s: %v", shieldID, err)
+  ```
+- Added logging for `handleScanReport`:
+  ```go
+  log.Printf("control stream: connector %s case ScanReport request_id=%s", connectorID, rep.ScanReport.RequestId)
+  ```
