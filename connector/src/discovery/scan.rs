@@ -81,8 +81,8 @@ pub async fn execute_scan(cmd: ScanCommand, connector_id: &str) -> ScanReport {
     }
 
     let mut alive: Vec<IpAddr> = Vec::new();
-    while let Some(Ok((ip, is_alive))) = ping_set.join_next().await {
-        if is_alive {
+    while let Some(result) = ping_set.join_next().await {
+        if let Ok((ip, true)) = result {
             info!("alive: {}", ip);
             alive.push(ip);
         }
@@ -113,16 +113,18 @@ pub async fn execute_scan(cmd: ScanCommand, connector_id: &str) -> ScanReport {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     let mut results = Vec::new();
 
-    while let Some(Ok((ip, port, true, service_name))) = probe_set.join_next().await {
-        info!("open: {}:{} ({})", ip, port, service_name);
-        results.push(ScanResult {
-            ip:             ip.to_string(),
-            port,
-            protocol:       "tcp".into(),
-            service_name,
-            reachable_from: connector_id.to_string(),
-            first_seen:     now,
-        });
+    while let Some(result) = probe_set.join_next().await {
+        if let Ok((ip, port, true, service_name)) = result {
+            info!("open: {}:{} ({})", ip, port, service_name);
+            results.push(ScanResult {
+                ip:             ip.to_string(),
+                port,
+                protocol:       "tcp".into(),
+                service_name,
+                reachable_from: connector_id.to_string(),
+                first_seen:     now,
+            });
+        }
     }
 
     info!("scan {}: {} services found", request_id, results.len());

@@ -188,7 +188,9 @@ export function ScanModal({
                   placeholder={'192.168.1.0/24\n10.0.0.15'}
                   className="min-h-36 w-full rounded-xl border border-border bg-secondary px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
                 />
-                <p className="text-xs text-muted-foreground">One per line or comma separated.</p>
+                <p className="text-xs text-muted-foreground">
+                  One per line or comma separated. Use full CIDR (e.g. <span className="font-mono">192.168.1.0/24</span>) or a bare IP (e.g. <span className="font-mono">10.0.0.15</span>).
+                </p>
               </div>
 
               <div className="space-y-2">
@@ -265,7 +267,20 @@ export function ScanModal({
                   </div>
                 ) : results.length === 0 ? (
                   <div className="flex h-full items-center justify-center rounded-3xl border border-dashed border-border bg-secondary/20 p-8 text-center text-sm text-muted-foreground">
-                    {pollingExpired ? 'No live services found in the given scope.' : 'Scanning… waiting for first results.'}
+                    {pollingExpired ? (
+                      <div className="space-y-2">
+                        <div className="font-semibold text-foreground">No live services found in the given scope.</div>
+                        <div className="text-xs">
+                          Verify that <span className="font-semibold">{connectorName}</span> can reach the target subnet
+                          and that at least one host is listening on the chosen ports. CIDR must be full (e.g. <span className="font-mono">192.168.1.0/24</span>).
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        <div>Scanning… waiting for first results.</div>
+                        <div className="text-xs">A /24 sweep typically completes in 5–60 s; results may arrive in batches.</div>
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div className="min-h-0 overflow-hidden rounded-2xl border border-border">
