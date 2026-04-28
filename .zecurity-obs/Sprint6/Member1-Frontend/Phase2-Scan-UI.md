@@ -113,3 +113,19 @@ cd admin && npm run build
 - `PromoteServiceModal.tsx` - New modal for promoting discovered services to resources
 
 **Note:** The Scan UI functionality is now part of the larger ResourceDiscovery page added in post-sprint fixes.
+
+### Fix: ScanModal Results Table Scrollable (commit 32815a6)
+**Issue:** Table wrapper was missing `flex-1/min-h-0` so `max-h-full` on the scroll div had no reference height — last rows clipped with no scroll handle.
+
+**Fix Applied:**
+- Switch wrapper to `flex-1 flex-col`
+- Header to `shrink-0`
+- Body to `flex-1 overflow-y-auto`
+
+### Fix: ScanModal Results Table Simplification (commit 19002cf)
+**Issue:** Table had 6 columns causing overflow at 960px modal width.
+
+**Fix Applied:**
+- Collapse IP+Port into one `host:port` cell
+- Drop redundant Protocol and Via (UUID) columns
+- Replace "Create Resource" text button with a `+` icon button
