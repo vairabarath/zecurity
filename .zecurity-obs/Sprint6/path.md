@@ -271,10 +271,22 @@ These fixes were applied after Sprint 6 completion to address bugs discovered du
 - **File:** `admin/src/pages/ResourceDiscovery.tsx`
 - **Change:** Added new page (367 lines) for discovery UI
 
+### Fix 8: ScanModal Results Table Simplification
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table had 6 columns causing overflow at 960px modal width
+- **Fix:** Collapsed IP+Port into one `host:port` cell, dropped redundant Protocol and Via columns, replaced text button with + icon
+
+### Fix 9: ScanModal Results Table Scrollable
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table wrapper missing `flex-1/min-h-0` caused last rows to be clipped with no scroll handle
+- **Fix:** Switch wrapper to `flex-1 flex-col`, header to `shrink-0`, body to `flex-1 overflow-y-auto`
+
 ---
 
 ### Commits Merged
 ```
+32815a6 fix(admin): make ScanModal results table scrollable to last row
+19002cf feat(admin): simplify ScanModal results table — 6 cols → 3
 53b94de fix(shield): correct IPv6 address parsing from /proc/net/tcp6
 275da31 chore: bump connector and shield to v1.0.4
 40f3261 fix(connector,shield): v1.0.2 — scan loop early exit + wildcard bound IP
