@@ -319,19 +319,20 @@ export default function RemoteNetworks() {
         </div>
       )}
 
-      {scanTarget ? (
-        <ScanModal
-          connectorId={scanTarget.connectorId}
-          remoteNetworkId={scanTarget.networkId}
-          connectorName={
-            networks
-              .find((network) => network.id === scanTarget.networkId)
-              ?.connectors.find((connector) => connector.id === scanTarget.connectorId)
-              ?.name ?? 'connector'
-          }
-          onClose={() => setScanTarget(null)}
-        />
-      ) : null}
+      {scanTarget ? (() => {
+        const connector = networks
+          .find((network) => network.id === scanTarget.networkId)
+          ?.connectors.find((c) => c.id === scanTarget.connectorId)
+        return (
+          <ScanModal
+            connectorId={scanTarget.connectorId}
+            remoteNetworkId={scanTarget.networkId}
+            connectorName={connector?.name ?? 'connector'}
+            connectorLanAddr={connector?.lanAddr ?? undefined}
+            onClose={() => setScanTarget(null)}
+          />
+        )
+      })() : null}
     </div>
   )
 }
