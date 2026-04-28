@@ -12,6 +12,18 @@ const IGNORED_PORTS: &[(u16, &str)] = &[
     (9091, "zecurity-connector"),
 ];
 
+/// UDP-specific ports to skip — infrastructure/system noise.
+const IGNORED_UDP_PORTS: &[(u16, &str)] = &[
+    (67,   "DHCP Server"),
+    (68,   "DHCP Client"),
+    (123,  "NTP"),
+    (137,  "NetBIOS-NS"),
+    (138,  "NetBIOS-DGM"),
+    (1900, "SSDP"),
+    (5353, "mDNS"),
+    (5355, "LLMNR"),
+];
+
 /// Ephemeral port range start (Linux default).
 const EPHEMERAL_PORT_START: u16 = 32768;
 
@@ -60,6 +72,25 @@ pub fn service_from_port(port: u16) -> &'static str {
     }
 }
 
+/// Static lookup of well-known UDP port numbers to service names.
+pub fn service_from_port_udp(port: u16) -> &'static str {
+    match port {
+        53   => "DNS",
+        69   => "TFTP",
+        161  => "SNMP",
+        162  => "SNMP Trap",
+        500  => "IKE",
+        514  => "Syslog",
+        1194 => "OpenVPN",
+        1812 => "RADIUS",
+        1813 => "RADIUS Accounting",
+        4500 => "IPSec NAT-T",
+        5060 => "SIP",
+        5061 => "SIP-TLS",
+        _    => "",
+    }
+}
+
 fn is_externally_listening(addr: &SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
@@ -93,6 +124,10 @@ fn is_ignored_port(port: u16) -> bool {
     IGNORED_PORTS.iter().any(|(p, _)| *p == port)
 }
 
+fn is_ignored_udp_port(port: u16) -> bool {
+    IGNORED_UDP_PORTS.iter().any(|(p, _)| *p == port)
+}
+
 fn should_include_port(port: u16) -> bool {
     if is_ignored_port(port) {
         return false;
@@ -104,7 +139,7 @@ fn should_include_port(port: u16) -> bool {
     true
 }
 
-// ── Linux: /proc/net/tcp parser ───────────────────────────────────────────────
+// ── Linux: /proc/net parsers ──────────────────────────────────────────────────
 
 fn parse_proc_ipv4(hex: &str) -> Option<Ipv4Addr> {
     let n = u32::from_str_radix(hex, 16).ok()?;
@@ -169,6 +204,50 @@ fn parse_proc_tcp(path: &str, is_v6: bool) -> Vec<SocketAddr> {
     results
 }
 
+/// Parse /proc/net/udp or /proc/net/udp6 for bound sockets (state 07).
+/// State 07 (TCP_CLOSE) is how the kernel marks a UDP socket that has called
+/// bind() and is waiting for datagrams — the connectionless equivalent of LISTEN.
+fn parse_proc_udp(path: &str, is_v6: bool) -> Vec<SocketAddr> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(path, error = %e, "could not read proc udp file");
+            return vec![];
+        }
+    };
+    let mut results = vec![];
+    for line in content.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        if fields[3] != "07" {
+            continue; // only bound UDP sockets
+        }
+        let parts: Vec<&str> = fields[1].split(':').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let port = match u16::from_str_radix(parts[1], 16) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let ip: IpAddr = if is_v6 {
+            match parse_proc_ipv6(parts[0]) {
+                Some(v6) => IpAddr::V6(v6),
+                None => continue,
+            }
+        } else {
+            match parse_proc_ipv4(parts[0]) {
+                Some(v4) => IpAddr::V4(v4),
+                None => continue,
+            }
+        };
+        results.push(SocketAddr::new(ip, port));
+    }
+    results
+}
+
 /// Synchronous discovery scan — called via spawn_blocking from async context.
 pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
     // Detect LAN IP once — used to replace wildcard bound addresses.
@@ -208,6 +287,37 @@ pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
             service_name: service_from_port(port).to_string(),
         });
     }
+    // ── UDP ──────────────────────────────────────────────────────────────────
+    let mut udp_addrs = parse_proc_udp("/proc/net/udp", false);
+    udp_addrs.extend(parse_proc_udp("/proc/net/udp6", true));
+    info!("discovery: raw UDP listener count = {}", udp_addrs.len());
+
+    for addr in &udp_addrs {
+        if !is_externally_listening(addr) {
+            continue;
+        }
+        let port = addr.port();
+        if is_ignored_udp_port(port) {
+            continue;
+        }
+        if port >= EPHEMERAL_PORT_START && service_from_port_udp(port).is_empty() {
+            continue;
+        }
+        let Some(bound_ip) = normalize_bound_ip(addr.ip(), lan_ip) else {
+            warn!(port, raw_ip = %addr.ip(), "skipping UDP wildcard — LAN IP not detected");
+            continue;
+        };
+        if !seen.insert((port, "udp")) {
+            continue; // dedup across /proc/net/udp and /proc/net/udp6
+        }
+        exposed.push(DiscoveredService {
+            protocol:     "udp",
+            port,
+            bound_ip:     bound_ip.to_string(),
+            service_name: service_from_port_udp(port).to_string(),
+        });
+    }
+
     info!("discovery: externally-listening services = {}", exposed.len());
     Ok(exposed)
 }

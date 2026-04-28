@@ -143,6 +143,23 @@ Two features land together:
 
 ---
 
+### PHASE E2 — M4 Shield UDP Discovery (Depends on: Phase E complete)
+
+> **Rationale:** Resource UI already supports both TCP and UDP resources. Neither has data-plane tunneling yet — Sprint 10 engineers both. Discovery must follow resource capability (not tunnel capability), so UDP belongs in discovery now. The proto, DB, and UI already support it — only `discovery.rs` needs extending.
+
+- [x] **M4-E2-1** `shield/src/discovery.rs` — Add `IGNORED_UDP_PORTS` constant (67 DHCP, 68 DHCP, 123 NTP, 137 NetBIOS-NS, 138 NetBIOS-DGM, 1900 SSDP — plus 5353/5355 already in TCP list)
+- [x] **M4-E2-2** `shield/src/discovery.rs` — Add `service_from_port_udp(port)` lookup (DNS/53, TFTP/69, SNMP/161, Syslog/514, OpenVPN/1194, RADIUS/1812, SIP/5060, IKE/500, IPSec NAT-T/4500)
+- [x] **M4-E2-3** `shield/src/discovery.rs` — Add `parse_proc_udp(path, is_v6)` — identical structure to `parse_proc_tcp` but filters on state `"07"` (bound UDP socket) instead of `"0A"` (TCP LISTEN)
+- [x] **M4-E2-4** `shield/src/discovery.rs` — Extend `discover_sync()` to scan `/proc/net/udp` + `/proc/net/udp6`; reuse existing `seen: HashSet<(u16, &'static str)>` — `(port, "udp")` entries are naturally separate from `(port, "tcp")`
+
+> **No other files change.** Proto `DiscoveredService.protocol` already exists. DB PK `(shield_id, protocol, port)` already separates TCP/UDP rows. UI protocol column already renders. Connector network scanner stays TCP-only.
+
+> Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
+
+> Phase spec: [[Sprint6/Member4-Rust-Shield/Phase3-UDP-Discovery]]
+
+---
+
 ### PHASE F — M1 Frontend (Depends on: Day 1 codegen done)
 
 - [x] **M1-F1** `admin/src/pages/Shields.tsx` — Add "Discovered Services" expandable panel per shield row; columns: Protocol, Port, Service Name, Bound IP, First Seen, Last Seen, Promote button
