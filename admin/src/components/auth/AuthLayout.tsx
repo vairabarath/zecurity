@@ -42,9 +42,9 @@ export function AuthCard({ children }: { children: ReactNode }) {
 export function BrandBlock({ subtitle }: { subtitle: string }) {
   return (
     <div className="mb-7 flex flex-col items-center gap-3 text-center">
-      <div className="relative grid h-14 w-14 place-items-center rounded-2xl bg-[linear-gradient(135deg,oklch(0.86_0.095_175)_0%,oklch(0.70_0.10_175)_100%)] text-primary-foreground shadow-[0_8px_24px_oklch(0.86_0.095_175/0.35)]">
+      <div className="relative grid h-14 w-14 place-items-center rounded-2xl bg-[linear-gradient(135deg,oklch(0.86_0.095_175)_0%,oklch(0.70_0.10_175)_100%)] text-[oklch(0.22_0.02_200)] shadow-[0_8px_24px_oklch(0.86_0.095_175/0.35)]">
         <Shield className="h-6 w-6" />
-        <span className="absolute -right-1 -top-1 grid h-4 w-4 place-items-center rounded-full border-2 border-card bg-primary text-primary-foreground">
+        <span className="absolute -right-1 -top-1 grid h-4 w-4 place-items-center rounded-full border-2 border-card bg-primary text-[oklch(0.22_0.02_200)]">
           <Check className="h-2.5 w-2.5" />
         </span>
       </div>
@@ -204,7 +204,7 @@ export function AccountTypeCard({
     >
       <div className={cn(
         'mb-3 grid h-10 w-10 place-items-center rounded-xl',
-        active ? 'bg-primary text-primary-foreground' : 'bg-accent text-muted-foreground',
+        active ? 'bg-primary text-[oklch(0.22_0.02_200)]' : 'bg-accent text-muted-foreground',
       )}>
         <Icon className="h-5 w-5" />
       </div>
