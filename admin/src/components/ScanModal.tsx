@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
-import { Loader2, Radar, Search, X } from 'lucide-react'
+import { Loader2, Plus, Radar, Search, X } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import {
   GetScanResultsDocument,
@@ -284,34 +284,34 @@ export function ScanModal({
                   </div>
                 ) : (
                   <div className="min-h-0 overflow-hidden rounded-2xl border border-border">
-                    <div className="grid grid-cols-[1.1fr_80px_90px_1fr_150px_120px] gap-3 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-                      <div>IP</div>
-                      <div>Port</div>
-                      <div>Protocol</div>
+                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] gap-4 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                      <div>Host</div>
                       <div>Service</div>
-                      <div>Via</div>
-                      <div className="text-right">Action</div>
+                      <div />
                     </div>
                     <div className="max-h-full overflow-y-auto">
                       {results.map((result) => (
                         <div
                           key={`${result.requestId}-${result.ip}-${result.port}`}
-                          className="grid grid-cols-[1.1fr_80px_90px_1fr_150px_120px] items-center gap-3 border-b border-border px-4 py-3 text-sm last:border-b-0"
+                          className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] items-center gap-4 border-b border-border px-4 py-3 last:border-b-0"
                         >
-                          <div className="font-mono text-xs text-muted-foreground">{result.ip}</div>
-                          <div className="font-mono text-xs">{result.port}</div>
-                          <div className="font-mono text-xs uppercase">{result.protocol}</div>
-                          <div>
-                            <div className="font-medium">{result.serviceName}</div>
+                          <div className="font-mono text-xs">
+                            {result.ip}
+                            <span className="text-muted-foreground">:{result.port}</span>
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">
+                              {result.serviceName || <span className="text-muted-foreground">Unknown</span>}
+                            </div>
                             <div className="text-xs text-muted-foreground">{relativeTime(result.firstSeen)}</div>
                           </div>
-                          <div className="truncate text-xs text-muted-foreground">{result.reachableFrom}</div>
-                          <div className="text-right">
+                          <div>
                             <button
                               onClick={() => handleCreateResource(result)}
-                              className="rounded-lg border border-border bg-background px-3 py-1 text-xs font-semibold text-primary transition hover:bg-secondary"
+                              title="Create Resource"
+                              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border bg-background text-primary transition hover:bg-secondary"
                             >
-                              Create Resource
+                              <Plus className="h-3.5 w-3.5" />
                             </button>
                           </div>
                         </div>
