@@ -359,6 +359,7 @@ export default function ResourceDiscovery() {
           connectorId={scanTarget.connectorId}
           remoteNetworkId={scanTarget.networkId}
           connectorName={connectorMap.get(scanTarget.connectorId)?.name ?? 'connector'}
+          connectorLanAddr={connectorMap.get(scanTarget.connectorId)?.lanAddr ?? undefined}
           onClose={() => setScanTarget(null)}
         />
       ) : null}
