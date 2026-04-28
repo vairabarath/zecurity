@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "zecurity-connector"
-version = "1.0.2"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "base64",
