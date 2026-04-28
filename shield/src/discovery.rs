@@ -119,7 +119,9 @@ fn parse_proc_ipv6(hex: &str) -> Option<Ipv6Addr> {
     let mut octets = [0u8; 16];
     for i in 0..4 {
         let word = u32::from_str_radix(&hex[i * 8..(i + 1) * 8], 16).ok()?;
-        let bytes = word.to_be().to_le_bytes();
+        // /proc/net/tcp6 prints each 4-byte group as a native (LE) u32 via %08X.
+        // to_le_bytes() recovers the original network-order bytes directly.
+        let bytes = word.to_le_bytes();
         octets[i * 4..i * 4 + 4].copy_from_slice(&bytes);
     }
     Some(Ipv6Addr::from(octets))
