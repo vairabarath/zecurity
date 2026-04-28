@@ -64,6 +64,31 @@ fn is_externally_listening(addr: &SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
 
+/// Normalize a raw bound IP from /proc/net/tcp[6]:
+/// - `0.0.0.0` / `::` (wildcard)       → shield LAN IP (reachable on all interfaces)
+/// - `::ffff:x.x.x.x` (IPv4-mapped)    → strip to plain IPv4
+/// - `::ffff:0.0.0.0` (mapped wildcard) → shield LAN IP
+/// - anything else                      → unchanged
+/// Returns `None` if the address is a wildcard but no LAN IP could be detected.
+fn normalize_bound_ip(ip: IpAddr, lan_ip: Option<IpAddr>) -> Option<IpAddr> {
+    match ip {
+        IpAddr::V4(v4) if v4.is_unspecified() => lan_ip,
+        IpAddr::V4(_) => Some(ip),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                // IPv4-mapped: ::ffff:x.x.x.x
+                if v4.is_unspecified() { lan_ip } else { Some(IpAddr::V4(v4)) }
+            } else if v6.is_unspecified() {
+                // Pure IPv6 wildcard: ::
+                lan_ip
+            } else {
+                // Genuine IPv6 unicast — keep as-is
+                Some(ip)
+            }
+        }
+    }
+}
+
 fn is_ignored_port(port: u16) -> bool {
     IGNORED_PORTS.iter().any(|(p, _)| *p == port)
 }
@@ -144,11 +169,19 @@ fn parse_proc_tcp(path: &str, is_v6: bool) -> Vec<SocketAddr> {
 
 /// Synchronous discovery scan — called via spawn_blocking from async context.
 pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
+    // Detect LAN IP once — used to replace wildcard bound addresses.
+    let lan_ip: Option<IpAddr> = crate::util::detect_lan_ip()
+        .and_then(|s| s.parse().ok());
+
     let mut addrs = parse_proc_tcp("/proc/net/tcp", false);
     addrs.extend(parse_proc_tcp("/proc/net/tcp6", true));
     info!("discovery: raw TCP listener count = {}", addrs.len());
 
-    let mut exposed = Vec::new();
+    let mut exposed: Vec<DiscoveredService> = Vec::new();
+    // Dedup by (port, protocol): a dual-stack wildcard service appears in both
+    // /proc/net/tcp and /proc/net/tcp6 — keep only the first entry per port.
+    let mut seen: HashSet<(u16, &'static str)> = HashSet::new();
+
     for addr in &addrs {
         if !is_externally_listening(addr) {
             continue;
@@ -157,10 +190,19 @@ pub fn discover_sync() -> Result<Vec<DiscoveredService>> {
         if !should_include_port(port) {
             continue;
         }
+        // Normalize wildcard / IPv4-mapped addresses. Skip if we cannot
+        // resolve a wildcard to a concrete LAN IP (no usable bound_ip to store).
+        let Some(bound_ip) = normalize_bound_ip(addr.ip(), lan_ip) else {
+            warn!(port, raw_ip = %addr.ip(), "skipping wildcard listener — LAN IP not detected");
+            continue;
+        };
+        if !seen.insert((port, "tcp")) {
+            continue; // already added this port from the other ip-family file
+        }
         exposed.push(DiscoveredService {
             protocol:     "tcp",
             port,
-            bound_ip:     addr.ip().to_string(),
+            bound_ip:     bound_ip.to_string(),
             service_name: service_from_port(port).to_string(),
         });
     }
