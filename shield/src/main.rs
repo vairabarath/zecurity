@@ -65,7 +65,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use types::ShieldState;
 
 #[tokio::main]
@@ -134,9 +134,9 @@ async fn main() -> anyhow::Result<()> {
             interface_addr = %state.interface_addr,
             "shield already enrolled, resuming"
         );
-        network::setup(&state.interface_addr, &state.connector_addr)
-            .await
-            .context("failed to restore network on startup")?;
+        if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
+            warn!(error = %e, "network setup failed (non-fatal)");
+        }
         state
     } else {
         // First run — enrollment flow (Phase I)
