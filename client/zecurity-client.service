@@ -1,0 +1,20 @@
+[Unit]
+Description=Zecurity Client Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/zecurity-client connect
+Restart=on-failure
+RestartSec=5
+WatchdogSec=90
+
+StandardOutput=journal
+StandardError=journal
+
+RuntimeDirectory=zecurity-client
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=default.target

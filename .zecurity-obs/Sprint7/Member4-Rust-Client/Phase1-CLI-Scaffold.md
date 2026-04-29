@@ -1,6 +1,6 @@
 ---
 type: phase
-status: planned
+status: done
 sprint: 7
 member: M4
 phase: Phase1-CLI-Scaffold
