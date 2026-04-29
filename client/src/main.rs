@@ -4,6 +4,7 @@ mod error;
 mod grpc;
 mod login;
 mod runtime;
+mod state_store;
 mod cmd {
     pub mod invite;
     pub mod login;
@@ -37,11 +38,11 @@ enum Commands {
         #[arg(long = "http-base")]
         http_base: Option<String>,
     },
-    /// Authenticate via OAuth, enroll device cert, store in memory
+    /// Authenticate via OAuth, enroll device cert, and save encrypted local state
     Login,
     /// Show current connection status
     Status,
-    /// Clear in-memory session (no-op - nothing persisted)
+    /// Clear saved session and device state
     Logout,
     /// Invite a user to the workspace (admin only)
     Invite {

@@ -38,11 +38,12 @@ tags:
 | **Email sending** | SMTP via env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, `SMTP_PASSWORD`). If not configured: log invite link to stdout (dev mode). |
 | **DB migration** | `011_client.sql` — adds `invitations` and `client_devices` tables. (010 was Sprint 6 discovery.) |
 | **CLI language** | Rust — lives in `client/` workspace at repo root. Binary: `zecurity-client`. |
-| **CLI storage — disk** | ONE file only: `/etc/zecurity/client.conf` (user fallback: `~/.config/zecurity-client/client.conf`). Contains: `workspace`, and optionally `controller_address`/`connector_address`/`http_base_url` for dev. In prod these are compiled-in constants (`appmeta.rs` via `option_env!`). |
-| **CLI storage — runtime** | Session tokens, device cert, private key, user info — **in memory only** (`RuntimeState` struct). Never serialized, never written to disk. Process exit clears everything. |
-| **CLI IPC** | Not needed in Sprint 7. Session is in-memory only during login. Sprint 8 handles IPC for connected state. |
-| **CLI command** | `zecurity-client login` — one-shot OAuth + enroll cert + store in RuntimeState + print result + exit. No daemon, no loop. |
-| **Private key lifecycle** | Generated fresh (P-384 ECDSA) on every `login` run. Lives in `RuntimeState.device.private_key_pem`. Used in-process to build `rustls::ClientConfig` for mTLS (Sprint 8) — never hits disk. |
+| **CLI storage — config** | `/etc/zecurity/client.conf` (user fallback: `~/.config/zecurity-client/client.conf`). Contains: `workspace`, and optionally `controller_address`/`connector_address`/`http_base_url` for dev. In prod these are compiled-in constants (`appmeta.rs` via `option_env!`). |
+| **CLI storage — state** | `~/.local/share/zecurity-client/<workspace>.json` (0600) stores workspace/user/device/session/resource state. Separate `~/.local/share/zecurity-client/.<workspace>.key` (0600) stores the AES-256 key used to encrypt `device.private_key_pem` as `enc1:<base64(nonce\|\|ciphertext)>`. |
+| **CLI storage — runtime** | The decrypted private key exists only in process memory while commands load/use state. It is encrypted before being written to disk. |
+| **CLI IPC** | Not needed in Sprint 7. Commands read persisted local state directly. Sprint 8 may add IPC for connected tunnel state. |
+| **CLI command** | `zecurity-client login` — one-shot OAuth + enroll cert + save encrypted local state + print result + exit. No daemon, no loop. |
+| **Private key lifecycle** | Generated fresh (P-384 ECDSA) on every `login` run. Plaintext lives only in memory; persisted state stores the key encrypted with the per-workspace AES key. |
 
 ---
 
@@ -169,12 +170,12 @@ tags:
 
 #### F4 — Login One-Shot (Depends on: F2 done)
 
-> **Architecture: Option B** — `login` is one-shot (auth + print + exit). No daemon, no IPC socket, no systemd unit.
+> **Architecture: Option B** — `login` is one-shot (auth + save encrypted local state + print + exit). No daemon, no IPC socket, no systemd unit.
 
 - [x] **M4-F11** ~~`client/src/ipc.rs`~~ — **REMOVED** (no daemon IPC)
-- [x] **M4-F12** `client/src/cmd/login.rs` — rewrite: load config → `login::run()` → print result → exit
-- [x] **M4-F13** `client/src/cmd/status.rs` — rewrite: reads config file only, prints workspace + "Not connected"
-- [x] **M4-F14** `client/src/cmd/logout.rs` — rewrite: no-op, prints "No active session to clear"
+- [x] **M4-F12** `client/src/cmd/login.rs` — rewrite: load config → `login::run()` → save encrypted `StoredWorkspaceState` → print result → exit
+- [x] **M4-F13** `client/src/cmd/status.rs` — rewrite: reads saved state and prints logged-in user + cert expiry, or "Not connected"
+- [x] **M4-F14** `client/src/cmd/logout.rs` — rewrite: deletes saved state file + AES key file
 - [x] **M4-F15** ~~`client/zecurity-client.service`~~ — **REMOVED** (no systemd daemon)
 - [x] `client/src/cmd/invite.rs` — rewrite: runs own `login::run()` to get token, then POST /api/invitations
 - [x] Delete `client/src/ipc.rs` and `client/zecurity-client.service`; remove `libc` from Cargo.toml if unused
@@ -222,11 +223,11 @@ M3-B  M3-C           M1-E          M4-F1
 - [ ] `cd client && cargo build` — clean (warnings OK)
 - [ ] `cd admin && npm run build` — clean
 - [ ] `zecurity-client setup --workspace myworkspace` writes `/etc/zecurity/client.conf` (workspace only)
-- [ ] No session/cert/key data is ever written to disk at any point
-- [ ] `zecurity-client login` opens browser, completes OAuth, prints "Logged in as user@example.com", exits
-- [ ] `zecurity-client status` prints workspace from config + "Not connected (run login to authenticate)"
+- [ ] Session/cert metadata is persisted to client state; private key is encrypted at rest and plaintext exists only in process memory
+- [ ] `zecurity-client login` opens browser, completes OAuth, saves encrypted state, prints "Logged in as user@example.com", exits
+- [ ] `zecurity-client status` prints workspace from config + "Logged in as user@example.com, cert expires in ..."
 - [ ] `zecurity-client status` with no config prints "Not configured"
-- [ ] `zecurity-client logout` prints "No active session to clear"
+- [ ] `zecurity-client logout` deletes saved state + AES key file
 - [ ] `zecurity-client invite --email user@example.com` runs login to authenticate via OAuth, then calls HTTP API
 - [ ] Admin UI: ADMIN login → /dashboard; MEMBER login → /client-install
 - [ ] `/invite/:token` page shows workspace + inviter info + Google sign-in button
@@ -325,3 +326,10 @@ See full details → [[Sprint7/Member4-Rust-Client/Phase2-Login-Flow]]
 **Phase:** M4 Phase 2 | **File:** `client/src/login.rs`, `client/src/grpc.rs`, `client/src/config.rs`, `client/src/main.rs`, `client/src/cmd/setup.rs`
 `zecurity-client login` used public/default TLS roots, but the controller gRPC certificate is signed by Zecurity's intermediate CA. The client now fetches `/ca.crt` from the controller HTTP API before dialing gRPC and configures tonic with that CA plus the expected controller host. Added `setup --http-base` for non-default dev HTTP API locations.
 See full details → [[Sprint7/Member4-Rust-Client/Phase2-Login-Flow]]
+
+---
+
+### Fix: client login did not persist usable session state
+**Phase:** M4 Phase 4 | **File:** `client/src/state_store.rs`, `client/src/cmd/login.rs`, `client/src/cmd/status.rs`, `client/src/cmd/logout.rs`, `client/Cargo.toml`
+The original F4 one-shot plan saved login results only in memory, so `zecurity-client status` reported "Not connected" immediately after successful login. Added encrypted persisted `StoredWorkspaceState`: login writes `~/.local/share/zecurity-client/<workspace>.json` with mode 0600, encrypts `device.private_key_pem` using AES-256-GCM as `enc1:<base64(nonce||ciphertext)>`, and stores the AES key separately in `.<workspace>.key` with mode 0600. `status` now loads state and prints the logged-in user plus certificate expiry; `logout` removes both files.
+See full details → [[Sprint7/Member4-Rust-Client/Phase4-Systemd-Daemon]]

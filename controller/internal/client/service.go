@@ -8,7 +8,10 @@ package client
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -39,23 +42,22 @@ const (
 type Service struct {
 	clientv1.UnimplementedClientServiceServer
 
-	pool                 *pgxpool.Pool
-	authSvc              auth.Service
-	pkiSvc               pki.Service
+	pool                     *pgxpool.Pool
+	authSvc                  auth.Service
+	pkiSvc                   pki.Service
 	clientGoogleClientID     string
 	clientGoogleClientSecret string
 	controllerHost           string
+	controllerHTTPURL        string // e.g. "http://localhost:8080" — base URL for /api/clients/callback
 }
 
 // NewService wires the ClientService with the dependencies it needs.
-// clientGoogleClientID / clientGoogleClientSecret are the CLI OAuth app's
-// credentials (separate from the admin web app); controllerHost is the
-// public hostname of this controller used by the CLI to label its config.
 func NewService(
 	pool *pgxpool.Pool,
 	authSvc auth.Service,
 	pkiSvc pki.Service,
-	clientGoogleClientID, clientGoogleClientSecret, controllerHost string,
+	clientGoogleClientID, clientGoogleClientSecret,
+	controllerHost, controllerHTTPURL string,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -64,13 +66,18 @@ func NewService(
 		clientGoogleClientID:     clientGoogleClientID,
 		clientGoogleClientSecret: clientGoogleClientSecret,
 		controllerHost:           controllerHost,
+		controllerHTTPURL:        strings.TrimRight(controllerHTTPURL, "/"),
 	}
 }
 
+// sha256b64url returns BASE64URL(SHA256(b)) without padding — used for PKCE.
+func sha256b64url(b []byte) string {
+	sum := sha256.Sum256(b)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
 // exchangeCode performs the Google OAuth code exchange using the CLI OAuth
-// app's own credentials. The auth code was issued for the CLI's client ID
-// so it must be exchanged with the same client ID — using the admin web
-// app's credentials would cause Google to reject it.
+// app's credentials. codeVerifier is the controller's own Google PKCE verifier.
 func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*auth.GoogleTokenResponse, error) {
 	body := url.Values{}
 	body.Set("code", code)
@@ -81,7 +88,7 @@ func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirect
 	body.Set("grant_type", "authorization_code")
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://oauth2.googleapis.com/token", strings.NewReader(body.Encode()))
+		googleTokenEndpoint, strings.NewReader(body.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build token request: %w", err)
 	}
@@ -109,10 +116,9 @@ func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirect
 	return &tokenResp, nil
 }
 
-// GetAuthConfig returns the OAuth configuration the CLI needs to drive its
-// own PKCE flow. No authentication is required — the workspace_slug is
-// validated only to surface a clear "workspace not found" error to the user
-// before they hit the browser.
+// GetAuthConfig returns the OAuth configuration the CLI needs for informational
+// purposes (e.g. showing the google_client_id). The actual auth URL is built
+// and returned by InitiateAuth.
 func (s *Service) GetAuthConfig(ctx context.Context, req *clientv1.GetAuthConfigRequest) (*clientv1.GetAuthConfigResponse, error) {
 	if req.GetWorkspaceSlug() == "" {
 		return nil, status.Error(codes.InvalidArgument, "workspace_slug is required")
@@ -133,14 +139,22 @@ func (s *Service) GetAuthConfig(ctx context.Context, req *clientv1.GetAuthConfig
 	}, nil
 }
 
-// TokenExchange swaps a Google OAuth authorization code for a Zecurity
-// access JWT + refresh token. If invite_token is set, the caller is
-// joining the workspace via that invitation; otherwise the user must
-// already exist in the workspace (admins seed themselves through the web
-// flow's bootstrap path).
-func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchangeRequest) (*clientv1.TokenExchangeResponse, error) {
-	if req.GetWorkspaceSlug() == "" || req.GetCode() == "" || req.GetCodeVerifier() == "" || req.GetRedirectUri() == "" {
-		return nil, status.Error(codes.InvalidArgument, "workspace_slug, code, code_verifier, redirect_uri are required")
+// InitiateAuth registers a PKCE auth session and returns the Google OAuth URL
+// for the CLI to open in the browser. The controller's fixed callback URL is
+// embedded in the returned auth_url — the CLI never constructs the Google URL.
+func (s *Service) InitiateAuth(ctx context.Context, req *clientv1.InitiateAuthRequest) (*clientv1.InitiateAuthResponse, error) {
+	if req.GetWorkspaceSlug() == "" || req.GetCodeChallenge() == "" || req.GetLocalRedirectUri() == "" {
+		return nil, status.Error(codes.InvalidArgument, "workspace_slug, code_challenge, local_redirect_uri are required")
+	}
+
+	// Validate that local_redirect_uri is a loopback address — security check.
+	u, err := url.Parse(req.GetLocalRedirectUri())
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid local_redirect_uri")
+	}
+	h := u.Hostname()
+	if h != "127.0.0.1" && h != "localhost" && h != "::1" {
+		return nil, status.Error(codes.InvalidArgument, "local_redirect_uri must be a loopback address (127.0.0.1 or localhost)")
 	}
 
 	ws, err := lookupWorkspaceBySlug(ctx, s.pool, req.GetWorkspaceSlug())
@@ -151,22 +165,122 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		return nil, status.Errorf(codes.Internal, "lookup workspace: %v", err)
 	}
 
-	tokens, err := s.exchangeCode(ctx, req.GetCode(), req.GetCodeVerifier(), req.GetRedirectUri())
+	// Generate the controller's own Google PKCE pair.
+	// The CLI never sees this verifier — it lives only in the session store.
+	rawVerifier := make([]byte, 32)
+	if _, err := rand.Read(rawVerifier); err != nil {
+		return nil, status.Errorf(codes.Internal, "generate google pkce verifier: %v", err)
+	}
+	googleVerifier := base64.RawURLEncoding.EncodeToString(rawVerifier)
+	googleChallenge := sha256b64url([]byte(googleVerifier))
+
+	sessionID, err := newSessionID()
 	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "google token exchange failed: %v", err)
+		return nil, status.Errorf(codes.Internal, "generate session id: %v", err)
 	}
 
-	claims, err := auth.VerifyGoogleIDToken(ctx, tokens.IDToken, s.clientGoogleClientID)
-	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "id token verification failed: %v", err)
-	}
-	if claims.Sub == "" || claims.Email == "" {
-		return nil, status.Error(codes.Unauthenticated, "id token missing required claims")
+	callbackURL := s.controllerHTTPURL + "/api/clients/callback"
+	authURL := fmt.Sprintf(
+		"%s?client_id=%s&redirect_uri=%s&response_type=code"+
+			"&scope=openid%%20email&code_challenge=%s&code_challenge_method=S256&state=%s",
+		googleAuthEndpoint,
+		url.QueryEscape(s.clientGoogleClientID),
+		url.QueryEscape(callbackURL),
+		url.QueryEscape(googleChallenge),
+		url.QueryEscape(sessionID),
+	)
+
+	putSession(sessionID, &authSession{
+		WorkspaceID:        ws.ID,
+		WorkspaceSlug:      ws.Slug,
+		CliCodeChallenge:   req.GetCodeChallenge(),
+		LocalRedirectURI:   req.GetLocalRedirectUri(),
+		GoogleCodeVerifier: googleVerifier,
+		ExpiresAt:          time.Now().Add(10 * time.Minute),
+	})
+
+	return &clientv1.InitiateAuthResponse{
+		AuthUrl:   authURL,
+		SessionId: sessionID,
+	}, nil
+}
+
+// AuthCallbackHandler handles GET /api/clients/callback — the fixed redirect
+// URI registered in Google Console. Google sends the auth code here; the
+// controller exchanges it server-side, then redirects the browser to the
+// CLI's local loopback server with a short-lived ctrl_code.
+func (s *Service) AuthCallbackHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		googleCode := r.URL.Query().Get("code")
+		sessionID := r.URL.Query().Get("state")
+
+		if googleCode == "" || sessionID == "" {
+			http.Error(w, "missing code or state", http.StatusBadRequest)
+			return
+		}
+
+		sess, ok := getSession(sessionID)
+		if !ok {
+			http.Error(w, "auth session not found or expired", http.StatusBadRequest)
+			return
+		}
+
+		callbackURL := s.controllerHTTPURL + "/api/clients/callback"
+		tokens, err := s.exchangeCode(r.Context(), googleCode, sess.GoogleCodeVerifier, callbackURL)
+		if err != nil {
+			http.Error(w, "google token exchange failed", http.StatusBadRequest)
+			return
+		}
+
+		claims, err := auth.VerifyGoogleIDToken(r.Context(), tokens.IDToken, s.clientGoogleClientID)
+		if err != nil || claims.Sub == "" || claims.Email == "" {
+			http.Error(w, "identity verification failed", http.StatusUnauthorized)
+			return
+		}
+
+		ctrlCode, err := newCtrlCode()
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		if !updateSessionCtrlCode(sessionID, claims.Email, claims.Sub, ctrlCode, time.Now().Add(60*time.Second)) {
+			http.Error(w, "auth session expired during callback", http.StatusBadRequest)
+			return
+		}
+
+		http.Redirect(w, r,
+			sess.LocalRedirectURI+"?code="+url.QueryEscape(ctrlCode),
+			http.StatusFound)
+	})
+}
+
+// TokenExchange validates the ctrl_code and CLI-Controller PKCE, then issues
+// a Zecurity JWT + refresh token. The session is consumed (single-use).
+func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchangeRequest) (*clientv1.TokenExchangeResponse, error) {
+	if req.GetSessionId() == "" || req.GetCtrlCode() == "" || req.GetCodeVerifier() == "" {
+		return nil, status.Error(codes.InvalidArgument, "session_id, ctrl_code, code_verifier are required")
 	}
 
-	// If an invite token was supplied, validate it belongs to this workspace,
-	// is still pending, and hasn't expired. We mark it accepted only after
-	// the user row is upserted so a failed insert doesn't burn the token.
+	sess, ok := consumeSession(req.GetSessionId())
+	if !ok {
+		return nil, status.Error(codes.NotFound, "auth session not found or expired")
+	}
+
+	if sess.CtrlCode == "" || time.Now().After(sess.CtrlCodeExpiresAt) {
+		return nil, status.Error(codes.FailedPrecondition, "callback not completed or ctrl_code expired")
+	}
+	if req.GetCtrlCode() != sess.CtrlCode {
+		return nil, status.Error(codes.Unauthenticated, "invalid ctrl_code")
+	}
+
+	// Verify CLI-Controller PKCE: SHA256(code_verifier) must equal the
+	// code_challenge that was registered in InitiateAuth.
+	if sha256b64url([]byte(req.GetCodeVerifier())) != sess.CliCodeChallenge {
+		return nil, status.Error(codes.Unauthenticated, "pkce verification failed")
+	}
+
+	// Validate invite token if provided.
 	var inviteRow *invitation
 	if req.GetInviteToken() != "" {
 		inv, err := getInvitationByToken(ctx, s.pool, req.GetInviteToken())
@@ -176,7 +290,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 			}
 			return nil, status.Errorf(codes.Internal, "lookup invitation: %v", err)
 		}
-		if inv.WorkspaceID != ws.ID {
+		if inv.WorkspaceID != sess.WorkspaceID {
 			return nil, status.Error(codes.PermissionDenied, "invitation does not belong to this workspace")
 		}
 		if inv.Status != "pending" {
@@ -188,10 +302,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		inviteRow = inv
 	}
 
-	// Upsert the user. With an invite, missing users are created as 'member'.
-	// Without an invite, an unknown user is rejected — the admin must invite
-	// them first or they must complete the web bootstrap flow.
-	user, created, err := upsertUser(ctx, s.pool, ws.ID, claims.Email, "google", claims.Sub, inviteRow != nil)
+	user, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, "google", sess.GoogleSub, inviteRow != nil)
 	if err != nil {
 		if errors.Is(err, errUserNotInvited) {
 			return nil, status.Error(codes.PermissionDenied, "no membership in workspace; ask an admin for an invitation")
@@ -206,7 +317,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, ws.ID, user.Role)
+	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
 	}
@@ -219,14 +330,11 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
 		ExpiresIn:    expiresIn,
-		Email:        claims.Email,
+		Email:        sess.Email,
 	}, nil
 }
 
-// EnrollDevice issues an mTLS leaf certificate for the calling user's
-// device. The access token is read from the request body (not gRPC
-// metadata) because the SPIFFE interceptor is bypassed for ClientService
-// and we want the auth surface to be explicit in the proto.
+// EnrollDevice issues an mTLS leaf certificate for the calling user's device.
 func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRequest) (*clientv1.EnrollDeviceResponse, error) {
 	if req.GetAccessToken() == "" || req.GetCsrPem() == "" || req.GetDeviceName() == "" || req.GetOs() == "" {
 		return nil, status.Error(codes.InvalidArgument, "access_token, csr_pem, device_name, os are required")
@@ -275,10 +383,9 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		WorkspaceCaPem:    certResult.WorkspaceCAPEM,
 		IntermediateCaPem: certResult.IntermediateCAPEM,
 		SpiffeId:          spiffeID,
+		DeviceId:          deviceID,
 	}, nil
 }
 
-// Compile-time check that the ClientService implementation matches the
-// generated server interface. If a proto RPC is added/renamed without a
-// handler, this fails to build.
+// Compile-time interface check.
 var _ clientv1.ClientServiceServer = (*Service)(nil)
