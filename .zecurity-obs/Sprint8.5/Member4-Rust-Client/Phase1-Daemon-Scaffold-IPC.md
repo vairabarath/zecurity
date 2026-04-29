@@ -1,0 +1,174 @@
+---
+type: phase
+status: pending
+sprint: 8.5
+member: M4
+phase: Phase1-Daemon-Scaffold-IPC
+depends_on: []
+tags:
+  - rust
+  - client
+  - daemon
+  - ipc
+  - systemd
+---
+
+# M4 Phase 1 — Daemon Scaffold + IPC
+
+---
+
+## What You're Building
+
+Create the daemon foundation required for active client runtime state.
+
+The daemon owns:
+
+- decrypted private key during active use
+- active access token
+- active ACL snapshot
+- future TUN/routes/tunnel state
+
+The CLI owns:
+
+- argument parsing
+- starting daemon if needed
+- running the existing PKCE/browser login flow
+- sending IPC requests
+- printing results
+
+---
+
+## Files To Create / Modify
+
+Likely files:
+
+- `client/src/daemon.rs`
+- `client/src/ipc.rs`
+- `client/src/main.rs`
+- `client/src/runtime.rs`
+- `client/src/cmd/login.rs`
+- `client/src/cmd/status.rs`
+- `client/src/cmd/logout.rs`
+- `client/src/cmd/invite.rs`
+- `client/systemd/zecurity-client.service`
+
+---
+
+## IPC Requirements
+
+Use a Unix socket under a user runtime directory, for example:
+
+```text
+$XDG_RUNTIME_DIR/zecurity-client/daemon.sock
+```
+
+Messages:
+
+- `Status`
+- `LoadState`
+- `GetToken`
+- `PostLoginState`
+- `Shutdown`
+- `Up` — stub only in Sprint 8.5; implemented in Sprint 9 Phase F. Return `{"ok":false,"error":"not implemented"}` for now.
+- `Down` — stub only in Sprint 8.5; implemented in Sprint 9 Phase F. Return `{"ok":false,"error":"not implemented"}` for now.
+
+Wire format:
+
+- newline-delimited JSON
+- one request or response object per line
+- `\n` is the frame delimiter
+- unknown message types return an error response
+- malformed JSON returns an error response and closes the connection
+
+Example request:
+
+```json
+{"type":"Status"}
+```
+
+Example response:
+
+```json
+{"ok":true,"type":"Status","state":"running"}
+```
+
+`PostLoginState` intent:
+
+- CLI runs the existing OAuth/PKCE/browser callback flow in `login.rs`.
+- CLI receives tokens, device info, cert, private key, and workspace info.
+- CLI sends that result to daemon as `PostLoginState`.
+- Daemon writes encrypted durable state through `state_store.rs`.
+- Daemon stores decrypted private key/access token/ACL snapshot in memory.
+
+Do not make the daemon run the browser OAuth flow in Sprint 8.5.
+
+Security:
+
+- Same-user only.
+- Remove stale socket on daemon startup.
+- Commands fail closed if IPC fails after daemon start retry.
+
+---
+
+## Systemd User Unit
+
+Install target:
+
+```text
+/etc/systemd/system/zecurity-client.service
+```
+
+This is a system-level unit, not a `systemctl --user` unit. The installer sets `User=<enrolling_user>` so the daemon runs as the user while still receiving `CAP_NET_ADMIN` from systemd.
+
+The service file at `client/zecurity-client.service` already contains:
+
+```ini
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+```
+
+Sprint 8.5 daemon does **not** use this capability — it is user-only. The capability is required by Sprint 9 Phase F when the daemon creates the TUN interface. Do not remove it from the service file.
+
+CLI startup flow:
+
+```text
+try IPC
+  -> success: use daemon
+  -> fail: systemctl start zecurity-client
+  -> retry IPC with short timeout
+```
+
+---
+
+## sd_notify — Required for Type=notify
+
+The service file uses `Type=notify`. If the daemon does not call `sd_notify("READY=1\n")` after binding the IPC socket, `systemctl start zecurity-client` will hang until the start timeout expires.
+
+Add this to `daemon.rs` immediately after the IPC socket is bound and ready to accept connections:
+
+```rust
+fn sd_notify_ready() {
+    let Ok(path) = std::env::var("NOTIFY_SOCKET") else { return };
+    let _ = std::os::unix::net::UnixDatagram::unbound()
+        .and_then(|s| s.send_to(b"READY=1\n", &path));
+}
+```
+
+Call `sd_notify_ready()` once, after the socket is bound, before entering the accept loop.
+
+---
+
+## Build Check
+
+```bash
+cd client && cargo build
+```
+
+Manual checks:
+
+```bash
+systemctl start zecurity-client    # must return immediately (not hang)
+systemctl status zecurity-client   # must show active (running)
+zecurity-client status
+zecurity-client logout
+```

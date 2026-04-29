@@ -1,11 +1,12 @@
 ---
 type: phase
 status: pending
-sprint: 7
+sprint: 9
 member: M3
 phase: Phase1-RDE-Device-Tunnel
 depends_on:
-  - M2-D1-A (shield.proto TunnelOpen/Opened/Data/Close — Sprint 7 Day 1)
+  - Sprint 8 Policy Engine complete
+  - M2-D1-A (shield.proto TunnelOpen/Opened/Data/Close — Sprint 9 Day 1)
   - buf generate
 tags:
   - rust
@@ -21,7 +22,7 @@ tags:
 
 ## What You're Building
 
-The RDE is the connector's device-facing access layer. End-user devices connect to the connector's TLS port (`:9092`) to access resources. The connector verifies access and routes the connection either:
+The RDE is the connector's device-facing access layer. End-user devices connect to the connector's TLS port (`:9092`) to access resources. The connector verifies access against the Sprint 8 local ACL snapshot and routes the connection either:
 
 - **Protected path** (resource has nftables rules): relay through `AgentTunnelHub` → Shield Control stream → Shield proxies TCP locally via `zecurity0`
 - **Direct path** (unprotected resource): `tokio::io::copy_bidirectional` directly to the resource IP:port
@@ -104,7 +105,6 @@ struct CheckAccessResponse {
 /// Start the TLS/TCP device tunnel listener.
 pub async fn listen(
     addr: &str,
-    controller_http_url: String,
     store: CertStore,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
@@ -185,30 +185,13 @@ pub async fn handle_stream<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     let req: TunnelRequest = serde_json::from_str(line.trim())
         .map_err(|e| anyhow::anyhow!("bad handshake: {}", e))?;
 
-    // Step 2: Resolve resource. Fast path: local policy cache.
-    // Fallback: controller HTTP check (cache miss or token validation needed).
-    let (resource_id, protected) = match acl.resolve_resource(&req.destination, &req.protocol, req.port) {
-        Some(result) => result,
-        None => {
-            let resp = check_access(controller_http_url, &req.token, &req.destination, req.port, &req.protocol).await;
-            match resp {
-                Err(e) => {
-                    let _ = send_response(&mut stream, false, Some("check-access error")).await;
-                    return Err(e);
-                }
-                Ok(r) if !r.allowed => {
-                    send_response(&mut stream, false, Some("access denied")).await?;
-                    return Ok(());
-                }
-                Ok(r) => {
-                    let p = acl.resource_by_id(&r.resource_id)
-                        .map(|res| res.firewall_status.eq_ignore_ascii_case("protected"))
-                        .unwrap_or(false);
-                    (r.resource_id, p)
-                }
-            }
-        }
+    // Step 2: Resolve and authorize from the local Sprint 8 ACL snapshot.
+    // No per-request controller check is allowed in the tunnel hot path.
+    let Some(decision) = acl.authorize(&req.destination, req.port, &req.protocol, client_spiffe_id) else {
+        send_response(&mut stream, false, Some("access denied")).await?;
+        return Ok(());
     };
+    let (resource_id, protected) = (decision.resource_id, decision.protected);
 
     let resource = acl.resource_by_id(&resource_id);
 
@@ -291,30 +274,6 @@ async fn relay_udp<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, dest: &str
     }
     info!("rde: UDP relay closed {}", dest);
     Ok(())
-}
-
-/// Fallback access check via controller HTTP when the local policy cache misses.
-async fn check_access(
-    controller_http_url: &str,
-    token: &str,
-    destination: &str,
-    port: u16,
-    protocol: &str,
-) -> Result<CheckAccessResponse> {
-    #[derive(Serialize)]
-    struct Req<'a> { destination: &'a str, protocol: &'a str, port: u16 }
-
-    let resp = shared_http_client()
-        .post(format!("{}/api/device/check-access", controller_http_url))
-        .bearer_auth(token)
-        .json(&Req { destination, protocol, port })
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("check-access {}", resp.text().await.unwrap_or_default());
-    }
-    Ok(resp.json::<CheckAccessResponse>().await?)
 }
 
 /// Fallback: find the shield that owns a destination IP when resource has no explicit agent_ids.
@@ -516,7 +475,6 @@ tokio::spawn(device_tunnel::listen(
 tokio::spawn(quic_listener::listen(
     "0.0.0.0:9092",
     &format!("{}:9092", lan_ip),
-    controller_http_url.clone(),
     cert_store.clone(),
     acl.clone(),
     tunnel_hub.clone(),
@@ -530,54 +488,8 @@ Add `mod device_tunnel;`, `mod quic_listener;`, `mod net_util;`.
 
 ---
 
-### 6. Controller: `/api/device/check-access` endpoint (Go)
-
-**`controller/internal/device/check_access.go`** (NEW):
-
-```go
-package device
-
-import (
-    "encoding/json"
-    "net/http"
-)
-
-type CheckAccessRequest struct {
-    Destination string `json:"destination"`
-    Protocol    string `json:"protocol"`
-    Port        int    `json:"port"`
-}
-
-type CheckAccessResponse struct {
-    Allowed    bool   `json:"allowed"`
-    ResourceID string `json:"resource_id"`
-}
-
-func CheckAccessHandler(db *sql.DB) http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        // 1. Extract Bearer token from Authorization header
-        // 2. Validate JWT → get device_id + workspace_id
-        // 3. Look up resource matching destination + port + protocol in workspace
-        // 4. Respond with { allowed: true/false, resource_id: "..." }
-        var req CheckAccessRequest
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            http.Error(w, "bad request", http.StatusBadRequest)
-            return
-        }
-        resp := CheckAccessResponse{Allowed: true, ResourceID: ""}
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(resp)
-    }
-}
-```
-
-Register on `POST /api/device/check-access` in `cmd/server/main.go`.
-
----
-
 ## Build Check
 
 ```bash
 cd connector && cargo build
-cd controller && go build ./...
 ```

@@ -887,3 +887,18 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Re-run `zecurity-client login`, then `zecurity-client status`; status should show the saved user and certificate expiry instead of "Not connected".
+
+---
+
+## 2026-04-29 — Codex (Sprint 8 planning correction)
+
+**What was done:**
+- Replaced the premature Sprint 8 RDE plan with a new Sprint 8 Policy Engine plan: groups, group members, resource access rules, ACL compiler, Connector heartbeat ACL push, and Client `GetACLSnapshot`.
+- Moved the existing RDE tunnel plan from `.zecurity-obs/Sprint8/` to `.zecurity-obs/Sprint9/`.
+- Updated Sprint 9 RDE docs to depend on Sprint 8 ACL snapshots and removed the per-request Controller `check-access` path from the tunnel hot path.
+
+**Key decisions:**
+- Policy must come before RDE. Sprint 8 builds local default-deny ACL enforcement; Sprint 9 uses that snapshot for device tunnel routing.
+
+**What's next:**
+- Start Sprint 8 with M2 Day 1 schema/proto work: migration 012, `GetACLSnapshot`, Connector heartbeat ACL payload, and GraphQL schema/codegen.

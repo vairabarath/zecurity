@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 7 is the active sprint.** Building Client Application (Phase 1) — Admin invites users via email, client CLI login with Google OAuth, device enrollment with mTLS certificate, status command, role-based routing in Admin UI (admin → dashboard, member → client-install).
+**Sprint 8 is the active sprint.** Building Policy Engine: groups, resource access rules, ACL snapshot compilation, Connector ACL push, and Client `GetACLSnapshot` support. Sprint 8.5 is the M4 client daemon bridge; Sprint 9 is the RDE data plane.
 
 ---
 
@@ -17,7 +17,7 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint7/path.md` — dependency map and progress checkboxes
+2. Read `.zecurity-obs/Sprint8/path.md` — dependency map and progress checkboxes
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
@@ -31,8 +31,8 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint7/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint7/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint8/path.md` | Dependency map + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint8/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
@@ -97,11 +97,12 @@ cd admin && npm run codegen                                  # Frontend TS hooks
 
 ## Rules (non-negotiable)
 
-Sprint 7 specific:
+Sprint 8 specific:
 - Build gate passes before proceeding to next phase
-- ClientService uses plain TLS + JWT Bearer (no mTLS for client yet)
-- Reuse existing PKI (`pki.Service.SignCSR()`) and OAuth (`auth/exchange.go`)
-- CLI state in memory only — tokens, cert, key never written to disk
+- Policy mutations must invalidate the per-workspace ACL snapshot cache via `NotifyPolicyChange(workspace_id)`
+- Missing ACL snapshot/resource/SPIFFE means default-deny
+- Connector receives ACL snapshots via heartbeat piggyback; Controller is not in the tunnel hot path
+- Client durable state is encrypted at rest in `state_store.rs`; decrypted private key and active access token live only in process/daemon memory during active use. See `.zecurity-obs/Decisions/ADR-002-Client-Daemon-Required.md`.
 
 Sprint 6 and earlier:
 - Build gate passes before proceeding to next phase

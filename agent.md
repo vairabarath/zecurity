@@ -11,7 +11,7 @@ A team member will tell you their member number. When they do, execute this sequ
 
 ```
 1. Read this file (agent.md) fully
-2. Read .zecurity-obs/Sprint7/path.md
+2. Read .zecurity-obs/Sprint8/path.md
 3. Find the first unchecked phase for your member where all depends_on are checked
 4. Read that phase file
 5. Tell the member: what they're building, which files to touch, the build check command
@@ -19,8 +19,8 @@ A team member will tell you their member number. When they do, execute this sequ
 
 If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), M3 (Go+Rust), or M4 (Rust)?"*
 
-**Team workflow guide (human-readable):** `.zecurity-obs/Sprint7/team-workflow.md`  
-**Active sprint plan:** `.zecurity-obs/Sprint7/path.md`
+**Active sprint plan:** `.zecurity-obs/Sprint8/path.md`
+**Follow-on sprint plans:** `.zecurity-obs/Sprint8.5/path.md`, `.zecurity-obs/Sprint9/path.md`
 
 ---
 
@@ -32,7 +32,7 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - **Connector:** Rust — `connector/` — Linux binary, enrollment + heartbeat + cert renewal + auto-update + Shield-facing gRPC :9091
 - **Shield:** Rust — `shield/` — Linux binary, enrollment + heartbeat via Connector + zecurity0 + nftables *(Sprint 4)*
 - **Admin UI:** React + Vite + Apollo — `admin/`
-- **Client:** Rust CLI — `client/` *(Sprint 7)*
+- **Client:** Rust CLI/daemon — `client/` *(Sprint 7 + Sprint 8.5 + Sprint 9 client dataplane)*
 - **Database:** PostgreSQL (pgx/v5) + Redis (sessions + JTI burn)
 - **PKI:** 3-tier CA (Root → Intermediate → Workspace CA → Connector cert / Shield cert)
 - **Identity:** SPIFFE — `spiffe://<trust_domain>/connector/<id>` and `spiffe://<trust_domain>/shield/<id>`
@@ -50,7 +50,9 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - Sprint 5: Resource protection — Shield applies nftables rules per resource, lifecycle `pending → managing → protecting → protected` via heartbeat piggyback
 
 **What's active:**
-- Sprint 7: Client Application — Admin invites users, client CLI login with mTLS enrollment, status command, role-based routing. See `.zecurity-obs/Sprint7/path.md`
+- Sprint 8: Policy Engine — groups, access rules, ACL snapshot compilation, Connector ACL push, Client `GetACLSnapshot` support. See `.zecurity-obs/Sprint8/path.md`
+- Sprint 8.5: M4 client daemon foundation — planned bridge before Sprint 9. See `.zecurity-obs/Sprint8.5/path.md`
+- Sprint 9: RDE dataplane — planned after Sprint 8 + 8.5. See `.zecurity-obs/Sprint9/path.md`
 
 ---
 
@@ -62,12 +64,12 @@ Claude Code (Lead)
   ├── Manages architecture decisions and Obsidian knowledge base
   ├── Reviews all implementation work
   ├── Final say on design direction
-  ├── Updates Sprint7/path.md checkboxes as phases complete
+  ├── Updates active sprint path.md checkboxes as phases complete
   │
   └── Codex / OpenCode / Other models (Specialists)
         ├── Execute implementation tasks assigned per member role
         ├── Follow conventions defined here
-        ├── Check Sprint7/path.md BEFORE touching any file
+        ├── Check the active sprint path.md BEFORE touching any file
         └── Log their work in the session log
 ```
 
@@ -107,13 +109,10 @@ The shared brain. All agents should read relevant notes before working on a subs
     Session Log.md              — running log of all work sessions
   Sprint1/ (complete) - Sprint5/ (complete)
   Sprint6/ (complete) - Discovery
-  Sprint7/ (ACTIVE)  - Client Application
-    path.md                     — MASTER dependency map + ordered checklist (read first!)
-    Member1-Frontend/           — M1 phase files
-    Member2-Go-Proto/           — M2 phase files
-    Member3-Go-Controller/     — M3 phase files
-    Member4-Rust-Client/       — M4 phase files (client CLI)
-  Sprint8/ (planned) - RDE (Connector :9092 tunnel)
+  Sprint7/ (complete) - Client Application
+  Sprint8/ (ACTIVE)  - Policy Engine: Groups, Resources, ACL Push
+  Sprint8.5/ (planned) - Client Daemon Foundation
+  Sprint9/ (planned) - RDE Dataplane
   Decisions/
   Research/
 ```
@@ -135,7 +134,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 1. Read `agent.md` (this file)
 2. Read `.zecurity-obs/Planning/Session Log.md` for recent context
 3. Read `.zecurity-obs/Planning/Roadmap.md` for current priorities
-4. **If Sprint 7:** Read `.zecurity-obs/Sprint7/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
+4. **If Sprint 8:** Read `.zecurity-obs/Sprint8/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
 5. Read relevant service note(s) if touching a specific subsystem
 
 ### During Work
@@ -145,7 +144,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 - Connector: `cargo build` must pass (warnings OK, errors not)
 - Shield: `cargo build --manifest-path shield/Cargo.toml` must pass
 - Client: `cargo build --manifest-path client/Cargo.toml` must pass
-- **Sprint 7:** After completing a phase, check its box in `Sprint7/path.md` and update the phase file `status:` frontmatter to `done`
+- **Sprint 8:** After completing a phase, check its box in `Sprint8/path.md` and update the phase file `status:` frontmatter to `done`
 - If making an architecture decision, document it or flag it for Claude Code
 - Do not touch files owned by other members — see conflict zone table in `Sprint6/path.md`
 
@@ -237,7 +236,7 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 | Release connector binary | `git tag connector-vX.Y.Z && git push origin connector-vX.Y.Z` |
 | Release shield binary | `git tag shield-vX.Y.Z && git push origin shield-vX.Y.Z` |
 | Open vault | Open `.zecurity-obs/` in Obsidian |
-| Sprint 7 dependency map | Read `.zecurity-obs/Sprint7/path.md` |
+| Sprint 8 dependency map | Read `.zecurity-obs/Sprint8/path.md` |
 
 ---
 
@@ -255,14 +254,13 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 
 ---
 
-## Sprint 7 Quick Rules (for any AI agent)
+## Sprint 8 Quick Rules (for any AI agent)
 
-1. **Read `Sprint7/path.md` first.** Find your member's phases. Confirm all `depends_on` are checked.
+1. **Read `Sprint8/path.md` first.** Find your member's phases. Confirm all `depends_on` are checked.
 2. **Build gates are mandatory.** Every phase file has a "Build Check" section. Do not proceed until it passes.
 3. **Conflict zones.** Files multiple members touch are listed in `path.md`. Coordinate before editing them.
-4. **Proto is immutable once published.** Never change field numbers. Current: ClientService RPCs (GetAuthConfig, TokenExchange, EnrollDevice).
-5. **ClientService = no mTLS.** Uses plain TLS + JWT Bearer. Client does not have cert yet.
-6. **Reuse existing PKI.** `pki.Service.SignCSR()` handles cert issuance.
-7. **Reuse existing OAuth.** `auth/exchange.go` for token exchange.
-8. **CLI state in memory only.** Tokens, cert, key stored in RuntimeState. Never written to disk.
-9. **SPIFFE format:** `spiffe://ws-{workspace_slug}.zecurity.in/client/{device_id}`
+4. **Proto is immutable once published.** Never change or reuse existing field numbers.
+5. **Policy cache.** Controller ACL snapshots use in-memory per-workspace cache invalidated by `NotifyPolicyChange(workspace_id)`. See `.zecurity-obs/Decisions/ADR-001-Sprint8-ACL-Snapshot-Caching.md`.
+6. **Default deny.** Missing snapshot, missing resource, disabled rule, or missing SPIFFE ID means deny.
+7. **Connector ACL push.** Connector receives ACL snapshots via heartbeat piggyback.
+8. **Client state model.** Durable client state is encrypted at rest in `state_store.rs`; decrypted private key and active access token live only in process/daemon memory during active use. See `.zecurity-obs/Decisions/ADR-002-Client-Daemon-Required.md`.

@@ -1,16 +1,17 @@
 ---
 type: planning
 status: planned
-sprint: 7
+sprint: 8
 tags:
-  - sprint7
+  - sprint8
   - dependencies
   - execution-path
   - team-coordination
-  - rde
+  - policy-engine
+  - acl
 ---
 
-# Sprint 7 — Execution Path & Dependency Map
+# Sprint 8 — Execution Path & Dependency Map
 
 > **Read this before writing a single line of code.**
 > This file is the source of truth for execution order. Following it prevents merge conflicts, broken builds, and blocked teammates.
@@ -19,14 +20,9 @@ tags:
 
 ## Sprint Goal
 
-**RDE (Remote Device Extension)** — The client-facing data plane. End-user devices connect to the Connector's TLS/QUIC listener (`:9092`) with a token and destination. The Connector validates access via the Controller, then routes the connection:
+**Policy Engine: Groups, Resources, ACL Push** — Admins create groups, add users to groups, and assign resources to groups. The Controller compiles those rules into ACL snapshots and pushes them to both Connectors and Clients. Both sides enforce default-deny from local snapshots.
 
-- **Protected resource** (has nftables rules on Shield): Connector relays through the Shield via `TunnelOpen/Data/Close` messages on the existing Control stream. Shield opens TCP locally and streams data back via `TunnelData`. nftables is bypassed because traffic enters via `zecurity0`.
-- **Unprotected resource**: Connector connects directly via `copy_bidirectional`.
-
-QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so clients can upgrade. CRL revocation checking and systemd watchdog keepalives round out Connector reliability.
-
-> **Prerequisite:** Sprint 6 must be merged. Fields 8–11 on `ShieldControlMessage` are pre-reserved — Sprint 7 Day 1 activates them.
+This sprint must land before RDE device tunneling. Sprint 9 can build the tunnel using local ACL snapshots instead of calling the Controller per connection.
 
 ---
 
@@ -34,14 +30,30 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 | Decision | Detail |
 |----------|--------|
-| **RDE transport** | TLS listener `:9092` (TCP) + QUIC listener `:9092` (UDP) on Connector; JSON handshake `TunnelRequest`/`TunnelResponse`; protected path relays via Shield Control stream; direct path via `copy_bidirectional` |
-| **QUIC advertise** | `quic_addr` in every `TunnelResponse` (even failures) — client uses this to pre-warm QUIC connection |
-| **Shield field numbers** | `TunnelOpen = 8`, `TunnelOpened = 9`, `TunnelData = 10`, `TunnelClose = 11` in ShieldControlMessage oneof — reserved in Sprint 6, activated here |
-| **CRL refresh** | Connector fetches `/ca.crl` from controller every 5min; revoked serial → reject with "certificate revoked" |
-| **Systemd watchdog** | `READY=1` on startup; `WATCHDOG=1` every `WATCHDOG_USEC/2`; connector only |
-| **Shield tunnel relay** | Shield opens local TCP to resource destination, streams data via `TunnelData` — bypasses nftables because `zecurity0` is whitelisted |
-| **Protected path detection** | Resource has `shield_id` set. Connector resolves via local policy cache first; falls back to `POST /api/device/check-access` on Controller. |
-| **Max chunk size** | 16 KB per `TunnelData` frame — enforced on both Connector and Shield sides |
+| **Policy model** | `group + resource = access rule`. Users inherit resource access through group membership. |
+| **Default-deny** | If a resource is missing from the local ACL snapshot, access is denied. |
+| **ACL compiler** | Controller compiles per-workspace ACL snapshots: resource address/port/protocol plus allowed client device SPIFFE IDs. |
+| **Connector push** | ACL snapshots ride the existing Connector heartbeat response, same pattern as Sprint 6 resource instructions. |
+| **Client pull** | Client `GetACLSnapshot` runtime handling is Sprint 8.5 daemon work. Sprint 8 only defines the RPC and Controller handler. |
+| **Snapshot shape** | `ACLSnapshot { version, workspace_id, generated_at, entries[] }`; each entry contains `resource_id`, address, port, protocol, and `allowed_spiffe_ids[]`. |
+| **Controller snapshot cache** | In-memory per-workspace cache invalidated by `NotifyPolicyChange(workspace_id)`. See [[Decisions/ADR-001-Sprint8-ACL-Snapshot-Caching]]. |
+| **Invalidation** | Group/member/rule changes call `NotifyPolicyChange(workspace_id)` so Connectors receive updated snapshots on their next heartbeat. |
+| **RDE dependency** | Sprint 9 `device_tunnel.rs` checks the Connector's local snapshot before routing. No per-request Controller access check in the hot path. |
+| **Client daemon timing** | M4 daemon foundation is Sprint 8.5, not a Day 1 Sprint 8 task. Daemon is required for active runtime/tunnel state; no direct-state fallback. See [[Decisions/ADR-002-Client-Daemon-Required]]. |
+
+---
+
+## Data Model
+
+New migration: `controller/migrations/012_groups_acl.sql`
+
+| Table | Fields |
+|-------|--------|
+| `groups` | `id`, `workspace_id`, `name`, `description`, timestamps |
+| `group_members` | `group_id`, `user_id`, `joined_at` |
+| `access_rules` | `id`, `workspace_id`, `resource_id`, `group_id`, `enabled`, timestamps |
+
+The existing `resources` and `client_devices` tables are used by the compiler.
 
 ---
 
@@ -49,10 +61,10 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 | Member | Role | Area |
 |--------|------|------|
-| **M1** | Frontend | Device/client management UI (token issuance, device list, access log viewer) |
-| **M2** | Go (Proto) | Activate shield.proto fields 8–11 (TunnelOpen/Opened/Data/Close) |
-| **M3** | Go+Rust (Controller + Connector) | `device_tunnel.rs`, `quic_listener.rs`, `agent_tunnel.rs` modifications, `net_util.rs`, `crl.rs`, `watchdog.rs`, `check_access.go` |
-| **M4** | Rust (Shield) | `shield/src/tunnel.rs`, `control_stream.rs` tunnel dispatch |
+| **M1** | Frontend | Groups page, member management, resource assignment UI, resource access visibility |
+| **M2** | Go (Proto + DB + GraphQL) | Migration 012, GraphQL schema, ClientService `GetACLSnapshot`, Connector heartbeat ACL field |
+| **M3** | Go (Controller) | Group/member/rule CRUD, ACL compiler, policy change notification, ClientService ACL handler |
+| **M4** | Rust (Client + Connector) | Connector heartbeat ACL receive/store, local default-deny helpers; client daemon foundation moves to Sprint 8.5 |
 
 ---
 
@@ -60,146 +72,136 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 | File | Who Touches It | Rule |
 |------|---------------|------|
-| `proto/shield/v1/shield.proto` | M2 adds TunnelOpen/Opened/Data/Close (fields 8–11) | M2 commits first — everyone waits for buf generate |
-| `connector/src/device_tunnel.rs` | M3 — new file | M3 only |
-| `connector/src/quic_listener.rs` | M3 — new file | M3 only |
-| `connector/src/agent_tunnel.rs` | M3 modifies TunnelHub + Control stream wiring | M3 only |
-| `connector/src/net_util.rs` | M3 — new file | M3 only |
-| `connector/src/crl.rs` | M3 — new file | M3 only |
-| `connector/src/watchdog.rs` | M3 — new file | M3 only |
-| `connector/src/main.rs` | M3 wires all listeners + watchdog | M3 only |
-| `shield/src/tunnel.rs` | M4 — new file | M4 only |
-| `shield/src/control_stream.rs` | M4 adds tunnel dispatch (TunnelOpen/Data/Close match arms) | M4 only. Sprint 6 discovery arms already present — add after them. |
-| `shield/src/main.rs` | M4 adds `mod tunnel` | M4 only |
-| `controller/internal/device/check_access.go` | M3 — new file, `/api/device/check-access` endpoint | M3 only |
+| `controller/migrations/012_groups_acl.sql` | M2 | M2 commits first. Do not reuse migration number 012. |
+| `proto/client/v1/client.proto` | M2 | Add `GetACLSnapshot`; never renumber existing fields. |
+| `proto/connector/v1/connector.proto` | M2 | Add `ACLSnapshot acl_snapshot = 11` to `ConnectorControlMessage`; never renumber existing fields and never reuse field 11. |
+| `controller/graph/client.graphqls` or new policy schema | M2 | M2 owns schema/codegen changes. |
+| `controller/internal/policy/` | M3 | M3 owns compiler + store + notifier. |
+| `controller/internal/client/service.go` | M3 | M3 adds `GetACLSnapshot` handler after proto lands. |
+| `connector/src/policy/` | M4 | M4 owns local ACL snapshot/cache helpers. |
+| `client/src/login.rs`, `client/src/runtime.rs`, client command files | M4 | Client daemon refactor is Sprint 8.5. Do not add a second direct-state ACL fallback path in Sprint 8. |
+| `admin/src/pages/` group UI files | M1 | M1 owns frontend pages and operations. |
 
 ---
 
 ## Execution Timeline
 
-### DAY 1 — Unblocking Work (Must land before anyone fans out)
+### DAY 1 — Unblocking Work
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add tunnel messages and activate reserved fields 8–11 in `ShieldControlMessage.oneof`:
-  - `TunnelOpen { connection_id, destination, port, protocol }` — field 8, Connector → Shield
-  - `TunnelOpened { connection_id, ok, error }` — field 9, Shield → Connector
-  - `TunnelData { connection_id, data bytes }` — field 10, bidirectional
-  - `TunnelClose { connection_id, error }` — field 11, bidirectional
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
-- [ ] **TEAM** Run `cd admin && npm run codegen`
+- [ ] **M2-D1-A** `controller/migrations/012_groups_acl.sql` — Add groups, group_members, access_rules.
+- [ ] **M2-D1-B** `proto/client/v1/client.proto` — Add `GetACLSnapshot` RPC and ACL snapshot messages.
+- [ ] **M2-D1-C** `proto/connector/v1/connector.proto` — Add ACL snapshot payload to heartbeat response.
+- [ ] **M2-D1-D** GraphQL schema — Group CRUD, membership, resource assignment, resource group visibility.
+- [ ] **TEAM** Run `buf generate` from repo root.
+- [ ] **TEAM** Run `cd controller && go generate ./graph/...`.
+- [ ] **TEAM** Run `cd admin && npm run codegen`.
 
-> After Day 1: M3 can start device_tunnel.rs scaffold; M4 can start tunnel.rs.
-
----
-
-### PHASE A — M2 Proto Schema (Day 1 = Phase A for this sprint)
-
-> See [[Sprint7/Member2-Go-Proto/Phase1-Tunnel-Proto]] for full field specs.
+> After Day 1: M3 can implement policy services, M1 can build UI, and M4 can wire client/connector snapshot handling.
 
 ---
 
-### PHASE B — M3 RDE Device Tunnel (Depends on: Day 1 done)
+### PHASE A — M2 Proto + DB + GraphQL
 
-- [ ] **M3-B1** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, `check_access()` HTTP fallback, protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`
-- [ ] **M3-B2** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
-- [ ] **M3-B3** `connector/src/agent_tunnel.rs` — MODIFY: dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
-- [ ] **M3-B4** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
+> See [[Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema]].
 
-> Build check: `cd connector && cargo build` must pass.
+- [ ] **M2-A1** Migration 012
+- [ ] **M2-A2** Client `GetACLSnapshot` proto
+- [ ] **M2-A3** Connector heartbeat ACL proto
+- [ ] **M2-A4** GraphQL schema/codegen
 
----
-
-### PHASE C — M3 Controller Check-Access Endpoint (Depends on: Day 1 done)
-
-- [ ] **M3-C1** `controller/internal/device/check_access.go` — NEW: `POST /api/device/check-access` — validate Bearer JWT, look up resource, return `{ok, shield_id, connector_id, protocol}`
-
-> Build check: `cd controller && go build ./...` must pass.
+> Build check: `buf generate` clean + `cd controller && go build ./...` passes.
 
 ---
 
-### PHASE D — M3 Connector Reliability (Depends on: M3-B done)
+### PHASE B — M3 Policy CRUD + Compiler
 
-- [ ] **M3-D1** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5min
-- [ ] **M3-D2** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
-- [ ] **M3-D3** `connector/src/main.rs` — MODIFY: wire all listeners in correct order, `notify_ready()`, `spawn_watchdog()`
+> Depends on: M2-A complete.
+> See [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]].
 
-> Build check: `cd connector && cargo build` must pass.
+- [ ] **M3-B1** Group/member/access-rule store and CRUD.
+- [ ] **M3-B2** `compile_acl_snapshot(workspace_id)` — resources → groups → users → client device SPIFFE IDs.
+- [ ] **M3-B3** `NotifyPolicyChange(workspace_id)` version bump/cache invalidation.
+- [ ] **M3-B4** `SnapshotCache` — in-memory per-workspace cache. Cache miss compiles; policy mutation invalidates.
+- [ ] **M3-B5** GraphQL/HTTP resolvers call notifier after mutations.
+- [ ] **M3-B6** ClientService `GetACLSnapshot` validates JWT/device context and returns snapshot.
 
----
-
-### PHASE E — M4 Shield Tunnel Relay (Depends on: Day 1 done + Sprint 6 M4-E done)
-
-- [ ] **M4-E1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open()` (connect TCP locally, register session), `handle_tunnel_data()` (forward bytes to local TCP), `handle_tunnel_close()` (drop session)
-- [ ] **M4-E2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` from incoming Control stream messages → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
-- [ ] **M4-E3** `shield/src/main.rs` — Add `mod tunnel`
-
-> Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
+> Build check: `cd controller && go build ./...` passes.
 
 ---
 
-### PHASE F — M1 Frontend (Depends on: M3-C done + codegen done)
+### PHASE C — M4 Connector ACL Handling
 
-- [ ] **M1-F1** Device/client management UI — TBD based on Sprint 7 kickoff. At minimum: access log viewer showing `connector_log` events from RDE connections.
+> Depends on: M2-A proto complete + M3 Compiler Output Contract documented. M4 does not need to wait for the M3 implementation.
+> See [[Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling]].
 
-> Build check: `cd admin && npm run build` must pass.
+- [ ] **M4-C1** Connector receives ACL snapshot from heartbeat response.
+- [ ] **M4-C2** Connector keeps local in-memory snapshot with default-deny helper APIs.
+- [ ] **M4-C3** Add test/helper proving unknown resource and missing SPIFFE are denied.
+> Build check: `cd connector && cargo build` passes. Client build remains required for Sprint 8.5 daemon work.
 
 ---
 
-Run these once all phases are complete:
+### PHASE D — M1 Frontend Policy UI
 
-- [ ] `buf generate` (from repo root) — clean, no errors
+> Depends on: M2-A GraphQL codegen and M3-B CRUD.
+> See [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]].
+
+- [ ] **M1-D1** Groups page: create/edit/delete.
+- [ ] **M1-D2** Members tab: add/remove users from group.
+- [ ] **M1-D3** Resources tab: assign/unassign resources to group.
+- [ ] **M1-D4** Resources page: show groups with access.
+- [ ] **M1-D5** Empty/error/loading states for policy operations.
+
+> Build check: `cd admin && npm run build` passes.
+
+---
+
+## Final Verification Checklist
+
+- [ ] `buf generate` — clean, no errors
 - [ ] `cd controller && go build ./...` — clean
-- [ ] `cd connector && cargo build` — clean (warnings OK)
-- [ ] `cargo build --manifest-path shield/Cargo.toml` — clean
+- [ ] `cd client && cargo build` — clean
+- [ ] `cd connector && cargo build` — clean
 - [ ] `cd admin && npm run build` — clean
-- [ ] Device connects to `:9092` with valid token → reaches resource through Shield tunnel relay
-- [ ] Device connects to `:9092` with valid token → reaches unprotected resource directly
-- [ ] Device connects with revoked certificate → rejected with "certificate revoked"
-- [ ] Device connects with invalid token → rejected with HTTP 401 from `check_access`
-- [ ] QUIC `quic_addr` present in every `TunnelResponse`
-- [ ] Systemd watchdog: `WATCHDOG=1` notifications appear in `journalctl` for connector service
-- [ ] Shield host: TCP to a port the Shield nftables blocks → still reachable through tunnel relay (via `zecurity0` interface)
+- [ ] Admin creates a group and adds a user.
+- [ ] Admin assigns a resource to that group.
+- [ ] Controller compiles ACL snapshot containing that user's client device SPIFFE ID.
+- [ ] Connector receives updated ACL snapshot via heartbeat response.
+- [ ] Client daemon ACL fetch contract is documented for Sprint 8.5.
+- [ ] Unknown resource is denied by local snapshot.
+- [ ] Known resource with missing client SPIFFE ID is denied.
+- [ ] Known resource with matching client SPIFFE ID is allowed.
+- [ ] Policy mutation triggers `NotifyPolicyChange(workspace_id)`.
 
 ---
 
-## Dependency Graph (Visual)
+## Dependency Graph
 
-```
-       M2-D1-A (shield.proto: TunnelOpen=8, TunnelOpened=9, TunnelData=10, TunnelClose=11)
-              │
-              ▼
-       buf generate + go generate + npm codegen
-              │
-      ┌───────┼──────────────┬──────────────┐
-      ▼       ▼              ▼              ▼
-    M3-B    M3-C           M4-E           M1-F
-  (device   (check_access  (tunnel.rs     (device UI)
-   tunnel,   endpoint)      heartbeat
-   QUIC,                    wiring)
-   agent_tunnel)
-      │
-      ▼
-    M3-D
-  (crl.rs,
-   watchdog.rs,
-   main.rs wiring)
+```text
+M2-A (migration + proto + GraphQL)
+  |
+  +--> M3-B (CRUD + compiler + GetACLSnapshot)
+  |       |
+  |       +--> M4-C (connector snapshot handling)
+  |       +--> Sprint 8.5 M4 daemon foundation (client runtime snapshot handling)
+  |
+  +--> M1-D (groups and access UI)
 ```
 
 ---
 
 ## Notes for AI Agents Working on This Sprint
 
-1. **Always check this file first.** Before touching any file, confirm dependency checkboxes are checked.
-2. **Proto field numbers are permanent.** Sprint 7 activates ShieldControlMessage fields 8–11 (reserved in Sprint 6). Never reuse or renumber.
-3. **Tunnel messages ride the existing Shield Control stream.** No new RPCs. Connector sends TunnelOpen; Shield replies TunnelOpened/Data/Close on the same stream.
-4. **Sprint 6 control_stream.rs already has discovery arms** — Sprint 7 M4-E2 adds additional match arms after them. Do not remove or reorder existing arms.
-5. **RDE protected path.** For resources with `shield_id` set, Connector MUST relay via `AgentTunnelHub` → Shield Control stream. Direct connect will fail due to nftables.
-6. **QUIC is on same port as TLS.** `:9092` — UDP for QUIC, TCP for TLS. OS demuxes by transport protocol.
-7. **Build gates are not optional.** Each phase has a build check. Do not proceed until it passes.
-8. **Max chunk size is 16 KB** per `TunnelData` frame — enforced on both sides.
+1. Always check this file first. Confirm dependency checkboxes before touching files.
+2. Do not implement RDE tunnel routing in Sprint 8. RDE is Sprint 9 and should consume this local ACL snapshot.
+3. Default-deny is mandatory. Missing snapshot, missing resource, disabled rule, or missing SPIFFE ID means deny.
+4. The Controller is the source of truth for policy compilation. Connector and Client only enforce snapshots.
+5. Proto field numbers are permanent. Add fields only at new numbers.
+6. Client active runtime state is daemon-required. Do not create optional direct-state fallback paths.
+7. Build gates are not optional.
 
-See individual member phase files for detailed specs:
-- [[Sprint7/Member2-Go-Proto/Phase1-Tunnel-Proto]]
-- [[Sprint7/Member3-Go-Connector/Phase1-RDE-Device-Tunnel]]
-- [[Sprint7/Member3-Go-Connector/Phase2-Connector-Extras]]
-- [[Sprint7/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]]
+See individual phase files:
+- [[Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema]]
+- [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]]
+- [[Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling]]
+- [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]]

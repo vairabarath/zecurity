@@ -1,11 +1,11 @@
 ---
 type: phase
 status: pending
-sprint: 7
+sprint: 9
 member: M4
 phase: Phase1-Shield-Tunnel-Relay
 depends_on:
-  - M2-D1-A (TunnelOpen/Opened/Data/Close in shield.proto — Sprint 7 Day 1)
+  - M2-D1-A (TunnelOpen/Opened/Data/Close in shield.proto — Sprint 9 Day 1)
   - buf generate
   - Sprint 6 M4-E (discovery control stream wiring — control_stream.rs already has discovery arms)
 tags:
@@ -36,7 +36,7 @@ Device → Connector :9092 (TLS)
   Either side sends TunnelClose to terminate
 ```
 
-Proto messages (added by M2 Sprint 7 Day 1):
+Proto messages (added by M2 Sprint 9 Day 1):
 - `TunnelOpen { connection_id, destination, port, protocol }` → field 8, Connector → Shield
 - `TunnelOpened { connection_id, ok, error }` → field 9, Shield → Connector
 - `TunnelData { connection_id, data }` → field 10, bidirectional
@@ -200,7 +200,7 @@ mod tunnel;
 ## Notes
 
 - **Max chunk size is 16 KB** — matches the proto spec. Do not send larger chunks.
-- **Back-pressure**: `inbound_tx.try_send()` drops data silently if the local writer is slow. Acceptable for Sprint 7 — full flow-control is deferred.
+- **Back-pressure**: `inbound_tx.try_send()` drops data silently if the local writer is slow. Acceptable for Sprint 9 — full flow-control is deferred.
 - **UDP tunneling from Shield**: Not implemented. If `protocol == "udp"` arrives, send `TunnelOpened{ok: false, error: "udp not supported"}` and return.
 - **`destination` field**: The Connector populates this with the resource `host` field. The Shield connects to exactly what the Connector sends — no substitution needed.
 
