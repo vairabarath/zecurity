@@ -839,3 +839,33 @@ Most recent first. Every agent appends an entry after their session.
 - M3 Phase B (`controller/internal/client/service.go` — implement the 3 RPCs) and M3 Phase C (invitation HTTP API + email + resolvers) are unblocked.
 - M4 Phase F1+F2 (Rust CLI scaffold + login flow) unblocked once M3-B lands.
 - M1 Phase E unblocked once M3-C lands.
+
+---
+
+## 2026-04-29 — Codex (M4, Sprint 7 client login fix)
+
+**What was done:**
+- Fixed `zecurity-client login` rustls CryptoProvider panic by installing the `ring` provider at process startup in `client/src/main.rs`.
+- Updated client rustls/tokio-rustls dependency features to use `ring` without the direct `aws_lc_rs` default.
+- Documented the fix in Sprint 7 path.md and the M4 Phase 2 phase file.
+
+**Key decisions:**
+- Matched the existing connector/shield provider choice (`ring`) rather than introducing a second runtime crypto provider policy.
+
+**What's next:**
+- Re-run `zecurity-client login` against a reachable controller to continue OAuth and enrollment validation.
+
+---
+
+## 2026-04-29 — Codex (M4, Sprint 7 client TLS trust fix)
+
+**What was done:**
+- Fixed `zecurity-client login` `UnknownIssuer` by fetching the controller intermediate CA from `/ca.crt` before the first gRPC call.
+- Updated tonic TLS setup to use the fetched CA and controller host as the expected TLS server name.
+- Added `setup --http-base` and default HTTP base derivation from `controller_address` for local dev.
+
+**Key decisions:**
+- Reused the controller's existing public CA endpoint instead of adding a second trust-bootstrap endpoint.
+
+**What's next:**
+- Run login against the local controller; it should proceed past TLS into `GetAuthConfig` / OAuth.

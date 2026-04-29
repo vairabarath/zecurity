@@ -311,3 +311,17 @@ See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
 **Phase:** M3 Phase 2 | **File:** `admin/codegen.yml`, `admin/src/graphql/queries.graphql`, `admin/src/graphql/mutations.graphql`
 `Invitation`/`ClientDevice` types and `createInvitation`/`myDevices`/`invitation` operations were absent from generated TypeScript. Added schema entry to codegen config, added queries + mutation to graphql files, re-ran `make codegen`. Also created `controller/graph/resolvers/client_helpers.go` to house `invitationToGQL()` helper so gqlgen doesn't evict it.
 See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
+
+---
+
+### Fix: rustls CryptoProvider panic during client login
+**Phase:** M4 Phase 2 | **File:** `client/src/main.rs`, `client/Cargo.toml`
+`zecurity-client login` panicked because rustls saw both `aws_lc_rs` and `ring` providers in the client dependency graph. Installed the `ring` provider at process startup and changed the direct rustls/tokio-rustls dependencies to request `ring` without default `aws_lc_rs`.
+See full details → [[Sprint7/Member4-Rust-Client/Phase2-Login-Flow]]
+
+---
+
+### Fix: controller gRPC TLS failed with `UnknownIssuer`
+**Phase:** M4 Phase 2 | **File:** `client/src/login.rs`, `client/src/grpc.rs`, `client/src/config.rs`, `client/src/main.rs`, `client/src/cmd/setup.rs`
+`zecurity-client login` used public/default TLS roots, but the controller gRPC certificate is signed by Zecurity's intermediate CA. The client now fetches `/ca.crt` from the controller HTTP API before dialing gRPC and configures tonic with that CA plus the expected controller host. Added `setup --http-base` for non-default dev HTTP API locations.
+See full details → [[Sprint7/Member4-Rust-Client/Phase2-Login-Flow]]
