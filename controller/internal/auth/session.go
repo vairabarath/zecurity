@@ -24,6 +24,41 @@ type jwtClaims struct {
 	// Expiry  (exp) = now + 15 min      — set via RegisteredClaims.ExpiresAt
 }
 
+// IssueAccessToken is the public wrapper around issueAccessToken used by
+// gRPC handlers (e.g. the ClientService TokenExchange RPC). It returns the
+// signed token plus the TTL in seconds so callers can populate expires_in
+// fields without re-parsing the configured TTL.
+func (s *serviceImpl) IssueAccessToken(userID, tenantID, role string) (string, int64, error) {
+	token, err := s.issueAccessToken(userID, tenantID, role)
+	if err != nil {
+		return "", 0, err
+	}
+	ttl, perr := time.ParseDuration(s.cfg.JWTAccessTTL)
+	if perr != nil {
+		ttl = 15 * time.Minute
+	}
+	return token, int64(ttl.Seconds()), nil
+}
+
+// IssueRefreshToken is the public wrapper around issueRefreshToken.
+func (s *serviceImpl) IssueRefreshToken(ctx context.Context, userID string) (string, error) {
+	return s.issueRefreshToken(ctx, userID)
+}
+
+// VerifyAccessToken parses and verifies a Zecurity-issued JWT and returns
+// the public claims view used by gRPC handlers.
+func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, error) {
+	claims, err := s.verifyAccessToken(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	return &AccessTokenClaims{
+		UserID:   claims.Subject,
+		TenantID: claims.TenantID,
+		Role:     claims.Role,
+	}, nil
+}
+
 // issueAccessToken creates a signed short-lived JWT.
 // exp = JWTAccessTTL (default 15 minutes) from now. Signed with HS256 using JWT_SECRET.
 // Called by: CallbackHandler() in callback.go (Step 8), RefreshHandler() in refresh.go (Step 5).

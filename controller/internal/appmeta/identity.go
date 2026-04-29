@@ -40,11 +40,13 @@ const (
 	SPIFFERoleConnector  = "connector"
 	SPIFFERoleAgent      = "agent" // future sprint — plumbed now
 	SPIFFERoleController = "controller"
+	SPIFFERoleClient     = "client" // Sprint 7 — end-user device certificates
 
 	// PKI cert subject CN prefixes — keeps cert naming consistent.
 	PKIConnectorCNPrefix = "connector-" // CN = "connector-<connectorID>"
 	PKIAgentCNPrefix     = "agent-"     // CN = "agent-<agentID>" — future
 	PKIShieldCNPrefix    = "shield-"    // CN = "shield-<shieldID>"
+	PKIClientCNPrefix    = "client-"    // CN = "client-<deviceID>"
 
 	// Shield networking constants.
 	ShieldInterfaceName = "zecurity0"
@@ -79,4 +81,9 @@ func ConnectorSPIFFEID(trustDomain, connectorID string) string {
 // ShieldSPIFFEID builds the full SPIFFE URI for a shield certificate.
 func ShieldSPIFFEID(trustDomain, shieldID string) string {
 	return "spiffe://" + trustDomain + "/" + SPIFFERoleShield + "/" + shieldID
+}
+
+// ClientSPIFFEID builds the full SPIFFE URI for a client device certificate.
+func ClientSPIFFEID(trustDomain, deviceID string) string {
+	return "spiffe://" + trustDomain + "/" + SPIFFERoleClient + "/" + deviceID
 }

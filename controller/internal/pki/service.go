@@ -39,6 +39,11 @@ type Service interface {
 	// RenewShieldCert issues a fresh shield certificate from a renewal CSR.
 	RenewShieldCert(ctx context.Context, tenantID, shieldID, trustDomain string, csrDER []byte, certTTL time.Duration) (*ShieldCertResult, error)
 
+	// SignClientCert signs a client device's CSR with the workspace CA, producing
+	// a short-lived client certificate carrying the client SPIFFE ID as URI SAN.
+	// Called by: client.Service.EnrollDevice (Sprint 7).
+	SignClientCert(ctx context.Context, tenantID, deviceID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ClientCertResult, error)
+
 	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
 	// for the controller gRPC endpoint. The certificate is signed by the
 	// intermediate CA, carries the controller SPIFFE ID, and includes DNS/IP SANs
@@ -69,6 +74,17 @@ type ConnectorCertResult struct {
 }
 
 type ShieldCertResult struct {
+	CertificatePEM    string
+	WorkspaceCAPEM    string
+	IntermediateCAPEM string
+	Serial            string
+	NotBefore         time.Time
+	NotAfter          time.Time
+}
+
+// ClientCertResult holds the output of SignClientCert.
+// Returned to the CLI via the EnrollDevice gRPC response.
+type ClientCertResult struct {
 	CertificatePEM    string
 	WorkspaceCAPEM    string
 	IntermediateCAPEM string
