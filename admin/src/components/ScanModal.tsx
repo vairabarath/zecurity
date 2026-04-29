@@ -17,7 +17,25 @@ interface ScanModalProps {
   connectorId: string
   remoteNetworkId: string
   connectorName: string
+  connectorLanAddr?: string | null
   onClose: () => void
+}
+
+const PREFIX_OPTIONS = [16, 20, 22, 23, 24, 25, 26, 28, 30] as const
+const DEFAULT_PREFIX = 24
+
+function deriveCidr(lanAddr: string | null | undefined, prefix: number): string | null {
+  if (!lanAddr) return null
+  const ipPart = lanAddr.split(':')[0].trim()
+  const octets = ipPart.split('.')
+  if (octets.length !== 4) return null
+  const nums = octets.map((o) => Number.parseInt(o, 10))
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null
+  if (prefix < 1 || prefix > 32) return null
+  const ipInt = ((nums[0] << 24) >>> 0) + (nums[1] << 16) + (nums[2] << 8) + nums[3]
+  const mask = (0xffffffff << (32 - prefix)) >>> 0
+  const net = (ipInt & mask) >>> 0
+  return `${(net >>> 24) & 0xff}.${(net >>> 16) & 0xff}.${(net >>> 8) & 0xff}.${net & 0xff}/${prefix}`
 }
 
 function parseTargets(value: string): string[] {
@@ -58,14 +76,29 @@ export function ScanModal({
   connectorId,
   remoteNetworkId,
   connectorName,
+  connectorLanAddr,
   onClose,
 }: ScanModalProps) {
   const navigate = useNavigate()
-  const [targetsText, setTargetsText] = useState('')
+  const [prefix, setPrefix] = useState<number>(DEFAULT_PREFIX)
+  const [userEditedTargets, setUserEditedTargets] = useState(false)
+  const [targetsText, setTargetsText] = useState<string>(
+    () => deriveCidr(connectorLanAddr, DEFAULT_PREFIX) ?? '',
+  )
   const [portsText, setPortsText] = useState('22, 80, 443')
   const [requestId, setRequestId] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [pollingExpired, setPollingExpired] = useState(false)
+
+  const canSuggest = deriveCidr(connectorLanAddr, DEFAULT_PREFIX) !== null
+
+  function handlePrefixChange(next: number) {
+    setPrefix(next)
+    if (!userEditedTargets) {
+      const cidr = deriveCidr(connectorLanAddr, next)
+      if (cidr) setTargetsText(cidr)
+    }
+  }
 
   const parsedTargets = useMemo(() => parseTargets(targetsText), [targetsText])
   const parsedPorts = useMemo(() => parsePorts(portsText), [portsText])
@@ -181,15 +214,37 @@ export function ScanModal({
           <div className="border-b border-border p-6 lg:border-b-0 lg:border-r">
             <div className="space-y-5">
               <div className="space-y-2">
-                <Label className="text-sm font-semibold">Target IPs / CIDRs</Label>
-                <textarea
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm font-semibold">Target IPs / CIDRs</Label>
+                  {canSuggest ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Prefix</span>
+                      <select
+                        value={prefix}
+                        onChange={(event) => handlePrefixChange(Number(event.target.value))}
+                        className="h-8 rounded-lg border border-border bg-secondary px-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      >
+                        {PREFIX_OPTIONS.map((p) => (
+                          <option key={p} value={p}>/{p}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+                </div>
+                <Input
                   value={targetsText}
-                  onChange={(event) => setTargetsText(event.target.value)}
-                  placeholder={'192.168.1.0/24\n10.0.0.15'}
-                  className="min-h-36 w-full rounded-xl border border-border bg-secondary px-3 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30"
+                  onChange={(event) => {
+                    setTargetsText(event.target.value)
+                    setUserEditedTargets(true)
+                  }}
+                  placeholder="192.168.1.0/24, 10.0.0.15"
+                  className="h-11 font-mono text-sm"
                 />
                 <p className="text-xs text-muted-foreground">
-                  One per line or comma separated. Use full CIDR (e.g. <span className="font-mono">192.168.1.0/24</span>) or a bare IP (e.g. <span className="font-mono">10.0.0.15</span>).
+                  Comma separated. Use full CIDR (e.g. <span className="font-mono">192.168.1.0/24</span>) or a bare IP (e.g. <span className="font-mono">10.0.0.15</span>).
+                  {canSuggest && !userEditedTargets ? (
+                    <> Suggested from <span className="font-mono">{connectorName}</span>'s LAN address.</>
+                  ) : null}
                 </p>
               </div>
 
@@ -283,13 +338,13 @@ export function ScanModal({
                     )}
                   </div>
                 ) : (
-                  <div className="min-h-0 overflow-hidden rounded-2xl border border-border">
-                    <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] gap-4 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                  <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-border">
+                    <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_40px] gap-4 border-b border-border bg-secondary px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
                       <div>Host</div>
                       <div>Service</div>
                       <div />
                     </div>
-                    <div className="max-h-full overflow-y-auto">
+                    <div className="flex-1 overflow-y-auto">
                       {results.map((result) => (
                         <div
                           key={`${result.requestId}-${result.ip}-${result.port}`}

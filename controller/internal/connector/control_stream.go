@@ -124,6 +124,9 @@ func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.Connecto
 func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) error {
 	ctx := stream.Context()
 
+	println("=== STDOUT TEST FROM CONTROLLER ===")
+	log.Printf("=== CONTROLLER: Control() handler invoked for connector ===")
+
 	trustDomain := TrustDomainFromContext(ctx)
 	role := SPIFFERoleFromContext(ctx)
 	connectorID := SPIFFEEntityIDFromContext(ctx)
@@ -181,31 +184,40 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	log.Printf("control stream: entering message loop for connector %s", connectorID)
 
 	for {
-	        log.Printf("control stream: waiting for message from connector %s", connectorID)
-	        msg, err := stream.Recv()
-	        if err == io.EOF {
-	                log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
-	                return nil
-	        }
-	        if err != nil {
-	                log.Printf("control stream: connector %s stream error: %v", connectorID, err)
-	                return err
-	        }
+		log.Printf("control stream: waiting for message from connector %s", connectorID)
+		msg, err := stream.Recv()
+		if err == io.EOF {
+			log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
+			return nil
+		}
+		if err != nil {
+			log.Printf("control stream: connector %s stream error: %v", connectorID, err)
+			return err
+		}
 
-	        log.Printf("control stream: received message from connector %s, body type: %T", connectorID, msg.Body)
+		log.Printf("control stream: received message from connector %s, body type: %T", connectorID, msg.Body)
 
-	        switch body := msg.Body.(type) {		case *pb.ConnectorControlMessage_ConnectorHealth:
-			h.handleConnectorHealth(ctx, connectorID, body.ConnectorHealth)
+		switch msg.Body.(type) {
+		case nil:
+			log.Printf("control stream: connector %s body is NIL", connectorID)
+		case *pb.ConnectorControlMessage_ConnectorHealth:
+			h.handleConnectorHealth(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
 		case *pb.ConnectorControlMessage_ShieldStatus:
-			h.handleShieldStatus(ctx, connectorID, body.ShieldStatus)
+			h.handleShieldStatus(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
-			h.handleResourceAcks(ctx, tenantID, body.ResourceAcks)
+			h.handleResourceAcks(ctx, tenantID, msg.Body.(*pb.ConnectorControlMessage_ResourceAcks).ResourceAcks)
 		case *pb.ConnectorControlMessage_ShieldDiscovery:
-			h.handleShieldDiscoveryBatch(ctx, body.ShieldDiscovery)
+			batch := msg.Body.(*pb.ConnectorControlMessage_ShieldDiscovery)
+			log.Printf("control stream: connector %s case ShieldDiscovery REPORTS=%d", connectorID, len(batch.ShieldDiscovery.Reports))
+			h.handleShieldDiscoveryBatch(ctx, batch.ShieldDiscovery)
 		case *pb.ConnectorControlMessage_ScanReport:
-			h.handleScanReport(ctx, connectorID, body.ScanReport)
+			rep := msg.Body.(*pb.ConnectorControlMessage_ScanReport)
+			log.Printf("control stream: connector %s case ScanReport request_id=%s", connectorID, rep.ScanReport.RequestId)
+			h.handleScanReport(ctx, connectorID, rep.ScanReport)
 		case *pb.ConnectorControlMessage_Pong:
-			// keepalive response — no action needed
+			log.Printf("control stream: connector %s case Pong", connectorID)
+		default:
+			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
 	}
 }
@@ -381,13 +393,17 @@ func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batc
 			continue
 		}
 
+		log.Printf("discovery: shield %s full_sync=%v added=%d removed=%d", shieldID, r.FullSync, len(r.Added), len(r.Removed))
 		if r.FullSync {
 			var services []discovery.DiscoveredService
 			for _, svc := range r.Added {
 				services = append(services, protoToDiscoveredService(shieldID, svc))
 			}
+			log.Printf("discovery: calling ReplaceDiscoveredServices shield=%s services=%d", shieldID, len(services))
 			if err := discovery.ReplaceDiscoveredServices(ctx, h.Pool, shieldID, services); err != nil {
-				log.Printf("discovery: replace failed for shield %s: %v", shieldID, err)
+				log.Printf("discovery: replace FAILED for shield %s: %v", shieldID, err)
+			} else {
+				log.Printf("discovery: replace OK for shield %s services=%d", shieldID, len(services))
 			}
 		} else {
 			var added, removed []discovery.DiscoveredService
@@ -400,8 +416,11 @@ func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batc
 					Port:     int(svc.Port),
 				})
 			}
+			log.Printf("discovery: calling UpsertDiscoveredServices shield=%s added=%d removed=%d", shieldID, len(added), len(removed))
 			if err := discovery.UpsertDiscoveredServices(ctx, h.Pool, shieldID, added, removed); err != nil {
-				log.Printf("discovery: upsert failed for shield %s: %v", shieldID, err)
+				log.Printf("discovery: upsert FAILED for shield %s: %v", shieldID, err)
+			} else {
+				log.Printf("discovery: upsert OK for shield %s added=%d removed=%d", shieldID, len(added), len(removed))
 			}
 		}
 	}
