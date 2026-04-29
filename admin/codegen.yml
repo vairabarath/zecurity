@@ -4,6 +4,7 @@ schema:
   - '../controller/graph/shield.graphqls'
   - '../controller/graph/resource.graphqls'
   - '../controller/graph/discovery.graphqls'
+  - '../controller/graph/client.graphqls'
 documents: 'src/graphql/**/*.graphql'
 generates:
   src/generated/:
