@@ -1,6 +1,6 @@
 ---
 type: phase
-status: planned
+status: done
 sprint: 7
 member: M2
 phase: Phase1-Client-Proto-Migration
@@ -223,4 +223,33 @@ Must pass with no errors before checking this phase complete.
 
 ## Post-Phase Fixes
 
-_None yet — add fixes here if bugs are found during integration._
+### Fix: proto `go_package` must include `proto/` segment
+**Issue:** The phase doc specified `option go_package = "github.com/zecurity/controller/proto/client/v1;clientv1"`. That module path does not exist in this repo (`go.mod` is `github.com/yourorg/ztna/controller`). Even after fixing the org, omitting the `proto/` segment is wrong because `paths=source_relative` writes generated files to `controller/gen/go/proto/client/v1/`, and consumers import them as `github.com/yourorg/ztna/controller/gen/go/proto/client/v1`.
+
+**Fix Applied:**
+```proto
+// AFTER:
+option go_package = "github.com/yourorg/ztna/controller/gen/go/proto/client/v1;clientv1";
+```
+Matches `proto/shield/v1/shield.proto`. (Note: `proto/connector/v1/connector.proto` uses the older non-`proto/` form; do not copy that — `shield.proto` is the correct pattern.)
+
+### Fix: GraphQL fields need colons; no `Time` scalar exists
+**Issue 1:** Phase doc renders fields as `id        ID!` (column-aligned, no colon). gqlgen rejected this with `Expected :, found Name`.
+**Issue 2:** Phase doc used `Time!` for timestamp fields; the repo has no `scalar Time` declaration. Every other graphqls file types timestamps as `String` / `String!`.
+
+**Fix Applied (`controller/graph/client.graphqls`):**
+```graphql
+type Invitation {
+  id:        ID!
+  email:     String!
+  status:    String!
+  expiresAt: String!
+  createdAt: String!
+}
+```
+And `ClientDevice` similarly — `certNotAfter`, `lastSeenAt` as `String`, `createdAt` as `String!`.
+
+### Fix: Skip the `gqlgen.yml` `models:` block from the phase doc
+**Issue:** Phase doc instructed adding `Invitation` / `ClientDevice` model mappings pointing at `github.com/zecurity/controller/graph/model.{Invitation,ClientDevice}` — that package does not exist in this repo and would break `go generate`.
+
+**Fix Applied:** Only added `- graph/client.graphqls` to the `schema:` list. No `models:` entries — gqlgen auto-generates the structs into `graph/models_gen.go`, matching how `Connector`, `Shield`, `Resource`, and `DiscoveredService` are already handled.

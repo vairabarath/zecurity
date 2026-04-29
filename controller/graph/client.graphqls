@@ -1,0 +1,30 @@
+type Invitation {
+  id:        ID!
+  email:     String!
+  status:    String!
+  expiresAt: String!
+  createdAt: String!
+}
+
+type ClientDevice {
+  id:           ID!
+  name:         String!
+  os:           String!
+  spiffeId:     String
+  certNotAfter: String
+  lastSeenAt:   String
+  createdAt:    String!
+}
+
+extend type Query {
+  # Returns the caller's enrolled client devices (any authenticated user)
+  myDevices: [ClientDevice!]!
+
+  # Returns invitation details by token (public — no auth required)
+  invitation(token: String!): Invitation
+}
+
+extend type Mutation {
+  # Admin only — creates an invitation and sends email to the given address
+  createInvitation(email: String!): Invitation!
+}

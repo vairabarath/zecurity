@@ -9,6 +9,16 @@ import (
 	"strconv"
 )
 
+type ClientDevice struct {
+	ID           string  `json:"id"`
+	Name         string  `json:"name"`
+	Os           string  `json:"os"`
+	SpiffeID     *string `json:"spiffeId,omitempty"`
+	CertNotAfter *string `json:"certNotAfter,omitempty"`
+	LastSeenAt   *string `json:"lastSeenAt,omitempty"`
+	CreatedAt    string  `json:"createdAt"`
+}
+
 type Connector struct {
 	ID              string          `json:"id"`
 	Name            string          `json:"name"`
@@ -46,6 +56,14 @@ type DiscoveredService struct {
 	ServiceName string `json:"serviceName"`
 	FirstSeen   string `json:"firstSeen"`
 	LastSeen    string `json:"lastSeen"`
+}
+
+type Invitation struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	ExpiresAt string `json:"expiresAt"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type Mutation struct {
