@@ -794,3 +794,25 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Release a new shield binary so deployed shields stop crash-looping
+
+---
+
+## 2026-04-29 — Claude Code (M2, Sprint 7 Phase 1)
+
+**What was done:**
+- Sprint 7 Day 1 unblock — all M2 deliverables landed.
+- New `proto/client/v1/client.proto` — `ClientService` with `GetAuthConfig`, `TokenExchange`, `EnrollDevice`.
+- New `controller/migrations/011_client.sql` — `invitations` + `client_devices` tables with FK to `users` / `workspaces`.
+- New `controller/graph/client.graphqls` — `Invitation`, `ClientDevice`, `myDevices`, `invitation(token)`, `createInvitation`.
+- Added `graph/client.graphqls` to `controller/graph/gqlgen.yml` schema list.
+- Ran `buf generate`, `gqlgen generate`, `npm run codegen` — all clean. `go build ./...` passes. Stub resolver `graph/resolvers/client.resolvers.go` ready for M3.
+- Ticked all M2-D1-* and M2-A* boxes plus the buf/gqlgen/codegen TEAM lines in `Sprint7/path.md`.
+- Phase file frontmatter set to `status: done`.
+
+**Key decisions:**
+- Deviated from phase doc on three points (documented in the phase file's Post-Phase Fixes section): proto `go_package` must include `proto/` segment and use `yourorg/ztna` module; GraphQL fields use `:` separator and `String` instead of nonexistent `Time` scalar; skipped the broken `models:` block — let gqlgen auto-generate into `models_gen.go` per repo convention.
+
+**What's next:**
+- M3 Phase B (`controller/internal/client/service.go` — implement the 3 RPCs) and M3 Phase C (invitation HTTP API + email + resolvers) are unblocked.
+- M4 Phase F1+F2 (Rust CLI scaffold + login flow) unblocked once M3-B lands.
+- M1 Phase E unblocked once M3-C lands.

@@ -72,12 +72,12 @@ tags:
 
 ### DAY 1 — Unblocking Work (Must land before anyone fans out)
 
-- [ ] **M2-D1-A** `proto/client/v1/client.proto` — Create ClientService with 3 RPCs: `GetAuthConfig`, `TokenExchange`, `EnrollDevice`. See [[Sprint7/Member2-Go-Proto/Phase1-Client-Proto-Migration]].
-- [ ] **M2-D1-B** `controller/migrations/011_client.sql` — `invitations` + `client_devices` tables.
-- [ ] **M2-D1-C** `controller/graph/client.graphqls` — Invitation + ClientDevice types, queries, `createInvitation` mutation. Add to `gqlgen.yml`.
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
-- [ ] **TEAM** Run `cd admin && npm run codegen`
+- [x] **M2-D1-A** `proto/client/v1/client.proto` — Create ClientService with 3 RPCs: `GetAuthConfig`, `TokenExchange`, `EnrollDevice`. See [[Sprint7/Member2-Go-Proto/Phase1-Client-Proto-Migration]].
+- [x] **M2-D1-B** `controller/migrations/011_client.sql` — `invitations` + `client_devices` tables.
+- [x] **M2-D1-C** `controller/graph/client.graphqls` — Invitation + ClientDevice types, queries, `createInvitation` mutation. Add to `gqlgen.yml`.
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
+- [x] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **TEAM** Run `cd admin && npm run codegen`
 
 > After Day 1: M3 can start ClientService impl; M1 can start page scaffolds; M4 can start CLI scaffold.
 
@@ -87,9 +87,9 @@ tags:
 
 > See [[Sprint7/Member2-Go-Proto/Phase1-Client-Proto-Migration]] for full specs.
 
-- [ ] **M2-A1** `proto/client/v1/client.proto`
-- [ ] **M2-A2** `controller/migrations/011_client.sql`
-- [ ] **M2-A3** `controller/graph/client.graphqls` + `gqlgen.yml` update
+- [x] **M2-A1** `proto/client/v1/client.proto`
+- [x] **M2-A2** `controller/migrations/011_client.sql`
+- [x] **M2-A3** `controller/graph/client.graphqls` + `gqlgen.yml` update
 
 > Build check: `buf generate` clean + `cd controller && go build ./...` passes.
 
