@@ -129,10 +129,10 @@ tags:
 
 ### PHASE E — M1 Frontend (Depends on: Day 1 codegen done + M3-C done)
 
-- [ ] **M1-E1** `admin/src/App.tsx` — Role-based redirect after auth (ADMIN → /dashboard, MEMBER/VIEWER → /client-install)
-- [ ] **M1-E2** `admin/src/pages/InviteAccept.tsx` — NEW: `/invite/:token` page with Google sign-in
-- [ ] **M1-E3** `admin/src/pages/ClientInstall.tsx` — NEW: download links + install instructions
-- [ ] **M1-E4** Sidebar/Header — "Install Client" button for ADMIN users
+- [x] **M1-E1** `admin/src/App.tsx` — Role-based redirect after auth (ADMIN → /dashboard, MEMBER/VIEWER → /client-install)
+- [x] **M1-E2** `admin/src/pages/InviteAccept.tsx` — NEW: `/invite/:token` page with Google sign-in
+- [x] **M1-E3** `admin/src/pages/ClientInstall.tsx` — NEW: download links + install instructions
+- [x] **M1-E4** Sidebar/Header — "Install Client" button for ADMIN users
 
 > Build check: `cd admin && npm run build` passes.
 
@@ -241,7 +241,7 @@ M3-B  M3-C           M1-E          M4-F1
 
 1. **Always check this file first.** Confirm dependency checkboxes before touching any file.
 2. **Reuse existing PKI.** `pki.Service.SignCSR()` handles cert issuance — do not reimplement.
-3. **Reuse existing OAuth code.** `auth/exchange.go` and `auth/idtoken.go` — TokenExchange gRPC handler calls these directly.
+3. **CLI uses its own Google OAuth app.** `ClientService` does NOT call `authSvc.ExchangeCode` — it has its own private `exchangeCode()` method using `CLIENT_GOOGLE_CLIENT_ID`/`CLIENT_GOOGLE_CLIENT_SECRET`. The admin web app and CLI must be registered as separate OAuth clients in Google Console. See Phase 1 Post-Phase Fixes.
 4. **ClientService = no mTLS.** Unlike ConnectorService, ClientService does not require client certificates on the gRPC connection. JWT Bearer in metadata is the auth mechanism.
 5. **DB migration is 011.** Migrations 001–010 are taken. Do not reuse or skip numbers.
 6. **SPIFFE format for client devices:** `spiffe://ws-{workspace_slug}.zecurity.in/client/{device_id}`
@@ -262,3 +262,49 @@ See individual member phase files for detailed specs:
 - [[Sprint7/Member4-Rust-Client/Phase5-TUN-Mode]]
 
 **M4 TUN mode note:** Phase 5 depends on Sprint 8's Connector `device_tunnel.rs` being live on `:9092`. F4 (daemon structure) can be completed and tested without it. F5 requires the Connector listener to be running.
+
+---
+
+## Post-Sprint Fixes
+
+Bugs discovered during TL review and Phase 1 implementation. All applied before M1 Phase E work began.
+
+### Fix: `CONTROLLER_HOST` missing from env files
+**Phase:** M3 Phase 1 | **File:** `controller/cmd/server/main.go`, `controller/.env`, `controller/.env.example`
+`mustEnv("CONTROLLER_HOST")` was called but var never added to env files — server crashed on startup. Added `CONTROLLER_HOST=localhost:9090` to both files.
+See full details → [[Sprint7/Member3-Go-Controller/Phase1-ClientService-gRPC]]
+
+---
+
+### Fix: CLI OAuth must use separate Google credentials
+**Phase:** M3 Phase 1 | **File:** `controller/internal/client/service.go`, `controller/cmd/server/main.go`
+`TokenExchange` was calling `authSvc.ExchangeCode` / `authSvc.VerifyIDToken` (admin web app credentials). Google rejects a code exchange when the client ID doesn't match. Added private `exchangeCode()` to `ClientService`, new env vars `CLIENT_GOOGLE_CLIENT_ID` + `CLIENT_GOOGLE_CLIENT_SECRET`.
+See full details → [[Sprint7/Member3-Go-Controller/Phase1-ClientService-gRPC]]
+
+---
+
+### Fix: `workspace_name` missing from GET invitation response
+**Phase:** M3 Phase 2 | **File:** `controller/internal/invitation/handler.go`
+`GET /api/invitations/{token}` response omitted `workspace_name`. Frontend `InviteAccept` needs it to call `InitiateAuth(workspaceName)`. `GetByToken` already JOINed it — just wasn't serialized. Added `WorkspaceName` to `invitationResponse`.
+See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
+
+---
+
+### Fix: `AcceptInvitation` did not add user as MEMBER
+**Phase:** M3 Phase 2 | **File:** `controller/internal/invitation/store.go`, `controller/internal/invitation/handler.go`
+`AcceptInvitation` only updated `invitations.status`. The `INSERT INTO workspace_users` step from the plan spec was missing — invited users had no workspace membership after accepting. Fixed store + handler to pass and use `userID`.
+See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
+
+---
+
+### Fix: `CreateInvitation` GraphQL resolver sent blank workspace name in email
+**Phase:** M3 Phase 2 | **File:** `controller/graph/resolvers/client.resolvers.go`
+Resolver passed `""` to `SendInvitation`. Fixed by querying workspace name from DB before calling emailer.
+See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
+
+---
+
+### Fix: `client.graphqls` missing from admin codegen + queries not added
+**Phase:** M3 Phase 2 | **File:** `admin/codegen.yml`, `admin/src/graphql/queries.graphql`, `admin/src/graphql/mutations.graphql`
+`Invitation`/`ClientDevice` types and `createInvitation`/`myDevices`/`invitation` operations were absent from generated TypeScript. Added schema entry to codegen config, added queries + mutation to graphql files, re-ran `make codegen`. Also created `controller/graph/resolvers/client_helpers.go` to house `invitationToGQL()` helper so gqlgen doesn't evict it.
+See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]

@@ -9,8 +9,13 @@ package client
 import (
 	"context"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,30 +39,74 @@ const (
 type Service struct {
 	clientv1.UnimplementedClientServiceServer
 
-	pool           *pgxpool.Pool
-	authSvc        auth.Service
-	pkiSvc         pki.Service
-	googleClientID string
-	controllerHost string
+	pool                 *pgxpool.Pool
+	authSvc              auth.Service
+	pkiSvc               pki.Service
+	clientGoogleClientID     string
+	clientGoogleClientSecret string
+	controllerHost           string
 }
 
 // NewService wires the ClientService with the dependencies it needs.
-// googleClientID is returned to the CLI verbatim so it can build its
-// authorize URL; controllerHost is the public hostname of this controller
-// (without scheme/port) used by the CLI to label its config.
+// clientGoogleClientID / clientGoogleClientSecret are the CLI OAuth app's
+// credentials (separate from the admin web app); controllerHost is the
+// public hostname of this controller used by the CLI to label its config.
 func NewService(
 	pool *pgxpool.Pool,
 	authSvc auth.Service,
 	pkiSvc pki.Service,
-	googleClientID, controllerHost string,
+	clientGoogleClientID, clientGoogleClientSecret, controllerHost string,
 ) *Service {
 	return &Service{
-		pool:           pool,
-		authSvc:        authSvc,
-		pkiSvc:         pkiSvc,
-		googleClientID: googleClientID,
-		controllerHost: controllerHost,
+		pool:                     pool,
+		authSvc:                  authSvc,
+		pkiSvc:                   pkiSvc,
+		clientGoogleClientID:     clientGoogleClientID,
+		clientGoogleClientSecret: clientGoogleClientSecret,
+		controllerHost:           controllerHost,
 	}
+}
+
+// exchangeCode performs the Google OAuth code exchange using the CLI OAuth
+// app's own credentials. The auth code was issued for the CLI's client ID
+// so it must be exchanged with the same client ID — using the admin web
+// app's credentials would cause Google to reject it.
+func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*auth.GoogleTokenResponse, error) {
+	body := url.Values{}
+	body.Set("code", code)
+	body.Set("code_verifier", codeVerifier)
+	body.Set("client_id", s.clientGoogleClientID)
+	body.Set("client_secret", s.clientGoogleClientSecret)
+	body.Set("redirect_uri", redirectURI)
+	body.Set("grant_type", "authorization_code")
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://oauth2.googleapis.com/token", strings.NewReader(body.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token exchange request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errBody map[string]any
+		json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck
+		return nil, fmt.Errorf("google token exchange failed: status=%d body=%v", resp.StatusCode, errBody)
+	}
+
+	var tokenResp auth.GoogleTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return nil, fmt.Errorf("decode token response: %w", err)
+	}
+	if tokenResp.IDToken == "" {
+		return nil, fmt.Errorf("google did not return id_token")
+	}
+	return &tokenResp, nil
 }
 
 // GetAuthConfig returns the OAuth configuration the CLI needs to drive its
@@ -77,7 +126,7 @@ func (s *Service) GetAuthConfig(ctx context.Context, req *clientv1.GetAuthConfig
 	}
 
 	return &clientv1.GetAuthConfigResponse{
-		GoogleClientId: s.googleClientID,
+		GoogleClientId: s.clientGoogleClientID,
 		AuthEndpoint:   googleAuthEndpoint,
 		TokenEndpoint:  googleTokenEndpoint,
 		ControllerHost: s.controllerHost,
@@ -102,12 +151,12 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		return nil, status.Errorf(codes.Internal, "lookup workspace: %v", err)
 	}
 
-	tokens, err := s.authSvc.ExchangeCode(ctx, req.GetCode(), req.GetCodeVerifier(), req.GetRedirectUri())
+	tokens, err := s.exchangeCode(ctx, req.GetCode(), req.GetCodeVerifier(), req.GetRedirectUri())
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "google token exchange failed: %v", err)
 	}
 
-	claims, err := s.authSvc.VerifyIDToken(ctx, tokens.IDToken)
+	claims, err := auth.VerifyGoogleIDToken(ctx, tokens.IDToken, s.clientGoogleClientID)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "id token verification failed: %v", err)
 	}

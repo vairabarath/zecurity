@@ -18,6 +18,8 @@ import ResourceDiscovery from '@/pages/ResourceDiscovery'
 import Step1Email from '@/pages/signup/Step1Email'
 import Step2Workspace from '@/pages/signup/Step2Workspace'
 import Step3Auth from '@/pages/signup/Step3Auth'
+import InviteAccept from '@/pages/InviteAccept'
+import ClientInstall from '@/pages/ClientInstall'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 
@@ -33,8 +35,9 @@ export default function App() {
   return (
     <Routes>
       {/* Public routes */}
-      <Route path="/login"         element={<Login />} />
-      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/login"           element={<Login />} />
+      <Route path="/auth/callback"   element={<AuthCallback />} />
+      <Route path="/invite/:token"   element={<InviteAccept />} />
 
       {/* Signup wizard routes */}
       <Route path="/signup"             element={<Step1Email />} />
@@ -57,7 +60,8 @@ export default function App() {
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
-        <Route path="/topology" element={<TopologyPage />} />
+        <Route path="/topology"          element={<TopologyPage />} />
+        <Route path="/client-install"    element={<ClientInstall />} />
       </Route>
     </Routes>
   )
