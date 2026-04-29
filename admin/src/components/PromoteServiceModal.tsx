@@ -49,10 +49,10 @@ export function PromoteServiceModal({
             <Server className="h-5 w-5" />
           </div>
           <div className="flex-1">
-            <h2 className="text-lg font-semibold">Promote to Resource</h2>
+            <h2 className="text-lg font-semibold">Add Resource</h2>
             <p className="text-sm text-muted-foreground">
-              Promote <span className="font-semibold">{serviceName}</span> (port{' '}
-              <span className="font-mono">{port}/{protocol}</span>) to a managed resource?
+              Add <span className="font-semibold">{serviceName || `Port ${port}`}</span> (
+              <span className="font-mono">{port}/{protocol}</span>) as a managed resource?
             </p>
           </div>
           <button
@@ -104,7 +104,7 @@ export function PromoteServiceModal({
                 Promoting...
               </span>
             ) : (
-              'Promote'
+              'Add Resource'
             )}
           </Button>
         </div>

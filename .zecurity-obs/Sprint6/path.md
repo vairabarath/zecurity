@@ -143,6 +143,23 @@ Two features land together:
 
 ---
 
+### PHASE E2 — M4 Shield UDP Discovery (Depends on: Phase E complete)
+
+> **Rationale:** Resource UI already supports both TCP and UDP resources. Neither has data-plane tunneling yet — Sprint 10 engineers both. Discovery must follow resource capability (not tunnel capability), so UDP belongs in discovery now. The proto, DB, and UI already support it — only `discovery.rs` needs extending.
+
+- [x] **M4-E2-1** `shield/src/discovery.rs` — Add `IGNORED_UDP_PORTS` constant (67 DHCP, 68 DHCP, 123 NTP, 137 NetBIOS-NS, 138 NetBIOS-DGM, 1900 SSDP — plus 5353/5355 already in TCP list)
+- [x] **M4-E2-2** `shield/src/discovery.rs` — Add `service_from_port_udp(port)` lookup (DNS/53, TFTP/69, SNMP/161, Syslog/514, OpenVPN/1194, RADIUS/1812, SIP/5060, IKE/500, IPSec NAT-T/4500)
+- [x] **M4-E2-3** `shield/src/discovery.rs` — Add `parse_proc_udp(path, is_v6)` — identical structure to `parse_proc_tcp` but filters on state `"07"` (bound UDP socket) instead of `"0A"` (TCP LISTEN)
+- [x] **M4-E2-4** `shield/src/discovery.rs` — Extend `discover_sync()` to scan `/proc/net/udp` + `/proc/net/udp6`; reuse existing `seen: HashSet<(u16, &'static str)>` — `(port, "udp")` entries are naturally separate from `(port, "tcp")`
+
+> **No other files change.** Proto `DiscoveredService.protocol` already exists. DB PK `(shield_id, protocol, port)` already separates TCP/UDP rows. UI protocol column already renders. Connector network scanner stays TCP-only.
+
+> Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
+
+> Phase spec: [[Sprint6/Member4-Rust-Shield/Phase3-UDP-Discovery]]
+
+---
+
 ### PHASE F — M1 Frontend (Depends on: Day 1 codegen done)
 
 - [x] **M1-F1** `admin/src/pages/Shields.tsx` — Add "Discovered Services" expandable panel per shield row; columns: Protocol, Port, Service Name, Bound IP, First Seen, Last Seen, Promote button
@@ -228,3 +245,66 @@ See individual member phase files for detailed specs:
 - [[Sprint6/Member3-Go-Connector/Phase3-Connector-Discovery]]
 - [[Sprint6/Member4-Rust-Shield/Phase1-Discovery-Module]]
 - [[Sprint6/Member4-Rust-Shield/Phase2-Control-Stream-Wiring]]
+
+---
+
+## Post-Sprint 6 Fixes (Merged from main to sprint6-member3)
+
+These fixes were applied after Sprint 6 completion to address bugs discovered during testing.
+
+### Fix 1: Network Setup Non-Fatal
+- **File:** `shield/src/network.rs`
+- **Issue:** Shield crashed on startup if `zecurity0` TUN interface couldn't be created (e.g., insufficient permissions)
+- **Fix:** Changed network setup failures from fatal to non-fatal warning. Shield continues running without the network interface.
+- **File:** `shield/src/main.rs` (line 137) - now logs `warn!` instead of returning error
+
+### Fix 2: Discovery Scan Loop Early Exit
+- **File:** `connector/src/discovery/scan.rs`
+- **Issue:** Scan loop could hang if target was unreachable
+- **Fix:** Added proper early exit conditions
+
+### Fix 3: Wildcard Bound IP Handling
+- **File:** `shield/src/discovery.rs`
+- **Issue:** Services bound to `0.0.0.0` (all interfaces) weren't handled correctly
+- **Fix:** Added wildcard IP handling in discovery
+
+### Fix 4: IPv6 Address Parsing
+- **File:** `shield/src/discovery.rs`
+- **Issue:** `::1` (IPv6 loopback) was incorrectly parsed as `::100:0` due to `word.to_be().to_le_bytes()` 
+- **Fix:** Changed to `word.to_le_bytes()` to correctly recover network-order bytes from kernel's native LE u32 output
+
+### Fix 5: Better Discovery Logging
+- **File:** `connector/src/agent_server.rs`
+- **Change:** Enhanced logging with `added`, `removed`, `full_sync` fields for better observability
+
+- **File:** `connector/src/control_stream.rs`  
+- **Change:** Added `report_count` to flush log message
+
+### Fix 6: Version Bump
+- **Files:** `shield/Cargo.toml`, `connector/Cargo.toml`
+- **Change:** Bumped to v1.0.4
+
+### Fix 7: Frontend ResourceDiscovery Page
+- **File:** `admin/src/pages/ResourceDiscovery.tsx`
+- **Change:** Added new page (367 lines) for discovery UI
+
+### Fix 8: ScanModal Results Table Simplification
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table had 6 columns causing overflow at 960px modal width
+- **Fix:** Collapsed IP+Port into one `host:port` cell, dropped redundant Protocol and Via columns, replaced text button with + icon
+
+### Fix 9: ScanModal Results Table Scrollable
+- **File:** `admin/src/components/ScanModal.tsx`
+- **Issue:** Table wrapper missing `flex-1/min-h-0` caused last rows to be clipped with no scroll handle
+- **Fix:** Switch wrapper to `flex-1 flex-col`, header to `shrink-0`, body to `flex-1 overflow-y-auto`
+
+---
+
+### Commits Merged
+```
+32815a6 fix(admin): make ScanModal results table scrollable to last row
+19002cf feat(admin): simplify ScanModal results table — 6 cols → 3
+53b94de fix(shield): correct IPv6 address parsing from /proc/net/tcp6
+275da31 chore: bump connector and shield to v1.0.4
+40f3261 fix(connector,shield): v1.0.2 — scan loop early exit + wildcard bound IP
+```

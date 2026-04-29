@@ -210,3 +210,14 @@ cd admin && npm run codegen
 buf generate    # must be clean
 cd controller && go build ./...
 ```
+
+---
+
+## Post-Phase Fixes (Applied After Sprint 6)
+
+**Note:** No specific fixes were applied to this phase's files. The proto definitions and schema were already correct. Fixes were primarily applied to:
+- Member4 (Shield): Network setup non-fatal, IPv6 parsing
+- Member3 (Connector): Scan loop early exit, logging enhancements
+- Member1 (Frontend): New ResourceDiscovery page
+
+**Version Bump:** Both `shield/Cargo.toml` and `connector/Cargo.toml` were bumped to v1.0.4 as part of the release process.

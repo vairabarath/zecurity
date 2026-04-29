@@ -777,3 +777,20 @@ Most recent first. Every agent appends an entry after their session.
 **What's next:**
 - Sprint 6 fully complete on this branch; ready for PR to main when other members finish
 - Sprint 7 planning available in `.zecurity-obs/Sprint7/path.md`
+
+---
+
+## 2026-04-27 — M3 (Claude Sonnet 4.6) — Shield network.rs restart crash fix
+
+**What was done:**
+- Fixed `shield/src/network.rs` `interface_index()` — was propagating `ENODEV` (os error 19) as a fatal error instead of returning `Ok(None)`, causing the shield to crash on every restart with "failed to restore network on startup / No such device"
+- Root cause: `zecurity0` TUN interface is destroyed when the shield process exits; on the next startup `interface_index()` received `ENODEV` from the netlink query and treated it as a hard failure rather than "interface doesn't exist yet, create it"
+- Fix: match `NetlinkError::NetlinkError` where `code.get() == -19` and return `Ok(None)`, letting `setup_tun_interface()` fall through to the creation path
+- Updated `.zecurity-obs/Services/Shield.md` to document the startup-restore behaviour and the ENODEV handling
+- `cargo build --manifest-path shield/Cargo.toml` passes clean
+
+**Key decisions:**
+- Fixed at the `interface_index` level — keeps the change minimal and lets the existing idempotent creation path handle the fresh-create on restart
+
+**What's next:**
+- Release a new shield binary so deployed shields stop crash-looping
