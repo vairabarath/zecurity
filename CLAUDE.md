@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 6 is the active sprint.** The team is building two discovery features — Shield Discovery (Shield scans `/proc/net/tcp` and reports services via Control stream) and Connector Network Discovery (Admin triggers a TCP scan across a CIDR/IP scope via Connector, results appear in the UI for resource creation).
+**Sprint 7 is the active sprint.** Building Client Application (Phase 1) — Admin invites users via email, client CLI login with Google OAuth, device enrollment with mTLS certificate, status command, role-based routing in Admin UI (admin → dashboard, member → client-install).
 
 ---
 
@@ -17,7 +17,7 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint6/path.md` — dependency map and progress checkboxes
+2. Read `.zecurity-obs/Sprint7/path.md` — dependency map and progress checkboxes
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
@@ -31,8 +31,8 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint6/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint6/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint7/path.md` | Dependency map + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint7/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
@@ -87,6 +87,7 @@ Example fix format:
 cd controller && go build ./...                              # Go controller
 cd connector && cargo build                                  # Rust connector
 cargo build --manifest-path shield/Cargo.toml               # Rust shield
+cd client && cargo build                                   # Rust client CLI
 buf generate                                                 # Proto → Go stubs (from repo root)
 cd controller && go generate ./graph/...                     # GraphQL codegen
 cd admin && npm run codegen                                  # Frontend TS hooks
@@ -96,6 +97,13 @@ cd admin && npm run codegen                                  # Frontend TS hooks
 
 ## Rules (non-negotiable)
 
+Sprint 7 specific:
+- Build gate passes before proceeding to next phase
+- ClientService uses plain TLS + JWT Bearer (no mTLS for client yet)
+- Reuse existing PKI (`pki.Service.SignCSR()`) and OAuth (`auth/exchange.go`)
+- CLI state in memory only — tokens, cert, key never written to disk
+
+Sprint 6 and earlier:
 - Build gate passes before proceeding to next phase
 - Never change proto field numbers
 - Check `Sprint5/path.md` conflict zone table before editing shared files
