@@ -8,6 +8,7 @@ import (
 
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -181,6 +182,14 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 			return handler(ctx, req)
 		}
 
+		// Skip the entire ClientService — Sprint 7 end-user device flow.
+		// The CLI has no certificate yet (GetAuthConfig/TokenExchange) or only
+		// receives one as the response (EnrollDevice). Auth is JWT-based via a
+		// field inside the request, validated by the ClientService handler.
+		if strings.HasPrefix(info.FullMethod, "/client.v1.ClientService/") {
+			return handler(ctx, req)
+		}
+
 		// Extract peer TLS info from the gRPC connection.
 		p, ok := peer.FromContext(ctx)
 		if !ok {
@@ -262,5 +271,6 @@ func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trust
 // Compile-time check: ensure the Enroll method name matches expectations.
 // If the proto definition changes, this will fail at compile time.
 var _ = pb.ConnectorService_Enroll_FullMethodName
+var _ = clientpb.ClientService_GetAuthConfig_FullMethodName
 var _ = shieldpb.ShieldService_Enroll_FullMethodName
 var _ = appmeta.SPIFFEGlobalTrustDomain

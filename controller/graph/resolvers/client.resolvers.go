@@ -7,22 +7,117 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // CreateInvitation is the resolver for the createInvitation field.
+// Admin-only — role check enforced here (GraphQL has no per-field middleware).
 func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (*graph.Invitation, error) {
-	panic(fmt.Errorf("not implemented: CreateInvitation - createInvitation"))
+	tc, ok := tenant.Get(ctx)
+	if !ok {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+	if tc.Role != "admin" {
+		return nil, fmt.Errorf("forbidden: only admins can create invitations")
+	}
+
+	inv, err := r.InvitationStore.CreateInvitation(ctx, email, tc.TenantID, tc.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("create invitation: %w", err)
+	}
+
+	go r.InvitationEmailer.SendInvitation(inv, "") //nolint:errcheck
+
+	return invitationToGQL(inv), nil
 }
 
 // MyDevices is the resolver for the myDevices field.
 func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, error) {
-	panic(fmt.Errorf("not implemented: MyDevices - myDevices"))
+	tc, ok := tenant.Get(ctx)
+	if !ok {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+
+	rows, err := r.Pool.Query(ctx,
+		`SELECT id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at
+		   FROM client_devices
+		  WHERE user_id = $1
+		    AND workspace_id = $2
+		  ORDER BY created_at DESC`,
+		tc.UserID, tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query client devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []*graph.ClientDevice
+	for rows.Next() {
+		var (
+			id, name, os string
+			spiffeID     *string
+			certNotAfter *time.Time
+			lastSeenAt   *time.Time
+			createdAt    time.Time
+		)
+		if err := rows.Scan(&id, &name, &os, &spiffeID, &certNotAfter, &lastSeenAt, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan client device: %w", err)
+		}
+
+		d := &graph.ClientDevice{
+			ID:        id,
+			Name:      name,
+			Os:        os,
+			SpiffeID:  spiffeID,
+			CreatedAt: createdAt.UTC().Format(time.RFC3339),
+		}
+		if certNotAfter != nil {
+			s := certNotAfter.UTC().Format(time.RFC3339)
+			d.CertNotAfter = &s
+		}
+		if lastSeenAt != nil {
+			s := lastSeenAt.UTC().Format(time.RFC3339)
+			d.LastSeenAt = &s
+		}
+		devices = append(devices, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate client devices: %w", err)
+	}
+
+	return devices, nil
 }
 
 // Invitation is the resolver for the invitation field.
+// Public — returns nil for unknown/expired/non-pending tokens without leaking details.
 func (r *queryResolver) Invitation(ctx context.Context, token string) (*graph.Invitation, error) {
-	panic(fmt.Errorf("not implemented: Invitation - invitation"))
+	inv, err := r.InvitationStore.GetByToken(ctx, token)
+	if errors.Is(err, invitation.ErrNotFound) {
+		return nil, nil //nolint:nilnil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup invitation: %w", err)
+	}
+
+	if inv.Status != "pending" || time.Now().After(inv.ExpiresAt) {
+		return nil, nil //nolint:nilnil
+	}
+
+	return invitationToGQL(inv), nil
+}
+
+func invitationToGQL(inv *invitation.Invitation) *graph.Invitation {
+	return &graph.Invitation{
+		ID:        inv.ID,
+		Email:     inv.Email,
+		Status:    inv.Status,
+		ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339),
+		CreatedAt: inv.CreatedAt.UTC().Format(time.RFC3339),
+	}
 }
