@@ -192,6 +192,28 @@ query GetScanResults($requestId: String!) {
   }
 }
 
+query GetInvitation($token: String!) {
+  invitation(token: $token) {
+    id
+    email
+    status
+    expiresAt
+    createdAt
+  }
+}
+
+query MyDevices {
+  myDevices {
+    id
+    name
+    os
+    spiffeId
+    certNotAfter
+    lastSeenAt
+    createdAt
+  }
+}
+
 query GetResources($remoteNetworkId: String!) {
   resources(remoteNetworkId: $remoteNetworkId) {
     id

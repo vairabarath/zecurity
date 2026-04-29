@@ -319,4 +319,97 @@ cd controller && go build ./...
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: `workspace_name` missing from GET invitation response
+**Issue:** `GET /api/invitations/{token}` response did not include `workspace_name`. Frontend `InviteAccept` page needs it to call `InitiateAuth(workspaceName)` and start the OAuth flow for the correct workspace.
+
+**Root Cause:** Phase spec comment says "Return invitation JSON (id, email, workspace name, status, expires_at)" but the JSON example below it omitted the field. M3 followed the example. `GetByToken` already JOINs the workspace table and populates `inv.WorkspaceName` — it just wasn't serialized.
+
+**Fix Applied (`controller/internal/invitation/handler.go`):**
+```go
+// BEFORE:
+type invitationResponse struct {
+    ID        string `json:"id"`
+    Email     string `json:"email"`
+    Status    string `json:"status"`
+    ExpiresAt string `json:"expires_at"`
+    CreatedAt string `json:"created_at"`
+}
+
+// AFTER:
+type invitationResponse struct {
+    ID            string `json:"id"`
+    Email         string `json:"email"`
+    Status        string `json:"status"`
+    WorkspaceName string `json:"workspace_name"`
+    ExpiresAt     string `json:"expires_at"`
+    CreatedAt     string `json:"created_at"`
+}
+// toResponse() also updated to populate WorkspaceName: inv.WorkspaceName
+```
+
+---
+
+### Fix: `AcceptInvitation` did not add user as MEMBER
+**Issue:** `store.AcceptInvitation` only updated `invitations.status = 'accepted'`. The invited user was never added to `workspace_users`, so they had no membership in the workspace after accepting.
+
+**Root Cause:** Plan spec explicitly showed the `INSERT INTO workspace_users` step but M3's implementation omitted it.
+
+**Fix Applied (`controller/internal/invitation/store.go`):**
+```go
+// Added after the UPDATE invitations SET status = 'accepted':
+_, err = s.db.Exec(ctx,
+    `INSERT INTO workspace_users (workspace_id, user_id, role)
+     VALUES ($1, $2, 'member')
+     ON CONFLICT (workspace_id, user_id) DO NOTHING`,
+    workspaceID, userID,
+)
+```
+
+**Fix Applied (`controller/internal/invitation/handler.go`):**
+```go
+// BEFORE:
+h.store.AcceptInvitation(r.Context(), token, tc.TenantID)
+// AFTER:
+h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID)
+```
+
+---
+
+### Fix: `CreateInvitation` GraphQL resolver passed empty workspace name to emailer
+**Issue:** `go r.InvitationEmailer.SendInvitation(inv, "")` — invitation email body contained blank workspace name. REST handler fell back to "your workspace" but GraphQL resolver did not.
+
+**Root Cause:** `CreateInvitation` store method does an INSERT (no JOIN) so `inv.WorkspaceName` is always empty. Resolver didn't query it separately.
+
+**Fix Applied (`controller/graph/resolvers/client.resolvers.go`):**
+```go
+// Added before SendInvitation call:
+var workspaceName string
+r.Pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id = $1`, tc.TenantID).Scan(&workspaceName)
+if workspaceName == "" {
+    workspaceName = "your workspace"
+}
+go r.InvitationEmailer.SendInvitation(inv, workspaceName)
+```
+
+---
+
+### Fix: `client.graphqls` missing from admin codegen config
+**Issue:** `admin/codegen.yml` listed all schema files except `client.graphqls`. `Invitation`, `ClientDevice`, `createInvitation`, `myDevices` types were absent from the generated TypeScript — frontend could not use them.
+
+**Root Cause:** M3 created `controller/graph/client.graphqls` but never registered it in the frontend codegen config.
+
+**Fix Applied (`admin/codegen.yml`):**
+```yaml
+# Added:
+- '../controller/graph/client.graphqls'
+```
+
+**Also added to `admin/src/graphql/queries.graphql`:**
+- `GetInvitation($token)` query
+- `MyDevices` query
+
+**Also added to `admin/src/graphql/mutations.graphql`:**
+- `CreateInvitation($email)` mutation
+
+**Also created `controller/graph/resolvers/client_helpers.go`:**
+- Moved `invitationToGQL()` helper out of `client.resolvers.go` into a separate file so gqlgen does not evict it on regeneration.

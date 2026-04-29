@@ -12,6 +12,29 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-04-28 — Claude Code — TL Review + UDP Discovery Planning
+
+**What was done:**
+- Fixed `connector/src/discovery/scan.rs` — Phase 2 probe loop used `while let Some(Ok((ip, port, true, svc)))` which exits on first closed-port result (Rust literal pattern). Changed to `while let Some(result)` + inner `if let Ok`. Root cause of scan always returning 0 results.
+- Fixed `shield/src/discovery.rs` — IPv6 wildcard `::` was reported as `bound_ip` causing PromoteDiscoveredService to fail. Added `normalize_bound_ip()` with LAN IP detection.
+- Fixed `shield/src/discovery.rs` — `parse_proc_ipv6` used `word.to_be().to_le_bytes()` double-conversion garbling `::1` (loopback) to `::100:0`. Changed to `word.to_le_bytes()`.
+- Released both connector and shield at `v1.0.4` — deleted and re-pushed `shield-v1.0.4` after the IPv6 parse fix landed.
+- Fixed `admin/src/components/ScanModal.tsx` — collapsed 6-column results table to 3 (Host:Port, Service, + icon). Removed VIA (UUID) and Protocol columns. Fixed scroll: table wrapper missing `flex-1 min-h-0`, last row was clipped.
+- Conducted full Sprint 6 flow review for TL: data flow diagrams, file references, correctness points, E2E checklist.
+- Planned Phase E2 — UDP local discovery for Shield. Created `Sprint6/Member4-Rust-Shield/Phase3-UDP-Discovery.md`. Updated `Sprint6/path.md` with Phase E2 checkboxes.
+
+**Key decisions:**
+- UDP discovery added to Shield local scan (`/proc/net/udp`) because resource UI already supports UDP resources and neither TCP nor UDP has data-plane tunneling yet — they are on equal footing until Sprint 10.
+- Connector network scanner stays TCP-only — UDP network scanning (no handshake, ICMP-dependent) is a fundamentally different problem deferred to Sprint 10.
+- PID/process name correlation (inode → `/proc/<pid>/fd/`) rejected for main daemon — requires `CAP_DAC_READ_SEARCH` + `CAP_SYS_PTRACE` on a non-root Shield user. Option 1 (accept limitation, port lookup covers 90%) recommended.
+
+**What's next:**
+- Implement Phase E2 (M4): extend `discovery.rs` with UDP proc parsing — 4 steps, one file only.
+- Run Sprint 6 E2E verification checklist (all items unchecked in path.md).
+- Sprint 7 planning: Client enrollment (end-user device cert + SPIFFE identity).
+
+---
+
 ## 2026-04-27 — Claude Code — M1 Phase 2 (Connector Network Scan UI)
 
 **What was done:**

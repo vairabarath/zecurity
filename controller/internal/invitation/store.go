@@ -83,10 +83,10 @@ func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, erro
 	return &inv, nil
 }
 
-// AcceptInvitation marks the invitation as accepted.
-// The caller must already be authenticated to the invited workspace (their
-// JWT tenant_id matches the invitation's workspace_id — enforced in handler).
-func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID string) error {
+// AcceptInvitation marks the invitation as accepted and adds the user to the
+// workspace as MEMBER. The caller must already be authenticated to the invited
+// workspace (JWT tenant_id == invitation workspace_id — enforced in handler).
+func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID string) error {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE invitations
 		    SET status = 'accepted'
@@ -101,6 +101,16 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID string)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO workspace_users (workspace_id, user_id, role)
+		 VALUES ($1, $2, 'member')
+		 ON CONFLICT (workspace_id, user_id) DO NOTHING`,
+		workspaceID, userID,
+	)
+	if err != nil {
+		return fmt.Errorf("add user to workspace: %w", err)
 	}
 	return nil
 }
