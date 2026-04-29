@@ -224,7 +224,8 @@ func main() {
 		db.Pool,
 		authSvc,
 		pkiService,
-		mustEnv("GOOGLE_CLIENT_ID"),
+		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
+		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)

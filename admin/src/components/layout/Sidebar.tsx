@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
 import {
   Box,
+  Download,
   LayoutDashboard,
   Network,
   Plug,
@@ -68,6 +69,9 @@ export function Sidebar() {
         {items.map((item) => (
           <NavItem key={item.to} {...item} />
         ))}
+        {user?.role === 'ADMIN' && (
+          <NavItem to="/client-install" label="Install Client" icon={Download} />
+        )}
       </nav>
 
       <div className="mx-1 mt-3 rounded-[14px] border border-border bg-secondary/70 p-3">

@@ -26,20 +26,22 @@ func NewHandler(store *Store, emailer *Emailer) *Handler {
 
 // invitationResponse is the JSON shape returned for all invitation endpoints.
 type invitationResponse struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	Status    string `json:"status"`
-	ExpiresAt string `json:"expires_at"`
-	CreatedAt string `json:"created_at"`
+	ID            string `json:"id"`
+	Email         string `json:"email"`
+	Status        string `json:"status"`
+	WorkspaceName string `json:"workspace_name"`
+	ExpiresAt     string `json:"expires_at"`
+	CreatedAt     string `json:"created_at"`
 }
 
 func toResponse(inv *Invitation) invitationResponse {
 	return invitationResponse{
-		ID:        inv.ID,
-		Email:     inv.Email,
-		Status:    inv.Status,
-		ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339),
-		CreatedAt: inv.CreatedAt.UTC().Format(time.RFC3339),
+		ID:            inv.ID,
+		Email:         inv.Email,
+		Status:        inv.Status,
+		WorkspaceName: inv.WorkspaceName,
+		ExpiresAt:     inv.ExpiresAt.UTC().Format(time.RFC3339),
+		CreatedAt:     inv.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -122,7 +124,7 @@ func (h *Handler) Accept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID); err != nil {
+	if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "invitation not found, already used, or expired")
 			return

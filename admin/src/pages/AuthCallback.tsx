@@ -67,8 +67,25 @@ export default function AuthCallback() {
         })
         setUser(result.data!.me)
 
-        // Step 5 — Navigate to dashboard
-        navigate('/dashboard', { replace: true })
+        // Step 5 — Accept invite if this login came from an invite link
+        const inviteToken = sessionStorage.getItem('ztna_invite_token')
+        if (inviteToken) {
+          sessionStorage.removeItem('ztna_invite_token')
+          const jwt = useAuthStore.getState().accessToken
+          await fetch(`/api/invitations/${inviteToken}/accept`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${jwt}` },
+          })
+          // Errors are intentionally ignored — expired or already-accepted
+          // invitations should not block the user from logging in.
+        }
+
+        // Step 6 — Role-based redirect
+        if (result.data!.me.role === 'ADMIN') {
+          navigate('/dashboard', { replace: true })
+        } else {
+          navigate('/client-install', { replace: true })
+        }
 
       } catch {
         // Token was issued but me query failed.

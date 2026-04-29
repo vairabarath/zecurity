@@ -112,3 +112,9 @@ Sprint 6 and earlier:
 - Shield validates `resource.host == detect_lan_ip()` before applying nftables
 - nftables `chain resource_protect` always flushed + rebuilt atomically — never appended
 - Resource instructions delivered via heartbeat piggyback only — no new RPCs
+
+---
+
+## Tool Usage
+
+For any file search or grep in the current git-indexed directory, use the `fff` MCP tools (`ffgrep`, `fffind`, `fff-multi-grep`). They are faster, more token-efficient, and provide frecency-ranked results with git status annotations.
