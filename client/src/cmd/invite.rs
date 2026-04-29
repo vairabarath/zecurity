@@ -12,7 +12,7 @@ struct InviteRequest<'a> {
 
 #[derive(Deserialize)]
 struct InviteResponse {
-    email:      String,
+    email: String,
     expires_at: String,
 }
 
@@ -34,12 +34,24 @@ pub async fn run(email: String) -> Result<()> {
     match resp.status().as_u16() {
         201 => {
             let inv: InviteResponse = resp.json().await?;
-            println!("Invitation sent to {} (expires: {})", inv.email, inv.expires_at);
+            println!(
+                "Invitation sent to {} (expires: {})",
+                inv.email, inv.expires_at
+            );
         }
-        401 => return Err(anyhow!("Session expired. Run `zecurity-client login` again.")),
+        401 => {
+            return Err(anyhow!(
+                "Session expired. Run `zecurity-client login` again."
+            ))
+        }
         403 => return Err(anyhow!("Permission denied. Only admins can invite users.")),
-        409 => return Err(anyhow!("{} is already invited or a workspace member.", email)),
-        s   => {
+        409 => {
+            return Err(anyhow!(
+                "{} is already invited or a workspace member.",
+                email
+            ))
+        }
+        s => {
             let body = resp.text().await.unwrap_or_default();
             return Err(anyhow!("Error {}: {}", s, body));
         }
