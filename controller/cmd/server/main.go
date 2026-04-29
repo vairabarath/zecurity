@@ -151,8 +151,10 @@ func main() {
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(
-			http.HandlerFunc(inviteHandler.Create),
+		middleware.RequireRole("admin")(
+			middleware.WorkspaceGuard(db.Pool)(
+				http.HandlerFunc(inviteHandler.Create),
+			),
 		),
 	)
 	mux.Handle("POST /api/invitations", inviteCreateRoute)
