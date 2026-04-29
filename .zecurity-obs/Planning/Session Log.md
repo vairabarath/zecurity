@@ -869,3 +869,21 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Run login against the local controller; it should proceed past TLS into `GetAuthConfig` / OAuth.
+
+---
+
+## 2026-04-29 — Codex (M4, Sprint 7 client state persistence fix)
+
+**What was done:**
+- Added `client/src/state_store.rs` for persisted `StoredWorkspaceState`.
+- `zecurity-client login` now saves workspace/user/device/session state after enrollment.
+- Private key PEM is encrypted at rest with AES-256-GCM (`enc1:<base64(nonce||ciphertext)>`); the AES key is stored separately in a 0600 `.key` file.
+- `zecurity-client status` now loads saved state and prints logged-in user, cert expiry, device ID, and SPIFFE ID.
+- `zecurity-client logout` deletes the saved state and key files.
+- Documented the corrected Sprint 7 storage behavior in `Sprint7/path.md` and the M4 Phase 4 Post-Phase Fixes section.
+
+**Key decisions:**
+- Treated "in memory only" as applying to the decrypted private key, not to all client session state. Persisting certs, tokens, and metadata is required for `status`, `logout`, and Sprint 8 tunnel startup.
+
+**What's next:**
+- Re-run `zecurity-client login`, then `zecurity-client status`; status should show the saved user and certificate expiry instead of "Not connected".

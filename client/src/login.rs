@@ -24,76 +24,89 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     let ca_pem = fetch_controller_ca(conf).await?;
     let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;
 
-    // 1. Get auth config
-    let auth_cfg = grpc
-        .get_auth_config(GetAuthConfigRequest {
-            workspace_slug: conf.workspace.clone(),
-        })
-        .await?
-        .into_inner();
-
-    // 2. PKCE
+    // CLI-Controller PKCE — CLI generates this pair.
+    // code_challenge is sent to the controller in InitiateAuth.
+    // code_verifier is kept locally and sent in TokenExchange.
+    // The controller verifies SHA256(code_verifier) == code_challenge.
     let mut verifier_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut verifier_bytes);
     let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
     let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
 
-    // 3. Local callback server
+    // Local callback server — receives the ctrl_code from the controller's
+    // redirect after it handles the Google OAuth callback server-side.
     let (tx, rx) = oneshot::channel::<String>();
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
 
-    let app = Router::new().route("/callback", get(move |Query(params): Query<HashMap<String, String>>| {
-        let tx = tx_clone.clone();
-        async move {
-            if let Some(code) = params.get("code") {
-                if let Some(sender) = tx.lock().await.take() {
-                    let _ = sender.send(code.clone());
+    let app = Router::new().route(
+        "/callback",
+        get(move |Query(params): Query<HashMap<String, String>>| {
+            let tx = tx_clone.clone();
+            async move {
+                if let Some(code) = params.get("code") {
+                    if let Some(sender) = tx.lock().await.take() {
+                        let _ = sender.send(code.clone());
+                    }
                 }
+                Html(
+                    "<html><body><h2>Authentication complete. \
+                     You can close this tab.</h2></body></html>",
+                )
             }
-            Html("<html><body><h2>Authentication complete. You can close this tab.</h2></body></html>")
-        }
-    }));
+        }),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+    let local_redirect_uri = format!("http://127.0.0.1:{}/callback", port);
     tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
 
-    // 4. Open browser
-    let oauth_url = format!(
-        "{}?client_id={}&redirect_uri={}&response_type=code\
-         &scope=openid%20email&code_challenge={}&code_challenge_method=S256",
-        auth_cfg.auth_endpoint,
-        auth_cfg.google_client_id,
-        urlencoding::encode(&redirect_uri),
-        code_challenge,
-    );
-    println!("Opening browser for authentication...");
-    println!("If the browser doesn't open, visit:\n{}", oauth_url);
-    open::that(&oauth_url).ok();
+    // InitiateAuth — controller builds the Google OAuth URL, stores the
+    // PKCE session, and returns the full auth_url. The CLI never constructs
+    // the Google URL directly. The controller's fixed /api/clients/callback
+    // is embedded in auth_url as the redirect_uri.
+    println!("Initiating authentication...");
+    let initiated = grpc
+        .initiate_auth(InitiateAuthRequest {
+            workspace_slug: conf.workspace.clone(),
+            code_challenge,
+            local_redirect_uri,
+        })
+        .await?
+        .into_inner();
 
-    // 5. Wait for code (5 min timeout)
-    let code = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+    // Open browser with the controller-built auth URL.
+    println!("Opening browser for authentication...");
+    println!(
+        "If the browser doesn't open, visit:\n{}",
+        initiated.auth_url
+    );
+    open::that(&initiated.auth_url).ok();
+
+    // Wait for ctrl_code delivered by the controller's callback redirect
+    // to our local server (5 minute timeout).
+    let ctrl_code = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
         .await
         .map_err(|_| anyhow!("Login timed out after 5 minutes"))??;
 
-    // 6. TokenExchange
+    // TokenExchange — presents session_id, ctrl_code, and code_verifier.
+    // The controller verifies ctrl_code matches its session record and that
+    // SHA256(code_verifier) == code_challenge from InitiateAuth (PKCE).
     println!("Exchanging token...");
     let tok = grpc
         .token_exchange(TokenExchangeRequest {
-            workspace_slug: conf.workspace.clone(),
-            code,
+            session_id: initiated.session_id,
+            ctrl_code,
             code_verifier,
-            redirect_uri,
             invite_token: invite_token.unwrap_or_default(),
         })
         .await?
         .into_inner();
 
-    // 7. Generate P-384 keypair in memory — never written to disk
+    // Generate P-384 keypair in memory — never written to disk.
     println!("Generating device certificate...");
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?;
     let private_key_pem = key_pair.serialize_pem();
@@ -111,7 +124,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         .push(rcgen::DnType::CommonName, &hostname);
     let csr_pem = params.serialize_request(&key_pair)?.pem()?;
 
-    // 8. EnrollDevice
+    // EnrollDevice — unchanged from the original flow.
     let enroll = grpc
         .enroll_device(EnrollDeviceRequest {
             access_token: tok.access_token.clone(),
@@ -122,7 +135,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         .await?
         .into_inner();
 
-    // 9. Build CA chain — concatenate workspace CA + intermediate
+    // Build CA chain — concatenate workspace CA + intermediate.
     let ca_cert_pem = format!(
         "{}\n{}",
         enroll.workspace_ca_pem, enroll.intermediate_ca_pem
@@ -144,7 +157,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             role: String::new(),
         },
         device: DeviceInfo {
-            id: String::new(),
+            id: enroll.device_id,
             spiffe_id: enroll.spiffe_id,
             certificate_pem: enroll.certificate_pem,
             private_key_pem,
