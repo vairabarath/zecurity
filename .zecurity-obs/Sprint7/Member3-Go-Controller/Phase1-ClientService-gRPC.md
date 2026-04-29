@@ -319,4 +319,43 @@ Must pass with no errors.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: `CONTROLLER_HOST` missing from env files
+**Issue:** `main.go` calls `mustEnv("CONTROLLER_HOST")` but the var was never added to `.env.example` or `.env`. Server crashes on startup.
+
+**Root Cause:** Plan specified "add this env var" but M3 forgot to add it to the env files.
+
+**Fix Applied:**
+Added to `controller/.env.example` and `controller/.env`:
+```
+CONTROLLER_HOST=localhost:9090
+```
+
+---
+
+### Fix: CLI OAuth app must use separate Google credentials
+**Issue:** `ClientService.TokenExchange` called `authSvc.ExchangeCode` and `authSvc.VerifyIDToken` — both hardwired to the admin web app's `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`. Google rejects a code exchange when the client ID used to exchange doesn't match the client ID that issued the auth code. The `aud` check in `VerifyIDToken` also fails for the same reason.
+
+**Root Cause:** Plan assumed the CLI would reuse the admin's Google credentials. In practice the CLI needs its own OAuth app (desktop app type) with its own credentials.
+
+**Fix Applied (`controller/internal/client/service.go`):**
+- Added `clientGoogleClientSecret` field to `Service` struct
+- Updated `NewService` signature: `clientGoogleClientID, clientGoogleClientSecret, controllerHost string`
+- Added private `exchangeCode()` method that posts to Google token endpoint using CLI credentials directly (does not call `authSvc.ExchangeCode`)
+- `TokenExchange` now calls `s.exchangeCode(...)` + `auth.VerifyGoogleIDToken(ctx, token, s.clientGoogleClientID)` instead of the auth service methods
+
+**Fix Applied (`controller/cmd/server/main.go`):**
+```go
+// BEFORE:
+mustEnv("GOOGLE_CLIENT_ID"),
+// AFTER:
+mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
+mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
+```
+
+**New env vars added to `.env.example` and `.env`:**
+```
+CLIENT_GOOGLE_CLIENT_ID=your_cli_oauth_app_client_id
+CLIENT_GOOGLE_CLIENT_SECRET=your_cli_oauth_app_client_secret
+```
+
+**Related files:** `controller/internal/client/service.go`, `controller/cmd/server/main.go`, `controller/.env.example`, `controller/.env`

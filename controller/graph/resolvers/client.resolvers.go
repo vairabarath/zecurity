@@ -32,7 +32,12 @@ func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (
 		return nil, fmt.Errorf("create invitation: %w", err)
 	}
 
-	go r.InvitationEmailer.SendInvitation(inv, "") //nolint:errcheck
+	var workspaceName string
+	r.Pool.QueryRow(ctx, `SELECT name FROM workspaces WHERE id = $1`, tc.TenantID).Scan(&workspaceName) //nolint:errcheck
+	if workspaceName == "" {
+		workspaceName = "your workspace"
+	}
+	go r.InvitationEmailer.SendInvitation(inv, workspaceName) //nolint:errcheck
 
 	return invitationToGQL(inv), nil
 }
@@ -110,14 +115,4 @@ func (r *queryResolver) Invitation(ctx context.Context, token string) (*graph.In
 	}
 
 	return invitationToGQL(inv), nil
-}
-
-func invitationToGQL(inv *invitation.Invitation) *graph.Invitation {
-	return &graph.Invitation{
-		ID:        inv.ID,
-		Email:     inv.Email,
-		Status:    inv.Status,
-		ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339),
-		CreatedAt: inv.CreatedAt.UTC().Format(time.RFC3339),
-	}
 }
