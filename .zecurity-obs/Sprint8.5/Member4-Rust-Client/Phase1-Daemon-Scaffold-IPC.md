@@ -120,14 +120,45 @@ Install target:
 
 This is a system-level unit, not a `systemctl --user` unit. The installer sets `User=<enrolling_user>` so the daemon runs as the user while still receiving `CAP_NET_ADMIN` from systemd.
 
-The service file at `client/zecurity-client.service` already contains:
+The service file lives at `client/zecurity-client.service` and is installed to `/etc/systemd/system/zecurity-client.service` by the enrollment script, which also sets `User=` to the enrolling user.
+
+Full file contents (reference copy — do not change `AmbientCapabilities`):
 
 ```ini
+[Unit]
+Description=Zecurity Client Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# User= is set by the installation script to the enrolling user.
+# This is a system-level unit (/etc/systemd/system/) — not a user unit.
+# AmbientCapabilities requires system-level placement to take effect.
+User=
+ExecStart=/usr/local/bin/zecurity-client daemon
+Restart=on-failure
+RestartSec=5
+WatchdogSec=90
+
+# CAP_NET_ADMIN is required for TUN interface creation and route management.
+# The daemon does not run as root — this is the minimum required capability.
+# Works here because this is a system unit. Would not work in --user unit.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+StandardOutput=journal
+StandardError=journal
+
+RuntimeDirectory=zecurity-client
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-Sprint 8.5 daemon does **not** use this capability — it is user-only. The capability is required by Sprint 9 Phase F when the daemon creates the TUN interface. Do not remove it from the service file.
+Sprint 8.5 daemon does **not** use `CAP_NET_ADMIN` — it is user-only. The capability is required by Sprint 9 Phase F when the daemon creates the TUN interface. Do not remove it from the service file.
 
 CLI startup flow:
 
