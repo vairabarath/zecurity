@@ -1,0 +1,2 @@
+cargo:rerun-if-changed=../proto/client/v1/client.proto
+cargo:rerun-if-changed=../proto
