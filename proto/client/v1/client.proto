@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package client.v1;
+
+option go_package = "github.com/yourorg/ztna/controller/gen/go/proto/client/v1;clientv1";
+
+service ClientService {
+  // GetAuthConfig — public, no auth. CLI calls this first to get Google OAuth config.
+  rpc GetAuthConfig(GetAuthConfigRequest) returns (GetAuthConfigResponse);
+
+  // TokenExchange — exchange OAuth code for Zecurity JWT + refresh token.
+  // If invite_token is set, accepts the invitation and adds user to workspace as MEMBER.
+  rpc TokenExchange(TokenExchangeRequest) returns (TokenExchangeResponse);
+
+  // EnrollDevice — issue mTLS certificate for the client device.
+  // Requires valid access_token in request (not in gRPC metadata).
+  rpc EnrollDevice(EnrollDeviceRequest) returns (EnrollDeviceResponse);
+}
+
+// ── GetAuthConfig ──────────────────────────────────────────────────────────
+
+message GetAuthConfigRequest {
+  string workspace_slug = 1;
+}
+
+message GetAuthConfigResponse {
+  string google_client_id = 1;
+  string auth_endpoint    = 2;
+  string token_endpoint   = 3;
+  string controller_host  = 4;
+}
+
+// ── TokenExchange ──────────────────────────────────────────────────────────
+
+message TokenExchangeRequest {
+  string workspace_slug = 1;
+  string code           = 2;
+  string code_verifier  = 3;
+  string redirect_uri   = 4;
+  string invite_token   = 5;
+}
+
+message TokenExchangeResponse {
+  string access_token  = 1;
+  string refresh_token = 2;
+  int64  expires_in    = 3;
+  string email         = 4;
+}
+
+// ── EnrollDevice ───────────────────────────────────────────────────────────
+
+message EnrollDeviceRequest {
+  string access_token = 1;
+  string csr_pem      = 2;
+  string device_name  = 3;
+  string os           = 4;
+}
+
+message EnrollDeviceResponse {
+  string certificate_pem     = 1;
+  string workspace_ca_pem    = 2;
+  string intermediate_ca_pem = 3;
+  string spiffe_id           = 4;
+}

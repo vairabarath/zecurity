@@ -4,6 +4,7 @@ schema:
   - graph/shield.graphqls
   - graph/resource.graphqls
   - graph/discovery.graphqls
+  - graph/client.graphqls
 
 exec:
   filename: graph/generated.go
