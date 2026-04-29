@@ -431,3 +431,95 @@ func (s *serviceImpl) RenewShieldCert(
 
 	return s.SignShieldCert(ctx, tenantID, shieldID, trustDomain, csr, certTTL)
 }
+
+// SignClientCert signs an end-user device CSR with the workspace CA,
+// producing a short-lived client certificate carrying the client SPIFFE ID
+// as URI SAN. Mirrors SignShieldCert; the only differences are the SPIFFE
+// path segment ("client") and the CN prefix.
+func (s *serviceImpl) SignClientCert(
+	ctx context.Context,
+	tenantID, deviceID, trustDomain string,
+	csr *x509.CertificateRequest,
+	certTTL time.Duration,
+) (*ClientCertResult, error) {
+	var encryptedKey, nonce, caCertPEM string
+	err := s.pool.QueryRow(ctx,
+		`SELECT encrypted_private_key, nonce, certificate_pem
+		   FROM workspace_ca_keys
+		  WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(&encryptedKey, &nonce, &caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load workspace CA key for tenant %s: %w", tenantID, err)
+	}
+
+	caPrivKey, err := decryptPrivateKey(encryptedKey, nonce, s.masterSecret, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt workspace CA key: %w", err)
+	}
+	defer caPrivKey.D.SetInt64(0)
+
+	caCert, err := parseCertFromPEM(caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse workspace CA cert: %w", err)
+	}
+
+	serial, err := newSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("generate serial: %w", err)
+	}
+
+	spiffeURI, err := url.Parse(appmeta.ClientSPIFFEID(trustDomain, deviceID))
+	if err != nil {
+		return nil, fmt.Errorf("parse SPIFFE URI: %w", err)
+	}
+
+	now := time.Now().UTC()
+	notBefore := now.Add(-1 * time.Hour)
+	notAfter := now.Add(certTTL)
+
+	template := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   appmeta.PKIClientCNPrefix + deviceID,
+			Organization: []string{appmeta.PKIWorkspaceOrganization},
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  false,
+		URIs:                  []*url.URL{spiffeURI},
+	}
+
+	certDER, err := x509.CreateCertificate(
+		rand.Reader,
+		template,
+		caCert,
+		csr.PublicKey,
+		caPrivKey,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("sign client certificate: %w", err)
+	}
+
+	certPEM := encodeCertToPEM(certDER)
+
+	var intermediateCAPEM string
+	err = s.pool.QueryRow(ctx,
+		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
+	).Scan(&intermediateCAPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load intermediate CA: %w", err)
+	}
+
+	return &ClientCertResult{
+		CertificatePEM:    certPEM,
+		WorkspaceCAPEM:    caCertPEM,
+		IntermediateCAPEM: intermediateCAPEM,
+		Serial:            serial.Text(16),
+		NotBefore:         notBefore,
+		NotAfter:          notAfter,
+	}, nil
+}
