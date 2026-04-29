@@ -49,6 +49,7 @@ completed/
 # controller/internal/connector/enrollment_test.go
 
 # Rust / Cargo
+client/target/
 connector/target/
 shield/target/
 
