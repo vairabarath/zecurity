@@ -142,21 +142,21 @@ tags:
 
 #### F1 — Scaffold + setup/status/logout (No dependencies)
 
-- [ ] **M4-F1** `client/Cargo.toml` — workspace + dependencies
-- [ ] **M4-F2** `client/src/main.rs` — clap CLI with subcommands
-- [ ] **M4-F3** `client/src/appmeta.rs` — compile-time controller/connector constants via `option_env!`
-- [ ] **M4-F4** `client/src/config.rs` — reads `/etc/zecurity/client.conf` (TOML, workspace + optional dev overrides only)
-- [ ] **M4-F5** `client/src/runtime.rs` — `RuntimeState` in-memory struct (never serialized)
-- [ ] **M4-F6** `client/src/error.rs` — error types
+- [x] **M4-F1** `client/Cargo.toml` — workspace + dependencies
+- [x] **M4-F2** `client/src/main.rs` — clap CLI with subcommands
+- [x] **M4-F3** `client/src/appmeta.rs` — compile-time controller/connector constants via `option_env!`
+- [x] **M4-F4** `client/src/config.rs` — reads `/etc/zecurity/client.conf` (TOML, workspace + optional dev overrides only)
+- [x] **M4-F5** `client/src/runtime.rs` — `RuntimeState` in-memory struct (never serialized)
+- [x] **M4-F6** `client/src/error.rs` — error types
 - [ ] `setup` (writes conf), `status` (placeholder), `logout` (placeholder) commands compile and run
 
 > Build check: `cd client && cargo build` passes.
 
 #### F2 — Login Flow (Depends on: M3-B done + F1 done)
 
-- [ ] **M4-F7** `client/build.rs` — tonic-build proto compilation
-- [ ] **M4-F8** `client/src/grpc.rs` — tonic ClientService client
-- [ ] **M4-F9** `client/src/login.rs` — library module (not a command): PKCE, local callback, GetAuthConfig, TokenExchange, EnrollDevice; returns `LoginResult` with all data in memory
+- [x] **M4-F7** `client/build.rs` — tonic-build proto compilation
+- [x] **M4-F8** `client/src/grpc.rs` — tonic ClientService client
+- [x] **M4-F9** `client/src/login.rs` — library module (not a command): PKCE, local callback, GetAuthConfig, TokenExchange, EnrollDevice; returns `LoginResult` with all data in memory
 
 > Build check: `cd client && cargo build` passes.
 
@@ -168,11 +168,11 @@ tags:
 
 #### F4 — Systemd Daemon + IPC (Depends on: F2 done)
 
-- [ ] **M4-F11** `client/src/ipc.rs` — Unix socket server (inside daemon) + client helpers (`query_daemon_status`, `query_daemon_token`, `signal_daemon_logout`)
-- [ ] **M4-F12** `client/src/cmd/connect.rs` — `connect` subcommand: calls `login::run()`, populates `SharedState`, spawns IPC server, reconnect loop, sd_notify READY + WATCHDOG
-- [ ] **M4-F13** `client/src/cmd/status.rs` — updated: queries IPC socket for live status
-- [ ] **M4-F14** `client/src/cmd/logout.rs` — updated: sends logout command via IPC socket
-- [ ] **M4-F15** `client/zecurity-client.service` — systemd unit file (Type=notify, Restart=on-failure, WatchdogSec=90)
+- [x] **M4-F11** `client/src/ipc.rs` — Unix socket server (inside daemon) + client helpers (`query_daemon_status`, `query_daemon_token`, `signal_daemon_logout`)
+- [x] **M4-F12** `client/src/cmd/connect.rs` — `connect` subcommand: calls `login::run()`, populates `SharedState`, spawns IPC server, reconnect loop, sd_notify READY + WATCHDOG
+- [x] **M4-F13** `client/src/cmd/status.rs` — updated: queries IPC socket for live status
+- [x] **M4-F14** `client/src/cmd/logout.rs` — updated: sends logout command via IPC socket
+- [x] **M4-F15** `client/zecurity-client.service` — systemd unit file (Type=notify, Restart=on-failure, WatchdogSec=90)
 
 > Build check: `cd client && cargo build` passes.
 
