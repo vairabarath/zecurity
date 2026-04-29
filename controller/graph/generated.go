@@ -44,6 +44,16 @@ type ComplexityRoot struct {
 		State       func(childComplexity int) int
 	}
 
+	ClientDevice struct {
+		CertNotAfter func(childComplexity int) int
+		CreatedAt    func(childComplexity int) int
+		ID           func(childComplexity int) int
+		LastSeenAt   func(childComplexity int) int
+		Name         func(childComplexity int) int
+		Os           func(childComplexity int) int
+		SpiffeID     func(childComplexity int) int
+	}
+
 	Connector struct {
 		CertNotAfter    func(childComplexity int) int
 		CreatedAt       func(childComplexity int) int
@@ -73,7 +83,16 @@ type ComplexityRoot struct {
 		ShieldID    func(childComplexity int) int
 	}
 
+	Invitation struct {
+		CreatedAt func(childComplexity int) int
+		Email     func(childComplexity int) int
+		ExpiresAt func(childComplexity int) int
+		ID        func(childComplexity int) int
+		Status    func(childComplexity int) int
+	}
+
 	Mutation struct {
+		CreateInvitation         func(childComplexity int, email string) int
 		CreateRemoteNetwork      func(childComplexity int, name string, location NetworkLocation) int
 		CreateResource           func(childComplexity int, input CreateResourceInput) int
 		DeleteConnector          func(childComplexity int, id string) int
@@ -98,9 +117,11 @@ type ComplexityRoot struct {
 		Connectors              func(childComplexity int, remoteNetworkID string) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
 		GetScanResults          func(childComplexity int, requestID string) int
+		Invitation              func(childComplexity int, token string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
 		Me                      func(childComplexity int) int
+		MyDevices               func(childComplexity int) int
 		RemoteNetwork           func(childComplexity int, id string) int
 		RemoteNetworks          func(childComplexity int) int
 		Resources               func(childComplexity int, remoteNetworkID string) int
@@ -216,6 +237,7 @@ type MutationResolver interface {
 	DeleteResource(ctx context.Context, id string) (bool, error)
 	PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*Resource, error)
 	TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error)
+	CreateInvitation(ctx context.Context, email string) (*Invitation, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -232,6 +254,8 @@ type QueryResolver interface {
 	AllResources(ctx context.Context) ([]*Resource, error)
 	GetDiscoveredServices(ctx context.Context, shieldID string) ([]*DiscoveredService, error)
 	GetScanResults(ctx context.Context, requestID string) ([]*ScanResult, error)
+	MyDevices(ctx context.Context) ([]*ClientDevice, error)
+	Invitation(ctx context.Context, token string) (*Invitation, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -269,6 +293,49 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.AuthInitPayload.State(childComplexity), true
+
+	case "ClientDevice.certNotAfter":
+		if e.ComplexityRoot.ClientDevice.CertNotAfter == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.CertNotAfter(childComplexity), true
+	case "ClientDevice.createdAt":
+		if e.ComplexityRoot.ClientDevice.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.CreatedAt(childComplexity), true
+	case "ClientDevice.id":
+		if e.ComplexityRoot.ClientDevice.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.ID(childComplexity), true
+	case "ClientDevice.lastSeenAt":
+		if e.ComplexityRoot.ClientDevice.LastSeenAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.LastSeenAt(childComplexity), true
+	case "ClientDevice.name":
+		if e.ComplexityRoot.ClientDevice.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.Name(childComplexity), true
+	case "ClientDevice.os":
+		if e.ComplexityRoot.ClientDevice.Os == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.Os(childComplexity), true
+	case "ClientDevice.spiffeId":
+		if e.ComplexityRoot.ClientDevice.SpiffeID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.SpiffeID(childComplexity), true
 
 	case "Connector.certNotAfter":
 		if e.ComplexityRoot.Connector.CertNotAfter == nil {
@@ -393,6 +460,48 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.DiscoveredService.ShieldID(childComplexity), true
 
+	case "Invitation.createdAt":
+		if e.ComplexityRoot.Invitation.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Invitation.CreatedAt(childComplexity), true
+	case "Invitation.email":
+		if e.ComplexityRoot.Invitation.Email == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Invitation.Email(childComplexity), true
+	case "Invitation.expiresAt":
+		if e.ComplexityRoot.Invitation.ExpiresAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Invitation.ExpiresAt(childComplexity), true
+	case "Invitation.id":
+		if e.ComplexityRoot.Invitation.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Invitation.ID(childComplexity), true
+	case "Invitation.status":
+		if e.ComplexityRoot.Invitation.Status == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Invitation.Status(childComplexity), true
+
+	case "Mutation.createInvitation":
+		if e.ComplexityRoot.Mutation.CreateInvitation == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_createInvitation_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.CreateInvitation(childComplexity, args["email"].(string)), true
 	case "Mutation.createRemoteNetwork":
 		if e.ComplexityRoot.Mutation.CreateRemoteNetwork == nil {
 			break
@@ -621,6 +730,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Query.GetScanResults(childComplexity, args["requestId"].(string)), true
 
+	case "Query.invitation":
+		if e.ComplexityRoot.Query.Invitation == nil {
+			break
+		}
+
+		args, err := ec.field_Query_invitation_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Invitation(childComplexity, args["token"].(string)), true
 	case "Query.lookupWorkspace":
 		if e.ComplexityRoot.Query.LookupWorkspace == nil {
 			break
@@ -649,6 +769,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Me(childComplexity), true
+	case "Query.myDevices":
+		if e.ComplexityRoot.Query.MyDevices == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.MyDevices(childComplexity), true
 	case "Query.remoteNetwork":
 		if e.ComplexityRoot.Query.RemoteNetwork == nil {
 			break
@@ -1154,7 +1280,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1171,12 +1297,24 @@ var sources = []*ast.Source{
 	{Name: "shield.graphqls", Input: sourceData("shield.graphqls"), BuiltIn: false},
 	{Name: "resource.graphqls", Input: sourceData("resource.graphqls"), BuiltIn: false},
 	{Name: "discovery.graphqls", Input: sourceData("discovery.graphqls"), BuiltIn: false},
+	{Name: "client.graphqls", Input: sourceData("client.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
 // endregion ************************** generated!.gotpl **************************
 
 // region    ***************************** args.gotpl *****************************
+
+func (ec *executionContext) field_Mutation_createInvitation_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "email", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["email"] = arg0
+	return args, nil
+}
 
 func (ec *executionContext) field_Mutation_createRemoteNetwork_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
@@ -1454,6 +1592,17 @@ func (ec *executionContext) field_Query_getScanResults_args(ctx context.Context,
 	return args, nil
 }
 
+func (ec *executionContext) field_Query_invitation_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "token", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["token"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Query_lookupWorkspace_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -1620,6 +1769,209 @@ func (ec *executionContext) _AuthInitPayload_state(ctx context.Context, field gr
 func (ec *executionContext) fieldContext_AuthInitPayload_state(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "AuthInitPayload",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_id(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_id,
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_name(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_os(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_os,
+		func(ctx context.Context) (any, error) {
+			return obj.Os, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_os(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_spiffeId(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_spiffeId,
+		func(ctx context.Context) (any, error) {
+			return obj.SpiffeID, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_spiffeId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_certNotAfter(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_certNotAfter,
+		func(ctx context.Context) (any, error) {
+			return obj.CertNotAfter, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_certNotAfter(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_lastSeenAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_lastSeenAt,
+		func(ctx context.Context) (any, error) {
+			return obj.LastSeenAt, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_lastSeenAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ClientDevice_createdAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ClientDevice_createdAt,
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_ClientDevice_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ClientDevice",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -2200,6 +2552,151 @@ func (ec *executionContext) _DiscoveredService_lastSeen(ctx context.Context, fie
 func (ec *executionContext) fieldContext_DiscoveredService_lastSeen(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "DiscoveredService",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Invitation_id(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Invitation_id,
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Invitation_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Invitation",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Invitation_email(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Invitation_email,
+		func(ctx context.Context) (any, error) {
+			return obj.Email, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Invitation_email(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Invitation",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Invitation_status(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Invitation_status,
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Invitation_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Invitation",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Invitation_expiresAt(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Invitation_expiresAt,
+		func(ctx context.Context) (any, error) {
+			return obj.ExpiresAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Invitation_expiresAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Invitation",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Invitation_createdAt(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Invitation_createdAt,
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Invitation_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Invitation",
 		Field:      field,
 		IsMethod:   false,
 		IsResolver: false,
@@ -3052,6 +3549,59 @@ func (ec *executionContext) fieldContext_Mutation_triggerScan(ctx context.Contex
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_createInvitation(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_createInvitation,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().CreateInvitation(ctx, fc.Args["email"].(string))
+		},
+		nil,
+		ec.marshalNInvitation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_createInvitation(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Invitation_id(ctx, field)
+			case "email":
+				return ec.fieldContext_Invitation_email(ctx, field)
+			case "status":
+				return ec.fieldContext_Invitation_status(ctx, field)
+			case "expiresAt":
+				return ec.fieldContext_Invitation_expiresAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Invitation_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Invitation", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_createInvitation_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_me(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -3834,6 +4384,104 @@ func (ec *executionContext) fieldContext_Query_getScanResults(ctx context.Contex
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Query_getScanResults_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_myDevices(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_myDevices,
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().MyDevices(ctx)
+		},
+		nil,
+		ec.marshalNClientDevice2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDeviceᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_myDevices(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_ClientDevice_id(ctx, field)
+			case "name":
+				return ec.fieldContext_ClientDevice_name(ctx, field)
+			case "os":
+				return ec.fieldContext_ClientDevice_os(ctx, field)
+			case "spiffeId":
+				return ec.fieldContext_ClientDevice_spiffeId(ctx, field)
+			case "certNotAfter":
+				return ec.fieldContext_ClientDevice_certNotAfter(ctx, field)
+			case "lastSeenAt":
+				return ec.fieldContext_ClientDevice_lastSeenAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_ClientDevice_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type ClientDevice", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_invitation(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_invitation,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Invitation(ctx, fc.Args["token"].(string))
+		},
+		nil,
+		ec.marshalOInvitation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_invitation(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Invitation_id(ctx, field)
+			case "email":
+				return ec.fieldContext_Invitation_email(ctx, field)
+			case "status":
+				return ec.fieldContext_Invitation_status(ctx, field)
+			case "expiresAt":
+				return ec.fieldContext_Invitation_expiresAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Invitation_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Invitation", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_invitation_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -7404,6 +8052,66 @@ func (ec *executionContext) _AuthInitPayload(ctx context.Context, sel ast.Select
 	return out
 }
 
+var clientDeviceImplementors = []string{"ClientDevice"}
+
+func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.SelectionSet, obj *ClientDevice) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, clientDeviceImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ClientDevice")
+		case "id":
+			out.Values[i] = ec._ClientDevice_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._ClientDevice_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "os":
+			out.Values[i] = ec._ClientDevice_os(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "spiffeId":
+			out.Values[i] = ec._ClientDevice_spiffeId(ctx, field, obj)
+		case "certNotAfter":
+			out.Values[i] = ec._ClientDevice_certNotAfter(ctx, field, obj)
+		case "lastSeenAt":
+			out.Values[i] = ec._ClientDevice_lastSeenAt(ctx, field, obj)
+		case "createdAt":
+			out.Values[i] = ec._ClientDevice_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var connectorImplementors = []string{"Connector"}
 
 func (ec *executionContext) _Connector(ctx context.Context, sel ast.SelectionSet, obj *Connector) graphql.Marshaler {
@@ -7588,6 +8296,65 @@ func (ec *executionContext) _DiscoveredService(ctx context.Context, sel ast.Sele
 	return out
 }
 
+var invitationImplementors = []string{"Invitation"}
+
+func (ec *executionContext) _Invitation(ctx context.Context, sel ast.SelectionSet, obj *Invitation) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, invitationImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("Invitation")
+		case "id":
+			out.Values[i] = ec._Invitation_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "email":
+			out.Values[i] = ec._Invitation_email(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "status":
+			out.Values[i] = ec._Invitation_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "expiresAt":
+			out.Values[i] = ec._Invitation_expiresAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createdAt":
+			out.Values[i] = ec._Invitation_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var mutationImplementors = []string{"Mutation"}
 
 func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet) graphql.Marshaler {
@@ -7715,6 +8482,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "triggerScan":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_triggerScan(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createInvitation":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_createInvitation(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -8051,6 +8825,47 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "myDevices":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_myDevices(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "invitation":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_invitation(ctx, field)
 				return res
 			}
 
@@ -9179,6 +9994,32 @@ func (ec *executionContext) marshalNBoolean2bool(ctx context.Context, sel ast.Se
 	return res
 }
 
+func (ec *executionContext) marshalNClientDevice2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDeviceᚄ(ctx context.Context, sel ast.SelectionSet, v []*ClientDevice) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNClientDevice2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNClientDevice2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDevice(ctx context.Context, sel ast.SelectionSet, v *ClientDevice) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ClientDevice(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNConnector2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorᚄ(ctx context.Context, sel ast.SelectionSet, v []*Connector) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
@@ -9320,6 +10161,20 @@ func (ec *executionContext) marshalNInt2ᚕintᚄ(ctx context.Context, sel ast.S
 	}
 
 	return ret
+}
+
+func (ec *executionContext) marshalNInvitation2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation(ctx context.Context, sel ast.SelectionSet, v Invitation) graphql.Marshaler {
+	return ec._Invitation(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNInvitation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation(ctx context.Context, sel ast.SelectionSet, v *Invitation) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._Invitation(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNNetworkHealth2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkHealth(ctx context.Context, v any) (NetworkHealth, error) {
@@ -9835,6 +10690,13 @@ func (ec *executionContext) marshalOInt2ᚖint(ctx context.Context, sel ast.Sele
 	_ = ctx
 	res := graphql.MarshalInt(*v)
 	return res
+}
+
+func (ec *executionContext) marshalOInvitation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation(ctx context.Context, sel ast.SelectionSet, v *Invitation) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._Invitation(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v *RemoteNetwork) graphql.Marshaler {
