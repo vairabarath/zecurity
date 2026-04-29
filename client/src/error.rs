@@ -4,7 +4,7 @@ use thiserror::Error;
 pub enum ClientError {
     #[error("Not configured. Run `zecurity-client setup --workspace <name>` first.")]
     NotConfigured,
-    #[error("Not connected. Run `zecurity-client connect` first.")]
+    #[error("Not connected. Run `zecurity-client login` first.")]
     NotConnected,
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
