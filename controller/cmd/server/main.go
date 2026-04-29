@@ -22,6 +22,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
@@ -29,7 +30,9 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	clientsvc "github.com/yourorg/ztna/controller/internal/client"
 	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/middleware"
@@ -103,6 +106,16 @@ func main() {
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	connectorRegistry := connector.NewConnectorRegistry()
 
+	inviteStore := invitation.NewStore(db.Pool)
+	inviteEmailer := invitation.NewEmailer(
+		envOr("SMTP_HOST", ""),
+		envOr("SMTP_PORT", "587"),
+		envOr("SMTP_FROM", ""),
+		envOr("SMTP_PASSWORD", ""),
+		envOr("APP_BASE_URL", "http://localhost:5173"),
+	)
+	inviteHandler := invitation.NewHandler(inviteStore, inviteEmailer)
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -114,6 +127,8 @@ func main() {
 				Pool:              db.Pool,
 				ShieldSvc:         shieldSvc,
 				ResourceCfg:       resource.NewConfig(db.Pool),
+				InvitationStore:   inviteStore,
+				InvitationEmailer: inviteEmailer,
 			},
 		}),
 	)
@@ -133,6 +148,23 @@ func main() {
 	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
+
+	// REST endpoints: invitations
+	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.RequireRole("admin")(
+			middleware.WorkspaceGuard(db.Pool)(
+				http.HandlerFunc(inviteHandler.Create),
+			),
+		),
+	)
+	mux.Handle("POST /api/invitations", inviteCreateRoute)
+	mux.Handle("GET /api/invitations/{token}", http.HandlerFunc(inviteHandler.Get))
+	inviteAcceptRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.WorkspaceGuard(db.Pool)(
+			http.HandlerFunc(inviteHandler.Accept),
+		),
+	)
+	mux.Handle("POST /api/invitations/{token}/accept", inviteAcceptRoute)
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
@@ -187,6 +219,15 @@ func main() {
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
+
+	clientSvc := clientsvc.NewService(
+		db.Pool,
+		authSvc,
+		pkiService,
+		mustEnv("GOOGLE_CLIENT_ID"),
+		mustEnv("CONTROLLER_HOST"),
+	)
+	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 	go shieldSvc.RunDisconnectWatcher(ctx)

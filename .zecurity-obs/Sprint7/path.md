@@ -97,9 +97,9 @@ tags:
 
 ### PHASE B — M3 ClientService gRPC (Depends on: Day 1 done)
 
-- [ ] **M3-B1** `controller/internal/client/service.go` — Implement `GetAuthConfig`, `TokenExchange`, `EnrollDevice`
-- [ ] **M3-B2** `controller/internal/client/store.go` — DB queries for client_devices insert + lookup
-- [ ] **M3-B3** `cmd/server/main.go` — Register `clientv1.RegisterClientServiceServer`
+- [x] **M3-B1** `controller/internal/client/service.go` — Implement `GetAuthConfig`, `TokenExchange`, `EnrollDevice`
+- [x] **M3-B2** `controller/internal/client/store.go` — DB queries for client_devices insert + lookup
+- [x] **M3-B3** `cmd/server/main.go` — Register `clientv1.RegisterClientServiceServer`
 
 > Build check: `cd controller && go build ./...` passes.
 
@@ -107,11 +107,11 @@ tags:
 
 ### PHASE C — M3 Invitation HTTP API + Email (Depends on: Day 1 done)
 
-- [ ] **M3-C1** `controller/internal/invitation/handler.go` — `POST /api/invitations`, `GET /api/invitations/{token}`, `POST /api/invitations/{token}/accept`
-- [ ] **M3-C2** `controller/internal/invitation/store.go` — DB queries for invitations
-- [ ] **M3-C3** `controller/internal/invitation/email.go` — SMTP send + dev-mode stdout fallback
-- [ ] **M3-C4** `cmd/server/main.go` — Wire invitation routes
-- [ ] **M3-C5** `controller/graph/resolvers/` — `createInvitation` + `invitation` + `myDevices` resolvers
+- [x] **M3-C1** `controller/internal/invitation/handler.go` — `POST /api/invitations`, `GET /api/invitations/{token}`, `POST /api/invitations/{token}/accept`
+- [x] **M3-C2** `controller/internal/invitation/store.go` — DB queries for invitations
+- [x] **M3-C3** `controller/internal/invitation/email.go` — SMTP send + dev-mode stdout fallback
+- [x] **M3-C4** `cmd/server/main.go` — Wire invitation routes
+- [x] **M3-C5** `controller/graph/resolvers/` — `createInvitation` + `invitation` + `myDevices` resolvers
 
 > Build check: `cd controller && go build ./...` passes.
 
@@ -119,9 +119,9 @@ tags:
 
 ### PHASE D — M3 Role Enforcement (Depends on: M3-B + M3-C done)
 
-- [ ] **M3-D1** `controller/internal/auth/middleware.go` — `RequireRole(roles ...string)` HTTP middleware
-- [ ] Apply to `POST /api/invitations` (admin only)
-- [ ] GraphQL `createInvitation` resolver — role check in resolver context
+- [x] **M3-D1** `controller/internal/middleware/role.go` — `RequireRole(roles ...string)` HTTP middleware
+- [x] Apply to `POST /api/invitations` (admin only)
+- [x] GraphQL `createInvitation` resolver — role check in resolver context
 
 > Build check: `cd controller && go build ./...` passes.
 
