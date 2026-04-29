@@ -40,8 +40,9 @@ tags:
 | **CLI language** | Rust — lives in `client/` workspace at repo root. Binary: `zecurity-client`. |
 | **CLI storage — disk** | ONE file only: `/etc/zecurity/client.conf` (user fallback: `~/.config/zecurity-client/client.conf`). Contains: `workspace`, and optionally `controller_address`/`connector_address`/`http_base_url` for dev. In prod these are compiled-in constants (`appmeta.rs` via `option_env!`). |
 | **CLI storage — runtime** | Session tokens, device cert, private key, user info — **in memory only** (`RuntimeState` struct). Never serialized, never written to disk. Process exit clears everything. |
-| **CLI IPC** | Running `connect` daemon exposes a Unix socket (`/run/zecurity-client.sock` or `/tmp/zecurity-client-{uid}.sock`). `status`, `invite`, `logout` subcommands query it via newline-delimited JSON. |
-| **Private key lifecycle** | Generated fresh (P-384 ECDSA) on every `connect` run. Lives in `RuntimeState.device.private_key_pem`. Used in-process to build `rustls::ClientConfig` for TUN mTLS — never hits disk. |
+| **CLI IPC** | Not needed in Sprint 7. Session is in-memory only during login. Sprint 8 handles IPC for connected state. |
+| **CLI command** | `zecurity-client login` — one-shot OAuth + enroll cert + store in RuntimeState + print result + exit. No daemon, no loop. |
+| **Private key lifecycle** | Generated fresh (P-384 ECDSA) on every `login` run. Lives in `RuntimeState.device.private_key_pem`. Used in-process to build `rustls::ClientConfig` for mTLS (Sprint 8) — never hits disk. |
 
 ---
 
@@ -52,7 +53,7 @@ tags:
 | **M1** | Frontend | Role routing, `/invite/:token` page, `/client-install` page, admin install button |
 | **M2** | Go (Proto + DB + GraphQL) | `proto/client/v1/client.proto`, migration 011, `client.graphqls` |
 | **M3** | Go (Controller) | ClientService gRPC impl, invitation HTTP API + email, role middleware |
-| **M4** | Rust (Client CLI) | `client/` workspace — all 5 commands: setup, login, status, logout, invite |
+| **M4** | Rust (Client CLI) | `client/` workspace — commands: setup, login, status, logout, invite |
 
 ---
 
@@ -148,7 +149,7 @@ tags:
 - [x] **M4-F4** `client/src/config.rs` — reads `/etc/zecurity/client.conf` (TOML, workspace + optional dev overrides only)
 - [x] **M4-F5** `client/src/runtime.rs` — `RuntimeState` in-memory struct (never serialized)
 - [x] **M4-F6** `client/src/error.rs` — error types
-- [ ] `setup` (writes conf), `status` (placeholder), `logout` (placeholder) commands compile and run
+- [x] `setup` (writes conf), `status` (placeholder), `logout` (placeholder) commands compile and run
 
 > Build check: `cd client && cargo build` passes.
 
@@ -162,17 +163,21 @@ tags:
 
 #### F3 — Invite Command (Depends on: M3-C done + F2 done)
 
-- [ ] **M4-F10** `client/src/cmd/invite.rs` — HTTP POST /api/invitations; gets access token from running daemon via `ipc::query_daemon_token()`
+- [x] **M4-F10** `client/src/cmd/invite.rs` — HTTP POST /api/invitations; gets access token from running daemon via `ipc::query_daemon_token()`
 
 > Build check: `cd client && cargo build` passes.
 
-#### F4 — Systemd Daemon + IPC (Depends on: F2 done)
+#### F4 — Login One-Shot (Depends on: F2 done)
 
-- [x] **M4-F11** `client/src/ipc.rs` — Unix socket server (inside daemon) + client helpers (`query_daemon_status`, `query_daemon_token`, `signal_daemon_logout`)
-- [x] **M4-F12** `client/src/cmd/connect.rs` — `connect` subcommand: calls `login::run()`, populates `SharedState`, spawns IPC server, reconnect loop, sd_notify READY + WATCHDOG
-- [x] **M4-F13** `client/src/cmd/status.rs` — updated: queries IPC socket for live status
-- [x] **M4-F14** `client/src/cmd/logout.rs` — updated: sends logout command via IPC socket
-- [x] **M4-F15** `client/zecurity-client.service` — systemd unit file (Type=notify, Restart=on-failure, WatchdogSec=90)
+> **Architecture: Option B** — `login` is one-shot (auth + print + exit). No daemon, no IPC socket, no systemd unit.
+
+- [x] **M4-F11** ~~`client/src/ipc.rs`~~ — **REMOVED** (no daemon IPC)
+- [x] **M4-F12** `client/src/cmd/login.rs` — rewrite: load config → `login::run()` → print result → exit
+- [x] **M4-F13** `client/src/cmd/status.rs` — rewrite: reads config file only, prints workspace + "Not connected"
+- [x] **M4-F14** `client/src/cmd/logout.rs` — rewrite: no-op, prints "No active session to clear"
+- [x] **M4-F15** ~~`client/zecurity-client.service`~~ — **REMOVED** (no systemd daemon)
+- [x] `client/src/cmd/invite.rs` — rewrite: runs own `login::run()` to get token, then POST /api/invitations
+- [x] Delete `client/src/ipc.rs` and `client/zecurity-client.service`; remove `libc` from Cargo.toml if unused
 
 > Build check: `cd client && cargo build` passes.
 
@@ -218,20 +223,18 @@ M3-B  M3-C           M1-E          M4-F1
 - [ ] `cd admin && npm run build` — clean
 - [ ] `zecurity-client setup --workspace myworkspace` writes `/etc/zecurity/client.conf` (workspace only)
 - [ ] No session/cert/key data is ever written to disk at any point
-- [ ] `zecurity-client connect` opens browser, completes OAuth, populates RuntimeState in memory, prints "Connected as user@example.com"
-- [ ] `zecurity-client status` queries running daemon via Unix socket, prints all fields
-- [ ] `zecurity-client status` with no daemon running prints "Not connected"
-- [ ] `zecurity-client logout` signals daemon via Unix socket to clear in-memory session
-- [ ] `zecurity-client invite --email user@example.com` gets access token from daemon via IPC, calls HTTP API
-- [ ] `zecurity-client invite` with no daemon running prints "Not connected" error
+- [ ] `zecurity-client login` opens browser, completes OAuth, prints "Logged in as user@example.com", exits
+- [ ] `zecurity-client status` prints workspace from config + "Not connected (run login to authenticate)"
+- [ ] `zecurity-client status` with no config prints "Not configured"
+- [ ] `zecurity-client logout` prints "No active session to clear"
+- [ ] `zecurity-client invite --email user@example.com` runs login to authenticate via OAuth, then calls HTTP API
 - [ ] Admin UI: ADMIN login → /dashboard; MEMBER login → /client-install
 - [ ] `/invite/:token` page shows workspace + inviter info + Google sign-in button
 - [ ] After invite acceptance: user added to workspace as MEMBER, redirect to /client-install
 - [ ] ADMIN user sees "Install Client" button in sidebar/header
 - [ ] `GET /api/invitations/:token` returns 404 for expired/unknown tokens
 - [ ] `POST /api/invitations` returns 403 for non-admin JWT
-- [ ] `systemctl start zecurity-client` starts daemon; `journalctl` shows READY=1 and WATCHDOG=1
-- [ ] `zecurity-client connect` (TUN mode, requires Sprint 8 Connector) creates `tun0` (100.64.0.2/24), routes packets through Connector `:9092`
+- [ ] `zecurity-client login` (TUN mode, requires Sprint 8 Connector) creates `tun0` (100.64.0.2/24), routes packets through Connector `:9092`
 - [ ] mTLS to Connector uses cert + key from RuntimeState — no disk file involved
 - [ ] Connector rejects revoked cert → client logs error, clears RuntimeState, retries login
 

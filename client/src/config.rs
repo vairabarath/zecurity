@@ -11,6 +11,9 @@ pub struct ClientConf {
     /// Only set in dev. Empty = use compiled-in constant from appmeta.
     #[serde(default)]
     pub connector_address: String,
+    /// Only set in dev. Empty = use compiled-in constant from appmeta.
+    #[serde(default)]
+    pub http_base_url: String,
 }
 
 impl ClientConf {
@@ -27,6 +30,14 @@ impl ClientConf {
             crate::appmeta::DEFAULT_CONNECTOR_ADDRESS
         } else {
             &self.connector_address
+        }
+    }
+
+    pub fn http_base(&self) -> &str {
+        if self.http_base_url.is_empty() {
+            crate::appmeta::DEFAULT_HTTP_BASE_URL
+        } else {
+            &self.http_base_url
         }
     }
 }
