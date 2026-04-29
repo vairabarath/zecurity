@@ -8,7 +8,14 @@ service ClientService {
   // GetAuthConfig — public, no auth. CLI calls this first to get Google OAuth config.
   rpc GetAuthConfig(GetAuthConfigRequest) returns (GetAuthConfigResponse);
 
-  // TokenExchange — exchange OAuth code for Zecurity JWT + refresh token.
+  // InitiateAuth — registers a PKCE auth session on the controller and returns
+  // the complete Google OAuth URL for the CLI to open in the browser.
+  // The controller's fixed callback URL is embedded in the returned auth_url.
+  rpc InitiateAuth(InitiateAuthRequest) returns (InitiateAuthResponse);
+
+  // TokenExchange — exchange the controller one-time ctrl_code for a Zecurity
+  // JWT + refresh token. Verifies CLI-Controller PKCE (code_verifier vs
+  // the code_challenge registered in InitiateAuth).
   // If invite_token is set, accepts the invitation and adds user to workspace as MEMBER.
   rpc TokenExchange(TokenExchangeRequest) returns (TokenExchangeResponse);
 
@@ -30,14 +37,30 @@ message GetAuthConfigResponse {
   string controller_host  = 4;
 }
 
+// ── InitiateAuth ───────────────────────────────────────────────────────────
+
+message InitiateAuthRequest {
+  string workspace_slug     = 1;
+  string code_challenge     = 2;  // BASE64URL(SHA256(cli_code_verifier)), no padding
+  string local_redirect_uri = 3;  // http://127.0.0.1:<port>/callback — CLI local server
+}
+
+message InitiateAuthResponse {
+  string auth_url   = 1;  // complete Google OAuth URL — open in browser
+  string session_id = 2;  // opaque token passed back in TokenExchange
+}
+
 // ── TokenExchange ──────────────────────────────────────────────────────────
 
 message TokenExchangeRequest {
-  string workspace_slug = 1;
-  string code           = 2;
-  string code_verifier  = 3;
-  string redirect_uri   = 4;
-  string invite_token   = 5;
+  reserved 1;               // was: workspace_slug (now carried by session_id)
+  reserved "workspace_slug";
+  string ctrl_code     = 2; // controller-issued one-time code from /api/clients/callback
+  string code_verifier = 3; // CLI PKCE verifier — controller checks SHA256 == code_challenge
+  reserved 4;               // was: redirect_uri (no longer needed)
+  reserved "redirect_uri";
+  string invite_token  = 5; // optional — accept a workspace invitation
+  string session_id    = 6; // from InitiateAuthResponse
 }
 
 message TokenExchangeResponse {
@@ -61,4 +84,5 @@ message EnrollDeviceResponse {
   string workspace_ca_pem    = 2;
   string intermediate_ca_pem = 3;
   string spiffe_id           = 4;
+  string device_id           = 5;
 }

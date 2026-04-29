@@ -166,9 +166,9 @@ cd client && cargo build
 
 Manual test:
 ```bash
-./target/debug/zecurity-client connect     # authenticates + prints result + exits
-./target/debug/zecurity-client status      # prints workspace from config
-./target/debug/zecurity-client logout      # prints acknowledgement
+./target/debug/zecurity-client login       # authenticates + saves encrypted state + exits
+./target/debug/zecurity-client status      # prints workspace, user, and cert expiry
+./target/debug/zecurity-client logout      # deletes saved state + key
 ./target/debug/zecurity-client invite --email user@example.com   # re-auths + sends invite
 ```
 
@@ -176,4 +176,17 @@ Manual test:
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: Client login state must persist across commands
+**Issue:** `zecurity-client login` completed OAuth and device enrollment, but `zecurity-client status` immediately printed `Not connected (run login to authenticate)`.
+
+**Root Cause:** The Phase 4 one-shot architecture interpreted "in memory only" too broadly and discarded all session, certificate, and device metadata when the login process exited. That made the client unusable for `status`, `logout`, and future tunnel startup.
+
+**Fix Applied:**
+- Added `client/src/state_store.rs`.
+- `login` now converts `LoginResult` into `StoredWorkspaceState` and saves it to `~/.local/share/zecurity-client/<workspace>.json` with mode 0600.
+- `device.private_key_pem` is encrypted before disk write with AES-256-GCM and stored as `enc1:<base64(nonce||ciphertext)>`.
+- The per-workspace AES-256 key is stored separately at `~/.local/share/zecurity-client/.<workspace>.key` with mode 0600.
+- `status` loads state and prints `Logged in as <email>, cert expires in <duration>`.
+- `logout` deletes both the JSON state file and the AES key file.
+
+**Clarification:** The decrypted private key is still "in memory only during active use"; the persisted JSON only contains the encrypted private key. Session tokens, certs, metadata, and resources are allowed to persist because the client needs them after `login` exits.

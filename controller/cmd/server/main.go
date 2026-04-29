@@ -227,8 +227,14 @@ func main() {
 		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
+		mustEnv("CONTROLLER_HTTP_URL"),
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
+
+	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
+	// Google redirects here after user consent; controller exchanges the code
+	// server-side and redirects the browser to the CLI's local loopback server.
+	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 	go shieldSvc.RunDisconnectWatcher(ctx)
