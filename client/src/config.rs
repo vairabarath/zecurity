@@ -33,12 +33,37 @@ impl ClientConf {
         }
     }
 
-    pub fn http_base(&self) -> &str {
-        if self.http_base_url.is_empty() {
-            crate::appmeta::DEFAULT_HTTP_BASE_URL
-        } else {
-            &self.http_base_url
+    pub fn http_base(&self) -> String {
+        if !self.http_base_url.is_empty() {
+            return trim_trailing_slash(&self.http_base_url);
         }
+        if !crate::appmeta::DEFAULT_HTTP_BASE_URL.is_empty() {
+            return trim_trailing_slash(crate::appmeta::DEFAULT_HTTP_BASE_URL);
+        }
+        format!("http://{}:8080", controller_host_for_url(self.controller()))
+    }
+}
+
+fn trim_trailing_slash(value: &str) -> String {
+    value.trim_end_matches('/').to_string()
+}
+
+fn controller_host_for_url(controller_address: &str) -> String {
+    if let Some(rest) = controller_address.strip_prefix('[') {
+        if let Some((host, _)) = rest.split_once(']') {
+            return format!("[{}]", host);
+        }
+    }
+
+    let host = controller_address
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(controller_address);
+
+    if host.contains(':') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
     }
 }
 

@@ -1,6 +1,6 @@
 ---
 type: phase
-status: planned
+status: done
 sprint: 7
 member: M4
 phase: Phase2-Login-Flow
@@ -263,4 +263,44 @@ Integration test (requires running Controller):
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: rustls CryptoProvider panic during `zecurity-client login`
+**Issue:** `zecurity-client login` panicked before opening OAuth:
+
+```text
+Could not automatically determine the process-level CryptoProvider from Rustls crate features.
+```
+
+**Root Cause:** The client dependency graph enabled both rustls crypto providers. `tonic`/`tokio-rustls` pulled `ring`, while the direct `rustls` dependency requested `aws_lc_rs`. With more than one provider compiled, rustls requires the process to choose one explicitly.
+
+**Fix Applied:**
+```rust
+// client/src/main.rs
+rustls::crypto::ring::default_provider()
+    .install_default()
+    .expect("failed to install default crypto provider");
+```
+
+Also changed `client/Cargo.toml` to request the `ring` rustls feature directly and disable `tokio-rustls` default features so `aws_lc_rs` is not enabled by the direct client dependency.
+
+### Fix: controller gRPC TLS failed with `UnknownIssuer`
+**Issue:** After the rustls provider fix, `zecurity-client login` failed while dialing the controller:
+
+```text
+invalid peer certificate: UnknownIssuer
+```
+
+**Root Cause:** The controller generates its gRPC server certificate in memory and signs it with Zecurity's intermediate CA. The client used `ClientTlsConfig::new()` with default public roots, so it could not trust the internal CA.
+
+**Fix Applied:**
+```rust
+// client/src/login.rs
+let ca_pem = fetch_controller_ca(conf).await?;
+let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;
+
+// client/src/grpc.rs
+let tls = ClientTlsConfig::new()
+    .ca_certificate(Certificate::from_pem(ca_pem.as_bytes()))
+    .domain_name(controller_host(controller_address));
+```
+
+The CLI now fetches the existing public `GET /ca.crt` endpoint before `GetAuthConfig`, uses that PEM as the tonic root CA, and derives the expected TLS server name from `controller_address`. Added `setup --http-base` for dev configs where the HTTP API is not the default `http://<controller-host>:8080`.

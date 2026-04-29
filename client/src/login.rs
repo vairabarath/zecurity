@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use axum::{extract::Query, response::Html, routing::get, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
@@ -9,19 +9,20 @@ use tokio::sync::oneshot;
 
 use crate::{
     config::ClientConf,
-    grpc::{connect_grpc, client_v1::*},
+    grpc::{client_v1::*, connect_grpc},
     runtime::{DeviceInfo, SessionInfo, UserInfo, WorkspaceInfo},
 };
 
 pub struct LoginResult {
     pub workspace: WorkspaceInfo,
-    pub user:      UserInfo,
-    pub device:    DeviceInfo,
-    pub session:   SessionInfo,
+    pub user: UserInfo,
+    pub device: DeviceInfo,
+    pub session: SessionInfo,
 }
 
 pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<LoginResult> {
-    let mut grpc = connect_grpc(conf.controller()).await?;
+    let ca_pem = fetch_controller_ca(conf).await?;
+    let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;
 
     // 1. Get auth config
     let auth_cfg = grpc
@@ -57,7 +58,9 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
-    tokio::spawn(async move { axum::serve(listener, app).await.ok(); });
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
 
     // 4. Open browser
     let oauth_url = format!(
@@ -73,63 +76,76 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     open::that(&oauth_url).ok();
 
     // 5. Wait for code (5 min timeout)
-    let code = tokio::time::timeout(
-        std::time::Duration::from_secs(300), rx,
-    ).await
+    let code = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
+        .await
         .map_err(|_| anyhow!("Login timed out after 5 minutes"))??;
 
     // 6. TokenExchange
     println!("Exchanging token...");
-    let tok = grpc.token_exchange(TokenExchangeRequest {
-        workspace_slug: conf.workspace.clone(),
-        code,
-        code_verifier,
-        redirect_uri,
-        invite_token: invite_token.unwrap_or_default(),
-    }).await?.into_inner();
+    let tok = grpc
+        .token_exchange(TokenExchangeRequest {
+            workspace_slug: conf.workspace.clone(),
+            code,
+            code_verifier,
+            redirect_uri,
+            invite_token: invite_token.unwrap_or_default(),
+        })
+        .await?
+        .into_inner();
 
     // 7. Generate P-384 keypair in memory — never written to disk
     println!("Generating device certificate...");
     let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?;
     let private_key_pem = key_pair.serialize_pem();
 
-    let hostname = hostname::get().unwrap_or_default().to_string_lossy().to_string();
+    let hostname = hostname::get()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let os = std::env::consts::OS.to_string();
 
     let mut params = CertificateParams::default();
     params.distinguished_name = DistinguishedName::new();
-    params.distinguished_name.push(rcgen::DnType::CommonName, &hostname);
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, &hostname);
     let csr_pem = params.serialize_request(&key_pair)?.pem()?;
 
     // 8. EnrollDevice
-    let enroll = grpc.enroll_device(EnrollDeviceRequest {
-        access_token: tok.access_token.clone(),
-        csr_pem,
-        device_name: hostname.clone(),
-        os: os.clone(),
-    }).await?.into_inner();
+    let enroll = grpc
+        .enroll_device(EnrollDeviceRequest {
+            access_token: tok.access_token.clone(),
+            csr_pem,
+            device_name: hostname.clone(),
+            os: os.clone(),
+        })
+        .await?
+        .into_inner();
 
     // 9. Build CA chain — concatenate workspace CA + intermediate
-    let ca_cert_pem = format!("{}\n{}", enroll.workspace_ca_pem, enroll.intermediate_ca_pem);
+    let ca_cert_pem = format!(
+        "{}\n{}",
+        enroll.workspace_ca_pem, enroll.intermediate_ca_pem
+    );
 
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
     Ok(LoginResult {
         workspace: WorkspaceInfo {
-            id:           String::new(),
-            name:         conf.workspace.clone(),
-            slug:         conf.workspace.clone(),
+            id: String::new(),
+            name: conf.workspace.clone(),
+            slug: conf.workspace.clone(),
             trust_domain: extract_trust_domain(&enroll.spiffe_id),
         },
         user: UserInfo {
-            id:    String::new(),
+            id: String::new(),
             email: tok.email.clone(),
-            role:  String::new(),
+            role: String::new(),
         },
         device: DeviceInfo {
-            id:              String::new(),
-            spiffe_id:       enroll.spiffe_id,
+            id: String::new(),
+            spiffe_id: enroll.spiffe_id,
             certificate_pem: enroll.certificate_pem,
             private_key_pem,
             ca_cert_pem,
@@ -138,11 +154,37 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             os,
         },
         session: SessionInfo {
-            access_token:  tok.access_token,
+            access_token: tok.access_token,
             refresh_token: tok.refresh_token,
-            expires_at:    now + tok.expires_in,
+            expires_at: now + tok.expires_in,
         },
     })
+}
+
+async fn fetch_controller_ca(conf: &ClientConf) -> Result<String> {
+    let url = format!("{}/ca.crt", conf.http_base());
+    let response = reqwest::get(&url)
+        .await
+        .with_context(|| format!("fetch controller CA from {}", url))?;
+
+    if !response.status().is_success() {
+        return Err(anyhow!(
+            "fetch controller CA from {}: HTTP {}",
+            url,
+            response.status()
+        ));
+    }
+
+    let ca_pem = response
+        .text()
+        .await
+        .with_context(|| format!("read controller CA from {}", url))?;
+
+    if !ca_pem.contains("BEGIN CERTIFICATE") {
+        return Err(anyhow!("controller CA response from {} was not PEM", url));
+    }
+
+    Ok(ca_pem)
 }
 
 fn extract_trust_domain(spiffe_id: &str) -> String {
