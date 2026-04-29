@@ -11,6 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +23,7 @@ use crate::{
 };
 
 const ENC_PREFIX: &str = "enc1:";
+const STATE_ENVELOPE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StoredWorkspaceState {
@@ -35,6 +37,12 @@ pub struct StoredWorkspaceState {
     pub resources: Vec<StoredResource>,
     #[serde(default)]
     pub last_sync_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EncryptedStateEnvelope {
+    version: u32,
+    ciphertext: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -228,32 +236,28 @@ pub fn save_workspace_state(workspace_slug: &str, state: &StoredWorkspaceState) 
     let path = state_path(workspace_slug);
     let mut persisted = state.clone();
     persisted.schema_version = appmeta::SCHEMA_VERSION;
-
-    if !persisted.device.private_key_pem.is_empty()
-        && !persisted.device.private_key_pem.starts_with(ENC_PREFIX)
-    {
-        let key = get_or_create_workspace_key(workspace_slug)?;
-        persisted.device.private_key_pem =
-            encrypt_private_key(&key, &persisted.device.private_key_pem)?;
-    }
-
-    let json = serde_json::to_string_pretty(&persisted)?;
+    let key = get_or_create_workspace_key(workspace_slug)?;
+    let envelope = encrypt_state(&key, workspace_slug, &persisted)?;
+    let json = serde_json::to_string_pretty(&envelope)?;
     write_secure(&path, json.as_bytes())?;
     Ok(path)
 }
 
 pub fn load_workspace_state(workspace_slug: &str) -> Result<StoredWorkspaceState> {
     let path = state_path(workspace_slug);
+    reject_symlink(&path)?;
     let data = fs::read_to_string(&path)
         .with_context(|| format!("read client state from {}", path.display()))?;
-    let mut state: StoredWorkspaceState = serde_json::from_str(&data)
-        .with_context(|| format!("parse client state from {}", path.display()))?;
 
-    if state.device.private_key_pem.starts_with(ENC_PREFIX) {
-        let key = get_or_create_workspace_key(workspace_slug)?;
-        state.device.private_key_pem = decrypt_private_key(&key, &state.device.private_key_pem)?;
+    if let Ok(envelope) = serde_json::from_str::<EncryptedStateEnvelope>(&data) {
+        let key = load_existing_workspace_key(workspace_slug)?;
+        return decrypt_state(&key, workspace_slug, &envelope)
+            .with_context(|| format!("decrypt client state from {}", path.display()));
     }
 
+    let mut state: StoredWorkspaceState = serde_json::from_str(&data)
+        .with_context(|| format!("parse legacy client state from {}", path.display()))?;
+    decrypt_legacy_private_key(workspace_slug, &mut state)?;
     Ok(state)
 }
 
@@ -289,15 +293,9 @@ pub fn format_duration_until(timestamp: i64) -> String {
 
 fn get_or_create_workspace_key(workspace_slug: &str) -> Result<[u8; 32]> {
     let path = key_path(workspace_slug);
+    reject_symlink(&path)?;
     if path.exists() {
-        let encoded = fs::read_to_string(&path)
-            .with_context(|| format!("read client key from {}", path.display()))?;
-        let bytes = B64.decode(encoded.trim())?;
-        if bytes.len() == 32 {
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
-            return Ok(key);
-        }
+        return read_workspace_key(&path);
     }
 
     let mut key = [0u8; 32];
@@ -306,26 +304,99 @@ fn get_or_create_workspace_key(workspace_slug: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn encrypt_private_key(key_bytes: &[u8; 32], pem: &str) -> Result<String> {
+fn load_existing_workspace_key(workspace_slug: &str) -> Result<[u8; 32]> {
+    let path = key_path(workspace_slug);
+    reject_symlink(&path)?;
+    if !path.exists() {
+        return Err(anyhow!(
+            "client state exists but encryption key is missing; run `zecurity-client login` again"
+        ));
+    }
+    read_workspace_key(&path)
+}
+
+fn read_workspace_key(path: &Path) -> Result<[u8; 32]> {
+    let encoded = fs::read_to_string(path)
+        .with_context(|| format!("read client key from {}", path.display()))?;
+    let bytes = B64.decode(encoded.trim())?;
+    if bytes.len() != 32 {
+        return Err(anyhow!(
+            "client encryption key at {} is invalid; run `zecurity-client login` again",
+            path.display()
+        ));
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&bytes);
+    Ok(key)
+}
+
+fn encrypt_state(
+    key_bytes: &[u8; 32],
+    workspace_slug: &str,
+    state: &StoredWorkspaceState,
+) -> Result<EncryptedStateEnvelope> {
     let key = Key::<Aes256Gcm>::from_slice(key_bytes);
     let cipher = Aes256Gcm::new(key);
     let nonce = Aes256Gcm::generate_nonce(&mut rand::rngs::OsRng);
+    let plaintext = serde_json::to_vec(state)?;
     let ciphertext = cipher
-        .encrypt(&nonce, pem.as_bytes())
-        .map_err(|_| anyhow!("encrypt private key"))?;
+        .encrypt(
+            &nonce,
+            aes_gcm::aead::Payload {
+                msg: &plaintext,
+                aad: state_aad(workspace_slug).as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("encrypt client state"))?;
     let mut blob = nonce.to_vec();
     blob.extend_from_slice(&ciphertext);
-    Ok(format!("{}{}", ENC_PREFIX, B64.encode(blob)))
+    Ok(EncryptedStateEnvelope {
+        version: STATE_ENVELOPE_VERSION,
+        ciphertext: format!("{}{}", ENC_PREFIX, B64.encode(blob)),
+    })
+}
+
+fn decrypt_state(
+    key_bytes: &[u8; 32],
+    workspace_slug: &str,
+    envelope: &EncryptedStateEnvelope,
+) -> Result<StoredWorkspaceState> {
+    if envelope.version != STATE_ENVELOPE_VERSION {
+        return Err(anyhow!(
+            "unsupported client state version {}; run `zecurity-client login` again",
+            envelope.version
+        ));
+    }
+    let blob = decode_encrypted_blob(&envelope.ciphertext, "client state")?;
+    let (nonce_bytes, ciphertext) = blob.split_at(12);
+    let key = Key::<Aes256Gcm>::from_slice(key_bytes);
+    let cipher = Aes256Gcm::new(key);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(
+            nonce,
+            aes_gcm::aead::Payload {
+                msg: ciphertext,
+                aad: state_aad(workspace_slug).as_bytes(),
+            },
+        )
+        .map_err(|_| anyhow!("decrypt client state"))?;
+    Ok(serde_json::from_slice(&plaintext)?)
+}
+
+fn decrypt_legacy_private_key(
+    workspace_slug: &str,
+    state: &mut StoredWorkspaceState,
+) -> Result<()> {
+    if state.device.private_key_pem.starts_with(ENC_PREFIX) {
+        let key = load_existing_workspace_key(workspace_slug)?;
+        state.device.private_key_pem = decrypt_private_key(&key, &state.device.private_key_pem)?;
+    }
+    Ok(())
 }
 
 fn decrypt_private_key(key_bytes: &[u8; 32], encrypted: &str) -> Result<String> {
-    let encoded = encrypted
-        .strip_prefix(ENC_PREFIX)
-        .ok_or_else(|| anyhow!("private key is not encrypted with enc1"))?;
-    let blob = B64.decode(encoded.trim())?;
-    if blob.len() < 12 {
-        return Err(anyhow!("encrypted private key is too short"));
-    }
+    let blob = decode_encrypted_blob(encrypted, "private key")?;
     let (nonce_bytes, ciphertext) = blob.split_at(12);
     let key = Key::<Aes256Gcm>::from_slice(key_bytes);
     let cipher = Aes256Gcm::new(key);
@@ -336,17 +407,58 @@ fn decrypt_private_key(key_bytes: &[u8; 32], encrypted: &str) -> Result<String> 
     Ok(String::from_utf8(plaintext)?)
 }
 
+fn decode_encrypted_blob(encrypted: &str, label: &str) -> Result<Vec<u8>> {
+    let encoded = encrypted
+        .strip_prefix(ENC_PREFIX)
+        .ok_or_else(|| anyhow!("{} is not encrypted with enc1", label))?;
+    let blob = B64.decode(encoded.trim())?;
+    if blob.len() < 12 {
+        return Err(anyhow!("encrypted {} is too short", label));
+    }
+    Ok(blob)
+}
+
+fn state_aad(workspace_slug: &str) -> String {
+    format!(
+        "zecurity-client-state:v{}:{}:{}",
+        STATE_ENVELOPE_VERSION,
+        appmeta::SCHEMA_VERSION,
+        sanitize_workspace_slug(workspace_slug)
+    )
+}
+
 fn write_secure(path: &Path, data: &[u8]) -> Result<()> {
+    reject_symlink(path)?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_secure_dir(parent)?;
+    }
+
+    let temp_path = temp_path_for(path);
+    let write_result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("create temp file {}", temp_path.display()))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
         }
-    }
+        file.write_all(data)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("rename {} to {}", temp_path.display(), path.display()))?;
+        sync_parent_dir(path)?;
+        Ok(())
+    })();
 
-    fs::write(path, data)?;
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result?;
+
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -355,11 +467,72 @@ fn write_secure(path: &Path, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn temp_path_for(path: &Path) -> PathBuf {
+    let mut nonce = [0u8; 8];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let suffix = format!(".tmp.{}.{}", std::process::id(), u64::from_le_bytes(nonce));
+    let file_name = path
+        .file_name()
+        .map(|name| format!("{}{}", name.to_string_lossy(), suffix))
+        .unwrap_or_else(|| format!("zecurity-client{}", suffix));
+    path.with_file_name(file_name)
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        let dir = fs::File::open(parent)
+            .with_context(|| format!("open parent directory {}", parent.display()))?;
+        dir.sync_all()
+            .with_context(|| format!("sync parent directory {}", parent.display()))?;
+    }
+    Ok(())
+}
+
 fn remove_if_exists(path: &Path) -> Result<bool> {
+    reject_symlink(path)?;
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn ensure_secure_dir(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(anyhow!(
+                    "refusing to use symlinked directory {}",
+                    path.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                return Err(anyhow!("{} is not a directory", path.display()));
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path)
+                .with_context(|| format!("create directory {}", path.display()))?;
+        }
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", path.display())),
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn reject_symlink(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(anyhow!("refusing to use symlinked path {}", path.display()))
+        }
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("inspect {}", path.display())),
     }
 }
 

@@ -6,6 +6,7 @@ use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::oneshot;
+use x509_parser::prelude::*;
 
 use crate::{
     config::ClientConf,
@@ -140,6 +141,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         "{}\n{}",
         enroll.workspace_ca_pem, enroll.intermediate_ca_pem
     );
+    let cert_expires_at = certificate_not_after_unix(&enroll.certificate_pem)?;
 
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
@@ -162,7 +164,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             certificate_pem: enroll.certificate_pem,
             private_key_pem,
             ca_cert_pem,
-            cert_expires_at: now + 7 * 24 * 3600,
+            cert_expires_at,
             hostname,
             os,
         },
@@ -207,4 +209,12 @@ fn extract_trust_domain(spiffe_id: &str) -> String {
         .and_then(|s| s.split('/').next())
         .unwrap_or("")
         .to_string()
+}
+
+fn certificate_not_after_unix(certificate_pem: &str) -> Result<i64> {
+    let (_, pem) = parse_x509_pem(certificate_pem.as_bytes())
+        .map_err(|err| anyhow!("parse issued certificate PEM: {err}"))?;
+    let (_, cert) = X509Certificate::from_der(&pem.contents)
+        .map_err(|err| anyhow!("parse issued certificate DER: {err}"))?;
+    Ok(cert.validity().not_after.timestamp())
 }
