@@ -1,7 +1,9 @@
 mod appmeta;
 mod config;
+mod daemon;
 mod error;
 mod grpc;
+mod ipc;
 mod login;
 mod runtime;
 mod state_store;
@@ -49,6 +51,9 @@ enum Commands {
         #[arg(long)]
         email: String,
     },
+    /// Run as background daemon (launched by systemd — not for direct use)
+    #[command(hide = true)]
+    Daemon,
 }
 
 #[tokio::main]
@@ -69,5 +74,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => cmd::status::run().await,
         Commands::Logout => cmd::logout::run().await,
         Commands::Invite { email } => cmd::invite::run(email).await,
+        Commands::Daemon => daemon::run().await,
     }
 }

@@ -134,9 +134,9 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 > Depends on: M2-A proto complete + M3 Compiler Output Contract documented. M4 does not need to wait for the M3 implementation.
 > See [[Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling]].
 
-- [ ] **M4-C1** Connector receives ACL snapshot from heartbeat response.
-- [ ] **M4-C2** Connector keeps local in-memory snapshot with default-deny helper APIs.
-- [ ] **M4-C3** Add test/helper proving unknown resource and missing SPIFFE are denied.
+- [x] **M4-C1** Connector receives ACL snapshot from heartbeat response.
+- [x] **M4-C2** Connector keeps local in-memory snapshot with default-deny helper APIs.
+- [x] **M4-C3** Add test/helper proving unknown resource and missing SPIFFE are denied.
 > Build check: `cd connector && cargo build` passes. Client build remains required for Sprint 8.5 daemon work.
 
 ---

@@ -1,14 +1,25 @@
 [Unit]
-Description=Zecurity Client Tunnel
+Description=Zecurity Client Daemon
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/zecurity-client connect
+# User= is set by the installation script to the enrolling user.
+# This is a system-level unit (/etc/systemd/system/) — not a user unit.
+# AmbientCapabilities requires system-level placement to take effect.
+User=
+ExecStart=/usr/local/bin/zecurity-client daemon
 Restart=on-failure
 RestartSec=5
 WatchdogSec=90
+
+# CAP_NET_ADMIN is required for TUN interface creation and route management.
+# The daemon does not run as root — this is the minimum required capability.
+# Works here because this is a system unit. Would not work in --user unit.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
 
 StandardOutput=journal
 StandardError=journal
@@ -17,4 +28,4 @@ RuntimeDirectory=zecurity-client
 RuntimeDirectoryMode=0700
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target

@@ -28,8 +28,10 @@ axum       = "0.7"
 reqwest    = { version = "0.12", features = ["json", "native-tls"], default-features = false }
 hostname   = "0.4"
 urlencoding = "2"
-serde_json  = "1"
-libc        = "0.2"
+serde_json         = "1"
+libc               = "0.2"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm     = "0.10"
 x509-parser = "0.16"
 

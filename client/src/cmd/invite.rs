@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::config::load;
+use crate::ipc::{send_ipc, IpcRequest};
 use crate::login;
 
 #[derive(Serialize)]
@@ -19,14 +20,20 @@ struct InviteResponse {
 pub async fn run(email: String) -> Result<()> {
     let conf = load()?;
 
-    println!("Authenticating...");
-    let result = login::run(&conf, None).await?;
+    // Use daemon token if available — avoids forcing re-auth on every invite.
+    let access_token = match send_ipc(&IpcRequest::GetToken).await {
+        Ok(resp) if resp.ok => resp.token.unwrap_or_default(),
+        _ => {
+            println!("Authenticating...");
+            login::run(&conf, None).await?.session.access_token
+        }
+    };
 
     let url = format!("{}/api/invitations", conf.http_base());
 
     let resp = Client::new()
         .post(&url)
-        .bearer_auth(&result.session.access_token)
+        .bearer_auth(&access_token)
         .json(&InviteRequest { email: &email })
         .send()
         .await?;
