@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::ipc::{ensure_daemon_and_send, IpcRequest};
+use crate::ipc::{send_ipc, IpcRequest};
 use crate::state_store::format_duration_until;
 
 pub async fn run() -> Result<()> {
@@ -16,7 +16,7 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    match ensure_daemon_and_send(&IpcRequest::Status).await {
+    match send_ipc(&IpcRequest::Status).await {
         Ok(resp) if resp.ok => {
             let email = resp.email.as_deref().unwrap_or("unknown");
             let expires = resp
@@ -32,11 +32,10 @@ pub async fn run() -> Result<()> {
                 println!("SPIFFE ID:  {}", spiffe);
             }
 
-            let acl_ver = resp.acl_snapshot_version.unwrap_or(0);
-            if acl_ver > 0 {
-                println!("ACL:        version {}", acl_ver);
-            } else {
-                println!("ACL:        not yet loaded");
+            match resp.acl_snapshot_version {
+                None        => println!("ACL:        not yet loaded"),
+                Some(0)     => println!("ACL:        loaded (no policies configured for this workspace)"),
+                Some(v)     => println!("ACL:        version {}", v),
             }
         }
         _ => {

@@ -68,6 +68,10 @@ pub async fn run() -> Result<()> {
     // Signal systemd: socket is bound, daemon is ready (required for Type=notify).
     sd_notify_ready();
 
+    // Keep the systemd watchdog alive. Reads WATCHDOG_USEC set by systemd and
+    // pings every half-interval so a transient slow tick never trips the timeout.
+    sd_spawn_watchdog();
+
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -146,7 +150,7 @@ async fn handle_request(
                 spiffe_id: s.device.as_ref().map(|d| d.spiffe_id.clone()),
                 cert_expires_at: s.device.as_ref().map(|d| d.cert_expires_at),
                 workspace: s.workspace.as_ref().map(|w| w.name.clone()),
-                acl_snapshot_version: Some(s.acl_snapshot.as_ref().map(|snap| snap.version).unwrap_or(0)),
+                acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 ..Default::default()
             }
         }
@@ -293,6 +297,27 @@ fn sd_notify_ready() {
     };
     let _ = std::os::unix::net::UnixDatagram::unbound()
         .and_then(|s| s.send_to(b"READY=1\n", &path));
+}
+
+fn sd_spawn_watchdog() {
+    let Ok(usec_str) = std::env::var("WATCHDOG_USEC") else {
+        return;
+    };
+    let Ok(usec) = usec_str.parse::<u64>() else {
+        return;
+    };
+    let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
+        return;
+    };
+    let interval = tokio::time::Duration::from_micros(usec / 2);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let _ = std::os::unix::net::UnixDatagram::unbound()
+                .and_then(|s| s.send_to(b"WATCHDOG=1\n", &path));
+        }
+    });
 }
 
 async fn fetch_acl_snapshot(
