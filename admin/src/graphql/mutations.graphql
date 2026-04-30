@@ -117,3 +117,68 @@ mutation CreateInvitation($email: String!) {
     createdAt
   }
 }
+
+mutation CreateGroup($name: String!, $description: String) {
+  createGroup(name: $name, description: $description) {
+    id
+    name
+    description
+    createdAt
+    updatedAt
+  }
+}
+
+mutation UpdateGroup($id: ID!, $name: String, $description: String) {
+  updateGroup(id: $id, name: $name, description: $description) {
+    id
+    name
+    description
+    updatedAt
+  }
+}
+
+mutation DeleteGroup($id: ID!) {
+  deleteGroup(id: $id)
+}
+
+mutation AddGroupMember($groupId: ID!, $userId: ID!) {
+  addGroupMember(groupId: $groupId, userId: $userId) {
+    id
+    members {
+      id
+      email
+      role
+    }
+  }
+}
+
+mutation RemoveGroupMember($groupId: ID!, $userId: ID!) {
+  removeGroupMember(groupId: $groupId, userId: $userId) {
+    id
+    members {
+      id
+      email
+      role
+    }
+  }
+}
+
+mutation AssignResourceToGroup($resourceId: ID!, $groupId: ID!) {
+  assignResourceToGroup(resourceId: $resourceId, groupId: $groupId) {
+    id
+    groups {
+      id
+      name
+    }
+  }
+}
+
+mutation UnassignResourceFromGroup($resourceId: ID!, $groupId: ID!) {
+  unassignResourceFromGroup(resourceId: $resourceId, groupId: $groupId) {
+    id
+    groups {
+      id
+      name
+    }
+  }
+}

@@ -113,3 +113,33 @@ cd controller && go generate ./graph/...
 cd controller && go build ./...
 cd admin && npm run codegen
 ```
+
+---
+
+## Post-Phase Fixes
+
+### Fix: Missing `users` GraphQL Query (added by M1 on 2026-04-30)
+
+**Issue:** M2's GraphQL schema added group types and mutations but did not add a `users` query. M1's GroupDetail "Add Member" flow needs to list all workspace users to populate the user picker dropdown. Without this query, the Add Member UI had no way to fetch users.
+
+**Root Cause:** M2's phase doc mentioned group CRUD, membership, and resource assignment in the GraphQL schema section but did not explicitly call out a `users: [User!]!` list query. The `me` query already existed (Sprint 1) but returns only the current user.
+
+**Fix Applied:**
+
+`controller/graph/schema.graphqls` — added to `Query`:
+```graphql
+# Returns all active users in the current workspace.
+# Scoped to tenant_id from JWT — never crosses workspaces.
+users: [User!]!
+```
+
+`controller/graph/resolvers/schema.resolvers.go` — added resolver:
+```go
+func (r *queryResolver) Users(ctx context.Context) ([]*models.User, error) {
+    tc := tenant.MustGet(ctx)
+    // queries all active users for the workspace ordered by email
+    ...
+}
+```
+
+`admin/src/graphql/queries.graphql` — added `GetUsers` query used by GroupDetail Add Member picker.

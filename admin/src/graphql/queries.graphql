@@ -165,6 +165,10 @@ query GetAllResources {
       id
       name
     }
+    groups {
+      id
+      name
+    }
   }
 }
 
@@ -232,6 +236,61 @@ query GetResources($remoteNetworkId: String!) {
       id
       name
       status
+    }
+  }
+}
+
+query GetUsers {
+  users {
+    id
+    email
+    role
+    createdAt
+  }
+}
+
+query GetGroups {
+  groups {
+    id
+    name
+    description
+    createdAt
+    updatedAt
+    members {
+      id
+      email
+      role
+    }
+    resources {
+      id
+      name
+      host
+      protocol
+      portFrom
+      portTo
+    }
+  }
+}
+
+query GetGroup($id: ID!) {
+  group(id: $id) {
+    id
+    name
+    description
+    createdAt
+    updatedAt
+    members {
+      id
+      email
+      role
+    }
+    resources {
+      id
+      name
+      host
+      protocol
+      portFrom
+      portTo
     }
   }
 }

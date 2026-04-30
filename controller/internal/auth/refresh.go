@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -98,6 +99,14 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 			writeJSONError(w, http.StatusInternalServerError, "token issue failed")
 			return
 		}
+
+		// Slide the refresh token TTL so active users are never logged out.
+		// Only truly inactive users (no requests for 7 days) will be logged out.
+		ttl, perr := time.ParseDuration(s.cfg.JWTRefreshTTL)
+		if perr != nil {
+			ttl = 7 * 24 * time.Hour
+		}
+		s.redisClient.SetRefreshToken(ctx, userID, cookieToken, ttl)
 
 		// Step 6 — Return new access JWT in JSON body.
 		w.Header().Set("Content-Type", "application/json")

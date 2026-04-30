@@ -1,6 +1,8 @@
-import { NavLink } from 'react-router-dom'
+import { useState } from 'react'
+import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
+  ChevronDown,
   Download,
   LayoutDashboard,
   Network,
@@ -9,12 +11,14 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  UserCircle2,
+  Users,
   Waypoints,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
 
-const items = [
+const mainItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/topology', label: 'Topology', icon: Waypoints },
   { to: '/resource-discovery', label: 'Resource Discovery', icon: Radar },
@@ -23,6 +27,11 @@ const items = [
   { to: '/shields', label: 'Shields', icon: Shield },
   { to: '/resources', label: 'Resources', icon: Box },
   { to: '/settings', label: 'Settings', icon: Settings },
+]
+
+const teamItems = [
+  { to: '/users', label: 'Users', icon: UserCircle2 },
+  { to: '/groups', label: 'Groups', icon: Users },
 ]
 
 function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: React.ElementType }) {
@@ -45,6 +54,59 @@ function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: R
   )
 }
 
+function SubNavItem({ to, label, icon: Icon }: { to: string; label: string; icon: React.ElementType }) {
+  return (
+    <NavLink to={to}>
+      {({ isActive }) => (
+        <div
+          className={cn(
+            'flex items-center gap-3 rounded-[10px] pl-6 pr-3 py-2 text-[13px] font-medium transition-colors',
+            isActive
+              ? 'bg-primary text-primary-foreground shadow-[0_4px_14px_oklch(0.86_0.095_175/0.2)]'
+              : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+          )}
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0" />
+          <span>{label}</span>
+        </div>
+      )}
+    </NavLink>
+  )
+}
+
+function TeamSection() {
+  const location = useLocation()
+  const isTeamActive = location.pathname.startsWith('/users') || location.pathname.startsWith('/groups')
+  const [open, setOpen] = useState(isTeamActive)
+
+  return (
+    <div>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className={cn(
+          'flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-[13.5px] font-medium transition-colors',
+          isTeamActive && !open
+            ? 'bg-primary/10 text-primary'
+            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+        )}
+      >
+        <Users className="h-4 w-4 shrink-0" />
+        <span className="flex-1 text-left">Team</span>
+        <ChevronDown
+          className={cn('h-3.5 w-3.5 shrink-0 transition-transform', open && 'rotate-180')}
+        />
+      </button>
+      {open && (
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          {teamItems.map((item) => (
+            <SubNavItem key={item.to} {...item} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function Sidebar() {
   const user = useAuthStore((state) => state.user)
   const initials = user?.email?.slice(0, 2).toUpperCase() ?? 'ZT'
@@ -62,13 +124,14 @@ export function Sidebar() {
       </div>
 
       <div className="mt-4 px-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-        Console
+        Navigation
       </div>
 
       <nav className="mt-2 flex flex-1 flex-col gap-1 px-1">
-        {items.map((item) => (
+        {mainItems.map((item) => (
           <NavItem key={item.to} {...item} />
         ))}
+        <TeamSection />
         {user?.role === 'ADMIN' && (
           <NavItem to="/client-install" label="Install Client" icon={Download} />
         )}

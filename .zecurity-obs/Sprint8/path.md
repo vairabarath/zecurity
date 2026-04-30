@@ -146,11 +146,11 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 > Depends on: M2-A GraphQL codegen and M3-B CRUD.
 > See [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]].
 
-- [ ] **M1-D1** Groups page: create/edit/delete.
-- [ ] **M1-D2** Members tab: add/remove users from group.
-- [ ] **M1-D3** Resources tab: assign/unassign resources to group.
-- [ ] **M1-D4** Resources page: show groups with access.
-- [ ] **M1-D5** Empty/error/loading states for policy operations.
+- [x] **M1-D1** Groups page: create/edit/delete.
+- [x] **M1-D2** Members tab: add/remove users from group.
+- [x] **M1-D3** Resources tab: assign/unassign resources to group.
+- [x] **M1-D4** Resources page: show groups with access.
+- [x] **M1-D5** Empty/error/loading states for policy operations.
 
 > Build check: `cd admin && npm run build` passes.
 
@@ -205,3 +205,63 @@ See individual phase files:
 - [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]]
 - [[Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling]]
 - [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]]
+
+---
+
+## Post-Sprint Fixes
+
+### Fix: Makefile GQLGEN_VERSION mismatch (fixed by M1 on 2026-04-30)
+
+**File:** `Makefile`
+
+**Issue:** `make gqlgen` failed — `Makefile` had `v0.17.89` but `controller/go.mod` pinned `v0.17.90`.
+
+**Fix:** `GQLGEN_VERSION := v0.17.90`.
+
+---
+
+### Fix: Apollo Client v4 HTTP 401 not caught (fixed by M1 on 2026-04-30)
+
+**File:** `admin/src/apollo/links/error.ts`
+
+**Issue:** Active users were logged out mid-session. Apollo v4 surfaces HTTP 401 as a network error, not a GraphQL error — `CombinedGraphQLErrors.is()` returned false so the refresh/logout logic never ran.
+
+**Fix:** Extended `isUnauthorizedError` to also check `error.statusCode === 401` and `error instanceof Response`.
+
+See full details in [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]] → Post-Phase Fixes.
+
+---
+
+### Fix: Refresh token TTL not sliding (fixed by M1 on 2026-04-30)
+
+**File:** `controller/internal/auth/refresh.go`
+
+**Issue:** Redis TTL set only at login, never extended. Active users logged out after 7 days regardless of activity.
+
+**Fix:** After issuing new access token, call `SetRefreshToken` with the configured TTL to slide the Redis expiry on every refresh.
+
+See full details in [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]] → Post-Phase Fixes.
+
+---
+
+### Fix: M2 Missing `users` GraphQL Query (added by M1 on 2026-04-30)
+
+**File:** `controller/graph/schema.graphqls`, `controller/graph/resolvers/schema.resolvers.go`, `admin/src/graphql/queries.graphql`
+
+**Issue:** M2's schema had no `users` list query. M1's GroupDetail "Add Member" picker needed to list all workspace users to show a dropdown — without it the feature was unusable.
+
+**Fix:** M1 added `users: [User!]!` to the Query type, wired the resolver (scoped by tenant_id from JWT, ordered by email), and added `GetUsers` to the frontend queries.
+
+See full fix details in [[Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema]] → Post-Phase Fixes.
+
+---
+
+### Fix: M3 Missing GraphQL Resolver Helpers (fixed by M1 on 2026-04-30)
+
+**File:** `controller/graph/resolvers/policy_helpers.go`
+
+**Issue:** Controller build broken after M3's PR merged. `policy.resolvers.go` called `groupRowToGQL`, `r.loadGroup`, and `r.loadResourceWithGroups` which were never implemented.
+
+**Fix:** M1 added the three missing functions to `policy_helpers.go`. Both `loadGroup` and `loadResourceWithGroups` are defined on `*Resolver` (the base struct) so both `mutationResolver` and `queryResolver` can access them via embedding.
+
+See full fix details in [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]] → Post-Phase Fixes.

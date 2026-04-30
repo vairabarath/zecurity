@@ -5,6 +5,7 @@ schema:
   - '../controller/graph/resource.graphqls'
   - '../controller/graph/discovery.graphqls'
   - '../controller/graph/client.graphqls'
+  - '../controller/graph/policy.graphqls'
 documents: 'src/graphql/**/*.graphql'
 generates:
   src/generated/:

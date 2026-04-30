@@ -5,6 +5,10 @@ type Query {
   # Requires valid JWT in Authorization header.
   me: User!
 
+  # Returns all active users in the current workspace.
+  # Scoped to tenant_id from JWT — never crosses workspaces.
+  users: [User!]!
+
   # Returns the workspace the current user belongs to.
   # Scoped to tenant_id from JWT — never crosses workspaces.
   workspace: Workspace!
