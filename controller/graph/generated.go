@@ -83,6 +83,16 @@ type ComplexityRoot struct {
 		ShieldID    func(childComplexity int) int
 	}
 
+	Group struct {
+		CreatedAt   func(childComplexity int) int
+		Description func(childComplexity int) int
+		ID          func(childComplexity int) int
+		Members     func(childComplexity int) int
+		Name        func(childComplexity int) int
+		Resources   func(childComplexity int) int
+		UpdatedAt   func(childComplexity int) int
+	}
+
 	Invitation struct {
 		CreatedAt func(childComplexity int) int
 		Email     func(childComplexity int) int
@@ -92,23 +102,30 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		CreateInvitation         func(childComplexity int, email string) int
-		CreateRemoteNetwork      func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource           func(childComplexity int, input CreateResourceInput) int
-		DeleteConnector          func(childComplexity int, id string) int
-		DeleteRemoteNetwork      func(childComplexity int, id string) int
-		DeleteResource           func(childComplexity int, id string) int
-		DeleteShield             func(childComplexity int, id string) int
-		GenerateConnectorToken   func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken      func(childComplexity int, remoteNetworkID string, shieldName string) int
-		InitiateAuth             func(childComplexity int, provider string, workspaceName *string) int
-		PromoteDiscoveredService func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource          func(childComplexity int, id string) int
-		RevokeConnector          func(childComplexity int, id string) int
-		RevokeShield             func(childComplexity int, id string) int
-		TriggerScan              func(childComplexity int, connectorID string, targets []string, ports []int) int
-		UnprotectResource        func(childComplexity int, id string) int
-		UpdateResource           func(childComplexity int, id string, input UpdateResourceInput) int
+		AddGroupMember            func(childComplexity int, groupID string, userID string) int
+		AssignResourceToGroup     func(childComplexity int, resourceID string, groupID string) int
+		CreateGroup               func(childComplexity int, name string, description *string) int
+		CreateInvitation          func(childComplexity int, email string) int
+		CreateRemoteNetwork       func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource            func(childComplexity int, input CreateResourceInput) int
+		DeleteConnector           func(childComplexity int, id string) int
+		DeleteGroup               func(childComplexity int, id string) int
+		DeleteRemoteNetwork       func(childComplexity int, id string) int
+		DeleteResource            func(childComplexity int, id string) int
+		DeleteShield              func(childComplexity int, id string) int
+		GenerateConnectorToken    func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken       func(childComplexity int, remoteNetworkID string, shieldName string) int
+		InitiateAuth              func(childComplexity int, provider string, workspaceName *string) int
+		PromoteDiscoveredService  func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource           func(childComplexity int, id string) int
+		RemoveGroupMember         func(childComplexity int, groupID string, userID string) int
+		RevokeConnector           func(childComplexity int, id string) int
+		RevokeShield              func(childComplexity int, id string) int
+		TriggerScan               func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnassignResourceFromGroup func(childComplexity int, resourceID string, groupID string) int
+		UnprotectResource         func(childComplexity int, id string) int
+		UpdateGroup               func(childComplexity int, id string, name *string, description *string) int
+		UpdateResource            func(childComplexity int, id string, input UpdateResourceInput) int
 	}
 
 	Query struct {
@@ -117,6 +134,8 @@ type ComplexityRoot struct {
 		Connectors              func(childComplexity int, remoteNetworkID string) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
 		GetScanResults          func(childComplexity int, requestID string) int
+		Group                   func(childComplexity int, id string) int
+		Groups                  func(childComplexity int) int
 		Invitation              func(childComplexity int, token string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
@@ -146,6 +165,7 @@ type ComplexityRoot struct {
 		CreatedAt      func(childComplexity int) int
 		Description    func(childComplexity int) int
 		ErrorMessage   func(childComplexity int) int
+		Groups         func(childComplexity int) int
 		Host           func(childComplexity int) int
 		ID             func(childComplexity int) int
 		LastVerifiedAt func(childComplexity int) int
@@ -238,6 +258,13 @@ type MutationResolver interface {
 	PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*Resource, error)
 	TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error)
 	CreateInvitation(ctx context.Context, email string) (*Invitation, error)
+	CreateGroup(ctx context.Context, name string, description *string) (*Group, error)
+	UpdateGroup(ctx context.Context, id string, name *string, description *string) (*Group, error)
+	DeleteGroup(ctx context.Context, id string) (bool, error)
+	AddGroupMember(ctx context.Context, groupID string, userID string) (*Group, error)
+	RemoveGroupMember(ctx context.Context, groupID string, userID string) (*Group, error)
+	AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
+	UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -256,6 +283,8 @@ type QueryResolver interface {
 	GetScanResults(ctx context.Context, requestID string) ([]*ScanResult, error)
 	MyDevices(ctx context.Context) ([]*ClientDevice, error)
 	Invitation(ctx context.Context, token string) (*Invitation, error)
+	Groups(ctx context.Context) ([]*Group, error)
+	Group(ctx context.Context, id string) (*Group, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -460,6 +489,49 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.DiscoveredService.ShieldID(childComplexity), true
 
+	case "Group.createdAt":
+		if e.ComplexityRoot.Group.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.CreatedAt(childComplexity), true
+	case "Group.description":
+		if e.ComplexityRoot.Group.Description == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.Description(childComplexity), true
+	case "Group.id":
+		if e.ComplexityRoot.Group.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.ID(childComplexity), true
+	case "Group.members":
+		if e.ComplexityRoot.Group.Members == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.Members(childComplexity), true
+	case "Group.name":
+		if e.ComplexityRoot.Group.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.Name(childComplexity), true
+	case "Group.resources":
+		if e.ComplexityRoot.Group.Resources == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.Resources(childComplexity), true
+	case "Group.updatedAt":
+		if e.ComplexityRoot.Group.UpdatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.UpdatedAt(childComplexity), true
+
 	case "Invitation.createdAt":
 		if e.ComplexityRoot.Invitation.CreatedAt == nil {
 			break
@@ -491,6 +563,39 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Invitation.Status(childComplexity), true
 
+	case "Mutation.addGroupMember":
+		if e.ComplexityRoot.Mutation.AddGroupMember == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_addGroupMember_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.AddGroupMember(childComplexity, args["groupId"].(string), args["userId"].(string)), true
+	case "Mutation.assignResourceToGroup":
+		if e.ComplexityRoot.Mutation.AssignResourceToGroup == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_assignResourceToGroup_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.AssignResourceToGroup(childComplexity, args["resourceId"].(string), args["groupId"].(string)), true
+	case "Mutation.createGroup":
+		if e.ComplexityRoot.Mutation.CreateGroup == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_createGroup_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.CreateGroup(childComplexity, args["name"].(string), args["description"].(*string)), true
 	case "Mutation.createInvitation":
 		if e.ComplexityRoot.Mutation.CreateInvitation == nil {
 			break
@@ -535,6 +640,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.DeleteConnector(childComplexity, args["id"].(string)), true
+	case "Mutation.deleteGroup":
+		if e.ComplexityRoot.Mutation.DeleteGroup == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_deleteGroup_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.DeleteGroup(childComplexity, args["id"].(string)), true
 	case "Mutation.deleteRemoteNetwork":
 		if e.ComplexityRoot.Mutation.DeleteRemoteNetwork == nil {
 			break
@@ -623,6 +739,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.ProtectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.removeGroupMember":
+		if e.ComplexityRoot.Mutation.RemoveGroupMember == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_removeGroupMember_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.RemoveGroupMember(childComplexity, args["groupId"].(string), args["userId"].(string)), true
 	case "Mutation.revokeConnector":
 		if e.ComplexityRoot.Mutation.RevokeConnector == nil {
 			break
@@ -656,6 +783,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.TriggerScan(childComplexity, args["connectorId"].(string), args["targets"].([]string), args["ports"].([]int)), true
+	case "Mutation.unassignResourceFromGroup":
+		if e.ComplexityRoot.Mutation.UnassignResourceFromGroup == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_unassignResourceFromGroup_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UnassignResourceFromGroup(childComplexity, args["resourceId"].(string), args["groupId"].(string)), true
 	case "Mutation.unprotectResource":
 		if e.ComplexityRoot.Mutation.UnprotectResource == nil {
 			break
@@ -667,6 +805,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UnprotectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.updateGroup":
+		if e.ComplexityRoot.Mutation.UpdateGroup == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateGroup_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateGroup(childComplexity, args["id"].(string), args["name"].(*string), args["description"].(*string)), true
 	case "Mutation.updateResource":
 		if e.ComplexityRoot.Mutation.UpdateResource == nil {
 			break
@@ -729,6 +878,23 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.GetScanResults(childComplexity, args["requestId"].(string)), true
+	case "Query.group":
+		if e.ComplexityRoot.Query.Group == nil {
+			break
+		}
+
+		args, err := ec.field_Query_group_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.Group(childComplexity, args["id"].(string)), true
+	case "Query.groups":
+		if e.ComplexityRoot.Query.Groups == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.Groups(childComplexity), true
 
 	case "Query.invitation":
 		if e.ComplexityRoot.Query.Invitation == nil {
@@ -905,6 +1071,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.ErrorMessage(childComplexity), true
+	case "Resource.groups":
+		if e.ComplexityRoot.Resource.Groups == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Resource.Groups(childComplexity), true
 	case "Resource.host":
 		if e.ComplexityRoot.Resource.Host == nil {
 			break
@@ -1280,7 +1452,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1298,12 +1470,61 @@ var sources = []*ast.Source{
 	{Name: "resource.graphqls", Input: sourceData("resource.graphqls"), BuiltIn: false},
 	{Name: "discovery.graphqls", Input: sourceData("discovery.graphqls"), BuiltIn: false},
 	{Name: "client.graphqls", Input: sourceData("client.graphqls"), BuiltIn: false},
+	{Name: "policy.graphqls", Input: sourceData("policy.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
 // endregion ************************** generated!.gotpl **************************
 
 // region    ***************************** args.gotpl *****************************
+
+func (ec *executionContext) field_Mutation_addGroupMember_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "groupId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["groupId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "userId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_assignResourceToGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "resourceId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["resourceId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "groupId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["groupId"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_createGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "name", ec.unmarshalNString2string)
+	if err != nil {
+		return nil, err
+	}
+	args["name"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "description", ec.unmarshalOString2ᚖstring)
+	if err != nil {
+		return nil, err
+	}
+	args["description"] = arg1
+	return args, nil
+}
 
 func (ec *executionContext) field_Mutation_createInvitation_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
@@ -1344,6 +1565,17 @@ func (ec *executionContext) field_Mutation_createResource_args(ctx context.Conte
 }
 
 func (ec *executionContext) field_Mutation_deleteConnector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_deleteGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
@@ -1467,6 +1699,22 @@ func (ec *executionContext) field_Mutation_protectResource_args(ctx context.Cont
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_removeGroupMember_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "groupId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["groupId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "userId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_revokeConnector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -1510,6 +1758,22 @@ func (ec *executionContext) field_Mutation_triggerScan_args(ctx context.Context,
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_unassignResourceFromGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "resourceId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["resourceId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "groupId", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["groupId"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_unprotectResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -1518,6 +1782,27 @@ func (ec *executionContext) field_Mutation_unprotectResource_args(ctx context.Co
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "name", ec.unmarshalOString2ᚖstring)
+	if err != nil {
+		return nil, err
+	}
+	args["name"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "description", ec.unmarshalOString2ᚖstring)
+	if err != nil {
+		return nil, err
+	}
+	args["description"] = arg2
 	return args, nil
 }
 
@@ -1589,6 +1874,17 @@ func (ec *executionContext) field_Query_getScanResults_args(ctx context.Context,
 		return nil, err
 	}
 	args["requestId"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_group_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id", ec.unmarshalNID2string)
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
 	return args, nil
 }
 
@@ -2562,6 +2858,253 @@ func (ec *executionContext) fieldContext_DiscoveredService_lastSeen(_ context.Co
 	return fc, nil
 }
 
+func (ec *executionContext) _Group_id(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_id,
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		ec.marshalNID2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type ID does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_name(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_name,
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_description(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_description,
+		func(ctx context.Context) (any, error) {
+			return obj.Description, nil
+		},
+		nil,
+		ec.marshalOString2ᚖstring,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_description(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_members(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_members,
+		func(ctx context.Context) (any, error) {
+			return obj.Members, nil
+		},
+		nil,
+		ec.marshalNUser2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUserᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_members(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_User_id(ctx, field)
+			case "email":
+				return ec.fieldContext_User_email(ctx, field)
+			case "role":
+				return ec.fieldContext_User_role(ctx, field)
+			case "provider":
+				return ec.fieldContext_User_provider(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_User_createdAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type User", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_resources(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_resources,
+		func(ctx context.Context) (any, error) {
+			return obj.Resources, nil
+		},
+		nil,
+		ec.marshalNResource2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourceᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_resources(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Resource_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Resource_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Resource_description(ctx, field)
+			case "host":
+				return ec.fieldContext_Resource_host(ctx, field)
+			case "protocol":
+				return ec.fieldContext_Resource_protocol(ctx, field)
+			case "portFrom":
+				return ec.fieldContext_Resource_portFrom(ctx, field)
+			case "portTo":
+				return ec.fieldContext_Resource_portTo(ctx, field)
+			case "status":
+				return ec.fieldContext_Resource_status(ctx, field)
+			case "errorMessage":
+				return ec.fieldContext_Resource_errorMessage(ctx, field)
+			case "appliedAt":
+				return ec.fieldContext_Resource_appliedAt(ctx, field)
+			case "lastVerifiedAt":
+				return ec.fieldContext_Resource_lastVerifiedAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Resource_createdAt(ctx, field)
+			case "shield":
+				return ec.fieldContext_Resource_shield(ctx, field)
+			case "remoteNetwork":
+				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_createdAt(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_createdAt,
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Group_updatedAt(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Group_updatedAt,
+		func(ctx context.Context) (any, error) {
+			return obj.UpdatedAt, nil
+		},
+		nil,
+		ec.marshalNString2string,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Group_updatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Group",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type String does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Invitation_id(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -3165,6 +3708,8 @@ func (ec *executionContext) fieldContext_Mutation_createResource(ctx context.Con
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -3236,6 +3781,8 @@ func (ec *executionContext) fieldContext_Mutation_updateResource(ctx context.Con
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -3307,6 +3854,8 @@ func (ec *executionContext) fieldContext_Mutation_protectResource(ctx context.Co
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -3378,6 +3927,8 @@ func (ec *executionContext) fieldContext_Mutation_unprotectResource(ctx context.
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -3490,6 +4041,8 @@ func (ec *executionContext) fieldContext_Mutation_promoteDiscoveredService(ctx c
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -3596,6 +4149,421 @@ func (ec *executionContext) fieldContext_Mutation_createInvitation(ctx context.C
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_createInvitation_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_createGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_createGroup,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().CreateGroup(ctx, fc.Args["name"].(string), fc.Args["description"].(*string))
+		},
+		nil,
+		ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_createGroup(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_createGroup_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_updateGroup,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateGroup(ctx, fc.Args["id"].(string), fc.Args["name"].(*string), fc.Args["description"].(*string))
+		},
+		nil,
+		ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_updateGroup(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateGroup_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_deleteGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_deleteGroup,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().DeleteGroup(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalNBoolean2bool,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_deleteGroup(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_deleteGroup_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_addGroupMember(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_addGroupMember,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().AddGroupMember(ctx, fc.Args["groupId"].(string), fc.Args["userId"].(string))
+		},
+		nil,
+		ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_addGroupMember(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_addGroupMember_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_removeGroupMember(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_removeGroupMember,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().RemoveGroupMember(ctx, fc.Args["groupId"].(string), fc.Args["userId"].(string))
+		},
+		nil,
+		ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_removeGroupMember(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_removeGroupMember_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_assignResourceToGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_assignResourceToGroup,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().AssignResourceToGroup(ctx, fc.Args["resourceId"].(string), fc.Args["groupId"].(string))
+		},
+		nil,
+		ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_assignResourceToGroup(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Resource_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Resource_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Resource_description(ctx, field)
+			case "host":
+				return ec.fieldContext_Resource_host(ctx, field)
+			case "protocol":
+				return ec.fieldContext_Resource_protocol(ctx, field)
+			case "portFrom":
+				return ec.fieldContext_Resource_portFrom(ctx, field)
+			case "portTo":
+				return ec.fieldContext_Resource_portTo(ctx, field)
+			case "status":
+				return ec.fieldContext_Resource_status(ctx, field)
+			case "errorMessage":
+				return ec.fieldContext_Resource_errorMessage(ctx, field)
+			case "appliedAt":
+				return ec.fieldContext_Resource_appliedAt(ctx, field)
+			case "lastVerifiedAt":
+				return ec.fieldContext_Resource_lastVerifiedAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Resource_createdAt(ctx, field)
+			case "shield":
+				return ec.fieldContext_Resource_shield(ctx, field)
+			case "remoteNetwork":
+				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_assignResourceToGroup_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_unassignResourceFromGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Mutation_unassignResourceFromGroup,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UnassignResourceFromGroup(ctx, fc.Args["resourceId"].(string), fc.Args["groupId"].(string))
+		},
+		nil,
+		ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Mutation_unassignResourceFromGroup(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Resource_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Resource_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Resource_description(ctx, field)
+			case "host":
+				return ec.fieldContext_Resource_host(ctx, field)
+			case "protocol":
+				return ec.fieldContext_Resource_protocol(ctx, field)
+			case "portFrom":
+				return ec.fieldContext_Resource_portFrom(ctx, field)
+			case "portTo":
+				return ec.fieldContext_Resource_portTo(ctx, field)
+			case "status":
+				return ec.fieldContext_Resource_status(ctx, field)
+			case "errorMessage":
+				return ec.fieldContext_Resource_errorMessage(ctx, field)
+			case "appliedAt":
+				return ec.fieldContext_Resource_appliedAt(ctx, field)
+			case "lastVerifiedAt":
+				return ec.fieldContext_Resource_lastVerifiedAt(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Resource_createdAt(ctx, field)
+			case "shield":
+				return ec.fieldContext_Resource_shield(ctx, field)
+			case "remoteNetwork":
+				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_unassignResourceFromGroup_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -4199,6 +5167,8 @@ func (ec *executionContext) fieldContext_Query_resources(ctx context.Context, fi
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -4269,6 +5239,8 @@ func (ec *executionContext) fieldContext_Query_allResources(_ context.Context, f
 				return ec.fieldContext_Resource_shield(ctx, field)
 			case "remoteNetwork":
 				return ec.fieldContext_Resource_remoteNetwork(ctx, field)
+			case "groups":
+				return ec.fieldContext_Resource_groups(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
 		},
@@ -4482,6 +5454,108 @@ func (ec *executionContext) fieldContext_Query_invitation(ctx context.Context, f
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Query_invitation_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_groups(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_groups,
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().Groups(ctx)
+		},
+		nil,
+		ec.marshalNGroup2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroupᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_groups(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_group(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Query_group,
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().Group(ctx, fc.Args["id"].(string))
+		},
+		nil,
+		ec.marshalOGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_Query_group(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_group_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -5323,6 +6397,51 @@ func (ec *executionContext) fieldContext_Resource_remoteNetwork(_ context.Contex
 				return ec.fieldContext_RemoteNetwork_createdAt(ctx, field)
 			}
 			return nil, fmt.Errorf("no field named %q was found under type RemoteNetwork", field.Name)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Resource_groups(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_Resource_groups,
+		func(ctx context.Context) (any, error) {
+			return obj.Groups, nil
+		},
+		nil,
+		ec.marshalNGroup2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroupᚄ,
+		true,
+		true,
+	)
+}
+
+func (ec *executionContext) fieldContext_Resource_groups(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Resource",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			switch field.Name {
+			case "id":
+				return ec.fieldContext_Group_id(ctx, field)
+			case "name":
+				return ec.fieldContext_Group_name(ctx, field)
+			case "description":
+				return ec.fieldContext_Group_description(ctx, field)
+			case "members":
+				return ec.fieldContext_Group_members(ctx, field)
+			case "resources":
+				return ec.fieldContext_Group_resources(ctx, field)
+			case "createdAt":
+				return ec.fieldContext_Group_createdAt(ctx, field)
+			case "updatedAt":
+				return ec.fieldContext_Group_updatedAt(ctx, field)
+			}
+			return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
 		},
 	}
 	return fc, nil
@@ -8296,6 +9415,72 @@ func (ec *executionContext) _DiscoveredService(ctx context.Context, sel ast.Sele
 	return out
 }
 
+var groupImplementors = []string{"Group"}
+
+func (ec *executionContext) _Group(ctx context.Context, sel ast.SelectionSet, obj *Group) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, groupImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("Group")
+		case "id":
+			out.Values[i] = ec._Group_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._Group_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "description":
+			out.Values[i] = ec._Group_description(ctx, field, obj)
+		case "members":
+			out.Values[i] = ec._Group_members(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "resources":
+			out.Values[i] = ec._Group_resources(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createdAt":
+			out.Values[i] = ec._Group_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updatedAt":
+			out.Values[i] = ec._Group_updatedAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(len(deferred)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var invitationImplementors = []string{"Invitation"}
 
 func (ec *executionContext) _Invitation(ctx context.Context, sel ast.SelectionSet, obj *Invitation) graphql.Marshaler {
@@ -8489,6 +9674,55 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "createInvitation":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createInvitation(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createGroup":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_createGroup(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateGroup":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateGroup(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deleteGroup":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_deleteGroup(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "addGroupMember":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_addGroupMember(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "removeGroupMember":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_removeGroupMember(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "assignResourceToGroup":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_assignResourceToGroup(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "unassignResourceFromGroup":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_unassignResourceFromGroup(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -8875,6 +10109,47 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "groups":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_groups(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "group":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_group(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -9043,6 +10318,11 @@ func (ec *executionContext) _Resource(ctx context.Context, sel ast.SelectionSet,
 			out.Values[i] = ec._Resource_shield(ctx, field, obj)
 		case "remoteNetwork":
 			out.Values[i] = ec._Resource_remoteNetwork(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "groups":
+			out.Values[i] = ec._Resource_groups(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -10101,6 +11381,36 @@ func (ec *executionContext) marshalNDiscoveredService2ᚖgithubᚗcomᚋyourorg�
 	return ec._DiscoveredService(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNGroup2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx context.Context, sel ast.SelectionSet, v Group) graphql.Marshaler {
+	return ec._Group(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNGroup2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroupᚄ(ctx context.Context, sel ast.SelectionSet, v []*Group) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx context.Context, sel ast.SelectionSet, v *Group) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._Group(ctx, sel, v)
+}
+
 func (ec *executionContext) unmarshalNID2string(ctx context.Context, v any) (string, error) {
 	res, err := graphql.UnmarshalID(v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -10408,6 +11718,22 @@ func (ec *executionContext) marshalNUser2githubᚗcomᚋyourorgᚋztnaᚋcontrol
 	return ec._User(ctx, sel, &v)
 }
 
+func (ec *executionContext) marshalNUser2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUserᚄ(ctx context.Context, sel ast.SelectionSet, v []*models.User) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNUser2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUser(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
 func (ec *executionContext) marshalNUser2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUser(ctx context.Context, sel ast.SelectionSet, v *models.User) graphql.Marshaler {
 	if v == nil {
 		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
@@ -10672,6 +11998,13 @@ func (ec *executionContext) marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztna�
 		return graphql.Null
 	}
 	return ec._Connector(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx context.Context, sel ast.SelectionSet, v *Group) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._Group(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalOInt2ᚖint(ctx context.Context, v any) (*int, error) {

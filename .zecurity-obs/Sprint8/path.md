@@ -88,13 +88,13 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 
 ### DAY 1 — Unblocking Work
 
-- [ ] **M2-D1-A** `controller/migrations/012_groups_acl.sql` — Add groups, group_members, access_rules.
-- [ ] **M2-D1-B** `proto/client/v1/client.proto` — Add `GetACLSnapshot` RPC and ACL snapshot messages.
-- [ ] **M2-D1-C** `proto/connector/v1/connector.proto` — Add ACL snapshot payload to heartbeat response.
-- [ ] **M2-D1-D** GraphQL schema — Group CRUD, membership, resource assignment, resource group visibility.
-- [ ] **TEAM** Run `buf generate` from repo root.
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...`.
-- [ ] **TEAM** Run `cd admin && npm run codegen`.
+- [x] **M2-D1-A** `controller/migrations/012_groups_acl.sql` — Add groups, group_members, access_rules.
+- [x] **M2-D1-B** `proto/client/v1/client.proto` — Add `GetACLSnapshot` RPC and ACL snapshot messages.
+- [x] **M2-D1-C** `proto/connector/v1/connector.proto` — Add ACL snapshot payload to heartbeat response.
+- [x] **M2-D1-D** GraphQL schema — Group CRUD, membership, resource assignment, resource group visibility.
+- [x] **TEAM** Run `buf generate` from repo root.
+- [x] **TEAM** Run `cd controller && go generate ./graph/...`.
+- [x] **TEAM** Run `cd admin && npm run codegen`.
 
 > After Day 1: M3 can implement policy services, M1 can build UI, and M4 can wire client/connector snapshot handling.
 
@@ -104,10 +104,10 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 
 > See [[Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema]].
 
-- [ ] **M2-A1** Migration 012
-- [ ] **M2-A2** Client `GetACLSnapshot` proto
-- [ ] **M2-A3** Connector heartbeat ACL proto
-- [ ] **M2-A4** GraphQL schema/codegen
+- [x] **M2-A1** Migration 012
+- [x] **M2-A2** Client `GetACLSnapshot` proto
+- [x] **M2-A3** Connector heartbeat ACL proto
+- [x] **M2-A4** GraphQL schema/codegen
 
 > Build check: `buf generate` clean + `cd controller && go build ./...` passes.
 

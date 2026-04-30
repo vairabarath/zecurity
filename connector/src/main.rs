@@ -31,6 +31,13 @@ pub mod shield {
         tonic::include_proto!("shield.v1");
     }
 }
+
+/// Generated client.v1 message types — used for ACLSnapshot referenced in connector.proto.
+pub mod client {
+    pub mod v1 {
+        tonic::include_proto!("client.v1");
+    }
+}
 /// Alias so existing agent_server.rs code can use `crate::shield_proto::*`.
 pub use shield::v1 as shield_proto;
 

@@ -1,0 +1,30 @@
+type Group {
+  id:          ID!
+  name:        String!
+  description: String
+  members:     [User!]!
+  resources:   [Resource!]!
+  createdAt:   String!
+  updatedAt:   String!
+}
+
+extend type Resource {
+  groups: [Group!]!     # groups granted access to this resource
+}
+
+extend type Query {
+  groups: [Group!]!
+  group(id: ID!): Group
+}
+
+extend type Mutation {
+  createGroup(name: String!, description: String): Group!
+  updateGroup(id: ID!, name: String, description: String): Group!
+  deleteGroup(id: ID!): Boolean!
+
+  addGroupMember(groupId: ID!, userId: ID!): Group!
+  removeGroupMember(groupId: ID!, userId: ID!): Group!
+
+  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource!
+  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource!
+}

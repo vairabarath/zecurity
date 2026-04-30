@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 8
 member: M2
 phase: Phase1-Policy-Schema
