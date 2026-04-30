@@ -118,12 +118,12 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 > Depends on: M2-A complete.
 > See [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]].
 
-- [ ] **M3-B1** Group/member/access-rule store and CRUD.
-- [ ] **M3-B2** `compile_acl_snapshot(workspace_id)` — resources → groups → users → client device SPIFFE IDs.
-- [ ] **M3-B3** `NotifyPolicyChange(workspace_id)` version bump/cache invalidation.
-- [ ] **M3-B4** `SnapshotCache` — in-memory per-workspace cache. Cache miss compiles; policy mutation invalidates.
-- [ ] **M3-B5** GraphQL/HTTP resolvers call notifier after mutations.
-- [ ] **M3-B6** ClientService `GetACLSnapshot` validates JWT/device context and returns snapshot.
+- [x] **M3-B1** Group/member/access-rule store and CRUD.
+- [x] **M3-B2** `compile_acl_snapshot(workspace_id)` — resources → groups → users → client device SPIFFE IDs.
+- [x] **M3-B3** `NotifyPolicyChange(workspace_id)` version bump/cache invalidation.
+- [x] **M3-B4** `SnapshotCache` — in-memory per-workspace cache. Cache miss compiles; policy mutation invalidates.
+- [x] **M3-B5** GraphQL/HTTP resolvers call notifier after mutations.
+- [x] **M3-B6** ClientService `GetACLSnapshot` validates JWT/device context and returns snapshot.
 
 > Build check: `cd controller && go build ./...` passes.
 

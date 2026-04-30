@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 8
 member: M3
 phase: Phase1-Policy-Compiler
@@ -146,3 +146,22 @@ All policy mutations must call `NotifyPolicyChange(workspace_id)` after successf
 ```bash
 cd controller && go build ./...
 ```
+
+---
+
+## Files Touched / Changed
+
+### Created
+| File | What |
+|------|------|
+| `controller/internal/policy/store.go` | Group CRUD, member add/remove, access rule assign/unassign, compiler queries (`ListEnabledRulesWithResources`, `ListActiveDeviceSPIFFEsForGroup`) |
+| `controller/internal/policy/compiler.go` | `CompileACLSnapshot` — walks enabled rules → groups → devices → SPIFFE IDs |
+| `controller/internal/policy/cache.go` | `SnapshotCache` — in-memory per-workspace cache (Get/Set/Invalidate) |
+| `controller/internal/policy/notifier.go` | `NotifyPolicyChange` — increments version counter and invalidates cache |
+
+### Modified
+| File | What |
+|------|------|
+| `controller/internal/client/service.go` | Added `GetACLSnapshot` handler — verifies JWT + device ownership, returns compiled snapshot |
+| `controller/graph/resolvers/policy.resolvers.go` | Wired all panicking stubs to `policy.Store` + `NotifyPolicyChange` calls after mutations |
+| `controller/graph/resolvers/resolver.go` | Added `PolicyStore *policy.Store` field to `Resolver` struct |

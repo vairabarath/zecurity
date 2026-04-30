@@ -29,6 +29,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/policy"
 )
 
 const (
@@ -49,6 +50,8 @@ type Service struct {
 	clientGoogleClientSecret string
 	controllerHost           string
 	controllerHTTPURL        string // e.g. "http://localhost:8080" — base URL for /api/clients/callback
+	policyStore              *policy.Store
+	policyCache              *policy.SnapshotCache
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -58,6 +61,8 @@ func NewService(
 	pkiSvc pki.Service,
 	clientGoogleClientID, clientGoogleClientSecret,
 	controllerHost, controllerHTTPURL string,
+	policyStore *policy.Store,
+	policyCache *policy.SnapshotCache,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -67,6 +72,8 @@ func NewService(
 		clientGoogleClientSecret: clientGoogleClientSecret,
 		controllerHost:           controllerHost,
 		controllerHTTPURL:        strings.TrimRight(controllerHTTPURL, "/"),
+		policyStore:              policyStore,
+		policyCache:              policyCache,
 	}
 }
 
@@ -385,6 +392,48 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		SpiffeId:          spiffeID,
 		DeviceId:          deviceID,
 	}, nil
+}
+
+// GetACLSnapshot returns the current workspace ACL snapshot for the calling device.
+// Validates the access token and confirms the device belongs to the token's user/workspace.
+// Default-deny: returns an empty snapshot on any validation or compile failure.
+func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapshotRequest) (*clientv1.GetACLSnapshotResponse, error) {
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token and device_id are required")
+	}
+
+	claims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
+	}
+
+	// Confirm the device belongs to this user and workspace.
+	var deviceWorkspaceID string
+	err = s.pool.QueryRow(ctx,
+		`SELECT workspace_id FROM client_devices
+		 WHERE id = $1 AND user_id = $2`,
+		req.GetDeviceId(), claims.UserID,
+	).Scan(&deviceWorkspaceID)
+	if err != nil || deviceWorkspaceID != claims.TenantID {
+		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
+	}
+
+	workspaceID := claims.TenantID
+
+	// Serve from cache when available.
+	if snap, ok := s.policyCache.Get(workspaceID); ok {
+		return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
+	}
+
+	// Cache miss — compile from DB.
+	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, workspaceID)
+	if err != nil {
+		// Default-deny: do not serve a partial or stale snapshot.
+		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)
+	}
+
+	s.policyCache.Set(workspaceID, snap)
+	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
 }
 
 // Compile-time interface check.
