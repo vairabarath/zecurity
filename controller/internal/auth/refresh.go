@@ -16,14 +16,14 @@ import (
 //
 // Flow:
 //
-//	1. Read refresh_token from httpOnly cookie
-//	2. Read user_id from the expired (or expiring) access JWT in Authorization header
-//	   Note: we parse the JWT without verifying expiry — we just need the user_id
-//	   to look up the refresh token in Redis
-//	3. Look up refresh token in Redis by user_id        → calls redis.go → GetRefreshToken()
-//	4. Compare cookie value with stored value (constant-time)
-//	5. Issue new access JWT                              → calls session.go → issueAccessToken()
-//	6. Return new access JWT in JSON body
+//  1. Read refresh_token from httpOnly cookie
+//  2. Read user_id from the expired (or expiring) access JWT in Authorization header
+//     Note: we parse the JWT without verifying expiry — we just need the user_id
+//     to look up the refresh token in Redis
+//  3. Look up refresh token in Redis by user_id        → calls redis.go → GetRefreshToken()
+//  4. Compare cookie value with stored value (constant-time)
+//  5. Issue new access JWT                              → calls session.go → issueAccessToken()
+//  6. Return new access JWT in JSON body
 //
 // The refresh token itself is NOT rotated on every refresh.
 // It expires after 7 days and the user must log in again.
@@ -66,10 +66,21 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 		userID := claims.Subject
 		tenantID := claims.TenantID
 		role := claims.Role
+		email := claims.Email
 
 		if userID == "" || tenantID == "" {
 			writeJSONError(w, http.StatusUnauthorized, "token missing claims")
 			return
+		}
+
+		if email == "" && s.cfg.Pool != nil {
+			if err := s.cfg.Pool.QueryRow(ctx,
+				`SELECT email FROM users WHERE id = $1`,
+				userID,
+			).Scan(&email); err != nil {
+				writeJSONError(w, http.StatusUnauthorized, "token missing claims")
+				return
+			}
 		}
 
 		// Step 3 — Look up stored refresh token in Redis by user_id.
@@ -94,7 +105,7 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 
 		// Step 5 — Issue new access JWT.
 		// Called: session.go → issueAccessToken()
-		accessToken, err := s.issueAccessToken(userID, tenantID, role)
+		accessToken, err := s.issueAccessToken(userID, tenantID, role, email)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "token issue failed")
 			return

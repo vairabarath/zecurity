@@ -1,6 +1,6 @@
 ---
 type: bug-fix-plan
-status: pending
+status: done
 sprint: 8.5
 tags:
   - invitation
@@ -14,6 +14,8 @@ tags:
 
 > Bug 1 (missing `workspace_members` table) is already fixed and merged.
 > This document covers the two remaining bugs to implement next.
+
+> Status 2026-04-30: Bug 2 and Bug 3 are implemented. Controller and admin builds pass.
 
 ---
 

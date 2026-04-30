@@ -110,7 +110,7 @@ func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, erro
 // workspace_members row: sets user_id, status='active', and joined_at.
 // The caller must already be authenticated to the invited workspace
 // (JWT tenant_id == invitation workspace_id — enforced in handler).
-func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID string) error {
+func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID, email string) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -122,9 +122,10 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 		    SET status = 'accepted'
 		  WHERE token = $1
 		    AND workspace_id = $2
+		    AND email = $3
 		    AND status = 'pending'
 		    AND expires_at > NOW()`,
-		token, workspaceID,
+		token, workspaceID, email,
 	)
 	if err != nil {
 		return fmt.Errorf("accept invitation: %w", err)
@@ -139,9 +140,10 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 		`UPDATE workspace_members
 		    SET user_id = $1, status = 'active', joined_at = NOW()
 		  WHERE workspace_id = $2
+		    AND email = $3
 		    AND status = 'invited'
 		    AND (user_id IS NULL OR user_id = $1)`,
-		userID, workspaceID,
+		userID, workspaceID, email,
 	)
 	if err != nil {
 		return fmt.Errorf("activate workspace_members: %w", err)

@@ -17,6 +17,7 @@ type TenantContext struct {
 	TenantID string // workspace UUID
 	UserID   string // user UUID
 	Role     string // "admin" | "member" | "viewer"
+	Email    string // authenticated user's email
 }
 
 // Set stores a TenantContext into ctx.

@@ -52,6 +52,7 @@ type Service struct {
 	controllerHTTPURL        string // e.g. "http://localhost:8080" — base URL for /api/clients/callback
 	policyStore              *policy.Store
 	policyCache              *policy.SnapshotCache
+	policyNotifier           *policy.Notifier
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -63,6 +64,7 @@ func NewService(
 	controllerHost, controllerHTTPURL string,
 	policyStore *policy.Store,
 	policyCache *policy.SnapshotCache,
+	policyNotifier *policy.Notifier,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -74,6 +76,7 @@ func NewService(
 		controllerHTTPURL:        strings.TrimRight(controllerHTTPURL, "/"),
 		policyStore:              policyStore,
 		policyCache:              policyCache,
+		policyNotifier:           policyNotifier,
 	}
 }
 
@@ -324,7 +327,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role)
+	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
 	}
@@ -426,7 +429,7 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	}
 
 	// Cache miss — compile from DB.
-	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, workspaceID)
+	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, workspaceID)
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.
 		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)

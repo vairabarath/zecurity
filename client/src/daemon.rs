@@ -7,7 +7,7 @@ use tracing::{error, info, warn};
 
 use crate::config;
 use crate::grpc::{self, client_v1::GetAclSnapshotRequest};
-use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResponse};
+use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::runtime::{self, DeviceInfo, SessionInfo, SharedState, UserInfo, WorkspaceInfo};
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
@@ -151,6 +151,28 @@ async fn handle_request(
                 cert_expires_at: s.device.as_ref().map(|d| d.cert_expires_at),
                 workspace: s.workspace.as_ref().map(|w| w.name.clone()),
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
+                acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                ..Default::default()
+            }
+        }
+
+        IpcRequest::Resources => {
+            let s = state.read().await;
+            let resources = s.acl_snapshot.as_ref().map(|snap| {
+                snap.entries
+                    .iter()
+                    .map(|e| IpcResource {
+                        name:     e.name.clone(),
+                        address:  e.address.clone(),
+                        port:     e.port,
+                        protocol: e.protocol.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            });
+            IpcResponse {
+                ok: true,
+                kind: "Resources".into(),
+                resources,
                 ..Default::default()
             }
         }

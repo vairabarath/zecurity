@@ -272,6 +272,7 @@ func (s *Store) ListResourcesForGroup(ctx context.Context, groupID string) ([]st
 // CompilerResourceRow is the minimal resource data the compiler needs.
 type CompilerResourceRow struct {
 	ResourceID string
+	Name       string
 	Address    string
 	Port       uint32
 	Protocol   string
@@ -279,10 +280,10 @@ type CompilerResourceRow struct {
 }
 
 // ListEnabledRulesWithResources returns all enabled access_rules joined with
-// resource host/port for a workspace. Used by the ACL compiler.
+// resource host/port/name for a workspace. Used by the ACL compiler.
 func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID string) ([]*CompilerResourceRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ar.resource_id, r.host, r.port_from, r.protocol, ar.group_id
+		`SELECT ar.resource_id, r.name, r.host, r.port_from, r.protocol, ar.group_id
 		 FROM access_rules ar
 		 JOIN resources r ON r.id = ar.resource_id
 		 WHERE ar.workspace_id = $1
@@ -298,7 +299,7 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 	var out []*CompilerResourceRow
 	for rows.Next() {
 		r := &CompilerResourceRow{}
-		if err := rows.Scan(&r.ResourceID, &r.Address, &r.Port, &r.Protocol, &r.GroupID); err != nil {
+		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID); err != nil {
 			return nil, fmt.Errorf("scan rule row: %w", err)
 		}
 		out = append(out, r)

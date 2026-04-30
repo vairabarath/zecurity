@@ -124,7 +124,7 @@ func (h *Handler) Accept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID); err != nil {
+	if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID, tc.Email); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeJSONError(w, http.StatusNotFound, "invitation not found, already used, or expired")
 			return

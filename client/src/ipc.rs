@@ -8,9 +8,18 @@ use tokio::net::UnixStream;
 // ── Wire types ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct IpcResource {
+    pub name:     String,
+    pub address:  String,
+    pub port:     u32,
+    pub protocol: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum IpcRequest {
     Status,
+    Resources,
     Shutdown,
     LoadState,
     GetToken,
@@ -61,6 +70,12 @@ pub struct IpcResponse {
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acl_snapshot_version: Option<u64>,
+    /// Number of ACL entries in the loaded snapshot. None when no snapshot is loaded.
+    /// Use this (not version) to determine whether policies are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl_entry_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Vec<IpcResource>>,
 }
 
 // ── Socket path ──────────────────────────────────────────────────────────────

@@ -32,10 +32,12 @@ pub async fn run() -> Result<()> {
                 println!("SPIFFE ID:  {}", spiffe);
             }
 
-            match resp.acl_snapshot_version {
-                None        => println!("ACL:        not yet loaded"),
-                Some(0)     => println!("ACL:        loaded (no policies configured for this workspace)"),
-                Some(v)     => println!("ACL:        version {}", v),
+            match (resp.acl_entry_count, resp.acl_snapshot_version) {
+                (None, _)              => println!("ACL:        not yet loaded"),
+                (Some(0), _)           => println!("ACL:        loaded (no policies configured for this workspace)"),
+                (Some(n), Some(0))     => println!("ACL:        loaded ({} rules)", n),
+                (Some(n), Some(v))     => println!("ACL:        loaded ({} rules, version {})", n, v),
+                (Some(n), None)        => println!("ACL:        loaded ({} rules)", n),
             }
         }
         _ => {
