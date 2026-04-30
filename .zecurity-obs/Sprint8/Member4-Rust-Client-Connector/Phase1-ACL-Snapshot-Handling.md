@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 8
 member: M4
 phase: Phase1-ACL-Snapshot-Handling

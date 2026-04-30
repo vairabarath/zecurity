@@ -1,8 +1,13 @@
 use anyhow::Result;
 
+use crate::ipc::{send_ipc, IpcRequest};
+
 pub async fn run() -> Result<()> {
     match crate::config::load() {
         Ok(conf) => {
+            // Best-effort shutdown — drop runtime state from daemon memory first.
+            let _ = send_ipc(&IpcRequest::Shutdown).await;
+
             if crate::state_store::clear_workspace_state(&conf.workspace)? {
                 println!("Logged out of {}.", conf.workspace);
             } else {

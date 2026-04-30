@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 8.5
 member: M4
 phase: Phase1-Daemon-Scaffold-IPC
@@ -50,7 +50,7 @@ Likely files:
 - `client/src/cmd/status.rs`
 - `client/src/cmd/logout.rs`
 - `client/src/cmd/invite.rs`
-- `client/systemd/zecurity-client.service`
+- `client/zecurity-client.service`
 
 ---
 
@@ -202,4 +202,42 @@ systemctl start zecurity-client    # must return immediately (not hang)
 systemctl status zecurity-client   # must show active (running)
 zecurity-client status
 zecurity-client logout
+```
+
+---
+
+## Files Touched
+
+### Created
+| File | What |
+|------|------|
+| `client/src/ipc.rs` | `IpcRequest` / `IpcResponse` types, `ipc_socket_path()`, `check_same_user()` via `SO_PEERCRED`, `send_ipc()`, `ensure_daemon_and_send()` |
+| `client/src/daemon.rs` | `run()` entry point, Unix socket accept loop, `handle_request()` for all 7 message types, `sd_notify_ready()`, `populate_runtime()` |
+
+### Modified
+| File | What |
+|------|------|
+| `client/src/main.rs` | Added `mod daemon`, `mod ipc`; added hidden `Daemon` subcommand; wired dispatch |
+| `client/zecurity-client.service` | Updated from old `connect` subcommand to `daemon`; added `User=`, `AmbientCapabilities=CAP_NET_ADMIN`, `CapabilityBoundingSet`, `NoNewPrivileges=yes`, changed `WantedBy` to `multi-user.target` |
+| `client/Cargo.toml` | Added `tracing = "0.1"` and `tracing-subscriber = { version = "0.3", features = ["env-filter"] }` |
+
+---
+
+## Post-Phase Fixes
+
+### Fix: `ClientConf` missing `Clone`
+
+**Issue:** `daemon.rs` clones `ClientConf` per accepted connection to move into the spawned task. Build failed with `no method named clone found for struct ClientConf`.
+
+**Root Cause:** `ClientConf` in `config.rs` only derived `Debug, Serialize, Deserialize, Default` — `Clone` was missing.
+
+**Fix Applied (`client/src/config.rs`):**
+```rust
+// BEFORE:
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ClientConf {
+
+// AFTER:
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ClientConf {
 ```

@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -6,6 +7,8 @@ use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tracing::{error, info, warn};
+
+use crate::policy::PolicyCache;
 
 use crate::agent_server::ShieldRegistry;
 use crate::config::ConnectorConfig;
@@ -35,6 +38,7 @@ pub async fn run_control_stream(
     state: &EnrollmentState,
     shield_registry: ShieldRegistry,
     mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
+    policy_cache: Arc<PolicyCache>,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -68,6 +72,7 @@ pub async fn run_control_stream(
             &hostname,
             &version,
             &public_ip,
+            &policy_cache,
         )
         .await
         {
@@ -98,6 +103,7 @@ async fn run_once(
     hostname: &str,
     version: &str,
     public_ip: &str,
+    policy_cache: &Arc<PolicyCache>,
 ) -> Result<()> {
     info!("starting mTLS SPIFFE preflight check");
     verify_controller_spiffe_preflight(cfg)
@@ -155,7 +161,7 @@ async fn run_once(
                         return Ok(());
                     }
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx).await {
+                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache).await {
                             return action;
                         }
                     }
@@ -229,6 +235,7 @@ async fn handle_controller_msg(
     state: &mut EnrollmentState,
     cfg: &ConnectorConfig,
     out_tx: &mpsc::Sender<ConnectorControlMessage>,
+    policy_cache: &Arc<PolicyCache>,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(CBody::ResourceInstructions(batch)) => {
@@ -296,6 +303,13 @@ async fn handle_controller_msg(
                     None
                 }
             }
+        }
+        Some(CBody::AclSnapshot(snap)) => {
+            let version = snap.version;
+            let workspace_id = snap.workspace_id.clone();
+            policy_cache.update(snap);
+            info!(version, %workspace_id, "ACL snapshot stored");
+            None
         }
         _ => None,
     }

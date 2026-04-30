@@ -20,6 +20,7 @@ mod control_stream;
 mod controller_client;
 mod crypto;
 mod enrollment;
+pub mod policy;
 mod renewal;
 mod tls;
 mod updater;
@@ -53,6 +54,8 @@ pub use connector::v1 as proto;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
+
+use std::sync::Arc;
 
 use anyhow::Context;
 use config::ConnectorConfig;
@@ -177,6 +180,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("connector running — entering Control stream loop");
 
+    let policy_cache = Arc::new(policy::PolicyCache::new());
+
     // Run bidirectional Control stream to controller (blocks with reconnect loop).
-    control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx).await
+    control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx, policy_cache).await
 }
