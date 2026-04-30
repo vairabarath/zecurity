@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/models"
+	"github.com/yourorg/ztna/controller/internal/policy"
 )
 
 // loadUser fetches a single user row by ID.
@@ -71,4 +72,82 @@ func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, resourceID string
 	res.RemoteNetwork = &graph.RemoteNetwork{ID: networkID, Name: networkName}
 	res.Groups = []*graph.Group{}
 	return &res, nil
+}
+
+// groupRowToGQL converts a policy.GroupRow to the GraphQL Group type.
+func groupRowToGQL(row *policy.GroupRow, members []*models.User, resources []*graph.Resource) *graph.Group {
+	if members == nil {
+		members = []*models.User{}
+	}
+	if resources == nil {
+		resources = []*graph.Resource{}
+	}
+	return &graph.Group{
+		ID:          row.ID,
+		Name:        row.Name,
+		Description: row.Description,
+		Members:     members,
+		Resources:   resources,
+		CreatedAt:   fmtTime(row.CreatedAt),
+		UpdatedAt:   fmtTime(row.UpdatedAt),
+	}
+}
+
+// loadGroup fetches a group with its members and assigned resources.
+func (r *Resolver) loadGroup(ctx context.Context, groupID string) (*graph.Group, error) {
+	row, err := r.PolicyStore.GetGroup(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("loadGroup: %w", err)
+	}
+
+	memberIDs, err := r.PolicyStore.ListGroupMembers(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("loadGroup members: %w", err)
+	}
+	members := make([]*models.User, 0, len(memberIDs))
+	for _, uid := range memberIDs {
+		u, err := loadUser(ctx, r.Pool, uid)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, u)
+	}
+
+	resourceIDs, err := r.PolicyStore.ListResourcesForGroup(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("loadGroup resources: %w", err)
+	}
+	resources := make([]*graph.Resource, 0, len(resourceIDs))
+	for _, rid := range resourceIDs {
+		res, err := loadResourceByID(ctx, r.Pool, rid)
+		if err != nil {
+			return nil, err
+		}
+		resources = append(resources, res)
+	}
+
+	return groupRowToGQL(row, members, resources), nil
+}
+
+// loadResourceWithGroups fetches a resource and populates its Groups field.
+func (r *Resolver) loadResourceWithGroups(ctx context.Context, tenantID, resourceID string) (*graph.Resource, error) {
+	res, err := loadResourceByID(ctx, r.Pool, resourceID)
+	if err != nil {
+		return nil, err
+	}
+
+	groupIDs, err := r.PolicyStore.ListGroupsForResource(ctx, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("loadResourceWithGroups: %w", err)
+	}
+	groups := make([]*graph.Group, 0, len(groupIDs))
+	for _, gid := range groupIDs {
+		grow, err := r.PolicyStore.GetGroup(ctx, gid)
+		if err != nil {
+			return nil, fmt.Errorf("loadResourceWithGroups group: %w", err)
+		}
+		groups = append(groups, groupRowToGQL(grow, nil, nil))
+	}
+	res.Groups = groups
+	return res, nil
 }

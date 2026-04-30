@@ -1,6 +1,6 @@
 .PHONY: gqlgen codegen generate-proto setup
 
-GQLGEN_VERSION := v0.17.89
+GQLGEN_VERSION := v0.17.90
 BUF_VERSION := v1.66.0
 GQLGEN_CACHE ?= /tmp/go-build-cache
 GQLGEN_MODCACHE ?= /tmp/go-mod-cache

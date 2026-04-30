@@ -22,6 +22,7 @@ import InviteAccept from '@/pages/InviteAccept'
 import ClientInstall from '@/pages/ClientInstall'
 import Groups from '@/pages/Groups'
 import GroupDetail from '@/pages/GroupDetail'
+import TeamUsers from '@/pages/TeamUsers'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 
@@ -64,6 +65,7 @@ export default function App() {
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
         <Route path="/topology"          element={<TopologyPage />} />
         <Route path="/client-install"    element={<ClientInstall />} />
+        <Route path="/users"             element={<TeamUsers />} />
         <Route path="/groups"            element={<Groups />} />
         <Route path="/groups/:id"        element={<GroupDetail />} />
       </Route>

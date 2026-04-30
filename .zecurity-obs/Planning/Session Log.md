@@ -8,6 +8,28 @@ tags:
 
 # Session Log
 
+---
+
+## 2026-04-30 — M1 (Yogesh), Sprint 8 — Groups Policy UI + Bug Fixes
+
+**What was done:**
+
+- Fixed refresh token TTL not sliding: `controller/internal/auth/refresh.go` — added `SetRefreshToken` call after issuing new access token so Redis TTL resets on every refresh (active users were being logged out after 7 days).
+- Fixed Apollo Client v4 HTTP 401 not caught: `admin/src/apollo/links/error.ts` — extended `isUnauthorizedError` to handle network-level 401 in addition to GraphQL-level `UNAUTHORIZED` errors.
+- Fixed `Makefile` GQLGEN_VERSION mismatch: `v0.17.89` → `v0.17.90` to match `controller/go.mod`.
+- Fixed `admin/codegen.yml` missing `policy.graphqls` schema source — group types were not being generated.
+- Completed all M1-D1 through M1-D5 Sprint 8 tasks: Groups page, GroupDetail (Members + Resources tabs), Resources page groups column, all GraphQL queries/mutations.
+- Added `users: [User!]!` GraphQL query (M2's zone) + resolver in `schema.resolvers.go` — needed for the Add Member user picker in GroupDetail; M2's schema didn't include it.
+- Fixed M3's broken controller build: added `groupRowToGQL`, `loadGroup`, `loadResourceWithGroups` to `controller/graph/resolvers/policy_helpers.go` — M3's `policy.resolvers.go` referenced these but they were never implemented.
+
+**Key decisions:**
+- `loadGroup` and `loadResourceWithGroups` defined on `*Resolver` (not `*queryResolver`/`*mutationResolver`) because both resolver types call `loadGroup` after group mutations.
+- Branched to `member_01/sprint_08` from main and cherry-picked auth fixes to keep work clean from stale `member_03/sprint_7`.
+
+**What's next:**
+- M4-C: Connector ACL snapshot receive/store (M4's work, Sprint 8 Phase C).
+- Final verification checklist in `path.md` once M4-C lands.
+
 Most recent first. Every agent appends an entry after their session.
 
 ---

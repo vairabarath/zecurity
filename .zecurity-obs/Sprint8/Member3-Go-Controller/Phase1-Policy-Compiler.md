@@ -165,3 +165,33 @@ cd controller && go build ./...
 | `controller/internal/client/service.go` | Added `GetACLSnapshot` handler — verifies JWT + device ownership, returns compiled snapshot |
 | `controller/graph/resolvers/policy.resolvers.go` | Wired all panicking stubs to `policy.Store` + `NotifyPolicyChange` calls after mutations |
 | `controller/graph/resolvers/resolver.go` | Added `PolicyStore *policy.Store` field to `Resolver` struct |
+
+---
+
+## Post-Phase Fixes
+
+### Fix: Missing GraphQL Resolver Helper Functions
+
+**Issue:** `policy.resolvers.go` referenced `groupRowToGQL`, `r.loadGroup`, and `r.loadResourceWithGroups` but these were never implemented. The controller build failed with undefined symbol errors.
+
+**Root Cause:** M3's phase doc specified wiring resolvers to `policy.Store` but did not include the helper functions needed to convert store rows into GraphQL types and load related data (members, resources, groups).
+
+**Fix Applied (`controller/graph/resolvers/policy_helpers.go`):**
+
+Added three functions — fixed by M1 on 2026-04-30:
+
+```go
+// groupRowToGQL converts a policy.GroupRow to the GraphQL Group type.
+func groupRowToGQL(row *policy.GroupRow, members []*models.User, resources []*graph.Resource) *graph.Group
+
+// loadGroup fetches a group with its members and assigned resources.
+// Defined on *Resolver (not queryResolver/mutationResolver) so both resolver types can call it.
+func (r *Resolver) loadGroup(ctx context.Context, groupID string) (*graph.Group, error)
+
+// loadResourceWithGroups fetches a resource and populates its Groups field.
+func (r *Resolver) loadResourceWithGroups(ctx context.Context, tenantID, resourceID string) (*graph.Resource, error)
+```
+
+Also added `"github.com/yourorg/ztna/controller/internal/policy"` import to the file.
+
+**Key decision:** Both helpers are on `*Resolver` (not `*queryResolver` or `*mutationResolver`) because both resolver types embed `*Resolver` and both call `loadGroup` (mutations call it after AddGroupMember/RemoveGroupMember to return the updated group).
