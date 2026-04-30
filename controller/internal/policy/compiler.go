@@ -12,7 +12,7 @@ import (
 // walking: enabled access_rules → groups → group members → client device SPIFFE IDs.
 //
 // Returns an error (and no snapshot) on any DB failure — callers must default-deny.
-func CompileACLSnapshot(ctx context.Context, store *Store, workspaceID string) (*clientv1.ACLSnapshot, error) {
+func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, workspaceID string) (*clientv1.ACLSnapshot, error) {
 	rules, err := store.ListEnabledRulesWithResources(ctx, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: list rules: %w", err)
@@ -26,11 +26,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, workspaceID string) (
 		protocol   string
 	}
 	spiffeSet := make(map[entryKey]map[string]struct{})
-	meta := make(map[entryKey]struct {
-		address  string
-		port     uint32
-		protocol string
-	})
+	names := make(map[entryKey]string)
 
 	for _, rule := range rules {
 		key := entryKey{
@@ -41,11 +37,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, workspaceID string) (
 		}
 		if _, ok := spiffeSet[key]; !ok {
 			spiffeSet[key] = make(map[string]struct{})
-			meta[key] = struct {
-				address  string
-				port     uint32
-				protocol string
-			}{rule.Address, rule.Port, rule.Protocol}
+			names[key] = rule.Name
 		}
 
 		spiffes, err := store.ListActiveDeviceSPIFFEsForGroup(ctx, workspaceID, rule.GroupID)
@@ -64,16 +56,23 @@ func CompileACLSnapshot(ctx context.Context, store *Store, workspaceID string) (
 			ids = append(ids, id)
 		}
 		entries = append(entries, &clientv1.ACLEntry{
-			ResourceId:        key.resourceID,
-			Address:           key.address,
-			Port:              key.port,
-			Protocol:          key.protocol,
-			AllowedSpiffeIds:  ids,
+			ResourceId:       key.resourceID,
+			Name:             names[key],
+			Address:          key.address,
+			Port:             key.port,
+			Protocol:         key.protocol,
+			AllowedSpiffeIds: ids,
 		})
 	}
 
+	// Use the notifier's monotonic version so downstream clients can detect
+	// policy changes. After a controller restart the counter resets to 0 but
+	// increments on the next policy mutation — that is acceptable.
+	version := notifier.Version(workspaceID)
+
 	return &clientv1.ACLSnapshot{
 		WorkspaceId: workspaceID,
+		Version:     version,
 		GeneratedAt: time.Now().Unix(),
 		Entries:     entries,
 	}, nil

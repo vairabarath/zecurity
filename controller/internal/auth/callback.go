@@ -118,7 +118,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 
 		// Step 8 — Issue access JWT.
 		// Called: session.go → issueAccessToken()
-		accessToken, err := s.issueAccessToken(result.UserID, result.TenantID, result.Role)
+		accessToken, err := s.issueAccessToken(result.UserID, result.TenantID, result.Role, email)
 		if err != nil {
 			fail("token_issue_failed")
 			return

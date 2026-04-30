@@ -15,7 +15,7 @@ func TestIssueAccessToken_ValidJWT(t *testing.T) {
 		redisClient: rc,
 	}
 
-	token, err := svc.issueAccessToken("user-123", "tenant-456", "admin")
+	token, err := svc.issueAccessToken("user-123", "tenant-456", "admin", "user@example.com")
 	if err != nil {
 		t.Fatalf("issueAccessToken: %v", err)
 	}
@@ -38,6 +38,9 @@ func TestIssueAccessToken_ValidJWT(t *testing.T) {
 	if claims.Role != "admin" {
 		t.Fatalf("expected role=admin, got %s", claims.Role)
 	}
+	if claims.Email != "user@example.com" {
+		t.Fatalf("expected email=user@example.com, got %s", claims.Email)
+	}
 }
 
 func TestIssueAccessToken_Issuer(t *testing.T) {
@@ -47,7 +50,7 @@ func TestIssueAccessToken_Issuer(t *testing.T) {
 		redisClient: rc,
 	}
 
-	token, _ := svc.issueAccessToken("u", "t", "r")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
 	claims, _ := svc.verifyAccessToken(token)
 
 	iss, _ := claims.GetIssuer()
@@ -62,7 +65,7 @@ func TestIssueAccessToken_Expiry(t *testing.T) {
 	cfg.JWTAccessTTL = "15m"
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
 	claims, _ := svc.verifyAccessToken(token)
 
 	exp, _ := claims.GetExpirationTime()
@@ -81,7 +84,7 @@ func TestIssueAccessToken_HS256(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
-	tokenStr, _ := svc.issueAccessToken("u", "t", "r")
+	tokenStr, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
 
 	// Parse without validation to check the header alg.
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
@@ -98,7 +101,7 @@ func TestVerifyAccessToken_WrongSecret(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
 
 	// Try verifying with a different secret.
 	badSvc := &serviceImpl{
@@ -119,7 +122,7 @@ func TestVerifyAccessToken_WrongIssuer(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
 
 	// Verify with a different expected issuer.
 	badSvc := &serviceImpl{
@@ -178,11 +181,15 @@ func TestJWTClaims_JSONTags(t *testing.T) {
 	c := jwtClaims{
 		TenantID: "t",
 		Role:     "r",
+		Email:    "e",
 	}
 	if c.TenantID != "t" {
 		t.Fatal("TenantID field broken")
 	}
 	if c.Role != "r" {
 		t.Fatal("Role field broken")
+	}
+	if c.Email != "e" {
+		t.Fatal("Email field broken")
 	}
 }
