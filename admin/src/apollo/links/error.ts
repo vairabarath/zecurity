@@ -61,11 +61,18 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
-// Check if the error is an UNAUTHORIZED GraphQL error.
-// In Apollo Client v4, GraphQL errors are wrapped in CombinedGraphQLErrors.
+// Check if the error is an UNAUTHORIZED error.
+// Apollo v4 returns HTTP 401 as a network error (not a GraphQL error),
+// so we must check both CombinedGraphQLErrors and network-level status.
 function isUnauthorizedError(error: unknown): boolean {
   if (CombinedGraphQLErrors.is(error)) {
     return error.errors.some((e) => (e.extensions?.code as string) === 'UNAUTHORIZED')
+  }
+  if (error instanceof Error && 'statusCode' in error) {
+    return (error as unknown as { statusCode: number }).statusCode === 401
+  }
+  if (error instanceof Response) {
+    return error.status === 401
   }
   return false
 }
