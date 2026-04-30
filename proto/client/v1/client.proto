@@ -22,6 +22,10 @@ service ClientService {
   // EnrollDevice — issue mTLS certificate for the client device.
   // Requires valid access_token in request (not in gRPC metadata).
   rpc EnrollDevice(EnrollDeviceRequest) returns (EnrollDeviceResponse);
+
+  // GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
+  // Validates access_token and device_id; default-deny if either is invalid.
+  rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
 }
 
 // ── GetAuthConfig ──────────────────────────────────────────────────────────
@@ -85,4 +89,30 @@ message EnrollDeviceResponse {
   string intermediate_ca_pem = 3;
   string spiffe_id           = 4;
   string device_id           = 5;
+}
+
+// ── GetACLSnapshot ─────────────────────────────────────────────────────────
+
+message GetACLSnapshotRequest {
+  string access_token = 1;
+  string device_id    = 2;
+}
+
+message GetACLSnapshotResponse {
+  ACLSnapshot snapshot = 1;
+}
+
+message ACLSnapshot {
+  uint64 version            = 1;
+  string workspace_id       = 2;
+  int64  generated_at       = 3;
+  repeated ACLEntry entries = 4;
+}
+
+message ACLEntry {
+  string resource_id                 = 1;
+  string address                     = 2;
+  uint32 port                        = 3;
+  string protocol                    = 4;
+  repeated string allowed_spiffe_ids = 5;
 }

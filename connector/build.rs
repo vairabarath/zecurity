@@ -25,6 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Tell cargo to re-run this build script only when the proto file changes.
     println!("cargo:rerun-if-changed=../proto/connector/v1/connector.proto");
     println!("cargo:rerun-if-changed=../proto/shield/v1/shield.proto");
+    println!("cargo:rerun-if-changed=../proto/client/v1/client.proto");
 
     // Compile the protos into Rust gRPC stubs.
     // This generates both client and server code, but we only use the client side.
@@ -32,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &[
             "../proto/connector/v1/connector.proto",
             "../proto/shield/v1/shield.proto",
+            "../proto/client/v1/client.proto",
         ],
         &[".."],
     )?;

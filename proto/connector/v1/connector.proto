@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package connector.v1;
 
+import "proto/client/v1/client.proto";
 import "proto/shield/v1/shield.proto";
 
 option go_package = "github.com/yourorg/ztna/controller/gen/go/connector/v1;connectorv1";
@@ -81,6 +82,8 @@ message ConnectorControlMessage {
     ScanReport                scan_report           = 9;
     // Controller → Connector
     ScanCommand               scan_command          = 10;
+    // Controller → Connector
+    client.v1.ACLSnapshot     acl_snapshot          = 11;
   }
 }
 

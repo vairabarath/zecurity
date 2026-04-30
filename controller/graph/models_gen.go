@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+
+	"github.com/yourorg/ztna/controller/internal/models"
 )
 
 type ClientDevice struct {
@@ -58,6 +60,16 @@ type DiscoveredService struct {
 	LastSeen    string `json:"lastSeen"`
 }
 
+type Group struct {
+	ID          string         `json:"id"`
+	Name        string         `json:"name"`
+	Description *string        `json:"description,omitempty"`
+	Members     []*models.User `json:"members"`
+	Resources   []*Resource    `json:"resources"`
+	CreatedAt   string         `json:"createdAt"`
+	UpdatedAt   string         `json:"updatedAt"`
+}
+
 type Invitation struct {
 	ID        string `json:"id"`
 	Email     string `json:"email"`
@@ -98,6 +110,7 @@ type Resource struct {
 	CreatedAt      string         `json:"createdAt"`
 	Shield         *Shield        `json:"shield,omitempty"`
 	RemoteNetwork  *RemoteNetwork `json:"remoteNetwork"`
+	Groups         []*Group       `json:"groups"`
 }
 
 type ScanResult struct {
