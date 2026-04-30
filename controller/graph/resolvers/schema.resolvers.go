@@ -49,6 +49,43 @@ func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
 	return &u, nil
 }
 
+// Users is the resolver for the users field.
+func (r *queryResolver) Users(ctx context.Context) ([]*models.User, error) {
+	tc := tenant.MustGet(ctx)
+
+	rows, err := r.TenantDB.Query(ctx,
+		`SELECT id, tenant_id, email, provider, provider_sub,
+		        role, status, last_login_at, created_at, updated_at
+		 FROM users
+		 WHERE tenant_id = $1
+		   AND status    = 'active'
+		 ORDER BY email`,
+		tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("users: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*models.User
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(
+			&u.ID, &u.TenantID, &u.Email,
+			&u.Provider, &u.ProviderSub,
+			&u.Role, &u.Status, &u.LastLoginAt,
+			&u.CreatedAt, &u.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("users scan: %w", err)
+		}
+		result = append(result, &u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("users iterate: %w", err)
+	}
+	return result, nil
+}
+
 // Workspace is the resolver for the workspace field.
 func (r *queryResolver) Workspace(ctx context.Context) (*models.Workspace, error) {
 	tc := tenant.MustGet(ctx)

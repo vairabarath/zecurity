@@ -9,6 +9,7 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  Users,
   Waypoints,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/auth'
@@ -22,6 +23,7 @@ const items = [
   { to: '/connectors', label: 'Connectors', icon: Plug },
   { to: '/shields', label: 'Shields', icon: Shield },
   { to: '/resources', label: 'Resources', icon: Box },
+  { to: '/groups', label: 'Groups', icon: Users },
   { to: '/settings', label: 'Settings', icon: Settings },
 ]
 

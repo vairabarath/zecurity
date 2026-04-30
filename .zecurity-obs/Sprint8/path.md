@@ -146,11 +146,11 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 > Depends on: M2-A GraphQL codegen and M3-B CRUD.
 > See [[Sprint8/Member1-Frontend/Phase1-Groups-Policy-UI]].
 
-- [ ] **M1-D1** Groups page: create/edit/delete.
-- [ ] **M1-D2** Members tab: add/remove users from group.
-- [ ] **M1-D3** Resources tab: assign/unassign resources to group.
-- [ ] **M1-D4** Resources page: show groups with access.
-- [ ] **M1-D5** Empty/error/loading states for policy operations.
+- [x] **M1-D1** Groups page: create/edit/delete.
+- [x] **M1-D2** Members tab: add/remove users from group.
+- [x] **M1-D3** Resources tab: assign/unassign resources to group.
+- [x] **M1-D4** Resources page: show groups with access.
+- [x] **M1-D5** Empty/error/loading states for policy operations.
 
 > Build check: `cd admin && npm run build` passes.
 
