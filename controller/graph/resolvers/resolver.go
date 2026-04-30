@@ -7,6 +7,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 )
@@ -23,4 +24,6 @@ type Resolver struct {
 	Pool              *pgxpool.Pool
 	InvitationStore   *invitation.Store
 	InvitationEmailer *invitation.Emailer
+	PolicyStore       *policy.Store
+	PolicyNotifier    *policy.Notifier
 }

@@ -7,52 +7,232 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/models"
+	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 )
+
+// ── Mutations ─────────────────────────────────────────────────────────────
 
 // CreateGroup is the resolver for the createGroup field.
 func (r *mutationResolver) CreateGroup(ctx context.Context, name string, description *string) (*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: CreateGroup - createGroup"))
+	tc := tenant.MustGet(ctx)
+
+	row, err := r.PolicyStore.CreateGroup(ctx, tc.TenantID, name, description)
+	if err != nil {
+		return nil, fmt.Errorf("createGroup: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("createGroup notify: %w", err)
+	}
+	return groupRowToGQL(row, nil, nil), nil
 }
 
 // UpdateGroup is the resolver for the updateGroup field.
 func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *string, description *string) (*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: UpdateGroup - updateGroup"))
+	tc := tenant.MustGet(ctx)
+
+	row, err := r.PolicyStore.UpdateGroup(ctx, id, name, description)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("updateGroup: group not found")
+		}
+		return nil, fmt.Errorf("updateGroup: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("updateGroup notify: %w", err)
+	}
+	return groupRowToGQL(row, nil, nil), nil
 }
 
 // DeleteGroup is the resolver for the deleteGroup field.
 func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, error) {
-	panic(fmt.Errorf("not implemented: DeleteGroup - deleteGroup"))
+	tc := tenant.MustGet(ctx)
+
+	if err := r.PolicyStore.DeleteGroup(ctx, id); err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return false, fmt.Errorf("deleteGroup: group not found")
+		}
+		return false, fmt.Errorf("deleteGroup: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return false, fmt.Errorf("deleteGroup notify: %w", err)
+	}
+	return true, nil
 }
 
 // AddGroupMember is the resolver for the addGroupMember field.
 func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: AddGroupMember - addGroupMember"))
+	tc := tenant.MustGet(ctx)
+
+	if err := r.PolicyStore.AddGroupMember(ctx, groupID, userID); err != nil {
+		return nil, fmt.Errorf("addGroupMember: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("addGroupMember notify: %w", err)
+	}
+	return r.loadGroup(ctx, groupID)
 }
 
 // RemoveGroupMember is the resolver for the removeGroupMember field.
 func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: RemoveGroupMember - removeGroupMember"))
+	tc := tenant.MustGet(ctx)
+
+	if err := r.PolicyStore.RemoveGroupMember(ctx, groupID, userID); err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("removeGroupMember: member not found")
+		}
+		return nil, fmt.Errorf("removeGroupMember: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("removeGroupMember notify: %w", err)
+	}
+	return r.loadGroup(ctx, groupID)
 }
 
 // AssignResourceToGroup is the resolver for the assignResourceToGroup field.
 func (r *mutationResolver) AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
-	panic(fmt.Errorf("not implemented: AssignResourceToGroup - assignResourceToGroup"))
+	tc := tenant.MustGet(ctx)
+
+	if _, err := r.PolicyStore.AssignResourceToGroup(ctx, tc.TenantID, resourceID, groupID); err != nil {
+		return nil, fmt.Errorf("assignResourceToGroup: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("assignResourceToGroup notify: %w", err)
+	}
+	return r.loadResourceWithGroups(ctx, tc.TenantID, resourceID)
 }
 
 // UnassignResourceFromGroup is the resolver for the unassignResourceFromGroup field.
 func (r *mutationResolver) UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*graph.Resource, error) {
-	panic(fmt.Errorf("not implemented: UnassignResourceFromGroup - unassignResourceFromGroup"))
+	tc := tenant.MustGet(ctx)
+
+	if err := r.PolicyStore.UnassignResourceFromGroup(ctx, resourceID, groupID); err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("unassignResourceFromGroup: rule not found")
+		}
+		return nil, fmt.Errorf("unassignResourceFromGroup: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("unassignResourceFromGroup notify: %w", err)
+	}
+	return r.loadResourceWithGroups(ctx, tc.TenantID, resourceID)
 }
+
+// ── Queries ───────────────────────────────────────────────────────────────
 
 // Groups is the resolver for the groups field.
 func (r *queryResolver) Groups(ctx context.Context) ([]*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: Groups - groups"))
+	tc := tenant.MustGet(ctx)
+
+	rows, err := r.PolicyStore.ListGroups(ctx, tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("groups: %w", err)
+	}
+
+	out := make([]*graph.Group, 0, len(rows))
+	for _, row := range rows {
+		g, err := r.loadGroup(ctx, row.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, nil
 }
 
 // Group is the resolver for the group field.
 func (r *queryResolver) Group(ctx context.Context, id string) (*graph.Group, error) {
-	panic(fmt.Errorf("not implemented: Group - group"))
+	return r.loadGroup(ctx, id)
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+// loadGroup fetches a group with its members and assigned resources.
+func (r *Resolver) loadGroup(ctx context.Context, groupID string) (*graph.Group, error) {
+	row, err := r.PolicyStore.GetGroup(ctx, groupID)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("group not found")
+		}
+		return nil, fmt.Errorf("loadGroup: %w", err)
+	}
+
+	memberIDs, err := r.PolicyStore.ListGroupMembers(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("loadGroup members: %w", err)
+	}
+
+	members := make([]*models.User, 0, len(memberIDs))
+	for _, uid := range memberIDs {
+		u, err := loadUser(ctx, r.Pool, uid)
+		if err != nil {
+			return nil, fmt.Errorf("loadGroup user %s: %w", uid, err)
+		}
+		members = append(members, u)
+	}
+
+	resourceIDs, err := r.PolicyStore.ListResourcesForGroup(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("loadGroup resources: %w", err)
+	}
+
+	resources := make([]*graph.Resource, 0, len(resourceIDs))
+	for _, rid := range resourceIDs {
+		res, err := loadResourceByID(ctx, r.Pool, rid)
+		if err != nil {
+			return nil, fmt.Errorf("loadGroup resource %s: %w", rid, err)
+		}
+		resources = append(resources, res)
+	}
+
+	return groupRowToGQL(row, members, resources), nil
+}
+
+// loadResourceWithGroups fetches a resource and attaches the groups that have access.
+func (r *Resolver) loadResourceWithGroups(ctx context.Context, workspaceID, resourceID string) (*graph.Resource, error) {
+	res, err := loadResourceByID(ctx, r.Pool, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("loadResourceWithGroups: %w", err)
+	}
+
+	groupIDs, err := r.PolicyStore.ListGroupsForResource(ctx, resourceID)
+	if err != nil {
+		return nil, fmt.Errorf("loadResourceWithGroups groups: %w", err)
+	}
+
+	groups := make([]*graph.Group, 0, len(groupIDs))
+	for _, gid := range groupIDs {
+		g, err := r.loadGroup(ctx, gid)
+		if err != nil {
+			return nil, err
+		}
+		groups = append(groups, g)
+	}
+	res.Groups = groups
+	_ = workspaceID
+	return res, nil
+}
+
+// groupRowToGQL converts a store GroupRow to the GQL Group type.
+func groupRowToGQL(row *policy.GroupRow, members []*models.User, resources []*graph.Resource) *graph.Group {
+	if members == nil {
+		members = []*models.User{}
+	}
+	if resources == nil {
+		resources = []*graph.Resource{}
+	}
+	return &graph.Group{
+		ID:          row.ID,
+		Name:        row.Name,
+		Description: row.Description,
+		Members:     members,
+		Resources:   resources,
+		CreatedAt:   fmtTime(row.CreatedAt),
+		UpdatedAt:   fmtTime(row.UpdatedAt),
+	}
 }

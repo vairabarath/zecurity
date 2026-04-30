@@ -31,6 +31,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/discovery"
@@ -116,6 +117,9 @@ func main() {
 	)
 	inviteHandler := invitation.NewHandler(inviteStore, inviteEmailer)
 
+	policyStore := policy.NewStore(db.Pool)
+	policyCache := policy.NewSnapshotCache()
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -129,6 +133,8 @@ func main() {
 				ResourceCfg:       resource.NewConfig(db.Pool),
 				InvitationStore:   inviteStore,
 				InvitationEmailer: inviteEmailer,
+				PolicyStore:       policyStore,
+				PolicyNotifier:    policy.NewNotifier(policyCache),
 			},
 		}),
 	)
@@ -228,6 +234,8 @@ func main() {
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
 		mustEnv("CONTROLLER_HTTP_URL"),
+		policyStore,
+		policyCache,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 
