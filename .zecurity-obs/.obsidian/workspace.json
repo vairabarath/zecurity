@@ -11,13 +11,28 @@
             "id": "1bd27bd99f8f8cf3",
             "type": "leaf",
             "state": {
-              "type": "empty",
-              "state": {},
-              "icon": "lucide-file",
-              "title": "New tab"
+              "type": "excalidraw",
+              "state": {
+                "file": "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.md"
+              },
+              "icon": "excalidraw-icon",
+              "title": "Drawing 2026-04-27 10.44.24.excalidraw"
+            }
+          },
+          {
+            "id": "f6c79cbbf5ff1be8",
+            "type": "leaf",
+            "state": {
+              "type": "excalidraw",
+              "state": {
+                "file": "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.restored.md"
+              },
+              "icon": "excalidraw-icon",
+              "title": "Drawing 2026-04-27 10.44.24.excalidraw.restored"
             }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -74,7 +89,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 348.5
   },
   "right": {
     "id": "right-split",
@@ -180,45 +195,45 @@
       "obsidian-excalidraw-plugin:New drawing": false
     }
   },
-  "active": "1bd27bd99f8f8cf3",
+  "active": "f6c79cbbf5ff1be8",
   "lastOpenFiles": [
-    "Sprint6/team-workflow.md",
-    "Sprint6/path.md",
-    "Sprint4/path.md",
-    "Sprint4/Member1-Frontend/Phase4-RemoteNetworks-Sidebar.md",
-    "Sprint4/Member1-Frontend/Phase3-Shields-Page.md",
-    "Sprint4/Member1-Frontend/Phase2-GraphQL-Operations.md",
-    "Sprint4/Member1-Frontend/Phase1-Layout-Routing.md",
-    "redis-to-valkey-migration/Checklist.md",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776516090606",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776515507134",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776512412302",
+    "docs/acl-sync-architecture.md",
+    "docs",
+    "Sprint8.5/Member4-Rust-Client/Phase3-ACL-Runtime-Fetch.md",
+    "Sprint8.5/Member4-Rust-Client/Phase2-Command-Refactor.md",
+    "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.md",
+    "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.restored.md",
     "Planning/Session Log.md",
-    "Sprint4/team-workflow.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase1-Crate-Scaffold.md",
-    "Sprint4/Member2-Go-Proto-Shield/Phase1-Proto-appmeta.md",
-    "redis-to-valkey-migration/Commit1-Infrastructure.md",
     "Planning/Roadmap.md",
-    "Home.md",
+    "Architecture/System Overview.excalidraw.md",
+    "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.md.tmp.86233.1777549835705",
+    "Decisions/ADR-001-Sprint8-ACL-Snapshot-Caching.md",
     "Architecture/Connector Lifecycle.excalidraw.md",
-    "redis-to-valkey-migration/Commit2-EnvVar-Rename.md",
-    "redis-to-valkey-migration/Overview.md",
-    "redis-to-valkey-migration/Checklist.md.tmp.255972.1776499863005",
-    "redis-to-valkey-migration/Commit3-Client-Swap.md",
-    "redis-to-valkey-migration/Commit3-Client-Swap.md.tmp.255972.1776499853518",
-    "redis-to-valkey-migration/Commit2-EnvVar-Rename.md.tmp.255972.1776499824847",
-    "redis-to-valkey-migration/Commit1-Infrastructure.md.tmp.255972.1776499814277",
-    "redis-to-valkey-migration/Overview.md.tmp.255972.1776499801954",
-    "redis-to-valkey-migration",
-    "Sprint4/Member3-Go-DB-GraphQL/Phase5-AgentServer-Rust.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase4-Heartbeat-Renewal.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase3-Enrollment.md",
-    "Sprint4/Member3-Go-DB-GraphQL/Phase3-Connector-Goodbye.md",
-    "Sprint4/Member3-Go-DB-GraphQL/Phase4-Connector-Heartbeat.md",
-    "Sprint4/Member2-Go-Proto-Shield/Phase2-Shield-Package.md",
-    "Sprint4/Member4-Rust-Shield-CI/Phase2-Core-Modules.md",
     "Architecture/Connector Lifecycle.canvas",
-    "Architecture/System Overview.canvas",
-    "Architecture/Connector Lifecycle.excalidraw.md.tmp.10855.1776310006594"
+    "Untitled.canvas",
+    "improvements.md",
+    "Sprint6/path.md",
+    "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md",
+    "Sprint6/Member2-Go-Proto-DB/Phase1-Proto-Schema.md",
+    "Sprint6/Member1-Frontend/Phase2-Scan-UI.md",
+    "Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema.md",
+    "Sprint8.5/Member4-Rust-Client/Phase1-Daemon-Scaffold-IPC.md",
+    "Sprint9/Member3-Go-Connector/Phase2-Connector-Extras.md",
+    "Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel.md",
+    "Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay.md",
+    "Sprint9/Member4-Rust-Client/Phase1-Client-TUN.md",
+    "Sprint9/Member2-Go-Proto/Phase1-Tunnel-Proto.md",
+    "Sprint9/path.md",
+    "Sprint9/Member4-Rust-Shield",
+    "Sprint9/Member4-Rust-Client",
+    "Sprint9/Member3-Go-Connector",
+    "Sprint9/Member2-Go-Proto",
+    "Sprint9",
+    "Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling.md",
+    "Sprint8/Member4-Rust-Client-Connector",
+    "Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler.md",
+    "Sprint8/Member3-Go-Controller",
+    "Sprint8/Member2-Go-Proto-DB",
+    "Architecture/System Overview.canvas"
   ]
 }
