@@ -19,6 +19,7 @@ use crate::proto::{
     DiscoveryReport, ShieldControlMessage, ShieldHealthReport,
 };
 use crate::resources::SharedResourceState;
+use crate::tunnel::{self, TunnelHub};
 use crate::types::ShieldState;
 use crate::{renewal, resources, tls, util};
 
@@ -72,6 +73,8 @@ async fn run_once(
     let mut discovery_fingerprint: u64 = 0;
     let mut discovery_seq: u64 = 0;
 
+    let tunnel_hub: TunnelHub = tunnel::new_hub();
+
     let (out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
     let response = client
         .control(Request::new(ReceiverStream::new(out_rx)))
@@ -121,6 +124,7 @@ async fn run_once(
                             cfg,
                             resource_state,
                             &out_tx,
+                            tunnel_hub.clone(),
                         ).await {
                             return action;
                         }
@@ -164,6 +168,7 @@ async fn handle_connector_msg(
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
     out_tx: &mpsc::Sender<ShieldControlMessage>,
+    tunnel_hub: TunnelHub,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(Body::ResourceInstruction(instr)) => {
@@ -211,6 +216,26 @@ async fn handle_connector_msg(
             {
                 return Some(Err(anyhow::anyhow!("outbound channel closed on pong")));
             }
+            None
+        }
+        Some(Body::TunnelOpen(open)) => {
+            tunnel::handle_tunnel_open(
+                tunnel_hub,
+                open.connection_id,
+                open.destination,
+                open.port,
+                open.protocol,
+                out_tx.clone(),
+            )
+            .await;
+            None
+        }
+        Some(Body::TunnelData(data)) => {
+            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data).await;
+            None
+        }
+        Some(Body::TunnelClose(close)) => {
+            tunnel::handle_tunnel_close(tunnel_hub, &close.connection_id).await;
             None
         }
         other => {

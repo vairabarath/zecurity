@@ -47,6 +47,7 @@ mod control_stream;
 mod discovery;
 mod renewal;
 mod resources;
+mod tunnel;
 /// Generated gRPC client stubs from proto/shield/v1/shield.proto.
 ///
 /// build.rs compiles the proto via tonic_prost_build and writes the

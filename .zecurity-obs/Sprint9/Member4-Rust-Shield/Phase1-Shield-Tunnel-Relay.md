@@ -305,3 +305,35 @@ mod tunnel;
 ```bash
 cargo build --manifest-path shield/Cargo.toml
 ```
+
+---
+
+## Post-Phase Fixes
+
+### Fix: `bytes` crate missing from shield dependencies
+**Issue:** `shield/src/tunnel.rs` uses `bytes::Bytes` for the inbound channel payloads but `bytes` was not listed in `shield/Cargo.toml`. Build failed with `use of unresolved crate or module 'bytes'`.
+
+**Fix Applied (`shield/Cargo.toml`):**
+```toml
+// BEFORE: no bytes entry
+// AFTER:
+bytes = "1"
+```
+
+---
+
+### Fix: `TunnelHub` type alias leaked private `TunnelSession` type
+**Issue:** Phase doc defines `pub type TunnelHub = Arc<Mutex<HashMap<String, TunnelSession>>>`. Because `TunnelSession` is private, Rust E0446 fired on every file that imported `TunnelHub` — including `control_stream.rs`. The compiler reported `type TunnelSession is private` six times.
+
+**Root Cause:** A public type alias that references a private type leaks the private type through the public API.
+
+**Fix Applied (`shield/src/tunnel.rs`):**
+```rust
+// BEFORE:
+pub type TunnelHub = Arc<Mutex<HashMap<String, TunnelSession>>>;
+
+// AFTER:
+#[derive(Clone)]
+pub struct TunnelHub(Arc<Mutex<HashMap<String, TunnelSession>>>);
+```
+All internal `.lock()` calls updated to `.0.lock()`. `Clone` is derived so `Arc` reference-count clone works the same as before.

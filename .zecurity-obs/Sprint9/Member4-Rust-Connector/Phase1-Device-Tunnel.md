@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 9
 member: M4
 phase: Phase1-Device-Tunnel
@@ -212,3 +212,22 @@ pub fn set_quic_advertise_addr(addr: String) {
 ```bash
 cd connector && cargo build
 ```
+
+---
+
+## Post-Phase Fixes
+
+### Fix: `handle_stream` required peer_addr parameter
+**File:** `connector/src/device_tunnel.rs`
+**Issue:** The `handle_stream` signature in the spec didn't include `peer_addr: SocketAddr`, but `quic_listener.rs` called it with a peer address. Build failed with "this function takes 8 arguments but 7 arguments were supplied".
+**Fix:** Added `peer_addr: SocketAddr` parameter to `handle_stream` function signature.
+
+### Fix: TlsAcceptor cannot be moved in loop
+**File:** `connector/src/device_tunnel.rs`
+**Issue:** The `TlsAcceptor` was moved into each iteration of the accept loop, but it doesn't implement `Copy`. Build failed with "use of moved value: acceptor".
+**Fix:** Clone the acceptor before each spawn: `let acceptor_clone = acceptor.clone();` in the loop.
+
+### Fix: QUIC listener passed wrong peer_addr type
+**File:** `connector/src/quic_listener.rs`
+**Issue:** QUIC listener called `device_tunnel::handle_stream` but passed string slice `&conn_id` where a `SocketAddr` was expected.
+**Fix:** Created a dummy SocketAddr: `let peer_addr = "0.0.0.0:0".parse().unwrap();` before calling handle_stream.
