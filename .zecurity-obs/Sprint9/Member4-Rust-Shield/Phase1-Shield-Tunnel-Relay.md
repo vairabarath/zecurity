@@ -77,12 +77,27 @@ pub fn new_hub() -> TunnelHub {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// Dispatch to TCP or UDP handler based on protocol field.
 pub async fn handle_tunnel_open(
     hub: TunnelHub,
     connection_id: String,
     destination: String,
     port: u32,
-    _protocol: String,
+    protocol: String,
+    upstream_tx: mpsc::Sender<ShieldControlMessage>,
+) {
+    if protocol == "udp" {
+        handle_tunnel_open_udp(hub, connection_id, destination, port, upstream_tx).await;
+    } else {
+        handle_tunnel_open_tcp(hub, connection_id, destination, port, upstream_tx).await;
+    }
+}
+
+async fn handle_tunnel_open_tcp(
+    hub: TunnelHub,
+    connection_id: String,
+    destination: String,
+    port: u32,
     upstream_tx: mpsc::Sender<ShieldControlMessage>,
 ) {
     let addr = format!("{destination}:{port}");
@@ -149,6 +164,85 @@ pub async fn handle_tunnel_open(
     });
 }
 
+/// UDP relay: each TunnelData proto message = one datagram.
+/// No extra length prefix — protobuf framing already handles message boundaries.
+/// Idle timeout: 30s with no received datagram closes the session.
+async fn handle_tunnel_open_udp(
+    hub: TunnelHub,
+    connection_id: String,
+    destination: String,
+    port: u32,
+    upstream_tx: mpsc::Sender<ShieldControlMessage>,
+) {
+    let addr = format!("{destination}:{port}");
+    let conn_id = connection_id.clone();
+    const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+    tokio::spawn(async move {
+        let socket = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = upstream_tx.send(tunnel_opened_msg(&conn_id, false, &e.to_string())).await;
+                return;
+            }
+        };
+        if let Err(e) = socket.connect(&addr).await {
+            let _ = upstream_tx.send(tunnel_opened_msg(&conn_id, false, &e.to_string())).await;
+            return;
+        }
+
+        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
+        hub.lock().await.insert(conn_id.clone(), TunnelSession { inbound_tx });
+
+        if upstream_tx.send(tunnel_opened_msg(&conn_id, true, "")).await.is_err() {
+            hub.lock().await.remove(&conn_id);
+            return;
+        }
+
+        let socket = std::sync::Arc::new(socket);
+        let hub_clone = hub.clone();
+        let tx_clone = upstream_tx.clone();
+        let conn_id_read = conn_id.clone();
+        let socket_read = socket.clone();
+
+        // Resource → Connector: recv datagram → TunnelData
+        let read_task = tokio::spawn(async move {
+            let mut buf = vec![0u8; MAX_CHUNK];
+            loop {
+                match timeout(UDP_IDLE_TIMEOUT, socket_read.recv(&mut buf)).await {
+                    Ok(Ok(n)) => {
+                        let msg = ShieldControlMessage {
+                            body: Some(Body::TunnelData(TunnelData {
+                                connection_id: conn_id_read.clone(),
+                                data: buf[..n].to_vec(),
+                            })),
+                        };
+                        if tx_clone.send(msg).await.is_err() { break; }
+                    }
+                    // Idle timeout or socket error — close session
+                    _ => break,
+                }
+            }
+            let _ = tx_clone.send(ShieldControlMessage {
+                body: Some(Body::TunnelClose(TunnelClose {
+                    connection_id: conn_id_read.clone(),
+                    error: String::new(),
+                })),
+            }).await;
+            hub_clone.lock().await.remove(&conn_id_read);
+        });
+
+        // Connector → Resource: TunnelData → send datagram
+        let write_task = tokio::spawn(async move {
+            while let Some(data) = inbound_rx.recv().await {
+                if socket.send(&data).await.is_err() { break; }
+            }
+        });
+
+        let _ = tokio::join!(read_task, write_task);
+    });
+}
+
 pub async fn handle_tunnel_data(hub: TunnelHub, connection_id: &str, data: Vec<u8>) {
     let guard = hub.lock().await;
     if let Some(session) = guard.get(connection_id) {
@@ -201,7 +295,7 @@ mod tunnel;
 
 - **Max chunk size is 16 KB** — matches the proto spec. Do not send larger chunks.
 - **Back-pressure**: `inbound_tx.try_send()` drops data silently if the local writer is slow. Acceptable for Sprint 9 — full flow-control is deferred.
-- **UDP tunneling from Shield**: Not implemented. If `protocol == "udp"` arrives, send `TunnelOpened{ok: false, error: "udp not supported"}` and return.
+- **UDP tunneling from Shield**: Supported. `handle_tunnel_open_udp()` binds a local UDP socket and relays datagrams. Each `TunnelData` message carries exactly one datagram — protobuf framing handles boundaries, no extra length prefix. Idle timeout is 30s.
 - **`destination` field**: The Connector populates this with the resource `host` field. The Shield connects to exactly what the Connector sends — no substitution needed.
 
 ---

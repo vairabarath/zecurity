@@ -10,6 +10,23 @@ tags:
 
 ---
 
+## 2026-04-30 — Codex (GPT-5) — Invitation Bug Fixes
+
+**What was done:**
+- Fixed invitation acceptance email validation: access JWTs now include `email`, auth middleware copies it into `TenantContext`, and `AcceptInvitation` requires matching token + workspace + email before consuming an invite or activating `workspace_members`.
+- Updated client token exchange to pass the session email into issued access tokens.
+- Rebuilt `admin/src/pages/ClientInstall.tsx` into the member install page: workspace name, signed-in email, Linux release links, copyable install/setup commands, and enrolled devices.
+- Documented fixes in Sprint 7 phase docs/path and marked `.zecurity-obs/Sprint8.5/Invitation-Bugs-Remaining.md` done.
+
+**Key decisions:**
+- Refresh preserves email from the old JWT and falls back to querying `users.email` only when an older token lacks the claim and the auth service has a DB pool.
+- `/client-install` remains under the normal authenticated shell because the route gate is auth-only, not admin-only.
+
+**What's next:**
+- Run a browser-level invite acceptance smoke test with a real member account once OAuth and SMTP/dev invite links are available.
+
+---
+
 ## 2026-04-30 — M4 (vairabarath), Sprint 8 + Sprint 8.5 — Connector ACL + Client Daemon Foundation
 
 **What was done:**

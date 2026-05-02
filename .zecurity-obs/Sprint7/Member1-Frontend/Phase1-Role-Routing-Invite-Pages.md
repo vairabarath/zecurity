@@ -1,6 +1,6 @@
 ---
 type: phase
-status: complete
+status: done
 sprint: 7
 member: M1
 phase: Phase1-Role-Routing-Invite-Pages
@@ -198,4 +198,14 @@ Must pass with no TypeScript errors.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: `/client-install` member page was incomplete
+**Issue:** Non-admin invite acceptance redirects to `/client-install`, but the existing page was placeholder content with fake links, no workspace name/slug, and generic platform cards.
+
+**Root Cause:** Phase routing existed, but the install page had not been completed to the invitation-flow requirements.
+
+**Fix Applied (`admin/src/pages/ClientInstall.tsx`):**
+- Queries `me`, `workspace`, and `myDevices`.
+- Shows `Welcome to {workspaceName}` and the signed-in email.
+- Provides GitHub release buttons for Linux amd64 and Linux arm64.
+- Adds copyable install and authentication command blocks using the workspace slug.
+- Preserves the admin shortcut and enrolled device table.

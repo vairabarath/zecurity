@@ -50,27 +50,79 @@ Responsibilities:
 - Create `zecurity0` TUN device using the `tun` crate.
 - Assign a `/32` host address (default `100.64.0.1/32`). Do **not** use `/10` — that installs a broad connected route for the CGNAT block which can conflict with enterprise/VPN networks.
 - The interface address must be configurable via daemon config.
-- Detect conflicts: before `up`, verify no existing route overlaps with any ACL resource IP. Return error if conflict found.
-- `add_route(ip: IpAddr)` — add one `/32` host route pointing to `zecurity0` per ACL snapshot resource address.
-- `remove_all_routes()` — remove all routes added during this session.
+- Detect conflicts: before `up`, query the kernel route table via rtnetlink and verify no existing route overlaps with any ACL resource IP. Return error if conflict found.
+- `add_route(ip: IpAddr)` — add one `/32` host route pointing to `zecurity0` per ACL snapshot resource address via rtnetlink `RTM_NEWROUTE`.
+- `remove_all_routes()` — remove all routes added during this session via rtnetlink `RTM_DELROUTE`. Never leave dangling routes even on panic — store route list in `TunManager` and call cleanup in Drop impl.
 - `destroy()` — bring down and remove the TUN interface.
 - Called from daemon's `handle_up()` and `handle_down()`.
 
 ```rust
 pub struct TunManager {
-    dev:    tun::AsyncDevice,
-    routes: Vec<IpAddr>,
+    dev:      tun::AsyncDevice,
+    routes:   Vec<IpAddr>,
+    if_index: u32,  // cached interface index for rtnetlink calls
 }
 
 impl TunManager {
-    pub fn create() -> Result<Self>;
-    pub fn add_route(&mut self, ip: IpAddr) -> Result<()>;
+    pub async fn create() -> Result<Self>;
+    pub async fn add_route(&mut self, ip: IpAddr) -> Result<()>;
+    pub async fn check_conflicts(&self, ips: &[IpAddr]) -> Result<()>;
     pub fn into_async_device(self) -> tun::AsyncDevice;
-    pub fn cleanup(self) -> Result<()>;  // remove routes + destroy
+    pub async fn cleanup(self) -> Result<()>;  // RTM_DELROUTE all routes + destroy
+}
+
+impl Drop for TunManager {
+    fn drop(&mut self) { /* best-effort sync cleanup of any remaining routes */ }
 }
 ```
 
-Use `ip route add <ip>/32 dev zecurity0` via `std::process::Command`. No external routing crate needed.
+Use **rtnetlink** (kernel netlink socket API) for all route operations — no `std::process::Command`, no dependency on `iproute2` being installed. This matches how production VPN clients (Tailscale, WireGuard) manage routes on Linux: typed kernel errors, no subprocess overhead, works on any distro.
+
+```rust
+// Add a /32 host route via rtnetlink
+use rtnetlink::Handle;
+
+async fn add_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()> {
+    handle
+        .route()
+        .add()
+        .v4()  // or .v6() for IPv6
+        .destination_prefix(ip, 32)
+        .output_interface(if_index)
+        .execute()
+        .await
+        .map_err(|e| anyhow::anyhow!("rtnetlink add route {}/32: {}", ip, e))
+}
+
+// Remove a /32 host route via rtnetlink
+async fn del_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()> {
+    handle
+        .route()
+        .del()
+        .v4()
+        .destination_prefix(ip, 32)
+        .output_interface(if_index)
+        .execute()
+        .await
+        .map_err(|e| anyhow::anyhow!("rtnetlink del route {}/32: {}", ip, e))
+}
+
+// Read existing routes for conflict detection
+async fn list_routes(handle: &Handle) -> Result<Vec<(IpAddr, u8)>> {
+    use futures::TryStreamExt;
+    let mut routes = handle.route().get(rtnetlink::IpVersion::V4).execute();
+    let mut result = Vec::new();
+    while let Some(msg) = routes.try_next().await? {
+        // extract destination + prefix_len from RouteMessage attributes
+        for attr in &msg.attributes {
+            if let rtnetlink::RouteAttribute::Destination(addr) = attr {
+                result.push((IpAddr::V4(*addr), msg.header.destination_prefix_length));
+            }
+        }
+    }
+    Ok(result)
+}
+```
 
 ---
 
@@ -216,9 +268,12 @@ Add `Up` and `Down` to the IPC message enum:
 ### `client/Cargo.toml` (MODIFY)
 
 ```toml
-tun     = "0.6"
-smoltcp = { version = "0.11", features = ["proto-ipv4", "socket-tcp", "socket-udp"] }
-quinn   = "0.11"
+tun      = "0.6"
+smoltcp  = { version = "0.11", features = ["proto-ipv4", "socket-tcp", "socket-udp"] }
+quinn    = "0.11"
+rtnetlink = "0.14"
+netlink-packet-route = "0.21"
+futures  = "0.3"
 ```
 
 ---
