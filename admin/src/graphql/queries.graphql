@@ -218,6 +218,30 @@ query MyDevices {
   }
 }
 
+query GetClientDevices {
+  clientDevices {
+    id
+    userId
+    name
+    commonName
+    os
+    spiffeId
+    certNotAfter
+    lastSeenAt
+    createdAt
+    revokedAt
+  }
+}
+
+query GetConnectorLogs($limit: Int) {
+  connectorLogs(limit: $limit) {
+    id
+    connectorId
+    message
+    createdAt
+  }
+}
+
 query GetResources($remoteNetworkId: String!) {
   resources(remoteNetworkId: $remoteNetworkId) {
     id

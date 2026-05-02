@@ -108,6 +108,10 @@ mutation TriggerScan($connectorId: ID!, $targets: [String!]!, $ports: [Int!]!) {
   triggerScan(connectorId: $connectorId, targets: $targets, ports: $ports)
 }
 
+mutation RevokeDevice($deviceId: ID!) {
+  revokeDevice(deviceId: $deviceId)
+}
+
 mutation CreateInvitation($email: String!) {
   createInvitation(email: $email) {
     id
