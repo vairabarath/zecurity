@@ -41,12 +41,17 @@ The infrastructure layer of the RDE Connector: QUIC listener, AgentTunnelHub API
 
 QUIC/UDP on the same port number as TLS/TCP. Each QUIC bidirectional stream is handled by the same `handle_stream` function.
 
+> **Interface contract with M4:** `device_tunnel::handle_stream` signature is:
+> `handle_stream(stream, acl, tunnel_hub, agent_registry, crl_manager, connector_id, control_tx)`
+> No `controller_http_url` — CRL fetching is handled by `CrlManager` (M3 Phase 2).
+
 ```rust
 use anyhow::Result;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 use crate::agent_tunnel::AgentTunnelHub;
+use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
 use crate::tls::cert_store::CertStore;
@@ -57,11 +62,11 @@ use crate::ControlMessage;
 pub async fn listen(
     addr: &str,
     advertise_addr: &str,
-    controller_http_url: String,
     store: CertStore,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
     agent_registry: Arc<AgentRegistry>,
+    crl_manager: CrlManager,
     connector_id: String,
     control_tx: tokio::sync::mpsc::Sender<ControlMessage>,
 ) -> Result<()> {
@@ -82,10 +87,10 @@ pub async fn listen(
     loop {
         match endpoint.accept().await {
             Some(incoming) => {
-                let ctrl         = controller_http_url.clone();
                 let acl          = acl.clone();
                 let tunnel_hub   = tunnel_hub.clone();
                 let agent_reg    = agent_registry.clone();
+                let crl          = crl_manager.clone();
                 let connector_id = connector_id.clone();
                 let control_tx   = control_tx.clone();
                 tokio::spawn(async move {
@@ -94,15 +99,15 @@ pub async fn listen(
                             match conn.accept_bi().await {
                                 Ok((send, recv)) => {
                                     let combined = tokio::io::join(recv, send);
-                                    let ctrl         = ctrl.clone();
                                     let acl          = acl.clone();
                                     let tunnel_hub   = tunnel_hub.clone();
                                     let agent_reg    = agent_reg.clone();
+                                    let crl          = crl.clone();
                                     let connector_id = connector_id.clone();
                                     let control_tx   = control_tx.clone();
                                     tokio::spawn(async move {
                                         if let Err(e) = device_tunnel::handle_stream(
-                                            combined, &ctrl, acl, tunnel_hub, agent_reg, &connector_id, &control_tx,
+                                            combined, acl, tunnel_hub, agent_reg, crl, &connector_id, &control_tx,
                                         ).await {
                                             warn!("QUIC stream error: {}", e);
                                         }
@@ -180,17 +185,17 @@ pub fn lan_ip() -> anyhow::Result<IpAddr> {
 
 ### 5. `connector/src/main.rs` (MODIFY)
 
-Start both device tunnel listeners after all agent-facing listeners:
+Start both device tunnel listeners after all agent-facing listeners. `crl_manager` is created in Phase 2 — wire it in here:
 
 ```rust
-// TLS/TCP on :9092
+// TLS/TCP on :9092  (M4 owns device_tunnel::listen — see Phase2-Connector-Extras for crl_manager init)
 tokio::spawn(device_tunnel::listen(
     "0.0.0.0:9092",
-    controller_http_url.clone(),
     cert_store.clone(),
     acl.clone(),
     tunnel_hub.clone(),
     agent_registry.clone(),
+    crl_manager.clone(),
     connector_id.clone(),
     control_tx.clone(),
 ));
@@ -203,12 +208,15 @@ tokio::spawn(quic_listener::listen(
     acl.clone(),
     tunnel_hub.clone(),
     agent_registry.clone(),
+    crl_manager.clone(),
     connector_id.clone(),
     control_tx.clone(),
 ));
 ```
 
 Add `mod device_tunnel;`, `mod quic_listener;`, `mod net_util;`.
+
+> Full wiring order (including `crl_manager` init) is in [[Sprint9/Member3-Go-Connector/Phase2-Connector-Extras]].
 
 ---
 
