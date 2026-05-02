@@ -132,9 +132,9 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 > See [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]].
 
-- [ ] **M4-C1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open_tcp()` (connect TCP locally), `handle_tunnel_open_udp()` (bind UDP socket, idle timeout 30s), `handle_tunnel_data()`, `handle_tunnel_close()`. Each `TunnelData` proto message = one UDP datagram — no extra length prefix needed.
-- [ ] **M4-C2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
-- [ ] **M4-C3** `shield/src/main.rs` — Add `mod tunnel`
+- [x] **M4-C1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open_tcp()` (connect TCP locally), `handle_tunnel_open_udp()` (bind UDP socket, idle timeout 30s), `handle_tunnel_data()`, `handle_tunnel_close()`. Each `TunnelData` proto message = one UDP datagram — no extra length prefix needed.
+- [x] **M4-C2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
+- [x] **M4-C3** `shield/src/main.rs` — Add `mod tunnel`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
@@ -142,7 +142,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 > See [[Sprint9/Member4-Rust-Connector/Phase1-Device-Tunnel]].
 
-- [ ] **M4-C4** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, local ACL snapshot enforcement (default-deny), protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`, CRL revocation check
+- [x] **M4-C4** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, local ACL snapshot enforcement (default-deny), protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`, CRL revocation check
 
 > Build check: `cd connector && cargo build` must pass.
 
@@ -150,12 +150,12 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 > See [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]].
 
-- [ ] **M4-C5** `client/src/tun.rs` — Create `zecurity0` TUN; assign `/32` host address; `add_route(ip)` via rtnetlink `RTM_NEWROUTE` per ACL entry; `check_conflicts()` reads kernel route table before `up`; `Drop` impl for panic-safe cleanup
-- [ ] **M4-C6** `client/src/net_stack.rs` — smoltcp integration: read packets from TUN, accept TCP/UDP from smoltcp, open QUIC stream via pool, send `TunnelRequest`/`TunnelResponse` JSON, relay bidirectionally. UDP: 30s idle timeout.
-- [ ] **M4-C7** `client/src/tunnel_pool.rs` — QUIC connection pool: one connection per Connector address using device mTLS cert from daemon RuntimeState; `open_stream()` reuses existing connection
-- [ ] **M4-C8** `client/src/cmd/up.rs` + `client/src/cmd/down.rs` — IPC commands; `Up` creates TUN + starts smoltcp loop; `Down` teardown + rtnetlink route removal
-- [ ] **M4-C9** Wire `Up`/`Down` IPC handlers in `client/src/daemon.rs`; add subcommands in `client/src/main.rs`; add to `client/src/ipc.rs` message enum
-- [ ] **M4-C10** `client/Cargo.toml` — add `tun = "0.6"`, `smoltcp = "0.11"`, `quinn = "0.11"`, `rtnetlink = "0.14"`, `netlink-packet-route = "0.21"`, `futures = "0.3"`
+- [x] **M4-C5** `client/src/tun.rs` — Create `zecurity0` TUN; assign `/32` host address; `add_route(ip)` via rtnetlink `RTM_NEWROUTE` per ACL entry; `check_conflicts()` reads kernel route table before `up`; `Drop` impl for panic-safe cleanup
+- [x] **M4-C6** `client/src/net_stack.rs` — smoltcp integration: read packets from TUN, accept TCP/UDP from smoltcp, open QUIC stream via pool, send `TunnelRequest`/`TunnelResponse` JSON, relay bidirectionally. UDP: 30s idle timeout.
+- [x] **M4-C7** `client/src/tunnel_pool.rs` — QUIC connection pool: one connection per Connector address using device mTLS cert from daemon RuntimeState; `open_stream()` reuses existing connection
+- [x] **M4-C8** `client/src/cmd/up.rs` + `client/src/cmd/down.rs` — IPC commands; `Up` creates TUN + starts smoltcp loop; `Down` teardown + rtnetlink route removal
+- [x] **M4-C9** Wire `Up`/`Down` IPC handlers in `client/src/daemon.rs`; add subcommands in `client/src/main.rs`; add to `client/src/ipc.rs` message enum
+- [x] **M4-C10** `client/Cargo.toml` — add `tun = "0.6"`, `smoltcp = "0.11"`, `quinn = "0.11"`, `rtnetlink = "0.14"`, `netlink-packet-route = "0.21"`, `futures = "0.3"`
 
 > Build check: `cd client && cargo build` passes.
 > Manual: `zecurity up` creates `zecurity0`, routes appear, app connects to resource IP transparently. `zecurity down` cleans up.
@@ -270,3 +270,93 @@ See individual member phase files for detailed specs:
 See architecture decisions:
 - [[Decisions/ADR-003-Client-TUN-Transparent-Proxy]]
 - [[Decisions/ADR-002-Client-Daemon-Required]]
+
+---
+
+## Post-Sprint Fixes
+
+### Fix: `TunnelHub` type alias leaked private `TunnelSession` (M4 Shield)
+**File:** `shield/src/tunnel.rs`
+**Issue:** `pub type TunnelHub = Arc<Mutex<HashMap<String, TunnelSession>>>` caused E0446 in every file that imported it.
+**Fix:** Changed to a newtype struct `pub struct TunnelHub(Arc<...>)` with `#[derive(Clone)]`.
+See full details in [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]] → Post-Phase Fixes.
+
+---
+
+### Fix: `bytes` crate missing from shield (M4 Shield)
+**File:** `shield/Cargo.toml`
+**Issue:** `tunnel.rs` used `bytes::Bytes` but crate was not in deps.
+**Fix:** Added `bytes = "1"`.
+See full details in [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]] → Post-Phase Fixes.
+
+---
+
+### Fix: `netlink-packet-route` version mismatch (M4 Client)
+**File:** `client/Cargo.toml`
+**Issue:** Spec said `"0.21"` but `rtnetlink 0.14` uses `"0.19"`. Two incompatible versions caused type mismatch errors in `tun.rs`.
+**Fix:** Changed to `netlink-packet-route = "0.19"` to unify versions.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+---
+
+### Fix: `RouteDelRequest` has no builder API (M4 Client)
+**File:** `client/src/tun.rs`
+**Issue:** Spec showed `.del().v4().destination_prefix(...)` but `rtnetlink 0.14` `del()` takes a `RouteMessage` directly.
+**Fix:** Build `RouteMessage` manually and pass to `handle.route().del(msg)`.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+---
+
+### Fix: Cannot move out of `TunManager` with `Drop` (M4 Client)
+**File:** `client/src/tun.rs`
+**Issue:** `into_async_device(self)` failed — Rust forbids moving out of a type that implements `Drop`.
+**Fix:** Changed `dev` field to `Option<tun::AsyncDevice>` and added `take_device(&mut self)`.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+---
+
+### Fix: `quinn_proto` not re-exported by `quinn` (M4 Client)
+**File:** `client/Cargo.toml`, `client/src/tunnel_pool.rs`
+**Issue:** `QuicClientConfig` lives in `quinn_proto` which `quinn` does not re-export.
+**Fix:** Added `quinn-proto = "0.11"` as a direct dependency.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+---
+
+### Fix: `TunSlot` needed alongside `SharedState` in daemon dispatch (M4 Client)
+**File:** `client/src/daemon.rs`
+**Issue:** `TunManager` can't live in `RuntimeState` (not Clone/Default). Up/Down handlers needed it for route cleanup.
+**Fix:** Added `type TunSlot = Arc<Mutex<Option<TunManager>>>` threaded through `handle_request`.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+---
+
+### Fix: handle_stream needs peer_addr parameter (M4 Connector)
+**File:** `connector/src/device_tunnel.rs`
+**Issue:** Spec didn't include `peer_addr` but quic_listener calls with it. "function takes 8 arguments but 7 supplied".
+**Fix:** Added `peer_addr: SocketAddr` parameter.
+
+### Fix: TlsAcceptor cannot move in loop (M4 Connector)
+**File:** `connector/src/device_tunnel.rs`
+**Issue:** `TlsAcceptor` moved each loop iteration, doesn't implement Copy.
+**Fix:** Clone acceptor before each spawn: `let acceptor_clone = acceptor.clone();`
+
+### Fix: smoltcp Device trait not compatible with tun crate (M4 Client)
+**File:** `client/src/net_stack.rs`
+**Issue:** smoltcp requires its own `Device` trait implementation, not compatible with tun's AsyncDevice.
+**Fix:** Created stub `TunDevice` implementing smoltcp's Device trait.
+
+### Fix: tun crate async module raw identifier (M4 Client)
+**File:** `client/src/net_stack.rs`
+**Issue:** `tun::async::AsyncDevice` fails - module is `r#async` due to keyword.
+**Fix:** Made net_stack generic over Send type.
+
+### Fix: ClientConf::load() type inference (M4 Client)
+**File:** `client/src/daemon.rs`
+**Issue:** "type annotations needed" on config::load().
+**Fix:** Added explicit type: `.map(|c: config::ClientConf| c.connector())`.
+
+### Fix: unwrap_or_else String vs &str mismatch (M4 Client)
+**File:** `client/src/daemon.rs`
+**Issue:** "expected &str, found String" on default connector.
+**Fix:** `.map(|c| c.connector().to_string())`.

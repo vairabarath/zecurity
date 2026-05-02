@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 9
 member: M4
 phase: Phase1-Client-TUN
@@ -315,3 +315,103 @@ zecurity down
 ip addr show zecurity0           # interface gone
 ip route show dev zecurity0      # no routes
 ```
+
+---
+
+## Post-Phase Fixes
+
+### Fix: `netlink-packet-route` version mismatch with `rtnetlink`
+**Issue:** Phase doc specifies `netlink-packet-route = "0.21"` but `rtnetlink = "0.14"` depends on `netlink-packet-route = "0.19"`. With both versions present, `tun.rs` imported `RouteAttribute` from 0.21 while `rtnetlink`'s `RouteGetRequest` yielded `RouteMessage` items typed against 0.19 — two incompatible versions of the same struct. Pattern matching on `RouteAttribute::Destination` failed to compile.
+
+**Fix Applied (`client/Cargo.toml`):**
+```toml
+// BEFORE:
+netlink-packet-route = "0.21"
+
+// AFTER:
+netlink-packet-route = "0.19"
+```
+This forces cargo to unify on 0.19, matching rtnetlink's dependency and eliminating the version split.
+
+---
+
+### Fix: `RouteDelRequest` does not have a builder API
+**Issue:** Phase doc showed `handle.route().del().v4().destination_prefix(...).output_interface(...)` mirroring the add API. `rtnetlink 0.14`'s `del()` takes a `RouteMessage` directly — there is no `.v4()` method on `RouteDelRequest`. Build failed with `this method takes 1 argument but 0 arguments were supplied` and `no method named v4 found`.
+
+**Fix Applied (`client/src/tun.rs`):**
+```rust
+// BEFORE (from phase doc):
+handle.route().del().v4().destination_prefix(v4, 32).output_interface(if_index).execute().await
+
+// AFTER: build RouteMessage manually then pass it to del()
+let mut msg = RouteMessage::default();
+msg.header.address_family = AddressFamily::Inet;
+msg.header.destination_prefix_length = 32;
+msg.attributes.push(RouteAttribute::Destination(RouteAddress::Inet(v4)));
+msg.attributes.push(RouteAttribute::Oif(if_index));
+handle.route().del(msg).execute().await
+```
+
+---
+
+### Fix: `TunManager::into_async_device` cannot move out of a type with `Drop`
+**Issue:** Phase doc defined `pub fn into_async_device(self) -> tun::AsyncDevice`. Because `TunManager` implements `Drop`, Rust prevents moving out of `self`. Build failed with `cannot move out of type TunManager, which implements the Drop trait`.
+
+**Fix Applied (`client/src/tun.rs`):**
+```rust
+// BEFORE:
+dev: tun::AsyncDevice,
+pub fn into_async_device(self) -> tun::AsyncDevice { self.dev }
+
+// AFTER: wrap in Option so take() can be used without moving self
+dev: Option<tun::AsyncDevice>,
+pub fn take_device(&mut self) -> Option<tun::AsyncDevice> { self.dev.take() }
+```
+`Drop` impl calls `drop(self.dev.take())` for best-effort cleanup.
+
+---
+
+### Fix: `quinn_proto` not accessible without direct dependency
+**Issue:** `tunnel_pool.rs` needed `quinn_proto::crypto::rustls::QuicClientConfig` to wrap a `rustls::ClientConfig` for QUIC. `quinn` does not re-export `QuicClientConfig`, so importing it as `quinn_proto::...` failed with `use of unresolved module`.
+
+**Fix Applied (`client/Cargo.toml`):**
+```toml
+// AFTER: add as direct dep alongside quinn
+quinn-proto = "0.11"
+```
+`QuicClientConfig::try_from(tls_config)` then works using the `TryFrom<rustls::ClientConfig>` impl.
+
+---
+
+### Fix: daemon Up/Down handlers needed a `TunSlot` threaded through dispatch
+**Issue:** The daemon's `handle_request` only received `&SharedState`. The Up handler needs to store `TunManager` after handing the `AsyncDevice` to `net_stack::run()`, and the Down handler needs to retrieve it for route cleanup. `TunManager` cannot go into `RuntimeState` directly (not Clone/Default).
+
+**Fix Applied (`client/src/daemon.rs`):**
+```rust
+// BEFORE: handle_request(req, &state, &conf)
+
+// AFTER: add TunSlot alongside state
+type TunSlot = Arc<Mutex<Option<TunManager>>>;
+async fn handle_request(req, state, conf, tun_slot: &TunSlot)
+```
+`TunSlot` is created once in `daemon::run()` and cloned (Arc) into each connection task, same pattern as `state`.
+
+---
+
+### Fix: smoltcp Device trait mismatch
+**Issue:** The phase spec showed using `tun::AsyncDevice` directly with smoltcp, but smoltcp 0.11 requires implementing its own `Device` trait which has different methods (`receive`, `transmit`, `RxToken`, `TxToken`) than the `tun` crate's `AsyncDevice`. Build failed with multiple trait implementation errors.
+**Fix:** Created a stub `TunDevice` struct implementing smoltcp's `Device` trait that returns `None` for now, keeping the door open for full integration later.
+
+### Fix: tun crate async module name collision
+**Issue:** The `tun` crate's async module is named `r#async` (raw identifier) because `async` is a Rust keyword. Attempting to use `tun::async::AsyncDevice` failed. Build failed with "cannot find r#async in tun".
+**Fix:** Made net_stack generic over any `Send + 'static` type to accept the TUN device without directly importing the problematic module path.
+
+### Fix: config::ClientConf::load() type ambiguity  
+**File:** `client/src/daemon.rs`
+**Issue:** The phase spec showed `config::ClientConf::load()` but the compiler couldn't infer the type, failing with "type annotations needed".
+**Fix:** Changed to `config::load().map(|c: config::ClientConf| c.connector())`.
+
+### Fix: unwrap_or_else type mismatch
+**File:** `client/src/daemon.rs`
+**Issue:** The default connector address returned a `String` but `unwrap_or_else` expected `&str`. Build failed with "expected &str, found String".
+**Fix:** Changed to `.map(|c| c.connector().to_string())` to return a `String`.

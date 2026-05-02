@@ -1,16 +1,23 @@
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::config;
 use crate::grpc::{self, client_v1::GetAclSnapshotRequest};
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
-use crate::runtime::{self, DeviceInfo, SessionInfo, SharedState, UserInfo, WorkspaceInfo};
+use crate::net_stack;
+use crate::runtime::{self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo};
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
+use crate::tun::TunManager;
+use crate::tunnel_pool::TunnelPool;
+
+type TunSlot = Arc<Mutex<Option<TunManager>>>;
 
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
@@ -72,6 +79,8 @@ pub async fn run() -> Result<()> {
     // pings every half-interval so a transient slow tick never trips the timeout.
     sd_spawn_watchdog();
 
+    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -81,8 +90,9 @@ pub async fn run() -> Result<()> {
                 }
                 let state = Arc::clone(&state);
                 let conf = conf.clone();
+                let tun_slot = Arc::clone(&tun_slot);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state, conf).await {
+                    if let Err(e) = handle_connection(stream, state, conf, tun_slot).await {
                         error!(error = %e, "IPC connection error");
                     }
                 });
@@ -96,6 +106,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     state: SharedState,
     conf: config::ClientConf,
+    tun_slot: TunSlot,
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -106,7 +117,7 @@ async fn handle_connection(
     let (response, shutdown) = match serde_json::from_str::<IpcRequest>(line.trim()) {
         Ok(req) => {
             let is_shutdown = matches!(req, IpcRequest::Shutdown);
-            let resp = handle_request(req, &state, &conf).await;
+            let resp = handle_request(req, &state, &conf, &tun_slot).await;
             (resp, is_shutdown)
         }
         Err(_) => (
@@ -137,6 +148,7 @@ async fn handle_request(
     req: IpcRequest,
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
 ) -> IpcResponse {
     match req {
         IpcRequest::Status => {
@@ -290,19 +302,167 @@ async fn handle_request(
             }
         }
 
-        IpcRequest::Up => IpcResponse {
+        IpcRequest::Up => handle_up(state, tun_slot).await,
+
+        IpcRequest::Down => handle_down(state, tun_slot).await,
+    }
+}
+
+async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
+    // Reject if already up.
+    if tun_slot.lock().await.is_some() {
+        return IpcResponse {
             ok: false,
             kind: "Up".into(),
-            error: Some("not implemented".into()),
+            error: Some("already up".into()),
             ..Default::default()
-        },
+        };
+    }
 
-        IpcRequest::Down => IpcResponse {
+    // Require an ACL snapshot with at least one entry.
+    let (acl, device) = {
+        let s = state.read().await;
+        (s.acl_snapshot.clone(), s.device.clone())
+    };
+
+    let acl = match acl {
+        None => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some("no ACL snapshot — run zecurity-client status to check daemon state".into()),
+                ..Default::default()
+            }
+        }
+        Some(a) if a.entries.is_empty() => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some("ACL snapshot has no entries — no resources to route".into()),
+                ..Default::default()
+            }
+        }
+        Some(a) => Arc::new(a),
+    };
+
+    let device = match device {
+        None => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some("no device identity — run zecurity-client login first".into()),
+                ..Default::default()
+            }
+        }
+        Some(d) => d,
+    };
+
+    // Build QUIC tunnel pool from device mTLS cert.
+    let pool = match TunnelPool::new(&device.certificate_pem, &device.private_key_pem, &device.ca_cert_pem) {
+        Ok(p) => Arc::new(p),
+        Err(e) => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some(format!("failed to build tunnel pool: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // Create TUN device.
+    let mut mgr = match TunManager::create().await {
+        Ok(m) => m,
+        Err(e) => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some(format!("failed to create TUN device: {}", e)),
+                ..Default::default()
+            }
+        }
+    };
+
+    // Collect resource IPs from ACL snapshot.
+    let ips: Vec<IpAddr> = acl.entries
+        .iter()
+        .filter_map(|e| e.address.parse::<IpAddr>().ok())
+        .collect();
+
+    // Check for route conflicts before installing anything.
+    if let Err(e) = mgr.check_conflicts(&ips).await {
+        return IpcResponse {
             ok: false,
-            kind: "Down".into(),
-            error: Some("not implemented".into()),
+            kind: "Up".into(),
+            error: Some(format!("route conflict: {}", e)),
             ..Default::default()
-        },
+        };
+    }
+
+    // Install one /32 route per resource IP.
+    for ip in &ips {
+        if let Err(e) = mgr.add_route(*ip).await {
+            warn!(ip = %ip, error = %e, "failed to add route (skipping)");
+        }
+    }
+
+    let route_count = ips.len();
+    let dev = match mgr.take_device() {
+        Some(d) => d,
+        None => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some("TUN device unavailable".into()),
+                ..Default::default()
+            }
+        }
+    };
+
+    // Spawn the packet-processing loop; keep AbortHandle for Down.
+    let connector_addr = config::load()
+        .map(|c| c.connector().to_string())
+        .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string());
+    let connector_socket: SocketAddr = connector_addr.parse()
+        .unwrap_or_else(|_| "127.0.0.1:9092".parse().unwrap());
+
+    let task = tokio::spawn(async move {
+        if let Err(e) = net_stack::run(dev, acl, pool, connector_socket).await {
+            error!(error = %e, "net_stack exited with error");
+        }
+    });
+    let abort = task.abort_handle();
+
+    // Store TunManager (for route cleanup) and AbortHandle (for task cancel).
+    *tun_slot.lock().await = Some(mgr);
+    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
+
+    info!(routes = route_count, "zecurity0 up");
+    IpcResponse {
+        ok: true,
+        kind: "Up".into(),
+        ..Default::default()
+    }
+}
+
+async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
+    let handle = state.write().await.tun_handle.take();
+    if let Some(h) = handle {
+        h.abort.abort();
+    }
+
+    let mgr = tun_slot.lock().await.take();
+    if let Some(m) = mgr {
+        if let Err(e) = m.cleanup().await {
+            warn!(error = %e, "error cleaning up TUN routes");
+        }
+    }
+
+    info!("zecurity0 down");
+    IpcResponse {
+        ok: true,
+        kind: "Down".into(),
+        ..Default::default()
     }
 }
 

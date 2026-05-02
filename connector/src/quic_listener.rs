@@ -81,8 +81,9 @@ pub async fn listen(
                 let ctrl_tx    = ctrl_tx.clone();
 
                 tokio::spawn(async move {
+                    let peer_addr = "0.0.0.0:0".parse().unwrap();
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, acl, hub, reg, crl, &conn_id, &ctrl_tx,
+                        stream, peer_addr, acl, hub, reg, crl, &conn_id, &ctrl_tx,
                     ).await {
                         warn!("QUIC stream error: {}", e);
                     }
