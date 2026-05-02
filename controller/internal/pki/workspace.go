@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"fmt"
+	"math/big"
 	"net/url"
 	"time"
 
@@ -522,4 +523,79 @@ func (s *serviceImpl) SignClientCert(
 		NotBefore:         notBefore,
 		NotAfter:          notAfter,
 	}, nil
+}
+
+// GenerateClientCRL builds a DER-encoded CRL signed by the workspace CA for
+// tenantID. It lists every client_devices row with a non-null revoked_at.
+func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([]byte, error) {
+	var encryptedKey, nonce, caCertPEM string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT encrypted_private_key, nonce, certificate_pem
+		   FROM workspace_ca_keys
+		  WHERE tenant_id = $1`,
+		tenantID,
+	).Scan(&encryptedKey, &nonce, &caCertPEM); err != nil {
+		return nil, fmt.Errorf("load workspace CA key: %w", err)
+	}
+
+	caPrivKey, err := decryptPrivateKey(encryptedKey, nonce, s.masterSecret, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt workspace CA key: %w", err)
+	}
+	defer caPrivKey.D.SetInt64(0)
+
+	caCert, err := parseCertFromPEM(caCertPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parse workspace CA cert: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx,
+		`SELECT cert_serial, revoked_at
+		   FROM client_devices
+		  WHERE workspace_id = $1
+		    AND revoked_at IS NOT NULL
+		    AND cert_serial IS NOT NULL`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query revoked devices: %w", err)
+	}
+	defer rows.Close()
+
+	var revoked []x509.RevocationListEntry
+	for rows.Next() {
+		var serialHex string
+		var revokedAt time.Time
+		if err := rows.Scan(&serialHex, &revokedAt); err != nil {
+			return nil, fmt.Errorf("scan revoked device: %w", err)
+		}
+		n := new(big.Int)
+		n.SetString(serialHex, 16)
+		revoked = append(revoked, x509.RevocationListEntry{
+			SerialNumber:   n,
+			RevocationTime: revokedAt.UTC(),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate revoked devices: %w", err)
+	}
+
+	crlSerial, err := newSerialNumber()
+	if err != nil {
+		return nil, fmt.Errorf("generate CRL serial: %w", err)
+	}
+
+	now := time.Now().UTC()
+	template := &x509.RevocationList{
+		Number:              crlSerial,
+		ThisUpdate:          now,
+		NextUpdate:          now.Add(24 * time.Hour),
+		RevokedCertificateEntries: revoked,
+	}
+
+	der, err := x509.CreateRevocationList(rand.Reader, template, caCert, caPrivKey)
+	if err != nil {
+		return nil, fmt.Errorf("create CRL: %w", err)
+	}
+	return der, nil
 }

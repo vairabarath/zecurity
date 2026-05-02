@@ -155,6 +155,7 @@ func main() {
 	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
+	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(

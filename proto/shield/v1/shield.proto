@@ -90,8 +90,37 @@ message ShieldControlMessage {
     ResourceAck         resource_ack         = 5;
     Pong                pong                 = 6;
     DiscoveryReport     discovery_report     = 7;
-    // Fields 8–11 reserved for Sprint 7 RDE tunnel messages
+    // Connector → Shield
+    TunnelOpen          tunnel_open          = 8;
+    // Shield → Connector
+    TunnelOpened        tunnel_opened        = 9;
+    // Bidirectional
+    TunnelData          tunnel_data          = 10;
+    TunnelClose         tunnel_close         = 11;
   }
+}
+
+message TunnelOpen {
+  string connection_id = 1;  // UUID identifying this tunnel session
+  string destination   = 2;  // target IP or hostname
+  uint32 port          = 3;
+  string protocol      = 4;  // "tcp" or "udp"
+}
+
+message TunnelOpened {
+  string connection_id = 1;
+  bool   ok            = 2;
+  string error         = 3;  // set only on failure
+}
+
+message TunnelData {
+  string connection_id = 1;
+  bytes  data          = 2;  // raw bytes (max 16 KB chunks)
+}
+
+message TunnelClose {
+  string connection_id = 1;
+  string error         = 2;  // empty = clean close
 }
 
 message DiscoveredService {

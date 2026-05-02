@@ -13,12 +13,15 @@ import (
 
 type ClientDevice struct {
 	ID           string  `json:"id"`
+	UserID       string  `json:"userId"`
 	Name         string  `json:"name"`
+	CommonName   string  `json:"commonName"`
 	Os           string  `json:"os"`
 	SpiffeID     *string `json:"spiffeId,omitempty"`
 	CertNotAfter *string `json:"certNotAfter,omitempty"`
 	LastSeenAt   *string `json:"lastSeenAt,omitempty"`
 	CreatedAt    string  `json:"createdAt"`
+	RevokedAt    *string `json:"revokedAt,omitempty"`
 }
 
 type Connector struct {
@@ -33,6 +36,14 @@ type Connector struct {
 	LanAddr         *string         `json:"lanAddr,omitempty"`
 	CertNotAfter    *string         `json:"certNotAfter,omitempty"`
 	CreatedAt       string          `json:"createdAt"`
+}
+
+type ConnectorLog struct {
+	ID          string `json:"id"`
+	WorkspaceID string `json:"workspaceId"`
+	ConnectorID string `json:"connectorId"`
+	Message     string `json:"message"`
+	CreatedAt   string `json:"createdAt"`
 }
 
 type ConnectorToken struct {
