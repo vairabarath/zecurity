@@ -119,6 +119,7 @@ func main() {
 
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
+	policyNotifier := policy.NewNotifier(policyCache)
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
@@ -134,7 +135,7 @@ func main() {
 				InvitationStore:   inviteStore,
 				InvitationEmailer: inviteEmailer,
 				PolicyStore:       policyStore,
-				PolicyNotifier:    policy.NewNotifier(policyCache),
+				PolicyNotifier:    policyNotifier,
 			},
 		}),
 	)
@@ -154,6 +155,7 @@ func main() {
 	mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
+	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
@@ -236,6 +238,7 @@ func main() {
 		mustEnv("CONTROLLER_HTTP_URL"),
 		policyStore,
 		policyCache,
+		policyNotifier,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 

@@ -47,12 +47,15 @@ type ComplexityRoot struct {
 
 	ClientDevice struct {
 		CertNotAfter func(childComplexity int) int
+		CommonName   func(childComplexity int) int
 		CreatedAt    func(childComplexity int) int
 		ID           func(childComplexity int) int
 		LastSeenAt   func(childComplexity int) int
 		Name         func(childComplexity int) int
 		Os           func(childComplexity int) int
+		RevokedAt    func(childComplexity int) int
 		SpiffeID     func(childComplexity int) int
+		UserID       func(childComplexity int) int
 	}
 
 	Connector struct {
@@ -67,6 +70,14 @@ type ComplexityRoot struct {
 		RemoteNetworkID func(childComplexity int) int
 		Status          func(childComplexity int) int
 		Version         func(childComplexity int) int
+	}
+
+	ConnectorLog struct {
+		ConnectorID func(childComplexity int) int
+		CreatedAt   func(childComplexity int) int
+		ID          func(childComplexity int) int
+		Message     func(childComplexity int) int
+		WorkspaceID func(childComplexity int) int
 	}
 
 	ConnectorToken struct {
@@ -121,6 +132,7 @@ type ComplexityRoot struct {
 		ProtectResource           func(childComplexity int, id string) int
 		RemoveGroupMember         func(childComplexity int, groupID string, userID string) int
 		RevokeConnector           func(childComplexity int, id string) int
+		RevokeDevice              func(childComplexity int, deviceID string) int
 		RevokeShield              func(childComplexity int, id string) int
 		TriggerScan               func(childComplexity int, connectorID string, targets []string, ports []int) int
 		UnassignResourceFromGroup func(childComplexity int, resourceID string, groupID string) int
@@ -131,7 +143,9 @@ type ComplexityRoot struct {
 
 	Query struct {
 		AllResources            func(childComplexity int) int
+		ClientDevices           func(childComplexity int) int
 		Connector               func(childComplexity int, id string) int
+		ConnectorLogs           func(childComplexity int, limit *int) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
 		GetScanResults          func(childComplexity int, requestID string) int
@@ -260,6 +274,7 @@ type MutationResolver interface {
 	PromoteDiscoveredService(ctx context.Context, shieldID string, protocol string, port int) (*Resource, error)
 	TriggerScan(ctx context.Context, connectorID string, targets []string, ports []int) (string, error)
 	CreateInvitation(ctx context.Context, email string) (*Invitation, error)
+	RevokeDevice(ctx context.Context, deviceID string) (bool, error)
 	CreateGroup(ctx context.Context, name string, description *string) (*Group, error)
 	UpdateGroup(ctx context.Context, id string, name *string, description *string) (*Group, error)
 	DeleteGroup(ctx context.Context, id string) (bool, error)
@@ -285,9 +300,11 @@ type QueryResolver interface {
 	GetDiscoveredServices(ctx context.Context, shieldID string) ([]*DiscoveredService, error)
 	GetScanResults(ctx context.Context, requestID string) ([]*ScanResult, error)
 	MyDevices(ctx context.Context) ([]*ClientDevice, error)
+	ClientDevices(ctx context.Context) ([]*ClientDevice, error)
 	Invitation(ctx context.Context, token string) (*Invitation, error)
 	Groups(ctx context.Context) ([]*Group, error)
 	Group(ctx context.Context, id string) (*Group, error)
+	ConnectorLogs(ctx context.Context, limit *int) ([]*ConnectorLog, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -332,6 +349,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ClientDevice.CertNotAfter(childComplexity), true
+	case "ClientDevice.commonName":
+		if e.ComplexityRoot.ClientDevice.CommonName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.CommonName(childComplexity), true
 	case "ClientDevice.createdAt":
 		if e.ComplexityRoot.ClientDevice.CreatedAt == nil {
 			break
@@ -362,12 +385,24 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ClientDevice.Os(childComplexity), true
+	case "ClientDevice.revokedAt":
+		if e.ComplexityRoot.ClientDevice.RevokedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.RevokedAt(childComplexity), true
 	case "ClientDevice.spiffeId":
 		if e.ComplexityRoot.ClientDevice.SpiffeID == nil {
 			break
 		}
 
 		return e.ComplexityRoot.ClientDevice.SpiffeID(childComplexity), true
+	case "ClientDevice.userId":
+		if e.ComplexityRoot.ClientDevice.UserID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ClientDevice.UserID(childComplexity), true
 
 	case "Connector.certNotAfter":
 		if e.ComplexityRoot.Connector.CertNotAfter == nil {
@@ -435,6 +470,37 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Connector.Version(childComplexity), true
+
+	case "ConnectorLog.connectorId":
+		if e.ComplexityRoot.ConnectorLog.ConnectorID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConnectorLog.ConnectorID(childComplexity), true
+	case "ConnectorLog.createdAt":
+		if e.ComplexityRoot.ConnectorLog.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConnectorLog.CreatedAt(childComplexity), true
+	case "ConnectorLog.id":
+		if e.ComplexityRoot.ConnectorLog.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConnectorLog.ID(childComplexity), true
+	case "ConnectorLog.message":
+		if e.ComplexityRoot.ConnectorLog.Message == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConnectorLog.Message(childComplexity), true
+	case "ConnectorLog.workspaceId":
+		if e.ComplexityRoot.ConnectorLog.WorkspaceID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ConnectorLog.WorkspaceID(childComplexity), true
 
 	case "ConnectorToken.connectorId":
 		if e.ComplexityRoot.ConnectorToken.ConnectorID == nil {
@@ -764,6 +830,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeConnector(childComplexity, args["id"].(string)), true
+	case "Mutation.revokeDevice":
+		if e.ComplexityRoot.Mutation.RevokeDevice == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_revokeDevice_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.RevokeDevice(childComplexity, args["deviceId"].(string)), true
 	case "Mutation.revokeShield":
 		if e.ComplexityRoot.Mutation.RevokeShield == nil {
 			break
@@ -837,6 +914,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.AllResources(childComplexity), true
+	case "Query.clientDevices":
+		if e.ComplexityRoot.Query.ClientDevices == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.ClientDevices(childComplexity), true
 	case "Query.connector":
 		if e.ComplexityRoot.Query.Connector == nil {
 			break
@@ -848,6 +931,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Connector(childComplexity, args["id"].(string)), true
+	case "Query.connectorLogs":
+		if e.ComplexityRoot.Query.ConnectorLogs == nil {
+			break
+		}
+
+		args, err := ec.field_Query_connectorLogs_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.ConnectorLogs(childComplexity, args["limit"].(*int)), true
 	case "Query.connectors":
 		if e.ComplexityRoot.Query.Connectors == nil {
 			break
@@ -1461,7 +1555,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1480,6 +1574,7 @@ var sources = []*ast.Source{
 	{Name: "discovery.graphqls", Input: sourceData("discovery.graphqls"), BuiltIn: false},
 	{Name: "client.graphqls", Input: sourceData("client.graphqls"), BuiltIn: false},
 	{Name: "policy.graphqls", Input: sourceData("policy.graphqls"), BuiltIn: false},
+	{Name: "log.graphqls", Input: sourceData("log.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -1501,8 +1596,12 @@ func (ec *executionContext) childFields_ClientDevice(ctx context.Context, field 
 	switch field.Name {
 	case "id":
 		return ec.fieldContext_ClientDevice_id(ctx, field)
+	case "userId":
+		return ec.fieldContext_ClientDevice_userId(ctx, field)
 	case "name":
 		return ec.fieldContext_ClientDevice_name(ctx, field)
+	case "commonName":
+		return ec.fieldContext_ClientDevice_commonName(ctx, field)
 	case "os":
 		return ec.fieldContext_ClientDevice_os(ctx, field)
 	case "spiffeId":
@@ -1513,6 +1612,8 @@ func (ec *executionContext) childFields_ClientDevice(ctx context.Context, field 
 		return ec.fieldContext_ClientDevice_lastSeenAt(ctx, field)
 	case "createdAt":
 		return ec.fieldContext_ClientDevice_createdAt(ctx, field)
+	case "revokedAt":
+		return ec.fieldContext_ClientDevice_revokedAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ClientDevice", field.Name)
 }
@@ -1543,6 +1644,22 @@ func (ec *executionContext) childFields_Connector(ctx context.Context, field gra
 		return ec.fieldContext_Connector_createdAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Connector", field.Name)
+}
+
+func (ec *executionContext) childFields_ConnectorLog(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_ConnectorLog_id(ctx, field)
+	case "workspaceId":
+		return ec.fieldContext_ConnectorLog_workspaceId(ctx, field)
+	case "connectorId":
+		return ec.fieldContext_ConnectorLog_connectorId(ctx, field)
+	case "message":
+		return ec.fieldContext_ConnectorLog_message(ctx, field)
+	case "createdAt":
+		return ec.fieldContext_ConnectorLog_createdAt(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type ConnectorLog", field.Name)
 }
 
 func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2239,6 +2356,20 @@ func (ec *executionContext) field_Mutation_revokeConnector_args(ctx context.Cont
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_revokeDevice_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "deviceId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["deviceId"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_revokeShield_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -2382,6 +2513,20 @@ func (ec *executionContext) field_Query___type_args(ctx context.Context, rawArgs
 		return nil, err
 	}
 	args["name"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_connectorLogs_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "limit",
+		func(ctx context.Context, v any) (*int, error) {
+			return ec.unmarshalOInt2ᚖint(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["limit"] = arg0
 	return args, nil
 }
 
@@ -2686,6 +2831,29 @@ func (ec *executionContext) fieldContext_ClientDevice_id(_ context.Context, fiel
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type ID does not have child fields"))
 }
 
+func (ec *executionContext) _ClientDevice_userId(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_userId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.UserID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_userId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
 func (ec *executionContext) _ClientDevice_name(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -2706,6 +2874,29 @@ func (ec *executionContext) _ClientDevice_name(ctx context.Context, field graphq
 	)
 }
 func (ec *executionContext) fieldContext_ClientDevice_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_commonName(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_commonName(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.CommonName, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_commonName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
@@ -2821,6 +3012,29 @@ func (ec *executionContext) _ClientDevice_createdAt(ctx context.Context, field g
 	)
 }
 func (ec *executionContext) fieldContext_ClientDevice_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ClientDevice_revokedAt(ctx context.Context, field graphql.CollectedField, obj *ClientDevice) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ClientDevice_revokedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.RevokedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ClientDevice_revokedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ClientDevice", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
@@ -3075,6 +3289,121 @@ func (ec *executionContext) _Connector_createdAt(ctx context.Context, field grap
 }
 func (ec *executionContext) fieldContext_Connector_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("Connector", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ConnectorLog_id(ctx context.Context, field graphql.CollectedField, obj *ConnectorLog) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConnectorLog_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConnectorLog_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConnectorLog", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _ConnectorLog_workspaceId(ctx context.Context, field graphql.CollectedField, obj *ConnectorLog) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConnectorLog_workspaceId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.WorkspaceID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConnectorLog_workspaceId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConnectorLog", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _ConnectorLog_connectorId(ctx context.Context, field graphql.CollectedField, obj *ConnectorLog) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConnectorLog_connectorId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ConnectorID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConnectorLog_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConnectorLog", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ConnectorLog_message(ctx context.Context, field graphql.CollectedField, obj *ConnectorLog) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConnectorLog_message(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Message, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConnectorLog_message(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConnectorLog", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ConnectorLog_createdAt(ctx context.Context, field graphql.CollectedField, obj *ConnectorLog) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ConnectorLog_createdAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ConnectorLog_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ConnectorLog", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, field graphql.CollectedField, obj *ConnectorToken) (ret graphql.Marshaler) {
@@ -4326,6 +4655,50 @@ func (ec *executionContext) fieldContext_Mutation_createInvitation(ctx context.C
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_revokeDevice(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_revokeDevice(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().RevokeDevice(ctx, fc.Args["deviceId"].(string))
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_revokeDevice(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_revokeDevice_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_createGroup(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -5266,6 +5639,38 @@ func (ec *executionContext) fieldContext_Query_myDevices(_ context.Context, fiel
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_clientDevices(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_clientDevices(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().ClientDevices(ctx)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*ClientDevice) graphql.Marshaler {
+			return ec.marshalNClientDevice2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDeviceᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_clientDevices(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ClientDevice(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_invitation(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -5380,6 +5785,50 @@ func (ec *executionContext) fieldContext_Query_group(ctx context.Context, field 
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Query_group_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_connectorLogs(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_connectorLogs(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().ConnectorLogs(ctx, fc.Args["limit"].(*int))
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*ConnectorLog) graphql.Marshaler {
+			return ec.marshalNConnectorLog2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorLogᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_connectorLogs(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ConnectorLog(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_connectorLogs_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -8169,8 +8618,18 @@ func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.Selection
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "userId":
+			out.Values[i] = ec._ClientDevice_userId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "name":
 			out.Values[i] = ec._ClientDevice_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "commonName":
+			out.Values[i] = ec._ClientDevice_commonName(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -8190,6 +8649,8 @@ func (ec *executionContext) _ClientDevice(ctx context.Context, sel ast.Selection
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "revokedAt":
+			out.Values[i] = ec._ClientDevice_revokedAt(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -8258,6 +8719,65 @@ func (ec *executionContext) _Connector(ctx context.Context, sel ast.SelectionSet
 			out.Values[i] = ec._Connector_certNotAfter(ctx, field, obj)
 		case "createdAt":
 			out.Values[i] = ec._Connector_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var connectorLogImplementors = []string{"ConnectorLog"}
+
+func (ec *executionContext) _ConnectorLog(ctx context.Context, sel ast.SelectionSet, obj *ConnectorLog) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, connectorLogImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ConnectorLog")
+		case "id":
+			out.Values[i] = ec._ConnectorLog_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "workspaceId":
+			out.Values[i] = ec._ConnectorLog_workspaceId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "connectorId":
+			out.Values[i] = ec._ConnectorLog_connectorId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "message":
+			out.Values[i] = ec._ConnectorLog_message(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createdAt":
+			out.Values[i] = ec._ConnectorLog_createdAt(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -8656,6 +9176,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "createInvitation":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createInvitation(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "revokeDevice":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_revokeDevice(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -9094,6 +9621,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "clientDevices":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_clientDevices(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "invitation":
 			field := field
 
@@ -9145,6 +9694,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_group(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "connectorLogs":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_connectorLogs(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
 				return res
 			}
 
@@ -10328,6 +10899,32 @@ func (ec *executionContext) marshalNConnector2ᚖgithubᚗcomᚋyourorgᚋztna�
 		return graphql.Null
 	}
 	return ec._Connector(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNConnectorLog2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorLogᚄ(ctx context.Context, sel ast.SelectionSet, v []*ConnectorLog) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNConnectorLog2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorLog(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNConnectorLog2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorLog(ctx context.Context, sel ast.SelectionSet, v *ConnectorLog) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ConnectorLog(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNConnectorStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorStatus(ctx context.Context, v any) (ConnectorStatus, error) {

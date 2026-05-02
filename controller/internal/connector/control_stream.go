@@ -216,6 +216,9 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			h.handleScanReport(ctx, connectorID, rep.ScanReport)
 		case *pb.ConnectorControlMessage_Pong:
 			log.Printf("control stream: connector %s case Pong", connectorID)
+		case *pb.ConnectorControlMessage_ConnectorLog:
+			entry := msg.Body.(*pb.ConnectorControlMessage_ConnectorLog).ConnectorLog
+			h.handleConnectorLog(ctx, tenantID, connectorID, entry)
 		default:
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
@@ -440,6 +443,17 @@ func (h *EnrollmentHandler) handleScanReport(ctx context.Context, connectorID st
 	}
 	if err := discovery.UpsertScanResults(ctx, h.Pool, connectorID, results); err != nil {
 		log.Printf("discovery: scan upsert failed for request %s: %v", rep.RequestId, err)
+	}
+}
+
+func (h *EnrollmentHandler) handleConnectorLog(ctx context.Context, tenantID, connectorID string, entry *pb.ConnectorLog) {
+	_, err := h.Pool.Exec(ctx,
+		`INSERT INTO connector_logs (workspace_id, connector_id, message)
+		 VALUES ($1, $2, $3)`,
+		tenantID, connectorID, entry.Message,
+	)
+	if err != nil {
+		log.Printf("control stream: insert connector log connector=%s: %v", connectorID, err)
 	}
 }
 

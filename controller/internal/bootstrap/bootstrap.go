@@ -69,6 +69,27 @@ func (s *Service) Bootstrap(
 		return nil, fmt.Errorf("lookup user by provider_sub: %w", err)
 	}
 
+	// New user — check workspace_members for a pending invite by email before
+	// creating a new workspace. Invited users join an existing workspace as
+	// 'member'; only truly first-time signups get a new workspace as 'admin'.
+	var pendingWorkspaceID, pendingRole string
+	err = s.Pool.QueryRow(ctx,
+		`SELECT workspace_id, role
+		   FROM workspace_members
+		  WHERE email = $1
+		    AND status = 'invited'
+		    AND user_id IS NULL
+		  LIMIT 1`,
+		email,
+	).Scan(&pendingWorkspaceID, &pendingRole)
+
+	if err == nil {
+		return s.runInvitedUserTransaction(ctx, email, provider, providerSub, pendingWorkspaceID, pendingRole)
+	}
+	if !isNoRows(err) {
+		return nil, fmt.Errorf("lookup pending invite: %w", err)
+	}
+
 	return s.runBootstrapTransaction(ctx, email, provider, providerSub, name)
 }
 
@@ -155,6 +176,18 @@ func (s *Service) runBootstrapTransaction(
 		return nil, fmt.Errorf("activate workspace: %w", err)
 	}
 
+	// Insert the admin into workspace_members so the table is the complete
+	// record of all members (admins + invited members) for this workspace.
+	_, err = tx.Exec(ctx,
+		`INSERT INTO workspace_members (workspace_id, user_id, email, role, status, joined_at)
+		 VALUES ($1, $2, $3, 'admin', 'active', NOW())
+		 ON CONFLICT (workspace_id, email) DO NOTHING`,
+		tenantID, userID, email,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert admin workspace_member: %w", err)
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit bootstrap transaction: %w", err)
 	}
@@ -163,6 +196,57 @@ func (s *Service) runBootstrapTransaction(
 		TenantID: tenantID,
 		UserID:   userID,
 		Role:     "admin",
+	}, nil
+}
+
+// runInvitedUserTransaction creates a user record for an invited person and
+// links them to the existing workspace they were invited to. No new workspace
+// is created — the invite already assigned them a workspace and role.
+func (s *Service) runInvitedUserTransaction(
+	ctx context.Context,
+	email, provider, providerSub, workspaceID, role string,
+) (*Result, error) {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var userID string
+	err = tx.QueryRow(ctx,
+		`INSERT INTO users
+		 (tenant_id, email, provider, provider_sub, role, status)
+		 VALUES ($1, $2, $3, $4, $5, 'active')
+		 RETURNING id`,
+		workspaceID, email, provider, providerSub, role,
+	).Scan(&userID)
+	if err != nil {
+		return nil, fmt.Errorf("insert invited user: %w", err)
+	}
+
+	// Link the workspace_members row to the now-known user_id.
+	// The full activation (status='active', joined_at) is done by AcceptInvitation
+	// after the frontend calls /api/invitations/{token}/accept.
+	_, err = tx.Exec(ctx,
+		`UPDATE workspace_members
+		    SET user_id = $1
+		  WHERE workspace_id = $2
+		    AND email = $3
+		    AND status = 'invited'`,
+		userID, workspaceID, email,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("link invited user to workspace_members: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit invited user transaction: %w", err)
+	}
+
+	return &Result{
+		TenantID: workspaceID,
+		UserID:   userID,
+		Role:     role,
 	}, nil
 }
 

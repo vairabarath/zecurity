@@ -52,29 +52,36 @@ See [[Decisions/ADR-002-Client-Daemon-Required]].
 ### PHASE A — Daemon Scaffold + IPC
 
 > See [[Sprint8.5/Member4-Rust-Client/Phase1-Daemon-Scaffold-IPC]].
+> No dependencies — start here.
 
-- [ ] **M4-A1** Add daemon subcommand/internal mode.
-- [ ] **M4-A2** Add same-user Unix socket IPC.
-- [ ] **M4-A3** Add `status`, `shutdown`, `load_state`, `get_token`, and `post_login_state` IPC messages using newline-delimited JSON.
-- [ ] **M4-A4** Add system-level systemd unit template with installer-populated `User=`.
-- [ ] **M4-A5** CLI helper starts daemon when required and retries IPC.
+- [x] **M4-A1** Add daemon subcommand/internal mode.
+- [x] **M4-A2** Add same-user Unix socket IPC.
+- [x] **M4-A3** Add `status`, `shutdown`, `load_state`, `get_token`, and `post_login_state` IPC messages using newline-delimited JSON.
+- [x] **M4-A4** Add system-level systemd unit template with installer-populated `User=`.
+- [x] **M4-A5** CLI helper starts daemon when required and retries IPC.
 
 > Build check: `cd client && cargo build` passes.
 
 ### PHASE B — Command Refactor
 
-- [ ] **M4-B1** `login` runs the existing OAuth/enrollment flow, then sends `PostLoginState` to the daemon.
-- [ ] **M4-B2** `status` queries daemon runtime status.
-- [ ] **M4-B3** `logout` tells daemon to clear runtime state and removes durable state.
-- [ ] **M4-B4** `invite` uses daemon token path or explicit login, without direct-state fallback.
+> Depends on: Phase A complete.
+> See [[Sprint8.5/Member4-Rust-Client/Phase2-Command-Refactor]].
+
+- [x] **M4-B1** `login` runs the existing OAuth/enrollment flow, then sends `PostLoginState` to the daemon.
+- [x] **M4-B2** `status` queries daemon runtime status.
+- [x] **M4-B3** `logout` tells daemon to clear runtime state and removes durable state.
+- [x] **M4-B4** `invite` uses daemon token path or explicit login, without direct-state fallback.
 
 > Build check: `cd client && cargo build` passes.
 
 ### PHASE C — ACL Runtime Fetch
 
-- [ ] **M4-C1** Daemon calls `GetACLSnapshot` after receiving `PostLoginState` or after refresh.
-- [ ] **M4-C2** Daemon stores ACL snapshot in runtime state.
-- [ ] **M4-C3** Missing/invalid ACL snapshot means default-deny.
+> Depends on: Phase A and Phase B complete.
+> See [[Sprint8.5/Member4-Rust-Client/Phase3-ACL-Runtime-Fetch]].
+
+- [x] **M4-C1** Daemon calls `GetACLSnapshot` after receiving `PostLoginState` or after refresh.
+- [x] **M4-C2** Daemon stores ACL snapshot in runtime state.
+- [x] **M4-C3** Missing/invalid ACL snapshot means default-deny.
 
 > Build check: `cd client && cargo build` passes.
 
@@ -82,13 +89,13 @@ See [[Decisions/ADR-002-Client-Daemon-Required]].
 
 ## Final Verification Checklist
 
-- [ ] `cd client && cargo build` passes.
-- [ ] `zecurity-client status` starts daemon if needed and reports daemon state.
-- [ ] `zecurity-client logout` clears daemon runtime and encrypted durable state.
-- [ ] Daemon socket rejects cross-user access.
-- [ ] IPC uses newline-delimited JSON and rejects malformed frames.
-- [ ] Daemon can load encrypted durable state but keeps decrypted key/access token in memory only.
-- [ ] Daemon fetches ACL snapshot and treats missing snapshot as default-deny.
+- [x] `cd client && cargo build` passes.
+- [x] `zecurity-client status` starts daemon if needed and reports daemon state.
+- [x] `zecurity-client logout` clears daemon runtime and encrypted durable state.
+- [x] Daemon socket rejects cross-user access.
+- [x] IPC uses newline-delimited JSON and rejects malformed frames.
+- [x] Daemon can load encrypted durable state but keeps decrypted key/access token in memory only.
+- [x] Daemon fetches ACL snapshot and treats missing snapshot as default-deny.
 
 ---
 

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::grpc::client_v1::AclSnapshot;
+
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
@@ -10,7 +12,9 @@ pub struct RuntimeState {
     pub device: Option<DeviceInfo>,
     pub session: Option<SessionInfo>,
     pub resources: Vec<Resource>,
-    pub last_sync_at: Option<i64>, // Unix timestamp
+    pub last_sync_at: Option<i64>,
+    /// ACL snapshot fetched from the Controller. None = default-deny.
+    pub acl_snapshot: Option<AclSnapshot>,
 }
 
 #[derive(Debug, Clone)]

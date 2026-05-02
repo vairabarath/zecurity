@@ -1,14 +1,16 @@
 mod appmeta;
 mod config;
+mod daemon;
 mod error;
 mod grpc;
+mod ipc;
 mod login;
 mod runtime;
 mod state_store;
 mod cmd {
-    pub mod invite;
     pub mod login;
     pub mod logout;
+    pub mod resources;
     pub mod setup;
     pub mod status;
 }
@@ -42,13 +44,13 @@ enum Commands {
     Login,
     /// Show current connection status
     Status,
+    /// List resources this device has access to
+    Resources,
     /// Clear saved session and device state
     Logout,
-    /// Invite a user to the workspace (admin only)
-    Invite {
-        #[arg(long)]
-        email: String,
-    },
+    /// Run as background daemon (launched by systemd — not for direct use)
+    #[command(hide = true)]
+    Daemon,
 }
 
 #[tokio::main]
@@ -67,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
         } => cmd::setup::run(workspace, controller, connector, http_base).await,
         Commands::Login => cmd::login::run().await,
         Commands::Status => cmd::status::run().await,
+        Commands::Resources => cmd::resources::run().await,
         Commands::Logout => cmd::logout::run().await,
-        Commands::Invite { email } => cmd::invite::run(email).await,
+        Commands::Daemon => daemon::run().await,
     }
 }

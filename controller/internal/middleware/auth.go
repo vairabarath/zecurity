@@ -13,6 +13,7 @@ import (
 type Claims struct {
 	TenantID string `json:"tenant_id"`
 	Role     string `json:"role"`
+	Email    string `json:"email"`
 	jwt.RegisteredClaims
 }
 
@@ -67,6 +68,7 @@ func AuthMiddleware(secret string) func(http.Handler) http.Handler {
 				TenantID: claims.TenantID,
 				UserID:   claims.Subject,
 				Role:     claims.Role,
+				Email:    claims.Email,
 			})
 
 			next.ServeHTTP(w, r.WithContext(ctx))

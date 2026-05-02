@@ -10,6 +10,64 @@ tags:
 
 ---
 
+## 2026-04-30 — Codex (GPT-5) — Invitation Bug Fixes
+
+**What was done:**
+- Fixed invitation acceptance email validation: access JWTs now include `email`, auth middleware copies it into `TenantContext`, and `AcceptInvitation` requires matching token + workspace + email before consuming an invite or activating `workspace_members`.
+- Updated client token exchange to pass the session email into issued access tokens.
+- Rebuilt `admin/src/pages/ClientInstall.tsx` into the member install page: workspace name, signed-in email, Linux release links, copyable install/setup commands, and enrolled devices.
+- Documented fixes in Sprint 7 phase docs/path and marked `.zecurity-obs/Sprint8.5/Invitation-Bugs-Remaining.md` done.
+
+**Key decisions:**
+- Refresh preserves email from the old JWT and falls back to querying `users.email` only when an older token lacks the claim and the auth service has a DB pool.
+- `/client-install` remains under the normal authenticated shell because the route gate is auth-only, not admin-only.
+
+**What's next:**
+- Run a browser-level invite acceptance smoke test with a real member account once OAuth and SMTP/dev invite links are available.
+
+---
+
+## 2026-04-30 — M4 (vairabarath), Sprint 8 + Sprint 8.5 — Connector ACL + Client Daemon Foundation
+
+**What was done:**
+
+- **Sprint 8 Phase C (Connector ACL Snapshot Handling):**
+  - `connector/src/policy/mod.rs` (new): `PolicyCache` with `RwLock<Option<AclSnapshot>>`, `is_allowed()`, `resolve_resource()`, 8 unit tests covering all default-deny cases.
+  - `connector/src/control_stream.rs`: added `CBody::AclSnapshot` heartbeat arm to store snapshot in `PolicyCache`.
+  - `connector/src/main.rs`: wired `Arc<PolicyCache>` into `run_control_stream`.
+  - M4-C1/C2/C3 checkboxes marked done in Sprint 8 path.md.
+
+- **Sprint 8.5 Phase A (Daemon Scaffold + IPC):**
+  - `client/src/daemon.rs` (new): daemon process, Unix socket accept loop, 7 IPC handlers (`Status`, `Shutdown`, `LoadState`, `GetToken`, `PostLoginState`, `Up`, `Down`), `sd_notify_ready` for systemd `Type=notify`.
+  - `client/src/ipc.rs` (new): `IpcRequest`/`IpcResponse` types, `SO_PEERCRED` same-user enforcement, `send_ipc`, `ensure_daemon_and_send`.
+  - `client/src/config.rs`: added `Clone` to `ClientConf` derive.
+  - `client/src/main.rs`: added hidden `daemon` subcommand.
+  - `client/zecurity-client.service`: `daemon` subcommand, `Type=notify`, `CAP_NET_ADMIN`, `RuntimeDirectory=zecurity-client`.
+  - `client/Cargo.toml`: added `tracing` + `tracing-subscriber`.
+
+- **Sprint 8.5 Phase B (Command Refactor):**
+  - `client/src/cmd/login.rs`: sends `PostLoginState` IPC after OAuth flow; CLI no longer calls `save_workspace_state` directly.
+  - `client/src/cmd/status.rs`: queries daemon `Status` IPC; prints email, cert expiry, device_id, SPIFFE ID, ACL version.
+  - `client/src/cmd/logout.rs`: best-effort `Shutdown` IPC before `clear_workspace_state`.
+  - `client/src/cmd/invite.rs`: tries `GetToken` IPC first; only falls back to full OAuth if no active session.
+  - Fixed: `PostLoginState` handler now reconstructs `LoginResult` and calls `StoredWorkspaceState::from_login` to correctly decode JWT claims (workspace_id, user_id, role).
+
+- **Sprint 8.5 Phase C (ACL Runtime Fetch):**
+  - `client/src/runtime.rs`: added `acl_snapshot: Option<AclSnapshot>` to `RuntimeState`.
+  - `client/src/daemon.rs`: `fetch_and_store_acl` spawned after `PostLoginState` and on daemon startup; never reverts snapshot to `None` on transient failure; Status response exposes `acl_snapshot_version`.
+
+**Key decisions:**
+- `ensure_daemon_and_send`: tries IPC → `systemctl start` → 500ms sleep → retry → fail closed.
+- Snapshot replacement rule: keep existing snapshot on fetch failure (never revert to `None`).
+- `from_login` JWT decoding preserved by reconstructing `LoginResult` in daemon rather than exposing `decode_claims`.
+
+**Merged as:** `member_04/sprint_08` → `main` (PR #25)
+
+**What's next:**
+- Sprint 9 RDE data plane: `device_tunnel.rs` reads `acl_snapshot` from daemon memory for per-connection enforcement.
+
+---
+
 ## 2026-04-30 — M1 (Yogesh), Sprint 8 — Groups Policy UI + Bug Fixes
 
 **What was done:**

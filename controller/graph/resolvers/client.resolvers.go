@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	pgx "github.com/jackc/pgx/v5"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -42,6 +43,36 @@ func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (
 	return invitationToGQL(inv), nil
 }
 
+// RevokeDevice is the resolver for the revokeDevice field.
+func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (bool, error) {
+	tc, ok := tenant.Get(ctx)
+	if !ok {
+		return false, fmt.Errorf("unauthenticated")
+	}
+	if tc.Role != "admin" {
+		return false, fmt.Errorf("forbidden: only admins can revoke devices")
+	}
+
+	var discardedID string
+	err := r.Pool.QueryRow(ctx,
+		`UPDATE client_devices
+		    SET revoked_at = NOW()
+		  WHERE id = $1
+		    AND workspace_id = $2
+		    AND revoked_at IS NULL
+		 RETURNING id`,
+		deviceID, tc.TenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, fmt.Errorf("revoke device: device not found or already revoked")
+		}
+		return false, fmt.Errorf("revoke device: %w", err)
+	}
+
+	return true, nil
+}
+
 // MyDevices is the resolver for the myDevices field.
 func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, error) {
 	tc, ok := tenant.Get(ctx)
@@ -50,7 +81,7 @@ func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, e
 	}
 
 	rows, err := r.Pool.Query(ctx,
-		`SELECT id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at
+		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
 		   FROM client_devices
 		  WHERE user_id = $1
 		    AND workspace_id = $2
@@ -64,31 +95,46 @@ func (r *queryResolver) MyDevices(ctx context.Context) ([]*graph.ClientDevice, e
 
 	var devices []*graph.ClientDevice
 	for rows.Next() {
-		var (
-			id, name, os string
-			spiffeID     *string
-			certNotAfter *time.Time
-			lastSeenAt   *time.Time
-			createdAt    time.Time
-		)
-		if err := rows.Scan(&id, &name, &os, &spiffeID, &certNotAfter, &lastSeenAt, &createdAt); err != nil {
+		d, err := scanClientDevice(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan client device: %w", err)
 		}
+		devices = append(devices, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate client devices: %w", err)
+	}
 
-		d := &graph.ClientDevice{
-			ID:        id,
-			Name:      name,
-			Os:        os,
-			SpiffeID:  spiffeID,
-			CreatedAt: createdAt.UTC().Format(time.RFC3339),
-		}
-		if certNotAfter != nil {
-			s := certNotAfter.UTC().Format(time.RFC3339)
-			d.CertNotAfter = &s
-		}
-		if lastSeenAt != nil {
-			s := lastSeenAt.UTC().Format(time.RFC3339)
-			d.LastSeenAt = &s
+	return devices, nil
+}
+
+// ClientDevices is the resolver for the clientDevices field.
+func (r *queryResolver) ClientDevices(ctx context.Context) ([]*graph.ClientDevice, error) {
+	tc, ok := tenant.Get(ctx)
+	if !ok {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+	if tc.Role != "admin" {
+		return nil, fmt.Errorf("forbidden: only admins can list all devices")
+	}
+
+	rows, err := r.Pool.Query(ctx,
+		`SELECT id, user_id, name, os, spiffe_id, cert_not_after, last_seen_at, created_at, revoked_at
+		   FROM client_devices
+		  WHERE workspace_id = $1
+		  ORDER BY created_at DESC`,
+		tc.TenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query client devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []*graph.ClientDevice
+	for rows.Next() {
+		d, err := scanClientDevice(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan client device: %w", err)
 		}
 		devices = append(devices, d)
 	}

@@ -315,6 +315,20 @@ See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
 
 ---
 
+### Fix: Invitation accept missing email validation
+**Phase:** M3 Phase 2 | **File:** `controller/internal/auth/session.go`, `controller/internal/auth/callback.go`, `controller/internal/auth/refresh.go`, `controller/internal/auth/service.go`, `controller/internal/middleware/auth.go`, `controller/internal/tenant/context.go`, `controller/internal/invitation/handler.go`, `controller/internal/invitation/store.go`, `controller/internal/client/service.go`
+`AcceptInvitation` only validated invite token + workspace. Access JWTs now include `email`, middleware puts it in `TenantContext`, and the invitation accept transaction requires the authenticated email to match the invitation email before consuming the token or activating `workspace_members`.
+See full details → [[Sprint7/Member3-Go-Controller/Phase2-Invitation-API]]
+
+---
+
+### Fix: `/client-install` member page incomplete
+**Phase:** M1 Phase 1 | **File:** `admin/src/pages/ClientInstall.tsx`
+The member redirect route existed, but the page still had placeholder download cards and did not show workspace-specific install commands. Rebuilt it to show workspace name, signed-in email, GitHub release links, copyable install/setup commands, and enrolled devices.
+See full details → [[Sprint7/Member1-Frontend/Phase1-Role-Routing-Invite-Pages]]
+
+---
+
 ### Fix: rustls CryptoProvider panic during client login
 **Phase:** M4 Phase 2 | **File:** `client/src/main.rs`, `client/Cargo.toml`
 `zecurity-client login` panicked because rustls saw both `aws_lc_rs` and `ring` providers in the client dependency graph. Installed the `ring` provider at process startup and changed the direct rustls/tokio-rustls dependencies to request `ring` without default `aws_lc_rs`.

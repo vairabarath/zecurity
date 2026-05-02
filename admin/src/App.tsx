@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import Login from '@/pages/Login'
 import AuthCallback from '@/pages/AuthCallback'
 import Dashboard from '@/pages/Dashboard'
@@ -25,12 +25,24 @@ import GroupDetail from '@/pages/GroupDetail'
 import TeamUsers from '@/pages/TeamUsers'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
+import { useAuthStore } from '@/store/auth'
 
-// ProtectedLayout wraps routes that require authentication.
-// useRequireAuth redirects to /login if no token in store.
+// Verifies authentication. Renders children directly with no chrome.
+// Used for member-accessible pages like /client-install.
 function ProtectedLayout() {
   const { isReady } = useRequireAuth()
-  if (!isReady) return null // or a loading spinner
+  if (!isReady) return null
+  return <Outlet />
+}
+
+// Verifies authentication AND admin role.
+// Non-admins are redirected to /client-install (their landing page).
+// Renders the full AppShell (sidebar + header) for admin pages.
+function AdminLayout() {
+  const { isReady } = useRequireAuth()
+  const { user } = useAuthStore()
+  if (!isReady) return null
+  if (user && user.role !== 'ADMIN') return <Navigate to="/client-install" replace />
   return <AppShell />
 }
 
@@ -47,8 +59,13 @@ export default function App() {
       <Route path="/signup/workspace"   element={<Step2Workspace />} />
       <Route path="/signup/auth"        element={<Step3Auth />} />
 
-      {/* Protected routes */}
+      {/* Member route — authenticated, no sidebar */}
       <Route element={<ProtectedLayout />}>
+        <Route path="/client-install" element={<ClientInstall />} />
+      </Route>
+
+      {/* Admin-only routes — full AppShell with sidebar */}
+      <Route element={<AdminLayout />}>
         <Route path="/"          element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/remote-networks" element={<RemoteNetworks />} />
@@ -64,7 +81,6 @@ export default function App() {
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
         <Route path="/topology"          element={<TopologyPage />} />
-        <Route path="/client-install"    element={<ClientInstall />} />
         <Route path="/users"             element={<TeamUsers />} />
         <Route path="/groups"            element={<Groups />} />
         <Route path="/groups/:id"        element={<GroupDetail />} />

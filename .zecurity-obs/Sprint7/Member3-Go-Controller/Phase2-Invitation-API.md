@@ -1,6 +1,6 @@
 ---
 type: phase
-status: planned
+status: done
 sprint: 7
 member: M3
 phase: Phase2-Invitation-API
@@ -413,3 +413,23 @@ go r.InvitationEmailer.SendInvitation(inv, workspaceName)
 
 **Also created `controller/graph/resolvers/client_helpers.go`:**
 - Moved `invitationToGQL()` helper out of `client.resolvers.go` into a separate file so gqlgen does not evict it on regeneration.
+
+---
+
+### Fix: Invitation accept missing email validation
+**Issue:** Any authenticated user in the invited workspace could call `POST /api/invitations/{token}/accept` with someone else's invite token. The token would be consumed and the wrong user could be linked to the pending `workspace_members` row.
+
+**Root Cause:** Access JWTs carried `sub`, `tenant_id`, and `role`, but not `email`. `TenantContext` therefore had no email field, so `AcceptInvitation` could only validate token + workspace.
+
+**Fix Applied:**
+- `controller/internal/auth/session.go`, `callback.go`, `refresh.go`, `service.go` — access JWTs now include `email`; refresh preserves it and falls back to `SELECT email FROM users WHERE id = $1` for older tokens when a DB pool is available.
+- `controller/internal/middleware/auth.go`, `controller/internal/tenant/context.go` — verified JWT email is copied into `TenantContext`.
+- `controller/internal/invitation/handler.go` — passes `tc.Email` into `AcceptInvitation`.
+- `controller/internal/invitation/store.go` — invitation acceptance now requires matching `token`, `workspace_id`, and `email`; workspace member activation also matches `email`.
+
+```go
+// AFTER:
+if err := h.store.AcceptInvitation(r.Context(), token, tc.TenantID, tc.UserID, tc.Email); err != nil {
+    // ...
+}
+```

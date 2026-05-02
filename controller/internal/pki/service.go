@@ -49,6 +49,11 @@ type Service interface {
 	// intermediate CA, carries the controller SPIFFE ID, and includes DNS/IP SANs
 	// for the supplied hosts.
 	GenerateControllerServerTLS(ctx context.Context, hosts []string, certTTL time.Duration) (*ControllerServerTLSResult, error)
+
+	// GenerateClientCRL produces a DER-encoded Certificate Revocation List signed
+	// by the workspace CA for tenantID. It includes all client_devices rows with a
+	// non-null revoked_at. Returns the raw DER bytes ready to be served at /ca.crl.
+	GenerateClientCRL(ctx context.Context, tenantID string) ([]byte, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.

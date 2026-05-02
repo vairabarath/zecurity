@@ -44,7 +44,7 @@ type Service interface {
 
 	// IssueAccessToken signs and returns a Zecurity access JWT for the given
 	// user, plus its TTL in seconds (so callers can populate expires_in).
-	IssueAccessToken(userID, tenantID, role string) (token string, expiresIn int64, err error)
+	IssueAccessToken(userID, tenantID, role, email string) (token string, expiresIn int64, err error)
 
 	// IssueRefreshToken generates a fresh refresh token, stores it in Redis,
 	// and returns the raw value.
@@ -63,4 +63,5 @@ type AccessTokenClaims struct {
 	UserID   string
 	TenantID string
 	Role     string
+	Email    string
 }

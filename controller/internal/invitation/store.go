@@ -34,7 +34,8 @@ type Store struct {
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
-// CreateInvitation inserts a new pending invitation and returns the full row.
+// CreateInvitation inserts a new pending invitation and a workspace_members row
+// with status 'invited' and user_id NULL (the user does not exist yet).
 // Token is 32 random bytes encoded as lowercase hex (64 hex chars, 256 bits entropy).
 func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invitedBy string) (*Invitation, error) {
 	raw := make([]byte, 32)
@@ -43,8 +44,14 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 	}
 	token := hex.EncodeToString(raw)
 
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
 	var inv Invitation
-	err := s.db.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`INSERT INTO invitations (email, workspace_id, invited_by, token)
 		 VALUES ($1, $2, $3, $4)
 		 RETURNING id, email, workspace_id, invited_by, token, status, expires_at, created_at`,
@@ -55,6 +62,22 @@ func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invite
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert invitation: %w", err)
+	}
+
+	// Pre-create the workspace_members row so the admin can see pending invites
+	// before the user has authenticated. user_id is NULL until acceptance.
+	_, err = tx.Exec(ctx,
+		`INSERT INTO workspace_members (workspace_id, email, role, status, invited_by)
+		 VALUES ($1, $2, 'member', 'invited', $3)
+		 ON CONFLICT (workspace_id, email) DO NOTHING`,
+		workspaceID, email, invitedBy,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("insert workspace_members: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit invitation: %w", err)
 	}
 	return &inv, nil
 }
@@ -83,18 +106,26 @@ func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, erro
 	return &inv, nil
 }
 
-// AcceptInvitation marks the invitation as accepted and adds the user to the
-// workspace as MEMBER. The caller must already be authenticated to the invited
-// workspace (JWT tenant_id == invitation workspace_id — enforced in handler).
-func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID string) error {
-	tag, err := s.db.Exec(ctx,
+// AcceptInvitation marks the invitation as accepted and activates the
+// workspace_members row: sets user_id, status='active', and joined_at.
+// The caller must already be authenticated to the invited workspace
+// (JWT tenant_id == invitation workspace_id — enforced in handler).
+func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID, email string) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE invitations
 		    SET status = 'accepted'
 		  WHERE token = $1
 		    AND workspace_id = $2
+		    AND email = $3
 		    AND status = 'pending'
 		    AND expires_at > NOW()`,
-		token, workspaceID,
+		token, workspaceID, email,
 	)
 	if err != nil {
 		return fmt.Errorf("accept invitation: %w", err)
@@ -103,14 +134,23 @@ func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID
 		return ErrNotFound
 	}
 
-	_, err = s.db.Exec(ctx,
-		`INSERT INTO workspace_users (workspace_id, user_id, role)
-		 VALUES ($1, $2, 'member')
-		 ON CONFLICT (workspace_id, user_id) DO NOTHING`,
-		workspaceID, userID,
+	// Activate the workspace_members row that was created at invite time.
+	// Links the real user_id, sets status active, and records when they joined.
+	_, err = tx.Exec(ctx,
+		`UPDATE workspace_members
+		    SET user_id = $1, status = 'active', joined_at = NOW()
+		  WHERE workspace_id = $2
+		    AND email = $3
+		    AND status = 'invited'
+		    AND (user_id IS NULL OR user_id = $1)`,
+		userID, workspaceID, email,
 	)
 	if err != nil {
-		return fmt.Errorf("add user to workspace: %w", err)
+		return fmt.Errorf("activate workspace_members: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit accept: %w", err)
 	}
 	return nil
 }

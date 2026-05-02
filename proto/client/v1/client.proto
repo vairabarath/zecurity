@@ -115,4 +115,5 @@ message ACLEntry {
   uint32 port                        = 3;
   string protocol                    = 4;
   repeated string allowed_spiffe_ids = 5;
+  string name                        = 6;
 }

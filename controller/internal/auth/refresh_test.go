@@ -62,7 +62,7 @@ func TestRefreshHandler_RefreshTokenExpired(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue a valid access token but do NOT store a refresh token in Redis.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin")
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "old-token"})
@@ -82,7 +82,7 @@ func TestRefreshHandler_RefreshTokenMismatch(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue access token and store a refresh token in Redis.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin")
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
 	svc.issueRefreshToken(context.Background(), "user-1")
 
 	// Send a DIFFERENT refresh token in the cookie.
@@ -104,7 +104,7 @@ func TestRefreshHandler_Success(t *testing.T) {
 	handler := svc.RefreshHandler()
 
 	// Issue access token and refresh token.
-	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin")
+	accessToken, _ := svc.issueAccessToken("user-1", "tenant-1", "admin", "user-1@example.com")
 	refreshToken, _ := svc.issueRefreshToken(context.Background(), "user-1")
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)

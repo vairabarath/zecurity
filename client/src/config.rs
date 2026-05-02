@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ClientConf {
     pub workspace: String,
     /// Only set in dev. Empty = use compiled-in constant from appmeta.
@@ -76,13 +76,31 @@ pub fn conf_paths() -> Vec<PathBuf> {
 }
 
 pub fn load() -> Result<ClientConf> {
+    // Merge all config files that exist. System config (/etc/zecurity/client.conf)
+    // is loaded first and provides default addresses; user config
+    // (~/.config/zecurity-client/client.conf) is loaded second and its non-empty
+    // fields take precedence. This lets the install script write addresses system-wide
+    // while `setup` writes the workspace to the per-user config.
+    let mut merged = ClientConf::default();
+    let mut found = false;
+
     for path in conf_paths() {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
-            return Ok(toml::from_str(&raw)?);
+            let c: ClientConf = toml::from_str(&raw)?;
+            if !c.workspace.is_empty()          { merged.workspace           = c.workspace; }
+            if !c.controller_address.is_empty() { merged.controller_address  = c.controller_address; }
+            if !c.connector_address.is_empty()  { merged.connector_address   = c.connector_address; }
+            if !c.http_base_url.is_empty()      { merged.http_base_url       = c.http_base_url; }
+            found = true;
         }
     }
-    Err(crate::error::ClientError::NotConfigured.into())
+
+    if found {
+        Ok(merged)
+    } else {
+        Err(crate::error::ClientError::NotConfigured.into())
+    }
 }
 
 pub fn save(conf: &ClientConf) -> Result<PathBuf> {

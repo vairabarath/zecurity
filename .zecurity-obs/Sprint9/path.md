@@ -54,10 +54,10 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 | Member | Role | Area |
 |--------|------|------|
-| **M1** | Frontend | Device/client management UI (token issuance, device list, access log viewer) |
-| **M2** | Go (Proto) | Activate shield.proto fields 8–11 (TunnelOpen/Opened/Data/Close) |
-| **M3** | Rust (Connector) | `device_tunnel.rs`, `quic_listener.rs`, `agent_tunnel.rs` modifications, `net_util.rs`, `crl.rs`, `watchdog.rs` |
-| **M4** | Rust (Shield + Client) | `shield/src/tunnel.rs`, `control_stream.rs` tunnel dispatch + client TUN device, smoltcp, QUIC pool, `zecurity up/down` |
+| **M1** | Frontend | Access log viewer (`/access-log`), device management UI (`/devices`), sidebar links, revoke device flow |
+| **M2** | Go (Proto + GraphQL) | Activate shield.proto fields 8–11; `connector_log` DB migration + GraphQL schema (`connectorLogs`, `clientDevices`, `revokeDevice`) so M1 can run codegen |
+| **M3** | Rust (Connector Infrastructure) | `quic_listener.rs`, `agent_tunnel.rs` dispatch + `AgentTunnelHub` API, `net_util.rs`, `crl.rs`, `watchdog.rs`, `main.rs` wiring |
+| **M4** | Rust (Device Tunnel + Shield + Client) | `device_tunnel.rs` ACL enforcement + routing decision, `shield/src/tunnel.rs` TCP+UDP relay, `control_stream.rs` dispatch, Client TUN/smoltcp/QUIC pool, `zecurity up/down` |
 
 ---
 
@@ -66,13 +66,13 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 | File | Who Touches It | Rule |
 |------|---------------|------|
 | `proto/shield/v1/shield.proto` | M2 adds TunnelOpen/Opened/Data/Close (fields 8–11) | M2 commits first — everyone waits for buf generate |
-| `connector/src/device_tunnel.rs` | M3 — new file | M3 only |
+| `connector/src/device_tunnel.rs` | M4 — new file | M4 only — ACL enforcement + routing logic |
 | `connector/src/quic_listener.rs` | M3 — new file | M3 only |
-| `connector/src/agent_tunnel.rs` | M3 modifies TunnelHub + Control stream wiring | M3 only |
+| `connector/src/agent_tunnel.rs` | M3 defines AgentTunnelHub API + dispatch | M3 only — M4 imports AgentTunnelHub from here |
 | `connector/src/net_util.rs` | M3 — new file | M3 only |
 | `connector/src/crl.rs` | M3 — new file | M3 only |
 | `connector/src/watchdog.rs` | M3 — new file | M3 only |
-| `connector/src/main.rs` | M3 wires all listeners + watchdog | M3 only |
+| `connector/src/main.rs` | M3 wires all listeners + watchdog | M3 only — wires both M3 and M4 modules |
 | `shield/src/tunnel.rs` | M4 — new file | M4 only |
 | `shield/src/control_stream.rs` | M4 adds tunnel dispatch (TunnelOpen/Data/Close match arms) | M4 only. Sprint 6 discovery arms already present — add after them. |
 | `shield/src/main.rs` | M4 adds `mod tunnel` | M4 only |
@@ -98,7 +98,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 - [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
 - [ ] **TEAM** Run `cd admin && npm run codegen`
 
-> After Day 1: M3 can start device_tunnel.rs scaffold; M4 can start tunnel.rs.
+> After Day 1: M3 starts connector infrastructure; M4 starts Shield tunnel.rs + Client TUN scaffold; M2 starts connector_logs schema.
 
 ---
 
@@ -108,65 +108,82 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 ---
 
-### PHASE B — M3 RDE Device Tunnel (Depends on: Day 1 done)
+### PHASE B — M3 Connector Infrastructure (Depends on: Day 1 done)
 
-- [ ] **M3-B1** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, local ACL snapshot enforcement, protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`
-- [ ] **M3-B2** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
-- [ ] **M3-B3** `connector/src/agent_tunnel.rs` — MODIFY: dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
-- [ ] **M3-B4** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
+> See [[Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel]] and [[Sprint9/Member3-Go-Connector/Phase2-Connector-Extras]].
 
+- [ ] **M3-B1** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
+- [ ] **M3-B2** `connector/src/agent_tunnel.rs` — MODIFY: define `AgentTunnelHub` struct + `open_relay_session()` API; dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
+- [ ] **M3-B3** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
+- [ ] **M3-B4** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5 min
+- [ ] **M3-B5** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
+- [ ] **M3-B6** `connector/src/main.rs` — MODIFY: wire all listeners in correct order (`quic_listener`, `device_tunnel`, agent_server), `notify_ready()`, `spawn_watchdog()`
+
+> **Note for M3:** `AgentTunnelHub` in `agent_tunnel.rs` must be defined before M4 can complete `device_tunnel.rs`. Define the public struct + method signatures first, even if the implementation comes later.
 > Build check: `cd connector && cargo build` must pass.
 
 ---
 
-### PHASE C — M3 Connector Access Enforcement (Depends on: Sprint 8 ACL cache + Day 1 done)
+### PHASE C — M4 Device Tunnel + Shield Relay + Client Proxy
 
-- [ ] **M3-C1** `connector/src/device_tunnel.rs` — enforce Sprint 8 policy cache before routing: missing snapshot, unknown resource, or missing client SPIFFE ID must deny.
-- [ ] **M3-C2** Access logging — emit local/Controller-bound access events after local decision.
+> Three parallel work streams. C1 and C3 can start on Day 1. C2 requires M3-B2 (AgentTunnelHub) to be defined first.
 
-> Build check: `cd connector && cargo build` must pass.
+#### C1 — Shield TCP + UDP Relay (Depends on: Day 1 proto only)
 
----
+> See [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]].
 
-### PHASE D — M3 Connector Reliability (Depends on: M3-B done)
-
-- [ ] **M3-D1** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5min
-- [ ] **M3-D2** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
-- [ ] **M3-D3** `connector/src/main.rs` — MODIFY: wire all listeners in correct order, `notify_ready()`, `spawn_watchdog()`
-
-> Build check: `cd connector && cargo build` must pass.
-
----
-
-### PHASE E — M4 Shield Tunnel Relay (Depends on: Day 1 done + Sprint 6 M4-E done)
-
-- [ ] **M4-E1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open()` (connect TCP locally, register session), `handle_tunnel_data()` (forward bytes to local TCP), `handle_tunnel_close()` (drop session)
-- [ ] **M4-E2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` from incoming Control stream messages → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
-- [ ] **M4-E3** `shield/src/main.rs` — Add `mod tunnel`
+- [ ] **M4-C1** `shield/src/tunnel.rs` — NEW: `TunnelHub`, `handle_tunnel_open_tcp()` (connect TCP locally), `handle_tunnel_open_udp()` (bind UDP socket, idle timeout 30s), `handle_tunnel_data()`, `handle_tunnel_close()`. Each `TunnelData` proto message = one UDP datagram — no extra length prefix needed.
+- [ ] **M4-C2** `shield/src/control_stream.rs` — MODIFY: add match arms for `TunnelOpen/Data/Close` → dispatch to `tunnel::` handlers. Add after existing Sprint 6 discovery arms.
+- [ ] **M4-C3** `shield/src/main.rs` — Add `mod tunnel`
 
 > Build check: `cargo build --manifest-path shield/Cargo.toml` must pass.
 
----
+#### C2 — Device Tunnel: ACL Enforcement + Routing (Depends on: Day 1 + M3-B2 AgentTunnelHub defined)
 
-### PHASE F — M4 Client Transparent Proxy (Depends on: Sprint 8.5 daemon + M4-E done + M3-B done)
+> See [[Sprint9/Member4-Rust-Connector/Phase1-Device-Tunnel]].
+
+- [ ] **M4-C4** `connector/src/device_tunnel.rs` — NEW: TLS listener `:9092`, `TunnelRequest`/`TunnelResponse` JSON handshake, local ACL snapshot enforcement (default-deny), protected path via `AgentTunnelHub` relay, direct path via `copy_bidirectional`, `relay_udp()` 4-byte length-prefix, `emit_access_log()`, CRL revocation check
+
+> Build check: `cd connector && cargo build` must pass.
+
+#### C3 — Client Transparent Proxy (Depends on: Sprint 8.5 daemon + Day 1)
 
 > See [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]].
 
-- [ ] **M4-F1** `client/src/tun.rs` — Create `zecurity0` TUN interface; assign configurable host address (default `100.64.0.1/32`); `add_route(ip)` per ACL snapshot entry; detect route conflicts before `up`; `cleanup()` removes routes and interface on shutdown.
-- [ ] **M4-F2** `client/src/net_stack.rs` — smoltcp integration: read IP packets from TUN, accept TCP connections, dispatch UDP datagrams; for each connection open QUIC stream via pool, send `TunnelRequest`/`TunnelResponse` JSON, relay bidirectionally.
-- [ ] **M4-F3** `client/src/tunnel_pool.rs` — QUIC connection pool: one connection per Connector address using device mTLS cert from daemon RuntimeState; `open_stream()` reuses existing connection.
-- [ ] **M4-F4** `client/src/cmd/up.rs` + `client/src/cmd/down.rs` — `zecurity up` / `zecurity down` IPC commands. `Up` creates TUN and starts smoltcp loop. `Down` teardown with route cleanup.
-- [ ] **M4-F5** Wire `Up`/`Down` IPC handlers in `client/src/daemon.rs`; add `Up`/`Down` subcommands in `client/src/main.rs`; add to `client/src/ipc.rs` message enum.
-- [ ] **M4-F6** `client/Cargo.toml` — add `tun = "0.6"`, `smoltcp = "0.11"`, `quinn = "0.11"`.
+- [ ] **M4-C5** `client/src/tun.rs` — Create `zecurity0` TUN; assign `/32` host address; `add_route(ip)` via rtnetlink `RTM_NEWROUTE` per ACL entry; `check_conflicts()` reads kernel route table before `up`; `Drop` impl for panic-safe cleanup
+- [ ] **M4-C6** `client/src/net_stack.rs` — smoltcp integration: read packets from TUN, accept TCP/UDP from smoltcp, open QUIC stream via pool, send `TunnelRequest`/`TunnelResponse` JSON, relay bidirectionally. UDP: 30s idle timeout.
+- [ ] **M4-C7** `client/src/tunnel_pool.rs` — QUIC connection pool: one connection per Connector address using device mTLS cert from daemon RuntimeState; `open_stream()` reuses existing connection
+- [ ] **M4-C8** `client/src/cmd/up.rs` + `client/src/cmd/down.rs` — IPC commands; `Up` creates TUN + starts smoltcp loop; `Down` teardown + rtnetlink route removal
+- [ ] **M4-C9** Wire `Up`/`Down` IPC handlers in `client/src/daemon.rs`; add subcommands in `client/src/main.rs`; add to `client/src/ipc.rs` message enum
+- [ ] **M4-C10** `client/Cargo.toml` — add `tun = "0.6"`, `smoltcp = "0.11"`, `quinn = "0.11"`, `rtnetlink = "0.14"`, `netlink-packet-route = "0.21"`, `futures = "0.3"`
 
 > Build check: `cd client && cargo build` passes.
 > Manual: `zecurity up` creates `zecurity0`, routes appear, app connects to resource IP transparently. `zecurity down` cleans up.
 
 ---
 
-### PHASE G — M1 Frontend (Depends on: M3-C done + codegen done)
+### PHASE D — M2 GraphQL Schema for Frontend (Depends on: Day 1 done)
 
-- [ ] **M1-F1** Device/client management UI — TBD based on Sprint 9 kickoff. At minimum: access log viewer showing `connector_log` events from RDE connections.
+> M2 must land this before M1 can run codegen. Can be done in parallel with M3-B.
+> See [[Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema]].
+
+- [ ] **M2-D1** `controller/migrations/013_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at`
+- [ ] **M2-D2** Controller handler for `connector_log` ControlMessage → insert into DB
+- [ ] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation
+- [ ] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
+
+> Build check: `cd controller && go build ./...` passes.
+
+---
+
+### PHASE E — M1 Frontend (Depends on: M2-D codegen done)
+
+> See [[Sprint9/Member1-Frontend/Phase1-RDE-Frontend]].
+
+- [ ] **M1-E1** `admin/src/pages/AccessLog.tsx` — access log table, 10s poll, color-coded allow/deny, last 100 entries
+- [ ] **M1-E2** `admin/src/pages/DeviceManagement.tsx` — enrolled device list, revoke device with confirmation modal
+- [ ] **M1-E3** `admin/src/App.tsx` — add `/access-log` and `/devices` routes
+- [ ] **M1-E4** Sidebar — add "Access Log" and "Devices" links for ADMIN role only
 
 > Build check: `cd admin && npm run build` must pass.
 
@@ -209,18 +226,21 @@ Sprint 8 ACL Snapshot + Sprint 8.5 Daemon + M2-D1-A (shield.proto TunnelOpen/Ope
               │
       ┌───────┼──────────────┬──────────────┐
       ▼       ▼              ▼              ▼
-    M3-B    M3-C           M4-E           M1-F
-  (device   (local ACL     (Shield        (device UI)
-   tunnel,   enforcement)   tunnel.rs
-   QUIC,                    relay)
-   agent_tunnel)
-      │                       │
-      ▼                       ▼
-    M3-D                    M4-F
-  (crl.rs,               (Client TUN
-   watchdog.rs,           smoltcp
-   main.rs wiring)        QUIC pool
-                          zecurity up/down)
+    M3-B    M4-C1           M4-C3          M2-D
+  (Connector  (Shield        (Client TUN    (connector_logs
+   Infra:     TCP+UDP        smoltcp        schema +
+   quic,      relay)         QUIC pool      migration)
+   agent_hub,                zecurity          │
+   crl,                      up/down)          ▼
+   watchdog)                               M1-E
+      │                                  (Access log
+      ▼ (AgentTunnelHub defined)          + Device
+    M4-C2                                  management UI)
+  (device_tunnel.rs
+   ACL + routing)
+      │
+      ▼ (M3 wires in main.rs)
+   Integration test
 ```
 
 ---
@@ -230,7 +250,7 @@ Sprint 8 ACL Snapshot + Sprint 8.5 Daemon + M2-D1-A (shield.proto TunnelOpen/Ope
 1. **Always check this file first.** Before touching any file, confirm dependency checkboxes are checked.
 2. **Proto field numbers are permanent.** Sprint 9 activates ShieldControlMessage fields 8–11 (reserved in Sprint 6). Never reuse or renumber.
 3. **Tunnel messages ride the existing Shield Control stream.** No new RPCs. Connector sends TunnelOpen; Shield replies TunnelOpened/Data/Close on the same stream.
-4. **Sprint 6 control_stream.rs already has discovery arms** — Sprint 9 M4-E2 adds additional match arms after them. Do not remove or reorder existing arms.
+4. **Sprint 6 control_stream.rs already has discovery arms** — Sprint 9 M4-C2 adds additional match arms after them. Do not remove or reorder existing arms.
 5. **RDE access checks.** Connector MUST use the Sprint 8 local ACL snapshot. Do not call the Controller per request.
 6. **RDE protected path.** For resources with `shield_id` set, Connector MUST relay via `AgentTunnelHub` → Shield Control stream. Direct connect will fail due to nftables.
 7. **QUIC is on same port as TLS.** `:9092` — UDP for QUIC, TCP for TLS. OS demuxes by transport protocol.
@@ -238,11 +258,14 @@ Sprint 8 ACL Snapshot + Sprint 8.5 Daemon + M2-D1-A (shield.proto TunnelOpen/Ope
 9. **Max chunk size is 16 KB** per `TunnelData` frame — enforced on both sides.
 
 See individual member phase files for detailed specs:
-- [[Sprint9/Member2-Go-Proto/Phase1-Tunnel-Proto]]
-- [[Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel]]
-- [[Sprint9/Member3-Go-Connector/Phase2-Connector-Extras]]
-- [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]]
-- [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]]
+- [[Sprint9/Member1-Frontend/Phase1-RDE-Frontend]] — access log viewer + device management UI (M1)
+- [[Sprint9/Member2-Go-Proto/Phase1-Tunnel-Proto]] — proto Day 1 (M2)
+- [[Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema]] — connector_logs migration + GraphQL schema (M2)
+- [[Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel]] — quic_listener + agent_tunnel hub + net_util (M3)
+- [[Sprint9/Member3-Go-Connector/Phase2-Connector-Extras]] — crl + watchdog + main.rs wiring (M3)
+- [[Sprint9/Member4-Rust-Connector/Phase1-Device-Tunnel]] — device_tunnel.rs ACL enforcement + routing (M4)
+- [[Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay]] — Shield TCP + UDP relay (M4)
+- [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] — Client TUN + smoltcp + QUIC pool (M4)
 
 See architecture decisions:
 - [[Decisions/ADR-003-Client-TUN-Transparent-Proxy]]

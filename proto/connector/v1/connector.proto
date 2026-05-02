@@ -84,7 +84,14 @@ message ConnectorControlMessage {
     ScanCommand               scan_command          = 10;
     // Controller → Connector
     client.v1.ACLSnapshot     acl_snapshot          = 11;
+    // Connector → Controller
+    ConnectorLog              connector_log         = 12;
   }
+}
+
+message ConnectorLog {
+  string connector_id = 1;
+  string message      = 2;  // e.g. "dest=192.168.1.10:443 path=direct allowed"
 }
 
 message ResourceInstructionBatch {

@@ -139,16 +139,19 @@ x509-parser = "0.16"
 ```rust
 mod crl;
 
+// The /ca.crl endpoint requires ?workspace_id=<uuid>.
+// workspace_id is the tenant UUID stored in config after enrollment.
+let crl_url = format!("{}/ca.crl?workspace_id={}", controller_base_url, workspace_id);
 let crl_manager = crl::CrlManager::new();
-if let Err(e) = crl_manager.refresh(&format!("{}/ca.crl", controller_base_url)).await {
+if let Err(e) = crl_manager.refresh(&crl_url).await {
     tracing::warn!("Initial CRL fetch failed: {e}");
 }
-crl_manager.clone().spawn_refresh(
-    format!("{}/ca.crl", controller_base_url),
-    300, // 5 minutes
-);
+crl_manager.clone().spawn_refresh(crl_url, 300); // 5-min refresh
 // Pass crl_manager into device_tunnel::listen()
 ```
+
+> **Note:** The controller serves `GET /ca.crl?workspace_id=<uuid>` and returns DER-encoded CRL
+> signed by the workspace CA. `workspace_id` is the connector's tenant UUID (known from enrollment).
 
 **Use in `device_tunnel.rs`:**
 

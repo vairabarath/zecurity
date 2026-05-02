@@ -1,0 +1,13 @@
+type ConnectorLog {
+  id:          ID!
+  workspaceId: ID!
+  connectorId: String!
+  message:     String!
+  createdAt:   String!
+}
+
+extend type Query {
+  # Admin only — returns last N tunnel access events across all connectors.
+  # Newest first. Default limit 100.
+  connectorLogs(limit: Int): [ConnectorLog!]!
+}
