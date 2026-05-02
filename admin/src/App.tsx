@@ -23,6 +23,8 @@ import ClientInstall from '@/pages/ClientInstall'
 import Groups from '@/pages/Groups'
 import GroupDetail from '@/pages/GroupDetail'
 import TeamUsers from '@/pages/TeamUsers'
+import AccessLog from '@/pages/AccessLog'
+import DeviceManagement from '@/pages/DeviceManagement'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 import { useAuthStore } from '@/store/auth'
@@ -84,6 +86,8 @@ export default function App() {
         <Route path="/users"             element={<TeamUsers />} />
         <Route path="/groups"            element={<Groups />} />
         <Route path="/groups/:id"        element={<GroupDetail />} />
+        <Route path="/access-log"        element={<AccessLog />} />
+        <Route path="/devices"           element={<DeviceManagement />} />
       </Route>
     </Routes>
   )
