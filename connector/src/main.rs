@@ -13,18 +13,24 @@
 //      — blocks with inner reconnect loop until process shutdown
 
 pub mod agent_server;
+pub mod agent_tunnel;
 mod appmeta;
+pub mod crl;
 pub mod discovery;
 mod config;
 mod control_stream;
 mod controller_client;
 mod crypto;
+pub mod device_tunnel;
 mod enrollment;
+pub mod net_util;
 pub mod policy;
+pub mod quic_listener;
 mod renewal;
-mod tls;
+pub mod tls;
 mod updater;
 mod util;
+mod watchdog;
 
 /// Generated gRPC client stubs from connector.proto.
 pub mod shield {
@@ -41,6 +47,13 @@ pub mod client {
 }
 /// Alias so existing agent_server.rs code can use `crate::shield_proto::*`.
 pub use shield::v1 as shield_proto;
+
+/// Type alias used by quic_listener.rs and device_tunnel.rs.
+/// Maps the spec name to the real ShieldRegistry type.
+pub type AgentRegistry = agent_server::ShieldRegistry;
+
+/// Type alias used by device_tunnel.rs for the control stream message type.
+pub type ControlMessage = proto::ConnectorControlMessage;
 
 /// Generated connector gRPC stubs.
 pub mod connector {
@@ -181,6 +194,81 @@ async fn main() -> anyhow::Result<()> {
     info!("connector running — entering Control stream loop");
 
     let policy_cache = Arc::new(policy::PolicyCache::new());
+
+    // Load cert/key material for the device tunnel TLS/QUIC listeners.
+    let cert_store = tls::cert_store::CertStore::load(&cfg.state_dir)
+        .context("failed to load cert store for device tunnel")?;
+
+    // Determine LAN IP for QUIC advertise address.
+    let lan_ip = net_util::lan_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_default();
+    let quic_advertise = format!("{}:9092", lan_ip);
+
+    let acl = policy_cache.clone();
+    let tunnel_hub = shield_registry.tunnel_hub.clone();
+    let agent_registry = Arc::new(shield_registry.clone());
+    let connector_id = enrollment_state.connector_id.clone();
+
+    // Build CRL URL from controller HTTP address (fallback: derive host from gRPC addr + port 8080).
+    let http_base = cfg.controller_http_addr.clone().unwrap_or_else(|| {
+        let host = cfg.controller_addr
+            .split(':')
+            .next()
+            .unwrap_or("localhost")
+            .to_string();
+        format!("http://{}:8080", host)
+    });
+    let crl_url = format!("{}/ca.crl?workspace_id={}", http_base, enrollment_state.workspace_id);
+
+    let crl_manager = crl::CrlManager::new();
+    if let Err(e) = crl_manager.refresh(&crl_url).await {
+        tracing::warn!("initial CRL fetch failed (using empty cache): {e}");
+    }
+    crl_manager.clone().spawn_refresh(crl_url, 300);
+
+    // Control message channel for device_tunnel → control_stream (emits access logs).
+    let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
+
+    // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
+    {
+        let store       = cert_store.clone();
+        let acl         = acl.clone();
+        let hub         = tunnel_hub.clone();
+        let reg         = agent_registry.clone();
+        let crl         = crl_manager.clone();
+        let cid         = connector_id.clone();
+        let tx          = ctrl_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = device_tunnel::listen("0.0.0.0:9092", store, acl, hub, reg, crl, cid, tx).await {
+                error!(error = %e, "device tunnel (TLS) on :9092 failed");
+            }
+        });
+    }
+
+    // Spawn QUIC/UDP device tunnel listener on :9092.
+    {
+        let store       = cert_store.clone();
+        let acl         = acl.clone();
+        let hub         = tunnel_hub.clone();
+        let reg         = agent_registry.clone();
+        let crl         = crl_manager.clone();
+        let cid         = connector_id.clone();
+        let tx          = ctrl_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = quic_listener::listen(
+                "0.0.0.0:9092", &quic_advertise,
+                store, acl, hub, reg, crl, cid, tx,
+            ).await {
+                error!(error = %e, "device tunnel (QUIC) on :9092 failed");
+            }
+        });
+    }
+
+    info!("device tunnel listeners spawned on :9092 (TLS+QUIC)");
+
+    watchdog::notify_ready();
+    watchdog::spawn_watchdog();
 
     // Run bidirectional Control stream to controller (blocks with reconnect loop).
     control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx, policy_cache).await

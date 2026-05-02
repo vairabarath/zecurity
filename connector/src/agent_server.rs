@@ -47,6 +47,8 @@ pub struct ShieldRegistry {
     trust_domain: String,
     connector_id: String,
     renewal_window_secs: u64,
+    /// Tunnel hub — routes RDE tunnel messages between device connections and Shields.
+    pub tunnel_hub: crate::agent_tunnel::AgentTunnelHub,
 }
 
 impl ShieldRegistry {
@@ -66,6 +68,7 @@ impl ShieldRegistry {
             trust_domain,
             connector_id,
             renewal_window_secs: DEFAULT_RENEWAL_WINDOW_SECS,
+            tunnel_hub: crate::agent_tunnel::AgentTunnelHub::new(),
         }
     }
 
@@ -330,6 +333,8 @@ impl ShieldService for ShieldRegistry {
 
         let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
         let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(32);
+        // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
+        let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
 
         {
             self.instruction_txs
@@ -337,6 +342,7 @@ impl ShieldService for ShieldRegistry {
                 .expect("instruction_txs poisoned")
                 .insert(identity.shield_id.clone(), instr_tx);
         }
+        self.tunnel_hub.register_shield(identity.shield_id.clone(), tunnel_tx);
 
         let registry = self.clone();
         let shield_id = identity.shield_id.clone();
@@ -410,6 +416,16 @@ impl ShieldService for ShieldRegistry {
                                         );
                                     }
                                     Some(Body::Pong(_)) => {}
+                                    // RDE tunnel responses from Shield → dispatch to relay sessions.
+                                    Some(Body::TunnelOpened(p)) => {
+                                        registry.tunnel_hub.dispatch_opened(&p.connection_id, p.ok, p.error.clone());
+                                    }
+                                    Some(Body::TunnelData(p)) => {
+                                        registry.tunnel_hub.dispatch_data(&p.connection_id, p.data.clone());
+                                    }
+                                    Some(Body::TunnelClose(p)) => {
+                                        registry.tunnel_hub.dispatch_close(&p.connection_id, p.error.clone());
+                                    }
                                     _ => {}
                                 }
                             }
@@ -429,6 +445,12 @@ impl ShieldService for ShieldRegistry {
                             break;
                         }
                     }
+                    // RDE: forward tunnel messages from the hub to the Shield's output stream.
+                    Some(msg) = tunnel_rx.recv() => {
+                        if out_tx.send(Ok(msg)).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
             registry
@@ -436,6 +458,7 @@ impl ShieldService for ShieldRegistry {
                 .lock()
                 .expect("instruction_txs poisoned")
                 .remove(&shield_id);
+            registry.tunnel_hub.unregister_shield(&shield_id);
             info!(shield_id = %shield_id, "shield Control stream disconnected");
         });
 

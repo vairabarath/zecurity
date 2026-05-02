@@ -1,4 +1,7 @@
-// tls.rs — SPIFFE-based controller certificate verification
+pub mod cert_store;
+pub mod server_cfg;
+
+// tls/mod.rs — SPIFFE-based controller certificate verification
 //
 // Used by controller_client.rs after the mTLS handshake to verify that the
 // controller's presented certificate contains the expected SPIFFE URI.
