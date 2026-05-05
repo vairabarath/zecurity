@@ -1,6 +1,6 @@
 ---
 type: phase
-status: pending
+status: done
 sprint: 9
 member: M3
 phase: Phase1-Connector-Infrastructure

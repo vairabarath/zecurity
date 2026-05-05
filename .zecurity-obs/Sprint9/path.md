@@ -167,9 +167,9 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 > M2 must land this before M1 can run codegen. Can be done in parallel with M3-B.
 > See [[Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema]].
 
-- [x] **M2-D1** `controller/migrations/013_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at`
+- [x] **M2-D1** `controller/migrations/014_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at` (note: 013 was taken by Sprint 8.5)
 - [x] **M2-D2** Controller handler for `connector_log` ControlMessage → insert into DB
-- [x] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation
+- [x] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation, `clientDevices` query, updated `myDevices`
 - [x] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
 
 > Build check: `cd controller && go build ./...` passes.
