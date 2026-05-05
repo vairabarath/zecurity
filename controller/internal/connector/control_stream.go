@@ -13,6 +13,7 @@ import (
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -201,7 +202,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case nil:
 			log.Printf("control stream: connector %s body is NIL", connectorID)
 		case *pb.ConnectorControlMessage_ConnectorHealth:
-			h.handleConnectorHealth(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
+			h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
@@ -272,7 +273,8 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 	return rows.Err()
 }
 
-func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, connectorID string, r *pb.ConnectorHealthReport) {
+func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
+	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s", connectorID, r.Version, r.Hostname, r.LanAddr)
 	_, err := h.Pool.Exec(ctx,
 		`UPDATE connectors
@@ -288,6 +290,35 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, connector
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
 	}
+	if err := h.pushACLSnapshot(ctx, client); err != nil {
+		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	}
+}
+
+func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient) error {
+	if h.PolicyStore == nil || h.PolicyCache == nil || h.PolicyNotifier == nil {
+		return nil
+	}
+
+	snap, ok := h.PolicyCache.Get(client.tenantID)
+	if !ok {
+		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+		if err != nil {
+			return fmt.Errorf("compile ACL snapshot: %w", err)
+		}
+		h.PolicyCache.Set(client.tenantID, compiled)
+		snap = compiled
+	}
+
+	if err := client.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_AclSnapshot{
+			AclSnapshot: snap,
+		},
+	}); err != nil {
+		return err
+	}
+	log.Printf("control stream: pushed ACL snapshot connector=%s version=%d entries=%d", client.connectorID, snap.Version, len(snap.Entries))
+	return nil
 }
 
 func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, connectorID string, batch *pb.ShieldStatusBatch) {

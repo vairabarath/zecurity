@@ -28,17 +28,17 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
-	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
-	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/connector"
-	"github.com/yourorg/ztna/controller/internal/invitation"
-	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/db"
+	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/middleware"
+	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
@@ -225,6 +225,10 @@ func main() {
 		PKIService: pkiService,
 		ShieldSvc:  shieldSvc,
 		Registry:   connectorRegistry,
+
+		PolicyStore:    policyStore,
+		PolicyCache:    policyCache,
+		PolicyNotifier: policyNotifier,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)

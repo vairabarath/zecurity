@@ -1014,3 +1014,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Deploy the updated controller, log in once, wait for connector heartbeat ACL push, then retry the protected resource.
+
+---
+
+## 2026-05-05 — Codex (M3, Sprint 9 connector ACL push)
+
+**What was done:**
+- Diagnosed continued `access denied` after client ACL refresh: connector Control stream never received ACL snapshots.
+- Added policy store/cache/notifier dependencies to `EnrollmentHandler`.
+- Updated connector health handling to send `ConnectorControlMessage_AclSnapshot` with the cached or freshly compiled ACL snapshot.
+- Ran `cd controller && go build ./...`; build passes.
+
+**Key decisions:**
+- Push ACL on connector health so reconnects and policy cache invalidations converge without adding a new control RPC.
+
+**What's next:**
+- Deploy/restart controller and watch connector logs for `ACL snapshot stored`; then retry the protected resource.

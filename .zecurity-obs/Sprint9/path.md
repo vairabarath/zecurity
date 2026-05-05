@@ -373,3 +373,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** After reinstall/login, the client received a new device SPIFFE ID, but connector dataplane denied the tunnel with `access denied` because it still held an ACL snapshot compiled before that device existed.
 **Root Cause:** `EnrollDevice` inserted and signed a new `client_devices` row but did not invalidate the policy snapshot cache or increment the policy version. Connector and client could keep using a stale ACL that allowed old device SPIFFE IDs only.
 **Fix:** Call `policyNotifier.NotifyPolicyChange(ctx, workspaceID)` after recording the device certificate so the next ACL snapshot includes the new client device SPIFFE.
+
+### Fix: Connector never receives ACL snapshots (M3 Controller)
+**File:** `controller/internal/connector/control_stream.go`, `controller/internal/connector/enrollment.go`, `controller/cmd/server/main.go`
+**Issue:** Client `status` showed a fresh ACL snapshot, but connector dataplane still denied access. Connector logs had no `ACL snapshot stored` entries after reconnect/heartbeat.
+**Root Cause:** The controller compiled ACL snapshots for clients but never sent `ConnectorControlMessage_AclSnapshot` on the connector Control stream.
+**Fix:** Added policy dependencies to `EnrollmentHandler` and push the cached/compiled ACL snapshot to the connector on every connector health report.
