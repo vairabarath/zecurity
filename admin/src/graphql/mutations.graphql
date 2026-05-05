@@ -182,3 +182,7 @@ mutation UnassignResourceFromGroup($resourceId: ID!, $groupId: ID!) {
     }
   }
 }
+
+mutation RevokeDevice($deviceId: ID!) {
+  revokeDevice(deviceId: $deviceId)
+}

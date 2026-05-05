@@ -294,3 +294,27 @@ query GetGroup($id: ID!) {
     }
   }
 }
+
+query GetConnectorLogs($limit: Int) {
+  connectorLogs(limit: $limit) {
+    id
+    connectorId
+    message
+    createdAt
+  }
+}
+
+query GetClientDevices {
+  clientDevices {
+    id
+    userId
+    name
+    commonName
+    os
+    spiffeId
+    certNotAfter
+    lastSeenAt
+    createdAt
+    revokedAt
+  }
+}

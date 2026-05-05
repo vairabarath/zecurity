@@ -4,10 +4,12 @@ import {
   Box,
   ChevronDown,
   Download,
+  Laptop,
   LayoutDashboard,
   Network,
   Plug,
   Radar,
+  ScrollText,
   Settings,
   Shield,
   ShieldCheck,
@@ -27,6 +29,8 @@ const mainItems = [
   { to: '/shields', label: 'Shields', icon: Shield },
   { to: '/resources', label: 'Resources', icon: Box },
   { to: '/settings', label: 'Settings', icon: Settings },
+  { to: '/access-log', label: 'Access Log', icon: ScrollText },
+  { to: '/devices', label: 'Devices', icon: Laptop },
 ]
 
 const teamItems = [

@@ -228,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
     crl_manager.clone().spawn_refresh(crl_url, 300);
 
     // Control message channel for device_tunnel → control_stream (emits access logs).
-    let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
+    let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
 
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
@@ -271,5 +271,5 @@ async fn main() -> anyhow::Result<()> {
     watchdog::spawn_watchdog();
 
     // Run bidirectional Control stream to controller (blocks with reconnect loop).
-    control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx, policy_cache).await
+    control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx, ctrl_rx, policy_cache).await
 }
