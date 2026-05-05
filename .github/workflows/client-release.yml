@@ -1,0 +1,126 @@
+name: Build & Release Client
+
+on:
+  push:
+    tags:
+      - "client-v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            asset_name: client-linux-amd64
+          - target: aarch64-unknown-linux-musl
+            asset_name: client-linux-arm64
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cross
+        run: cargo install cross --locked
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('client/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Install protoc
+        run: |
+          curl -fsSL https://github.com/protocolbuffers/protobuf/releases/download/v26.1/protoc-26.1-linux-x86_64.zip -o /tmp/protoc.zip
+          unzip /tmp/protoc.zip -d /tmp/protoc
+          sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
+          protoc --version
+
+      - name: Build release binary
+        env:
+          CROSS_CONTAINER_OPTS: "--volume /usr/local/bin/protoc:/usr/local/bin/protoc --env PROTOC=/usr/local/bin/protoc"
+        run: cross build --manifest-path client/Cargo.toml --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        run: |
+          cp client/target/${{ matrix.target }}/release/zecurity-client ${{ matrix.asset_name }}
+          chmod +x ${{ matrix.asset_name }}
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: build-artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          cp build-artifacts/client-linux-amd64/client-linux-amd64 release-assets/
+          cp build-artifacts/client-linux-arm64/client-linux-arm64 release-assets/
+          cp client/scripts/client-install.sh release-assets/client-install.sh
+          cp client/systemd/zecurity-client.service release-assets/
+          chmod +x release-assets/client-linux-amd64
+          chmod +x release-assets/client-linux-arm64
+          chmod +x release-assets/client-install.sh
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum client-linux-amd64 client-linux-arm64 > checksums.txt
+
+      - name: List release assets
+        run: ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Client ${{ github.ref_name }}
+          body: |
+            ## Zecurity Client ${{ github.ref_name }}
+
+            ### Zero-config install
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/client/scripts/client-install.sh | sudo bash
+            ```
+
+            ### Install with pre-configured controller (LAN)
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/client/scripts/client-install.sh | \
+              sudo CONTROLLER_ADDR=192.168.x.x:9090 bash
+            ```
+
+            ### After install
+            ```bash
+            zecurity-client setup --workspace <workspace-name>
+            zecurity-client login
+            zecurity-client up
+            ```
+          files: |
+            release-assets/client-linux-amd64
+            release-assets/client-linux-arm64
+            release-assets/checksums.txt
+            release-assets/client-install.sh
+            release-assets/zecurity-client.service

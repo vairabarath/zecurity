@@ -1,0 +1,35 @@
+# zecurity-client.service — ZECURITY client daemon
+#
+# Installed to: /etc/systemd/system/zecurity-client.service
+# Binary path:  /usr/local/bin/zecurity-client
+# Config file:  /etc/zecurity/client.conf  (written by install script)
+#
+# User= is set by the installation script to the enrolling user.
+# Runs as a system unit with CAP_NET_ADMIN for TUN interface creation.
+
+[Unit]
+Description=Zecurity Client Daemon
+Documentation=https://github.com/vairabarath/zecurity
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=
+ExecStart=/usr/local/bin/zecurity-client daemon
+Restart=on-failure
+RestartSec=5
+WatchdogSec=90
+
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+StandardOutput=journal
+StandardError=journal
+
+RuntimeDirectory=zecurity-client
+RuntimeDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
