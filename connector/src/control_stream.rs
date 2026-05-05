@@ -38,6 +38,7 @@ pub async fn run_control_stream(
     state: &EnrollmentState,
     shield_registry: ShieldRegistry,
     mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
+    mut log_rx: mpsc::Receiver<crate::ControlMessage>,
     policy_cache: Arc<PolicyCache>,
 ) -> Result<()> {
     let hostname = util::read_hostname();
@@ -68,6 +69,7 @@ pub async fn run_control_stream(
             &mut current_state,
             &shield_registry,
             &mut ack_rx,
+            &mut log_rx,
             &lan_addr,
             &hostname,
             &version,
@@ -99,6 +101,7 @@ async fn run_once(
     state: &mut EnrollmentState,
     shield_registry: &ShieldRegistry,
     ack_rx: &mut mpsc::Receiver<(String, ResourceAck)>,
+    log_rx: &mut mpsc::Receiver<crate::ControlMessage>,
     lan_addr: &str,
     hostname: &str,
     version: &str,
@@ -172,6 +175,12 @@ async fn run_once(
                 if out_tx.send(ConnectorControlMessage {
                     body: Some(CBody::ResourceAcks(ResourceAckBatch { acks: vec![ack] })),
                 }).await.is_err() {
+                    return Err(anyhow::anyhow!("outbound channel closed"));
+                }
+            }
+
+            Some(log_msg) = log_rx.recv() => {
+                if out_tx.send(log_msg).await.is_err() {
                     return Err(anyhow::anyhow!("outbound channel closed"));
                 }
             }

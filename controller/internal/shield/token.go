@@ -9,13 +9,13 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/netutil"
 )
 
 const enrollmentJTIPrefix = "shield:enrollment:jti:"
@@ -111,18 +111,15 @@ func (s *service) GenerateShieldToken(
 		return "", "", fmt.Errorf("persist shield token state: %w", err)
 	}
 
+	grpcDefault, httpDefault := netutil.DetectLANAddr("9090", "8080")
 	controllerAddr := os.Getenv("CONTROLLER_ADDR")
-	if controllerAddr == "" {
-		controllerAddr = "localhost:9090"
+	if controllerAddr == "" || netutil.IsLocalhost(controllerAddr) {
+		controllerAddr = grpcDefault
 	}
 
 	controllerHTTPAddr := os.Getenv("CONTROLLER_HTTP_ADDR")
-	if controllerHTTPAddr == "" {
-		if i := strings.LastIndex(controllerAddr, ":"); i != -1 {
-			controllerHTTPAddr = controllerAddr[:i] + ":8080"
-		} else {
-			controllerHTTPAddr = "localhost:8080"
-		}
+	if controllerHTTPAddr == "" || netutil.IsLocalhost(controllerHTTPAddr) {
+		controllerHTTPAddr = httpDefault
 	}
 
 	installCmd := fmt.Sprintf(

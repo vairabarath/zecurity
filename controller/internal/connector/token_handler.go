@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -101,17 +102,14 @@ func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb valkeycompat.Cmd
 			return
 		}
 
+		grpcDefault, httpDefault := netutil.DetectLANAddr(cfg.GRPCPort, "8080")
 		controllerAddr := os.Getenv("CONTROLLER_ADDR")
-		if controllerAddr == "" {
-			controllerAddr = "localhost:" + cfg.GRPCPort
+		if controllerAddr == "" || netutil.IsLocalhost(controllerAddr) {
+			controllerAddr = grpcDefault
 		}
 		controllerHTTPAddr := os.Getenv("CONTROLLER_HTTP_ADDR")
-		if controllerHTTPAddr == "" {
-			if i := strings.LastIndex(controllerAddr, ":"); i != -1 {
-				controllerHTTPAddr = controllerAddr[:i] + ":8080"
-			} else {
-				controllerHTTPAddr = "localhost:8080"
-			}
+		if controllerHTTPAddr == "" || netutil.IsLocalhost(controllerHTTPAddr) {
+			controllerHTTPAddr = httpDefault
 		}
 		installCmd := fmt.Sprintf(
 			"curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/connector/scripts/connector-install.sh | sudo CONTROLLER_ADDR=%s CONTROLLER_HTTP_ADDR=%s ENROLLMENT_TOKEN=%s bash",

@@ -180,10 +180,10 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 > See [[Sprint9/Member1-Frontend/Phase1-RDE-Frontend]].
 
-- [ ] **M1-E1** `admin/src/pages/AccessLog.tsx` — access log table, 10s poll, color-coded allow/deny, last 100 entries
-- [ ] **M1-E2** `admin/src/pages/DeviceManagement.tsx` — enrolled device list, revoke device with confirmation modal
-- [ ] **M1-E3** `admin/src/App.tsx` — add `/access-log` and `/devices` routes
-- [ ] **M1-E4** Sidebar — add "Access Log" and "Devices" links for ADMIN role only
+- [x] **M1-E1** `admin/src/pages/AccessLog.tsx` — access log table, 10s poll, color-coded allow/deny, last 100 entries
+- [x] **M1-E2** `admin/src/pages/DeviceManagement.tsx` — enrolled device list, revoke device with confirmation modal
+- [x] **M1-E3** `admin/src/App.tsx` — add `/access-log` and `/devices` routes
+- [x] **M1-E4** Sidebar — add "Access Log" and "Devices" links for ADMIN role only
 
 > Build check: `cd admin && npm run build` must pass.
 
