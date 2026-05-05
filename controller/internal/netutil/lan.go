@@ -23,6 +23,11 @@ func IsLocalhost(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// DetectLANIP returns the machine's outbound LAN IP, or "localhost" on failure.
+func DetectLANIP() string {
+	return detectLANIP()
+}
+
 func detectLANIP() string {
 	conn, err := net.Dial("udp", "8.8.8.8:53")
 	if err != nil {

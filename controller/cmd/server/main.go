@@ -28,6 +28,7 @@ import (
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
 	clientsvc "github.com/yourorg/ztna/controller/internal/client"
@@ -496,14 +497,20 @@ func controllerCertHosts(grpcPort string) []string {
 		"::1":       {},
 	}
 
+	// Always include the detected LAN IP so connectors on other LAN machines
+	// can verify the controller cert when connecting via its LAN address.
+	if lanIP := netutil.DetectLANIP(); !netutil.IsLocalhost(lanIP) {
+		hosts[lanIP] = struct{}{}
+	}
+
 	if addr := os.Getenv("CONTROLLER_ADDR"); addr != "" {
-		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" && !netutil.IsLocalhost(host) {
 			hosts[host] = struct{}{}
 		}
 	}
 
 	if addr := os.Getenv("CONTROLLER_HTTP_ADDR"); addr != "" {
-		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+		if host, _, err := net.SplitHostPort(addr); err == nil && host != "" && !netutil.IsLocalhost(host) {
 			hosts[host] = struct{}{}
 		}
 	}
