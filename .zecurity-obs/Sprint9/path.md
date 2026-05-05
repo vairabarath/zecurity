@@ -89,14 +89,14 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 ### DAY 1 — Unblocking Work (Must land before anyone fans out)
 
-- [ ] **M2-D1-A** `proto/shield/v1/shield.proto` — Add tunnel messages and activate reserved fields 8–11 in `ShieldControlMessage.oneof`:
+- [x] **M2-D1-A** `proto/shield/v1/shield.proto` — Add tunnel messages and activate reserved fields 8–11 in `ShieldControlMessage.oneof`:
   - `TunnelOpen { connection_id, destination, port, protocol }` — field 8, Connector → Shield
   - `TunnelOpened { connection_id, ok, error }` — field 9, Shield → Connector
   - `TunnelData { connection_id, data bytes }` — field 10, bidirectional
   - `TunnelClose { connection_id, error }` — field 11, bidirectional
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
-- [ ] **TEAM** Run `cd admin && npm run codegen`
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
+- [x] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **TEAM** Run `cd admin && npm run codegen`
 
 > After Day 1: M3 starts connector infrastructure; M4 starts Shield tunnel.rs + Client TUN scaffold; M2 starts connector_logs schema.
 
@@ -112,12 +112,12 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 > See [[Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel]] and [[Sprint9/Member3-Go-Connector/Phase2-Connector-Extras]].
 
-- [ ] **M3-B1** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
-- [ ] **M3-B2** `connector/src/agent_tunnel.rs` — MODIFY: define `AgentTunnelHub` struct + `open_relay_session()` API; dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
-- [ ] **M3-B3** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
-- [ ] **M3-B4** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5 min
-- [ ] **M3-B5** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
-- [ ] **M3-B6** `connector/src/main.rs` — MODIFY: wire all listeners in correct order (`quic_listener`, `device_tunnel`, agent_server), `notify_ready()`, `spawn_watchdog()`
+- [x] **M3-B1** `connector/src/quic_listener.rs` — NEW: QUIC/UDP listener `:9092`, ALPN `ztna-tunnel-v1`, delegates each bidir stream to `device_tunnel::handle_stream()`
+- [x] **M3-B2** `connector/src/agent_tunnel.rs` — MODIFY: define `AgentTunnelHub` struct + `open_relay_session()` API; dispatch `TunnelOpened/Data/Close` from Shield Control stream into hub sessions; send `TunnelOpen` to Shield via control stream sender
+- [x] **M3-B3** `connector/src/net_util.rs` — NEW: `lan_ip()` UDP routing trick for private IP discovery
+- [x] **M3-B4** `connector/src/crl.rs` — NEW: `CrlManager` — fetch `/ca.crl` DER, cache revoked serials, background refresh every 5 min
+- [x] **M3-B5** `connector/src/watchdog.rs` — NEW: `notify_ready()` + `spawn_watchdog()` for systemd sd_notify integration
+- [x] **M3-B6** `connector/src/main.rs` — MODIFY: wire all listeners in correct order (`quic_listener`, `device_tunnel`, agent_server), `notify_ready()`, `spawn_watchdog()`
 
 > **Note for M3:** `AgentTunnelHub` in `agent_tunnel.rs` must be defined before M4 can complete `device_tunnel.rs`. Define the public struct + method signatures first, even if the implementation comes later.
 > Build check: `cd connector && cargo build` must pass.
@@ -167,10 +167,10 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 > M2 must land this before M1 can run codegen. Can be done in parallel with M3-B.
 > See [[Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema]].
 
-- [ ] **M2-D1** `controller/migrations/013_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at`
-- [ ] **M2-D2** Controller handler for `connector_log` ControlMessage → insert into DB
-- [ ] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation
-- [ ] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
+- [x] **M2-D1** `controller/migrations/013_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at`
+- [x] **M2-D2** Controller handler for `connector_log` ControlMessage → insert into DB
+- [x] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation
+- [x] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
 
 > Build check: `cd controller && go build ./...` passes.
 

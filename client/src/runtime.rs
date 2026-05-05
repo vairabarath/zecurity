@@ -3,6 +3,22 @@ use tokio::sync::RwLock;
 
 use crate::grpc::client_v1::AclSnapshot;
 
+/// Live TUN session handle — present while `zecurity up` is active.
+pub struct TunHandle {
+    /// Abort the net_stack::run task on Down.
+    pub abort: tokio::task::AbortHandle,
+    /// Resource IPs added as /32 routes (for cleanup logging).
+    pub route_count: usize,
+}
+
+impl std::fmt::Debug for TunHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunHandle")
+            .field("route_count", &self.route_count)
+            .finish()
+    }
+}
+
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
@@ -15,6 +31,8 @@ pub struct RuntimeState {
     pub last_sync_at: Option<i64>,
     /// ACL snapshot fetched from the Controller. None = default-deny.
     pub acl_snapshot: Option<AclSnapshot>,
+    /// Live TUN session. Present while `zecurity up` is active.
+    pub tun_handle: Option<Arc<TunHandle>>,
 }
 
 #[derive(Debug, Clone)]

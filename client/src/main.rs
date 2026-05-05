@@ -5,14 +5,19 @@ mod error;
 mod grpc;
 mod ipc;
 mod login;
+mod net_stack;
 mod runtime;
 mod state_store;
+mod tun;
+mod tunnel_pool;
 mod cmd {
+    pub mod down;
     pub mod login;
     pub mod logout;
     pub mod resources;
     pub mod setup;
     pub mod status;
+    pub mod up;
 }
 
 use clap::{Parser, Subcommand};
@@ -48,6 +53,10 @@ enum Commands {
     Resources,
     /// Clear saved session and device state
     Logout,
+    /// Connect to Zecurity and make resources accessible by IP
+    Up,
+    /// Disconnect and remove resource routes
+    Down,
     /// Run as background daemon (launched by systemd — not for direct use)
     #[command(hide = true)]
     Daemon,
@@ -71,6 +80,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Status => cmd::status::run().await,
         Commands::Resources => cmd::resources::run().await,
         Commands::Logout => cmd::logout::run().await,
+        Commands::Up => cmd::up::run().await,
+        Commands::Down => cmd::down::run().await,
         Commands::Daemon => daemon::run().await,
     }
 }

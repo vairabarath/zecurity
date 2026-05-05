@@ -12,6 +12,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
+use x509_parser::prelude::*;
+
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::policy::PolicyCache;
@@ -93,9 +95,28 @@ pub async fn listen(
                 }
             };
 
+            let (spiffe_id, cert_serial) = {
+                let certs = tls_stream.get_ref().1.peer_certificates();
+                match certs.and_then(|c| c.first()) {
+                    Some(der) => match extract_peer_info(der.as_ref()) {
+                        Ok(info) => info,
+                        Err(e) => {
+                            tracing::warn!(peer = %peer_addr, error = %e, "failed to extract peer cert info");
+                            return;
+                        }
+                    },
+                    None => {
+                        tracing::warn!(peer = %peer_addr, "no peer certificate after mTLS handshake");
+                        return;
+                    }
+                }
+            };
+
             if let Err(e) = handle_stream(
                 tls_stream,
                 peer_addr,
+                spiffe_id,
+                cert_serial,
                 acl_clone,
                 hub_clone,
                 reg_clone,
@@ -114,17 +135,27 @@ pub async fn listen(
 pub async fn handle_stream<S>(
     mut stream: S,
     _peer_addr: SocketAddr,
+    client_spiffe_id: String,
+    cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
-    _agent_registry: Arc<AgentRegistry>,
-    _crl_manager: CrlManager,
+    agent_registry: Arc<AgentRegistry>,
+    crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let client_spiffe_id = "device://stub".to_string();
+    if crl_manager.is_revoked(&cert_serial) {
+        let response = TunnelResponse {
+            ok: false,
+            error: Some("certificate revoked".to_string()),
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+        send_response(&mut stream, &response).await?;
+        return Err(anyhow!("certificate revoked for spiffe_id={}", client_spiffe_id));
+    }
 
     let mut buf = vec![0u8; MAX_HANDSHAKE_SIZE];
     let n = stream.read(&mut buf).await?;
@@ -169,27 +200,24 @@ where
         return Err(anyhow!("access denied"));
     }
 
-    let acl_entry = decision.unwrap();
-    let is_protected = !acl_entry.resource_id.is_empty();
+    let _acl_entry = decision.unwrap();
+    let shield_id = agent_registry.shield_for_host(&req.destination);
 
-    if is_protected {
-        let shield_id = find_shield_for_resource(&acl_entry.resource_id).await?;
-        if let Some(shield_id) = shield_id {
-            let response = TunnelResponse {
-                ok: true,
-                error: None,
-                quic_addr: quic_advertise_addr().map(String::from),
-            };
-            send_response(&mut stream, &response).await?;
-            emit_access_log(control_tx, connector_id, &format!("allow spiffe_id={} dest={}:{} proto={} path=shield_relay shield={}", client_spiffe_id, req.destination, req.port, req.protocol, shield_id)).await;
+    if let Some(shield_id) = shield_id {
+        let response = TunnelResponse {
+            ok: true,
+            error: None,
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+        send_response(&mut stream, &response).await?;
+        emit_access_log(control_tx, connector_id, &format!("allow spiffe_id={} dest={}:{} proto={} path=shield_relay shield={}", client_spiffe_id, req.destination, req.port, req.protocol, shield_id)).await;
 
-            let relay = tunnel_hub
-                .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
-                .await?;
+        let relay = tunnel_hub
+            .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
+            .await?;
 
-            relay.relay_stream(stream).await?;
-            return Ok(());
-        }
+        relay.relay_stream(stream).await?;
+        return Ok(());
     }
 
     if req.protocol.to_lowercase() == "udp" {
@@ -282,6 +310,25 @@ async fn emit_access_log(
     let _ = control_tx.send(log_msg).await;
 }
 
-async fn find_shield_for_resource(_resource_id: &str) -> Result<Option<String>> {
-    Ok(None)
+/// Extract (spiffe_uri, cert_serial_bytes) from a DER-encoded peer certificate.
+fn extract_peer_info(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| anyhow!("failed to parse peer certificate: {:?}", e))?;
+
+    let serial = cert.raw_serial().to_vec();
+
+    let san = cert
+        .subject_alternative_name()
+        .map_err(|e| anyhow!("failed to parse SAN: {:?}", e))?
+        .ok_or_else(|| anyhow!("peer certificate has no SAN extension"))?;
+
+    for name in &san.value.general_names {
+        if let GeneralName::URI(uri) = name {
+            if uri.starts_with("spiffe://") {
+                return Ok((uri.to_string(), serial));
+            }
+        }
+    }
+
+    Err(anyhow!("peer certificate has no SPIFFE URI in SAN"))
 }
