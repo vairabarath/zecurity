@@ -367,3 +367,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Root Cause:** The SPIFFE-aware verifier only accepted the older `CertificateError::NotValidForName` variant. Current rustls returns `NotValidForNameContext { .. }` for the same DNS/SAN mismatch, so the client still aborted the handshake.
 **Fix:** Accept both rustls name-mismatch variants only after validating the server certificate has a connector SPIFFE URI under the same workspace trust domain as the client device certificate. Bumped client package version to `1.0.10` for the next release.
 See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.
+
+### Fix: New client device enrollment leaves ACL snapshot stale (M3 Controller)
+**File:** `controller/internal/client/service.go`
+**Issue:** After reinstall/login, the client received a new device SPIFFE ID, but connector dataplane denied the tunnel with `access denied` because it still held an ACL snapshot compiled before that device existed.
+**Root Cause:** `EnrollDevice` inserted and signed a new `client_devices` row but did not invalidate the policy snapshot cache or increment the policy version. Connector and client could keep using a stale ACL that allowed old device SPIFFE IDs only.
+**Fix:** Call `policyNotifier.NotifyPolicyChange(ctx, workspaceID)` after recording the device certificate so the next ACL snapshot includes the new client device SPIFFE.

@@ -387,6 +387,9 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	if err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID); err != nil {
 		return nil, status.Errorf(codes.Internal, "record device cert: %v", err)
 	}
+	if err := s.policyNotifier.NotifyPolicyChange(ctx, tokenClaims.TenantID); err != nil {
+		return nil, status.Errorf(codes.Internal, "refresh policy after device enrollment: %v", err)
+	}
 
 	return &clientv1.EnrollDeviceResponse{
 		CertificatePem:    certResult.CertificatePEM,

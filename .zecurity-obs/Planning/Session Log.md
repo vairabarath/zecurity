@@ -998,3 +998,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Cut/publish `client-v1.0.10`, reinstall the client, restart `zecurity-client.service`, run `zecurity-client up`, then retry the protected resource.
+
+---
+
+## 2026-05-05 — Codex (M3, Sprint 9 ACL refresh after client enrollment)
+
+**What was done:**
+- Diagnosed the post-QUIC `access denied` as stale ACL data after a new client device enrollment.
+- Updated `controller/internal/client/service.go` so `EnrollDevice` notifies policy change after recording the new device SPIFFE.
+- Documented the fix in Sprint 9 path.md.
+- Ran `cd controller && go build ./...`; build passes.
+
+**Key decisions:**
+- Invalidating the ACL cache at enrollment keeps the existing group/rule compiler model intact while ensuring new device SPIFFE IDs reach connectors on the next snapshot push.
+
+**What's next:**
+- Deploy the updated controller, log in once, wait for connector heartbeat ACL push, then retry the protected resource.
