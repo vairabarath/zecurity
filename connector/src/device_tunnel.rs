@@ -311,6 +311,10 @@ async fn emit_access_log(
 }
 
 /// Extract (spiffe_uri, cert_serial_bytes) from a DER-encoded peer certificate.
+pub fn extract_peer_info_pub(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
+    extract_peer_info(cert_der)
+}
+
 fn extract_peer_info(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
     let (_, cert) = X509Certificate::from_der(cert_der)
         .map_err(|e| anyhow!("failed to parse peer certificate: {:?}", e))?;

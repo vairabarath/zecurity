@@ -83,7 +83,13 @@ export default function ClientInstall() {
 
   const controllerAddr = useMemo(() => {
     if (typeof window === 'undefined') return 'controller.example.com:9090'
-    return `${window.location.hostname}:9090`
+    const hostname = window.location.hostname
+    // nip.io hostnames (e.g. 192-168-1-223.nip.io) require external DNS.
+    // Convert back to raw IP so the install command works on LAN machines
+    // without internet-dependent DNS, and matches the cert's IP SAN.
+    const nipMatch = hostname.match(/^(\d+-\d+-\d+-\d+)\.nip\.io$/)
+    if (nipMatch) return `${nipMatch[1].replace(/-/g, '.')}:9090`
+    return `${hostname}:9090`
   }, [])
 
   const installCmd = `curl -fsSL ${INSTALL_SCRIPT_URL} | sudo CONTROLLER_ADDR=${controllerAddr} bash`

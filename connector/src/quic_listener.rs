@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use rustls;
 
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
@@ -64,29 +65,42 @@ pub async fn listen(
                 Err(e) => { warn!("QUIC connection error: {}", e); return; }
             };
 
+            // Extract SPIFFE ID and cert serial from the peer's mTLS certificate.
+            // The certificate is available on the connection after the handshake.
+            let (spiffe_id, cert_serial) = conn
+                .peer_identity()
+                .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok())
+                .and_then(|certs| certs.first().cloned())
+                .and_then(|cert| device_tunnel::extract_peer_info_pub(cert.as_ref()).ok())
+                .unwrap_or_else(|| {
+                    warn!("QUIC connection: no peer cert or SPIFFE extraction failed — rejecting");
+                    (String::new(), vec![])
+                });
+
+            if spiffe_id.is_empty() {
+                return;
+            }
+
             loop {
                 let (send, recv) = match conn.accept_bi().await {
                     Ok(pair) => pair,
                     Err(e) => { warn!("QUIC accept_bi: {}", e); break; }
                 };
 
-                // Combine send + recv into a single bidirectional AsyncRead+AsyncWrite.
-                let stream = tokio::io::join(recv, send);
-
-                let acl        = acl.clone();
-                let hub        = tunnel_hub.clone();
-                let reg        = agent_reg.clone();
-                let crl        = crl.clone();
-                let conn_id    = conn_id.clone();
-                let ctrl_tx    = ctrl_tx.clone();
+                let stream   = tokio::io::join(recv, send);
+                let acl      = acl.clone();
+                let hub      = tunnel_hub.clone();
+                let reg      = agent_reg.clone();
+                let crl      = crl.clone();
+                let conn_id  = conn_id.clone();
+                let ctrl_tx  = ctrl_tx.clone();
+                let sid      = spiffe_id.clone();
+                let serial   = cert_serial.clone();
 
                 tokio::spawn(async move {
                     let peer_addr = "0.0.0.0:0".parse().unwrap();
-                    // QUIC mTLS SPIFFE extraction is not yet implemented; stub values used.
-                    let spiffe_id = "device://quic-stub".to_string();
-                    let cert_serial: Vec<u8> = vec![];
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, peer_addr, spiffe_id, cert_serial, acl, hub, reg, crl, &conn_id, &ctrl_tx,
+                        stream, peer_addr, sid, serial, acl, hub, reg, crl, &conn_id, &ctrl_tx,
                     ).await {
                         warn!("QUIC stream error: {}", e);
                     }
