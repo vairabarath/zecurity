@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -73,6 +74,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 
 	// Look up the active connector's LAN address so clients know which QUIC
 	// tunnel endpoint to connect to. Connector QUIC always runs on port 9092.
+	// lan_addr may be stored as "ip:port" (gRPC port 9091) — extract only the host.
 	var connectorTunnelAddr string
 	var lanAddr string
 	_ = pool.QueryRow(ctx,
@@ -83,7 +85,11 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		workspaceID,
 	).Scan(&lanAddr)
 	if lanAddr != "" {
-		connectorTunnelAddr = lanAddr + ":9092"
+		host := lanAddr
+		if h, _, err := net.SplitHostPort(lanAddr); err == nil {
+			host = h
+		}
+		connectorTunnelAddr = host + ":9092"
 	}
 
 	return &clientv1.ACLSnapshot{
