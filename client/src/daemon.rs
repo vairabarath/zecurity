@@ -419,10 +419,19 @@ async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
         }
     };
 
-    // Spawn the packet-processing loop; keep AbortHandle for Down.
-    let connector_addr = config::load()
-        .map(|c| c.connector().to_string())
-        .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string());
+    // Resolve connector tunnel address: prefer the address embedded in the
+    // ACL snapshot (populated from the connector's live lan_addr in the DB),
+    // then fall back to config, then compiled-in default.
+    let connector_addr = {
+        let from_snapshot = acl.connector_tunnel_addr.as_str();
+        if !from_snapshot.is_empty() {
+            from_snapshot.to_string()
+        } else {
+            config::load()
+                .map(|c| c.connector().to_string())
+                .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string())
+        }
+    };
     let connector_socket: SocketAddr = connector_addr.parse()
         .unwrap_or_else(|_| "127.0.0.1:9092".parse().unwrap());
 

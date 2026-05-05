@@ -11,7 +11,9 @@ export default defineConfig({
     },
   },
   server: {
+    host: true,
     port: 5173,
+    allowedHosts: ['.nip.io'],
     // Proxy API calls to Go controller in development
     // so CORS is not needed during local dev
     //

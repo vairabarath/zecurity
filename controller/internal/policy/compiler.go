@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 )
 
@@ -12,7 +13,7 @@ import (
 // walking: enabled access_rules → groups → group members → client device SPIFFE IDs.
 //
 // Returns an error (and no snapshot) on any DB failure — callers must default-deny.
-func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, workspaceID string) (*clientv1.ACLSnapshot, error) {
+func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, pool *pgxpool.Pool, workspaceID string) (*clientv1.ACLSnapshot, error) {
 	rules, err := store.ListEnabledRulesWithResources(ctx, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: list rules: %w", err)
@@ -70,10 +71,26 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 	// increments on the next policy mutation — that is acceptable.
 	version := notifier.Version(workspaceID)
 
+	// Look up the active connector's LAN address so clients know which QUIC
+	// tunnel endpoint to connect to. Connector QUIC always runs on port 9092.
+	var connectorTunnelAddr string
+	var lanAddr string
+	_ = pool.QueryRow(ctx,
+		`SELECT COALESCE(lan_addr, '') FROM connectors
+		 WHERE workspace_id = $1
+		   AND status = 'active'
+		 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1`,
+		workspaceID,
+	).Scan(&lanAddr)
+	if lanAddr != "" {
+		connectorTunnelAddr = lanAddr + ":9092"
+	}
+
 	return &clientv1.ACLSnapshot{
-		WorkspaceId: workspaceID,
-		Version:     version,
-		GeneratedAt: time.Now().Unix(),
-		Entries:     entries,
+		WorkspaceId:          workspaceID,
+		Version:              version,
+		GeneratedAt:          time.Now().Unix(),
+		Entries:              entries,
+		ConnectorTunnelAddr:  connectorTunnelAddr,
 	}, nil
 }

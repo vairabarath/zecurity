@@ -76,7 +76,7 @@ func main() {
 		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
 		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
 		ValkeyURL:          mustEnv("VALKEY_URL"),
-		AllowedOrigin:      mustEnv("ALLOWED_ORIGIN"),
+		AllowedOrigin:      envOr("APP_BASE_URL", "http://localhost:5173"),
 	})
 	if err != nil {
 		log.Fatalf("auth init: %v", err)
@@ -499,8 +499,11 @@ func controllerCertHosts(grpcPort string) []string {
 
 	// Always include the detected LAN IP so connectors on other LAN machines
 	// can verify the controller cert when connecting via its LAN address.
+	// Also add the nip.io DNS name (192-168-1-x.nip.io) so clients connecting
+	// via nip.io hostname pass TLS validation without a real DNS certificate.
 	if lanIP := netutil.DetectLANIP(); !netutil.IsLocalhost(lanIP) {
 		hosts[lanIP] = struct{}{}
+		hosts[strings.ReplaceAll(lanIP, ".", "-")+".nip.io"] = struct{}{}
 	}
 
 	if addr := os.Getenv("CONTROLLER_ADDR"); addr != "" {
