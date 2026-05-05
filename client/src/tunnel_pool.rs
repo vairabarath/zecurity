@@ -4,9 +4,75 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use quinn::Connection;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::{CertificateError, DigitallySignedStruct, Error, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 use tokio::sync::Mutex;
+
+/// Validates the full certificate chain against the workspace CA but skips the
+/// DNS-hostname / IP check.  SPIFFE certs carry identity in a URI SAN
+/// (`spiffe://...`) which rustls's standard WebPKI verifier always rejects
+/// because it is not a DNS name or IP address.  We accept
+/// `NotValidForName` as the sole allowed deviation; every other validation
+/// (chain trust, validity period, key usage) is still enforced.
+#[derive(Debug)]
+struct SpiffeServerVerifier {
+    inner: Arc<rustls::client::WebPkiServerVerifier>,
+}
+
+impl SpiffeServerVerifier {
+    fn new(roots: rustls::RootCertStore) -> Arc<Self> {
+        let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .expect("build WebPkiServerVerifier");
+        Arc::new(Self { inner })
+    }
+}
+
+impl ServerCertVerifier for SpiffeServerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, Error> {
+        match self
+            .inner
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        {
+            Ok(v) => Ok(v),
+            Err(Error::InvalidCertificate(CertificateError::NotValidForName)) => {
+                Ok(ServerCertVerified::assertion())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
 
 pub struct TunnelPool {
     connections: Arc<Mutex<HashMap<SocketAddr, Connection>>>,
@@ -43,7 +109,8 @@ impl TunnelPool {
         }
 
         let tls_config = rustls::ClientConfig::builder()
-            .with_root_certificates(root_store)
+            .dangerous()
+            .with_custom_certificate_verifier(SpiffeServerVerifier::new(root_store))
             .with_client_auth_cert(cert_chain, private_key)
             .context("build rustls client config")?;
 
