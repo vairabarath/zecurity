@@ -94,9 +94,9 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
   - `TunnelOpened { connection_id, ok, error }` — field 9, Shield → Connector
   - `TunnelData { connection_id, data bytes }` — field 10, bidirectional
   - `TunnelClose { connection_id, error }` — field 11, bidirectional
-- [ ] **TEAM** Run `buf generate` from repo root → Go stubs updated
-- [ ] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
-- [ ] **TEAM** Run `cd admin && npm run codegen`
+- [x] **TEAM** Run `buf generate` from repo root → Go stubs updated
+- [x] **TEAM** Run `cd controller && go generate ./graph/...` → gqlgen regenerates `generated.go`
+- [x] **TEAM** Run `cd admin && npm run codegen`
 
 > After Day 1: M3 starts connector infrastructure; M4 starts Shield tunnel.rs + Client TUN scaffold; M2 starts connector_logs schema.
 
@@ -170,7 +170,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 - [x] **M2-D1** `controller/migrations/014_connector_logs.sql` — `connector_logs` table: `id`, `workspace_id`, `connector_id`, `message`, `created_at` (note: 013 was taken by Sprint 8.5)
 - [x] **M2-D2** Controller handler for `connector_log` ControlMessage → insert into DB
 - [x] **M2-D3** GraphQL schema — add `ConnectorLog` type, `connectorLogs(limit: Int)` query, `revokeDevice(deviceId: ID!)` mutation, `clientDevices` query, updated `myDevices`
-- [ ] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
+- [x] **M2-D4** Run `cd controller && go generate ./graph/...` + `cd admin && npm run codegen`
 
 > Build check: `cd controller && go build ./...` passes.
 

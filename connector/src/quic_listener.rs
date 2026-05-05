@@ -82,8 +82,11 @@ pub async fn listen(
 
                 tokio::spawn(async move {
                     let peer_addr = "0.0.0.0:0".parse().unwrap();
+                    // QUIC mTLS SPIFFE extraction is not yet implemented; stub values used.
+                    let spiffe_id = "device://quic-stub".to_string();
+                    let cert_serial: Vec<u8> = vec![];
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, peer_addr, acl, hub, reg, crl, &conn_id, &ctrl_tx,
+                        stream, peer_addr, spiffe_id, cert_serial, acl, hub, reg, crl, &conn_id, &ctrl_tx,
                     ).await {
                         warn!("QUIC stream error: {}", e);
                     }

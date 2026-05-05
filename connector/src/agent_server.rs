@@ -102,6 +102,16 @@ impl ShieldRegistry {
         }
     }
 
+    /// Return the shield_id whose lan_ip matches `host`, or None if no connected Shield owns it.
+    pub fn shield_for_host(&self, host: &str) -> Option<String> {
+        self.health
+            .lock()
+            .expect("health map poisoned")
+            .iter()
+            .find(|(_, entry)| entry.lan_ip == host)
+            .map(|(id, _)| id.clone())
+    }
+
     /// Snapshot of alive shields for the health report sent to controller.
     pub fn get_shield_status_batch(&self) -> crate::proto::ShieldStatusBatch {
         let cutoff = unix_now() - SHIELD_STALE_THRESHOLD_SECS;

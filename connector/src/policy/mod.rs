@@ -77,6 +77,7 @@ mod tests {
     fn entry(resource_id: &str, allowed: Vec<&str>) -> AclEntry {
         AclEntry {
             resource_id: resource_id.into(),
+            name: resource_id.into(),
             address: "10.0.0.1".into(),
             port: 443,
             protocol: "tcp".into(),

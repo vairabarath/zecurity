@@ -4,12 +4,10 @@ import {
   Box,
   ChevronDown,
   Download,
-  Laptop,
   LayoutDashboard,
   Network,
   Plug,
   Radar,
-  ScrollText,
   Settings,
   Shield,
   ShieldCheck,
@@ -135,11 +133,7 @@ export function Sidebar() {
         ))}
         <TeamSection />
         {user?.role === 'ADMIN' && (
-          <>
-            <NavItem to="/access-log" label="Access Log" icon={ScrollText} />
-            <NavItem to="/devices" label="Devices" icon={Laptop} />
-            <NavItem to="/client-install" label="Install Client" icon={Download} />
-          </>
+          <NavItem to="/client-install" label="Install Client" icon={Download} />
         )}
       </nav>
 
