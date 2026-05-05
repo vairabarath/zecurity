@@ -79,7 +79,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 	var lanAddr string
 	_ = pool.QueryRow(ctx,
 		`SELECT COALESCE(lan_addr, '') FROM connectors
-		 WHERE workspace_id = $1
+		 WHERE tenant_id = $1
 		   AND status = 'active'
 		 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1`,
 		workspaceID,
