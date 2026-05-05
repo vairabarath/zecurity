@@ -3514,7 +3514,7 @@ dependencies = [
 
 [[package]]
 name = "zecurity-client"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "aes-gcm",
  "anyhow",

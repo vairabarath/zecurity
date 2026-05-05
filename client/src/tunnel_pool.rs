@@ -108,11 +108,13 @@ impl TunnelPool {
             root_store.add(ca).context("add CA cert to root store")?;
         }
 
-        let tls_config = rustls::ClientConfig::builder()
+        let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(SpiffeServerVerifier::new(root_store))
             .with_client_auth_cert(cert_chain, private_key)
             .context("build rustls client config")?;
+
+        tls_config.alpn_protocols = vec![b"ztna-tunnel-v1".to_vec()];
 
         let quic_client_cfg = quinn_proto::crypto::rustls::QuicClientConfig::try_from(tls_config)
             .map_err(|e| anyhow::anyhow!("build QUIC client config: {}", e))?;
