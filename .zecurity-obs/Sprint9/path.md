@@ -360,3 +360,10 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **File:** `client/src/daemon.rs`
 **Issue:** "expected &str, found String" on default connector.
 **Fix:** `.map(|c| c.connector().to_string())`.
+
+### Fix: QUIC client rejects connector SPIFFE-only certificate (M4 Client)
+**File:** `client/src/tunnel_pool.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** Client dataplane traffic failed before ACL/routing with `QUIC handshake`; connector logged `certificate not valid for name "connector"` because the client connected with TLS name `connector` while connector certificates only carry SPIFFE URI SANs.
+**Root Cause:** The SPIFFE-aware verifier only accepted the older `CertificateError::NotValidForName` variant. Current rustls returns `NotValidForNameContext { .. }` for the same DNS/SAN mismatch, so the client still aborted the handshake.
+**Fix:** Accept both rustls name-mismatch variants only after validating the server certificate has a connector SPIFFE URI under the same workspace trust domain as the client device certificate. Bumped client package version to `1.0.10` for the next release.
+See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-Phase Fixes.

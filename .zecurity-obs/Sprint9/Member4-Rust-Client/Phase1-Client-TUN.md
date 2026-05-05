@@ -415,3 +415,20 @@ async fn handle_request(req, state, conf, tun_slot: &TunSlot)
 **File:** `client/src/daemon.rs`
 **Issue:** The default connector address returned a `String` but `unwrap_or_else` expected `&str`. Build failed with "expected &str, found String".
 **Fix:** Changed to `.map(|c| c.connector().to_string())` to return a `String`.
+
+### Fix: QUIC client rejects connector SPIFFE-only certificate
+**File:** `client/src/tunnel_pool.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** Client dataplane access failed before tunnel authorization. The client logged `QUIC relay ended error=QUIC handshake`; the connector logged `certificate not valid for name "connector"` because connector certificates contain a SPIFFE URI SAN, not a DNS SAN named `connector`.
+
+**Root Cause:** The custom QUIC verifier allowed `CertificateError::NotValidForName`, but rustls 0.23 can return the richer `CertificateError::NotValidForNameContext { .. }` for the same SAN mismatch. That error was passed through, aborting the handshake.
+
+**Fix Applied:**
+```rust
+Err(Error::InvalidCertificate(CertificateError::NotValidForName))
+| Err(Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })) => {
+    self.verify_connector_spiffe(end_entity)?;
+    Ok(ServerCertVerified::assertion())
+}
+```
+
+The verifier now also parses the client device cert to derive the workspace trust domain and requires the connector server cert to contain `spiffe://<workspace-trust-domain>/connector/...` before accepting a DNS-name mismatch. The client package version was bumped to `1.0.10` for release.

@@ -982,3 +982,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Start Sprint 8 with M2 Day 1 schema/proto work: migration 012, `GetACLSnapshot`, Connector heartbeat ACL payload, and GraphQL schema/codegen.
+
+---
+
+## 2026-05-05 — Codex (M4, Sprint 9 client QUIC SPIFFE fix)
+
+**What was done:**
+- Diagnosed client dataplane failure from logs: QUIC handshake aborted before tunnel authorization because the client verified the connector cert against TLS name `connector`.
+- Updated `client/src/tunnel_pool.rs` to accept rustls `NotValidForNameContext` as a SPIFFE-name mismatch only when the connector cert has `spiffe://<workspace-trust-domain>/connector/...`.
+- Bumped client package version to `1.0.10` and documented the fix in Sprint 9 path and M4 client phase docs.
+- Ran `cd client && cargo build`; build passes with pre-existing warnings.
+
+**Key decisions:**
+- Kept workspace CA chain validation intact and added explicit connector SPIFFE validation instead of disabling server certificate checks.
+
+**What's next:**
+- Cut/publish `client-v1.0.10`, reinstall the client, restart `zecurity-client.service`, run `zecurity-client up`, then retry the protected resource.

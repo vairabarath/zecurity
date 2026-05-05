@@ -9,6 +9,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{CertificateError, DigitallySignedStruct, Error, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 use tokio::sync::Mutex;
+use x509_parser::prelude::*;
 
 /// Validates the full certificate chain against the workspace CA but skips the
 /// DNS-hostname / IP check.  SPIFFE certs carry identity in a URI SAN
@@ -19,17 +20,39 @@ use tokio::sync::Mutex;
 #[derive(Debug)]
 struct SpiffeServerVerifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
+    expected_prefix: String,
 }
 
 impl SpiffeServerVerifier {
-    fn new(roots: rustls::RootCertStore) -> Arc<Self> {
+    fn new(roots: rustls::RootCertStore, trust_domain: String) -> Arc<Self> {
         let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
             .expect("build WebPkiServerVerifier");
-        Arc::new(Self { inner })
+        Arc::new(Self {
+            inner,
+            expected_prefix: format!("spiffe://{}/connector/", trust_domain),
+        })
+    }
+
+    fn verify_connector_spiffe(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
+        let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
+            .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        let san = cert
+            .subject_alternative_name()
+            .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?
+            .ok_or(Error::InvalidCertificate(CertificateError::NotValidForName))?;
+
+        for name in &san.value.general_names {
+            if let GeneralName::URI(uri) = name {
+                if uri.starts_with(&self.expected_prefix) {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(Error::InvalidCertificate(CertificateError::NotValidForName))
     }
 }
-
 impl ServerCertVerifier for SpiffeServerVerifier {
     fn verify_server_cert(
         &self,
@@ -39,12 +62,20 @@ impl ServerCertVerifier for SpiffeServerVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        match self
-            .inner
-            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
-        {
-            Ok(v) => Ok(v),
-            Err(Error::InvalidCertificate(CertificateError::NotValidForName)) => {
+        match self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        ) {
+            Ok(v) => {
+                self.verify_connector_spiffe(end_entity)?;
+                Ok(v)
+            }
+            Err(Error::InvalidCertificate(CertificateError::NotValidForName))
+            | Err(Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })) => {
+                self.verify_connector_spiffe(end_entity)?;
                 Ok(ServerCertVerified::assertion())
             }
             Err(e) => Err(e),
@@ -88,6 +119,12 @@ impl TunnelPool {
                 .collect::<Result<Vec<_>, _>>()
                 .context("parse device cert PEM")?
         };
+        let trust_domain = extract_client_trust_domain(
+            cert_chain
+                .first()
+                .context("device cert chain is empty")?
+                .as_ref(),
+        )?;
 
         let private_key: PrivateKeyDer<'static> = {
             let mut reader = std::io::BufReader::new(key_pem.as_bytes());
@@ -110,7 +147,7 @@ impl TunnelPool {
 
         let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(SpiffeServerVerifier::new(root_store))
+            .with_custom_certificate_verifier(SpiffeServerVerifier::new(root_store, trust_domain))
             .with_client_auth_cert(cert_chain, private_key)
             .context("build rustls client config")?;
 
@@ -163,4 +200,29 @@ impl TunnelPool {
         let conn = self.get_or_connect(addr).await?;
         conn.open_bi().await.context("open QUIC stream")
     }
+}
+
+fn extract_client_trust_domain(cert_der: &[u8]) -> Result<String> {
+    let (_, cert) = X509Certificate::from_der(cert_der)
+        .map_err(|e| anyhow::anyhow!("parse device certificate DER: {:?}", e))?;
+    let san = cert
+        .subject_alternative_name()
+        .map_err(|e| anyhow::anyhow!("parse device certificate SAN: {:?}", e))?
+        .context("device certificate has no SAN extension")?;
+
+    for name in &san.value.general_names {
+        if let GeneralName::URI(uri) = name {
+            if let Some(rest) = uri.strip_prefix("spiffe://") {
+                if let Some((trust_domain, path)) = rest.split_once('/') {
+                    if path.starts_with("client/") {
+                        return Ok(trust_domain.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "device certificate has no client SPIFFE URI SAN"
+    ))
 }
