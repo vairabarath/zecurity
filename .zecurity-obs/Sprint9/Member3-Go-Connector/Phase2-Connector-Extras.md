@@ -209,3 +209,26 @@ cd connector && cargo build
 ```
 
 Warnings OK. Zero errors required before proceeding.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: skip redundant ACL snapshot pushes on connector heartbeat
+**File:** `proto/connector/v1/connector.proto`, `controller/internal/connector/control_stream.go`, `connector/src/control_stream.rs`, `connector/src/policy/mod.rs`
+**Issue:** The controller pushed a full ACL snapshot after every connector health report, even when the connector already had the current snapshot.
+
+**Root Cause:** `ConnectorHealthReport` only carried health metadata, not the connector's local ACL snapshot version. The controller could not compare versions and had to push every time to stay self-healing.
+
+**Fix Applied:**
+```proto
+message ConnectorHealthReport {
+  string version     = 1;
+  string hostname    = 2;
+  string public_ip   = 3;
+  string lan_addr    = 4;
+  uint64 acl_version = 5;
+}
+```
+
+Connector sends `policy_cache.version()` on the initial health report and each heartbeat. Controller compiles or reads the current workspace ACL snapshot, compares `r.AclVersion` with `snap.Version`, and skips the ACL payload when they match. A connector with no snapshot reports version `0`, so reconnect and missed-update recovery still receive the full snapshot.

@@ -1079,3 +1079,20 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Publish/install `client-v1.0.12`, then verify `login`, `resources`, and `up` work without running manual `sync` first.
+
+---
+
+## 2026-05-06 — Codex (M3/M4, Sprint 9 conditional connector ACL push)
+
+**What was done:**
+- Added `acl_version` to `ConnectorHealthReport`.
+- Updated connector heartbeats to report the current local ACL snapshot version.
+- Updated controller heartbeat handling to skip full ACL snapshot pushes when connector and controller versions already match.
+- Documented the fix in Sprint 9 path and connector phase docs.
+- Ran `cd controller && go build ./...` and `cd connector && cargo build`; both pass with existing warnings.
+
+**Key decisions:**
+- Heartbeat remains the self-healing path: connector version `0` or an older version triggers a full ACL push. Matching versions skip the payload.
+
+**What's next:**
+- Deploy controller and connector together because the heartbeat proto changed, then verify logs show `connector ACL already current` during steady-state heartbeats.

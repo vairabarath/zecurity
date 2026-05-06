@@ -100,10 +100,11 @@ message ResourceInstructionBatch {
 }
 
 message ConnectorHealthReport {
-  string version   = 1;
-  string hostname  = 2;
-  string public_ip = 3;
-  string lan_addr  = 4;
+  string version     = 1;
+  string hostname    = 2;
+  string public_ip   = 3;
+  string lan_addr    = 4;
+  uint64 acl_version = 5;  // connector's currently loaded ACL snapshot version; 0 means none
 }
 
 message ShieldStatusUpdate {

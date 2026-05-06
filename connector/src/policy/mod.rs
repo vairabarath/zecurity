@@ -25,6 +25,16 @@ impl PolicyCache {
         *self.snapshot.write().unwrap() = Some(snapshot);
     }
 
+    /// Current local ACL snapshot version. Returns 0 when no snapshot is loaded.
+    pub fn version(&self) -> u64 {
+        self.snapshot
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.version)
+            .unwrap_or(0)
+    }
+
     /// Returns true only when the snapshot exists, the resource entry exists,
     /// `allowed_spiffe_ids` is non-empty, and `client_spiffe_id` is in the list.
     pub fn is_allowed(&self, resource_id: &str, client_spiffe_id: &str) -> bool {

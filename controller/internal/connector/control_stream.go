@@ -275,7 +275,7 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 
 func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
 	connectorID := client.connectorID
-	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s", connectorID, r.Version, r.Hostname, r.LanAddr)
+	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
 	_, err := h.Pool.Exec(ctx,
 		`UPDATE connectors
 		    SET version           = $1,
@@ -290,12 +290,12 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
 	}
-	if err := h.pushACLSnapshot(ctx, client); err != nil {
+	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
 		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
 	}
 }
 
-func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient) error {
+func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient, connectorVersion uint64) error {
 	if h.PolicyStore == nil || h.PolicyCache == nil || h.PolicyNotifier == nil {
 		return nil
 	}
@@ -308,6 +308,11 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		}
 		h.PolicyCache.Set(client.tenantID, compiled)
 		snap = compiled
+	}
+
+	if connectorVersion == snap.Version {
+		log.Printf("control stream: connector ACL already current connector=%s version=%d entries=%d", client.connectorID, snap.Version, len(snap.Entries))
+		return nil
 	}
 
 	if err := client.send(&pb.ConnectorControlMessage{

@@ -397,3 +397,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** Manual `zecurity-client sync` worked, but normal flows could still use a stale daemon ACL until the user remembered to sync.
 **Root Cause:** `Resources` and `Up` read the in-memory ACL snapshot directly, and `login` did not wait for daemon-side ACL refresh success.
 **Fix:** Added a 60s ACL refresh TTL in the daemon. `Resources` and `Up` refresh when missing/stale, using a cached snapshot only when refresh fails and a cache already exists. `PostLoginState` now syncs ACL before returning success, and the login CLI checks daemon IPC errors. Status shows last successful ACL sync time. Bumped client package version to `1.0.12`.
+
+### Fix: Skip redundant connector ACL pushes on heartbeat (M3/M4 Control Stream)
+**File:** `proto/connector/v1/connector.proto`, `controller/internal/connector/control_stream.go`, `connector/src/control_stream.rs`, `connector/src/policy/mod.rs`
+**Issue:** Controller pushed the full ACL snapshot after every connector heartbeat, even when the connector already had the current snapshot version.
+**Root Cause:** Connector health reports did not include local ACL version, so the controller had no cheap way to detect whether the connector was current.
+**Fix:** Added `acl_version` to `ConnectorHealthReport`. Connector reports its current local ACL snapshot version, and controller compares that to the cached/compiled workspace snapshot. If versions match, controller skips the ACL payload; if connector reports `0` or an older version, controller sends the snapshot. Heartbeat remains the recovery path for reconnects and missed updates.

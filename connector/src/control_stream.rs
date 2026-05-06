@@ -142,6 +142,7 @@ async fn run_once(
                 hostname: hostname.to_string(),
                 public_ip: public_ip.to_string(),
                 lan_addr: lan_addr.to_string(),
+                acl_version: policy_cache.version(),
             })),
         })
         .await
@@ -206,6 +207,7 @@ async fn run_once(
                         hostname: hostname.to_string(),
                         public_ip: public_ip.to_string(),
                         lan_addr: lan_addr.to_string(),
+                        acl_version: policy_cache.version(),
                     })),
                 }).await.is_err() {
                     return Err(anyhow::anyhow!("outbound channel closed"));
