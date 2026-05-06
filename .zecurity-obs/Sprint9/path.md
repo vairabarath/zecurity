@@ -391,3 +391,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** The current client only refreshed ACL/resource snapshots at daemon startup and after login. There was no equivalent to the old project's manual `sync` path, so operators had to restart or re-login to force a fresh ACL after policy/resource changes.
 **Root Cause:** ACL fetch logic existed as a background helper, but it was not exposed through IPC or CLI.
 **Fix:** Added `zecurity-client sync`, an IPC `Sync` request, `sync_acl_now()` in the daemon, and `acl_last_sync_at` runtime metadata. The command fetches the latest ACL snapshot from the controller and updates daemon memory immediately.
+
+### Fix: Auto-refresh client ACL before resource use (M4 Client)
+**File:** `client/src/daemon.rs`, `client/src/cmd/login.rs`, `client/src/cmd/resources.rs`, `client/src/cmd/status.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** Manual `zecurity-client sync` worked, but normal flows could still use a stale daemon ACL until the user remembered to sync.
+**Root Cause:** `Resources` and `Up` read the in-memory ACL snapshot directly, and `login` did not wait for daemon-side ACL refresh success.
+**Fix:** Added a 60s ACL refresh TTL in the daemon. `Resources` and `Up` refresh when missing/stale, using a cached snapshot only when refresh fails and a cache already exists. `PostLoginState` now syncs ACL before returning success, and the login CLI checks daemon IPC errors. Status shows last successful ACL sync time. Bumped client package version to `1.0.12`.

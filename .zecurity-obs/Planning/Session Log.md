@@ -1062,3 +1062,20 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Test `zecurity-client sync` against a running controller/daemon, then implement automatic refresh behavior around `up`, `resources`, and login.
+
+---
+
+## 2026-05-06 — Codex (M4, Sprint 9 automatic client ACL refresh)
+
+**What was done:**
+- Added daemon-side ACL auto-refresh with a 60s TTL for `Resources` and `Up`.
+- Changed `PostLoginState` to sync ACL before reporting login success, and fixed the login CLI to fail if daemon IPC returns `ok=false`.
+- Added last successful ACL sync age to `zecurity-client status`.
+- Bumped client package version to `1.0.12` and documented the fix.
+- Ran `cd client && cargo build`; build passes with existing warnings.
+
+**Key decisions:**
+- Requests fail closed when no ACL snapshot exists. If a cached snapshot exists and refresh has a transient failure, the daemon logs the failure and continues with the cached snapshot.
+
+**What's next:**
+- Publish/install `client-v1.0.12`, then verify `login`, `resources`, and `up` work without running manual `sync` first.

@@ -23,7 +23,10 @@ pub async fn run() -> Result<()> {
                 .cert_expires_at
                 .map(format_duration_until)
                 .unwrap_or_else(|| "unknown".into());
-            println!("Status:     Running as {}, cert expires in {}", email, expires);
+            println!(
+                "Status:     Running as {}, cert expires in {}",
+                email, expires
+            );
 
             if let Some(id) = &resp.device_id {
                 println!("Device ID:  {}", id);
@@ -33,11 +36,16 @@ pub async fn run() -> Result<()> {
             }
 
             match (resp.acl_entry_count, resp.acl_snapshot_version) {
-                (None, _)              => println!("ACL:        not yet loaded"),
-                (Some(0), _)           => println!("ACL:        loaded (no policies configured for this workspace)"),
-                (Some(n), Some(0))     => println!("ACL:        loaded ({} rules)", n),
-                (Some(n), Some(v))     => println!("ACL:        loaded ({} rules, version {})", n, v),
-                (Some(n), None)        => println!("ACL:        loaded ({} rules)", n),
+                (None, _) => println!("ACL:        not yet loaded"),
+                (Some(0), _) => {
+                    println!("ACL:        loaded (no policies configured for this workspace)")
+                }
+                (Some(n), Some(0)) => println!("ACL:        loaded ({} rules)", n),
+                (Some(n), Some(v)) => println!("ACL:        loaded ({} rules, version {})", n, v),
+                (Some(n), None) => println!("ACL:        loaded ({} rules)", n),
+            }
+            if let Some(last_sync) = resp.acl_last_sync_at {
+                println!("ACL Sync:   {}", format_duration_since(last_sync));
             }
         }
         _ => {
@@ -46,4 +54,21 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn format_duration_since(ts: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs = now.saturating_sub(ts);
+    if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
 }

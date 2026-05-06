@@ -20,6 +20,7 @@ use crate::tun::TunManager;
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
+const ACL_REFRESH_TTL_SECS: i64 = 60;
 
 struct AclSyncResult {
     version: u64,
@@ -196,6 +197,15 @@ async fn handle_request(
         },
 
         IpcRequest::Resources => {
+            if let Err(e) = refresh_acl_if_needed(state, conf).await {
+                return IpcResponse {
+                    ok: false,
+                    kind: "Resources".into(),
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                };
+            }
+
             let s = state.read().await;
             let resources = s.acl_snapshot.as_ref().map(|snap| {
                 snap.entries
@@ -211,6 +221,9 @@ async fn handle_request(
             IpcResponse {
                 ok: true,
                 kind: "Resources".into(),
+                acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
+                acl_last_sync_at: s.acl_last_sync_at,
+                acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
                 resources,
                 ..Default::default()
             }
@@ -320,22 +333,14 @@ async fn handle_request(
                     info!("PostLoginState: durable state saved, runtime updated");
                     drop(s);
 
-                    // Fetch ACL snapshot in background — does not block IPC response.
-                    let state_clone = Arc::clone(state);
-                    let conf_clone = conf.clone();
-                    let ca_pem = stored.device.ca_cert_pem.clone();
-                    let access_token = stored.session.access_token.clone();
-                    let device_id = stored.device.id.clone();
-                    tokio::spawn(async move {
-                        fetch_and_store_acl(
-                            &state_clone,
-                            &conf_clone,
-                            ca_pem,
-                            access_token,
-                            device_id,
-                        )
-                        .await;
-                    });
+                    if let Err(e) = sync_acl_now(state, conf).await {
+                        return IpcResponse {
+                            ok: false,
+                            kind: "PostLoginState".into(),
+                            error: Some(format!("login state saved, but ACL sync failed: {}", e)),
+                            ..Default::default()
+                        };
+                    }
 
                     IpcResponse {
                         ok: true,
@@ -352,19 +357,32 @@ async fn handle_request(
             }
         }
 
-        IpcRequest::Up => handle_up(state, tun_slot).await,
+        IpcRequest::Up => handle_up(state, conf, tun_slot).await,
 
         IpcRequest::Down => handle_down(state, tun_slot).await,
     }
 }
 
-async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
+async fn handle_up(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> IpcResponse {
     // Reject if already up.
     if tun_slot.lock().await.is_some() {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
             error: Some("already up".into()),
+            ..Default::default()
+        };
+    }
+
+    if let Err(e) = refresh_acl_if_needed(state, conf).await {
+        return IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some(format!("ACL sync failed: {}", e)),
             ..Default::default()
         };
     }
@@ -607,6 +625,37 @@ async fn fetch_and_store_acl(
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
+        }
+    }
+}
+
+async fn refresh_acl_if_needed(
+    state: &SharedState,
+    conf: &config::ClientConf,
+) -> Result<Option<AclSyncResult>> {
+    let should_refresh = {
+        let s = state.read().await;
+        match s.acl_last_sync_at {
+            Some(last) if s.acl_snapshot.is_some() => {
+                now_unix().saturating_sub(last) >= ACL_REFRESH_TTL_SECS
+            }
+            _ => true,
+        }
+    };
+
+    if !should_refresh {
+        return Ok(None);
+    }
+
+    match sync_acl_now(state, conf).await {
+        Ok(result) => Ok(Some(result)),
+        Err(e) => {
+            if state.read().await.acl_snapshot.is_some() {
+                warn!(error = %e, "ACL refresh failed — using cached snapshot");
+                Ok(None)
+            } else {
+                Err(e)
+            }
         }
     }
 }

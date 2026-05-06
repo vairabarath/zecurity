@@ -467,3 +467,23 @@ IpcRequest::Sync => match sync_acl_now(state, conf).await { ... }
 ```
 
 `sync_acl_now()` reuses the stored device CA, access token, and device ID, fetches `GetAclSnapshot` from the controller, updates `RuntimeState.acl_snapshot`, and records `acl_last_sync_at`. This is the first parity step with the old project's manual sync flow.
+
+### Fix: auto-refresh ACL before `resources` and `up`
+**File:** `client/src/daemon.rs`, `client/src/cmd/login.rs`, `client/src/cmd/resources.rs`, `client/src/cmd/status.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** After adding manual sync, regular client workflows could still use stale ACL data unless the operator ran `zecurity-client sync` first.
+
+**Root Cause:** `Resources` and `Up` read `RuntimeState.acl_snapshot` directly. `PostLoginState` spawned ACL fetch in the background and returned success even if the snapshot failed to load.
+
+**Fix Applied:**
+```rust
+const ACL_REFRESH_TTL_SECS: i64 = 60;
+
+IpcRequest::Resources => {
+    refresh_acl_if_needed(state, conf).await?;
+    // return resources from refreshed snapshot
+}
+
+IpcRequest::Up => handle_up(state, conf, tun_slot).await
+```
+
+`refresh_acl_if_needed()` refreshes when the snapshot is missing or older than 60 seconds. If refresh fails and a cached snapshot exists, the daemon logs a warning and uses the cache; if no snapshot exists, the request fails closed. `PostLoginState` now calls `sync_acl_now()` before returning success, and `zecurity-client login` checks the daemon response. Status also prints the last successful ACL sync age. The client package version was bumped to `1.0.12` for release.

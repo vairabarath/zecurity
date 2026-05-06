@@ -19,15 +19,30 @@ pub async fn run() -> Result<()> {
                 println!("Run `zecurity-client login` if not connected.");
             } else {
                 println!("Resources ({}):", resources.len());
-                println!("{:<28} {:<24} {:<6} {}", "Name", "Address", "Port", "Protocol");
+                println!(
+                    "{:<28} {:<24} {:<6} {}",
+                    "Name", "Address", "Port", "Protocol"
+                );
                 println!("{}", "-".repeat(70));
                 for r in &resources {
-                    println!("{:<28} {:<24} {:<6} {}", r.name, r.address, r.port, r.protocol.to_uppercase());
+                    println!(
+                        "{:<28} {:<24} {:<6} {}",
+                        r.name,
+                        r.address,
+                        r.port,
+                        r.protocol.to_uppercase()
+                    );
                 }
             }
         }
+        Ok(resp) => {
+            println!(
+                "Could not load resources: {}",
+                resp.error.unwrap_or_else(|| "unknown error".into())
+            );
+        }
         _ => {
-            println!("Daemon not running — run `zecurity-client login` first.");
+            println!("Could not load resources — run `zecurity-client login` first.");
         }
     }
 
