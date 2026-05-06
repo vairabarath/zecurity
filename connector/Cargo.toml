@@ -1,6 +1,6 @@
 [package]
 name = "zecurity-connector"
-version = "1.0.8"
+version = "1.0.9"
 edition = "2021"
 description = "ZECURITY connector — enrollment, control streaming, and auto-update agent"
 
@@ -23,7 +23,7 @@ figment            = { version = "0.10", features = ["env", "toml"] }
 serde              = { version = "1", features = ["derive"] }
 serde_json         = "1"
 semver             = "1"
-reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest            = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 base64             = "0.22"
 time               = { version = "0.3", features = ["formatting"] }
 if-addrs           = "0.13"

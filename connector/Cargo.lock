@@ -1353,7 +1353,6 @@ version = "0.11.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "434b42fec591c96ef50e21e886936e66d3cc3f737104fdb9b737c40ffb94c098"
 dependencies = [
- "aws-lc-rs",
  "bytes",
  "fastbloom",
  "getrandom 0.3.4",
@@ -1506,7 +1505,6 @@ dependencies = [
  "log",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
@@ -2935,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "zecurity-connector"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "base64",
