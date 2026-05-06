@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use nftables::{
     batch::Batch,
-    expr::{Expression, Meta, MetaKey, NamedExpression, Payload, PayloadField, Range},
+    expr::{Expression, Meta, MetaKey, NamedExpression, Payload, PayloadField, Prefix, Range},
     helper,
     schema::{Chain, NfListObject, NfObject, Rule, Table},
     stmt::{Accept, Drop, Match, Operator, Statement},
@@ -402,6 +402,18 @@ fn source_accept_rule(
     port_expr: Expression<'static>,
     source: &str,
 ) -> Rule<'static> {
+    // Parse "addr/len" into a Prefix expression. Fall back to plain string for
+    // single-host addresses (no slash), which nftables resolves correctly.
+    let source_expr: Expression<'static> = if let Some((addr, len)) = source.split_once('/') {
+        let len: u32 = len.parse().expect("invalid prefix length in source rule");
+        Expression::Named(NamedExpression::Prefix(Prefix {
+            addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
+            len,
+        }))
+    } else {
+        Expression::String(Cow::Owned(source.to_string()))
+    };
+
     Rule {
         family: NfFamily::INet,
         table: TABLE.into(),
@@ -414,7 +426,7 @@ fn source_accept_rule(
                         field: "saddr".into(),
                     },
                 ))),
-                right: Expression::String(Cow::Owned(source.to_string())),
+                right: source_expr,
                 op: Operator::EQ,
             }),
             Statement::Match(Match {
