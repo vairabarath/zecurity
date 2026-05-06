@@ -31,6 +31,8 @@ pub struct RuntimeState {
     pub last_sync_at: Option<i64>,
     /// ACL snapshot fetched from the Controller. None = default-deny.
     pub acl_snapshot: Option<AclSnapshot>,
+    /// Unix timestamp of the last successful ACL snapshot fetch.
+    pub acl_last_sync_at: Option<i64>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
 }

@@ -450,3 +450,20 @@ cleanup_stale_interface().await;
 ```
 
 Cleanup now deletes the `zecurity0` link via rtnetlink, and create removes stale `zecurity0` before creating a fresh TUN. The client package version was bumped to `1.0.11` for release.
+
+### Fix: manual ACL/resource snapshot sync
+**File:** `client/src/main.rs`, `client/src/ipc.rs`, `client/src/daemon.rs`, `client/src/runtime.rs`, `client/src/cmd/sync.rs`
+**Issue:** ACL/resource snapshots were refreshed only during daemon startup and after login. There was no manual command to force a fresh snapshot after workspace policy, resource, or device membership changes.
+
+**Root Cause:** The daemon had internal ACL fetch logic, but no IPC request or CLI command exposed it.
+
+**Fix Applied:**
+```rust
+// CLI
+Commands::Sync => cmd::sync::run().await
+
+// IPC
+IpcRequest::Sync => match sync_acl_now(state, conf).await { ... }
+```
+
+`sync_acl_now()` reuses the stored device CA, access token, and device ID, fetches `GetAclSnapshot` from the controller, updates `RuntimeState.acl_snapshot`, and records `acl_last_sync_at`. This is the first parity step with the old project's manual sync flow.

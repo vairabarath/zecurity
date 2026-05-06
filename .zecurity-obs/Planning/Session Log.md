@@ -1046,3 +1046,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Publish/install `client-v1.0.11`, then verify repeated `zecurity-client up/down/up` works without manual `ip link del`.
+
+---
+
+## 2026-05-06 — Codex (M4, Sprint 9 manual client ACL sync)
+
+**What was done:**
+- Compared the old ZTA client ACL sync model to the current client and started implementing parity one step at a time.
+- Added `zecurity-client sync`, IPC request/response fields, daemon-side `sync_acl_now()`, and runtime `acl_last_sync_at` metadata.
+- Documented the fix in Sprint 9 path and M4 client phase docs.
+- Ran `cd client && cargo build`; build passes with existing warnings.
+
+**Key decisions:**
+- Kept this first step manual only. Auto refresh before `up`/`resources`/`status` and persisted snapshot metadata can be added in the next slice.
+
+**What's next:**
+- Test `zecurity-client sync` against a running controller/daemon, then implement automatic refresh behavior around `up`, `resources`, and login.

@@ -385,3 +385,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** `zecurity-client down` returned success, but the next `zecurity-client up` failed with `failed to create TUN device: create TUN device zecurity0`.
 **Root Cause:** `handle_up` moves the `AsyncDevice` into the net stack task, so `TunManager::cleanup()` no longer owns the device fd to drop. Aborting the task is asynchronous, and cleanup only removed routes, leaving the kernel link behind.
 **Fix:** `TunManager::cleanup()` now deletes the `zecurity0` link explicitly via rtnetlink, and `TunManager::create()` removes a stale `zecurity0` before creating a fresh TUN. Bumped client package version to `1.0.11`.
+
+### Fix: Manual client ACL sync command (M4 Client)
+**File:** `client/src/main.rs`, `client/src/ipc.rs`, `client/src/daemon.rs`, `client/src/runtime.rs`, `client/src/cmd/sync.rs`
+**Issue:** The current client only refreshed ACL/resource snapshots at daemon startup and after login. There was no equivalent to the old project's manual `sync` path, so operators had to restart or re-login to force a fresh ACL after policy/resource changes.
+**Root Cause:** ACL fetch logic existed as a background helper, but it was not exposed through IPC or CLI.
+**Fix:** Added `zecurity-client sync`, an IPC `Sync` request, `sync_acl_now()` in the daemon, and `acl_last_sync_at` runtime metadata. The command fetches the latest ACL snapshot from the controller and updates daemon memory immediately.

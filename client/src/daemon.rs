@@ -12,12 +12,20 @@ use crate::grpc::{self, client_v1::GetAclSnapshotRequest};
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
-use crate::runtime::{self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo};
+use crate::runtime::{
+    self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
+};
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::tun::TunManager;
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
+
+struct AclSyncResult {
+    version: u64,
+    entry_count: usize,
+    synced_at: i64,
+}
 
 pub async fn run() -> Result<()> {
     tracing_subscriber::fmt()
@@ -163,10 +171,29 @@ async fn handle_request(
                 cert_expires_at: s.device.as_ref().map(|d| d.cert_expires_at),
                 workspace: s.workspace.as_ref().map(|w| w.name.clone()),
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
+                acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
                 ..Default::default()
             }
         }
+
+        IpcRequest::Sync => match sync_acl_now(state, conf).await {
+            Ok(result) => IpcResponse {
+                ok: true,
+                kind: "Sync".into(),
+                acl_snapshot_version: Some(result.version),
+                acl_last_sync_at: Some(result.synced_at),
+                acl_entry_count: Some(result.entry_count),
+                synced_resources: Some(result.entry_count),
+                ..Default::default()
+            },
+            Err(e) => IpcResponse {
+                ok: false,
+                kind: "Sync".into(),
+                error: Some(e.to_string()),
+                ..Default::default()
+            },
+        },
 
         IpcRequest::Resources => {
             let s = state.read().await;
@@ -174,9 +201,9 @@ async fn handle_request(
                 snap.entries
                     .iter()
                     .map(|e| IpcResource {
-                        name:     e.name.clone(),
-                        address:  e.address.clone(),
-                        port:     e.port,
+                        name: e.name.clone(),
+                        address: e.address.clone(),
+                        port: e.port,
                         protocol: e.protocol.clone(),
                     })
                     .collect::<Vec<_>>()
@@ -200,7 +227,11 @@ async fn handle_request(
                 let mut s = state.write().await;
                 populate_runtime(&mut s, &stored);
                 info!("runtime state reloaded via LoadState");
-                IpcResponse { ok: true, kind: "LoadState".into(), ..Default::default() }
+                IpcResponse {
+                    ok: true,
+                    kind: "LoadState".into(),
+                    ..Default::default()
+                }
             }
             Err(e) => IpcResponse {
                 ok: false,
@@ -212,7 +243,11 @@ async fn handle_request(
 
         IpcRequest::GetToken => {
             let s = state.read().await;
-            match s.session.as_ref().filter(|sess| !sess.access_token.is_empty()) {
+            match s
+                .session
+                .as_ref()
+                .filter(|sess| !sess.access_token.is_empty())
+            {
                 Some(sess) => IpcResponse {
                     ok: true,
                     kind: "GetToken".into(),
@@ -255,7 +290,11 @@ async fn handle_request(
                     slug: workspace_slug.clone(),
                     trust_domain,
                 },
-                user: UserInfo { id: String::new(), email: user_email, role: String::new() },
+                user: UserInfo {
+                    id: String::new(),
+                    email: user_email,
+                    role: String::new(),
+                },
                 device: DeviceInfo {
                     id: device_id,
                     spiffe_id,
@@ -266,7 +305,11 @@ async fn handle_request(
                     hostname,
                     os,
                 },
-                session: SessionInfo { access_token, refresh_token, expires_at },
+                session: SessionInfo {
+                    access_token,
+                    refresh_token,
+                    expires_at,
+                },
             };
             let stored = StoredWorkspaceState::from_login(login_result);
 
@@ -284,7 +327,14 @@ async fn handle_request(
                     let access_token = stored.session.access_token.clone();
                     let device_id = stored.device.id.clone();
                     tokio::spawn(async move {
-                        fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, access_token, device_id).await;
+                        fetch_and_store_acl(
+                            &state_clone,
+                            &conf_clone,
+                            ca_pem,
+                            access_token,
+                            device_id,
+                        )
+                        .await;
                     });
 
                     IpcResponse {
@@ -330,7 +380,9 @@ async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some("no ACL snapshot — run zecurity-client status to check daemon state".into()),
+                error: Some(
+                    "no ACL snapshot — run zecurity-client status to check daemon state".into(),
+                ),
                 ..Default::default()
             }
         }
@@ -358,7 +410,11 @@ async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     };
 
     // Build QUIC tunnel pool from device mTLS cert.
-    let pool = match TunnelPool::new(&device.certificate_pem, &device.private_key_pem, &device.ca_cert_pem) {
+    let pool = match TunnelPool::new(
+        &device.certificate_pem,
+        &device.private_key_pem,
+        &device.ca_cert_pem,
+    ) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             return IpcResponse {
@@ -384,7 +440,8 @@ async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     };
 
     // Collect resource IPs from ACL snapshot.
-    let ips: Vec<IpAddr> = acl.entries
+    let ips: Vec<IpAddr> = acl
+        .entries
         .iter()
         .filter_map(|e| e.address.parse::<IpAddr>().ok())
         .collect();
@@ -432,7 +489,8 @@ async fn handle_up(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
                 .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string())
         }
     };
-    let connector_socket: SocketAddr = connector_addr.parse()
+    let connector_socket: SocketAddr = connector_addr
+        .parse()
         .unwrap_or_else(|_| "127.0.0.1:9092".parse().unwrap());
 
     let task = tokio::spawn(async move {
@@ -486,8 +544,8 @@ fn sd_notify_ready() {
     let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
         return;
     };
-    let _ = std::os::unix::net::UnixDatagram::unbound()
-        .and_then(|s| s.send_to(b"READY=1\n", &path));
+    let _ =
+        std::os::unix::net::UnixDatagram::unbound().and_then(|s| s.send_to(b"READY=1\n", &path));
 }
 
 fn sd_spawn_watchdog() {
@@ -541,12 +599,56 @@ async fn fetch_and_store_acl(
     match fetch_acl_snapshot(conf, &ca_pem, &access_token, &device_id).await {
         Ok(snapshot) => {
             let version = snapshot.version;
+            let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_snapshot = Some(snapshot);
+            s.acl_last_sync_at = Some(synced_at);
             info!(version, "ACL snapshot stored");
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
         }
     }
+}
+
+async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
+    let (ca_pem, access_token, device_id) = {
+        let s = state.read().await;
+        let device = s.device.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no device identity — run zecurity-client login first")
+        })?;
+        let session = s
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no session — run zecurity-client login first"))?;
+        (
+            device.ca_cert_pem.clone(),
+            session.access_token.clone(),
+            device.id.clone(),
+        )
+    };
+
+    let snapshot = fetch_acl_snapshot(conf, &ca_pem, &access_token, &device_id).await?;
+    let result = AclSyncResult {
+        version: snapshot.version,
+        entry_count: snapshot.entries.len(),
+        synced_at: now_unix(),
+    };
+
+    let mut s = state.write().await;
+    s.acl_snapshot = Some(snapshot);
+    s.acl_last_sync_at = Some(result.synced_at);
+    info!(
+        version = result.version,
+        entries = result.entry_count,
+        "ACL snapshot synced"
+    );
+    Ok(result)
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }

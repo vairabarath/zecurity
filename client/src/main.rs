@@ -17,6 +17,7 @@ mod cmd {
     pub mod resources;
     pub mod setup;
     pub mod status;
+    pub mod sync;
     pub mod up;
 }
 
@@ -51,6 +52,8 @@ enum Commands {
     Status,
     /// List resources this device has access to
     Resources,
+    /// Refresh ACL/resource snapshot from the controller
+    Sync,
     /// Clear saved session and device state
     Logout,
     /// Connect to Zecurity and make resources accessible by IP
@@ -79,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Login => cmd::login::run().await,
         Commands::Status => cmd::status::run().await,
         Commands::Resources => cmd::resources::run().await,
+        Commands::Sync => cmd::sync::run().await,
         Commands::Logout => cmd::logout::run().await,
         Commands::Up => cmd::up::run().await,
         Commands::Down => cmd::down::run().await,

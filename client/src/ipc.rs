@@ -9,9 +9,9 @@ use tokio::net::UnixStream;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IpcResource {
-    pub name:     String,
-    pub address:  String,
-    pub port:     u32,
+    pub name: String,
+    pub address: String,
+    pub port: u32,
     pub protocol: String,
 }
 
@@ -20,26 +20,27 @@ pub struct IpcResource {
 pub enum IpcRequest {
     Status,
     Resources,
+    Sync,
     Shutdown,
     LoadState,
     GetToken,
     PostLoginState {
-        workspace_slug:  String,
-        workspace_name:  String,
-        workspace_id:    String,
-        trust_domain:    String,
-        user_email:      String,
-        access_token:    String,
-        refresh_token:   String,
-        expires_at:      i64,
-        device_id:       String,
-        spiffe_id:       String,
+        workspace_slug: String,
+        workspace_name: String,
+        workspace_id: String,
+        trust_domain: String,
+        user_email: String,
+        access_token: String,
+        refresh_token: String,
+        expires_at: i64,
+        device_id: String,
+        spiffe_id: String,
         certificate_pem: String,
         private_key_pem: String,
-        ca_cert_pem:     String,
+        ca_cert_pem: String,
         cert_expires_at: i64,
-        hostname:        String,
-        os:              String,
+        hostname: String,
+        os: String,
     },
     /// Stub — implemented in Sprint 9 Phase F.
     Up,
@@ -70,10 +71,14 @@ pub struct IpcResponse {
     pub workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acl_snapshot_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acl_last_sync_at: Option<i64>,
     /// Number of ACL entries in the loaded snapshot. None when no snapshot is loaded.
     /// Use this (not version) to determine whether policies are configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acl_entry_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub synced_resources: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<IpcResource>>,
 }
@@ -99,7 +104,11 @@ pub fn ipc_socket_path() -> PathBuf {
 pub fn check_same_user(stream: &UnixStream) -> bool {
     use std::os::unix::io::AsRawFd;
     unsafe {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         libc::getsockopt(
             stream.as_raw_fd(),
