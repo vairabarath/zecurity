@@ -379,3 +379,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** Client `status` showed a fresh ACL snapshot, but connector dataplane still denied access. Connector logs had no `ACL snapshot stored` entries after reconnect/heartbeat.
 **Root Cause:** The controller compiled ACL snapshots for clients but never sent `ConnectorControlMessage_AclSnapshot` on the connector Control stream.
 **Fix:** Added policy dependencies to `EnrollmentHandler` and push the cached/compiled ACL snapshot to the connector on every connector health report.
+
+### Fix: `zecurity-client down` leaves stale `zecurity0` interface (M4 Client)
+**File:** `client/src/tun.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** `zecurity-client down` returned success, but the next `zecurity-client up` failed with `failed to create TUN device: create TUN device zecurity0`.
+**Root Cause:** `handle_up` moves the `AsyncDevice` into the net stack task, so `TunManager::cleanup()` no longer owns the device fd to drop. Aborting the task is asynchronous, and cleanup only removed routes, leaving the kernel link behind.
+**Fix:** `TunManager::cleanup()` now deletes the `zecurity0` link explicitly via rtnetlink, and `TunManager::create()` removes a stale `zecurity0` before creating a fresh TUN. Bumped client package version to `1.0.11`.

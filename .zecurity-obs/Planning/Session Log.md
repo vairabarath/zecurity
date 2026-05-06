@@ -1030,3 +1030,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Deploy/restart controller and watch connector logs for `ACL snapshot stored`; then retry the protected resource.
+
+---
+
+## 2026-05-06 — Codex (M4, Sprint 9 client TUN cleanup)
+
+**What was done:**
+- Diagnosed `zecurity-client down` leaving the `zecurity0` interface behind, causing the next `up` to fail creating the TUN.
+- Updated `client/src/tun.rs` so cleanup explicitly deletes the kernel link via rtnetlink and create removes stale `zecurity0` before creating a new interface.
+- Bumped client package version to `1.0.11` and documented the fix.
+- Ran `cd client && cargo build`; build passes with existing warnings.
+
+**Key decisions:**
+- Explicit link deletion is more reliable than relying on async task abort/drop timing for TUN cleanup.
+
+**What's next:**
+- Publish/install `client-v1.0.11`, then verify repeated `zecurity-client up/down/up` works without manual `ip link del`.

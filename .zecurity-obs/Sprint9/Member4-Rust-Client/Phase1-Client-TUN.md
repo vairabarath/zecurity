@@ -432,3 +432,21 @@ Err(Error::InvalidCertificate(CertificateError::NotValidForName))
 ```
 
 The verifier now also parses the client device cert to derive the workspace trust domain and requires the connector server cert to contain `spiffe://<workspace-trust-domain>/connector/...` before accepting a DNS-name mismatch. The client package version was bumped to `1.0.10` for release.
+
+### Fix: `down` leaves stale `zecurity0` interface
+**File:** `client/src/tun.rs`, `client/Cargo.toml`, `client/Cargo.lock`
+**Issue:** `zecurity-client down` returned `Zecurity is down.`, but a following `zecurity-client up` failed with `failed to create TUN device: create TUN device zecurity0`.
+
+**Root Cause:** `handle_up` calls `TunManager::take_device()` and moves the `AsyncDevice` into `net_stack::run()`. After that, `TunManager::cleanup()` has no device fd to drop. It removed routes but did not explicitly delete the kernel link, and aborting the net stack task does not synchronously guarantee the fd/link is gone before the next `up`.
+
+**Fix Applied:**
+```rust
+// cleanup path
+drop(self.dev.take());
+let _ = del_link_by_index(&self.handle, self.if_index).await;
+
+// create path
+cleanup_stale_interface().await;
+```
+
+Cleanup now deletes the `zecurity0` link via rtnetlink, and create removes stale `zecurity0` before creating a fresh TUN. The client package version was bumped to `1.0.11` for release.

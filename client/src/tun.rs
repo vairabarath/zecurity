@@ -1,9 +1,9 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
 use netlink_packet_route::{
-    route::{RouteAddress, RouteAttribute, RouteHeader, RouteMessage},
+    route::{RouteAddress, RouteAttribute, RouteMessage},
     AddressFamily,
 };
 use rtnetlink::Handle;
@@ -17,6 +17,8 @@ pub struct TunManager {
 
 impl TunManager {
     pub async fn create() -> Result<Self> {
+        cleanup_stale_interface().await;
+
         let mut config = tun::Configuration::default();
         config
             .name("zecurity0")
@@ -70,6 +72,7 @@ impl TunManager {
             let _ = del_host_route(&self.handle, ip, self.if_index).await;
         }
         drop(self.dev.take());
+        let _ = del_link_by_index(&self.handle, self.if_index).await;
         Ok(())
     }
 }
@@ -89,6 +92,26 @@ async fn if_index_by_name(handle: &Handle, name: &str) -> Result<u32> {
         return Ok(msg.header.index);
     }
     anyhow::bail!("interface {} not found", name)
+}
+
+async fn cleanup_stale_interface() {
+    let Ok((conn, handle, _)) = rtnetlink::new_connection() else {
+        return;
+    };
+    tokio::spawn(conn);
+    if let Ok(if_index) = if_index_by_name(&handle, "zecurity0").await {
+        let _ = del_link_by_index(&handle, if_index).await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn del_link_by_index(handle: &Handle, if_index: u32) -> Result<()> {
+    handle
+        .link()
+        .del(if_index)
+        .execute()
+        .await
+        .with_context(|| format!("rtnetlink delete link index {}", if_index))
 }
 
 async fn add_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()> {
@@ -163,7 +186,3 @@ async fn list_routes_v4(handle: &Handle) -> Result<Vec<(IpAddr, u8)>> {
     }
     Ok(result)
 }
-
-// Suppress unused import warnings for types only needed in pattern matching.
-#[allow(unused_imports)]
-use std::net::{IpAddr as _IpAddr};
