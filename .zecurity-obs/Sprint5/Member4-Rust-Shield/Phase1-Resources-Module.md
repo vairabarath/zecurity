@@ -74,8 +74,9 @@ pub fn check_port(port: u16) -> bool {
 //    (or: nft add chain inet zecurity resource_protect { type filter hook input priority 0\; }
 //         if chain doesn't exist yet)
 // 2. For each resource:
-//    nft add rule inet zecurity resource_protect \
-//        {protocol} dport {port_from}-{port_to} iif != {lo, zecurity0} drop
+//    allow iifname "lo" {protocol} dport {port_from}-{port_to}
+//    allow ip saddr 127.0.0.0/8 {protocol} dport {port_from}-{port_to}
+//    drop {protocol} dport {port_from}-{port_to}
 // 3. Rebuild entire chain atomically — never append incrementally
 
 // Use nftables crate or shell out to `nft` binary
@@ -168,6 +169,22 @@ cargo build --manifest-path shield/Cargo.toml   # must pass
 - Flushing + rebuilding the chain on every instruction change ensures no stale rules accumulate — even if Shield restarts mid-apply.
 - The health check loop runs regardless of whether any resources are active — it's a no-op when `active` is empty.
 - Port range: if `port_from == port_to`, use single port in nftables rule. If different, use range `{port_from}-{port_to}`.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: Resource firewall should allow Shield-local relay, not Shield TUN
+**Issue:** The per-resource chain allowed `iifname "zecurity0"` before dropping the protected port, but the current protected-resource dataplane uses a Shield-local socket opened from `TunnelOpen`.
+
+**Root Cause:** The original resource firewall rule assumed packet-forwarded tunnel traffic entered through the Shield interface. Sprint 9 moved protected access to Connector → Shield Control-stream relay.
+
+**Fix Applied (`shield/src/resources.rs`):**
+```text
+allow iifname "lo" <proto> dport <port>
+allow ip saddr 127.0.0.0/8 <proto> dport <port>
+drop  <proto> dport <port>
+```
 
 ---
 

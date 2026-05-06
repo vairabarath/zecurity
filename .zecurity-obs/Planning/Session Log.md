@@ -1096,3 +1096,19 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Deploy controller and connector together because the heartbeat proto changed, then verify logs show `connector ACL already current` during steady-state heartbeats.
+
+---
+
+## 2026-05-06 — Codex (M4, Shield firewall relay semantics)
+
+**What was done:**
+- Compared the current Shield relay path against the old ZTA agent firewall model.
+- Updated `shield/src/resources.rs` so per-resource nftables rules allow local relay traffic via `lo` and `127.0.0.0/8`, then drop normal LAN access.
+- Removed Shield `zecurity0` from the per-resource allow path while leaving Shield interface setup untouched.
+- Updated Sprint 5/Sprint 9 and Shield service docs to reflect that Shield `zecurity0` is not in the Sprint 9 protected-resource dataplane.
+
+**Key decisions:**
+- Keep the current Connector → Shield Control-stream relay model and avoid deleting Shield interface setup until routing metadata cleanup is done.
+
+**What's next:**
+- Verify `nft list ruleset` on a Shield host shows no `iifname "zecurity0"` rule in `resource_protect`, then test LAN block plus client access through Connector → Shield.

@@ -21,7 +21,7 @@ tags:
 
 **RDE (Remote Device Extension)** — The client-facing data plane. End-user devices connect to the Connector's TLS/QUIC listener (`:9092`) with a device identity and destination. The Connector validates access against the local ACL snapshot delivered in Sprint 8, then routes the connection:
 
-- **Protected resource** (has nftables rules on Shield): Connector relays through the Shield via `TunnelOpen/Data/Close` messages on the existing Control stream. Shield opens TCP locally and streams data back via `TunnelData`. nftables is bypassed because traffic enters via `zecurity0`.
+- **Protected resource** (has nftables rules on Shield): Connector relays through the Shield via `TunnelOpen/Data/Close` messages on the existing Control stream. Shield opens TCP/UDP locally and streams data back via `TunnelData`. Shield `zecurity0` is not in the Sprint 9 relay dataplane.
 - **Unprotected resource**: Connector connects directly via `copy_bidirectional`.
 
 QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so clients can upgrade. CRL revocation checking and systemd watchdog keepalives round out Connector reliability.
@@ -43,7 +43,7 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 | **Shield field numbers** | `TunnelOpen = 8`, `TunnelOpened = 9`, `TunnelData = 10`, `TunnelClose = 11` in ShieldControlMessage oneof — reserved in Sprint 6, activated here |
 | **CRL refresh** | Connector fetches `/ca.crl` from controller every 5min; revoked serial → reject with "certificate revoked" |
 | **Systemd watchdog** | `READY=1` on startup; `WATCHDOG=1` every `WATCHDOG_USEC/2`; connector only |
-| **Shield tunnel relay** | Shield opens local TCP to resource destination, streams data via `TunnelData` — bypasses nftables because `zecurity0` is whitelisted |
+| **Shield tunnel relay** | Shield opens local TCP/UDP to resource destination and streams data via `TunnelData`; per-resource nftables allows local relay traffic and drops normal LAN access |
 | **Access enforcement** | Connector resolves resource + client SPIFFE ID against the Sprint 8 local ACL snapshot. Missing snapshot/resource/SPIFFE means deny. No per-request Controller check in the tunnel hot path. |
 | **Protected path detection** | Resource has `shield_id` set in the local resource/policy snapshot. Protected resources relay via Shield; unprotected resources connect directly. |
 | **Max chunk size** | 16 KB per `TunnelData` frame — enforced on both Connector and Shield sides |
@@ -403,3 +403,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** Controller pushed the full ACL snapshot after every connector heartbeat, even when the connector already had the current snapshot version.
 **Root Cause:** Connector health reports did not include local ACL version, so the controller had no cheap way to detect whether the connector was current.
 **Fix:** Added `acl_version` to `ConnectorHealthReport`. Connector reports its current local ACL snapshot version, and controller compares that to the cached/compiled workspace snapshot. If versions match, controller skips the ACL payload; if connector reports `0` or an older version, controller sends the snapshot. Heartbeat remains the recovery path for reconnects and missed updates.
+
+### Fix: Shield resource firewall should allow local relay, not Shield TUN
+**File:** `shield/src/resources.rs`
+**Issue:** The Sprint 9 relay path uses Shield-local sockets opened from `TunnelOpen`, but the per-resource nftables chain still allowed `iifname "zecurity0"` as if protected traffic entered through the Shield TUN.
+**Root Cause:** The old packet-routing assumption survived after the protected dataplane moved to Connector → Shield Control-stream relay.
+**Fix:** Per-resource rules now allow loopback interface traffic and localhost source traffic (`127.0.0.0/8`) before dropping the protected port. Shield `zecurity0` setup remains untouched for now, but it is no longer part of the per-resource allow path.

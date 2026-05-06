@@ -31,7 +31,7 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 | **Heartbeat interval** | Resource check = 30s (separate from heartbeat = 60s) |
 | **Delivery guarantee** | Controller resends all `managing`/`removing` resources every heartbeat until Shield ACKs |
 | **nftables chain** | Separate `chain resource_protect` — flushed + rebuilt atomically each update |
-| **LAN block** | `tcp dport {port} iif != {lo, zecurity0} drop` — lo + zecurity0 always allowed |
+| **LAN block** | Per protected port, allow local relay traffic (`lo` and `127.0.0.0/8`) and drop normal LAN access |
 
 ---
 
@@ -148,7 +148,7 @@ Run these once all phases are complete:
 - [ ] Click Protect → status = managing → next heartbeat delivers to Shield
 - [ ] Shield applies nftables → `nft list ruleset` shows `chain resource_protect`
 - [ ] Port blocked on LAN: `nc -zv {shield_lan_ip} {port}` from another host → refused
-- [ ] Port reachable via zecurity0: `nc -zv {interface_addr} {port}` → success
+- [ ] Port reachable by local Shield relay while normal LAN access is blocked
 - [ ] Shield health check: stop the service → status = failed within 90s
 - [ ] Restart service → status = protected within 90s
 - [ ] Click Unprotect → nftables rule removed → port accessible on LAN again

@@ -21,7 +21,7 @@ tags:
 
 ## What You're Building
 
-When a device connects to the Connector's RDE listener (`:9092`) and targets a resource running on a Shield host, the Connector cannot connect directly — the Shield host has nftables rules blocking LAN access on that port. Instead, the Connector sends a `TunnelOpen` message via the existing Control stream to the Shield. The Shield then opens a TCP connection locally (through `zecurity0` or direct loopback) and streams data back and forth using `TunnelData` messages.
+When a device connects to the Connector's RDE listener (`:9092`) and targets a resource running on a Shield host, the Connector cannot connect directly — the Shield host has nftables rules blocking LAN access on that port. Instead, the Connector sends a `TunnelOpen` message via the existing Control stream to the Shield. The Shield then opens a TCP/UDP socket locally and streams data back and forth using `TunnelData` messages.
 
 ---
 
@@ -30,7 +30,7 @@ When a device connects to the Connector's RDE listener (`:9092`) and targets a r
 ```
 Device → Connector :9092 (TLS)
   Connector ──TunnelOpen──► Shield (via Control stream)
-  Shield opens TCP to resource (e.g. 127.0.0.1:22 or via zecurity0)
+  Shield opens TCP/UDP to resource from the local host
   Shield ──TunnelOpened{ok:true}──► Connector
   Connector ◄──TunnelData──► Shield  (bidirectional)
   Either side sends TunnelClose to terminate
@@ -337,3 +337,17 @@ pub type TunnelHub = Arc<Mutex<HashMap<String, TunnelSession>>>;
 pub struct TunnelHub(Arc<Mutex<HashMap<String, TunnelSession>>>);
 ```
 All internal `.lock()` calls updated to `.0.lock()`. `Clone` is derived so `Arc` reference-count clone works the same as before.
+
+### Fix: Resource firewall no longer whitelists Shield `zecurity0`
+**Issue:** The Shield tunnel relay opens local sockets after receiving `TunnelOpen`; protected traffic does not enter through Shield `zecurity0`.
+
+**Root Cause:** The per-resource nftables chain still reflected an older packet-forwarding assumption.
+
+**Fix Applied (`shield/src/resources.rs`):**
+```text
+allow iifname "lo" <proto> dport <port>
+allow ip saddr 127.0.0.0/8 <proto> dport <port>
+drop  <proto> dport <port>
+```
+
+The Shield interface setup is left in place, but `zecurity0` is no longer whitelisted in `resource_protect`.

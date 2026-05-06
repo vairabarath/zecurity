@@ -138,13 +138,13 @@ table inet zecurity {
   chain input {
     type filter hook input priority 0; policy accept;
     iif "lo" accept
+    iif "zecurity0" accept
     ip saddr <connector_ip> accept
-    iif "zecurity0" drop         # default DROP until Sprint 5 resource rules
   }
 }
 ```
 
-Sprint 5 will add per-resource ACCEPT rules to this table.
+Sprint 5 adds a separate `resource_protect` chain. Current per-resource rules allow Shield-local relay traffic (`lo` and `127.0.0.0/8`) and drop normal LAN access to protected ports. Shield `zecurity0` still exists as bootstrap state, but it is not in the Sprint 9 protected-resource relay dataplane.
 
 **Implementation note:**
 - Interface creation/address/up uses `rtnetlink` directly from the daemon.
