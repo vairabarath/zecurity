@@ -3250,7 +3250,7 @@ dependencies = [
 
 [[package]]
 name = "zecurity-shield"
-version = "1.0.4"
+version = "1.0.6"
 dependencies = [
  "anyhow",
  "base64",

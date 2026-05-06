@@ -11,6 +11,8 @@ pub struct PolicyCache {
 pub struct ResourceAcl {
     pub resource_id: String,
     pub allowed_spiffe_ids: Vec<String>,
+    pub route_type: String,
+    pub shield_id: String,
 }
 
 impl PolicyCache {
@@ -63,6 +65,8 @@ impl PolicyCache {
         Some(ResourceAcl {
             resource_id: entry.resource_id.clone(),
             allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
+            route_type: entry.route_type.clone(),
+            shield_id: entry.shield_id.clone(),
         })
     }
 }
@@ -92,6 +96,8 @@ mod tests {
             port: 443,
             protocol: "tcp".into(),
             allowed_spiffe_ids: allowed.into_iter().map(String::from).collect(),
+            route_type: "shield".into(),
+            shield_id: "shield-test".into(),
         }
     }
 

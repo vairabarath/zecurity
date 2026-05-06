@@ -14,7 +14,7 @@ use nftables::{
 use tracing::{error, info, warn};
 
 use crate::proto::ResourceAck;
-use crate::{appmeta, util};
+use crate::util;
 
 const TABLE: &str = "zecurity";
 const PROTECT_CHAIN: &str = "resource_protect";
@@ -131,18 +131,24 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         };
         for proto in protos {
             let port_expr = port_expression(res.port_from, res.port_to);
-            // Allow loopback and zecurity0 (ZTNA tunnel); drop everything else for this port.
             batch.add(NfListObject::Rule(iif_accept_rule(
                 proto,
                 port_expr.clone(),
                 "lo",
             )));
-            batch.add(NfListObject::Rule(iif_accept_rule(
+            batch.add(NfListObject::Rule(source_accept_rule(
                 proto,
                 port_expr.clone(),
-                appmeta::SHIELD_INTERFACE_NAME,
+                "127.0.0.0/8",
             )));
             batch.add(NfListObject::Rule(port_drop_rule(proto, port_expr)));
+            info!(
+                resource_id = %res.resource_id,
+                proto = proto,
+                port = res.port_from,
+                rules = "lo,localhost-source,drop",
+                "firewall rules applied",
+            );
         }
     }
 
@@ -373,6 +379,42 @@ fn iif_accept_rule(protocol: &str, port_expr: Expression<'static>, iif: &str) ->
                     key: MetaKey::Iifname,
                 })),
                 right: Expression::String(Cow::Owned(iif.to_string())),
+                op: Operator::EQ,
+            }),
+            Statement::Match(Match {
+                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                    PayloadField {
+                        protocol: Cow::Owned(protocol.to_string()),
+                        field: "dport".into(),
+                    },
+                ))),
+                right: port_expr,
+                op: Operator::EQ,
+            }),
+            Statement::Accept(Some(Accept {})),
+        ]),
+        ..Rule::default()
+    }
+}
+
+fn source_accept_rule(
+    protocol: &str,
+    port_expr: Expression<'static>,
+    source: &str,
+) -> Rule<'static> {
+    Rule {
+        family: NfFamily::INet,
+        table: TABLE.into(),
+        chain: PROTECT_CHAIN.into(),
+        expr: Cow::Owned(vec![
+            Statement::Match(Match {
+                left: Expression::Named(NamedExpression::Payload(Payload::PayloadField(
+                    PayloadField {
+                        protocol: "ip".into(),
+                        field: "saddr".into(),
+                    },
+                ))),
+                right: Expression::String(Cow::Owned(source.to_string())),
                 op: Operator::EQ,
             }),
             Statement::Match(Match {

@@ -139,7 +139,7 @@ pub async fn handle_stream<S>(
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
-    agent_registry: Arc<AgentRegistry>,
+    _agent_registry: Arc<AgentRegistry>,
     crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
@@ -190,35 +190,97 @@ where
     };
 
     if decision.is_none() {
+        tracing::warn!(
+            spiffe_id = %client_spiffe_id,
+            dest = %req.destination,
+            port = req.port,
+            proto = %req.protocol,
+            reason = "no_acl_match",
+            "access denied",
+        );
         let response = TunnelResponse {
             ok: false,
             error: Some("access denied".to_string()),
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!("deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match", client_spiffe_id, req.destination, req.port, req.protocol)).await;
+        emit_access_log(control_tx, connector_id, &format!(
+            "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
+            client_spiffe_id, req.destination, req.port, req.protocol,
+        )).await;
         return Err(anyhow!("access denied"));
     }
 
-    let _acl_entry = decision.unwrap();
-    let shield_id = agent_registry.shield_for_host(&req.destination);
+    let acl_entry = decision.unwrap();
 
-    if let Some(shield_id) = shield_id {
+    if acl_entry.route_type == "shield" {
+        if acl_entry.shield_id.is_empty() {
+            tracing::error!(
+                spiffe_id = %client_spiffe_id,
+                resource_id = %acl_entry.resource_id,
+                reason = "missing_shield_id",
+                "access denied — shield route has no shield_id",
+            );
+            let response = TunnelResponse {
+                ok: false,
+                error: Some("shield routing configured but shield_id missing".to_string()),
+                quic_addr: quic_advertise_addr().map(String::from),
+            };
+            send_response(&mut stream, &response).await?;
+            emit_access_log(control_tx, connector_id, &format!(
+                "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
+                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+            )).await;
+            return Err(anyhow!("shield_id missing for shield-routed resource {}", acl_entry.resource_id));
+        }
+        let shield_id = acl_entry.shield_id.clone();
+        tracing::info!(
+            spiffe_id = %client_spiffe_id,
+            resource_id = %acl_entry.resource_id,
+            dest = %req.destination,
+            port = req.port,
+            proto = %req.protocol,
+            route = "shield",
+            shield = %shield_id,
+            "access allowed",
+        );
         let response = TunnelResponse {
             ok: true,
             error: None,
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!("allow spiffe_id={} dest={}:{} proto={} path=shield_relay shield={}", client_spiffe_id, req.destination, req.port, req.protocol, shield_id)).await;
+        emit_access_log(control_tx, connector_id, &format!(
+            "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
+            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, shield_id,
+        )).await;
 
-        let relay = tunnel_hub
+        match tunnel_hub
             .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
-            .await?;
-
-        relay.relay_stream(stream).await?;
+            .await
+        {
+            Ok(relay) => {
+                tracing::info!(shield = %shield_id, resource_id = %acl_entry.resource_id, "tunnel_opened ok");
+                relay.relay_stream(stream).await?;
+            }
+            Err(e) => {
+                tracing::error!(shield = %shield_id, resource_id = %acl_entry.resource_id, error = %e, "tunnel_opened error");
+                return Err(e);
+            }
+        }
         return Ok(());
     }
+
+    // direct route
+    tracing::info!(
+        spiffe_id = %client_spiffe_id,
+        resource_id = %acl_entry.resource_id,
+        dest = %req.destination,
+        port = req.port,
+        proto = %req.protocol,
+        route = "direct",
+        "access allowed",
+    );
 
     if req.protocol.to_lowercase() == "udp" {
         let response = TunnelResponse {
@@ -227,15 +289,27 @@ where
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!("allow spiffe_id={} dest={}:{} proto={} path=direct", client_spiffe_id, req.destination, req.port, req.protocol)).await;
+        emit_access_log(control_tx, connector_id, &format!(
+            "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
+            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+        )).await;
 
         relay_udp(&mut stream, &req.destination, req.port).await?;
         return Ok(());
     }
 
     let target = format!("{}:{}", req.destination, req.port);
-    let mut resource_conn = TcpStream::connect(&target).await
-        .map_err(|e| anyhow!("failed to connect to {}: {}", target, e))?;
+    let resource_conn_result = TcpStream::connect(&target).await;
+    let mut resource_conn = match resource_conn_result {
+        Ok(c) => {
+            tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
+            c
+        }
+        Err(e) => {
+            tracing::error!(resource_id = %acl_entry.resource_id, dest = %target, error = %e, "tunnel_opened error");
+            return Err(anyhow!("failed to connect to {}: {}", target, e));
+        }
+    };
 
     let response = TunnelResponse {
         ok: true,
@@ -243,7 +317,10 @@ where
         quic_addr: quic_advertise_addr().map(String::from),
     };
     send_response(&mut stream, &response).await?;
-    emit_access_log(control_tx, connector_id, &format!("allow spiffe_id={} dest={}:{} proto={} path=direct", client_spiffe_id, req.destination, req.port, req.protocol)).await;
+    emit_access_log(control_tx, connector_id, &format!(
+        "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
+        client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+    )).await;
 
     tokio::io::copy_bidirectional(&mut stream, &mut resource_conn).await?;
     Ok(())
