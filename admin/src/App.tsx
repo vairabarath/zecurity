@@ -52,14 +52,14 @@ export default function App() {
   return (
     <Routes>
       {/* Public routes */}
-      <Route path="/login"           element={<Login />} />
-      <Route path="/auth/callback"   element={<AuthCallback />} />
-      <Route path="/invite/:token"   element={<InviteAccept />} />
+      <Route path="/login" element={<Login />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/invite/:token" element={<InviteAccept />} />
 
       {/* Signup wizard routes */}
-      <Route path="/signup"             element={<Step1Email />} />
-      <Route path="/signup/workspace"   element={<Step2Workspace />} />
-      <Route path="/signup/auth"        element={<Step3Auth />} />
+      <Route path="/signup" element={<Step1Email />} />
+      <Route path="/signup/workspace" element={<Step2Workspace />} />
+      <Route path="/signup/auth" element={<Step3Auth />} />
 
       {/* Member route — authenticated, no sidebar */}
       <Route element={<ProtectedLayout />}>
@@ -68,7 +68,7 @@ export default function App() {
 
       {/* Admin-only routes — full AppShell with sidebar */}
       <Route element={<AdminLayout />}>
-        <Route path="/"          element={<Navigate to="/dashboard" replace />} />
+        <Route path="/" element={<Navigate to="/dashboard" replace />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/remote-networks" element={<RemoteNetworks />} />
         <Route path="/remote-networks/:id" element={<RemoteNetworkDetail />} />
@@ -78,16 +78,16 @@ export default function App() {
         <Route path="/shields/:shieldId" element={<ShieldDetail />} />
         <Route path="/connectors" element={<AllConnectors />} />
         <Route path="/connectors/:connectorId" element={<ConnectorDetail />} />
-        <Route path="/settings"  element={<Settings />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
-        <Route path="/topology"          element={<TopologyPage />} />
-        <Route path="/users"             element={<TeamUsers />} />
-        <Route path="/groups"            element={<Groups />} />
-        <Route path="/groups/:id"        element={<GroupDetail />} />
-        <Route path="/access-log"        element={<AccessLog />} />
-        <Route path="/devices"           element={<DeviceManagement />} />
+        <Route path="/topology" element={<TopologyPage />} />
+        <Route path="/users" element={<TeamUsers />} />
+        <Route path="/groups" element={<Groups />} />
+        <Route path="/groups/:id" element={<GroupDetail />} />
+        <Route path="/access-log" element={<AccessLog />} />
+        <Route path="/devices" element={<DeviceManagement />} />
       </Route>
     </Routes>
   )

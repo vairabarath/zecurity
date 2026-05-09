@@ -85,6 +85,7 @@ mod tests {
             workspace_id: "ws-test".into(),
             generated_at: 0,
             entries,
+            connector_tunnel_addr: String::new(),
         }
     }
 
