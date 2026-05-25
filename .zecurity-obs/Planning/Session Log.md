@@ -10,6 +10,21 @@ tags:
 
 ---
 
+## 2026-05-14 — Codex (GPT-5) — Connector Lint Diagnostics
+
+**What was done:**
+- Added `controller/internal/connector/doc.go` with a package comment to satisfy ST1000 for the connector package.
+- Removed unused `pingClient` helper from `control_stream.go`.
+- Replaced remaining `interface{}` signatures in the connector package with `any`.
+
+**Key decisions:**
+- Removed the unreferenced keepalive helper instead of suppressing `unusedfunc`, since no production code or tests call it.
+
+**What's next:**
+- Re-run connector package tests in an environment with Docker access; local sandbox verification cannot start the Valkey test container.
+
+---
+
 ## 2026-04-30 — Codex (GPT-5) — Invitation Bug Fixes
 
 **What was done:**

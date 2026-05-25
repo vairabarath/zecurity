@@ -120,11 +120,11 @@ export function InstallCommandModal({
   if (isShield) {
     return (
       <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
-        <DialogContent className="left-auto right-0 top-0 h-screen max-w-[500px] translate-x-0 translate-y-0 rounded-none border-l border-border bg-card p-0 text-card-foreground shadow-[0_30px_80px_oklch(0.10_0.02_250/0.45)] data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right [&>button]:hidden">
+        <DialogContent className="left-auto right-0 top-0 h-screen max-w-125 translate-x-0 translate-y-0 rounded-none border-l border-border bg-card p-0 text-card-foreground shadow-[0_30px_80px_oklch(0.10_0.02_250/0.45)] data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right [&>button]:hidden">
           <div className="flex h-full flex-col">
             <div className="flex items-start justify-between border-b border-border px-6 py-5">
               <div className="flex items-start gap-4">
-                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[oklch(0.78_0.10_235/0.14)] text-[oklch(0.78_0.10_235)]">
+                <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[oklch(0.78_0.10_235/0.14)] text-info">
                   <Shield className="h-6 w-6" />
                 </div>
                 <div>
@@ -244,7 +244,7 @@ export function InstallCommandModal({
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
-      <DialogContent className="left-auto right-0 top-0 h-screen max-w-[500px] translate-x-0 translate-y-0 rounded-none border-l border-border bg-card p-0 text-card-foreground shadow-[0_30px_80px_oklch(0.10_0.02_250/0.45)] data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right [&>button]:hidden">
+      <DialogContent className="left-auto right-0 top-0 h-screen max-w-125 translate-x-0 translate-y-0 rounded-none border-l border-border bg-card p-0 text-card-foreground shadow-[0_30px_80px_oklch(0.10_0.02_250/0.45)] data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right [&>button]:hidden">
         <div className="flex h-full flex-col">
           <div className="flex items-start justify-between border-b border-border px-6 py-5">
             <div className="flex items-start gap-4">
@@ -357,7 +357,7 @@ export function InstallCommandModal({
 
               <div className="rounded-2xl border border-[oklch(0.85_0.13_80/0.35)] bg-[oklch(0.85_0.13_80/0.08)] px-4 py-4">
                 <div className="flex items-start gap-3">
-                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[oklch(0.85_0.13_80/0.15)] text-[oklch(0.85_0.13_80)]">
+                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[oklch(0.85_0.13_80/0.15)] text-warning">
                     <AlertTriangle className="h-5 w-5" />
                   </div>
                   <div>

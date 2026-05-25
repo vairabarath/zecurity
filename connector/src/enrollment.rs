@@ -12,7 +12,7 @@
 //   7. Connect to controller gRPC (plaintext for now)
 //   8. Call Enroll RPC
 //   9. Save artifacts (connector.crt, workspace_ca.crt, state.json)
-//  10. Return EnrollmentResult
+//  10. Return EnrollmentState
 
 use std::fs;
 use std::path::Path;
@@ -59,20 +59,31 @@ pub struct EnrollmentState {
     pub enrolled_at: String,
     pub cert_not_after: String,
 }
+impl EnrollmentState {
+    /// Load EnrollmentState from state.json in the given state directory.
+    pub fn load(state_dir: &str) -> anyhow::Result<Self> {
+        let path = Path::new(state_dir).join("state.json");
+        let json = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        serde_json::from_str(&json).with_context(|| format!("failed to parse {}", path.display()))
+    }
 
-/// Result returned to main.rs after enrollment succeeds.
-pub struct EnrollmentResult {
-    pub connector_id: String,
-    pub trust_domain: String,
+    pub fn save(&self, state_dir: &str) -> anyhow::Result<()> {
+        let dir = Path::new(state_dir);
+        fs::create_dir_all(dir)
+            .with_context(|| format!("failed to create state dir {}", dir.display()))?;
+        let path = dir.join("state.json");
+        let json = serde_json::to_string_pretty(self).context("failed to serialize EnrollmentState")?;
+        fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))
+    }
 }
-
 // ── Public entry point ──────────────────────────────────────────────────────
 
 /// Run the full enrollment flow.
 ///
 /// Called from main.rs when state.json does not exist.
 /// Exits the process on fatal errors (e.g., MITM detection).
-pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
+pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
     let token = cfg
         .enrollment_token
         .as_deref()
@@ -192,23 +203,18 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentResult> {
         cert_not_after,
     };
 
-    let state_path = state_dir.join("state.json");
-    let state_json =
-        serde_json::to_string_pretty(&state).context("failed to serialize enrollment state")?;
-    fs::write(&state_path, state_json)
-        .with_context(|| format!("failed to write {}", state_path.display()))?;
-    info!(path = %state_path.display(), "saved enrollment state");
+    state
+        .save(&cfg.state_dir)
+        .context("failed to save enrollment state")?;
+    info!(path = %Path::new(&cfg.state_dir).join("state.json").display(), "saved enrollment state");
 
     // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
     // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
     // so the connector process (running as zecurity) may not have write access.
-    cleanup_config_after_enrollment(&claims.connector_id);
+    cleanup_config_after_enrollment(&state.connector_id);
 
     // Step 10: Return result
-    Ok(EnrollmentResult {
-        connector_id: claims.connector_id,
-        trust_domain: claims.trust_domain,
-    })
+    Ok(state)
 }
 
 // ── Config cleanup ─────────────────────────────────────────────────────────

@@ -77,8 +77,8 @@ export default function AllConnectors() {
           <p className="page-subtitle">Network gateways providing access to remote networks.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-[oklch(0.82_0.12_160)]">
-            <span className="status-pill-dot bg-[oklch(0.82_0.12_160)]" />
+          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-secure">
+            <span className="status-pill-dot bg-secure" />
             <span className="font-bold">{activeCount}</span> active
           </span>
           <span className="status-pill border-border bg-secondary text-muted-foreground">
@@ -92,7 +92,7 @@ export default function AllConnectors() {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <label className="toolbar-input max-w-[330px]">
+        <label className="toolbar-input max-w-82.5">
           <Search className="h-4 w-4 shrink-0" />
           <input
             value={query}
@@ -105,11 +105,10 @@ export default function AllConnectors() {
           <button
             key={option}
             onClick={() => setFilter(option)}
-            className={`rounded-full px-3.5 py-1.5 text-xs font-bold transition ${
-              filter === option
+            className={`rounded-full px-3.5 py-1.5 text-xs font-bold transition ${filter === option
                 ? 'border border-primary/30 bg-primary/12 text-primary'
                 : 'bg-secondary text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
             <span className="capitalize">{option}</span>
           </button>
@@ -118,14 +117,14 @@ export default function AllConnectors() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1120px] items-center grid-cols-[1.5fr_160px_1fr_1fr_110px_140px_110px] gap-4 px-5 py-4">
+          <div className="table-head grid min-w-280 items-center grid-cols-[1.5fr_160px_1fr_1fr_110px_140px_110px] gap-4 px-5 py-4">
             {['Name', 'Status', 'Network', 'Hostname', 'Version', 'Last Seen', 'Actions'].map((label, index) => (
               <div key={label + index} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[1120px] p-5 space-y-3">
+            <div className="min-w-280 p-5 space-y-3">
               {Array.from({ length: 5 }).map((_, index) => (
                 <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
               ))}
@@ -137,7 +136,7 @@ export default function AllConnectors() {
               action={networks.length > 0 ? <Button onClick={() => setShowAdd(true)}>Add Connector</Button> : <Link to="/remote-networks" className="text-sm font-semibold text-primary">Create a remote network</Link>}
             />
           ) : (
-            <div className="min-w-[1120px]">
+            <div className="min-w-280">
               {filteredConnectors.map((connector) => (
                 <div key={connector.id} className="admin-table-row group grid items-center grid-cols-[1.5fr_160px_1fr_1fr_110px_140px_110px] gap-4 px-5 py-4">
                   <div className="flex min-w-0 items-center gap-3">

@@ -82,7 +82,7 @@ pub struct ConnectorConfig {
     /// LAN address shields use to reach this connector's gRPC server (:9091).
     /// Set this to override auto-detection (e.g. "192.168.1.10:9091").
     /// If unset, the connector auto-detects its RFC-1918 LAN IP at startup.
-    #[serde(default)]
+    #[serde(default, alias = "connector_lan_addr")]
     pub lan_addr: Option<String>,
 
     /// Directory for persistent state files:

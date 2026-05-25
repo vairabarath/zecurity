@@ -25,6 +25,7 @@ use crate::proto::{
 };
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
+use crate::tls::cert_store::CertStore;
 use crate::util;
 
 const BACKOFF_INITIAL_SECS: u64 = 2;
@@ -108,13 +109,16 @@ async fn run_once(
     public_ip: &str,
     policy_cache: &Arc<PolicyCache>,
 ) -> Result<()> {
+    let cert_store =
+        CertStore::load(&cfg.state_dir).context("failed to load cert store for control stream")?;
+
     info!("starting mTLS SPIFFE preflight check");
-    verify_controller_spiffe_preflight(cfg)
+    verify_controller_spiffe_preflight(cfg, &cert_store)
         .await
         .context("controller SPIFFE preflight failed")?;
     info!("controller SPIFFE identity verified — opening Control stream");
 
-    let channel = build_channel(cfg)
+    let channel = build_channel(cfg, &cert_store)
         .await
         .context("failed to build mTLS channel for Control stream")?;
     let mut client = ConnectorServiceClient::new(channel);
@@ -260,26 +264,30 @@ async fn handle_controller_msg(
             let out_tx = out_tx.clone();
             tokio::spawn(async move {
                 let scan_cmd = ScanCommand {
-                    request_id:  cmd.request_id.clone(),
-                    targets:     cmd.targets,
-                    ports:       cmd.ports.into_iter().map(|p| p as u16).collect(),
+                    request_id: cmd.request_id.clone(),
+                    targets: cmd.targets,
+                    ports: cmd.ports.into_iter().map(|p| p as u16).collect(),
                     max_targets: cmd.max_targets,
                     timeout_sec: cmd.timeout_sec as u64,
                 };
                 let report = execute_scan(scan_cmd, &connector_id).await;
-                let proto_results: Vec<ProtoScanResult> = report.results.into_iter().map(|r| ProtoScanResult {
-                    ip:              r.ip,
-                    port:            r.port as u32,
-                    protocol:        r.protocol,
-                    service_name:    r.service_name,
-                    reachable_from:  r.reachable_from,
-                    first_seen:      r.first_seen,
-                }).collect();
+                let proto_results: Vec<ProtoScanResult> = report
+                    .results
+                    .into_iter()
+                    .map(|r| ProtoScanResult {
+                        ip: r.ip,
+                        port: r.port as u32,
+                        protocol: r.protocol,
+                        service_name: r.service_name,
+                        reachable_from: r.reachable_from,
+                        first_seen: r.first_seen,
+                    })
+                    .collect();
                 let proto_report = ConnectorControlMessage {
                     body: Some(CBody::ScanReport(ProtoScanReport {
                         request_id: report.request_id,
-                        results:    proto_results,
-                        error:      report.error.unwrap_or_default(),
+                        results: proto_results,
+                        error: report.error.unwrap_or_default(),
                     })),
                 };
                 let _ = out_tx.send(proto_report).await;

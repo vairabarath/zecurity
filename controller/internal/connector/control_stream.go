@@ -352,7 +352,7 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 // The gRPC server must register this as a StreamInterceptor alongside the UnaryInterceptor.
 func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.StreamServerInterceptor {
 	return func(
-		srv interface{},
+		srv any,
 		ss grpc.ServerStream,
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
@@ -412,16 +412,6 @@ func peerFromContext(ctx context.Context) ([]*x509.Certificate, error) {
 		return nil, status.Error(codes.Unauthenticated, "no client certificate")
 	}
 	return tlsInfo.State.PeerCertificates, nil
-}
-
-// Keepalive ping — sent periodically by a background goroutine if needed.
-// For now this is a utility used by tests and future keepalive logic.
-func pingClient(c *connectorStreamClient) error {
-	return c.send(&pb.ConnectorControlMessage{
-		Body: &pb.ConnectorControlMessage_Ping{
-			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
-		},
-	})
 }
 
 func (h *EnrollmentHandler) handleShieldDiscoveryBatch(ctx context.Context, batch *pb.ShieldDiscoveryBatch) {

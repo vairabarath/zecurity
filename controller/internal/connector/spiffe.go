@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
+	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
-	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -171,10 +171,10 @@ func parseSPIFFEID(cert *x509.Certificate) (trustDomain, role, id string, err er
 func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
-		req interface{},
+		req any,
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
-	) (interface{}, error) {
+	) (any, error) {
 		// Skip Enroll RPCs — neither connector nor shield has a certificate
 		// during enrollment; both authenticate via JWT instead.
 		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
