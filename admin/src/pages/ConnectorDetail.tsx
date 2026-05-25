@@ -88,7 +88,7 @@ function MetadataCell({
   accent?: boolean
 }) {
   return (
-    <div className="border-t border-border p-5 md:border-l md:first:border-l-0 md:[&:nth-child(3n+1)]:border-l-0">
+    <div className="border-t border-border p-5 md:border-l md:first:border-l-0 md:nth-[3n+1]:border-l-0">
       <div className="text-xs font-semibold uppercase tracking-[0.08em] text-muted-foreground">{label}</div>
       <div className={cn('mt-3 text-xl font-semibold', accent ? 'text-primary' : 'text-foreground')}>
         {value}
@@ -274,7 +274,7 @@ export default function ConnectorDetail() {
 
       <div className="flex items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-4">
-          <div className="grid h-14 w-14 place-items-center rounded-[16px] bg-primary/12 text-primary">
+          <div className="grid h-14 w-14 place-items-center rounded-xl bg-primary/12 text-primary">
             <Server className="h-7 w-7" />
           </div>
           <div className="min-w-0">
@@ -314,7 +314,7 @@ export default function ConnectorDetail() {
       {pending ? (
         <div className="rounded-[18px] border border-[oklch(0.85_0.13_80/0.35)] bg-[oklch(0.85_0.13_80/0.08)] px-5 py-4">
           <div className="flex items-start gap-3">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[oklch(0.85_0.13_80/0.15)] text-[oklch(0.85_0.13_80)]">
+            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-[oklch(0.85_0.13_80/0.15)] text-warning">
               <Terminal className="h-5 w-5" />
             </div>
             <div>
@@ -360,7 +360,7 @@ export default function ConnectorDetail() {
                     </Button>
                   </div>
                 ) : (
-                  <pre className="overflow-x-auto whitespace-pre-wrap break-words font-mono text-[15px] leading-8 text-foreground/90">
+                  <pre className="overflow-x-auto whitespace-pre-wrap wrap-break-word font-mono text-[15px] leading-8 text-foreground/90">
                     {installCommand ?? '# Install command will appear here'}
                   </pre>
                 )}

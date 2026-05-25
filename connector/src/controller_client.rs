@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,6 +11,7 @@ use tracing::warn;
 
 use crate::config::ConnectorConfig;
 use crate::tls;
+use crate::tls::cert_store::CertStore;
 
 pub async fn fetch_public_ip() -> String {
     let result = Client::builder().build().ok().map(|c| async move {
@@ -34,20 +34,10 @@ pub async fn fetch_public_ip() -> String {
     }
 }
 
-fn load_pem(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))
-}
-
-pub async fn build_channel(cfg: &ConnectorConfig) -> Result<Channel> {
-    let state_dir = Path::new(&cfg.state_dir);
-
-    let cert_pem = load_pem(&state_dir.join("connector.crt"))?;
-    let key_pem = load_pem(&state_dir.join("connector.key"))?;
-    let ca_pem = load_pem(&state_dir.join("workspace_ca.crt"))?;
-
+pub async fn build_channel(cfg: &ConnectorConfig, store: &CertStore) -> Result<Channel> {
     let tls = ClientTlsConfig::new()
-        .identity(Identity::from_pem(&cert_pem, &key_pem))
-        .ca_certificate(Certificate::from_pem(&ca_pem));
+        .identity(Identity::from_pem(&store.cert_pem, &store.key_pem))
+        .ca_certificate(Certificate::from_pem(&store.workspace_ca_pem));
 
     let grpc_addr = format!("https://{}", cfg.controller_addr);
     Channel::from_shared(grpc_addr.clone())
@@ -59,26 +49,24 @@ pub async fn build_channel(cfg: &ConnectorConfig) -> Result<Channel> {
         .with_context(|| format!("failed to connect to {}", grpc_addr))
 }
 
-pub async fn verify_controller_spiffe_preflight(cfg: &ConnectorConfig) -> Result<()> {
-    let state_dir = Path::new(&cfg.state_dir);
-
-    let cert_pem = load_pem(&state_dir.join("connector.crt"))?;
-    let key_pem = load_pem(&state_dir.join("connector.key"))?;
-    let ca_pem = load_pem(&state_dir.join("workspace_ca.crt"))?;
-
+pub async fn verify_controller_spiffe_preflight(
+    cfg: &ConnectorConfig,
+    store: &CertStore,
+) -> Result<()> {
     let mut root_store = RootCertStore::empty();
-    for cert_result in CertificateDer::pem_slice_iter(&ca_pem) {
+    for cert_result in CertificateDer::pem_slice_iter(&store.workspace_ca_pem) {
         let cert = cert_result.context("failed to parse CA cert from chain")?;
         root_store
             .add(cert)
             .context("failed to add CA to root store")?;
     }
 
-    let client_certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(&cert_pem)
-        .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))
-        .collect::<Result<_>>()?;
+    let client_certs: Vec<CertificateDer<'static>> =
+        CertificateDer::pem_slice_iter(&store.cert_pem)
+            .map(|r| r.map_err(|e| anyhow::anyhow!("failed to parse client cert: {}", e)))
+            .collect::<Result<_>>()?;
 
-    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&key_pem)
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(&store.key_pem)
         .map_err(|e| anyhow::anyhow!("failed to parse client private key: {}", e))?;
 
     let config = ClientConfig::builder()

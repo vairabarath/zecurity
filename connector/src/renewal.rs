@@ -90,11 +90,10 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
         cert_not_after: new_not_after_str.clone(),
     };
 
-    let state_path = Path::new(&cfg.state_dir).join("state.json");
-    let json = serde_json::to_string_pretty(&new_state).context("failed to serialize state")?;
-    tokio::fs::write(&state_path, json)
-        .await
-        .with_context(|| format!("failed to write {}", state_path.display()))?;
+    // 9. Save updated state.json
+    new_state
+        .save(&cfg.state_dir)
+        .context("failed to save renewed state")?;
 
     info!(
         "certificate renewed successfully, new expiry: {}",

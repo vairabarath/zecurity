@@ -85,14 +85,14 @@ export default function Connectors() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[930px] grid-cols-[1.2fr_130px_130px_180px_110px_120px_160px] gap-4 px-5 py-3">
+          <div className="table-head grid min-w-232.5 grid-cols-[1.2fr_130px_130px_180px_110px_120px_160px] gap-4 px-5 py-3">
             {['Name', 'Status', 'Last Seen', 'Hostname', 'Version', 'Public IP', 'Actions'].map((label, index) => (
               <div key={label + index} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
             ))}
           </div>
 
           {loading && !data ? (
-            <div className="min-w-[930px] p-5 space-y-3">
+            <div className="min-w-232.5 p-5 space-y-3">
               {Array.from({ length: 4 }).map((_, index) => (
                 <Skeleton key={index} className="h-14 rounded-2xl bg-secondary" />
               ))}
@@ -104,7 +104,7 @@ export default function Connectors() {
               action={<Button onClick={() => setShowInstall(true)}>Add Connector</Button>}
             />
           ) : (
-            <div className="min-w-[930px]">
+            <div className="min-w-232.5">
               {connectors.map((connector) => {
                 const canRevoke = connector.status === ConnectorStatus.Active || connector.status === ConnectorStatus.Disconnected
                 const canDelete = connector.status === ConnectorStatus.Pending || connector.status === ConnectorStatus.Revoked
@@ -133,7 +133,7 @@ export default function Connectors() {
                       {canRevoke ? (
                         <button
                           onClick={() => handleRevoke(connector.id)}
-                          className="rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] p-2 text-[oklch(0.85_0.13_80)]"
+                          className="rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] p-2 text-warning"
                         >
                           <ShieldOff className="h-4 w-4" />
                         </button>

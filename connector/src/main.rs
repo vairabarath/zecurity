@@ -15,13 +15,13 @@
 pub mod agent_server;
 pub mod agent_tunnel;
 mod appmeta;
-pub mod crl;
-pub mod discovery;
 mod config;
 mod control_stream;
 mod controller_client;
+pub mod crl;
 mod crypto;
 pub mod device_tunnel;
+pub mod discovery;
 mod enrollment;
 pub mod net_util;
 pub mod policy;
@@ -64,7 +64,6 @@ pub mod connector {
 /// Alias so connector modules can use `proto::*`.
 pub use connector::v1 as proto;
 
-use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -111,10 +110,7 @@ async fn main() -> anyhow::Result<()> {
     let state_path = Path::new(&cfg.state_dir).join("state.json");
 
     let enrollment_state: EnrollmentState = if state_path.exists() {
-        let state_json = fs::read_to_string(&state_path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", state_path.display(), e))?;
-        let state: EnrollmentState = serde_json::from_str(&state_json)
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", state_path.display(), e))?;
+        let state = EnrollmentState::load(&cfg.state_dir)?;
         info!(
             connector_id = %state.connector_id,
             trust_domain = %state.trust_domain,
@@ -125,30 +121,26 @@ async fn main() -> anyhow::Result<()> {
         state
     } else {
         info!("no state found — starting enrollment");
-        let result = enrollment::enroll(&cfg).await?;
+        let state = enrollment::enroll(&cfg).await?;
         info!(
-            connector_id = %result.connector_id,
-            trust_domain = %result.trust_domain,
+            connector_id = %state.connector_id,
+            trust_domain = %state.trust_domain,
             "enrollment complete"
         );
-        let state_json = fs::read_to_string(&state_path)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {}", state_path.display(), e))?;
-        serde_json::from_str(&state_json)
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", state_path.display(), e))?
+        state
     };
 
-    // Build controller channel for ShieldRegistry (proxies RenewCert to controller).
-    let state_dir = Path::new(&cfg.state_dir);
-    let cert_pem = fs::read(state_dir.join("connector.crt"))
-        .context("failed to read connector.crt for ShieldRegistry channel")?;
-    let key_pem = fs::read(state_dir.join("connector.key"))
-        .context("failed to read connector.key for ShieldRegistry channel")?;
-    let ca_pem = fs::read(state_dir.join("workspace_ca.crt"))
-        .context("failed to read workspace_ca.crt for ShieldRegistry channel")?;
+    // Load cert/key material once — shared by the controller channel and device tunnels.
+    let cert_store =
+        tls::cert_store::CertStore::load(&cfg.state_dir).context("failed to load cert store")?;
 
+    // Build controller channel for ShieldRegistry (proxies RenewCert to controller).
     let tls = ClientTlsConfig::new()
-        .identity(Identity::from_pem(&cert_pem, &key_pem))
-        .ca_certificate(Certificate::from_pem(&ca_pem));
+        .identity(Identity::from_pem(
+            &cert_store.cert_pem,
+            &cert_store.key_pem,
+        ))
+        .ca_certificate(Certificate::from_pem(&cert_store.workspace_ca_pem));
 
     let grpc_addr = format!("https://{}", cfg.controller_addr);
     let controller_channel = Channel::from_shared(grpc_addr)
@@ -195,10 +187,6 @@ async fn main() -> anyhow::Result<()> {
 
     let policy_cache = Arc::new(policy::PolicyCache::new());
 
-    // Load cert/key material for the device tunnel TLS/QUIC listeners.
-    let cert_store = tls::cert_store::CertStore::load(&cfg.state_dir)
-        .context("failed to load cert store for device tunnel")?;
-
     // Determine LAN IP for QUIC advertise address.
     let lan_ip = net_util::lan_ip()
         .map(|ip| ip.to_string())
@@ -212,14 +200,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Build CRL URL from controller HTTP address (fallback: derive host from gRPC addr + port 8080).
     let http_base = cfg.controller_http_addr.clone().unwrap_or_else(|| {
-        let host = cfg.controller_addr
+        let host = cfg
+            .controller_addr
             .split(':')
             .next()
             .unwrap_or("localhost")
             .to_string();
         format!("http://{}:8080", host)
     });
-    let crl_url = format!("{}/ca.crl?workspace_id={}", http_base, enrollment_state.workspace_id);
+    let crl_url = format!(
+        "{}/ca.crl?workspace_id={}",
+        http_base, enrollment_state.workspace_id
+    );
 
     let crl_manager = crl::CrlManager::new();
     if let Err(e) = crl_manager.refresh(&crl_url).await {
@@ -232,15 +224,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
-        let store       = cert_store.clone();
-        let acl         = acl.clone();
-        let hub         = tunnel_hub.clone();
-        let reg         = agent_registry.clone();
-        let crl         = crl_manager.clone();
-        let cid         = connector_id.clone();
-        let tx          = ctrl_tx.clone();
+        let store = cert_store.clone();
+        let acl = acl.clone();
+        let hub = tunnel_hub.clone();
+        let reg = agent_registry.clone();
+        let crl = crl_manager.clone();
+        let cid = connector_id.clone();
+        let tx = ctrl_tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = device_tunnel::listen("0.0.0.0:9092", store, acl, hub, reg, crl, cid, tx).await {
+            if let Err(e) =
+                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, reg, crl, cid, tx).await
+            {
                 error!(error = %e, "device tunnel (TLS) on :9092 failed");
             }
         });
@@ -248,18 +242,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn QUIC/UDP device tunnel listener on :9092.
     {
-        let store       = cert_store.clone();
-        let acl         = acl.clone();
-        let hub         = tunnel_hub.clone();
-        let reg         = agent_registry.clone();
-        let crl         = crl_manager.clone();
-        let cid         = connector_id.clone();
-        let tx          = ctrl_tx.clone();
+        let store = cert_store.clone();
+        let acl = acl.clone();
+        let hub = tunnel_hub.clone();
+        let reg = agent_registry.clone();
+        let crl = crl_manager.clone();
+        let cid = connector_id.clone();
+        let tx = ctrl_tx.clone();
         tokio::spawn(async move {
             if let Err(e) = quic_listener::listen(
-                "0.0.0.0:9092", &quic_advertise,
-                store, acl, hub, reg, crl, cid, tx,
-            ).await {
+                "0.0.0.0:9092",
+                &quic_advertise,
+                store,
+                acl,
+                hub,
+                reg,
+                crl,
+                cid,
+                tx,
+            )
+            .await
+            {
                 error!(error = %e, "device tunnel (QUIC) on :9092 failed");
             }
         });
@@ -271,5 +274,13 @@ async fn main() -> anyhow::Result<()> {
     watchdog::spawn_watchdog();
 
     // Run bidirectional Control stream to controller (blocks with reconnect loop).
-    control_stream::run_control_stream(&cfg, &enrollment_state, shield_registry, ack_rx, ctrl_rx, policy_cache).await
+    control_stream::run_control_stream(
+        &cfg,
+        &enrollment_state,
+        shield_registry,
+        ack_rx,
+        ctrl_rx,
+        policy_cache,
+    )
+    .await
 }

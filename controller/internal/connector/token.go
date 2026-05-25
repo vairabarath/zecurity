@@ -56,7 +56,7 @@ func GenerateEnrollmentToken(
 
 // VerifyEnrollmentToken parses and validates an enrollment JWT.
 func VerifyEnrollmentToken(cfg Config, tokenString string) (*EnrollmentClaims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &EnrollmentClaims{}, func(t *jwt.Token) (interface{}, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &EnrollmentClaims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
