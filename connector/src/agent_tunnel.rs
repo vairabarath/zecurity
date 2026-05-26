@@ -1,5 +1,6 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -51,15 +52,12 @@ impl AgentTunnelHub {
     /// Register a channel that delivers ShieldControlMessages to `shield_id`.
     /// Called by agent_server's `control()` after the Shield connects.
     pub fn register_shield(&self, shield_id: String, tx: mpsc::Sender<ShieldControlMessage>) {
-        self.shield_txs
-            .lock()
-            .unwrap()
-            .insert(shield_id, tx);
+        self.shield_txs.lock().insert(shield_id, tx);
     }
 
     /// Remove the Shield's send channel when it disconnects.
     pub fn unregister_shield(&self, shield_id: &str) {
-        self.shield_txs.lock().unwrap().remove(shield_id);
+        self.shield_txs.lock().remove(shield_id);
     }
 
     // -----------------------------------------------------------------------
@@ -67,41 +65,26 @@ impl AgentTunnelHub {
     // -----------------------------------------------------------------------
 
     pub fn dispatch_opened(&self, connection_id: &str, ok: bool, error: String) {
-        let tx = self
-            .relay_sessions
-            .lock()
-            .unwrap()
-            .get(connection_id)
-            .cloned();
+        let tx = self.relay_sessions.lock().get(connection_id).cloned();
         if let Some(tx) = tx {
             let _ = tx.try_send(RelayEvent::Opened { ok, error });
         }
     }
 
     pub fn dispatch_data(&self, connection_id: &str, data: Vec<u8>) {
-        let tx = self
-            .relay_sessions
-            .lock()
-            .unwrap()
-            .get(connection_id)
-            .cloned();
+        let tx = self.relay_sessions.lock().get(connection_id).cloned();
         if let Some(tx) = tx {
             let _ = tx.try_send(RelayEvent::Data(data));
         }
     }
 
     pub fn dispatch_close(&self, connection_id: &str, error: String) {
-        let tx = self
-            .relay_sessions
-            .lock()
-            .unwrap()
-            .get(connection_id)
-            .cloned();
+        let tx = self.relay_sessions.lock().get(connection_id).cloned();
         if let Some(tx) = tx {
             let _ = tx.try_send(RelayEvent::Close(error));
         }
         // Remove session — Shield closed its side.
-        self.relay_sessions.lock().unwrap().remove(connection_id);
+        self.relay_sessions.lock().remove(connection_id);
     }
 
     // -----------------------------------------------------------------------
@@ -130,7 +113,6 @@ impl AgentTunnelHub {
         let shield_tx = self
             .shield_txs
             .lock()
-            .unwrap()
             .get(shield_id)
             .cloned()
             .ok_or_else(|| anyhow!("shield {} not connected", shield_id))?;
@@ -142,7 +124,6 @@ impl AgentTunnelHub {
         let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(64);
         self.relay_sessions
             .lock()
-            .unwrap()
             .insert(connection_id.clone(), event_tx);
 
         shield_tx
@@ -161,11 +142,11 @@ impl AgentTunnelHub {
         match event_rx.recv().await {
             Some(RelayEvent::Opened { ok: true, .. }) => {}
             Some(RelayEvent::Opened { ok: false, error }) => {
-                self.relay_sessions.lock().unwrap().remove(&connection_id);
+                self.relay_sessions.lock().remove(&connection_id);
                 return Err(anyhow!("shield rejected tunnel: {}", error));
             }
             _ => {
-                self.relay_sessions.lock().unwrap().remove(&connection_id);
+                self.relay_sessions.lock().remove(&connection_id);
                 return Err(anyhow!("tunnel session closed before TunnelOpened"));
             }
         }

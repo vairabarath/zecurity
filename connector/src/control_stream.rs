@@ -97,6 +97,17 @@ pub async fn run_control_stream(
     }
 }
 
+/// Send a message on the outbound control stream.
+/// Returns an error if the stream is closed - causes run_once() to break and reconnect.
+async fn send_msg(
+    tx: &mpsc::Sender<ConnectorControlMessage>,
+    msg: ConnectorControlMessage,
+) -> Result<()> {
+    tx.send(msg)
+        .await
+        .map_err(|_| anyhow::anyhow!("outbound channel closed"))
+}
+
 async fn run_once(
     cfg: &ConnectorConfig,
     state: &mut EnrollmentState,
@@ -110,7 +121,7 @@ async fn run_once(
     policy_cache: &Arc<PolicyCache>,
 ) -> Result<()> {
     let cert_store =
-        CertStore::load(&cfg.state_dir).context("failed to load cert store for control stream")?;
+        CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for control stream")?;
 
     info!("starting mTLS SPIFFE preflight check");
     verify_controller_spiffe_preflight(cfg, &cert_store)
@@ -177,17 +188,11 @@ async fn run_once(
             }
 
             Some((_, ack)) = ack_rx.recv() => {
-                if out_tx.send(ConnectorControlMessage {
-                    body: Some(CBody::ResourceAcks(ResourceAckBatch { acks: vec![ack] })),
-                }).await.is_err() {
-                    return Err(anyhow::anyhow!("outbound channel closed"));
-                }
+                send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ResourceAcks(ResourceAckBatch { acks: vec![ack] })), }).await?;
             }
 
             Some(log_msg) = log_rx.recv() => {
-                if out_tx.send(log_msg).await.is_err() {
-                    return Err(anyhow::anyhow!("outbound channel closed"));
-                }
+                send_msg(&out_tx, log_msg).await?;
             }
 
             _ = health_ticker.tick() => {
@@ -198,32 +203,20 @@ async fn run_once(
                     acks.push(ack);
                 }
                 if !acks.is_empty() {
-                    if out_tx.send(ConnectorControlMessage {
-                        body: Some(CBody::ResourceAcks(ResourceAckBatch { acks })),
-                    }).await.is_err() {
-                        return Err(anyhow::anyhow!("outbound channel closed"));
-                    }
+                    send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ResourceAcks(ResourceAckBatch { acks })), }).await?;
                 }
 
-                if out_tx.send(ConnectorControlMessage {
-                    body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
-                        version: version.to_string(),
-                        hostname: hostname.to_string(),
-                        public_ip: public_ip.to_string(),
-                        lan_addr: lan_addr.to_string(),
-                        acl_version: policy_cache.version(),
-                    })),
-                }).await.is_err() {
-                    return Err(anyhow::anyhow!("outbound channel closed"));
-                }
+                send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
+                    version: version.to_string(),
+                    hostname: hostname.to_string(),
+                    public_ip: public_ip.to_string(),
+                    lan_addr: lan_addr.to_string(),
+                    acl_version: policy_cache.version(),
+                })), }).await?;
 
                 let status = shield_registry.get_shield_status_batch();
                 if !status.shields.is_empty() {
-                    if out_tx.send(ConnectorControlMessage {
-                        body: Some(CBody::ShieldStatus(status)),
-                    }).await.is_err() {
-                        return Err(anyhow::anyhow!("outbound channel closed"));
-                    }
+                    send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ShieldStatus(status)), }).await?;
                 }
             }
 
@@ -234,9 +227,7 @@ async fn run_once(
                         _ => 0,
                     };
                     info!(report_count, "flushing ShieldDiscoveryBatch upstream");
-                    if out_tx.send(batch_msg).await.is_err() {
-                        return Err(anyhow::anyhow!("outbound channel closed sending discovery batch"));
-                    }
+                    send_msg(&out_tx, batch_msg).await?;
                 }
             }
         }

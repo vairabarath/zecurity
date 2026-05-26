@@ -1,5 +1,6 @@
+use parking_lot::RwLock;
 use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::interval;
@@ -25,7 +26,7 @@ impl CrlManager {
 
     /// Returns true if `serial` (raw big-endian bytes from the peer cert) is revoked.
     pub fn is_revoked(&self, serial: &[u8]) -> bool {
-        self.revoked.read().unwrap().contains(serial)
+        self.revoked.read().contains(serial)
     }
 
     /// Fetch the DER CRL from `url`, parse it, and replace the cached revoked set.
@@ -42,15 +43,15 @@ impl CrlManager {
             .await
             .map_err(|e| anyhow::anyhow!("CRL body read error: {e}"))?;
 
-        let (_, crl) = parse_x509_crl(&bytes)
-            .map_err(|e| anyhow::anyhow!("CRL parse error: {:?}", e))?;
+        let (_, crl) =
+            parse_x509_crl(&bytes).map_err(|e| anyhow::anyhow!("CRL parse error: {:?}", e))?;
 
         let serials: HashSet<Vec<u8>> = crl
             .iter_revoked_certificates()
             .map(|r| r.raw_serial().to_vec())
             .collect();
 
-        *self.revoked.write().unwrap() = serials;
+        *self.revoked.write() = serials;
         Ok(())
     }
 

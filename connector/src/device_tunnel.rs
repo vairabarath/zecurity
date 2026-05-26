@@ -3,7 +3,6 @@
 // The core of the RDE: connection handler that enforces ACL and routes
 // either direct or via Shield relay.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -19,7 +18,6 @@ use crate::crl::CrlManager;
 use crate::policy::PolicyCache;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
-use crate::AgentRegistry;
 use crate::ControlMessage;
 
 const MAX_HANDSHAKE_SIZE: usize = 4096;
@@ -61,14 +59,13 @@ pub async fn listen(
     store: CertStore,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
-    agent_registry: Arc<AgentRegistry>,
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
 ) -> Result<()> {
+    use std::sync::Arc as StdArc;
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
-    use std::sync::Arc as StdArc;
 
     let tls_config = build_device_tunnel_tls(&store)?;
     let acceptor = TlsAcceptor::from(StdArc::new(tls_config));
@@ -80,7 +77,6 @@ pub async fn listen(
         let (stream, peer_addr) = listener.accept().await?;
         let acl_clone = acl.clone();
         let hub_clone = tunnel_hub.clone();
-        let reg_clone = agent_registry.clone();
         let crl_clone = crl_manager.clone();
         let conn_id_clone = connector_id.clone();
         let tx_clone = control_tx.clone();
@@ -114,12 +110,10 @@ pub async fn listen(
 
             if let Err(e) = handle_stream(
                 tls_stream,
-                peer_addr,
                 spiffe_id,
                 cert_serial,
                 acl_clone,
                 hub_clone,
-                reg_clone,
                 crl_clone,
                 &conn_id_clone,
                 &tx_clone,
@@ -134,12 +128,10 @@ pub async fn listen(
 
 pub async fn handle_stream<S>(
     mut stream: S,
-    _peer_addr: SocketAddr,
     client_spiffe_id: String,
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
-    _agent_registry: Arc<AgentRegistry>,
     crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
@@ -154,7 +146,10 @@ where
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        return Err(anyhow!("certificate revoked for spiffe_id={}", client_spiffe_id));
+        return Err(anyhow!(
+            "certificate revoked for spiffe_id={}",
+            client_spiffe_id
+        ));
     }
 
     let mut buf = vec![0u8; MAX_HANDSHAKE_SIZE];
@@ -163,12 +158,12 @@ where
         return Err(anyhow!("client closed connection before sending handshake"));
     }
 
-    let handshake = String::from_utf8(buf[..n].to_vec())
-        .map_err(|_| anyhow!("handshake not valid UTF-8"))?;
+    let handshake =
+        String::from_utf8(buf[..n].to_vec()).map_err(|_| anyhow!("handshake not valid UTF-8"))?;
     let handshake = handshake.trim();
 
-    let req: TunnelRequest = serde_json::from_str(handshake)
-        .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
+    let req: TunnelRequest =
+        serde_json::from_str(handshake).map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
 
     tracing::debug!(
         destination = %req.destination,
@@ -180,7 +175,11 @@ where
 
     let decision = match acl.resolve_resource(&req.destination, req.port, &req.protocol) {
         Some(acl_entry) => {
-            if !acl_entry.allowed_spiffe_ids.iter().any(|id| id == &client_spiffe_id) {
+            if !acl_entry
+                .allowed_spiffe_ids
+                .iter()
+                .any(|id| id == &client_spiffe_id)
+            {
                 None
             } else {
                 Some(acl_entry)
@@ -204,10 +203,15 @@ where
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!(
-            "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
-            client_spiffe_id, req.destination, req.port, req.protocol,
-        )).await;
+        emit_access_log(
+            control_tx,
+            connector_id,
+            &format!(
+                "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
+                client_spiffe_id, req.destination, req.port, req.protocol,
+            ),
+        )
+        .await;
         return Err(anyhow!("access denied"));
     }
 
@@ -227,11 +231,23 @@ where
                 quic_addr: quic_advertise_addr().map(String::from),
             };
             send_response(&mut stream, &response).await?;
-            emit_access_log(control_tx, connector_id, &format!(
-                "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
-                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-            )).await;
-            return Err(anyhow!("shield_id missing for shield-routed resource {}", acl_entry.resource_id));
+            emit_access_log(
+                control_tx,
+                connector_id,
+                &format!(
+                    "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                ),
+            )
+            .await;
+            return Err(anyhow!(
+                "shield_id missing for shield-routed resource {}",
+                acl_entry.resource_id
+            ));
         }
         let shield_id = acl_entry.shield_id.clone();
         tracing::info!(
@@ -250,10 +266,20 @@ where
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!(
-            "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
-            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, shield_id,
-        )).await;
+        emit_access_log(
+            control_tx,
+            connector_id,
+            &format!(
+                "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
+                client_spiffe_id,
+                acl_entry.resource_id,
+                req.destination,
+                req.port,
+                req.protocol,
+                shield_id,
+            ),
+        )
+        .await;
 
         match tunnel_hub
             .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
@@ -289,10 +315,15 @@ where
             quic_addr: quic_advertise_addr().map(String::from),
         };
         send_response(&mut stream, &response).await?;
-        emit_access_log(control_tx, connector_id, &format!(
-            "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-        )).await;
+        emit_access_log(
+            control_tx,
+            connector_id,
+            &format!(
+                "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
+                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+            ),
+        )
+        .await;
 
         relay_udp(&mut stream, &req.destination, req.port).await?;
         return Ok(());
@@ -317,10 +348,15 @@ where
         quic_addr: quic_advertise_addr().map(String::from),
     };
     send_response(&mut stream, &response).await?;
-    emit_access_log(control_tx, connector_id, &format!(
-        "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-        client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-    )).await;
+    emit_access_log(
+        control_tx,
+        connector_id,
+        &format!(
+            "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
+            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+        ),
+    )
+    .await;
 
     tokio::io::copy_bidirectional(&mut stream, &mut resource_conn).await?;
     Ok(())
@@ -331,9 +367,11 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let target = format!("{}:{}", dest, port);
-    let udp = UdpSocket::bind("0.0.0.0:0").await
+    let udp = UdpSocket::bind("0.0.0.0:0")
+        .await
         .map_err(|e| anyhow!("failed to bind UDP socket: {}", e))?;
-    udp.connect(&target).await
+    udp.connect(&target)
+        .await
         .map_err(|e| anyhow!("failed to connect UDP to {}: {}", target, e))?;
 
     let mut udp_buf = [0u8; 65535];

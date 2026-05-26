@@ -11,7 +11,6 @@ use crate::device_tunnel;
 use crate::policy::PolicyCache;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
-use crate::AgentRegistry;
 use crate::ControlMessage;
 
 /// QUIC/UDP listener on the same port as the TLS/TCP device tunnel (:9092).
@@ -28,7 +27,6 @@ pub async fn listen(
     store: CertStore,
     acl: Arc<PolicyCache>,
     tunnel_hub: AgentTunnelHub,
-    agent_registry: Arc<AgentRegistry>,
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
@@ -54,7 +52,6 @@ pub async fn listen(
 
         let acl          = acl.clone();
         let tunnel_hub   = tunnel_hub.clone();
-        let agent_reg    = agent_registry.clone();
         let crl          = crl_manager.clone();
         let conn_id      = connector_id.clone();
         let ctrl_tx      = control_tx.clone();
@@ -90,7 +87,6 @@ pub async fn listen(
                 let stream   = tokio::io::join(recv, send);
                 let acl      = acl.clone();
                 let hub      = tunnel_hub.clone();
-                let reg      = agent_reg.clone();
                 let crl      = crl.clone();
                 let conn_id  = conn_id.clone();
                 let ctrl_tx  = ctrl_tx.clone();
@@ -98,9 +94,8 @@ pub async fn listen(
                 let serial   = cert_serial.clone();
 
                 tokio::spawn(async move {
-                    let peer_addr = "0.0.0.0:0".parse().unwrap();
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, peer_addr, sid, serial, acl, hub, reg, crl, &conn_id, &ctrl_tx,
+                        stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx,
                     ).await {
                         warn!("QUIC stream error: {}", e);
                     }

@@ -5,17 +5,21 @@
 // We just get a fresh cert for the same key + same SPIFFE identity.
 //
 // Steps:
-//   1. Read existing private key from disk
+//   1. Load cert/key material from disk (CertStore)
 //   2. Extract public key in DER format
 //   3. Build mTLS channel (uses existing cert — still valid for ~48h)
 //   4. Call RenewCert RPC
 //   5. Save new connector.crt to disk
-//   6. Update state.json with new cert_not_after
+//   6. Save updated CA chain (workspace CA + intermediate CA)
+//   7. Parse new cert_not_after from the returned certificate
+//   8. Build updated EnrollmentState with new expiry
+//   9. Save updated state.json
 
 use std::path::Path;
 
+use crate::controller_client;
+use crate::tls::cert_store::CertStore;
 use anyhow::{Context, Result};
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::info;
 
 use crate::config::ConnectorConfig;
@@ -31,17 +35,17 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
     info!("starting certificate renewal");
 
     // 1. Read existing private key from disk
-    let key_path = Path::new(&cfg.state_dir).join("connector.key");
-    let key_pem = tokio::fs::read_to_string(&key_path)
-        .await
-        .with_context(|| format!("failed to read {}", key_path.display()))?;
+    let cert_store =
+        CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for renewal")?;
 
     // 2. Extract public key in DER format
+    let key_pem_str =
+        std::str::from_utf8(&cert_store.key_pem).context("connector.key is not valid UTF-8")?;
     let public_key_der =
-        crypto::extract_public_key_der(&key_pem).context("failed to extract public key")?;
+        crypto::extract_public_key_der(&key_pem_str).context("failed to extract public key")?;
 
     // 3. Build mTLS channel (uses existing cert — still valid)
-    let channel = build_mtls_channel(cfg)
+    let channel = controller_client::build_channel(cfg, &cert_store)
         .await
         .context("failed to build mTLS channel")?;
 
@@ -101,27 +105,4 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
     );
 
     Ok(new_state)
-}
-
-/// Build a tonic mTLS channel for renewal.
-async fn build_mtls_channel(cfg: &ConnectorConfig) -> Result<Channel> {
-    let state_dir = Path::new(&cfg.state_dir);
-
-    let cert_pem = tokio::fs::read(state_dir.join("connector.crt")).await?;
-    let key_pem = tokio::fs::read(state_dir.join("connector.key")).await?;
-    let ca_pem = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
-
-    let identity = Identity::from_pem(&cert_pem, &key_pem);
-    let ca = Certificate::from_pem(&ca_pem);
-
-    let tls = ClientTlsConfig::new().identity(identity).ca_certificate(ca);
-
-    let grpc_addr = format!("https://{}", cfg.controller_addr);
-    let channel = Channel::from_shared(grpc_addr.clone())?
-        .tls_config(tls)?
-        .connect()
-        .await
-        .with_context(|| format!("failed to connect to {}", grpc_addr))?;
-
-    Ok(channel)
 }

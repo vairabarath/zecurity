@@ -1,4 +1,4 @@
-use std::sync::RwLock;
+use parking_lot::RwLock;
 
 use crate::client::v1::{AclEntry, AclSnapshot};
 
@@ -24,14 +24,13 @@ impl PolicyCache {
 
     /// Replace the stored snapshot atomically.
     pub fn update(&self, snapshot: AclSnapshot) {
-        *self.snapshot.write().unwrap() = Some(snapshot);
+        *self.snapshot.write() = Some(snapshot);
     }
 
     /// Current local ACL snapshot version. Returns 0 when no snapshot is loaded.
     pub fn version(&self) -> u64 {
         self.snapshot
             .read()
-            .unwrap()
             .as_ref()
             .map(|s| s.version)
             .unwrap_or(0)
@@ -40,7 +39,7 @@ impl PolicyCache {
     /// Returns true only when the snapshot exists, the resource entry exists,
     /// `allowed_spiffe_ids` is non-empty, and `client_spiffe_id` is in the list.
     pub fn is_allowed(&self, resource_id: &str, client_spiffe_id: &str) -> bool {
-        let guard = self.snapshot.read().unwrap();
+        let guard = self.snapshot.read();
         let snapshot = match guard.as_ref() {
             None => return false,
             Some(s) => s,
@@ -49,19 +48,28 @@ impl PolicyCache {
             None => false,
             Some(entry) => {
                 !entry.allowed_spiffe_ids.is_empty()
-                    && entry.allowed_spiffe_ids.iter().any(|id| id == client_spiffe_id)
+                    && entry
+                        .allowed_spiffe_ids
+                        .iter()
+                        .any(|id| id == client_spiffe_id)
             }
         }
     }
 
     /// Look up a resource by its network tuple (address + port + protocol).
     /// Returns `None` when no snapshot is present or no entry matches — callers must deny.
-    pub fn resolve_resource(&self, address: &str, port: u16, protocol: &str) -> Option<ResourceAcl> {
-        let guard = self.snapshot.read().unwrap();
+    pub fn resolve_resource(
+        &self,
+        address: &str,
+        port: u16,
+        protocol: &str,
+    ) -> Option<ResourceAcl> {
+        let guard = self.snapshot.read();
         let snapshot = guard.as_ref()?;
-        let entry = snapshot.entries.iter().find(|e| {
-            e.address == address && e.port == port as u32 && e.protocol == protocol
-        })?;
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|e| e.address == address && e.port == port as u32 && e.protocol == protocol)?;
         Some(ResourceAcl {
             resource_id: entry.resource_id.clone(),
             allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
@@ -72,7 +80,10 @@ impl PolicyCache {
 }
 
 fn find_entry_by_id<'a>(snapshot: &'a AclSnapshot, resource_id: &str) -> Option<&'a AclEntry> {
-    snapshot.entries.iter().find(|e| e.resource_id == resource_id)
+    snapshot
+        .entries
+        .iter()
+        .find(|e| e.resource_id == resource_id)
 }
 
 #[cfg(test)]
@@ -111,14 +122,20 @@ mod tests {
     #[test]
     fn deny_unknown_resource() {
         let cache = PolicyCache::new();
-        cache.update(snapshot_with(vec![entry("res-1", vec!["spiffe://ws/client/device-1"])]));
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
         assert!(!cache.is_allowed("res-unknown", "spiffe://ws/client/device-1"));
     }
 
     #[test]
     fn deny_missing_spiffe_id() {
         let cache = PolicyCache::new();
-        cache.update(snapshot_with(vec![entry("res-1", vec!["spiffe://ws/client/device-1"])]));
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
         assert!(!cache.is_allowed("res-1", "spiffe://ws/client/device-OTHER"));
     }
 
@@ -132,7 +149,10 @@ mod tests {
     #[test]
     fn allow_known_resource_with_matching_spiffe() {
         let cache = PolicyCache::new();
-        cache.update(snapshot_with(vec![entry("res-1", vec!["spiffe://ws/client/device-1"])]));
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
         assert!(cache.is_allowed("res-1", "spiffe://ws/client/device-1"));
     }
 
@@ -145,7 +165,10 @@ mod tests {
     #[test]
     fn resolve_resource_matches_network_tuple() {
         let cache = PolicyCache::new();
-        cache.update(snapshot_with(vec![entry("res-1", vec!["spiffe://ws/client/device-1"])]));
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
         let result = cache.resolve_resource("10.0.0.1", 443, "tcp");
         assert!(result.is_some());
         assert_eq!(result.unwrap().resource_id, "res-1");
@@ -154,7 +177,10 @@ mod tests {
     #[test]
     fn resolve_resource_returns_none_on_port_mismatch() {
         let cache = PolicyCache::new();
-        cache.update(snapshot_with(vec![entry("res-1", vec!["spiffe://ws/client/device-1"])]));
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
         assert!(cache.resolve_resource("10.0.0.1", 80, "tcp").is_none());
     }
 }

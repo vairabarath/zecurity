@@ -1,7 +1,8 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ::time::OffsetDateTime;
@@ -23,6 +24,15 @@ use crate::shield_proto::{
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 
+/// All per-shield mutable state behind a single lock.
+#[derive(Debug)]
+struct ShieldMaps {
+    instruction_txs: HashMap<String, mpsc::Sender<ResourceInstruction>>,
+    resource_instructions: HashMap<String, Vec<ResourceInstruction>>,
+    health: HashMap<String, ShieldEntry>,
+    pending_discovery: HashMap<String, crate::shield_proto::DiscoveryReport>,
+}
+
 #[derive(Debug, Clone)]
 struct ShieldEntry {
     status: String,
@@ -34,15 +44,10 @@ struct ShieldEntry {
 /// Shared state for Shield-facing Control streams.
 #[derive(Debug, Clone)]
 pub struct ShieldRegistry {
-    // Stream-connected shields: shield_id → instruction sender
-    instruction_txs: Arc<Mutex<HashMap<String, mpsc::Sender<ResourceInstruction>>>>,
-    // Buffered instructions for shields that reconnect after the connector already received work.
-    resource_instructions: Arc<Mutex<HashMap<String, Vec<ResourceInstruction>>>>,
-    // Unified ack sink — consumed by control_stream.rs which forwards to controller
+    /// All per-shield mutable hansmaps behind a single lock.
+    maps: Arc<Mutex<ShieldMaps>>,
+    // Unified ack sink - consumed by control_stream.rs which forwards to controller
     pub ack_tx: mpsc::Sender<(String, ResourceAck)>,
-    health: Arc<Mutex<HashMap<String, ShieldEntry>>>,
-    // Pending discovery reports, keyed by shield_id — flushed upstream every 5s
-    pending_discovery: Arc<Mutex<HashMap<String, crate::shield_proto::DiscoveryReport>>>,
     controller_channel: Channel,
     trust_domain: String,
     connector_id: String,
@@ -59,11 +64,13 @@ impl ShieldRegistry {
         ack_tx: mpsc::Sender<(String, ResourceAck)>,
     ) -> Self {
         Self {
-            instruction_txs: Arc::new(Mutex::new(HashMap::new())),
-            resource_instructions: Arc::new(Mutex::new(HashMap::new())),
+            maps: Arc::new(Mutex::new(ShieldMaps {
+                instruction_txs: HashMap::new(),
+                resource_instructions: HashMap::new(),
+                health: HashMap::new(),
+                pending_discovery: HashMap::new(),
+            })),
             ack_tx,
-            health: Arc::new(Mutex::new(HashMap::new())),
-            pending_discovery: Arc::new(Mutex::new(HashMap::new())),
             controller_channel,
             trust_domain,
             connector_id,
@@ -77,12 +84,7 @@ impl ShieldRegistry {
         if instructions.is_empty() {
             return;
         }
-        let maybe_tx = self
-            .instruction_txs
-            .lock()
-            .expect("instruction_txs poisoned")
-            .get(shield_id)
-            .cloned();
+        let maybe_tx = self.maps.lock().instruction_txs.get(shield_id).cloned();
 
         if let Some(tx) = maybe_tx {
             let id = shield_id.to_string();
@@ -95,18 +97,18 @@ impl ShieldRegistry {
                 }
             });
         } else {
-            self.resource_instructions
+            self.maps
                 .lock()
-                .expect("resource_instructions poisoned")
+                .resource_instructions
                 .insert(shield_id.to_string(), instructions);
         }
     }
 
     /// Return the shield_id whose lan_ip matches `host`, or None if no connected Shield owns it.
     pub fn shield_for_host(&self, host: &str) -> Option<String> {
-        self.health
+        self.maps
             .lock()
-            .expect("health map poisoned")
+            .health
             .iter()
             .find(|(_, entry)| entry.lan_ip == host)
             .map(|(id, _)| id.clone())
@@ -116,9 +118,9 @@ impl ShieldRegistry {
     pub fn get_shield_status_batch(&self) -> crate::proto::ShieldStatusBatch {
         let cutoff = unix_now() - SHIELD_STALE_THRESHOLD_SECS;
         let shields = self
-            .health
+            .maps
             .lock()
-            .expect("health map poisoned")
+            .health
             .iter()
             .filter(|(_, e)| e.last_seen_unix >= cutoff)
             .map(|(id, e)| crate::proto::ShieldStatusUpdate {
@@ -139,11 +141,12 @@ impl ShieldRegistry {
     /// Drain all pending discovery reports into a ShieldDiscoveryBatch message.
     /// Returns None if there are no pending reports.
     pub fn drain_discovery_batch(&self) -> Option<crate::proto::ConnectorControlMessage> {
-        let mut map = self.pending_discovery.lock().expect("pending_discovery poisoned");
-        if map.is_empty() {
+        let mut maps = self.maps.lock();
+        if maps.pending_discovery.is_empty() {
             return None;
         }
-        let reports: Vec<crate::proto::ShieldDiscoveryReport> = map
+        let reports: Vec<crate::proto::ShieldDiscoveryReport> = maps
+            .pending_discovery
             .drain()
             .map(|(shield_id, report)| crate::proto::ShieldDiscoveryReport {
                 shield_id,
@@ -151,9 +154,11 @@ impl ShieldRegistry {
             })
             .collect();
         Some(crate::proto::ConnectorControlMessage {
-            body: Some(crate::proto::connector_control_message::Body::ShieldDiscovery(
-                crate::proto::ShieldDiscoveryBatch { reports },
-            )),
+            body: Some(
+                crate::proto::connector_control_message::Body::ShieldDiscovery(
+                    crate::proto::ShieldDiscoveryBatch { reports },
+                ),
+            ),
         })
     }
 
@@ -347,12 +352,13 @@ impl ShieldService for ShieldRegistry {
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
 
         {
-            self.instruction_txs
+            self.maps
                 .lock()
-                .expect("instruction_txs poisoned")
+                .instruction_txs
                 .insert(identity.shield_id.clone(), instr_tx);
         }
-        self.tunnel_hub.register_shield(identity.shield_id.clone(), tunnel_tx);
+        self.tunnel_hub
+            .register_shield(identity.shield_id.clone(), tunnel_tx);
 
         let registry = self.clone();
         let shield_id = identity.shield_id.clone();
@@ -362,9 +368,9 @@ impl ShieldService for ShieldRegistry {
             info!(shield_id = %shield_id, "shield Control stream connected");
 
             let buffered = registry
-                .resource_instructions
+                .maps
                 .lock()
-                .expect("resource_instructions poisoned")
+                .resource_instructions
                 .remove(&shield_id)
                 .unwrap_or_default();
             for instr in buffered {
@@ -388,9 +394,7 @@ impl ShieldService for ShieldRegistry {
                                 use crate::shield_proto::shield_control_message::Body;
                                 match m.body {
                                     Some(Body::HealthReport(hr)) => {
-                                        registry.health
-                                            .lock()
-                                            .expect("health map poisoned")
+                                        registry.maps.lock().health
                                             .insert(shield_id.clone(), ShieldEntry {
                                                 status: "active".to_string(),
                                                 version: hr.version,
@@ -412,10 +416,7 @@ impl ShieldService for ShieldRegistry {
                                         let added = report.added.len();
                                         let removed = report.removed.len();
                                         let full_sync = report.full_sync;
-                                        registry
-                                            .pending_discovery
-                                            .lock()
-                                            .expect("pending_discovery poisoned")
+                                        registry.maps.lock().pending_discovery
                                             .insert(shield_id.clone(), report);
                                         info!(
                                             shield_id = %shield_id,
@@ -463,11 +464,7 @@ impl ShieldService for ShieldRegistry {
                     }
                 }
             }
-            registry
-                .instruction_txs
-                .lock()
-                .expect("instruction_txs poisoned")
-                .remove(&shield_id);
+            registry.maps.lock().instruction_txs.remove(&shield_id);
             registry.tunnel_hub.unregister_shield(&shield_id);
             info!(shield_id = %shield_id, "shield Control stream disconnected");
         });
@@ -499,9 +496,9 @@ impl ShieldService for ShieldRegistry {
         let req = request.into_inner();
 
         let removed = self
-            .health
+            .maps
             .lock()
-            .map_err(|_| Status::internal("health map mutex poisoned"))?
+            .health
             .remove(&verified.shield_id)
             .is_some();
 

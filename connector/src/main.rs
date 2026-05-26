@@ -73,7 +73,6 @@ use anyhow::Context;
 use config::ConnectorConfig;
 use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::{error, info};
 
 #[tokio::main]
@@ -135,19 +134,7 @@ async fn main() -> anyhow::Result<()> {
         tls::cert_store::CertStore::load(&cfg.state_dir).context("failed to load cert store")?;
 
     // Build controller channel for ShieldRegistry (proxies RenewCert to controller).
-    let tls = ClientTlsConfig::new()
-        .identity(Identity::from_pem(
-            &cert_store.cert_pem,
-            &cert_store.key_pem,
-        ))
-        .ca_certificate(Certificate::from_pem(&cert_store.workspace_ca_pem));
-
-    let grpc_addr = format!("https://{}", cfg.controller_addr);
-    let controller_channel = Channel::from_shared(grpc_addr)
-        .context("invalid controller gRPC address")?
-        .tls_config(tls)
-        .context("failed to configure TLS for controller channel")?
-        .connect()
+    let controller_channel = controller_client::build_channel(&cfg, &cert_store)
         .await
         .context("failed to connect to controller for ShieldRegistry")?;
 
@@ -195,7 +182,6 @@ async fn main() -> anyhow::Result<()> {
 
     let acl = policy_cache.clone();
     let tunnel_hub = shield_registry.tunnel_hub.clone();
-    let agent_registry = Arc::new(shield_registry.clone());
     let connector_id = enrollment_state.connector_id.clone();
 
     // Build CRL URL from controller HTTP address (fallback: derive host from gRPC addr + port 8080).
@@ -227,13 +213,12 @@ async fn main() -> anyhow::Result<()> {
         let store = cert_store.clone();
         let acl = acl.clone();
         let hub = tunnel_hub.clone();
-        let reg = agent_registry.clone();
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, reg, crl, cid, tx).await
+                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, crl, cid, tx).await
             {
                 error!(error = %e, "device tunnel (TLS) on :9092 failed");
             }
@@ -245,7 +230,6 @@ async fn main() -> anyhow::Result<()> {
         let store = cert_store.clone();
         let acl = acl.clone();
         let hub = tunnel_hub.clone();
-        let reg = agent_registry.clone();
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
@@ -256,7 +240,6 @@ async fn main() -> anyhow::Result<()> {
                 store,
                 acl,
                 hub,
-                reg,
                 crl,
                 cid,
                 tx,
