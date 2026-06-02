@@ -37,6 +37,7 @@ type ResolverRoot interface {
 }
 
 type DirectiveRoot struct {
+	HasRole func(ctx context.Context, obj any, next graphql.Resolver, roles []Role) (res any, err error)
 }
 
 type ComplexityRoot struct {
@@ -2024,6 +2025,20 @@ func (ec *executionContext) childFields___Type(ctx context.Context, field graphq
 
 // region    ***************************** args.gotpl *****************************
 
+func (ec *executionContext) dir_hasRole_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "roles",
+		func(ctx context.Context, v any) ([]Role, error) {
+			return ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["roles"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_addGroupMember_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3963,7 +3978,25 @@ func (ec *executionContext) _Mutation_createRemoteNetwork(ctx context.Context, f
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().CreateRemoteNetwork(ctx, fc.Args["name"].(string), fc.Args["location"].(NetworkLocation))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *RemoteNetwork
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *RemoteNetwork
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *RemoteNetwork) graphql.Marshaler {
 			return ec.marshalNRemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx, selections, v)
 		},
@@ -4007,7 +4040,25 @@ func (ec *executionContext) _Mutation_deleteRemoteNetwork(ctx context.Context, f
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().DeleteRemoteNetwork(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4051,7 +4102,25 @@ func (ec *executionContext) _Mutation_generateConnectorToken(ctx context.Context
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().GenerateConnectorToken(ctx, fc.Args["remoteNetworkId"].(string), fc.Args["connectorName"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ConnectorToken
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ConnectorToken
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *ConnectorToken) graphql.Marshaler {
 			return ec.marshalNConnectorToken2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorToken(ctx, selections, v)
 		},
@@ -4095,7 +4164,25 @@ func (ec *executionContext) _Mutation_revokeConnector(ctx context.Context, field
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().RevokeConnector(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4139,7 +4226,25 @@ func (ec *executionContext) _Mutation_deleteConnector(ctx context.Context, field
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().DeleteConnector(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4183,7 +4288,25 @@ func (ec *executionContext) _Mutation_generateShieldToken(ctx context.Context, f
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().GenerateShieldToken(ctx, fc.Args["remoteNetworkId"].(string), fc.Args["shieldName"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ShieldToken
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ShieldToken
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *ShieldToken) graphql.Marshaler {
 			return ec.marshalNShieldToken2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldToken(ctx, selections, v)
 		},
@@ -4227,7 +4350,25 @@ func (ec *executionContext) _Mutation_revokeShield(ctx context.Context, field gr
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().RevokeShield(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4271,7 +4412,25 @@ func (ec *executionContext) _Mutation_deleteShield(ctx context.Context, field gr
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().DeleteShield(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4315,7 +4474,25 @@ func (ec *executionContext) _Mutation_createResource(ctx context.Context, field 
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().CreateResource(ctx, fc.Args["input"].(CreateResourceInput))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4359,7 +4536,25 @@ func (ec *executionContext) _Mutation_updateResource(ctx context.Context, field 
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().UpdateResource(ctx, fc.Args["id"].(string), fc.Args["input"].(UpdateResourceInput))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4403,7 +4598,25 @@ func (ec *executionContext) _Mutation_protectResource(ctx context.Context, field
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().ProtectResource(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4447,7 +4660,25 @@ func (ec *executionContext) _Mutation_unprotectResource(ctx context.Context, fie
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().UnprotectResource(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4491,7 +4722,25 @@ func (ec *executionContext) _Mutation_deleteResource(ctx context.Context, field 
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().DeleteResource(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4535,7 +4784,25 @@ func (ec *executionContext) _Mutation_promoteDiscoveredService(ctx context.Conte
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().PromoteDiscoveredService(ctx, fc.Args["shieldId"].(string), fc.Args["protocol"].(string), fc.Args["port"].(int))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4579,7 +4846,25 @@ func (ec *executionContext) _Mutation_triggerScan(ctx context.Context, field gra
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().TriggerScan(ctx, fc.Args["connectorId"].(string), fc.Args["targets"].([]string), fc.Args["ports"].([]int))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal string
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal string
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
 			return ec.marshalNString2string(ctx, selections, v)
 		},
@@ -4623,7 +4908,25 @@ func (ec *executionContext) _Mutation_createInvitation(ctx context.Context, fiel
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().CreateInvitation(ctx, fc.Args["email"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Invitation
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Invitation
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Invitation) graphql.Marshaler {
 			return ec.marshalNInvitation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐInvitation(ctx, selections, v)
 		},
@@ -4667,7 +4970,25 @@ func (ec *executionContext) _Mutation_revokeDevice(ctx context.Context, field gr
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().RevokeDevice(ctx, fc.Args["deviceId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4711,7 +5032,25 @@ func (ec *executionContext) _Mutation_createGroup(ctx context.Context, field gra
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().CreateGroup(ctx, fc.Args["name"].(string), fc.Args["description"].(*string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Group) graphql.Marshaler {
 			return ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, selections, v)
 		},
@@ -4755,7 +5094,25 @@ func (ec *executionContext) _Mutation_updateGroup(ctx context.Context, field gra
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().UpdateGroup(ctx, fc.Args["id"].(string), fc.Args["name"].(*string), fc.Args["description"].(*string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Group) graphql.Marshaler {
 			return ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, selections, v)
 		},
@@ -4799,7 +5156,25 @@ func (ec *executionContext) _Mutation_deleteGroup(ctx context.Context, field gra
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().DeleteGroup(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
 			return ec.marshalNBoolean2bool(ctx, selections, v)
 		},
@@ -4843,7 +5218,25 @@ func (ec *executionContext) _Mutation_addGroupMember(ctx context.Context, field 
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().AddGroupMember(ctx, fc.Args["groupId"].(string), fc.Args["userId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Group) graphql.Marshaler {
 			return ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, selections, v)
 		},
@@ -4887,7 +5280,25 @@ func (ec *executionContext) _Mutation_removeGroupMember(ctx context.Context, fie
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().RemoveGroupMember(ctx, fc.Args["groupId"].(string), fc.Args["userId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Group) graphql.Marshaler {
 			return ec.marshalNGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, selections, v)
 		},
@@ -4931,7 +5342,25 @@ func (ec *executionContext) _Mutation_assignResourceToGroup(ctx context.Context,
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().AssignResourceToGroup(ctx, fc.Args["resourceId"].(string), fc.Args["groupId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -4975,7 +5404,25 @@ func (ec *executionContext) _Mutation_unassignResourceFromGroup(ctx context.Cont
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Mutation().UnassignResourceFromGroup(ctx, fc.Args["resourceId"].(string), fc.Args["groupId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
 		},
@@ -5050,7 +5497,25 @@ func (ec *executionContext) _Query_users(ctx context.Context, field graphql.Coll
 		func(ctx context.Context) (any, error) {
 			return ec.Resolvers.Query().Users(ctx)
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*models.User
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*models.User
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*models.User) graphql.Marshaler {
 			return ec.marshalNUser2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋinternalᚋmodelsᚐUserᚄ(ctx, selections, v)
 		},
@@ -5202,7 +5667,25 @@ func (ec *executionContext) _Query_remoteNetworks(ctx context.Context, field gra
 		func(ctx context.Context) (any, error) {
 			return ec.Resolvers.Query().RemoteNetworks(ctx)
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*RemoteNetwork
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*RemoteNetwork
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*RemoteNetwork) graphql.Marshaler {
 			return ec.marshalNRemoteNetwork2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetworkᚄ(ctx, selections, v)
 		},
@@ -5235,7 +5718,25 @@ func (ec *executionContext) _Query_remoteNetwork(ctx context.Context, field grap
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().RemoteNetwork(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *RemoteNetwork
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *RemoteNetwork
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *RemoteNetwork) graphql.Marshaler {
 			return ec.marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx, selections, v)
 		},
@@ -5279,7 +5780,25 @@ func (ec *executionContext) _Query_connectors(ctx context.Context, field graphql
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Connectors(ctx, fc.Args["remoteNetworkId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*Connector
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*Connector
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*Connector) graphql.Marshaler {
 			return ec.marshalNConnector2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorᚄ(ctx, selections, v)
 		},
@@ -5323,7 +5842,25 @@ func (ec *executionContext) _Query_connector(ctx context.Context, field graphql.
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Connector(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Connector
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Connector
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Connector) graphql.Marshaler {
 			return ec.marshalOConnector2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnector(ctx, selections, v)
 		},
@@ -5367,7 +5904,25 @@ func (ec *executionContext) _Query_shields(ctx context.Context, field graphql.Co
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Shields(ctx, fc.Args["remoteNetworkId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*Shield
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*Shield
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*Shield) graphql.Marshaler {
 			return ec.marshalNShield2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShieldᚄ(ctx, selections, v)
 		},
@@ -5411,7 +5966,25 @@ func (ec *executionContext) _Query_shield(ctx context.Context, field graphql.Col
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Shield(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Shield
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Shield
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Shield) graphql.Marshaler {
 			return ec.marshalOShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx, selections, v)
 		},
@@ -5455,7 +6028,25 @@ func (ec *executionContext) _Query_resources(ctx context.Context, field graphql.
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Resources(ctx, fc.Args["remoteNetworkId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourceᚄ(ctx, selections, v)
 		},
@@ -5498,7 +6089,25 @@ func (ec *executionContext) _Query_allResources(ctx context.Context, field graph
 		func(ctx context.Context) (any, error) {
 			return ec.Resolvers.Query().AllResources(ctx)
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*Resource) graphql.Marshaler {
 			return ec.marshalNResource2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourceᚄ(ctx, selections, v)
 		},
@@ -5531,7 +6140,25 @@ func (ec *executionContext) _Query_getDiscoveredServices(ctx context.Context, fi
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().GetDiscoveredServices(ctx, fc.Args["shieldId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*DiscoveredService
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*DiscoveredService
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*DiscoveredService) graphql.Marshaler {
 			return ec.marshalNDiscoveredService2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredServiceᚄ(ctx, selections, v)
 		},
@@ -5575,7 +6202,25 @@ func (ec *executionContext) _Query_getScanResults(ctx context.Context, field gra
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().GetScanResults(ctx, fc.Args["requestId"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*ScanResult
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*ScanResult
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*ScanResult) graphql.Marshaler {
 			return ec.marshalNScanResult2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResultᚄ(ctx, selections, v)
 		},
@@ -5650,7 +6295,25 @@ func (ec *executionContext) _Query_clientDevices(ctx context.Context, field grap
 		func(ctx context.Context) (any, error) {
 			return ec.Resolvers.Query().ClientDevices(ctx)
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*ClientDevice
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*ClientDevice
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*ClientDevice) graphql.Marshaler {
 			return ec.marshalNClientDevice2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐClientDeviceᚄ(ctx, selections, v)
 		},
@@ -5726,7 +6389,25 @@ func (ec *executionContext) _Query_groups(ctx context.Context, field graphql.Col
 		func(ctx context.Context) (any, error) {
 			return ec.Resolvers.Query().Groups(ctx)
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*Group) graphql.Marshaler {
 			return ec.marshalNGroup2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroupᚄ(ctx, selections, v)
 		},
@@ -5759,7 +6440,25 @@ func (ec *executionContext) _Query_group(ctx context.Context, field graphql.Coll
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().Group(ctx, fc.Args["id"].(string))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Group
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Group
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v *Group) graphql.Marshaler {
 			return ec.marshalOGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐGroup(ctx, selections, v)
 		},
@@ -5803,7 +6502,25 @@ func (ec *executionContext) _Query_connectorLogs(ctx context.Context, field grap
 			fc := graphql.GetFieldContext(ctx)
 			return ec.Resolvers.Query().ConnectorLogs(ctx, fc.Args["limit"].(*int))
 		},
-		nil,
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*ConnectorLog
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*ConnectorLog
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
 		func(ctx context.Context, selections ast.SelectionSet, v []*ConnectorLog) graphql.Marshaler {
 			return ec.marshalNConnectorLog2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐConnectorLogᚄ(ctx, selections, v)
 		},
@@ -11186,6 +11903,37 @@ func (ec *executionContext) unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontr
 
 func (ec *executionContext) marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx context.Context, sel ast.SelectionSet, v Role) graphql.Marshaler {
 	return v
+}
+
+func (ec *executionContext) unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx context.Context, v any) ([]Role, error) {
+	var vSlice []any
+	vSlice = graphql.CoerceList(v)
+	var err error
+	res := make([]Role, len(vSlice))
+	for i := range vSlice {
+		ctx := graphql.WithPathContext(ctx, graphql.NewPathWithIndex(i))
+		res[i], err = ec.unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx, vSlice[i])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (ec *executionContext) marshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx context.Context, sel ast.SelectionSet, v []Role) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
 }
 
 func (ec *executionContext) marshalNScanResult2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScanResultᚄ(ctx context.Context, sel ast.SelectionSet, v []*ScanResult) graphql.Marshaler {

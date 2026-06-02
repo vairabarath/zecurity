@@ -30,7 +30,7 @@ import { useRequireAuth } from '@/hooks/useRequireAuth'
 import { useAuthStore } from '@/store/auth'
 
 // Verifies authentication. Renders children directly with no chrome.
-// Used for member-accessible pages like /client-install.
+// Used for member-accessible pages like /install.
 function ProtectedLayout() {
   const { isReady } = useRequireAuth()
   if (!isReady) return null
@@ -38,13 +38,13 @@ function ProtectedLayout() {
 }
 
 // Verifies authentication AND admin role.
-// Non-admins are redirected to /client-install (their landing page).
+// Non-admins are redirected to /install (their landing page).
 // Renders the full AppShell (sidebar + header) for admin pages.
 function AdminLayout() {
   const { isReady } = useRequireAuth()
   const { user } = useAuthStore()
   if (!isReady) return null
-  if (user && user.role !== 'ADMIN') return <Navigate to="/client-install" replace />
+  if (user && user.role !== 'ADMIN') return <Navigate to="/install" replace />
   return <AppShell />
 }
 
@@ -63,7 +63,7 @@ export default function App() {
 
       {/* Member route — authenticated, no sidebar */}
       <Route element={<ProtectedLayout />}>
-        <Route path="/client-install" element={<ClientInstall />} />
+        <Route path="/install" element={<ClientInstall />} />
       </Route>
 
       {/* Admin-only routes — full AppShell with sidebar */}

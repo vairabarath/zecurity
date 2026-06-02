@@ -3,37 +3,37 @@
 extend type Query {
   # List all remote networks for the current tenant.
   # Excludes soft-deleted networks.
-  remoteNetworks: [RemoteNetwork!]!
+  remoteNetworks: [RemoteNetwork!]! @hasRole(roles: [ADMIN])
 
   # Get a single remote network by ID.
   # Scoped to tenant_id — never crosses tenants.
-  remoteNetwork(id: ID!): RemoteNetwork
+  remoteNetwork(id: ID!): RemoteNetwork @hasRole(roles: [ADMIN])
 
   # List all connectors for a given remote network.
   # Scoped to tenant_id — never crosses tenants.
-  connectors(remoteNetworkId: ID!): [Connector!]!
+  connectors(remoteNetworkId: ID!): [Connector!]! @hasRole(roles: [ADMIN])
 
   # Get a single connector by ID.
   # Scoped to tenant_id — never crosses tenants.
-  connector(id: ID!): Connector
+  connector(id: ID!): Connector @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
   # Create a new remote network for the current tenant.
-  createRemoteNetwork(name: String!, location: NetworkLocation!): RemoteNetwork!
+  createRemoteNetwork(name: String!, location: NetworkLocation!): RemoteNetwork! @hasRole(roles: [ADMIN])
 
   # Soft-delete a remote network (only if no active connectors remain).
-  deleteRemoteNetwork(id: ID!): Boolean!
+  deleteRemoteNetwork(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 
   # Generate a one-time enrollment token for a new connector.
   # Creates the connector row in "pending" status and returns the install command.
-  generateConnectorToken(remoteNetworkId: ID!, connectorName: String!): ConnectorToken!
+  generateConnectorToken(remoteNetworkId: ID!, connectorName: String!): ConnectorToken! @hasRole(roles: [ADMIN])
 
   # Revoke a connector (set status to "revoked").
-  revokeConnector(id: ID!): Boolean!
+  revokeConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 
   # Delete a connector row (only if status is "pending" or "revoked").
-  deleteConnector(id: ID!): Boolean!
+  deleteConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 }
 
 enum NetworkHealth {

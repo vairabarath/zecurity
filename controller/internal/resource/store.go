@@ -46,12 +46,13 @@ type PendingRow struct {
 
 // CreateInput holds fields provided by the admin when creating a resource.
 type CreateInput struct {
-	Name        string
-	Description *string
-	Host        string
-	Protocol    string
-	PortFrom    int
-	PortTo      int
+	RemoteNetworkID string
+	Name            string
+	Description     *string
+	Host            string
+	Protocol        string
+	PortFrom        int
+	PortTo          int
 }
 
 const resourceSelectCols = `
@@ -81,29 +82,31 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 	return &row, nil
 }
 
-// AutoMatchShield finds a shield whose lan_ip matches the given host.
-func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID string) (shieldID, remoteNetworkID string, err error) {
+// AutoMatchShield finds a shield whose lan_ip matches the given host within a specific remote network.
+// remote_network_id is required: the same private IP can exist in multiple remote networks behind different NATs.
+func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remoteNetworkID string) (shieldID string, err error) {
 	err = db.QueryRow(ctx,
-		`SELECT id, remote_network_id
+		`SELECT id
 		   FROM shields
 		  WHERE lan_ip = $1
 		    AND tenant_id = $2
+		    AND remote_network_id = $3
 		    AND status NOT IN ('revoked', 'deleted')
 		  LIMIT 1`,
-		host, tenantID,
-	).Scan(&shieldID, &remoteNetworkID)
+		host, tenantID, remoteNetworkID,
+	).Scan(&shieldID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", "", fmt.Errorf("no shield installed on host %s", host)
+			return "", fmt.Errorf("no shield installed on host %s in this remote network", host)
 		}
-		return "", "", fmt.Errorf("auto-match shield: %w", err)
+		return "", fmt.Errorf("auto-match shield: %w", err)
 	}
-	return shieldID, remoteNetworkID, nil
+	return shieldID, nil
 }
 
-// Create inserts a new resource, auto-matching the shield by host IP.
+// Create inserts a new resource, auto-matching the shield by host IP within the specified remote network.
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
-	shieldID, remoteNetworkID, err := AutoMatchShield(ctx, db, input.Host, tenantID)
+	shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +117,7 @@ func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input Create
 		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host, port_from, port_to)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING id`,
-		tenantID, remoteNetworkID, shieldID,
+		tenantID, input.RemoteNetworkID, shieldID,
 		input.Name, input.Description, input.Protocol, input.Host, input.PortFrom, input.PortTo,
 	).Scan(&id)
 	if err != nil {

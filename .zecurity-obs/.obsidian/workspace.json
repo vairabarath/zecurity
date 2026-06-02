@@ -25,12 +25,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md",
+                "file": "CodeStudy/02-Protect-Resource-Flow.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Phase1-RDE-Frontend"
+              "title": "02-Protect-Resource-Flow"
             }
           }
         ],
@@ -198,24 +198,25 @@
   },
   "active": "f6c79cbbf5ff1be8",
   "lastOpenFiles": [
-    "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md.tmp.10054.1777961985815",
-    "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md.tmp.10054.1777961264162",
-    "Sprint9/path.md.tmp.10054.1777960951138",
-    "Sprint9/path.md.tmp.10054.1777960945500",
-    "Sprint9/path.md.tmp.10054.1777960942483",
-    "Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay.md.tmp.10054.1777960937784",
-    "Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema.md.tmp.10054.1777960937730",
-    "Sprint9/Member2-Go-Proto/Phase1-Tunnel-Proto.md.tmp.10054.1777960937675",
-    "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md.tmp.10054.1777960937619",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.45ca08d66b4d",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.9fa9f002ddc4",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.5c6c1ec91b2a",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.dce093d23e24",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.f4b9476e79c2",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.161a12dcdb4b",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.edea910251c7",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.2b1d7414212f",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.5731e2edae80",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.0858ece96a5c",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.53165f8feb03",
+    "Study-Plan.md",
+    "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md",
     "Sprint9/path.md",
     "Sprint9/Member2-Go-Proto/Phase1-Tunnel-Proto.md",
-    "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md",
     "Sprint9/Member2-Go-Proto/Phase2-ConnectorLogs-Schema.md",
     "Sprint9/Member4-Rust-Client/Phase1-Client-TUN.md",
     "Sprint9/Member3-Go-Connector/Phase2-Connector-Extras.md",
     "Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel.md",
-    "Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel.md.tmp.10300.1777701770050",
-    "Sprint9/Member3-Go-Connector/Phase1-RDE-Device-Tunnel.md.tmp.10300.1777701760107",
     "Sprint9/Member4-Rust-Shield/Phase1-Shield-Tunnel-Relay.md",
     "Sprint9/Member4-Rust-Connector/Phase1-Device-Tunnel.md",
     "docs/acl-sync-architecture.md",
@@ -235,7 +236,6 @@
     "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md",
     "Sprint6/Member2-Go-Proto-DB/Phase1-Proto-Schema.md",
     "Sprint6/Member1-Frontend/Phase2-Scan-UI.md",
-    "Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema.md",
     "Architecture/System Overview.canvas"
   ]
 }

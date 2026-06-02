@@ -9,5 +9,5 @@ type ConnectorLog {
 extend type Query {
   # Admin only — returns last N tunnel access events across all connectors.
   # Newest first. Default limit 100.
-  connectorLogs(limit: Int): [ConnectorLog!]!
+  connectorLogs(limit: Int): [ConnectorLog!]! @hasRole(roles: [ADMIN])
 }
