@@ -20,9 +20,6 @@ func (r *queryResolver) ConnectorLogs(ctx context.Context, limit *int) ([]*graph
 	if !ok {
 		return nil, fmt.Errorf("unauthenticated")
 	}
-	if tc.Role != "admin" {
-		return nil, fmt.Errorf("forbidden: only admins can view connector logs")
-	}
 
 	n := 100
 	if limit != nil && *limit > 0 {

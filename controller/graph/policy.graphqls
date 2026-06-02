@@ -13,18 +13,18 @@ extend type Resource {
 }
 
 extend type Query {
-  groups: [Group!]!
-  group(id: ID!): Group
+  groups: [Group!]! @hasRole(roles: [ADMIN])
+  group(id: ID!): Group @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
-  createGroup(name: String!, description: String): Group!
-  updateGroup(id: ID!, name: String, description: String): Group!
-  deleteGroup(id: ID!): Boolean!
+  createGroup(name: String!, description: String): Group! @hasRole(roles: [ADMIN])
+  updateGroup(id: ID!, name: String, description: String): Group! @hasRole(roles: [ADMIN])
+  deleteGroup(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 
-  addGroupMember(groupId: ID!, userId: ID!): Group!
-  removeGroupMember(groupId: ID!, userId: ID!): Group!
+  addGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
+  removeGroupMember(groupId: ID!, userId: ID!): Group! @hasRole(roles: [ADMIN])
 
-  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource!
-  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource!
+  assignResourceToGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
+  unassignResourceFromGroup(resourceId: ID!, groupId: ID!): Resource! @hasRole(roles: [ADMIN])
 }

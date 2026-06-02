@@ -18,14 +18,11 @@ import (
 )
 
 // CreateInvitation is the resolver for the createInvitation field.
-// Admin-only — role check enforced here (GraphQL has no per-field middleware).
+// Admin-only — enforced by the @hasRole directive on the schema field.
 func (r *mutationResolver) CreateInvitation(ctx context.Context, email string) (*graph.Invitation, error) {
 	tc, ok := tenant.Get(ctx)
 	if !ok {
 		return nil, fmt.Errorf("unauthenticated")
-	}
-	if tc.Role != "admin" {
-		return nil, fmt.Errorf("forbidden: only admins can create invitations")
 	}
 
 	inv, err := r.InvitationStore.CreateInvitation(ctx, email, tc.TenantID, tc.UserID)
@@ -48,9 +45,6 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 	tc, ok := tenant.Get(ctx)
 	if !ok {
 		return false, fmt.Errorf("unauthenticated")
-	}
-	if tc.Role != "admin" {
-		return false, fmt.Errorf("forbidden: only admins can revoke devices")
 	}
 
 	var discardedID string
@@ -113,9 +107,6 @@ func (r *queryResolver) ClientDevices(ctx context.Context) ([]*graph.ClientDevic
 	tc, ok := tenant.Get(ctx)
 	if !ok {
 		return nil, fmt.Errorf("unauthenticated")
-	}
-	if tc.Role != "admin" {
-		return nil, fmt.Errorf("forbidden: only admins can list all devices")
 	}
 
 	rows, err := r.Pool.Query(ctx,

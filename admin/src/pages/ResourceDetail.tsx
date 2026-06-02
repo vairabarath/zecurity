@@ -3,7 +3,6 @@ import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation } from '@apollo/client/react'
 import {
   GetAllResourcesDocument,
-  GetShieldsDocument,
   ProtectResourceDocument,
   UnprotectResourceDocument,
   DeleteResourceDocument,
@@ -29,7 +28,6 @@ import {
   Activity,
   FileText,
   Plus,
-  CheckCircle2,
   AlertTriangle,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -75,7 +73,6 @@ export default function ResourceDetail() {
   const { resourceId } = useParams<{ resourceId: string }>()
   const navigate = useNavigate()
   const [editOpen, setEditOpen] = useState(false)
-  const [selectedShieldId, setSelectedShieldId] = useState<string>('')
 
   const { data, loading, refetch, startPolling } = useQuery(GetAllResourcesDocument, {
     fetchPolicy: 'cache-and-network',
@@ -83,21 +80,6 @@ export default function ResourceDetail() {
   })
 
   const resource = data?.allResources.find((r) => r.id === resourceId)
-
-  const { data: shieldsData } = useQuery(GetShieldsDocument, {
-    variables: { remoteNetworkId: resource?.remoteNetwork.id ?? '' },
-    skip: !resource?.remoteNetwork.id,
-    fetchPolicy: 'cache-and-network',
-  })
-
-  const shields = shieldsData?.shields ?? []
-  const candidateShields = shields.filter((s) => s.status !== ShieldStatus.Revoked)
-
-  useEffect(() => {
-    if (candidateShields.length > 0 && !selectedShieldId) {
-      setSelectedShieldId(candidateShields[0].id)
-    }
-  }, [candidateShields, selectedShieldId])
 
   useEffect(() => {
     if (!resource) return
@@ -175,6 +157,9 @@ export default function ResourceDetail() {
 
   const isProtected = resource.status === 'protected'
   const shield = resource.shield
+  // Mirror the backend gate: MarkProtecting requires the bound shield to be 'active'
+  // (controller maps DB status → enum verbatim, so 'active' ⇔ ShieldStatus.Active).
+  const canProtect = shield?.status === ShieldStatus.Active
   const transitional = ['managing', 'protecting', 'removing'].includes(resource.status)
 
   return (
@@ -219,7 +204,7 @@ export default function ResourceDetail() {
           {!isProtected && !transitional && (
             <Button
               onClick={handleProtect}
-              disabled={protecting || candidateShields.length === 0}
+              disabled={protecting || !canProtect}
               className="gap-2"
               variant="outline"
             >
@@ -290,11 +275,18 @@ export default function ResourceDetail() {
               <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[oklch(0.85_0.13_80)]">Unprotected</div>
               <div className="text-lg font-bold">No shield is enforcing this resource</div>
               <div className="text-sm text-muted-foreground">
-                {candidateShields.length > 0 ? (
+                {canProtect ? (
                   <>
                     A shield is available on{' '}
                     <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code>
                     . Click <strong>Protect this resource</strong> above to enable enforcement.
+                  </>
+                ) : shield ? (
+                  <>
+                    The shield <strong>{shield.name}</strong> on{' '}
+                    <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code>{' '}
+                    is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect before this
+                    resource can be protected.
                   </>
                 ) : (
                   <>
@@ -305,7 +297,7 @@ export default function ResourceDetail() {
                 )}
               </div>
             </div>
-            {candidateShields.length > 0 && (
+            {canProtect && (
               <Button onClick={handleProtect} disabled={protecting} className="shrink-0 gap-2">
                 {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
                 Protect
@@ -477,42 +469,45 @@ export default function ResourceDetail() {
                     Enforcing
                   </span>
                 </div>
-              ) : candidateShields.length > 0 ? (
+              ) : shield ? (
                 <>
-                  <p className="mb-3 text-xs text-muted-foreground">
-                    Shields available on this host. Select one and click <strong>Protect this resource</strong> to enable enforcement:
-                  </p>
-                  <div className="space-y-2">
-                    {candidateShields.map((s) => (
-                      <button
-                        key={s.id}
-                        onClick={() => setSelectedShieldId(s.id)}
-                        className={cn(
-                          'flex w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition',
-                          selectedShieldId === s.id
-                            ? 'border-primary/40 bg-primary/5'
-                            : 'border-border bg-secondary/40 hover:border-border/80 hover:bg-secondary/60'
-                        )}
-                      >
-                        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[oklch(0.78_0.10_235/0.16)] text-[oklch(0.78_0.10_235)]">
-                          <Shield className="h-4 w-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-bold">{s.name}</div>
-                          <div className="text-[11px] font-mono text-muted-foreground">
-                            {s.hostname ?? 'unknown'} · {s.lastSeenAt ? relativeTime(s.lastSeenAt) : 'never seen'}
-                          </div>
-                        </div>
-                        {selectedShieldId === s.id && (
-                          <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />
-                        )}
-                      </button>
-                    ))}
+                  <div className="flex items-center gap-3 rounded-xl border border-border bg-secondary/40 px-4 py-3">
+                    <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[oklch(0.78_0.10_235/0.16)] text-[oklch(0.78_0.10_235)]">
+                      <Shield className="h-4 w-4" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-bold">{shield.name}</div>
+                      <div className="text-[11px] font-mono text-muted-foreground">{shield.lanIp}</div>
+                    </div>
+                    <span
+                      className={cn(
+                        'rounded-full border px-2.5 py-0.5 text-[11px] font-bold capitalize',
+                        canProtect
+                          ? 'border-border bg-secondary text-muted-foreground'
+                          : 'border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] text-[oklch(0.85_0.13_80)]'
+                      )}
+                    >
+                      {canProtect ? 'Ready' : shield.status.toLowerCase()}
+                    </span>
                   </div>
-                  <Button onClick={handleProtect} disabled={protecting} className="mt-3 w-full gap-2">
-                    {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
-                    Protect with {candidateShields.find((s) => s.id === selectedShieldId)?.name ?? candidateShields[0]?.name}
-                  </Button>
+                  {canProtect ? (
+                    <>
+                      <p className="mb-3 mt-3 text-xs text-muted-foreground">
+                        This resource is bound to the shield on{' '}
+                        <code className="rounded bg-secondary px-1 font-mono">{resource.host}</code>. Click{' '}
+                        <strong>Protect this resource</strong> to enable enforcement.
+                      </p>
+                      <Button onClick={handleProtect} disabled={protecting} className="w-full gap-2">
+                        {protecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+                        Protect this resource
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      The bound shield is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect
+                      before this resource can be protected.
+                    </p>
+                  )}
                 </>
               ) : (
                 <div className="flex flex-col items-center justify-center py-8 text-center">

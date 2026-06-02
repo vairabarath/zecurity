@@ -19,11 +19,11 @@ type ScanResult {
 }
 
 extend type Query {
-  getDiscoveredServices(shieldId: ID!): [DiscoveredService!]!
-  getScanResults(requestId: String!): [ScanResult!]!
+  getDiscoveredServices(shieldId: ID!): [DiscoveredService!]! @hasRole(roles: [ADMIN])
+  getScanResults(requestId: String!): [ScanResult!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
-  promoteDiscoveredService(shieldId: ID!, protocol: String!, port: Int!): Resource!
-  triggerScan(connectorId: ID!, targets: [String!]!, ports: [Int!]!): String!
+  promoteDiscoveredService(shieldId: ID!, protocol: String!, port: Int!): Resource! @hasRole(roles: [ADMIN])
+  triggerScan(connectorId: ID!, targets: [String!]!, ports: [Int!]!): String! @hasRole(roles: [ADMIN])
 }

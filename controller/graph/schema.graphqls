@@ -1,5 +1,12 @@
 # controller/graph/schema.graphqls — Sprint 1 types
 
+# Restricts a field to callers whose JWT role is one of `roles`.
+# Enforced in the GraphQL execution layer (see resolvers.HasRole), so it gates
+# individual queries/mutations — unlike the route-level RequireRole HTTP middleware,
+# which can't distinguish operations on the single /graphql endpoint.
+# Widen the list (e.g. [ADMIN, AUDITOR]) when new roles are added.
+directive @hasRole(roles: [Role!]!) on FIELD_DEFINITION
+
 type Query {
   # Returns the currently authenticated user.
   # Requires valid JWT in Authorization header.
@@ -7,7 +14,7 @@ type Query {
 
   # Returns all active users in the current workspace.
   # Scoped to tenant_id from JWT — never crosses workspaces.
-  users: [User!]!
+  users: [User!]! @hasRole(roles: [ADMIN])
 
   # Returns the workspace the current user belongs to.
   # Scoped to tenant_id from JWT — never crosses workspaces.

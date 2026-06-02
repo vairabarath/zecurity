@@ -138,6 +138,9 @@ func main() {
 				PolicyStore:       policyStore,
 				PolicyNotifier:    policyNotifier,
 			},
+			Directives: graph.DirectiveRoot{
+				HasRole: resolvers.HasRole,
+			},
 		}),
 	)
 
@@ -177,16 +180,20 @@ func main() {
 
 	// REST endpoint: POST /connectors/{id}/token — regenerates enrollment token.
 	connectorTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(
-			connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
+		middleware.RequireRole("admin")(
+			middleware.WorkspaceGuard(db.Pool)(
+				connector.RegenerateTokenHandler(db.Pool, connectorCfg, valkeycompat.NewAdapter(connectorValkey)),
+			),
 		),
 	)
 	mux.Handle("/api/connectors/", connectorTokenRoute)
 
 	// REST endpoint: POST /shields/{id}/token — regenerates enrollment token.
 	shieldTokenRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.WorkspaceGuard(db.Pool)(
-			shieldSvc.TokenHandler(),
+		middleware.RequireRole("admin")(
+			middleware.WorkspaceGuard(db.Pool)(
+				shieldSvc.TokenHandler(),
+			),
 		),
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)

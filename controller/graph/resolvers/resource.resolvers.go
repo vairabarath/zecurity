@@ -19,12 +19,13 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 	tc := tenant.MustGet(ctx)
 
 	row, err := resource.Create(ctx, r.ResourceCfg.DB, tc.TenantID, resource.CreateInput{
-		Name:        input.Name,
-		Description: input.Description,
-		Host:        input.Host,
-		Protocol:    input.Protocol,
-		PortFrom:    input.PortFrom,
-		PortTo:      input.PortTo,
+		RemoteNetworkID: input.RemoteNetworkID,
+		Name:            input.Name,
+		Description:     input.Description,
+		Host:            input.Host,
+		Protocol:        input.Protocol,
+		PortFrom:        input.PortFrom,
+		PortTo:          input.PortTo,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("createResource: %w", err)

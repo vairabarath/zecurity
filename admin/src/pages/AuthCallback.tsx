@@ -84,7 +84,7 @@ export default function AuthCallback() {
         if (result.data!.me.role === 'ADMIN') {
           navigate('/dashboard', { replace: true })
         } else {
-          navigate('/client-install', { replace: true })
+          navigate('/install', { replace: true })
         }
 
       } catch {

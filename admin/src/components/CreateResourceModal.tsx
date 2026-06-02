@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useMutation, useQuery } from '@apollo/client/react'
 import {
   CreateResourceDocument,
@@ -37,13 +37,13 @@ export function CreateResourceModal({
   onSuccess,
   defaults,
 }: CreateResourceModalProps) {
-  const [name, setName] = useState('')
+  const [name, setName] = useState(() => defaults?.name ?? '')
   const [description, setDescription] = useState('')
-  const [host, setHost] = useState('')
-  const [protocol, setProtocol] = useState('tcp')
-  const [portFrom, setPortFrom] = useState('')
-  const [portTo, setPortTo] = useState('')
-  const [remoteNetworkId, setRemoteNetworkId] = useState('')
+  const [host, setHost] = useState(() => defaults?.host ?? '')
+  const [protocol, setProtocol] = useState(() => defaults?.protocol ?? 'tcp')
+  const [portFrom, setPortFrom] = useState(() => defaults?.portFrom ? String(defaults.portFrom) : '')
+  const [portTo, setPortTo] = useState(() => defaults?.portTo ? String(defaults.portTo) : '')
+  const [remoteNetworkId, setRemoteNetworkId] = useState(() => defaults?.remoteNetworkId ?? '')
   const [error, setError] = useState<string | null>(null)
 
   const { data: networksData, loading: networksLoading } = useQuery(GetRemoteNetworksDocument, {
@@ -66,27 +66,7 @@ export function CreateResourceModal({
     },
   })
 
-  function resetForm() {
-    setName(defaults?.name ?? '')
-    setDescription('')
-    setHost(defaults?.host ?? '')
-    setProtocol(defaults?.protocol ?? 'tcp')
-    setPortFrom(defaults?.portFrom ? String(defaults.portFrom) : '')
-    setPortTo(defaults?.portTo ? String(defaults.portTo) : '')
-    setRemoteNetworkId(defaults?.remoteNetworkId ?? '')
-    setError(null)
-  }
-
-  useEffect(() => {
-    resetForm()
-  }, [defaults])
-
-  useEffect(() => {
-    if (open) resetForm()
-  }, [defaults, open])
-
   const handleClose = (isOpen: boolean) => {
-    if (!isOpen) resetForm()
     onOpenChange(isOpen)
   }
 

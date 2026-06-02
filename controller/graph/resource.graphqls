@@ -35,14 +35,14 @@ input UpdateResourceInput {
 }
 
 extend type Query {
-  resources(remoteNetworkId: String!): [Resource!]!
-  allResources: [Resource!]!
+  resources(remoteNetworkId: String!): [Resource!]! @hasRole(roles: [ADMIN])
+  allResources: [Resource!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
-  createResource(input: CreateResourceInput!): Resource!
-  updateResource(id: ID!, input: UpdateResourceInput!): Resource!
-  protectResource(id: ID!): Resource!
-  unprotectResource(id: ID!): Resource!
-  deleteResource(id: ID!): Boolean!
+  createResource(input: CreateResourceInput!): Resource! @hasRole(roles: [ADMIN])
+  updateResource(id: ID!, input: UpdateResourceInput!): Resource! @hasRole(roles: [ADMIN])
+  protectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
+  unprotectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
+  deleteResource(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 }
