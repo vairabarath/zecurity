@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
   ChevronDown,
+  Download,
   Laptop,
   LayoutDashboard,
   Network,
