@@ -29,10 +29,10 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // code_challenge is sent to the controller in InitiateAuth.
     // code_verifier is kept locally and sent in TokenExchange.
     // The controller verifies SHA256(code_verifier) == code_challenge.
-    let mut verifier_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut verifier_bytes);
-    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
-    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let mut verifier_bytes = [0u8; 32]; // create empty 32 sized array
+    rand::thread_rng().fill_bytes(&mut verifier_bytes); // fills the randome 0's and 1's bytes there
+    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes); // creates bash64 encode
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes())); // create again a base64 encode for the code verifier this is code challenge
 
     // Local callback server — receives the ctrl_code from the controller's
     // redirect after it handles the Google OAuth callback server-side.
@@ -40,19 +40,19 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
 
-    let app = Router::new().route(
+    let app = Router::new().route( // definition only for the rout handler
         "/callback",
         get(move |Query(params): Query<HashMap<String, String>>| {
             let tx = tx_clone.clone();
             async move {
-                if let Some(code) = params.get("code") {
+                if let Some(code) = params.get("code") { // http://127.0.0.1:53721/callback?code=XYZ then 'code = "XYZ"'
                     if let Some(sender) = tx.lock().await.take() {
                         let _ = sender.send(code.clone());
                     }
                 }
                 Html(
                     "<html><body><h2>Authentication complete. \
-                     You can close this tab.</h2></body></html>",
+                     You can close this tab.</h2></body></html>", // after the login complete the message is showed to the client
                 )
             }
         }),
@@ -70,7 +70,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // the Google URL directly. The controller's fixed /api/clients/callback
     // is embedded in auth_url as the redirect_uri.
     println!("Initiating authentication...");
-    let initiated = grpc
+    let initiated = grpc //this is send to the controller for the browser to open the login flow
         .initiate_auth(InitiateAuthRequest {
             workspace_slug: conf.workspace.clone(),
             code_challenge,

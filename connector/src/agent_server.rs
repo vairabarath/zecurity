@@ -344,10 +344,16 @@ impl ShieldService for ShieldRegistry {
         request: Request<Streaming<ShieldControlMessage>>,
     ) -> Result<Response<Self::ControlStream>, Status> {
         let identity = self.extract_shield_identity(&request)?;
+
+        
         let mut in_stream = request.into_inner();
 
+        // channel pair for outbound messages to shield 
         let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
+        
+        //for resource instructions 
         let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(32);
+        
         // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
 

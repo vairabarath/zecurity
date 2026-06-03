@@ -12,7 +12,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/graph/model"
 )
-
+// first bootstrap creation navigates us to the gmail selectin page ............................................
 // InitiateAuth implements auth.Service.InitiateAuth.
 // Called by: the initiateAuth GraphQL mutation resolver (Member 4 writes the resolver in
 //

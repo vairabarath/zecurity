@@ -39,7 +39,9 @@ export default function InviteAccept() {
         variables: { provider: 'google', workspaceName: invitation.workspace_name },
       })
       const { redirectUrl, state } = result.data!.initiateAuth
+
       sessionStorage.setItem('ztna_oauth_state', state)
+      
       window.location.href = redirectUrl
     } catch {
       sessionStorage.removeItem('ztna_invite_token')

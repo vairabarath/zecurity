@@ -26,7 +26,7 @@ export function AuthShell({
         <div className="flex items-center gap-4">
           <span>{version}</span>
           <span className="font-mono tabular-nums">
-            {time.toLocaleTimeString('en-GB', { hour12: false })}
+            {time.toLocaleTimeString('en-GB', { hour12: true })}
           </span>
         </div>
       </div>

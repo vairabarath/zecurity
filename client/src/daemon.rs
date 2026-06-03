@@ -76,7 +76,7 @@ pub async fn run() -> Result<()> {
             .with_context(|| format!("create socket directory {}", parent.display()))?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
+    let listener = UnixListener::bind(&socket_path) // this is like an api for the daemon and the client commands zecurity-client status -> .sock -> daemon -> goes to the main.rs and match is worked and continue. this is the cli commands communication channel
         .with_context(|| format!("bind IPC socket {}", socket_path.display()))?;
 
     info!(path = %socket_path.display(), "IPC socket ready");
