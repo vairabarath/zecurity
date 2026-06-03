@@ -81,13 +81,32 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 
 // DeleteResource is the resolver for the deleteResource field.
 func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool, error) {
+
 	tc := tenant.MustGet(ctx)
 
-	if err := resource.SoftDelete(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
+	row, err := resource.GetByID(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+	if err != nil {
 		return false, fmt.Errorf("deleteResource: %w", err)
 	}
 
-	return true, nil
+	switch row.Status {
+	case "protecting", "deleting":
+		return false, fmt.Errorf("deleteResource: resource is mid-operation; wait for it to finish")
+	case "protected", "failed":
+		// May hold a shield rule → tombstone + tell the shield to remove it.
+		// The row is reaped by RecordAck once the shield acks removal.
+		delRow, err := resource.MarkDeleting(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+		if err != nil {
+			return false, fmt.Errorf("deleteResource: %w", err)
+		}
+		r.ConnectorRegistry.PushInstruction(delRow)
+		return true, nil
+	default: // pending, unprotected — no rule possible, delete now
+		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
+			return false, fmt.Errorf("deleteResource: %w", err)
+		}
+		return true, nil
+	}
 }
 
 // Resources is the resolver for the resources field.

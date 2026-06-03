@@ -11,18 +11,6 @@
             "id": "1bd27bd99f8f8cf3",
             "type": "leaf",
             "state": {
-              "type": "excalidraw",
-              "state": {
-                "file": "Excalidraw/Drawing 2026-04-27 10.44.24.excalidraw.md"
-              },
-              "icon": "lucide-ghost",
-              "title": "excalidraw"
-            }
-          },
-          {
-            "id": "f6c79cbbf5ff1be8",
-            "type": "leaf",
-            "state": {
               "type": "markdown",
               "state": {
                 "file": "CodeStudy/02-Protect-Resource-Flow.md",
@@ -33,8 +21,7 @@
               "title": "02-Protect-Resource-Flow"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "vertical"
@@ -196,19 +183,21 @@
       "bases:Create new base": false
     }
   },
-  "active": "f6c79cbbf5ff1be8",
+  "active": "1bd27bd99f8f8cf3",
   "lastOpenFiles": [
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.340135.04c5634a3c73",
+    "Decisions/ADR-004-Resource-Reconciliation.md.tmp.340135.1d7c339516e1",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.5780.b23cd0321907",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.5780.1c7fee4f4155",
+    "CodeStudy/02-Protect-Resource-Flow.md.tmp.5780.b0383141993a",
+    "Decisions/ADR-004-Resource-Reconciliation.md",
+    "Decisions/ADR-004-Resource-Reconciliation.md.tmp.5780.80bfe1aa46f2",
+    "CodeStudy/02-Protect-Resource-Flow.md",
     "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.45ca08d66b4d",
     "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.9fa9f002ddc4",
     "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.5c6c1ec91b2a",
     "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.dce093d23e24",
     "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.f4b9476e79c2",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.161a12dcdb4b",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.edea910251c7",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.2b1d7414212f",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.5731e2edae80",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.0858ece96a5c",
-    "CodeStudy/02-Protect-Resource-Flow.md.tmp.39984.53165f8feb03",
     "Study-Plan.md",
     "Sprint9/Member1-Frontend/Phase1-RDE-Frontend.md",
     "Sprint9/path.md",
@@ -234,8 +223,6 @@
     "improvements.md",
     "Sprint6/path.md",
     "Sprint6/Member1-Frontend/Phase1-Discovery-Tab.md",
-    "Sprint6/Member2-Go-Proto-DB/Phase1-Proto-Schema.md",
-    "Sprint6/Member1-Frontend/Phase2-Scan-UI.md",
     "Architecture/System Overview.canvas"
   ]
 }

@@ -173,14 +173,14 @@ func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, err
 	return collectRows(rows)
 }
 
-// GetPendingForShield returns resources in the protecting state for a shield.
+// GetPendingForShield returns resources in the protecting and deleting state for a shield.
 // Called on stream connect to deliver any queued instructions to a reconnecting connector.
 func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
 		`SELECT id, host, protocol, port_from, port_to, pending_action
 		   FROM resources
 		  WHERE shield_id = $1
-		    AND status = 'protecting'
+		    AND status IN ('protecting', 'deleting')
 		    AND deleted_at IS NULL`,
 		shieldID,
 	)
@@ -314,14 +314,38 @@ func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string
 	return GetByID(ctx, db, tenantID, id)
 }
 
-// SoftDelete hard-deletes a resource row so the name can be reused immediately.
-func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error {
+// MarkDeleting transitions a resource to the 'deleting' tombstone with
+// pending_action='remove'. The row is NOT removed here — it is reaped by
+// RecordAck once the shield confirms the nftables rule is gone. Only states
+// that may hold a rule (protected, failed) take this path.
+func MarkDeleting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
+	var discardedID string
+	err := db.QueryRow(ctx,
+		`UPDATE resources
+                  SET status = 'deleting', pending_action = 'remove', updated_at = NOW()
+                WHERE id = $1 AND tenant_id = $2
+                  AND status IN ('protected', 'failed')
+               RETURNING id`,
+		id, tenantID,
+	).Scan(&discardedID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("delete resource: resource not found or in invalid state")
+		}
+		return nil, fmt.Errorf("mark deleting: %w", err)
+	}
+	return GetByID(ctx, db, tenantID, id)
+}
+
+// DeleteRow hard-deletes a resource that cannot have a shield rule (pending or
+// unprotected). Protected/failed resources must go through MarkDeleting first.
+func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error {
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`DELETE FROM resources
-		  WHERE id = $1 AND tenant_id = $2
-		    AND status != 'protecting'
-		 RETURNING id`,
+                WHERE id = $1 AND tenant_id = $2
+                  AND status IN ('pending', 'unprotected')
+               RETURNING id`,
 		id, tenantID,
 	).Scan(&discardedID)
 	if err != nil {
@@ -335,6 +359,20 @@ func SoftDelete(ctx context.Context, db *pgxpool.Pool, tenantID, id string) erro
 
 // RecordAck processes a ResourceAck from Shield and updates the resource status.
 func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
+	if status == "unprotected" {
+		ct, err := db.Exec(ctx,
+			`DELETE FROM resources
+			 WHERE id = $1 AND tenant_id = $2
+			   AND status = 'deleting'`,
+			resourceID, tenantID,
+		)
+		if err != nil {
+			return fmt.Errorf("record ack (reap): %w", err)
+		}
+		if ct.RowsAffected() > 0 {
+			return nil
+		}
+	}
 	_, err := db.Exec(ctx,
 		`UPDATE resources
 		    SET status           = $2,
@@ -345,6 +383,7 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		  WHERE id = $1
 		    AND tenant_id = $5
 		    AND deleted_at IS NULL
+			AND status != 'deleting'
 		    AND NOT (status = 'protecting' AND pending_action = 'remove' AND $2 != 'unprotected')
 		    AND NOT (status = 'protecting' AND pending_action = 'apply'  AND $2 = 'unprotected')`,
 		resourceID, status, errMsg, verifiedAt, tenantID,
@@ -354,7 +393,6 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 	}
 	return nil
 }
-
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {
 	var result []*Row
