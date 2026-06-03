@@ -61,7 +61,7 @@ function MetaCell({
 function resourceTone(status: string): 'ok' | 'warn' | 'danger' | 'muted' | 'info' {
   if (status === 'protected') return 'ok'
   if (status === 'failed') return 'danger'
-  if (status === 'protecting' || status === 'managing' || status === 'removing') return 'warn'
+  if (status === 'protecting' || status === 'managing' || status === 'removing' || status === 'deleting') return 'warn'
   return 'muted'
 }
 
@@ -83,7 +83,7 @@ export default function ResourceDetail() {
 
   useEffect(() => {
     if (!resource) return
-    const transitional = ['managing', 'protecting', 'removing'].includes(resource.status)
+    const transitional = ['managing', 'protecting', 'removing', 'deleting'].includes(resource.status)
     startPolling(transitional ? 3000 : 10000)
   }, [resource, startPolling])
 
@@ -160,7 +160,7 @@ export default function ResourceDetail() {
   // Mirror the backend gate: MarkProtecting requires the bound shield to be 'active'
   // (controller maps DB status → enum verbatim, so 'active' ⇔ ShieldStatus.Active).
   const canProtect = shield?.status === ShieldStatus.Active
-  const transitional = ['managing', 'protecting', 'removing'].includes(resource.status)
+  const transitional = ['managing', 'protecting', 'removing', 'deleting'].includes(resource.status)
 
   return (
     <div className="space-y-6">
@@ -231,7 +231,7 @@ export default function ResourceDetail() {
             variant="ghost"
             size="sm"
             onClick={handleDelete}
-            disabled={deleting}
+            disabled={deleting || transitional}
             className="gap-2 text-destructive/80 hover:bg-destructive/5 hover:text-destructive"
           >
             {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
