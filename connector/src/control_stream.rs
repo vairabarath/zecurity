@@ -250,6 +250,14 @@ async fn handle_controller_msg(
             }
             None
         }
+        // ADR-004 Phase 2: desired-state snapshots — cache per shield and
+        // forward live if the shield is connected (replayed on shield reconnect).
+        Some(CBody::ResourceSnapshots(batch)) => {
+            for (shield_id, snapshot) in batch.shield_snapshots {
+                shield_registry.push_snapshot(&shield_id, snapshot);
+            }
+            None
+        }
         Some(CBody::ScanCommand(cmd)) => {
             let connector_id = shield_registry.connector_id().to_string();
             let out_tx = out_tx.clone();

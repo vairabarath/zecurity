@@ -175,6 +175,16 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
 - **Gate 2:** protect 2 → reboot shield → both rules reappear. Protect, unprotect while connector
   briefly down (missed remove) → reconnect snapshot omits it → rule dropped.
 
+> **STATUS: ✅ IMPLEMENTED + VERIFIED (2026-06-04)** on the live stack (controller local; connector
+> on "Archer" 192.168.1.87; shield on 192.168.1.164). Observed in logs: snapshot built on
+> connector-connect (generation = unix-millis), cached, **"replayed cached resource snapshot on
+> connect"** on shield (re)connect, shield **"resource snapshot applied — chain rebuilt"** with the
+> matching generation; after a shield process restart the same cached snapshot re-applied (fresh
+> process starts at generation 0 — correct). Protect showed the **dual delivery**: incremental apply
+> + live snapshot rebuild ~40ms apart (idempotent by design). Shield restart with a protected
+> resource recovered seamlessly — DB `last_verified_at` never exceeded its normal 15s sawtooth.
+> Deployed via locally-built binaries (update timers stopped during test); release after merge.
+
 ### PHASE 3 — Closed-loop: shield state report + controller reconciler
 **Fixes:** transient-disconnect zombies, partial applies, lost messages. Enables confirmation-gated reaping.
 
