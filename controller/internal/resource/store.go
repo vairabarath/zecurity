@@ -200,6 +200,37 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 	return result, rows.Err()
 }
 
+// GetDesiredForShield returns the complete set of resources that should be
+// enforced on a shield right now: protected, plus in-flight applies. Used to
+// build the authoritative ResourceSnapshot pushed on (re)connect (ADR-004 Phase 2).
+// 'deleting' and 'protecting/remove' rows are intentionally absent — the shield's
+// replace-semantics drops anything not listed here.
+func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
+	rows, err := db.Query(ctx,
+		`SELECT id, host, protocol, port_from, port_to, pending_action
+	    	FROM resources
+		WHERE shield_id = $1
+		 AND (status = 'protected' OR (status = 'protecting' AND pending_action = 'apply'))
+		 AND deleted_at IS NULL`,
+		shieldID,
+	)
+
+	if err != nil {
+		return nil, fmt.Errorf("get desired resources: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*PendingRow
+	for rows.Next() {
+		var r PendingRow
+		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo, &r.PendingAction); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		result = append(result, &r)
+	}
+	return result, nil
+}
+
 // UpdateInput holds the fields that can be changed on an existing resource.
 // Only non-nil fields are written to the database.
 type UpdateInput struct {

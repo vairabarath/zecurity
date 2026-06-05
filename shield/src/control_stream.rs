@@ -186,6 +186,24 @@ async fn handle_connector_msg(
             }
             None
         }
+        // ADR-004 Phase 2: authoritative desired-state snapshot — replace the
+        // active set, rebuild the chain, ack every contained resource.
+        Some(Body::ResourceSnapshot(snap)) => {
+            let acks = resources::handle_snapshot(&snap, resource_state).await;
+            for ack in acks {
+                resource_state.store_ack(ack.clone());
+                if out_tx
+                    .send(ShieldControlMessage {
+                        body: Some(Body::ResourceAck(ack)),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Some(Err(anyhow::anyhow!("outbound channel closed on snapshot ack")));
+                }
+            }
+            None
+        }
         Some(Body::ReEnroll(_)) => {
             info!(shield_id = %state.shield_id, "connector requested cert renewal");
             match renewal::renew_cert(state, cfg).await {

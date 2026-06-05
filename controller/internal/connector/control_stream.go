@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -64,6 +65,61 @@ func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.clients[connectorID]
+}
+
+// buildSnapshotMsg builds the authoritative desired-state snapshot message for
+// one shield (ADR-004 Phase 2). Generation is wall-clock millis — good enough
+// for "drop stale cached copies"; Phase 3 replaces this with reconciliation.
+func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*pb.ConnectorControlMessage, error) {
+	desired, err := resource.GetDesiredForShield(ctx, db, shieldID)
+	if err != nil {
+		return nil, fmt.Errorf("buildSnapshotMsg: %w", err)
+	}
+
+	resources := make([]*shieldpb.ResourceInstruction, 0, len(desired))
+	for _, row := range desired {
+		resources = append(resources, &shieldpb.ResourceInstruction{
+			ResourceId: row.ID,
+			Host:       row.Host,
+			Protocol:   row.Protocol,
+			PortFrom:   int32(row.PortFrom),
+			PortTo:     int32(row.PortTo),
+		})
+	}
+
+	return &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
+			ResourceSnapshots: &pb.ResourceSnapshotBatch{
+				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
+					shieldID: {Resources: resources, Generation: uint64(time.Now().UnixMilli())},
+				},
+			},
+		},
+	}, nil
+}
+
+// PushSnapshotForShield refreshes the connector's cached desired-state snapshot
+// for a shield. Called after every mutation that changes the desired set —
+// keeping the cache fresh is what makes the connector's replay-on-shield-connect
+// safe (a stale snapshot would wipe newer rules). Offline connector is fine:
+// snapshots are re-sent for every shield on connector connect.
+func PushSnapshotForShield(ctx context.Context, db *pgxpool.Pool, r *ConnectorRegistry, connectorID, shieldID string) {
+	if connectorID == "" {
+		return
+	}
+
+	c := r.get(connectorID)
+	if c == nil {
+		return
+	}
+	msg, err := buildSnapshotMsg(ctx, db, shieldID)
+	if err != nil {
+		log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
+		return
+	}
+	if err := c.send(msg); err != nil {
+		log.Printf("control stream: push snapshot to connector %s: %v", connectorID, err)
+	}
 }
 
 // PushInstruction builds and delivers a single resource instruction from a Row to
@@ -242,6 +298,18 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 		if err := rows.Scan(&shieldID); err != nil {
 			continue
 		}
+
+		// ADR-004 Phase 2: refresh this shield's cached desired-state snapshot.
+		// Sent for EVERY shield (even with nothing pending) so a shield that
+		// reboots later gets re-protected from the connector's cache.
+		if msg, err := buildSnapshotMsg(ctx, h.Pool, shieldID); err == nil {
+			if err := client.send(msg); err != nil {
+				log.Printf("control stream: send snapshot for shield %s: %v", shieldID, err)
+			}
+		} else {
+			log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
+		}
+
 		pending, err := resource.GetPendingForShield(ctx, h.Pool, shieldID)
 		if err != nil || len(pending) == 0 {
 			continue

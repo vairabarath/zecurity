@@ -18,7 +18,8 @@ use crate::shield_proto::shield_service_client::ShieldServiceClient;
 use crate::shield_proto::shield_service_server::{ShieldService, ShieldServiceServer};
 use crate::shield_proto::{
     EnrollRequest, EnrollResponse, GoodbyeRequest, GoodbyeResponse, ReEnrollSignal,
-    RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction, ShieldControlMessage,
+    RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction, ResourceSnapshot,
+    ShieldControlMessage,
 };
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
@@ -29,6 +30,11 @@ const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 struct ShieldMaps {
     instruction_txs: HashMap<String, mpsc::Sender<ResourceInstruction>>,
     resource_instructions: HashMap<String, Vec<ResourceInstruction>>,
+    /// Live channel to forward snapshots to a connected shield.
+    snapshot_txs: HashMap<String, mpsc::Sender<ResourceSnapshot>>,
+    /// Latest desired-state snapshot per shield — replayed on shield (re)connect
+    /// (ADR-004 Phase 2: re-protects a rebooted shield).
+    resource_snapshots: HashMap<String, ResourceSnapshot>,
     health: HashMap<String, ShieldEntry>,
     pending_discovery: HashMap<String, crate::shield_proto::DiscoveryReport>,
 }
@@ -67,6 +73,8 @@ impl ShieldRegistry {
             maps: Arc::new(Mutex::new(ShieldMaps {
                 instruction_txs: HashMap::new(),
                 resource_instructions: HashMap::new(),
+                snapshot_txs: HashMap::new(),
+                resource_snapshots: HashMap::new(),
                 health: HashMap::new(),
                 pending_discovery: HashMap::new(),
             })),
@@ -101,6 +109,26 @@ impl ShieldRegistry {
                 .lock()
                 .resource_instructions
                 .insert(shield_id.to_string(), instructions);
+        }
+    }
+
+    /// Cache the latest desired-state snapshot and forward it live if the
+    /// shield is connected. The cache is replayed when a shield (re)connects —
+    /// this is what re-protects a rebooted shield (ADR-004 Phase 2).
+    pub fn push_snapshot(&self, shield_id: &str, snapshot: ResourceSnapshot) {
+        let maybe_tx = {
+            let mut maps = self.maps.lock();
+            maps.resource_snapshots
+                .insert(shield_id.to_string(), snapshot.clone());
+            maps.snapshot_txs.get(shield_id).cloned()
+        };
+        if let Some(tx) = maybe_tx {
+            let id = shield_id.to_string();
+            tokio::spawn(async move {
+                if tx.send(snapshot).await.is_err() {
+                    warn!(shield_id = %id, "shield snapshot channel closed during push");
+                }
+            });
         }
     }
 
@@ -348,14 +376,15 @@ impl ShieldService for ShieldRegistry {
 
         let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
         let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(32);
+        let (snap_tx, mut snap_rx) = mpsc::channel::<ResourceSnapshot>(8);
         // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
 
         {
-            self.maps
-                .lock()
-                .instruction_txs
+            let mut maps = self.maps.lock();
+            maps.instruction_txs
                 .insert(identity.shield_id.clone(), instr_tx);
+            maps.snapshot_txs.insert(identity.shield_id.clone(), snap_tx);
         }
         self.tunnel_hub
             .register_shield(identity.shield_id.clone(), tunnel_tx);
@@ -366,6 +395,31 @@ impl ShieldService for ShieldRegistry {
 
         tokio::spawn(async move {
             info!(shield_id = %shield_id, "shield Control stream connected");
+
+            // ADR-004 Phase 2: replay the cached desired-state snapshot first —
+            // a rebooted shield starts empty and must be re-protected. The cache
+            // is read (not consumed): it must survive for the next reconnect too.
+            let cached = registry
+                .maps
+                .lock()
+                .resource_snapshots
+                .get(&shield_id)
+                .cloned();
+            if let Some(snap) = cached {
+                use crate::shield_proto::shield_control_message::Body;
+                let generation = snap.generation;
+                if out_tx
+                    .send(Ok(ShieldControlMessage {
+                        body: Some(Body::ResourceSnapshot(snap)),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    warn!(shield_id = %shield_id, "failed to replay cached snapshot on connect");
+                } else {
+                    info!(shield_id = %shield_id, generation, "replayed cached resource snapshot on connect");
+                }
+            }
 
             let buffered = registry
                 .maps
@@ -456,6 +510,15 @@ impl ShieldService for ShieldRegistry {
                             break;
                         }
                     }
+                    // ADR-004 Phase 2: forward fresh desired-state snapshots live.
+                    Some(snap) = snap_rx.recv() => {
+                        use crate::shield_proto::shield_control_message::Body;
+                        if out_tx.send(Ok(ShieldControlMessage {
+                            body: Some(Body::ResourceSnapshot(snap)),
+                        })).await.is_err() {
+                            break;
+                        }
+                    }
                     // RDE: forward tunnel messages from the hub to the Shield's output stream.
                     Some(msg) = tunnel_rx.recv() => {
                         if out_tx.send(Ok(msg)).await.is_err() {
@@ -464,7 +527,11 @@ impl ShieldService for ShieldRegistry {
                     }
                 }
             }
-            registry.maps.lock().instruction_txs.remove(&shield_id);
+            {
+                let mut maps = registry.maps.lock();
+                maps.instruction_txs.remove(&shield_id);
+                maps.snapshot_txs.remove(&shield_id); // cache itself survives for the next reconnect
+            }
             registry.tunnel_hub.unregister_shield(&shield_id);
             info!(shield_id = %shield_id, "shield Control stream disconnected");
         });

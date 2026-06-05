@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -63,6 +64,7 @@ func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*gra
 	}
 
 	r.ConnectorRegistry.PushInstruction(row)
+	connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	return toResourceGQL(row), nil
 }
 
@@ -76,12 +78,12 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 	}
 
 	r.ConnectorRegistry.PushInstruction(row)
+	connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	return toResourceGQL(row), nil
 }
 
 // DeleteResource is the resolver for the deleteResource field.
 func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool, error) {
-
 	tc := tenant.MustGet(ctx)
 
 	row, err := resource.GetByID(ctx, r.ResourceCfg.DB, tc.TenantID, id)
@@ -100,6 +102,7 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
 		r.ConnectorRegistry.PushInstruction(delRow)
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 		return true, nil
 	default: // pending, unprotected — no rule possible, delete now
 		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
