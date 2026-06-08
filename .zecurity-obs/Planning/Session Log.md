@@ -1161,3 +1161,37 @@ Most recent first. Every agent appends an entry after their session.
 - 3.5 Gate: SQL-injected orphan → auto-resync; delete-while-down + connector restart → report-
   confirmed tombstone reap; verify no reconciler thrash during normal ops. Then commit/push/release.
 - Status details in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).
+
+---
+
+## 2026-06-08 — Claude (M3/M4, ADR-004 Phase 3 implemented + Gate 3 verified)
+
+**What was done:**
+- Completed Phase 3 (closed-loop reconciliation): steps 3.4 (controller reconciler) + 3.5 (gate).
+  - store: `GetDeletingForShield`, `ReapTombstone`.
+  - new `internal/connector/reconcile.go`: per-report security scope (shield ∈ reporting
+    connector+tenant); drift (orphan = reported∖desired, missing = desired∖reported) → 2-report
+    hysteresis → `buildSnapshotMsg` re-push; `deleting` tombstone absent 3 reports → reap.
+  - `Recon reconcileState` on `EnrollmentHandler`; `ResourceState` case in the recv loop.
+- Committed all of Phase 3 (3.1–3.4) to branch `feat/resource-state-reconciliation` (90cec17),
+  pushed. Hand-deployed branch binaries to connector (Archer) + shield (inkyank-01) via
+  systemctl stop / install / start (update timers stopped first); controller via local `go run`.
+- Gate 3 verified live: no-thrash (silent ~90s); organic orphan auto-resync with correct 2-report
+  hysteresis; Test 3 tombstone reap purely by reconciler in ~76s; `nft list` on the host confirmed
+  the resource_protect chain empty (rule dropped).
+
+**Key decisions / findings:**
+- `RecordAck` periodic re-verification heals DB corruption back to the shield's actual state — so
+  you cannot fake a stable orphan on a legitimately-enforced resource; only `deleting` (guarded by
+  `status != 'deleting'`) is immune, which is exactly why the reap test uses it.
+- OPEN: should `failed` (port-not-listening, rule WAS applied) be in `GetDesiredForShield`?
+  Currently excluded → reconciler strips the rule. Fail-closed alternative pending product call.
+- OPEN: dev `go run` controller returns `RenewCert not implemented` → shield cert will expire
+  (mTLS lockout risk, as seen 2026-06-03). Fix controller build before long deployments.
+
+**What's next:**
+- Decide `failed`-in-desired; if fail-closed, one-line change in `GetDesiredForShield` + retest.
+- Merge `feat/resource-state-reconciliation` PR; bump versions; tag → release shield+connector;
+  re-enable update timers on the deployed hosts.
+- Phase 4 (break-glass forceDelete, vestigial `deleted_at` cleanup, drift metrics) when desired.
+- Status detail in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).
