@@ -211,6 +211,57 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
   Delete while offline → reconnect snapshot drops it → next report confirms absent → tombstone
   auto-reaped. Verify no thrash on a freshly-protected resource (hysteresis).
 
+> **STATUS: ✅ IMPLEMENTED + VERIFIED (2026-06-08) — all of 3.1–3.5 done.**
+> Gate 3 passed on the live stack (controller local `go run`; connector on Archer 192.168.1.87;
+> shield on inkyank-01 192.168.1.164, binaries hand-deployed from the branch).
+> - **Test 1 (no-thrash):** protected resource steady ~90s, zero `reconcile:` chatter. ✅
+> - **Organic orphan:** a stale connector-cached snapshot replayed a `failed` resource onto the
+>   shield; controller logged `ORPHAN ×2 → drift persisted 2 reports → re-pushing snapshot`, next
+>   report clean. ✅ (Hysteresis confirmed: acted only on the 2nd consecutive drift report.)
+> - **Test 2 finding:** injecting `status='unprotected'` on a legitimately-enforced+reachable
+>   resource did NOT create a stable orphan — `RecordAck`'s periodic re-verify ack healed it back
+>   to `protected` within one heartbeat. Good property: the shield's truth overrides DB corruption.
+>   The `AND status != 'deleting'` guard is what makes `deleting` immune to this (so reap is stable).
+> - **Test 3 (tombstone reap — headline):** injected `status='deleting'` directly (no resolver →
+>   no remove instruction → no ack). Reaped purely by the reconciler in ~76s (≈5 heartbeats:
+>   ~2 to resync the orphan, ~3 to confirm absent). `nft list chain inet zecurity resource_protect`
+>   on the host confirmed the 5173 rule gone (empty chain). ✅
+>
+> **Open follow-ups (not blockers):**
+> - **`failed`-in-desired decision (UNRESOLVED):** `GetDesiredForShield` excludes `failed`, so a
+>   port-not-listening resource (which the shield DID apply a rule for) gets its rule stripped by
+>   the reconciler. Fail-closed alternative: include `failed` in the desired set so a temporarily
+>   down service keeps enforcement. One-line SQL change; product call pending.
+> - **`RenewCert not implemented`** in the dev `go run` controller — shield cert renewal fails;
+>   will expire the 7-day cert and cause an mTLS lockout (same failure mode as 2026-06-03). Fix
+>   the controller build before long-running deployments. Unrelated to ADR-004.
+>
+> _Original in-progress detail below (kept for history)._
+
+> **(historical) IN PROGRESS (2026-06-05) — steps 3.1–3.3 implemented, 3.4–3.5 pending.**
+> - **3.1 protos ✅** — `ResourceStateReport` (shield oneof field 13: shield_id, generation,
+>   sorted active_resource_ids, fingerprint) + `ResourceStateBatch` (connector oneof field 14).
+>   buf + both cargo regens clean; controller builds.
+> - **3.2 shield ✅** — `state_seq: Mutex<u64>` in `SharedResourceState`; `bump_state_seq()` at
+>   ALL FOUR active-set mutation points (apply upsert, apply Err-rollback retain, remove retain,
+>   snapshot replace); `build_state_report()` (sorted ids → DefaultHasher fingerprint); report
+>   emitted on every heartbeat tick after the ack drain (`control_stream.rs`).
+> - **3.3 connector ✅** — `pending_state` latest-wins map in `ShieldMaps`; inbound
+>   `Body::ResourceState` arm buffers per shield; `drain_state_batch()` (exact mirror of
+>   `drain_discovery_batch`); flushed upstream on the health tick after the ShieldStatus send.
+> - **3.4 controller (NEXT)** — store helpers `GetDeletingForShield` + `ReapTombstone`;
+>   new `internal/connector/reconcile.go` (security scope: shield must belong to reporting
+>   connector+tenant; drift → 2-consecutive-report hysteresis → `buildSnapshotMsg` re-push;
+>   tombstone absent 3 consecutive reports → reap); `Recon reconcileState` field on
+>   `EnrollmentHandler` (zero-value-ready, lazy maps); `ConnectorControlMessage_ResourceState`
+>   case in the control-stream recv loop. Full code in the Phase 3 chat guide.
+> - **3.5 gate (PENDING)** — Runtime A: SQL-delete a protected row → orphan detected → snapshot
+>   resync drops rule. Runtime B (showcase): delete-while-shield-down + connector restart (buffer
+>   lost) → tombstone reaped via report-confirmed absence ≈45s. Runtime C: no reconciler chatter
+>   during normal operations.
+> - Reports reflect the shield's in-memory intent state, NOT raw kernel nftables (manual nft
+>   tamper invisible — documented limitation). Hysteresis counters are controller-memory.
+
 ### PHASE 4 — UX, break-glass, observability, cleanup
 - Frontend: finalize `deleting` UX (list + detail "Deleting…").
 - Break-glass: admin-only `forceDeleteResource(id)` (`@hasRole([ADMIN])`), audit-logged.

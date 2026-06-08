@@ -85,7 +85,10 @@ message ConnectorControlMessage {
     client.v1.ACLSnapshot acl_snapshot = 11;
     // Connector → Controller
     ConnectorLog connector_log = 12;
+    // Controller → Connector
     ResourceSnapshotBatch resource_snapshots = 13;
+    // Connector → Controller
+    ResourceStateBatch resource_state = 14;
   }
 }
 
@@ -102,6 +105,12 @@ message ResourceInstructionBatch {
 message ResourceSnapshotBatch {
   // keyed by shield_id → resource snapshot for that shield
   map<string, shield.v1.ResourceSnapshot> shield_snapshots = 1;
+}
+
+// Shield actual-state reports forwarded upstream (ADR-004 Phase 3).
+// Buffered latest-wins on the connector, flushed on the health tick.
+message ResourceStateBatch {
+  repeated shield.v1.ResourceStateReport reports = 1;
 }
 
 message ConnectorHealthReport {

@@ -276,6 +276,8 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case *pb.ConnectorControlMessage_ConnectorLog:
 			entry := msg.Body.(*pb.ConnectorControlMessage_ConnectorLog).ConnectorLog
 			h.handleConnectorLog(ctx, tenantID, connectorID, entry)
+		case *pb.ConnectorControlMessage_ResourceState:
+			h.handleResourceState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ResourceState).ResourceState)
 		default:
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}

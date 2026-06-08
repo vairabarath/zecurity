@@ -142,6 +142,15 @@ async fn run_once(
                         .await
                         .context("failed to send resource ack")?;
                 }
+                // ADR-004 Phase 3: report actual enforced state every heartbeat
+                // so the controller can reconcile observed vs desired.
+                let report = resource_state.build_state_report(&state.shield_id);
+                out_tx
+                    .send(ShieldControlMessage {
+                        body: Some(Body::ResourceState(report)),
+                    })
+                    .await
+                    .context("failed to send resource state report")?;
                 // Non-blocking poll: only runs when discovery_interval_secs have elapsed.
                 if discovery_tick.tick().now_or_never().is_some() {
                     match discovery::run_discovery_diff(
