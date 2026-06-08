@@ -442,3 +442,40 @@ func collectRows(rows pgx.Rows) ([]*Row, error) {
 	}
 	return result, nil
 }
+
+// GetDeletingForShield returns the ids of tombstoned ('deleting') resources on
+// a shield. The Phase 3 reconciler reaps these once the shield's state reports
+// confirm the rule is gone (ADR-004: confirmation-gated deletion).
+func GetDeletingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]string, error) {
+	rows, err := db.Query(ctx,
+		`SELECT id FROM resources WHERE shield_id = $1 AND status = 'deleting'`,
+		shieldID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get deleting resources: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ReapTombstone hard-deletes a 'deleting' tombstone after the shield's reported
+// state confirmed the rule is absent. Returns true if a row was reaped.
+func ReapTombstone(ctx context.Context, db *pgxpool.Pool, tenantID, shieldID, resourceID string) (bool, error) {
+	ct, err := db.Exec(ctx,
+		`DELETE FROM resources
+		  WHERE id = $1 AND tenant_id = $2 AND shield_id = $3 AND status = 'deleting'`,
+		resourceID, tenantID, shieldID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("reap tombstone: %w", err)
+	}
+	return ct.RowsAffected() > 0, nil
+}

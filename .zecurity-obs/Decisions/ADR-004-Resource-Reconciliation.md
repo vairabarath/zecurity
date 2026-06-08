@@ -211,6 +211,30 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
   Delete while offline → reconnect snapshot drops it → next report confirms absent → tombstone
   auto-reaped. Verify no thrash on a freshly-protected resource (hysteresis).
 
+> **STATUS: 🔶 IN PROGRESS (2026-06-05) — steps 3.1–3.3 implemented, 3.4–3.5 pending.**
+> - **3.1 protos ✅** — `ResourceStateReport` (shield oneof field 13: shield_id, generation,
+>   sorted active_resource_ids, fingerprint) + `ResourceStateBatch` (connector oneof field 14).
+>   buf + both cargo regens clean; controller builds.
+> - **3.2 shield ✅** — `state_seq: Mutex<u64>` in `SharedResourceState`; `bump_state_seq()` at
+>   ALL FOUR active-set mutation points (apply upsert, apply Err-rollback retain, remove retain,
+>   snapshot replace); `build_state_report()` (sorted ids → DefaultHasher fingerprint); report
+>   emitted on every heartbeat tick after the ack drain (`control_stream.rs`).
+> - **3.3 connector ✅** — `pending_state` latest-wins map in `ShieldMaps`; inbound
+>   `Body::ResourceState` arm buffers per shield; `drain_state_batch()` (exact mirror of
+>   `drain_discovery_batch`); flushed upstream on the health tick after the ShieldStatus send.
+> - **3.4 controller (NEXT)** — store helpers `GetDeletingForShield` + `ReapTombstone`;
+>   new `internal/connector/reconcile.go` (security scope: shield must belong to reporting
+>   connector+tenant; drift → 2-consecutive-report hysteresis → `buildSnapshotMsg` re-push;
+>   tombstone absent 3 consecutive reports → reap); `Recon reconcileState` field on
+>   `EnrollmentHandler` (zero-value-ready, lazy maps); `ConnectorControlMessage_ResourceState`
+>   case in the control-stream recv loop. Full code in the Phase 3 chat guide.
+> - **3.5 gate (PENDING)** — Runtime A: SQL-delete a protected row → orphan detected → snapshot
+>   resync drops rule. Runtime B (showcase): delete-while-shield-down + connector restart (buffer
+>   lost) → tombstone reaped via report-confirmed absence ≈45s. Runtime C: no reconciler chatter
+>   during normal operations.
+> - Reports reflect the shield's in-memory intent state, NOT raw kernel nftables (manual nft
+>   tamper invisible — documented limitation). Hysteresis counters are controller-memory.
+
 ### PHASE 4 — UX, break-glass, observability, cleanup
 - Frontend: finalize `deleting` UX (list + detail "Deleting…").
 - Break-glass: admin-only `forceDeleteResource(id)` (`@hasRole([ADMIN])`), audit-logged.

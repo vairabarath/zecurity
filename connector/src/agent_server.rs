@@ -19,7 +19,7 @@ use crate::shield_proto::shield_service_server::{ShieldService, ShieldServiceSer
 use crate::shield_proto::{
     EnrollRequest, EnrollResponse, GoodbyeRequest, GoodbyeResponse, ReEnrollSignal,
     RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction, ResourceSnapshot,
-    ShieldControlMessage,
+    ResourceStateReport, ShieldControlMessage,
 };
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
@@ -35,6 +35,9 @@ struct ShieldMaps {
     /// Latest desired-state snapshot per shield — replayed on shield (re)connect
     /// (ADR-004 Phase 2: re-protects a rebooted shield).
     resource_snapshots: HashMap<String, ResourceSnapshot>,
+    /// Latest actual-state report per shield — flushed upstream on the health
+    /// tick (ADR-004 Phase 3). Latest-wins: it's a checkpoint, not a queue.
+    pending_state: HashMap<String, ResourceStateReport>,
     health: HashMap<String, ShieldEntry>,
     pending_discovery: HashMap<String, crate::shield_proto::DiscoveryReport>,
 }
@@ -75,6 +78,7 @@ impl ShieldRegistry {
                 resource_instructions: HashMap::new(),
                 snapshot_txs: HashMap::new(),
                 resource_snapshots: HashMap::new(),
+                pending_state: HashMap::new(),
                 health: HashMap::new(),
                 pending_discovery: HashMap::new(),
             })),
@@ -187,6 +191,22 @@ impl ShieldRegistry {
                     crate::proto::ShieldDiscoveryBatch { reports },
                 ),
             ),
+        })
+    }
+
+    /// Drain buffered shield actual-state reports into a ResourceStateBatch
+    /// message (ADR-004 Phase 3). Returns None if there are no pending reports.
+    pub fn drain_state_batch(&self) -> Option<crate::proto::ConnectorControlMessage> {
+        let mut maps = self.maps.lock();
+        if maps.pending_state.is_empty() {
+            return None;
+        }
+        let reports: Vec<ResourceStateReport> =
+            maps.pending_state.drain().map(|(_, report)| report).collect();
+        Some(crate::proto::ConnectorControlMessage {
+            body: Some(crate::proto::connector_control_message::Body::ResourceState(
+                crate::proto::ResourceStateBatch { reports },
+            )),
         })
     }
 
@@ -479,6 +499,12 @@ impl ShieldService for ShieldRegistry {
                                             full_sync,
                                             "received DiscoveryReport from shield (buffered for upstream flush)"
                                         );
+                                    }
+                                    // ADR-004 Phase 3: latest actual-state report,
+                                    // buffered for upstream flush on the health tick.
+                                    Some(Body::ResourceState(report)) => {
+                                        registry.maps.lock().pending_state
+                                            .insert(shield_id.clone(), report);
                                     }
                                     Some(Body::Pong(_)) => {}
                                     // RDE tunnel responses from Shield → dispatch to relay sessions.

@@ -1127,3 +1127,37 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Verify `nft list ruleset` on a Shield host shows no `iifname "zecurity0"` rule in `resource_protect`, then test LAN block plus client access through Connector → Shield.
+
+---
+
+## 2026-06-05 — Claude (M2/M3/M4, ADR-004 Phase 2 release + Phase 3 reconciliation start)
+
+**What was done:**
+- Merged Phase 2 (desired-state snapshot resync) via PR #39; verified live: cached snapshot
+  replayed on shield (re)connect, applied with matching generation, dual delivery on protect
+  (instruction + live snapshot ~40ms apart), seamless recovery across shield restart.
+- Released `shield-v1.0.9` + `connector-v1.0.16` (version bumps on main, tag-triggered CI;
+  both workflows green, all assets incl. checksums published). Rollout via the auto-update
+  timers (semver compare vs CARGO_PKG_VERSION — bump-before-tag is mandatory).
+- Started Phase 3 (closed-loop reconciliation), steps 3.1–3.3 complete and building:
+  - protos: `ResourceStateReport` (shield oneof 13) + `ResourceStateBatch` (connector oneof 14)
+  - shield: `state_seq` bumped at all 4 active-set mutation points; `build_state_report()`
+    (sorted ids + fingerprint); report emitted on every heartbeat after the ack drain
+  - connector: `pending_state` latest-wins buffer + `drain_state_batch()` flushed on health tick
+- Reports now arrive at the controller every ~15s and hit the default case (harmless) until 3.4.
+
+**Key decisions:**
+- Reconciler's corrective action is simply `buildSnapshotMsg` re-push (Phase 2 replace-semantics
+  drops orphans + applies missing) — no new fix machinery, only new observation.
+- Hysteresis is mandatory: drift must persist 2 consecutive reports before resync; a `deleting`
+  tombstone must be absent 3 consecutive reports before reap. Counters in controller memory
+  (restart just delays action).
+- Reports describe the shield's in-memory intent state, not raw kernel nftables — manual nft
+  tampering is out of scope for Phase 3 (documented limitation).
+
+**What's next:**
+- 3.4: store helpers (`GetDeletingForShield`, `ReapTombstone`), `internal/connector/reconcile.go`
+  (security-scoped, hysteresis), `Recon` field on `EnrollmentHandler`, recv-loop case.
+- 3.5 Gate: SQL-injected orphan → auto-resync; delete-while-down + connector restart → report-
+  confirmed tombstone reap; verify no reconciler thrash during normal ops. Then commit/push/release.
+- Status details in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).

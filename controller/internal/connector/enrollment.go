@@ -31,6 +31,8 @@ type EnrollmentHandler struct {
 	PolicyStore    *policy.Store
 	PolicyCache    *policy.SnapshotCache
 	PolicyNotifier *policy.Notifier
+
+	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
 }
 
 // Enroll implements the ConnectorService.Enroll gRPC handler.

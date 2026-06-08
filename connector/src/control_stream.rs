@@ -218,6 +218,12 @@ async fn run_once(
                 if !status.shields.is_empty() {
                     send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ShieldStatus(status)), }).await?;
                 }
+
+                // ADR-004 Phase 3: flush buffered shield actual-state reports
+                // upstream for reconciliation.
+                if let Some(state_batch) = shield_registry.drain_state_batch() {
+                    send_msg(&out_tx, state_batch).await?;
+                }
             }
 
             _ = discovery_ticker.tick() => {

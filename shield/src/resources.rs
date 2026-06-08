@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +37,9 @@ pub struct SharedResourceState {
     /// Stale snapshots (e.g. a cached replay racing a newer live push) are
     /// dropped so an older truth can never overwrite a newer one.
     pub last_snapshot_generation: Mutex<u64>,
+    /// Session-local sequence, bumped on every active-set mutation (ADR-004
+    /// Phase 3). Lets the controller order state reports within a session.
+    pub state_seq: Mutex<u64>,
 }
 
 impl SharedResourceState {
@@ -43,6 +48,7 @@ impl SharedResourceState {
             active: Mutex::new(Vec::new()),
             acks: Mutex::new(Vec::new()),
             last_snapshot_generation: Mutex::new(0),
+            state_seq: Mutex::new(0),
         }
     }
 
@@ -55,6 +61,33 @@ impl SharedResourceState {
     pub fn drain_acks(&self) -> Vec<ResourceAck> {
         let mut acks = self.acks.lock().unwrap();
         std::mem::take(&mut *acks)
+    }
+
+    pub fn bump_state_seq(&self) {
+        *self.state_seq.lock().unwrap() += 1;
+    }
+
+    /// Build the actual-state report from the in-memory active set (ADR-004
+    /// Phase 3). Reflects the shield's applied intent — not raw kernel state.
+    pub fn build_state_report(&self, shield_id: &str) -> crate::proto::ResourceStateReport {
+        let mut ids: Vec<String> = self
+            .active
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.resource_id.clone())
+            .collect();
+        ids.sort();
+        let mut hasher = DefaultHasher::new();
+        for id in &ids {
+            id.hash(&mut hasher);
+        }
+        crate::proto::ResourceStateReport {
+            shield_id: shield_id.to_string(),
+            generation: *self.state_seq.lock().unwrap(),
+            active_resource_ids: ids,
+            fingerprint: hasher.finish(),
+        }
     }
 }
 
@@ -272,6 +305,7 @@ pub async fn handle_apply(
             });
         }
     }
+    state.bump_state_seq();
 
     let snapshot = state.active.lock().unwrap().clone();
     match apply_nftables(&snapshot).await {
@@ -305,6 +339,7 @@ pub async fn handle_apply(
                 .lock()
                 .unwrap()
                 .retain(|r| r.resource_id != instruction.resource_id);
+            state.bump_state_seq();
             error!(
                 resource_id = %instruction.resource_id,
                 error = %e,
@@ -330,6 +365,7 @@ pub async fn handle_remove(
         .lock()
         .unwrap()
         .retain(|r| r.resource_id != instruction.resource_id);
+    state.bump_state_seq();
 
     let snapshot = state.active.lock().unwrap().clone();
     if let Err(e) = apply_nftables(&snapshot).await {
@@ -407,6 +443,7 @@ pub async fn handle_snapshot(
 
     // The replace: active becomes exactly the snapshot's (validated) contents.
     *state.active.lock().unwrap() = new_active;
+    state.bump_state_seq();
     let applied = state.active.lock().unwrap().clone();
     match apply_nftables(&applied).await {
         Ok(()) => {

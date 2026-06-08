@@ -66,6 +66,16 @@ message ResourceSnapshot {
   uint64 generation = 2; // monotonic; shield ignores snapshots older than the last applied
 }
 
+// Shield → Connector: the shield's actual enforced state (ADR-004 Phase 3).
+// Sent on every heartbeat so the controller can reconcile observed vs desired
+// state (orphan removal, missing re-apply, confirmation-gated tombstone reap).
+message ResourceStateReport {
+  string shield_id = 1;
+  uint64 generation = 2; // session-local seq, bumped on every active-set mutation
+  repeated string active_resource_ids = 3; // sorted
+  uint64 fingerprint = 4; // hash over the sorted id list — cheap no-change check
+}
+
 message RenewCertRequest {
   string shield_id = 1; // for logging only — identity comes from mTLS cert
   bytes public_key_der = 2; // shield's existing EC P-384 public key (DER)
@@ -105,7 +115,10 @@ message ShieldControlMessage {
     // Bidirectional
     TunnelData tunnel_data = 10;
     TunnelClose tunnel_close = 11;
+    // Connector → Shield
     ResourceSnapshot resource_snapshot = 12;
+    // Shield → Connector
+    ResourceStateReport resource_state = 13;
   }
 }
 
