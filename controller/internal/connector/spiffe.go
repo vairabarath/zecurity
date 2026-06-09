@@ -10,6 +10,7 @@ import (
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/spiffe"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -17,45 +18,22 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// ── Context keys ────────────────────────────────────────────────────────────
-// Unexported types prevent collisions with other packages' context values.
-
-type spiffeIDKey struct{}
-type spiffeRoleKey struct{}
-type spiffeEntityIDKey struct{}
-type trustDomainKey struct{}
-
 // ── Context accessors ───────────────────────────────────────────────────────
-// These are the ONLY way handlers should read SPIFFE identity from context.
-// The interceptor injects the values; handlers consume them via these helpers.
+// The verified SPIFFE identity now lives in the neutral internal/spiffe package
+// so handler packages outside connector (e.g. shield) can read it without an
+// import cycle. These thin wrappers preserve the existing connector call sites.
 
 // SPIFFEIDFromContext returns the full SPIFFE URI from the context.
-// Called by: enrollment.go, control_stream.go
-func SPIFFEIDFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(spiffeIDKey{}).(string)
-	return v
-}
+func SPIFFEIDFromContext(ctx context.Context) string { return spiffe.ID(ctx) }
 
-// SPIFFERoleFromContext returns the SPIFFE role ("connector", "agent", "controller").
-// Called by: control_stream.go (verifies role == "connector")
-func SPIFFERoleFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(spiffeRoleKey{}).(string)
-	return v
-}
+// SPIFFERoleFromContext returns the SPIFFE role ("connector", "shield", "controller").
+func SPIFFERoleFromContext(ctx context.Context) string { return spiffe.Role(ctx) }
 
 // SPIFFEEntityIDFromContext returns the entity-specific ID (e.g. connector UUID).
-// Called by: control_stream.go (used as connectorID)
-func SPIFFEEntityIDFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(spiffeEntityIDKey{}).(string)
-	return v
-}
+func SPIFFEEntityIDFromContext(ctx context.Context) string { return spiffe.EntityID(ctx) }
 
 // TrustDomainFromContext returns the trust domain from the context.
-// Called by: control_stream.go (used for tenant resolution)
-func TrustDomainFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(trustDomainKey{}).(string)
-	return v
-}
+func TrustDomainFromContext(ctx context.Context) string { return spiffe.TrustDomain(ctx) }
 
 // ── WorkspaceStore ──────────────────────────────────────────────────────────
 
@@ -230,11 +208,8 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		// Build the full SPIFFE URI for context injection.
 		spiffeID := "spiffe://" + trustDomain + "/" + role + "/" + entityID
 
-		// Inject identity into context for downstream handlers.
-		ctx = context.WithValue(ctx, spiffeIDKey{}, spiffeID)
-		ctx = context.WithValue(ctx, spiffeRoleKey{}, role)
-		ctx = context.WithValue(ctx, spiffeEntityIDKey{}, entityID)
-		ctx = context.WithValue(ctx, trustDomainKey{}, trustDomain)
+		// Inject identity into context for downstream handlers (shared package).
+		ctx = spiffe.WithIdentity(ctx, spiffeID, role, entityID, trustDomain)
 
 		return handler(ctx, req)
 	}

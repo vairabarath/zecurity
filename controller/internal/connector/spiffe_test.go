@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/spiffe"
 )
 
 // ── parseSPIFFEID tests ─────────────────────────────────────────────────────
@@ -94,10 +95,7 @@ func TestParseSPIFFEID_EmptyTrustDomain(t *testing.T) {
 
 func TestContextAccessors_RoundTrip(t *testing.T) {
 	ctx := context.Background()
-	ctx = context.WithValue(ctx, spiffeIDKey{}, "spiffe://ws-acme.zecurity.in/connector/abc")
-	ctx = context.WithValue(ctx, spiffeRoleKey{}, "connector")
-	ctx = context.WithValue(ctx, spiffeEntityIDKey{}, "abc")
-	ctx = context.WithValue(ctx, trustDomainKey{}, "ws-acme.zecurity.in")
+	ctx = spiffe.WithIdentity(ctx, "spiffe://ws-acme.zecurity.in/connector/abc", "connector", "abc", "ws-acme.zecurity.in")
 
 	if v := SPIFFEIDFromContext(ctx); v != "spiffe://ws-acme.zecurity.in/connector/abc" {
 		t.Fatalf("SPIFFEIDFromContext = %q", v)

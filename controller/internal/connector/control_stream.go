@@ -16,6 +16,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/spiffe"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -451,10 +452,7 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		}
 
 		spiffeID := "spiffe://" + trustDomain + "/" + role + "/" + entityID
-		ctx = context.WithValue(ctx, spiffeIDKey{}, spiffeID)
-		ctx = context.WithValue(ctx, spiffeRoleKey{}, role)
-		ctx = context.WithValue(ctx, spiffeEntityIDKey{}, entityID)
-		ctx = context.WithValue(ctx, trustDomainKey{}, trustDomain)
+		ctx = spiffe.WithIdentity(ctx, spiffeID, role, entityID, trustDomain)
 
 		return handler(srv, &wrappedStream{ServerStream: ss, ctx: ctx})
 	}
