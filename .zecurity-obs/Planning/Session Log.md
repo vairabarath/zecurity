@@ -1195,3 +1195,61 @@ Most recent first. Every agent appends an entry after their session.
   re-enable update timers on the deployed hosts.
 - Phase 4 (break-glass forceDelete, vestigial `deleted_at` cleanup, drift metrics) when desired.
 - Status detail in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).
+
+---
+
+## 2026-06-09 — Claude (M3/M4, ADR-004 fail-closed + Phase 3 release)
+
+**What was done:**
+- Merged fail-closed fix (PR #41): `GetDesiredForShield` now includes `failed` so a
+  port-not-listening resource (shield HAS the drop rule) keeps enforcement instead of being
+  stripped by the snapshot/reconciler. Doc + commit note the host-mismatch edge (benign re-push
+  thrash; common case stays in active, no thrash).
+- Bumped shield 1.0.9→1.0.10, connector 1.0.16→1.0.17 (PR #42); tagged shield-v1.0.10 +
+  connector-v1.0.17; both Build & Release workflows green; all assets (binaries, checksums,
+  install scripts, systemd units) published. First releases containing ADR-004 Phase 3.
+- ADR-004 complete: Phase 1 (tombstone delete) + Phase 2 (snapshot resync) on 1.0.9/1.0.16;
+  Phase 3 (closed-loop reconciliation) + fail-closed on 1.0.10/1.0.17. All phases live-verified.
+
+**Key decisions:**
+- Fail-closed for `failed` resources: admin intent is "protected"; don't strip a rule from a
+  temporarily-down service. Controller-only change (ships with controller deploy, not the
+  shield/connector release).
+
+**What's next:**
+- Roll deployed hosts onto 1.0.10/1.0.17: re-enable update timers (stopped during testing) or
+  `--check-update`. Ensure the controller is running latest main (carries the fail-closed change).
+- FIX `RenewCert not implemented` on the controller before any long-lived deploy — shield cert is
+  7-day, renewal starts ~48h before expiry; failing renewal = mTLS lockout (seen 2026-06-03).
+- Phase 4 (break-glass forceDelete, vestigial deleted_at cleanup, drift metrics) when desired.
+
+---
+
+## 2026-06-09 (later) — Claude (M3, shield cert renewal handler)
+
+**What was done:**
+- Root-caused the repeated `RenewCert not implemented` errors: the controller's ShieldService
+  never implemented `RenewCert`. Shield requests renewal correctly and the connector proxies it,
+  but the controller returned Unimplemented → shield cert (7-day) never renews → mTLS lockout
+  ~7 days after enrollment (same symptom as the 2026-06-03 incident, different cause).
+- Implemented `RenewCert` on the controller ShieldService (`internal/shield/renewal.go`):
+  proxied-identity trust model (caller is the connector via its own mTLS; verify the shield is
+  owned by that connector + trust domain + not revoked), then `pki.RenewShieldCert` (the
+  `public_key_der` field actually carries a CSR — proven by the working connector path), update
+  shields cert_serial/cert_not_after, return cert + CA chain.
+- Extracted SPIFFE context keys/accessors into a neutral `internal/spiffe` package to break the
+  connector↔shield import cycle; connector accessors now delegate (call sites unchanged); both
+  unary + streaming interceptors inject via `spiffe.WithIdentity`. Updated spiffe_test.
+- Controller builds + vets clean; connector package tests pass.
+
+**Key decisions:**
+- Controller-only fix — deployed shield/connector already request/proxy correctly; ships with a
+  controller deploy, no shield/connector release.
+- Trust chain for proxied renewal: controller trusts connector (mTLS, interceptor-verified) →
+  connector verified shield mTLS → controller confirms shield∈connector. A connector already
+  controls its shields' traffic, so this stays within the existing boundary.
+
+**What's next:**
+- Verify with a short CertTTL in a dev controller to watch a full renewal cycle (hard to trigger
+  otherwise — only fires within 48h of the 7-day expiry).
+- Merge + deploy the controller. Then Phase 4 (break-glass, deleted_at cleanup, drift metrics).
