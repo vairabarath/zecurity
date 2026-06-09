@@ -201,16 +201,26 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 }
 
 // GetDesiredForShield returns the complete set of resources that should be
-// enforced on a shield right now: protected, plus in-flight applies. Used to
-// build the authoritative ResourceSnapshot pushed on (re)connect (ADR-004 Phase 2).
-// 'deleting' and 'protecting/remove' rows are intentionally absent — the shield's
-// replace-semantics drops anything not listed here.
+// enforced on a shield right now. Used to build the authoritative
+// ResourceSnapshot pushed on (re)connect and by the reconciler (ADR-004).
+//
+// Includes (fail-closed):
+//   - protected
+//   - failed — the admin's intent is "protected"; a failed resource (e.g. the
+//     'port not listening' case, where the shield HAS applied the drop rule) must
+//     keep its rule so a temporarily-down service stays protected and is enforced
+//     the instant it returns. Re-applying a host-mismatch/nftables-error 'failed'
+//     is a harmless no-op on the shield.
+//   - protecting + apply (in-flight protect)
+//
+// 'deleting', 'unprotected', 'pending', and 'protecting/remove' are intentionally
+// absent — the shield's replace-semantics drops anything not listed here.
 func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
 		`SELECT id, host, protocol, port_from, port_to, pending_action
 	    	FROM resources
 		WHERE shield_id = $1
-		 AND (status = 'protected' OR (status = 'protecting' AND pending_action = 'apply'))
+		 AND (status IN ('protected', 'failed') OR (status = 'protecting' AND pending_action = 'apply'))
 		 AND deleted_at IS NULL`,
 		shieldID,
 	)
