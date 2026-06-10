@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -110,6 +111,58 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		}
 		return true, nil
 	}
+}
+
+// ForceDeleteResource is the resolver for the forceDeleteResource field — the
+// break-glass escape hatch (ADR-004 Phase 4). It hard-deletes a resource in ANY
+// state, including a 'deleting' tombstone or a 'protecting' row stuck because its
+// shield is permanently gone and will never ack. This deliberately bypasses the
+// confirmation-gated tombstone path, so it is admin-only (@hasRole) and every call
+// is audit-logged. Best-effort: if the shield turns out to still be connected, the
+// re-pushed snapshot makes it drop the now-removed rule (replace semantics).
+func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	// Snapshot the row for the audit record before it's gone. Best-effort — even if
+	// it can't be loaded we still attempt the delete; the whole point is rescuing a
+	// resource the normal path can't.
+	row, _ := resource.GetByID(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+
+	deleted, err := resource.ForceDeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+	if err != nil {
+		return false, fmt.Errorf("forceDeleteResource: %w", err)
+	}
+	if !deleted {
+		return false, fmt.Errorf("forceDeleteResource: resource not found")
+	}
+
+	// Durable audit trail — this bypassed the safety model, so it MUST leave a
+	// record. The delete already happened; a failed audit write is logged, not fatal.
+	details := map[string]any{}
+	if row != nil {
+		details["name"] = row.Name
+		details["host"] = row.Host
+		details["status"] = row.Status
+		details["shield_id"] = row.ShieldID
+		details["connector_id"] = row.ConnectorID
+	}
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "resource.force_delete",
+		TargetType:  "resource",
+		TargetID:    id,
+		Details:     details,
+	})
+
+	// Best-effort: if the shield is in fact still connected, re-push its desired set
+	// so it drops the rule for the resource we just removed.
+	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	}
+
+	return true, nil
 }
 
 // Resources is the resolver for the resources field.

@@ -6,6 +6,7 @@ import {
   ProtectResourceDocument,
   UnprotectResourceDocument,
   DeleteResourceDocument,
+  ForceDeleteResourceDocument,
   ShieldStatus,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -111,6 +112,14 @@ export default function ResourceDetail() {
     onError: (e) => toast.error(e.message),
   })
 
+  const [forceDeleteResource, { loading: forceDeleting }] = useMutation(ForceDeleteResourceDocument, {
+    onCompleted: () => {
+      toast.success('Resource force-deleted')
+      navigate('/resources')
+    },
+    onError: (e) => toast.error(e.message),
+  })
+
   function handleProtect() {
     if (!resourceId) return
     void protectResource({ variables: { id: resourceId } })
@@ -126,6 +135,22 @@ export default function ResourceDetail() {
     if (!resourceId) return
     if (!window.confirm('Delete this resource? This cannot be undone.')) return
     void deleteResource({ variables: { id: resourceId } })
+  }
+
+  function handleForceDelete() {
+    if (!resourceId) return
+    if (
+      !window.confirm(
+        'BREAK-GLASS: Force-delete this resource?\n\n' +
+          'This skips the safe removal flow and erases the record immediately, ' +
+          'even though it is mid-operation. Only use this if the shield is permanently gone.\n\n' +
+          'If the shield is still online it will drop the firewall rule. If it is offline, ' +
+          'any rule it holds stays until you reinstall.\n\n' +
+          'This action is audited and cannot be undone.'
+      )
+    )
+      return
+    void forceDeleteResource({ variables: { id: resourceId } })
   }
 
   if (loading && !resource) {
@@ -237,6 +262,21 @@ export default function ResourceDetail() {
             {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             Delete
           </Button>
+          {/* Break-glass: only when the resource is stuck mid-operation, where the
+              normal Delete is blocked. Erases the record even though it can't be
+              confirmed-safe — audited server-side. */}
+          {transitional && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleForceDelete}
+              disabled={forceDeleting}
+              className="gap-2 border border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              {forceDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+              Force delete
+            </Button>
+          )}
         </div>
       </div>
 

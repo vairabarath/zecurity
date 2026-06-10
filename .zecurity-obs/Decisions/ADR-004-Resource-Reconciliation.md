@@ -264,7 +264,16 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
 
 ### PHASE 4 — UX, break-glass, observability, cleanup
 - Frontend: finalize `deleting` UX (list + detail "Deleting…").
-- Break-glass: admin-only `forceDeleteResource(id)` (`@hasRole([ADMIN])`), audit-logged.
+- **Break-glass: admin-only `forceDeleteResource(id)` (`@hasRole([ADMIN])`), audit-logged. ✅ DONE (2026-06-10).**
+  - `internal/resource.ForceDeleteRow` — tenant-scoped hard `DELETE` in ANY state, bypassing the
+    confirmation-gated tombstone path; for resources stuck because their shield is gone.
+  - Resolver `ForceDeleteResource`: snapshot row → force-delete → audit-log → best-effort
+    `PushSnapshotForShield` (a still-connected shield drops the now-removed rule via replace-semantics).
+  - Durable audit: migration `016_audit_logs.sql` (append-only `audit_logs`) + `internal/audit`
+    package `Record()` (write-and-log; never fails the already-completed action). Action key
+    `resource.force_delete`. First consumer of a reusable audit table.
+  - Frontend: guarded "Force delete" button on `ResourceDetail`, shown only when the resource is
+    transitional (where normal Delete is disabled), behind a stern break-glass confirm.
 - Finding 8 cleanup: decide fate of vestigial `deleted_at` / `'deleted'` status now that `deleting`
   is the real tombstone — repurpose `deleted_at` as tombstone timestamp or drop the dead scaffolding
   + `deleted_at IS NULL` filters.

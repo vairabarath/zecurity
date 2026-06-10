@@ -398,6 +398,24 @@ func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error
 	return nil
 }
 
+// ForceDeleteRow hard-deletes a resource in ANY state, tenant-scoped. This is the
+// break-glass escape hatch (ADR-004 Phase 4): it bypasses the confirmation-gated
+// tombstone path (MarkDeleting → ack-driven reap) for a resource permanently stuck
+// because its shield is gone and will never ack removal. Because it removes the
+// record of intent WITHOUT observing the rule's removal, callers must be admin-only
+// and MUST audit-log the action, then best-effort re-push the shield snapshot so a
+// still-connected shield drops any lingering rule. Returns true if a row was deleted.
+func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (bool, error) {
+	ct, err := db.Exec(ctx,
+		`DELETE FROM resources WHERE id = $1 AND tenant_id = $2`,
+		id, tenantID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("force delete resource: %w", err)
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
 // RecordAck processes a ResourceAck from Shield and updates the resource status.
 func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
 	if status == "unprotected" {

@@ -1253,3 +1253,40 @@ Most recent first. Every agent appends an entry after their session.
 - Verify with a short CertTTL in a dev controller to watch a full renewal cycle (hard to trigger
   otherwise — only fires within 48h of the 7-day expiry).
 - Merge + deploy the controller. Then Phase 4 (break-glass, deleted_at cleanup, drift metrics).
+
+---
+
+## 2026-06-10 — Claude (M2/M1, ADR-004 Phase 4.1 — break-glass forceDeleteResource)
+
+**What was done:**
+- Implemented the break-glass `forceDeleteResource(id)` mutation — the escape hatch for a resource
+  permanently stuck mid-operation (`protecting`/`deleting`) because its shield is gone and will
+  never ack removal. Hard-deletes the row in ANY state, deliberately bypassing the
+  confirmation-gated tombstone path.
+- New durable audit trail: migration `016_audit_logs.sql` (append-only `audit_logs` table:
+  tenant, actor user/email, dotted action, target type/id, JSONB details snapshot, created_at;
+  indexed by tenant+time and tenant+target). New `internal/audit` package with `Record()`
+  (write-and-log; a failed audit write is logged loudly but never fails the already-completed
+  action). Break-glass MUST leave a record since it skips the safety model.
+- Store `ForceDeleteRow` (tenant-scoped `DELETE` regardless of status). Resolver flow: snapshot the
+  row for audit → force-delete → audit-log `resource.force_delete` → best-effort
+  `PushSnapshotForShield` so a still-connected shield drops the now-removed rule (replace semantics).
+- Schema field gated `@hasRole(roles: [ADMIN])`; `make gqlgen` + `npm run codegen` regenerated.
+- Frontend: `ForceDeleteResource` mutation + a guarded "Force delete" button on `ResourceDetail`
+  that only appears when the resource is `transitional` (exactly where normal Delete is disabled),
+  behind a stern break-glass confirm explaining the shield-offline rule-residue caveat.
+- Controller `go build ./...` + `go vet` clean; frontend `tsc --noEmit` clean.
+
+**Key decisions:**
+- "Audit-logged" for a security break-glass means a durable, queryable DB record — not a log line.
+  Built a general `audit_logs` table (first consumer: force-delete; future mutations can adopt it),
+  matching the gap flagged in improvements.md 4.6.
+- Best-effort snapshot re-push on force-delete: if the shield is actually alive, the orphan rule is
+  dropped; if it's gone (the expected case), the push is a harmless no-op. Honest UI confirm states
+  a rule held by an offline shield persists until reinstall.
+
+**What's next:**
+- Phase 4.2: vestigial `deleted_at` / `'deleted'` status cleanup (Finding 8).
+- Phase 4.3: drift/reconcile metrics (`drift_detected`, `orphans_removed`, `tombstones_reaped`).
+- Phase 4.4: finalize `deleting` list/detail UX.
+- Migration 016 needs to run on existing DBs (manual psql or `down -v`) — it's additive (new table).
