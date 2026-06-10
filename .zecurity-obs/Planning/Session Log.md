@@ -1362,3 +1362,36 @@ fresh main (no stacking).
 **What's next:**
 - Phase 4.4: finalize `deleting` list/detail UX (last Phase 4 item).
 - Deploy note: set `METRICS_ADDR` per env; point Prometheus at it. No DB migration in 4.3.
+
+---
+
+## 2026-06-10 (later) — Claude (M1, ADR-004 Phase 4.4 — `deleting` UX, completes Phase 4)
+
+**Pre-work — repo state check:** PR #45 (`feat/reconcile-metrics`, 4.3) merged → main is `6a98368`.
+Branched `feat/deleting-ux` off fresh main.
+
+**What was done (frontend only, no API change):**
+- `Resources.tsx`: fixed a real bug — `transitionalStates` was `["managing","protecting","removing"]`
+  (legacy states renamed away in mig 009, and MISSING the real `deleting`). A `deleting` row therefore
+  polled at the slow 30s interval, so after the reconciler reaped it the row lingered up to 30s and read
+  as a hung delete. Now `["protecting","deleting"]` → 3s polling, prompt disappearance.
+- `ResourceDetail.tsx`: during `deleting`, `isProtected` is false, which previously showed the
+  misleading "No shield is enforcing / Install a shield" hero AND a "Protect this resource" button.
+  Added (a) a dedicated amber deletion hero, (b) a "Removing" row in the Protection panel, and
+  suppressed the unprotected CTA in both. Copy explains the row persists until the shield confirms
+  removal (explicitly "not a hung delete") and points to Force delete (4.1) if the shield is gone.
+  Transitional spinner banner scoped to `protecting` so it doesn't duplicate the deletion hero.
+- `tsc --noEmit` + eslint clean.
+
+**Key decisions:**
+- The two stale-status spots (`Resources.tsx` poll set here; `resourceTone` in 4.2) are the same class
+  of bug from the mig-009 rename + the later `deleting` addition — worth a grep sweep for any other
+  `'managing'`/`'removing'` references in future work.
+
+**Phase 4 COMPLETE** — 4.1 break-glass + audit (PR #44), 4.2 drop soft-delete (PR #44), 4.3 reconciler
+metrics (PR #45), 4.4 deleting UX (this branch). ADR-004 fully delivered across Phases 1–4.
+
+**What's next (post-ADR-004 backlog, not Phase 4):**
+- Apply migrations 016 + 017 on existing DBs; re-enable shield/connector update timers (1.0.10/1.0.17).
+- Finding 7 (deferred): unprotect-against-dead-shield can stick in `protecting/remove` forever.
+- Verify RenewCert end-to-end with a short `CertTTL`.
