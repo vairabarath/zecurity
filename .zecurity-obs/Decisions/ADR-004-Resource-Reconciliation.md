@@ -289,7 +289,25 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
     had no tone for the real `deleting` state (fell through to `info`).
   - SCOPE NOTE: only the `resources` table touched. The `'deleted'` status on workspaces / users /
     connectors / shields / remote_networks is real in-use soft-delete and was left untouched.
-- Observability: counters/logs — `drift_detected`, `orphans_removed`, `missing_reapplied`, `tombstones_reaped`.
+- **Observability ✅ DONE (2026-06-10) — Prometheus metrics on the reconciler.**
+  Backend: `github.com/prometheus/client_golang` with a private registry; exposed on a SEPARATE
+  internal listener (`METRICS_ADDR`, default `127.0.0.1:9102`) — never the public mux, since metrics
+  leak operational data. New `internal/metrics` package owns the collectors + typed helpers; wired
+  into `internal/connector/reconcile.go`.
+  - `reconcile_reports_total` (counter) — shield reports processed (denominator).
+  - `reconcile_drift_detected_total{kind="orphan"|"missing"}` (counter) — drifting resources seen.
+  - `reconcile_resyncs_total` (counter) — corrective snapshot re-pushes after hysteresis.
+  - `reconcile_tombstones_reaped_total` (counter) — confirmed-absent tombstones reaped.
+  - `reconcile_shields_drifting` (gauge) — shields drifting right now.
+  - `reconcile_tombstones_pending` (gauge) — tombstones awaiting reap; a sustained non-zero value =
+    a gone shield = a break-glass (Phase 4.1 `forceDeleteResource`) candidate.
+  - NAMING: the original wishlist `orphans_removed`/`missing_reapplied` were renamed. Removal happens
+    on the shield via snapshot replace-semantics — the controller never gets a per-orphan removal
+    confirmation, only the orphan's absence in the NEXT report. So the honest controller-side signals
+    are `drift_detected{kind}` (seen) + `resyncs_total` (corrective action); "removed" is observable
+    as `drift_detected{orphan}` going quiet after a resync.
+  - CARDINALITY RULE: no `shield_id`/`tenant_id`/`resource_id` labels (unbounded → series explosion).
+    Only `kind` (orphan|missing). Per-entity detail stays in the logs.
 
 ## Sequencing
 - **Phase 1 is independently shippable** — fixes Finding 5 safely; ship first.
