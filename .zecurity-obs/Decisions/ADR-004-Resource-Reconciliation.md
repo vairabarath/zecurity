@@ -274,9 +274,21 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
     `resource.force_delete`. First consumer of a reusable audit table.
   - Frontend: guarded "Force delete" button on `ResourceDetail`, shown only when the resource is
     transitional (where normal Delete is disabled), behind a stern break-glass confirm.
-- Finding 8 cleanup: decide fate of vestigial `deleted_at` / `'deleted'` status now that `deleting`
-  is the real tombstone — repurpose `deleted_at` as tombstone timestamp or drop the dead scaffolding
-  + `deleted_at IS NULL` filters.
+- **Finding 8 cleanup ✅ DONE (2026-06-10) — Option A (drop the dead scaffolding).**
+  Resources are hard-deleted and the tombstone is `deleting` + ack-gated reap, so the soft-delete
+  leftovers were pure confusion. Repurposing `deleted_at` as a tombstone timestamp (Option B) was
+  rejected: `updated_at` already records when `MarkDeleting` fired, and a `deleted_at` on a
+  `deleting` (not deleted) row is misleading. Changes:
+  - migration `017_resources_drop_soft_delete.sql`: drop indexes → `DROP COLUMN deleted_at` →
+    recreate `idx_resources_shield` / `idx_resources_pending` without the `deleted_at IS NULL`
+    predicate → swap `resources_status_check` to drop the unreachable `'deleted'` value
+    (enum is now `pending|protecting|protected|unprotected|failed|deleting`).
+  - `internal/resource/store.go`: removed all seven `deleted_at IS NULL` filters.
+  - frontend: `resourceTone` in `Resources.tsx` + `ResourceDetail.tsx` aligned to the real enum —
+    dropped dead `'deleted'`/`'managing'`/`'removing'`, and FIXED a latent bug where `Resources.tsx`
+    had no tone for the real `deleting` state (fell through to `info`).
+  - SCOPE NOTE: only the `resources` table touched. The `'deleted'` status on workspaces / users /
+    connectors / shields / remote_networks is real in-use soft-delete and was left untouched.
 - Observability: counters/logs — `drift_detected`, `orphans_removed`, `missing_reapplied`, `tombstones_reaped`.
 
 ## Sequencing

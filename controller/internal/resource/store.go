@@ -131,7 +131,7 @@ func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input Create
 func GetByID(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	row, err := scanRow(db.QueryRow(ctx,
 		`SELECT `+resourceSelectCols+resourceJoins+`
-		  WHERE r.id = $1 AND r.tenant_id = $2 AND r.deleted_at IS NULL`,
+		  WHERE r.id = $1 AND r.tenant_id = $2`,
 		id, tenantID,
 	))
 	if err != nil {
@@ -143,11 +143,11 @@ func GetByID(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, 
 	return row, nil
 }
 
-// GetByRemoteNetwork returns all non-deleted resources for a remote network.
+// GetByRemoteNetwork returns all resources for a remote network.
 func GetByRemoteNetwork(ctx context.Context, db *pgxpool.Pool, tenantID, remoteNetworkID string) ([]*Row, error) {
 	rows, err := db.Query(ctx,
 		`SELECT `+resourceSelectCols+resourceJoins+`
-		  WHERE r.remote_network_id = $1 AND r.tenant_id = $2 AND r.deleted_at IS NULL
+		  WHERE r.remote_network_id = $1 AND r.tenant_id = $2
 		  ORDER BY r.created_at DESC`,
 		remoteNetworkID, tenantID,
 	)
@@ -158,11 +158,11 @@ func GetByRemoteNetwork(ctx context.Context, db *pgxpool.Pool, tenantID, remoteN
 	return collectRows(rows)
 }
 
-// GetAll returns all non-deleted resources for a tenant.
+// GetAll returns all resources for a tenant.
 func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, error) {
 	rows, err := db.Query(ctx,
 		`SELECT `+resourceSelectCols+resourceJoins+`
-		  WHERE r.tenant_id = $1 AND r.deleted_at IS NULL
+		  WHERE r.tenant_id = $1
 		  ORDER BY r.created_at DESC`,
 		tenantID,
 	)
@@ -180,8 +180,7 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 		`SELECT id, host, protocol, port_from, port_to, pending_action
 		   FROM resources
 		  WHERE shield_id = $1
-		    AND status IN ('protecting', 'deleting')
-		    AND deleted_at IS NULL`,
+		    AND status IN ('protecting', 'deleting')`,
 		shieldID,
 	)
 	if err != nil {
@@ -220,8 +219,7 @@ func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 		`SELECT id, host, protocol, port_from, port_to, pending_action
 	    	FROM resources
 		WHERE shield_id = $1
-		 AND (status IN ('protected', 'failed') OR (status = 'protecting' AND pending_action = 'apply'))
-		 AND deleted_at IS NULL`,
+		 AND (status IN ('protected', 'failed') OR (status = 'protecting' AND pending_action = 'apply'))`,
 		shieldID,
 	)
 
@@ -283,7 +281,7 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 
 	query := fmt.Sprintf(
 		`UPDATE resources SET %s
-		  WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		  WHERE id = $1 AND tenant_id = $2
 		  RETURNING id`,
 		joinSets(sets),
 	)
@@ -441,7 +439,6 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		        updated_at       = NOW()
 		  WHERE id = $1
 		    AND tenant_id = $5
-		    AND deleted_at IS NULL
 			AND status != 'deleting'
 		    AND NOT (status = 'protecting' AND pending_action = 'remove' AND $2 != 'unprotected')
 		    AND NOT (status = 'protecting' AND pending_action = 'apply'  AND $2 = 'unprotected')`,

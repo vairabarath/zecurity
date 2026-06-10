@@ -1290,3 +1290,38 @@ Most recent first. Every agent appends an entry after their session.
 - Phase 4.3: drift/reconcile metrics (`drift_detected`, `orphans_removed`, `tombstones_reaped`).
 - Phase 4.4: finalize `deleting` list/detail UX.
 - Migration 016 needs to run on existing DBs (manual psql or `down -v`) — it's additive (new table).
+
+---
+
+## 2026-06-10 (later) — Claude (M2/M1, ADR-004 Phase 4.2 — drop vestigial soft-delete, Finding 8)
+
+**What was done:**
+- Option A (drop the dead scaffolding) for the `resources` table's soft-delete leftovers. Resources
+  are hard-deleted and the real tombstone is `deleting` + ack-gated reap, so `deleted_at` was always
+  NULL, the `'deleted'` status unreachable, and seven `deleted_at IS NULL` filters were no-ops.
+- migration `017_resources_drop_soft_delete.sql`: drop `idx_resources_shield` + `idx_resources_pending`
+  → `DROP COLUMN deleted_at` → recreate both indexes without the `deleted_at IS NULL` predicate →
+  swap `resources_status_check` to drop `'deleted'` (enum now
+  pending|protecting|protected|unprotected|failed|deleting). Ordered so the column drop isn't blocked
+  by a dependent index.
+- `internal/resource/store.go`: removed all seven `deleted_at IS NULL` clauses (GetByID,
+  GetByRemoteNetwork, GetAll, GetPendingForShield, GetDesiredForShield, Update, RecordAck).
+- frontend: `resourceTone` in `Resources.tsx` + `ResourceDetail.tsx` aligned to the real enum —
+  dropped dead `'deleted'`/`'managing'`/`'removing'`; also FIXED a latent bug where `Resources.tsx`
+  had no tone for the real `deleting` state (fell through to `info`). Transitional arrays in
+  `ResourceDetail.tsx` trimmed to `['protecting','deleting']`.
+- Controller `go build ./...` + `go vet` clean; frontend `tsc --noEmit` clean.
+
+**Key decisions:**
+- Option A over B (repurpose `deleted_at` as a tombstone timestamp): `updated_at` already records
+  when `MarkDeleting` fired, and `deleted_at` on a `deleting` (not deleted) row is misleading.
+  Tombstone-age observability belongs in Phase 4.3 metrics, not a resurrected column.
+- SCOPE: only the `resources` table. The `'deleted'` status on workspaces/users/connectors/shields/
+  remote_networks is real in-use soft-delete — explicitly left untouched (a blind grep would break
+  shield/connector lifecycle).
+
+**What's next:**
+- Phase 4.3: drift/reconcile metrics (`drift_detected`, `orphans_removed`, `tombstones_reaped`).
+- Phase 4.4: finalize `deleting` list/detail UX.
+- Migrations 016 + 017 won't auto-apply on an existing DB (manual psql or `down -v`). 017 is
+  destructive-by-design (`DROP COLUMN`) but lossless — the column was always NULL.
