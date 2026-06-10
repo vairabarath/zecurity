@@ -213,8 +213,9 @@ A row leaves `protecting` ONLY via `RecordAck` or reconnect replay (`GetPendingF
 🟠 **Finding 7 — protect/unprotect shield-active asymmetry → unprotect can stick forever.**
 `MarkProtecting` requires shield `active`; `MarkUnprotecting` (`:297-315`) requires only `status='protected'` — no shield check. Unprotecting against an offline/disconnected/**revoked** shield → `protecting/remove` waiting for an ack that never comes if the shield is gone. Consider resolving unprotect-against-dead-shield straight to `unprotected`. **Decision needed; deferred.**
 
-🟡 **Finding 8 (minor) — vestigial soft-delete scaffolding.**
+🟡 **Finding 8 (minor) — vestigial soft-delete scaffolding. ✅ FIXED (2026-06-10, ADR-004 Phase 4.2, Option A).**
 Schema has `deleted_at` (mig 007) + `'deleted'` status (008/009) + ~5 `deleted_at IS NULL` filters, but `SoftDelete` hard-deletes (`DELETE FROM`). So `deleted_at` is never set → all those filters are no-ops, `'deleted'` status is unreachable, function name lies, UI `'deleted'` tone is dead. Cleanup: rename to `Delete` + drop dead filters/status, OR restore real soft-delete (the latter also helps Finding 5).
+> **Resolution:** dropped the scaffolding (migration `017_resources_drop_soft_delete.sql`: `DROP COLUMN deleted_at`, rebuilt both partial indexes without the predicate, removed `'deleted'` from `resources_status_check`); stripped all seven `deleted_at IS NULL` filters in `store.go`; aligned `resourceTone` in both `Resources.tsx` and `ResourceDetail.tsx` to the real enum (also fixed a missing `deleting` tone in `Resources.tsx`). Only the `resources` table was touched — the `'deleted'` soft-delete on workspaces/users/connectors/shields/remote_networks is real and untouched.
 
 🟡 **Finding 9 (minor, perf) — stale partial index after state rename.**
 Mig 007 `idx_resources_managing ON resources(shield_id,status) WHERE status IN ('managing','removing')`; mig 009 renamed those states to `protecting` but never recreated the index → it now matches **zero rows**, and `GetPendingForShield`'s `WHERE shield_id=$1 AND status='protecting'` has no supporting partial index. Replace predicate with `WHERE status='protecting'`.

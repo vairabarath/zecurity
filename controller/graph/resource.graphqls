@@ -45,4 +45,8 @@ extend type Mutation {
   protectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
   unprotectResource(id: ID!): Resource! @hasRole(roles: [ADMIN])
   deleteResource(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  # Break-glass (ADR-004 Phase 4): hard-delete a resource in ANY state, bypassing
+  # the confirmation-gated tombstone path. For resources permanently stuck because
+  # their shield is gone and will never ack removal. Admin-only and audit-logged.
+  forceDeleteResource(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 }

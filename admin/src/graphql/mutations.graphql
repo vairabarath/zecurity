@@ -96,6 +96,10 @@ mutation DeleteResource($id: ID!) {
   deleteResource(id: $id)
 }
 
+mutation ForceDeleteResource($id: ID!) {
+  forceDeleteResource(id: $id)
+}
+
 mutation PromoteDiscoveredService($shieldId: ID!, $protocol: String!, $port: Int!) {
   promoteDiscoveredService(shieldId: $shieldId, protocol: $protocol, port: $port) {
     id

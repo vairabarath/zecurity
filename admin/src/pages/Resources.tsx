@@ -35,9 +35,8 @@ function resourceTone(
 ): "ok" | "warn" | "danger" | "muted" | "info" {
   if (status === "protected") return "ok";
   if (status === "failed") return "danger";
-  if (status === "protecting" || status === "managing" || status === "removing")
-    return "warn";
-  if (status === "unprotected" || status === "deleted") return "muted";
+  if (status === "protecting" || status === "deleting") return "warn";
+  if (status === "unprotected") return "muted";
   return "info";
 }
 
