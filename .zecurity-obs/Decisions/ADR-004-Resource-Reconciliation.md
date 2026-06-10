@@ -263,7 +263,17 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
 >   tamper invisible — documented limitation). Hysteresis counters are controller-memory.
 
 ### PHASE 4 — UX, break-glass, observability, cleanup
-- Frontend: finalize `deleting` UX (list + detail "Deleting…").
+- **Frontend: finalize `deleting` UX (list + detail). ✅ DONE (2026-06-10).**
+  - `Resources.tsx`: fixed `transitionalStates` — was `["managing","protecting","removing"]` (legacy
+    states renamed in mig 009, MISSING `deleting`) → `["protecting","deleting"]`. A `deleting` row now
+    polls at 3s, so it disappears promptly after the reconciler reaps it instead of lingering for the
+    30s slow interval (which read as a hung delete).
+  - `ResourceDetail.tsx`: during `deleting`, `isProtected` is false, which previously rendered the
+    misleading "No shield is enforcing / Install a shield" hero AND a "Protect this resource" button.
+    Added a dedicated deletion hero + a "Removing" row in the Protection panel; suppressed the
+    unprotected CTA. Copy states the row persists until the shield confirms removal (not a hung
+    delete) and points to Force delete (4.1) if the shield is gone. Transitional banner scoped to
+    `protecting` to avoid duplicating the deletion hero.
 - **Break-glass: admin-only `forceDeleteResource(id)` (`@hasRole([ADMIN])`), audit-logged. ✅ DONE (2026-06-10).**
   - `internal/resource.ForceDeleteRow` — tenant-scoped hard `DELETE` in ANY state, bypassing the
     confirmation-gated tombstone path; for resources stuck because their shield is gone.

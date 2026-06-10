@@ -17,7 +17,12 @@ import {
   relativeTime,
 } from "@/lib/console";
 
-const transitionalStates = new Set(["managing", "protecting", "removing"]);
+// States that warrant fast polling — a resource mid-operation will change soon.
+// `deleting` MUST be here: a tombstone is reaped once the shield confirms removal,
+// and without fast polling the row lingers for the full slow interval after it's
+// gone, reading as a hung delete. (`managing`/`removing` were renamed away in
+// migration 009; `deleting` is the real tombstone.)
+const transitionalStates = new Set(["protecting", "deleting"]);
 
 interface ResourcePrefillState {
   createResourceDefaults?: {
