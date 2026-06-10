@@ -1325,3 +1325,40 @@ Most recent first. Every agent appends an entry after their session.
 - Phase 4.4: finalize `deleting` list/detail UX.
 - Migrations 016 + 017 won't auto-apply on an existing DB (manual psql or `down -v`). 017 is
   destructive-by-design (`DROP COLUMN`) but lossless — the column was always NULL.
+
+---
+
+## 2026-06-10 (later) — Claude (M2, ADR-004 Phase 4.3 — reconciler Prometheus metrics)
+
+**Pre-work — repo state check:** PR #43 (`fix/shield-cert-renewal`) merged to main; merged PR #44
+(`feat/resource-force-delete`, 4.1+4.2) → main is `3a96db0`. Branched `feat/reconcile-metrics` off
+fresh main (no stacking).
+
+**What was done:**
+- Made the closed-loop reconciler observable. Backend = `github.com/prometheus/client_golang`
+  (private registry); served on a SEPARATE internal listener (`METRICS_ADDR`, default
+  `127.0.0.1:9102`) — deliberately NOT the public mux (metrics leak operational data). Metrics-server
+  failure is logged, not fatal.
+- New `internal/metrics` package: collectors + typed helpers (`ReconcileReport`, `DriftDetected(kind)`,
+  `Resync`, `TombstoneReaped`, `SetReconcileGauges`) + `Handler()`. Known drift labels pre-created at 0
+  so series exist from startup (a CounterVec emits nothing until a label set is observed).
+- Wired into `internal/connector/reconcile.go` at the five event sites + gauge update at end of
+  `reconcileShield` (under the existing `Recon.mu`): reports, drift{orphan|missing}, resyncs,
+  tombstones_reaped, and current-state gauges (shields_drifting = drift entries >0; tombstones_pending
+  = len(absent)).
+- `main.go`: second goroutine listener serving `/metrics` on `METRICS_ADDR`.
+- Metrics unit test (httptest scrape asserts families + counter/gauge values). `go build`, `go vet ./...`,
+  `go test ./internal/metrics/...` + `./internal/connector/...` all green.
+
+**Key decisions:**
+- Renamed the wishlist `orphans_removed`/`missing_reapplied` → honest `drift_detected{kind}` +
+  `resyncs_total`. Removal happens on the shield via snapshot replace-semantics; the controller never
+  gets a per-orphan removal confirmation, only the orphan's absence in the next report. Don't ship a
+  metric that claims more precision than the controller has.
+- CARDINALITY: no shield_id/tenant_id/resource_id labels (unbounded → series explosion). Only `kind`.
+- `reconcile_tombstones_pending` sustained >0 = a gone shield = break-glass (4.1) candidate — directly
+  ties the metric back to the escape hatch.
+
+**What's next:**
+- Phase 4.4: finalize `deleting` list/detail UX (last Phase 4 item).
+- Deploy note: set `METRICS_ADDR` per env; point Prometheus at it. No DB migration in 4.3.

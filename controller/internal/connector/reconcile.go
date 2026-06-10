@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/resource"
 )
 
@@ -56,6 +57,7 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 	h.Recon.mu.Lock()
 	defer h.Recon.mu.Unlock()
 	h.Recon.ensure()
+	metrics.ReconcileReport()
 
 	desired, err := resource.GetDesiredForShield(ctx, db, report.ShieldId)
 	if err != nil {
@@ -75,12 +77,14 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 	for id := range reportedSet {
 		if !desiredSet[id] {
 			drift = true
+			metrics.DriftDetected("orphan")
 			log.Printf("reconcile: shield %s enforcing ORPHAN resource %s", report.ShieldId, id)
 		}
 	}
 	for id := range desiredSet {
 		if !reportedSet[id] {
 			drift = true
+			metrics.DriftDetected("missing")
 			log.Printf("reconcile: shield %s MISSING desired resource %s", report.ShieldId, id)
 		}
 	}
@@ -90,6 +94,7 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 			log.Printf("reconcile: drift persisted %d reports on shield %s — re-pushing snapshot", h.Recon.drift[report.ShieldId], report.ShieldId)
 			if msg, err := buildSnapshotMsg(ctx, db, report.ShieldId); err == nil {
 				_ = client.send(msg)
+				metrics.Resync()
 			}
 			h.Recon.drift[report.ShieldId] = 0
 		}
@@ -110,9 +115,21 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 		h.Recon.absent[rid]++
 		if h.Recon.absent[rid] >= absentReportsBeforeReap {
 			if reaped, _ := resource.ReapTombstone(ctx, db, client.tenantID, report.ShieldId, rid); reaped {
+				metrics.TombstoneReaped()
 				log.Printf("reconcile: tombstone %s confirmed absent x%d — reaped", rid, absentReportsBeforeReap)
 			}
 			delete(h.Recon.absent, rid)
 		}
 	}
+
+	// Current-state gauges (under h.Recon.mu). drift entries reset to 0 stay in
+	// the map, so count only the non-zero ones; every absent entry is a tombstone
+	// still awaiting reap confirmation.
+	drifting := 0
+	for _, n := range h.Recon.drift {
+		if n > 0 {
+			drifting++
+		}
+	}
+	metrics.SetReconcileGauges(drifting, len(h.Recon.absent))
 }
