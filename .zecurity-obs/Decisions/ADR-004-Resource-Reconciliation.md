@@ -309,8 +309,22 @@ the delete-orphan bug (Finding 5). Do not start a phase until the prior gate is 
   - `reconcile_resyncs_total` (counter) — corrective snapshot re-pushes after hysteresis.
   - `reconcile_tombstones_reaped_total` (counter) — confirmed-absent tombstones reaped.
   - `reconcile_shields_drifting` (gauge) — shields drifting right now.
-  - `reconcile_tombstones_pending` (gauge) — tombstones awaiting reap; a sustained non-zero value =
-    a gone shield = a break-glass (Phase 4.1 `forceDeleteResource`) candidate.
+  - `reconcile_tombstones_pending` (gauge) — tombstones the reconciler is actively tracking toward
+    reap, i.e. seen in a live report from a REPORTING shield.
+
+  - **Post-verification corrections (2026-06-10 live run on the distributed stack):**
+    1. **`tombstones_pending` semantics (help text was wrong).** Originally documented as "sustained
+       non-zero = a gone shield = break-glass candidate." The live run proved the opposite: a fully
+       disconnected shield sends no reports, so the reconciler never runs for it and the gauge stays
+       **0** even with a genuinely stuck tombstone. The gauge means "shield is reporting but hasn't
+       converged." The real break-glass signal is **a row stuck in `deleting` + shield status
+       `disconnected`** (DB/status), not this gauge. Help text corrected.
+    2. **`drift_detected{orphan}` over-counted (reconciler fix).** The drift pass classified a
+       `deleting` tombstone still enforced by the shield as an `orphan`, conflating normal
+       deletes-in-progress with true zombie rules. Fixed: orphan classification now excludes known
+       tombstones (`GetDeletingForShield`), which are owned by the reap pass. A still-enforced
+       tombstone still sets `drift=true` (so a resync re-pushes the removal — backstop for a lost
+       remove instruction) but is no longer counted as an orphan. `orphan` now means a TRUE zombie.
   - NAMING: the original wishlist `orphans_removed`/`missing_reapplied` were renamed. Removal happens
     on the shield via snapshot replace-semantics — the controller never gets a per-orphan removal
     confirmation, only the orphan's absence in the NEXT report. So the honest controller-side signals
