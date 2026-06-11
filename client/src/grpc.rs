@@ -8,7 +8,7 @@ pub use client_v1::client_service_client::ClientServiceClient;
 
 pub async fn connect_grpc(
     controller_address: &str,
-    ca_pem: &str,
+    ca_pem: &str, // controller ca certificate
 ) -> Result<ClientServiceClient<Channel>> {
     let tls = ClientTlsConfig::new()
         .ca_certificate(Certificate::from_pem(ca_pem.as_bytes()))
