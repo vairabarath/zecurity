@@ -69,16 +69,19 @@ func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
 }
 
 // buildSnapshotMsg builds the authoritative desired-state snapshot message for
-// one shield (ADR-004 Phase 2). Generation is wall-clock millis — good enough
-// for "drop stale cached copies"; Phase 3 replaces this with reconciliation.
+// one shield (ADR-004 Phase 2). The desired set and its monotonic generation come
+// from resource.BuildShieldSnapshot — the generation is a per-shield counter
+// bumped only when the desired content actually changes, so the shield's
+// `generation <= last` gate dedups unchanged re-pushes and resolves out-of-order
+// deliveries (see F11). It is NOT wall-clock and not derived in this layer.
 func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*pb.ConnectorControlMessage, error) {
-	desired, err := resource.GetDesiredForShield(ctx, db, shieldID)
+	snap, err := resource.BuildShieldSnapshot(ctx, db, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("buildSnapshotMsg: %w", err)
 	}
 
-	resources := make([]*shieldpb.ResourceInstruction, 0, len(desired))
-	for _, row := range desired {
+	resources := make([]*shieldpb.ResourceInstruction, 0, len(snap.Resources))
+	for _, row := range snap.Resources {
 		resources = append(resources, &shieldpb.ResourceInstruction{
 			ResourceId: row.ID,
 			Host:       row.Host,
@@ -92,7 +95,7 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*
 		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
 			ResourceSnapshots: &pb.ResourceSnapshotBatch{
 				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
-					shieldID: {Resources: resources, Generation: uint64(time.Now().UnixMilli())},
+					shieldID: {Resources: resources, Generation: snap.Generation},
 				},
 			},
 		},
