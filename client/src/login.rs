@@ -98,32 +98,32 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // SHA256(code_verifier) == code_challenge from InitiateAuth (PKCE).
     println!("Exchanging token...");
     let tok = grpc
-        .token_exchange(TokenExchangeRequest {
+        .token_exchange(TokenExchangeRequest { // validtates the ctrl_code in service.go
             session_id: initiated.session_id,
             ctrl_code,
             code_verifier,
             invite_token: invite_token.unwrap_or_default(),
         })
         .await?
-        .into_inner();
+        .into_inner(); //accesstoken, refreshtoken, expiresin, email
 
     // Generate P-384 keypair in memory — never written to disk.
     println!("Generating device certificate...");
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?;
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?; // generates private key and public key
     let private_key_pem = key_pair.serialize_pem();
 
     let hostname = hostname::get()
         .unwrap_or_default()
         .to_string_lossy()
-        .to_string();
+        .to_string(); // gets the device name and make this as owner of the value
     let os = std::env::consts::OS.to_string();
 
-    let mut params = CertificateParams::default();
-    params.distinguished_name = DistinguishedName::new();
+    let mut params = CertificateParams::default(); // creates empty certificate request parameters
+    params.distinguished_name = DistinguishedName::new(); // creates empty x.509 identity fields initialy cn = "", o="", ou = "" all empty
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, &hostname);
-    let csr_pem = params.serialize_request(&key_pair)?.pem()?;
+        .push(rcgen::DnType::CommonName, &hostname); // adds cn = desktop-abc123 'the host name'
+    let csr_pem = params.serialize_request(&key_pair)?.pem()?;// creates the signing request contains public key and cn and signature using the private key
 
     // EnrollDevice — unchanged from the original flow.
     let enroll = grpc
@@ -132,7 +132,12 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             csr_pem,
             device_name: hostname.clone(),
             os: os.clone(),
-        })
+        })/*{
+                                                "access_token": "jwt...",
+                                                "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----",
+                                                "device_name": "DESKTOP-ABC123",
+                                                "os": "linux"
+                                                } */
         .await?
         .into_inner();
 
