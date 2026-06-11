@@ -54,9 +54,6 @@ func (h *EnrollmentHandler) handleResourceState(ctx context.Context, client *con
 }
 
 func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Pool, client *connectorStreamClient, report *shieldpb.ResourceStateReport) {
-	h.Recon.mu.Lock()
-	defer h.Recon.mu.Unlock()
-	h.Recon.ensure()
 	metrics.ReconcileReport()
 
 	desired, err := resource.GetDesiredForShield(ctx, db, report.ShieldId)
@@ -111,21 +108,34 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 			log.Printf("reconcile: shield %s MISSING desired resource %s", report.ShieldId, id)
 		}
 	}
+
+	// ── Counter bookkeeping under the lock. h.Recon.mu guards ONLY the in-memory
+	// hysteresis maps, so we hold it just long enough to update counters and decide
+	// what to do — capturing the decisions (resync? which tombstones to reap?) —
+	// then release it BEFORE any DB query or connector send. Holding it across I/O
+	// would serialize reconciliation for every connector in the controller behind a
+	// single slow query or a stalled stream send. Per-key access is single-writer
+	// (a shield is owned by exactly one connector, whose stream is processed by one
+	// goroutine), so splitting the lock from the I/O introduces no per-shield race.
+	var (
+		shouldResync    bool
+		resyncDriftRuns int
+		toReap          []string
+		drifting        int
+		absent          int
+	)
+	h.Recon.mu.Lock()
+	h.Recon.ensure()
 	if drift {
 		h.Recon.drift[report.ShieldId]++
 		if h.Recon.drift[report.ShieldId] >= driftReportsBeforeResync {
-			log.Printf("reconcile: drift persisted %d reports on shield %s — re-pushing snapshot", h.Recon.drift[report.ShieldId], report.ShieldId)
-			if msg, err := buildSnapshotMsg(ctx, db, report.ShieldId); err == nil {
-				_ = client.send(msg)
-				metrics.Resync()
-			}
+			shouldResync = true
+			resyncDriftRuns = h.Recon.drift[report.ShieldId]
 			h.Recon.drift[report.ShieldId] = 0
 		}
 	} else {
 		h.Recon.drift[report.ShieldId] = 0
 	}
-
-	// ── Tombstone reap: confirmed-absent 'deleting' rows (set fetched above)
 	for _, rid := range deleting {
 		if reportedSet[rid] {
 			h.Recon.absent[rid] = 0 // still enforced — snapshot will drop it; keep waiting
@@ -133,22 +143,36 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 		}
 		h.Recon.absent[rid]++
 		if h.Recon.absent[rid] >= absentReportsBeforeReap {
-			if reaped, _ := resource.ReapTombstone(ctx, db, client.tenantID, report.ShieldId, rid); reaped {
-				metrics.TombstoneReaped()
-				log.Printf("reconcile: tombstone %s confirmed absent x%d — reaped", rid, absentReportsBeforeReap)
-			}
+			toReap = append(toReap, rid)
 			delete(h.Recon.absent, rid)
 		}
 	}
-
-	// Current-state gauges (under h.Recon.mu). drift entries reset to 0 stay in
-	// the map, so count only the non-zero ones; every absent entry is a tombstone
-	// still awaiting reap confirmation.
-	drifting := 0
+	// Current-state gauges, snapshotted under the lock. drift entries reset to 0 stay
+	// in the map, so count only the non-zero ones; every remaining absent entry is a
+	// tombstone still awaiting reap confirmation.
 	for _, n := range h.Recon.drift {
 		if n > 0 {
 			drifting++
 		}
 	}
-	metrics.SetReconcileGauges(drifting, len(h.Recon.absent))
+	absent = len(h.Recon.absent)
+	h.Recon.mu.Unlock()
+
+	// ── I/O outside the lock: snapshot re-push for persistent drift, then reap the
+	// tombstones the bookkeeping pass confirmed absent.
+	if shouldResync {
+		log.Printf("reconcile: drift persisted %d reports on shield %s — re-pushing snapshot", resyncDriftRuns, report.ShieldId)
+		if msg, err := buildSnapshotMsg(ctx, db, report.ShieldId); err == nil {
+			_ = client.send(msg)
+			metrics.Resync()
+		}
+	}
+	for _, rid := range toReap {
+		if reaped, _ := resource.ReapTombstone(ctx, db, client.tenantID, report.ShieldId, rid); reaped {
+			metrics.TombstoneReaped()
+			log.Printf("reconcile: tombstone %s confirmed absent x%d — reaped", rid, absentReportsBeforeReap)
+		}
+	}
+
+	metrics.SetReconcileGauges(drifting, absent)
 }
