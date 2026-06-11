@@ -1395,3 +1395,46 @@ metrics (PR #45), 4.4 deleting UX (this branch). ADR-004 fully delivered across 
 - Apply migrations 016 + 017 on existing DBs; re-enable shield/connector update timers (1.0.10/1.0.17).
 - Finding 7 (deferred): unprotect-against-dead-shield can stick in `protecting/remove` forever.
 - Verify RenewCert end-to-end with a short `CertTTL`.
+
+---
+
+## 2026-06-10 (later) — Claude (live verification of Phase 4 on the distributed stack + reconciler fix)
+
+**Setup:** controller + admin on dev box; connector on friend device 1; shield + resource on friend
+device 2 (`192.168.1.164`). Applied migrations 016 + 017 to the dev DB (audit_logs created; deleted_at
+dropped lossless — verified 0 non-null; 'deleted' removed from status check). Confirmed metrics endpoint
+serves on `127.0.0.1:9102`.
+
+**Verification — all 5 scenarios PASS:**
+1. Baseline protect — full pipeline works; reconciler stayed quiet (0 drift/resyncs) under 300+ healthy
+   reports (no-thrash confirmed under real traffic).
+2. Deleting UX + tombstone delete (shield online) — sub-second ack-driven reap (RecordAck, not the
+   reconciler); no audit row (correct — normal delete doesn't audit); list cleared promptly.
+3. Break-glass force-delete (shield offline) — resource stuck in `deleting`; UI showed the deletion hero
+   + Force delete button; force-delete removed the row AND wrote an `audit_logs` row
+   (action=`resource.force_delete`, real actor email, details snapshot incl. status=deleting). 016 works e2e.
+4. Drift metrics under orphan — SQL raw-deleted a protected row; reconciler detected orphan
+   (`shields_drifting`→1, no resync on report 1), fired resync on report 2 (`resyncs_total` 0→1,
+   `drift_detected{orphan}` →2), shield dropped the rule, drift cleared. 2-report hysteresis confirmed live.
+5. Reconciler reap + gauges — SQL-injected a synthetic `deleting` tombstone; `tombstones_pending`→1,
+   reaped after exactly 3 absent reports (`tombstones_reaped_total` 0→1, pending→0). 3-report hysteresis
+   confirmed live, via the reconciler path (not RecordAck).
+
+**Two findings the live run surfaced (both fixed on branch `fix/reconcile-tombstone-orphan`):**
+- **`tombstones_pending` help text was wrong.** A fully-disconnected shield sends no reports → reconciler
+  never runs → gauge stays 0 even with a stuck tombstone (proven in scenario 3). The "sustained >0 = gone
+  shield" framing was backwards. Corrected: real break-glass signal = row stuck in `deleting` + shield
+  `disconnected`, not this gauge.
+- **`drift_detected{orphan}` over-counted.** The drift pass classified a `deleting` tombstone still
+  enforced by the shield as an orphan (conflating normal deletes-in-progress with true zombies). Fixed in
+  `reconcile.go`: orphan classification now excludes known tombstones (`GetDeletingForShield`, fetched
+  before the drift pass); a still-enforced tombstone still sets `drift=true` (resync re-pushes the
+  removal — backstop for a lost remove instruction) but is not counted as an orphan. `orphan` now means a
+  TRUE zombie. `go build`/`vet`/`test` green.
+
+**What's next:**
+- Deploy the fix (controller restart) and optionally re-verify the orphan-vs-tombstone classification live
+  (flip a protected row to `deleting` via SQL while the shield keeps reporting it → old build counts orphan,
+  new build does not).
+- Still open: Prometheus scrape + corrected alert (`deleting`-age + shield disconnected); production deploy
+  of controller + 016/017; re-enable update timers; Finding 7; RenewCert short-TTL check.

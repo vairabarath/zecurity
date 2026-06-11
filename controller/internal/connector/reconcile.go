@@ -67,6 +67,22 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 	for _, d := range desired {
 		desiredSet[d.ID] = true
 	}
+
+	// Known tombstones ('deleting'). They are EXPECTED to still be enforced for a
+	// few reports while the shield processes the removal, so they are NOT orphans —
+	// the tombstone-reap pass below owns them. Excluding them from orphan
+	// classification keeps drift_detected{orphan} meaning a TRUE zombie (enforced,
+	// never desired, not mid-delete). On a load error, proceed with an empty set so
+	// drift detection still runs.
+	deleting, err := resource.GetDeletingForShield(ctx, db, report.ShieldId)
+	if err != nil {
+		log.Printf("reconcile: load deleting set for shield %s: %v", report.ShieldId, err)
+	}
+	deletingSet := make(map[string]bool, len(deleting))
+	for _, id := range deleting {
+		deletingSet[id] = true
+	}
+
 	reportedSet := make(map[string]bool, len(report.ActiveResourceIds))
 	for _, id := range report.ActiveResourceIds {
 		reportedSet[id] = true
@@ -76,9 +92,16 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 	drift := false
 	for id := range reportedSet {
 		if !desiredSet[id] {
+			// Still drift — a resync re-pushes the desired set, which drops a true
+			// zombie AND re-sends a removal whose instruction may have been lost
+			// (backstop for a stuck tombstone). But only a NON-tombstone counts as an
+			// orphan: a 'deleting' row reported here is just mid-removal, owned by the
+			// reap pass below — counting it would conflate normal deletes with zombies.
 			drift = true
-			metrics.DriftDetected("orphan")
-			log.Printf("reconcile: shield %s enforcing ORPHAN resource %s", report.ShieldId, id)
+			if !deletingSet[id] {
+				metrics.DriftDetected("orphan")
+				log.Printf("reconcile: shield %s enforcing ORPHAN resource %s", report.ShieldId, id)
+			}
 		}
 	}
 	for id := range desiredSet {
@@ -102,11 +125,7 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 		h.Recon.drift[report.ShieldId] = 0
 	}
 
-	// ── Tombstone reap: confirmed-absent 'deleting' rows
-	deleting, err := resource.GetDeletingForShield(ctx, db, report.ShieldId)
-	if err != nil {
-		return
-	}
+	// ── Tombstone reap: confirmed-absent 'deleting' rows (set fetched above)
 	for _, rid := range deleting {
 		if reportedSet[rid] {
 			h.Recon.absent[rid] = 0 // still enforced — snapshot will drop it; keep waiting

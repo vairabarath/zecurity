@@ -29,7 +29,7 @@ var (
 
 	reconcileDriftDetected = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "reconcile_drift_detected_total",
-		Help: "Resources observed in drift. kind=orphan (enforced but not desired); kind=missing (desired but not enforced).",
+		Help: "Resources observed in drift. kind=orphan (a TRUE zombie: enforced, never desired, and not a 'deleting' tombstone mid-removal); kind=missing (desired but not enforced).",
 	}, []string{"kind"})
 
 	reconcileResyncs = prometheus.NewCounter(prometheus.CounterOpts{
@@ -49,7 +49,7 @@ var (
 
 	reconcileTombstonesPending = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "reconcile_tombstones_pending",
-		Help: "Tombstones awaiting reap confirmation. A sustained non-zero value signals a gone shield that will never ack — a break-glass (forceDeleteResource) candidate.",
+		Help: "Tombstones the reconciler is actively tracking toward reap, i.e. seen in a live report from a REPORTING shield. NOTE: a fully-disconnected shield sends no reports, so its stuck tombstone is NOT counted here — detect that break-glass (forceDeleteResource) case via a row stuck in 'deleting' plus shield status 'disconnected', not this gauge.",
 	})
 )
 
