@@ -306,6 +306,21 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 		out = append(out, r)
 	}
 	return out, rows.Err()
+			/*
+			out = [
+			{
+				ResourceID:"res-1",
+				GroupID:"grp-dev",
+			},
+			{
+				ResourceID:"res-1",
+				GroupID:"grp-admin",
+			},
+			{
+				ResourceID:"res-2",
+				GroupID:"grp-admin",
+			},
+		]*/
 }
 
 // ListActiveDeviceSPIFFEsForGroup returns non-revoked client device SPIFFE IDs

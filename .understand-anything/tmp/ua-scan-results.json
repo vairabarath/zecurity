@@ -1,0 +1,2148 @@
+{
+  "scriptCompleted": true,
+  "name": "zecurity",
+  "rawDescription": "",
+  "readmeHead": "",
+  "languages": [
+    "css",
+    "dockerfile",
+    "example",
+    "go",
+    "graphql",
+    "graphqls",
+    "html",
+    "javascript",
+    "json",
+    "makefile",
+    "markdown",
+    "mod",
+    "protobuf",
+    "rust",
+    "service",
+    "shell",
+    "sql",
+    "sum",
+    "timer",
+    "toml",
+    "typescript",
+    "unknown",
+    "yaml"
+  ],
+  "frameworks": [
+    "React",
+    "Vite",
+    "Tailwind CSS",
+    "Zustand",
+    "Apollo Client",
+    "gqlgen",
+    "pgx (PostgreSQL)",
+    "Tokio",
+    "Serde",
+    "Tonic (gRPC)",
+    "Axum",
+    "Docker",
+    "Docker Compose",
+    "GitHub Actions"
+  ],
+  "files": [
+    {
+      "path": ".github/workflows/connector-release.yml",
+      "language": "yaml",
+      "sizeLines": 114,
+      "fileCategory": "infra"
+    },
+    {
+      "path": ".github/workflows/shield-release.yml",
+      "language": "yaml",
+      "sizeLines": 112,
+      "fileCategory": "infra"
+    },
+    {
+      "path": ".note.md",
+      "language": "markdown",
+      "sizeLines": 6,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "admin/codegen.yml",
+      "language": "yaml",
+      "sizeLines": 16,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/components.json",
+      "language": "json",
+      "sizeLines": 21,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/eslint.config.js",
+      "language": "javascript",
+      "sizeLines": 23,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/index.html",
+      "language": "html",
+      "sizeLines": 15,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "admin/package.json",
+      "language": "json",
+      "sizeLines": 54,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/README.md",
+      "language": "markdown",
+      "sizeLines": 73,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "admin/src/apollo/client.ts",
+      "language": "typescript",
+      "sizeLines": 32,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/apollo/links/auth.ts",
+      "language": "typescript",
+      "sizeLines": 36,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/apollo/links/error.ts",
+      "language": "typescript",
+      "sizeLines": 122,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/App.tsx",
+      "language": "typescript",
+      "sizeLines": 94,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/auth/AuthLayout.tsx",
+      "language": "typescript",
+      "sizeLines": 258,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/CreateResourceModal.tsx",
+      "language": "typescript",
+      "sizeLines": 323,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/DiscoveredServicesPanel.tsx",
+      "language": "typescript",
+      "sizeLines": 370,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/EditResourceModal.tsx",
+      "language": "typescript",
+      "sizeLines": 281,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/InstallCommandModal.tsx",
+      "language": "typescript",
+      "sizeLines": 386,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/layout/AppShell.tsx",
+      "language": "typescript",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/layout/Header.tsx",
+      "language": "typescript",
+      "sizeLines": 116,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/layout/Sidebar.tsx",
+      "language": "typescript",
+      "sizeLines": 159,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/PromoteServiceModal.tsx",
+      "language": "typescript",
+      "sizeLines": 114,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ScanModal.tsx",
+      "language": "typescript",
+      "sizeLines": 384,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/alert.tsx",
+      "language": "typescript",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/avatar.tsx",
+      "language": "typescript",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/badge.tsx",
+      "language": "typescript",
+      "sizeLines": 34,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/border-beam.tsx",
+      "language": "typescript",
+      "sizeLines": 45,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/button.tsx",
+      "language": "typescript",
+      "sizeLines": 57,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/card.tsx",
+      "language": "typescript",
+      "sizeLines": 80,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/dialog.tsx",
+      "language": "typescript",
+      "sizeLines": 95,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/dropdown-menu.tsx",
+      "language": "typescript",
+      "sizeLines": 199,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/input.tsx",
+      "language": "typescript",
+      "sizeLines": 22,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/label.tsx",
+      "language": "typescript",
+      "sizeLines": 24,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/particles.tsx",
+      "language": "typescript",
+      "sizeLines": 162,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/separator.tsx",
+      "language": "typescript",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/shimmer-button.tsx",
+      "language": "typescript",
+      "sizeLines": 92,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/skeleton.tsx",
+      "language": "typescript",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/toast.tsx",
+      "language": "typescript",
+      "sizeLines": 127,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/toaster.tsx",
+      "language": "typescript",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/components/ui/use-toast.ts",
+      "language": "typescript",
+      "sizeLines": 191,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/graphql/mutations.graphql",
+      "language": "graphql",
+      "sizeLines": 188,
+      "fileCategory": "data"
+    },
+    {
+      "path": "admin/src/graphql/queries.graphql",
+      "language": "graphql",
+      "sizeLines": 321,
+      "fileCategory": "data"
+    },
+    {
+      "path": "admin/src/hooks/useRequireAuth.ts",
+      "language": "typescript",
+      "sizeLines": 89,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/index.css",
+      "language": "css",
+      "sizeLines": 869,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "admin/src/lib/console.tsx",
+      "language": "typescript",
+      "sizeLines": 99,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/lib/parseConnectorLog.ts",
+      "language": "typescript",
+      "sizeLines": 46,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/lib/utils.ts",
+      "language": "typescript",
+      "sizeLines": 6,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/main.tsx",
+      "language": "typescript",
+      "sizeLines": 17,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/AccessLog.tsx",
+      "language": "typescript",
+      "sizeLines": 114,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/AllConnectors.tsx",
+      "language": "typescript",
+      "sizeLines": 194,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/AllShields.tsx",
+      "language": "typescript",
+      "sizeLines": 139,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/AuthCallback.tsx",
+      "language": "typescript",
+      "sizeLines": 108,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/ClientInstall.tsx",
+      "language": "typescript",
+      "sizeLines": 169,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/ConnectorDetail.tsx",
+      "language": "typescript",
+      "sizeLines": 491,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Connectors.tsx",
+      "language": "typescript",
+      "sizeLines": 159,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Dashboard.tsx",
+      "language": "typescript",
+      "sizeLines": 308,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/DeviceManagement.tsx",
+      "language": "typescript",
+      "sizeLines": 151,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/GroupDetail.tsx",
+      "language": "typescript",
+      "sizeLines": 372,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Groups.tsx",
+      "language": "typescript",
+      "sizeLines": 297,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/InviteAccept.tsx",
+      "language": "typescript",
+      "sizeLines": 111,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Login.tsx",
+      "language": "typescript",
+      "sizeLines": 212,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/RemoteNetworkDetail.tsx",
+      "language": "typescript",
+      "sizeLines": 485,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/RemoteNetworks.tsx",
+      "language": "typescript",
+      "sizeLines": 338,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/ResourceDetail.tsx",
+      "language": "typescript",
+      "sizeLines": 555,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/ResourceDiscovery.tsx",
+      "language": "typescript",
+      "sizeLines": 469,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Resources.tsx",
+      "language": "typescript",
+      "sizeLines": 211,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Settings.tsx",
+      "language": "typescript",
+      "sizeLines": 47,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/ShieldDetail.tsx",
+      "language": "typescript",
+      "sizeLines": 454,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Shields.tsx",
+      "language": "typescript",
+      "sizeLines": 193,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/signup/Step1Email.tsx",
+      "language": "typescript",
+      "sizeLines": 80,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/signup/Step2Workspace.tsx",
+      "language": "typescript",
+      "sizeLines": 78,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/signup/Step3Auth.tsx",
+      "language": "typescript",
+      "sizeLines": 79,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/TeamUsers.tsx",
+      "language": "typescript",
+      "sizeLines": 256,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/pages/Topology.tsx",
+      "language": "typescript",
+      "sizeLines": 956,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/store/auth.ts",
+      "language": "typescript",
+      "sizeLines": 36,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/src/store/signup.ts",
+      "language": "typescript",
+      "sizeLines": 85,
+      "fileCategory": "code"
+    },
+    {
+      "path": "admin/tsconfig.app.json",
+      "language": "json",
+      "sizeLines": 30,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/tsconfig.json",
+      "language": "json",
+      "sizeLines": 7,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/tsconfig.node.json",
+      "language": "json",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "admin/vite.config.ts",
+      "language": "typescript",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "agent.md",
+      "language": "markdown",
+      "sizeLines": 266,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "AGENTS.md",
+      "language": "markdown",
+      "sizeLines": 107,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "buf.gen.yaml",
+      "language": "yaml",
+      "sizeLines": 12,
+      "fileCategory": "config"
+    },
+    {
+      "path": "buf.yaml",
+      "language": "yaml",
+      "sizeLines": 9,
+      "fileCategory": "config"
+    },
+    {
+      "path": "CLAUDE.md",
+      "language": "markdown",
+      "sizeLines": 121,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "CLIENT_PLAN.md",
+      "language": "markdown",
+      "sizeLines": 201,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "client/build.rs",
+      "language": "rust",
+      "sizeLines": 7,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 53,
+      "fileCategory": "config"
+    },
+    {
+      "path": "client/src/appmeta.rs",
+      "language": "rust",
+      "sizeLines": 26,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/down.rs",
+      "language": "rust",
+      "sizeLines": 16,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/login.rs",
+      "language": "rust",
+      "sizeLines": 43,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/logout.rs",
+      "language": "rust",
+      "sizeLines": 20,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/resources.rs",
+      "language": "rust",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/setup.rs",
+      "language": "rust",
+      "sizeLines": 21,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/status.rs",
+      "language": "rust",
+      "sizeLines": 49,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/cmd/up.rs",
+      "language": "rust",
+      "sizeLines": 16,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/config.rs",
+      "language": "rust",
+      "sizeLines": 128,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/daemon.rs",
+      "language": "rust",
+      "sizeLines": 543,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/error.rs",
+      "language": "rust",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/grpc.rs",
+      "language": "rust",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/ipc.rs",
+      "language": "rust",
+      "sizeLines": 157,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/login.rs",
+      "language": "rust",
+      "sizeLines": 220,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/main.rs",
+      "language": "rust",
+      "sizeLines": 87,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/net_stack.rs",
+      "language": "rust",
+      "sizeLines": 287,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/runtime.rs",
+      "language": "rust",
+      "sizeLines": 89,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/state_store.rs",
+      "language": "rust",
+      "sizeLines": 565,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/tun.rs",
+      "language": "rust",
+      "sizeLines": 169,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/src/tunnel_pool.rs",
+      "language": "rust",
+      "sizeLines": 97,
+      "fileCategory": "code"
+    },
+    {
+      "path": "client/zecurity-client.service",
+      "language": "service",
+      "sizeLines": 31,
+      "fileCategory": "code"
+    },
+    {
+      "path": "codebase.md",
+      "language": "markdown",
+      "sizeLines": 211,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "connector/build.rs",
+      "language": "rust",
+      "sizeLines": 42,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 37,
+      "fileCategory": "config"
+    },
+    {
+      "path": "connector/Cross.toml",
+      "language": "toml",
+      "sizeLines": 5,
+      "fileCategory": "config"
+    },
+    {
+      "path": "connector/docker-compose.yml",
+      "language": "yaml",
+      "sizeLines": 44,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "connector/Dockerfile",
+      "language": "dockerfile",
+      "sizeLines": 61,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "connector/scripts/connector-install.sh",
+      "language": "shell",
+      "sizeLines": 264,
+      "fileCategory": "script"
+    },
+    {
+      "path": "connector/src/agent_server.rs",
+      "language": "rust",
+      "sizeLines": 517,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/agent_tunnel.rs",
+      "language": "rust",
+      "sizeLines": 259,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/appmeta.rs",
+      "language": "rust",
+      "sizeLines": 135,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/config.rs",
+      "language": "rust",
+      "sizeLines": 125,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/control_stream.rs",
+      "language": "rust",
+      "sizeLines": 316,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/controller_client.rs",
+      "language": "rust",
+      "sizeLines": 122,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/crl.rs",
+      "language": "rust",
+      "sizeLines": 70,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/crypto.rs",
+      "language": "rust",
+      "sizeLines": 147,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/device_tunnel.rs",
+      "language": "rust",
+      "sizeLines": 333,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/discovery/mod.rs",
+      "language": "rust",
+      "sizeLines": 4,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/discovery/scan.rs",
+      "language": "rust",
+      "sizeLines": 132,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/discovery/scope.rs",
+      "language": "rust",
+      "sizeLines": 36,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/discovery/service_detect.rs",
+      "language": "rust",
+      "sizeLines": 71,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/discovery/tcp_ping.rs",
+      "language": "rust",
+      "sizeLines": 14,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/enrollment.rs",
+      "language": "rust",
+      "sizeLines": 418,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/main.rs",
+      "language": "rust",
+      "sizeLines": 275,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/net_util.rs",
+      "language": "rust",
+      "sizeLines": 10,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/policy/mod.rs",
+      "language": "rust",
+      "sizeLines": 143,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/quic_listener.rs",
+      "language": "rust",
+      "sizeLines": 99,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/renewal.rs",
+      "language": "rust",
+      "sizeLines": 128,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/tls/cert_store.rs",
+      "language": "rust",
+      "sizeLines": 24,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/tls/mod.rs",
+      "language": "rust",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/tls/server_cfg.rs",
+      "language": "rust",
+      "sizeLines": 44,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/updater.rs",
+      "language": "rust",
+      "sizeLines": 449,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/util.rs",
+      "language": "rust",
+      "sizeLines": 50,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/src/watchdog.rs",
+      "language": "rust",
+      "sizeLines": 32,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/systemd/zecurity-connector-update.service",
+      "language": "service",
+      "sizeLines": 21,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/systemd/zecurity-connector-update.timer",
+      "language": "timer",
+      "sizeLines": 21,
+      "fileCategory": "code"
+    },
+    {
+      "path": "connector/systemd/zecurity-connector.service",
+      "language": "service",
+      "sizeLines": 69,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/.env.example",
+      "language": "example",
+      "sizeLines": 49,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/cmd/server/main.go",
+      "language": "go",
+      "sizeLines": 538,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/docker-compose.yml",
+      "language": "yaml",
+      "sizeLines": 34,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "controller/go.mod",
+      "language": "mod",
+      "sizeLines": 85,
+      "fileCategory": "config"
+    },
+    {
+      "path": "controller/go.sum",
+      "language": "sum",
+      "sizeLines": 227,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/client.graphqls",
+      "language": "graphqls",
+      "sizeLines": 40,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/connector.graphqls",
+      "language": "graphqls",
+      "sizeLines": 94,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/discovery.graphqls",
+      "language": "graphqls",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/gqlgen.yml",
+      "language": "yaml",
+      "sizeLines": 31,
+      "fileCategory": "config"
+    },
+    {
+      "path": "controller/graph/graph/generated.go",
+      "language": "go",
+      "sizeLines": 2447,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/graph/models_gen.go",
+      "language": "go",
+      "sizeLines": 6,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/graph/resolvers/resolver.go",
+      "language": "go",
+      "sizeLines": 8,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/log.graphqls",
+      "language": "graphqls",
+      "sizeLines": 13,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/model/model.go",
+      "language": "go",
+      "sizeLines": 10,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/models_gen.go",
+      "language": "go",
+      "sizeLines": 588,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/policy.graphqls",
+      "language": "graphqls",
+      "sizeLines": 30,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolver.go",
+      "language": "go",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/auth.resolvers.go",
+      "language": "go",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/client_helpers.go",
+      "language": "go",
+      "sizeLines": 56,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/client.resolvers.go",
+      "language": "go",
+      "sizeLines": 164,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/connector.resolvers.go",
+      "language": "go",
+      "sizeLines": 391,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/discovery.resolvers.go",
+      "language": "go",
+      "sizeLines": 116,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/helpers.go",
+      "language": "go",
+      "sizeLines": 240,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/log.resolvers.go",
+      "language": "go",
+      "sizeLines": 67,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/policy_helpers.go",
+      "language": "go",
+      "sizeLines": 153,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/policy.resolvers.go",
+      "language": "go",
+      "sizeLines": 146,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/resolver.go",
+      "language": "go",
+      "sizeLines": 29,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/resource.resolvers.go",
+      "language": "go",
+      "sizeLines": 122,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/schema.resolvers.go",
+      "language": "go",
+      "sizeLines": 208,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/shield.resolvers.go",
+      "language": "go",
+      "sizeLines": 143,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resolvers/workspace.resolvers.go",
+      "language": "go",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/resource.graphqls",
+      "language": "graphqls",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/schema.graphqls",
+      "language": "graphqls",
+      "sizeLines": 90,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/graph/shield.graphqls",
+      "language": "graphqls",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/appmeta/identity_test.go",
+      "language": "go",
+      "sizeLines": 88,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/appmeta/identity.go",
+      "language": "go",
+      "sizeLines": 89,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/callback_test.go",
+      "language": "go",
+      "sizeLines": 105,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/callback.go",
+      "language": "go",
+      "sizeLines": 158,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/config.go",
+      "language": "go",
+      "sizeLines": 115,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/exchange.go",
+      "language": "go",
+      "sizeLines": 131,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/helpers_test.go",
+      "language": "go",
+      "sizeLines": 60,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/idtoken.go",
+      "language": "go",
+      "sizeLines": 228,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/integration_test.go",
+      "language": "go",
+      "sizeLines": 369,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/oidc_test.go",
+      "language": "go",
+      "sizeLines": 157,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/oidc.go",
+      "language": "go",
+      "sizeLines": 139,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/refresh_test.go",
+      "language": "go",
+      "sizeLines": 144,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/refresh.go",
+      "language": "go",
+      "sizeLines": 146,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/service.go",
+      "language": "go",
+      "sizeLines": 67,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/session_test.go",
+      "language": "go",
+      "sizeLines": 195,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/session.go",
+      "language": "go",
+      "sizeLines": 143,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/valkey_test.go",
+      "language": "go",
+      "sizeLines": 189,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/auth/valkey.go",
+      "language": "go",
+      "sizeLines": 120,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/bootstrap/bootstrap.go",
+      "language": "go",
+      "sizeLines": 281,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/client/auth_session.go",
+      "language": "go",
+      "sizeLines": 97,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/client/service.go",
+      "language": "go",
+      "sizeLines": 443,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/client/store.go",
+      "language": "go",
+      "sizeLines": 210,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/ca_endpoint.go",
+      "language": "go",
+      "sizeLines": 66,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/config.go",
+      "language": "go",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/control_stream.go",
+      "language": "go",
+      "sizeLines": 468,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/disconnect_watcher.go",
+      "language": "go",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/enrollment_test.go",
+      "language": "go",
+      "sizeLines": 1141,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/enrollment.go",
+      "language": "go",
+      "sizeLines": 286,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/goodbye.go",
+      "language": "go",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/spiffe_test.go",
+      "language": "go",
+      "sizeLines": 231,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/spiffe.go",
+      "language": "go",
+      "sizeLines": 276,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/token_handler.go",
+      "language": "go",
+      "sizeLines": 124,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/connector/token.go",
+      "language": "go",
+      "sizeLines": 93,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/db/pool.go",
+      "language": "go",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/db/tenant.go",
+      "language": "go",
+      "sizeLines": 68,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/discovery/config.go",
+      "language": "go",
+      "sizeLines": 13,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/discovery/store.go",
+      "language": "go",
+      "sizeLines": 172,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/invitation/email.go",
+      "language": "go",
+      "sizeLines": 62,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/invitation/handler.go",
+      "language": "go",
+      "sizeLines": 143,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/invitation/store.go",
+      "language": "go",
+      "sizeLines": 156,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/middleware/auth.go",
+      "language": "go",
+      "sizeLines": 84,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/middleware/role.go",
+      "language": "go",
+      "sizeLines": 39,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/middleware/session.go",
+      "language": "go",
+      "sizeLines": 1,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/middleware/workspace.go",
+      "language": "go",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/models/user.go",
+      "language": "go",
+      "sizeLines": 16,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/models/workspace.go",
+      "language": "go",
+      "sizeLines": 13,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/controller.go",
+      "language": "go",
+      "sizeLines": 91,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/crypto.go",
+      "language": "go",
+      "sizeLines": 256,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/intermediate_integration_test.go",
+      "language": "go",
+      "sizeLines": 153,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/intermediate.go",
+      "language": "go",
+      "sizeLines": 150,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/root_integration_test.go",
+      "language": "go",
+      "sizeLines": 179,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/root.go",
+      "language": "go",
+      "sizeLines": 141,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/service.go",
+      "language": "go",
+      "sizeLines": 213,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/workspace_integration_test.go",
+      "language": "go",
+      "sizeLines": 172,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/pki/workspace.go",
+      "language": "go",
+      "sizeLines": 601,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/policy/cache.go",
+      "language": "go",
+      "sizeLines": 43,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/policy/compiler.go",
+      "language": "go",
+      "sizeLines": 79,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/policy/notifier.go",
+      "language": "go",
+      "sizeLines": 56,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/policy/store.go",
+      "language": "go",
+      "sizeLines": 336,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/resource/config.go",
+      "language": "go",
+      "sizeLines": 11,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/resource/store.go",
+      "language": "go",
+      "sizeLines": 372,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/config.go",
+      "language": "go",
+      "sizeLines": 50,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/enrollment.go",
+      "language": "go",
+      "sizeLines": 169,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/heartbeat.go",
+      "language": "go",
+      "sizeLines": 66,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/spiffe.go",
+      "language": "go",
+      "sizeLines": 31,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/token_handler.go",
+      "language": "go",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/shield/token.go",
+      "language": "go",
+      "sizeLines": 280,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/internal/tenant/context.go",
+      "language": "go",
+      "sizeLines": 54,
+      "fileCategory": "code"
+    },
+    {
+      "path": "controller/migrations/001_schema.sql",
+      "language": "sql",
+      "sizeLines": 80,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/002_connector_schema.sql",
+      "language": "sql",
+      "sizeLines": 107,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/003_shield_schema.sql",
+      "language": "sql",
+      "sizeLines": 28,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/004_connector_agent_addr.sql",
+      "language": "sql",
+      "sizeLines": 8,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/005_rename_agent_addr.sql",
+      "language": "sql",
+      "sizeLines": 6,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/006_shield_lan_ip.sql",
+      "language": "sql",
+      "sizeLines": 6,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/007_resources.sql",
+      "language": "sql",
+      "sizeLines": 32,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/008_add_unprotected_state.sql",
+      "language": "sql",
+      "sizeLines": 4,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/009_streaming_states.sql",
+      "language": "sql",
+      "sizeLines": 21,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/010_discovery.sql",
+      "language": "sql",
+      "sizeLines": 29,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/011_client.sql",
+      "language": "sql",
+      "sizeLines": 33,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/012_groups_acl.sql",
+      "language": "sql",
+      "sizeLines": 41,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/013_workspace_members.sql",
+      "language": "sql",
+      "sizeLines": 34,
+      "fileCategory": "data"
+    },
+    {
+      "path": "controller/migrations/014_connector_logs.sql",
+      "language": "sql",
+      "sizeLines": 17,
+      "fileCategory": "data"
+    },
+    {
+      "path": "implementation-report.md",
+      "language": "markdown",
+      "sizeLines": 648,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "improvements.md",
+      "language": "markdown",
+      "sizeLines": 601,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "Makefile",
+      "language": "makefile",
+      "sizeLines": 34,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "proto/.gitkeep",
+      "language": "unknown",
+      "sizeLines": 0,
+      "fileCategory": "code"
+    },
+    {
+      "path": "proto/client/v1/client.proto",
+      "language": "protobuf",
+      "sizeLines": 119,
+      "fileCategory": "data"
+    },
+    {
+      "path": "proto/connector/v1/connector.proto",
+      "language": "protobuf",
+      "sizeLines": 155,
+      "fileCategory": "data"
+    },
+    {
+      "path": "proto/shield/v1/shield.proto",
+      "language": "protobuf",
+      "sizeLines": 157,
+      "fileCategory": "data"
+    },
+    {
+      "path": "scripts/client-local-install.sh",
+      "language": "shell",
+      "sizeLines": 127,
+      "fileCategory": "script"
+    },
+    {
+      "path": "scripts/client-uninstall.sh",
+      "language": "shell",
+      "sizeLines": 165,
+      "fileCategory": "script"
+    },
+    {
+      "path": "scripts/connector-local-install.sh",
+      "language": "shell",
+      "sizeLines": 130,
+      "fileCategory": "script"
+    },
+    {
+      "path": "scripts/connector-uninstall.sh",
+      "language": "shell",
+      "sizeLines": 180,
+      "fileCategory": "script"
+    },
+    {
+      "path": "scripts/shield-local-install.sh",
+      "language": "shell",
+      "sizeLines": 130,
+      "fileCategory": "script"
+    },
+    {
+      "path": "scripts/shield-uninstall.sh",
+      "language": "shell",
+      "sizeLines": 248,
+      "fileCategory": "script"
+    },
+    {
+      "path": "shield/build.rs",
+      "language": "rust",
+      "sizeLines": 7,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 42,
+      "fileCategory": "config"
+    },
+    {
+      "path": "shield/Cross.toml",
+      "language": "toml",
+      "sizeLines": 5,
+      "fileCategory": "config"
+    },
+    {
+      "path": "shield/Dockerfile",
+      "language": "dockerfile",
+      "sizeLines": 51,
+      "fileCategory": "infra"
+    },
+    {
+      "path": "shield/scripts/shield-install.sh",
+      "language": "shell",
+      "sizeLines": 341,
+      "fileCategory": "script"
+    },
+    {
+      "path": "shield/src/appmeta.rs",
+      "language": "rust",
+      "sizeLines": 168,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/config.rs",
+      "language": "rust",
+      "sizeLines": 119,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/control_stream.rs",
+      "language": "rust",
+      "sizeLines": 351,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/crypto.rs",
+      "language": "rust",
+      "sizeLines": 161,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/discovery.rs",
+      "language": "rust",
+      "sizeLines": 438,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/enrollment.rs",
+      "language": "rust",
+      "sizeLines": 415,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/main.rs",
+      "language": "rust",
+      "sizeLines": 220,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/network.rs",
+      "language": "rust",
+      "sizeLines": 349,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/renewal.rs",
+      "language": "rust",
+      "sizeLines": 121,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/resources.rs",
+      "language": "rust",
+      "sizeLines": 414,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/tls.rs",
+      "language": "rust",
+      "sizeLines": 301,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/tunnel.rs",
+      "language": "rust",
+      "sizeLines": 245,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/types.rs",
+      "language": "rust",
+      "sizeLines": 60,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/updater.rs",
+      "language": "rust",
+      "sizeLines": 349,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/src/util.rs",
+      "language": "rust",
+      "sizeLines": 76,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/systemd/zecurity-shield-update.service",
+      "language": "service",
+      "sizeLines": 18,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/systemd/zecurity-shield-update.timer",
+      "language": "timer",
+      "sizeLines": 17,
+      "fileCategory": "code"
+    },
+    {
+      "path": "shield/systemd/zecurity-shield.service",
+      "language": "service",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "studyplan.md",
+      "language": "markdown",
+      "sizeLines": 1352,
+      "fileCategory": "docs"
+    }
+  ],
+  "totalFiles": 298,
+  "filteredByIgnore": 120,
+  "estimatedComplexity": "large",
+  "importMap": {
+    ".github/workflows/connector-release.yml": [],
+    ".github/workflows/shield-release.yml": [],
+    ".note.md": [],
+    "admin/codegen.yml": [],
+    "admin/components.json": [],
+    "admin/eslint.config.js": [],
+    "admin/index.html": [],
+    "admin/package.json": [],
+    "admin/README.md": [],
+    "admin/src/apollo/client.ts": [
+      "admin/src/apollo/links/auth.ts",
+      "admin/src/apollo/links/error.ts"
+    ],
+    "admin/src/apollo/links/auth.ts": [],
+    "admin/src/apollo/links/error.ts": [],
+    "admin/src/App.tsx": [],
+    "admin/src/components/auth/AuthLayout.tsx": [],
+    "admin/src/components/CreateResourceModal.tsx": [],
+    "admin/src/components/DiscoveredServicesPanel.tsx": [],
+    "admin/src/components/EditResourceModal.tsx": [],
+    "admin/src/components/InstallCommandModal.tsx": [],
+    "admin/src/components/layout/AppShell.tsx": [
+      "admin/src/components/layout/Sidebar.tsx",
+      "admin/src/components/layout/Header.tsx"
+    ],
+    "admin/src/components/layout/Header.tsx": [],
+    "admin/src/components/layout/Sidebar.tsx": [],
+    "admin/src/components/PromoteServiceModal.tsx": [],
+    "admin/src/components/ScanModal.tsx": [],
+    "admin/src/components/ui/alert.tsx": [],
+    "admin/src/components/ui/avatar.tsx": [],
+    "admin/src/components/ui/badge.tsx": [],
+    "admin/src/components/ui/border-beam.tsx": [],
+    "admin/src/components/ui/button.tsx": [],
+    "admin/src/components/ui/card.tsx": [],
+    "admin/src/components/ui/dialog.tsx": [],
+    "admin/src/components/ui/dropdown-menu.tsx": [],
+    "admin/src/components/ui/input.tsx": [],
+    "admin/src/components/ui/label.tsx": [],
+    "admin/src/components/ui/particles.tsx": [],
+    "admin/src/components/ui/separator.tsx": [],
+    "admin/src/components/ui/shimmer-button.tsx": [],
+    "admin/src/components/ui/skeleton.tsx": [],
+    "admin/src/components/ui/toast.tsx": [],
+    "admin/src/components/ui/toaster.tsx": [],
+    "admin/src/components/ui/use-toast.ts": [],
+    "admin/src/graphql/mutations.graphql": [],
+    "admin/src/graphql/queries.graphql": [],
+    "admin/src/hooks/useRequireAuth.ts": [],
+    "admin/src/index.css": [],
+    "admin/src/lib/console.tsx": [],
+    "admin/src/lib/parseConnectorLog.ts": [],
+    "admin/src/lib/utils.ts": [],
+    "admin/src/main.tsx": [
+      "admin/src/App.tsx"
+    ],
+    "admin/src/pages/AccessLog.tsx": [],
+    "admin/src/pages/AllConnectors.tsx": [],
+    "admin/src/pages/AllShields.tsx": [],
+    "admin/src/pages/AuthCallback.tsx": [],
+    "admin/src/pages/ClientInstall.tsx": [],
+    "admin/src/pages/ConnectorDetail.tsx": [],
+    "admin/src/pages/Connectors.tsx": [],
+    "admin/src/pages/Dashboard.tsx": [],
+    "admin/src/pages/DeviceManagement.tsx": [],
+    "admin/src/pages/GroupDetail.tsx": [],
+    "admin/src/pages/Groups.tsx": [],
+    "admin/src/pages/InviteAccept.tsx": [],
+    "admin/src/pages/Login.tsx": [],
+    "admin/src/pages/RemoteNetworkDetail.tsx": [],
+    "admin/src/pages/RemoteNetworks.tsx": [],
+    "admin/src/pages/ResourceDetail.tsx": [],
+    "admin/src/pages/ResourceDiscovery.tsx": [],
+    "admin/src/pages/Resources.tsx": [],
+    "admin/src/pages/Settings.tsx": [],
+    "admin/src/pages/ShieldDetail.tsx": [],
+    "admin/src/pages/Shields.tsx": [],
+    "admin/src/pages/signup/Step1Email.tsx": [],
+    "admin/src/pages/signup/Step2Workspace.tsx": [],
+    "admin/src/pages/signup/Step3Auth.tsx": [],
+    "admin/src/pages/TeamUsers.tsx": [],
+    "admin/src/pages/Topology.tsx": [],
+    "admin/src/store/auth.ts": [],
+    "admin/src/store/signup.ts": [],
+    "admin/tsconfig.app.json": [],
+    "admin/tsconfig.json": [],
+    "admin/tsconfig.node.json": [],
+    "admin/vite.config.ts": [],
+    "agent.md": [],
+    "AGENTS.md": [],
+    "buf.gen.yaml": [],
+    "buf.yaml": [],
+    "CLAUDE.md": [],
+    "CLIENT_PLAN.md": [],
+    "client/build.rs": [],
+    "client/Cargo.toml": [],
+    "client/src/appmeta.rs": [],
+    "client/src/cmd/down.rs": [],
+    "client/src/cmd/login.rs": [],
+    "client/src/cmd/logout.rs": [],
+    "client/src/cmd/resources.rs": [],
+    "client/src/cmd/setup.rs": [],
+    "client/src/cmd/status.rs": [],
+    "client/src/cmd/up.rs": [],
+    "client/src/config.rs": [],
+    "client/src/daemon.rs": [],
+    "client/src/error.rs": [],
+    "client/src/grpc.rs": [],
+    "client/src/ipc.rs": [],
+    "client/src/login.rs": [],
+    "client/src/main.rs": [],
+    "client/src/net_stack.rs": [],
+    "client/src/runtime.rs": [],
+    "client/src/state_store.rs": [],
+    "client/src/tun.rs": [],
+    "client/src/tunnel_pool.rs": [],
+    "client/zecurity-client.service": [],
+    "codebase.md": [],
+    "connector/build.rs": [],
+    "connector/Cargo.toml": [],
+    "connector/Cross.toml": [],
+    "connector/docker-compose.yml": [],
+    "connector/Dockerfile": [],
+    "connector/scripts/connector-install.sh": [],
+    "connector/src/agent_server.rs": [],
+    "connector/src/agent_tunnel.rs": [],
+    "connector/src/appmeta.rs": [],
+    "connector/src/config.rs": [],
+    "connector/src/control_stream.rs": [],
+    "connector/src/controller_client.rs": [],
+    "connector/src/crl.rs": [],
+    "connector/src/crypto.rs": [],
+    "connector/src/device_tunnel.rs": [],
+    "connector/src/discovery/mod.rs": [],
+    "connector/src/discovery/scan.rs": [],
+    "connector/src/discovery/scope.rs": [],
+    "connector/src/discovery/service_detect.rs": [],
+    "connector/src/discovery/tcp_ping.rs": [],
+    "connector/src/enrollment.rs": [],
+    "connector/src/main.rs": [],
+    "connector/src/net_util.rs": [],
+    "connector/src/policy/mod.rs": [],
+    "connector/src/quic_listener.rs": [],
+    "connector/src/renewal.rs": [],
+    "connector/src/tls/cert_store.rs": [],
+    "connector/src/tls/mod.rs": [],
+    "connector/src/tls/server_cfg.rs": [],
+    "connector/src/updater.rs": [],
+    "connector/src/util.rs": [],
+    "connector/src/watchdog.rs": [],
+    "connector/systemd/zecurity-connector-update.service": [],
+    "connector/systemd/zecurity-connector-update.timer": [],
+    "connector/systemd/zecurity-connector.service": [],
+    "controller/.env.example": [],
+    "controller/cmd/server/main.go": [],
+    "controller/docker-compose.yml": [],
+    "controller/go.mod": [],
+    "controller/go.sum": [],
+    "controller/graph/client.graphqls": [],
+    "controller/graph/connector.graphqls": [],
+    "controller/graph/discovery.graphqls": [],
+    "controller/graph/gqlgen.yml": [],
+    "controller/graph/graph/generated.go": [],
+    "controller/graph/graph/models_gen.go": [],
+    "controller/graph/graph/resolvers/resolver.go": [],
+    "controller/graph/log.graphqls": [],
+    "controller/graph/model/model.go": [],
+    "controller/graph/models_gen.go": [],
+    "controller/graph/policy.graphqls": [],
+    "controller/graph/resolver.go": [],
+    "controller/graph/resolvers/auth.resolvers.go": [],
+    "controller/graph/resolvers/client_helpers.go": [],
+    "controller/graph/resolvers/client.resolvers.go": [],
+    "controller/graph/resolvers/connector.resolvers.go": [],
+    "controller/graph/resolvers/discovery.resolvers.go": [],
+    "controller/graph/resolvers/helpers.go": [],
+    "controller/graph/resolvers/log.resolvers.go": [],
+    "controller/graph/resolvers/policy_helpers.go": [],
+    "controller/graph/resolvers/policy.resolvers.go": [],
+    "controller/graph/resolvers/resolver.go": [],
+    "controller/graph/resolvers/resource.resolvers.go": [],
+    "controller/graph/resolvers/schema.resolvers.go": [],
+    "controller/graph/resolvers/shield.resolvers.go": [],
+    "controller/graph/resolvers/workspace.resolvers.go": [],
+    "controller/graph/resource.graphqls": [],
+    "controller/graph/schema.graphqls": [],
+    "controller/graph/shield.graphqls": [],
+    "controller/internal/appmeta/identity_test.go": [],
+    "controller/internal/appmeta/identity.go": [],
+    "controller/internal/auth/callback_test.go": [],
+    "controller/internal/auth/callback.go": [],
+    "controller/internal/auth/config.go": [],
+    "controller/internal/auth/exchange.go": [],
+    "controller/internal/auth/helpers_test.go": [],
+    "controller/internal/auth/idtoken.go": [],
+    "controller/internal/auth/integration_test.go": [],
+    "controller/internal/auth/oidc_test.go": [],
+    "controller/internal/auth/oidc.go": [],
+    "controller/internal/auth/refresh_test.go": [],
+    "controller/internal/auth/refresh.go": [],
+    "controller/internal/auth/service.go": [],
+    "controller/internal/auth/session_test.go": [],
+    "controller/internal/auth/session.go": [],
+    "controller/internal/auth/valkey_test.go": [],
+    "controller/internal/auth/valkey.go": [],
+    "controller/internal/bootstrap/bootstrap.go": [],
+    "controller/internal/client/auth_session.go": [],
+    "controller/internal/client/service.go": [],
+    "controller/internal/client/store.go": [],
+    "controller/internal/connector/ca_endpoint.go": [],
+    "controller/internal/connector/config.go": [],
+    "controller/internal/connector/control_stream.go": [],
+    "controller/internal/connector/disconnect_watcher.go": [],
+    "controller/internal/connector/enrollment_test.go": [],
+    "controller/internal/connector/enrollment.go": [],
+    "controller/internal/connector/goodbye.go": [],
+    "controller/internal/connector/spiffe_test.go": [],
+    "controller/internal/connector/spiffe.go": [],
+    "controller/internal/connector/token_handler.go": [],
+    "controller/internal/connector/token.go": [],
+    "controller/internal/db/pool.go": [],
+    "controller/internal/db/tenant.go": [],
+    "controller/internal/discovery/config.go": [],
+    "controller/internal/discovery/store.go": [],
+    "controller/internal/invitation/email.go": [],
+    "controller/internal/invitation/handler.go": [],
+    "controller/internal/invitation/store.go": [],
+    "controller/internal/middleware/auth.go": [],
+    "controller/internal/middleware/role.go": [],
+    "controller/internal/middleware/session.go": [],
+    "controller/internal/middleware/workspace.go": [],
+    "controller/internal/models/user.go": [],
+    "controller/internal/models/workspace.go": [],
+    "controller/internal/pki/controller.go": [],
+    "controller/internal/pki/crypto.go": [],
+    "controller/internal/pki/intermediate_integration_test.go": [],
+    "controller/internal/pki/intermediate.go": [],
+    "controller/internal/pki/root_integration_test.go": [],
+    "controller/internal/pki/root.go": [],
+    "controller/internal/pki/service.go": [],
+    "controller/internal/pki/workspace_integration_test.go": [],
+    "controller/internal/pki/workspace.go": [],
+    "controller/internal/policy/cache.go": [],
+    "controller/internal/policy/compiler.go": [],
+    "controller/internal/policy/notifier.go": [],
+    "controller/internal/policy/store.go": [],
+    "controller/internal/resource/config.go": [],
+    "controller/internal/resource/store.go": [],
+    "controller/internal/shield/config.go": [],
+    "controller/internal/shield/enrollment.go": [],
+    "controller/internal/shield/heartbeat.go": [],
+    "controller/internal/shield/spiffe.go": [],
+    "controller/internal/shield/token_handler.go": [],
+    "controller/internal/shield/token.go": [],
+    "controller/internal/tenant/context.go": [],
+    "controller/migrations/001_schema.sql": [],
+    "controller/migrations/002_connector_schema.sql": [],
+    "controller/migrations/003_shield_schema.sql": [],
+    "controller/migrations/004_connector_agent_addr.sql": [],
+    "controller/migrations/005_rename_agent_addr.sql": [],
+    "controller/migrations/006_shield_lan_ip.sql": [],
+    "controller/migrations/007_resources.sql": [],
+    "controller/migrations/008_add_unprotected_state.sql": [],
+    "controller/migrations/009_streaming_states.sql": [],
+    "controller/migrations/010_discovery.sql": [],
+    "controller/migrations/011_client.sql": [],
+    "controller/migrations/012_groups_acl.sql": [],
+    "controller/migrations/013_workspace_members.sql": [],
+    "controller/migrations/014_connector_logs.sql": [],
+    "implementation-report.md": [],
+    "improvements.md": [],
+    "Makefile": [],
+    "proto/.gitkeep": [],
+    "proto/client/v1/client.proto": [],
+    "proto/connector/v1/connector.proto": [],
+    "proto/shield/v1/shield.proto": [],
+    "scripts/client-local-install.sh": [],
+    "scripts/client-uninstall.sh": [],
+    "scripts/connector-local-install.sh": [],
+    "scripts/connector-uninstall.sh": [],
+    "scripts/shield-local-install.sh": [],
+    "scripts/shield-uninstall.sh": [],
+    "shield/build.rs": [],
+    "shield/Cargo.toml": [],
+    "shield/Cross.toml": [],
+    "shield/Dockerfile": [],
+    "shield/scripts/shield-install.sh": [],
+    "shield/src/appmeta.rs": [],
+    "shield/src/config.rs": [],
+    "shield/src/control_stream.rs": [],
+    "shield/src/crypto.rs": [],
+    "shield/src/discovery.rs": [],
+    "shield/src/enrollment.rs": [],
+    "shield/src/main.rs": [],
+    "shield/src/network.rs": [],
+    "shield/src/renewal.rs": [],
+    "shield/src/resources.rs": [],
+    "shield/src/tls.rs": [],
+    "shield/src/tunnel.rs": [],
+    "shield/src/types.rs": [],
+    "shield/src/updater.rs": [],
+    "shield/src/util.rs": [],
+    "shield/systemd/zecurity-shield-update.service": [],
+    "shield/systemd/zecurity-shield-update.timer": [],
+    "shield/systemd/zecurity-shield.service": [],
+    "studyplan.md": []
+  }
+}
