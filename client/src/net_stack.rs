@@ -111,10 +111,10 @@ pub async fn run(
     pool: Arc<TunnelPool>,
     connector_addr: SocketAddr,
 ) -> Result<()> {
-    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>(); //TUN Reader Task
+    let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>(); //TUN Writer Task
 
-    let (mut tun_read, mut tun_write) = tokio::io::split(dev);
+    let (mut tun_read, mut tun_write) = tokio::io::split(dev); //dev = AsyncDevice(zecurity0)
 
     // TUN → smoltcp: read raw IP packets from the kernel and forward to the
     // sync channel that TunDevice::receive() drains each poll cycle.
@@ -151,7 +151,10 @@ pub async fn run(
             match ip { IpAddr::V4(v4) => Some((v4, e.port as u16)), _ => None }
         })
         .collect();
-
+        /*resource_entries = [
+                (10.50.0.10, 5432),
+                (10.50.0.11, 443)
+            ] */
     // Assign one /32 address per resource so smoltcp accepts inbound packets.
     iface.update_ip_addrs(|addrs| {
         for (ip, _) in &resource_entries {
