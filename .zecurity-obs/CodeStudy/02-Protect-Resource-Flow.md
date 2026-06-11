@@ -49,7 +49,7 @@ status: in-progress
 - [x] **Piece 1** — Admin UI trigger ✅
 - [x] **Piece 2** — Controller resolver ✅
 - [x] **Piece 3** — Controller DB write (state machine) ✅ (findings recorded; fixes deferred)
-- [ ] **Piece 4** — Controller → Connector delivery
+- [x] **Piece 4** — Controller → Connector delivery ✅ (ADR-004 Phase 2/3 landed; F10 fixed)
 - [ ] **Piece 5** — Connector receives + queues
 - [ ] **Piece 6** — Connector → Shield forwarding (:9091)
 - [ ] **Piece 7** — Shield applies firewall rule
@@ -226,22 +226,71 @@ Mig 007 `idx_resources_managing ON resources(shield_id,status) WHERE status IN (
 
 # Piece 4 — Controller → Connector Delivery
 
-**Status:** ⬜ not reviewed
+**Status:** ✅ reviewed (2026-06-11)
 
 `PushInstruction` builds the proto, `PushResourceInstruction` sends over the live control stream. `pushPendingInstructions` replays DB-pending instructions on reconnect.
 
+> ⚠️ **The code has moved two ADR-004 phases past this doc's original snapshot.** The naive incremental-push path described here now sits inside a desired-state delivery system: **Phase 2** (snapshot-on-reconnect) lives in `control_stream.go`, and **Phase 3** (closed-loop reconciler) is an entirely new file `reconcile.go` the doc never listed. This is the "we already did something related in earlier pieces" feeling — the ADR-004 plan referenced all over Piece 3 (Findings 5, 6, 6b) has **landed**, and it resolves the carry-forwards that Pieces 2/3 parked here.
+
 **Files**
-- `controller/internal/connector/control_stream.go:69-112` — push path
-- `controller/internal/connector/control_stream.go:229-274` — reconnect replay
+- `controller/internal/connector/control_stream.go:126-169` — push path (`PushInstruction` / `PushResourceInstruction`)
+- `controller/internal/connector/control_stream.go:71-124` — `buildSnapshotMsg` / `PushSnapshotForShield` (ADR-004 Phase 2)
+- `controller/internal/connector/control_stream.go:288-345` — `pushPendingInstructions` (reconnect: snapshot-per-shield + pending replay)
+- `controller/internal/connector/reconcile.go` — `handleResourceState` / `reconcileShield` (ADR-004 Phase 3 closed-loop reconciler) — **NEW, not in original doc**
+- `controller/internal/resource/store.go:176-240` — `GetPendingForShield` / `GetDesiredForShield`
+- `controller/internal/resource/store.go:474-506` — `GetDeletingForShield` / `ReapTombstone`
 
 **To review**
-- [ ] Offline-safe semantics (returns nil when connector absent)
-- [ ] Per-shield batching in `ResourceInstructionBatch`
-- [ ] Reconnect query scope (`status NOT IN ('revoked','deleted')`)
-- [ ] **Doc drift:** CLAUDE.md says "heartbeat piggyback only — no new RPCs", but this is a persistent bidirectional control stream pushing in near-real-time. Confirm intent / update docs.
+- [x] Offline-safe semantics — ✅ all three push entry points guard: `PushInstruction` returns on empty `ConnectorID` (`:130`); `PushResourceInstruction` returns nil when connector absent (`:151-154`, "already written to DB by caller"); `PushSnapshotForShield` returns on nil connector (`:112-115`).
+- [x] Per-shield batching in `ResourceInstructionBatch` — ✅ structure correct (`map[shield]→[]instr`) but **the online hot path never batches** (Finding F13): `PushInstruction` sends one resource for one shield per resolver call. Only `pushPendingInstructions` (reconnect) fills the batch.
+- [x] Reconnect query scope (`status NOT IN ('revoked','deleted')`) — ✅ correct. This is the **shields** table (`control_stream.go:291`), where the `'deleted'` soft-delete is still real — unlike `resources`, where Finding 8 dropped it.
+- [x] **Doc drift** — ✅ CONFIRMED real (Finding F1-doc). It is a persistent bidirectional `Control` gRPC stream with near-real-time push, plus new `ResourceState` reports and `ResourceSnapshotBatch`. CLAUDE.md "heartbeat piggyback only — no new RPCs" is now definitively contradicted.
+
+**Carry-forwards from earlier pieces — RESOLVED by ADR-004 Phase 2/3**
+
+| Carried into Piece 4 | Status |
+|---|---|
+| **Finding 4 / X-cut #5** — online `c.send` fails → stuck `protecting` forever, no resend | ✅ **Resolved.** Reconciler detects `missing` drift (desired-but-not-reported) and re-pushes the snapshot after 2 reports (`reconcile.go` drift path). Self-heals. *(Latency-coupling half remains — see F14.)* |
+| **Finding 6b** — fail-open after shield reboot (protected silently lost) | ✅ **Resolved.** `GetDesiredForShield` includes `protected`+`failed` (`store.go:217-222`); snapshot pushed for **every** non-revoked/deleted shield on reconnect (`control_stream.go:308`), even with nothing pending. Reboot re-protects from the connector's cache. |
+| **Finding 5** — delete of `protected` orphans the shield rule | ✅ **Resolved.** `deleting` tombstone + reap loop (`reconcile.go` tombstone pass + `ReapTombstone` `store.go:496`); snapshot replace-semantics also drops zombies. |
 
 **Notes**
-> _(findings go here)_
+
+🔴 **Finding F10 (important) — reconciler held one global mutex across DB queries + network send. → ✅ FIXED (2026-06-11).**
+`reconcileShield` took `h.Recon.mu` with `defer Unlock()` on entry and held it across `GetDesiredForShield`, `GetDeletingForShield`, `buildSnapshotMsg` (another DB query), `client.send`, and `ReapTombstone`. The mutex only needs to guard the in-memory `drift`/`absent` hysteresis maps — but holding it across I/O serialized reconciliation for **every connector in the controller** behind one slow query or a stalled stream send.
+
+**Fix applied** (`reconcile.go:56-160`, build/vet/`-race` tests clean):
+- Read-only DB queries + drift classification now run **lock-free** (no shared state).
+- **One short locked section** updates the counter maps, captures the decisions (`shouldResync`, `resyncDriftRuns`, `toReap`) and snapshots the gauge values, then unlocks.
+- **All I/O after the unlock** — snapshot re-push (`buildSnapshotMsg` + `client.send`) and `ReapTombstone` deletes.
+- Behavior preserved exactly: same thresholds, counter resets, reap semantics, gauge values, and log lines.
+- **Why still race-free:** a shield is owned by exactly one connector whose stream is processed by a single goroutine → per-key counter access is single-writer; the lock only guards the Go map structure against *cross-connector* concurrent access (different keys). Documented in-code so the lock isn't re-tightened later.
+
+🟠 **Finding F11 (minor) — snapshot `Generation` was wall-clock millis, and its "Phase 3 replaces this" comment was false. → ✅ FIXED (2026-06-11).**
+`buildSnapshotMsg` stamped `Generation: uint64(time.Now().UnixMilli())`. Two problems: (a) **non-monotonic** — an NTP step backwards makes a newer snapshot carry a *lower* generation, so the shield's `generation <= last` gate (`shield/src/resources.rs:405`) drops it as stale → silent drift that only self-heals on the next reconcile cycle; two snapshots in the same ms tie. (b) The comment claimed *"Phase 3 replaces this with reconciliation"* — but Phase 3 (`reconcile.go`) re-used the same wall-clock generation; it was never replaced.
+
+**Fix applied (Option F — generation behind the Go desired-state computation, no SQL semantics):**
+- **Migration `018_shield_snapshot_generation.sql`** — adds two **opaque** columns `snapshot_generation BIGINT` + `snapshot_fingerprint TEXT` to `shields`. No trigger, no predicate; SQL carries zero desired-state knowledge.
+- **Single source of truth** — extracted `resource.desiredForShield(querier, shieldID)` as the *one* definition of a shield's desired set; both the reconciler (`GetDesiredForShield`) and snapshot delivery route through it, so the predicate can't drift (this was the key design constraint — see the rejected trigger approaches).
+- **`resource.BuildShieldSnapshot`** — in one tx with `SELECT … FOR UPDATE` on the shield row: read stored (gen, fp) → read desired set → hash the exact rows (`fingerprintDesired`, sorted by ID) → bump generation **only when the fingerprint changes**, else reuse. So generation tracks real content changes, is MVCC-consistent with the rows it stamps (later content ⇒ higher gen ⇒ shield resolves out-of-order deliveries), survives controller restarts, and **metadata/audit writes never churn it**.
+- **`buildSnapshotMsg`** now reads `snap.Generation`; the misleading comment is corrected.
+- **Verified** against real Postgres (`snapshot_integration_test.go`, guarded by `RESOURCE_TEST_DATABASE_URL`): lifecycle `first=1 → dedup=1 → metadata=1 → payload=2 → left=3`. `go build`/`go vet`/`go test -race` clean.
+
+> **Design note — why not a trigger:** the first two attempts (unconditional `AFTER INSERT/UPDATE/DELETE` trigger, then a column-gated trigger) were rejected: the unconditional one churned generation on every audit/metadata write (defeating the shield's dedup), and *both* re-encoded the desired-state predicate in PL/pgSQL — a second source of truth that drifts from Go's `desiredForShield` the moment the rule changes. Option F keeps the rule in Go alone and lets SQL store generation as semantics-free bytes.
+
+🟡 **Finding F12 (minor) — reconnect double-delivers.**
+`pushPendingInstructions` sends the desired-state **snapshot** (`:308`) *and then* the **pending instructions** (`:331`) for the same shield. A `protecting/apply` row is in both sets (`GetDesiredForShield` and `GetPendingForShield`). A `deleting` row: the snapshot omits it (replace-semantics → drop) **and** pending includes it with `action=remove` (`GetPendingForShield:183`). Both paths converge and apply is idempotent → safe, but redundant. The snapshot already subsumes the pending replay for the reconnect case. **Open (cosmetic / minor bandwidth).**
+
+🟡 **Finding F13 (minor) — the "batch" never batches on the hot path.**
+`ResourceInstructionBatch.ShieldResources` is `map[shield]→[]instr`, but `PushInstruction` (`:129-142`) sends exactly one resource for one shield per resolver mutation. Only `pushPendingInstructions` fills the batch. Functionally fine; means online protect/unprotect is one-RPC-per-resource (chatty under bulk ops). **Open / wontfix-grade.**
+
+🟡 **Finding F14 (minor / reliability edge) — residual of Finding 4: `c.send` is synchronous in the resolver.**
+`send()` (`:47-51`) holds `sendMu` and calls `stream.Send()`, which can block on gRPC flow control if the connector isn't draining. `PushInstruction` runs inline in the GraphQL resolver (Piece 2), so a wedged connector can stall the mutation while holding `sendMu`. The reconciler fixes *delivery reliability* but not this *latency-coupling*. Bounded by the gRPC window; low severity. **Open.**
+
+**Note (not a finding) — desired/pending/deleting query helpers trust their caller for tenant isolation.**
+`GetDesiredForShield` / `GetPendingForShield` / `GetDeletingForShield` (`store.go`) scope by `shield_id` only, no `tenant_id`. Safe today: `handleResourceState` validates `shield ∈ (connector, tenant)` before reconciling (`reconcile.go:43-51`), `pushPendingInstructions` selects shields by the authenticated `connector_id`, and `ReapTombstone` *does* scope by tenant. A one-line contract comment would stop a future caller reusing them unscoped.
+
+✅ **Correct:** offline-safe push at every entry point; snapshot-on-reconnect is the right fail-closed primitive (replace-semantics drops zombies + restores protected in one shot); hysteresis (2 drift reports before resync, 3 absent before reap) avoids acting on in-flight state; reconnect query correctly uses the shields-table `'deleted'` which is still live.
 
 ---
 
@@ -345,8 +394,10 @@ Shield emits `ResourceAck` (immediately on apply + drained on next heartbeat). C
 2. ~~**Git-diff mismatch**~~ — RESOLVED in Piece 1: modified UI files are an unrelated create-modal prefill refactor, not part of the protect path.
 3. ~~**Shield picker is a dead control**~~ — ✅ FIXED (Piece 1, Finding 1). Removed the picker; panel now shows the auto-bound shield read-only. Shield is matched by host IP at create (`AutoMatchShield`) and is immutable. Also tightened the UI gate (Finding 2 UI side).
 4. ~~**No authorization on resource mutations**~~ — ✅ FIXED via centralized **`@hasRole` directive** (Piece 2, Finding 3). All admin mutations + infra read queries gated `[ADMIN]`; `me`/`myDevices`/`workspace` open; public ops unannotated. 9 inline checks removed. REST token routes (`/api/connectors/`, `/api/shields/`) wrapped with `RequireRole("admin")`. Future roles widen the directive's role list. **This was the systemic fix — covers connector/shield/discovery/policy, not just resources.**
-5. **Push error discarded; possible stuck `protecting`** (Piece 2 Finding 4 / Piece 3 Finding 6) — online-but-send-failed isn't retried unless connector reconnects; state machine has NO timeout/reconciliation out of `protecting`. **Open — Piece 4.**
-6. **Delete of `protected` orphans shield firewall rule** (Piece 3, Finding 5) + **fail-open after reboot** (Finding 6b) + **stuck `protecting`** (Finding 6) + **protect/unprotect asymmetry** (Finding 7) — **all one root cause: incremental delivery, no reconciliation.** → **Planned fix: [[Decisions/ADR-004-Resource-Reconciliation]]** (tombstone delete + desired-state snapshot + closed-loop reconciler; 4-phase manual plan). Invariant: *never destroy intent until effect is observably confirmed.*
+5. ~~**Push error discarded; possible stuck `protecting`**~~ (Piece 2 Finding 4 / Piece 3 Finding 6) — ✅ **Resolved (Piece 4):** the ADR-004 Phase 3 closed-loop reconciler (`reconcile.go`) detects `missing` drift and re-pushes the snapshot, so an online-but-send-failed apply self-heals without waiting for a reconnect. **Residual:** `c.send` is still synchronous in the resolver (Piece 4 Finding F14) — delivery is reliable, but a wedged connector can still couple latency into the mutation.
+6. ~~**Delete of `protected` orphans shield firewall rule** + **fail-open after reboot** (6b) + **stuck `protecting`** (6)~~ — ✅ **Resolved (Piece 4)** by ADR-004 Phase 2/3, now landed: tombstone delete + reap, desired-state snapshot on reconnect (restores `protected`/`failed` after reboot), closed-loop reconciler. **Still open:** protect/unprotect shield-active **asymmetry** (Piece 3 Finding 7 — unprotect against a dead shield can stick); decision deferred. Invariant held: *never destroy intent until effect is observably confirmed.*
+8. **Reconciler held a global mutex across DB + network I/O** (Piece 4 Finding F10) — ✅ **FIXED (2026-06-11):** lock narrowed to the in-memory hysteresis maps only; all I/O moved outside it.
+9. ~~**Snapshot `Generation` is non-monotonic wall-clock**~~ (Piece 4 Finding F11) — ✅ **FIXED (2026-06-11):** replaced wall-clock millis with a per-shield monotonic counter bumped only on desired-content change (fingerprint over `desiredForShield`'s rows), stored as opaque columns (migration 018). Desired-state rule stays single-sourced in Go — no trigger, no SQL predicate. Verified end-to-end against real Postgres.
 7. **Vestigial soft-delete + stale index** (Piece 3, Findings 8/9) — `deleted_at`/`'deleted'` scaffolding is dead (hard-delete); `idx_resources_managing` matches zero rows post-rename. **Folded into ADR-004 (Phase 1 index fix, Phase 4 cleanup).**
 
 ---
