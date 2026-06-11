@@ -316,12 +316,24 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 			log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
 		}
 
+		// The snapshot above is the authoritative APPLY path: it enforces the full
+		// desired set (protected/failed/protecting-apply) and acks each resource, so
+		// protect completions still happen on reconnect. It only drops removed
+		// resources by OMISSION, without an ack — so explicit 'remove' instructions
+		// must still be delivered for tombstones ('deleting') and in-flight unprotects
+		// ('protecting'/remove): handle_remove emits the 'unprotected' ack that reaps
+		// a tombstone immediately (the state-report reconciler is the slower backstop).
+		// 'apply' instructions are intentionally NOT re-sent — the snapshot already
+		// covers them — avoiding a redundant second chain rebuild + duplicate ack.
 		pending, err := resource.GetPendingForShield(ctx, h.Pool, shieldID)
-		if err != nil || len(pending) == 0 {
+		if err != nil {
 			continue
 		}
 		instrs := make([]*shieldpb.ResourceInstruction, 0, len(pending))
 		for _, r := range pending {
+			if r.PendingAction != "remove" {
+				continue // applies are delivered by the snapshot above
+			}
 			instrs = append(instrs, &shieldpb.ResourceInstruction{
 				ResourceId: r.ID,
 				Host:       r.Host,
@@ -330,6 +342,9 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 				PortTo:     int32(r.PortTo),
 				Action:     r.PendingAction,
 			})
+		}
+		if len(instrs) == 0 {
+			continue
 		}
 		msg := &pb.ConnectorControlMessage{
 			Body: &pb.ConnectorControlMessage_ResourceInstructions{
