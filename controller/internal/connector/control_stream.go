@@ -37,17 +37,49 @@ func NewConnectorRegistry() *ConnectorRegistry {
 	return &ConnectorRegistry{clients: make(map[string]*connectorStreamClient)}
 }
 
+// connectorSendQueueSize bounds a connector's outbound mailbox. A wedged connector
+// (one that stops draining its stream) fills this, after which sends fail fast
+// rather than blocking the caller; the dropped message is recovered by reconnect
+// replay or the Phase 3 reconciler. Sized for normal bursts (snapshot + acks + ACL).
+const connectorSendQueueSize = 128
+
 type connectorStreamClient struct {
 	stream      pb.ConnectorService_ControlServer
-	sendMu      sync.Mutex
+	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
 }
 
+// send enqueues a message for the writer goroutine. It never blocks the caller: if
+// the mailbox is full (connector not draining) it fails fast, so a wedged connector
+// can't stall a GraphQL resolver or the reconciler on the socket write. gRPC permits
+// only one concurrent Send, which runWriter (the sole sender) guarantees.
 func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.stream.Send(msg)
+	select {
+	case c.outbound <- msg:
+		return nil
+	default:
+		return fmt.Errorf("connector %s send queue full", c.connectorID)
+	}
+}
+
+// runWriter is the only goroutine that calls stream.Send. It drains the outbound
+// mailbox until the stream context is cancelled (connector disconnect / handler
+// exit) or a Send fails (broken stream) — in which case the recv loop also observes
+// the error and tears the connection down. A blocking Send on a wedged connector
+// blocks only this goroutine; callers have already failed fast in send().
+func (c *connectorStreamClient) runWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-c.outbound:
+			if err := c.stream.Send(msg); err != nil {
+				log.Printf("control stream: send to connector %s failed: %v", c.connectorID, err)
+				return
+			}
+		}
+	}
 }
 
 func (r *ConnectorRegistry) add(connectorID string, c *connectorStreamClient) {
@@ -207,9 +239,20 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
-	client := &connectorStreamClient{stream: stream, connectorID: connectorID, tenantID: tenantID}
+	client := &connectorStreamClient{
+		stream:      stream,
+		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID: connectorID,
+		tenantID:    tenantID,
+	}
 	h.Registry.add(connectorID, client)
 	defer h.Registry.remove(connectorID)
+
+	// A single writer goroutine owns stream.Send; every send goes through
+	// client.send (enqueue). This decouples resolvers and the reconciler from the
+	// socket write, so a wedged connector can block only this goroutine — which
+	// unblocks when ctx is cancelled (handler returns) or the Send fails.
+	go client.runWriter(ctx)
 
 	_, _ = h.Pool.Exec(ctx,
 		`UPDATE connectors SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1`,
@@ -226,15 +269,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 
 	log.Printf("control stream: connector %s connected", connectorID)
 
-	// Flush gRPC headers by sending an initial Ping. This ensures the client-side
-	// .control().await call resolves immediately.
+	// Flush gRPC headers by enqueuing an initial Ping (the writer sends it first,
+	// resolving the client-side .control().await immediately). Enqueue can't fail on
+	// a fresh empty mailbox; if it ever did, the recv loop would surface the break.
 	if err := client.send(&pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_Ping{
 			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
 		},
 	}); err != nil {
-		log.Printf("control stream: initial ping to connector %s failed: %v", connectorID, err)
-		return err
+		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
 	}
 
 	// Deliver any instructions that queued while the connector was offline.
