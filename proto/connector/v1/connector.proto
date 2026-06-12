@@ -8,7 +8,6 @@ import "proto/shield/v1/shield.proto";
 option go_package = "github.com/yourorg/ztna/controller/gen/go/connector/v1;connectorv1";
 
 service ConnectorService {
-
   // Called once during enrollment.
   // Uses plain TLS — connector has no cert yet.
   // Connector presents enrollment JWT + PKCS#10 CSR.
@@ -29,17 +28,17 @@ service ConnectorService {
 }
 
 message EnrollRequest {
-  string enrollment_token = 1;  // signed JWT — single-use enrollment token
-  bytes  csr_der          = 2;  // DER-encoded PKCS#10 CSR (EC P-384)
-  string version          = 3;  // CARGO_PKG_VERSION
-  string hostname         = 4;
+  string enrollment_token = 1; // signed JWT — single-use enrollment token
+  bytes csr_der = 2; // DER-encoded PKCS#10 CSR (EC P-384)
+  string version = 3; // CARGO_PKG_VERSION
+  string hostname = 4;
 }
 
 message EnrollResponse {
-  bytes  certificate_pem      = 1;  // signed leaf cert — 7-day validity, SPIFFE SAN
-  bytes  workspace_ca_pem     = 2;  // WorkspaceCA cert (PEM)
-  bytes  intermediate_ca_pem  = 3;  // Intermediate CA cert (PEM)
-  string connector_id         = 4;  // confirmed connector UUID
+  bytes certificate_pem = 1; // signed leaf cert — 7-day validity, SPIFFE SAN
+  bytes workspace_ca_pem = 2; // WorkspaceCA cert (PEM)
+  bytes intermediate_ca_pem = 3; // Intermediate CA cert (PEM)
+  string connector_id = 4; // confirmed connector UUID
 }
 
 message ShieldResourceInstructions {
@@ -47,14 +46,14 @@ message ShieldResourceInstructions {
 }
 
 message RenewCertRequest {
-  string connector_id = 1;  // for logging only — identity comes from mTLS cert
-  bytes  public_key_der = 2;  // connector's existing EC P-384 public key (DER)
+  string connector_id = 1; // for logging only — identity comes from mTLS cert
+  bytes public_key_der = 2; // connector's existing EC P-384 public key (DER)
 }
 
 message RenewCertResponse {
-  bytes certificate_pem = 1;        // fresh 7-day cert, same SPIFFE SAN
-  bytes workspace_ca_pem = 2;      // WorkspaceCA (may not have changed, but send anyway)
-  bytes intermediate_ca_pem = 3;     // Intermediate CA
+  bytes certificate_pem = 1; // fresh 7-day cert, same SPIFFE SAN
+  bytes workspace_ca_pem = 2; // WorkspaceCA (may not have changed, but send anyway)
+  bytes intermediate_ca_pem = 3; // Intermediate CA
 }
 
 message GoodbyeRequest {
@@ -70,28 +69,32 @@ message GoodbyeResponse {
 message ConnectorControlMessage {
   oneof body {
     // Controller → Connector
-    ResourceInstructionBatch  resource_instructions = 1;
-    shield.v1.ReEnrollSignal  re_enroll             = 2;
-    shield.v1.Ping            ping                  = 3;
+    ResourceInstructionBatch resource_instructions = 1;
+    shield.v1.ReEnrollSignal re_enroll = 2;
+    shield.v1.Ping ping = 3;
     // Connector → Controller
-    ConnectorHealthReport     connector_health      = 4;
-    ShieldStatusBatch         shield_status         = 5;
-    ResourceAckBatch          resource_acks         = 6;
-    shield.v1.Pong            pong                  = 7;
-    ShieldDiscoveryBatch      shield_discovery      = 8;
-    ScanReport                scan_report           = 9;
+    ConnectorHealthReport connector_health = 4;
+    ShieldStatusBatch shield_status = 5;
+    ResourceAckBatch resource_acks = 6;
+    shield.v1.Pong pong = 7;
+    ShieldDiscoveryBatch shield_discovery = 8;
+    ScanReport scan_report = 9;
     // Controller → Connector
-    ScanCommand               scan_command          = 10;
+    ScanCommand scan_command = 10;
     // Controller → Connector
-    client.v1.ACLSnapshot     acl_snapshot          = 11;
+    client.v1.ACLSnapshot acl_snapshot = 11;
     // Connector → Controller
-    ConnectorLog              connector_log         = 12;
+    ConnectorLog connector_log = 12;
+    // Controller → Connector
+    ResourceSnapshotBatch resource_snapshots = 13;
+    // Connector → Controller
+    ResourceStateBatch resource_state = 14;
   }
 }
 
 message ConnectorLog {
   string connector_id = 1;
-  string message      = 2;  // e.g. "dest=192.168.1.10:443 path=direct allowed"
+  string message = 2; // e.g. "dest=192.168.1.10:443 path=direct allowed"
 }
 
 message ResourceInstructionBatch {
@@ -99,20 +102,31 @@ message ResourceInstructionBatch {
   map<string, ShieldResourceInstructions> shield_resources = 1;
 }
 
+message ResourceSnapshotBatch {
+  // keyed by shield_id → resource snapshot for that shield
+  map<string, shield.v1.ResourceSnapshot> shield_snapshots = 1;
+}
+
+// Shield actual-state reports forwarded upstream (ADR-004 Phase 3).
+// Buffered latest-wins on the connector, flushed on the health tick.
+message ResourceStateBatch {
+  repeated shield.v1.ResourceStateReport reports = 1;
+}
+
 message ConnectorHealthReport {
-  string version     = 1;
-  string hostname    = 2;
-  string public_ip   = 3;
-  string lan_addr    = 4;
-  uint64 acl_version = 5;  // connector's currently loaded ACL snapshot version; 0 means none
+  string version = 1;
+  string hostname = 2;
+  string public_ip = 3;
+  string lan_addr = 4;
+  uint64 acl_version = 5; // connector's currently loaded ACL snapshot version; 0 means none
 }
 
 message ShieldStatusUpdate {
-  string shield_id      = 1;
-  string status         = 2;
-  string version        = 3;
-  string lan_ip         = 4;
-  int64  last_seen_unix = 5;
+  string shield_id = 1;
+  string status = 2;
+  string version = 3;
+  string lan_ip = 4;
+  int64 last_seen_unix = 5;
 }
 
 message ShieldStatusBatch {
@@ -124,8 +138,8 @@ message ResourceAckBatch {
 }
 
 message ShieldDiscoveryReport {
-  string                    shield_id = 1;
-  shield.v1.DiscoveryReport report    = 2;
+  string shield_id = 1;
+  shield.v1.DiscoveryReport report = 2;
 }
 
 message ShieldDiscoveryBatch {
@@ -133,24 +147,24 @@ message ShieldDiscoveryBatch {
 }
 
 message ScanCommand {
-  string          request_id  = 1;  // UUID — client uses this to poll results
-  repeated string targets     = 2;  // IPs or CIDRs (e.g. "192.168.1.0/24")
-  repeated uint32 ports       = 3;  // ports to probe (max 16)
-  uint32          max_targets = 4;  // hard cap, default 512
-  uint32          timeout_sec = 5;  // per-target timeout, default 5, max 60
+  string request_id = 1; // UUID — client uses this to poll results
+  repeated string targets = 2; // IPs or CIDRs (e.g. "192.168.1.0/24")
+  repeated uint32 ports = 3; // ports to probe (max 16)
+  uint32 max_targets = 4; // hard cap, default 512
+  uint32 timeout_sec = 5; // per-target timeout, default 5, max 60
 }
 
 message ScanResult {
-  string ip             = 1;
-  uint32 port           = 2;
-  string protocol       = 3;  // "tcp"
-  string service_name   = 4;
-  uint64 first_seen     = 5;  // unix timestamp
-  string reachable_from = 6;  // connector_id that ran the scan
+  string ip = 1;
+  uint32 port = 2;
+  string protocol = 3; // "tcp"
+  string service_name = 4;
+  uint64 first_seen = 5; // unix timestamp
+  string reachable_from = 6; // connector_id that ran the scan
 }
 
 message ScanReport {
-  string              request_id = 1;
-  repeated ScanResult results    = 2;
-  string              error      = 3;  // set only on scan-level errors
+  string request_id = 1;
+  repeated ScanResult results = 2;
+  string error = 3; // set only on scan-level errors
 }

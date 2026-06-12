@@ -25,48 +25,66 @@ service ShieldService {
 }
 
 message EnrollRequest {
-  string enrollment_token = 1;  // signed JWT — single-use enrollment token
-  bytes csr_der           = 2;  // DER-encoded PKCS#10 CSR (EC P-384)
-  string version          = 3;  // CARGO_PKG_VERSION
-  string hostname         = 4;
+  string enrollment_token = 1; // signed JWT — single-use enrollment token
+  bytes csr_der = 2; // DER-encoded PKCS#10 CSR (EC P-384)
+  string version = 3; // CARGO_PKG_VERSION
+  string hostname = 4;
 }
 
 message EnrollResponse {
-  bytes certificate_pem     = 1;  // signed leaf cert — 7-day validity, SPIFFE SAN
-  bytes workspace_ca_pem    = 2;  // WorkspaceCA cert (PEM)
-  bytes intermediate_ca_pem = 3;  // Intermediate CA cert (PEM)
-  string shield_id          = 4;  // confirmed shield UUID
-  string interface_addr     = 5;  // assigned zecurity0 /32
-  string connector_addr     = 6;  // selected connector Shield gRPC addr
-  string connector_id       = 7;  // confirmed connector UUID
+  bytes certificate_pem = 1; // signed leaf cert — 7-day validity, SPIFFE SAN
+  bytes workspace_ca_pem = 2; // WorkspaceCA cert (PEM)
+  bytes intermediate_ca_pem = 3; // Intermediate CA cert (PEM)
+  string shield_id = 4; // confirmed shield UUID
+  string interface_addr = 5; // assigned zecurity0 /32
+  string connector_addr = 6; // selected connector Shield gRPC addr
+  string connector_id = 7; // confirmed connector UUID
 }
 
 message ResourceInstruction {
   string resource_id = 1;
-  string host        = 2;  // must match shield's lan_ip
-  string protocol    = 3;  // "tcp", "udp", "any"
-  int32  port_from   = 4;
-  int32  port_to     = 5;
-  string action      = 6;  // "apply" or "remove"
+  string host = 2; // must match shield's lan_ip
+  string protocol = 3; // "tcp", "udp", "any"
+  int32 port_from = 4;
+  int32 port_to = 5;
+  string action = 6; // "apply" or "remove"
 }
 
 message ResourceAck {
-  string resource_id    = 1;
-  string status         = 2;  // "protected", "failed", "removed"
-  string error          = 3;  // set only on failure
-  int64  verified_at    = 4;  // unix timestamp of last port check
-  bool   port_reachable = 5;
+  string resource_id = 1;
+  string status = 2; // "protected", "failed", "removed"
+  string error = 3; // set only on failure
+  int64 verified_at = 4; // unix timestamp of last port check
+  bool port_reachable = 5;
+}
+
+// Complete desired resource set for this shield (ADR-004 Phase 2).
+// Replace-semantics: on receipt the shield sets its active set to exactly
+// this list and rebuilds the resource_protect chain — anything absent is dropped.
+message ResourceSnapshot {
+  repeated ResourceInstruction resources = 1; // action is implicitly "apply"
+  uint64 generation = 2; // monotonic; shield ignores snapshots older than the last applied
+}
+
+// Shield → Connector: the shield's actual enforced state (ADR-004 Phase 3).
+// Sent on every heartbeat so the controller can reconcile observed vs desired
+// state (orphan removal, missing re-apply, confirmation-gated tombstone reap).
+message ResourceStateReport {
+  string shield_id = 1;
+  uint64 generation = 2; // session-local seq, bumped on every active-set mutation
+  repeated string active_resource_ids = 3; // sorted
+  uint64 fingerprint = 4; // hash over the sorted id list — cheap no-change check
 }
 
 message RenewCertRequest {
-  string shield_id = 1;  // for logging only — identity comes from mTLS cert
-  bytes public_key_der = 2;  // shield's existing EC P-384 public key (DER)
+  string shield_id = 1; // for logging only — identity comes from mTLS cert
+  bytes public_key_der = 2; // shield's existing EC P-384 public key (DER)
 }
 
 message RenewCertResponse {
-  bytes certificate_pem     = 1;  // fresh 7-day cert, same SPIFFE SAN
-  bytes workspace_ca_pem    = 2;  // WorkspaceCA (may not have changed, but send anyway)
-  bytes intermediate_ca_pem = 3;  // Intermediate CA
+  bytes certificate_pem = 1; // fresh 7-day cert, same SPIFFE SAN
+  bytes workspace_ca_pem = 2; // WorkspaceCA (may not have changed, but send anyway)
+  bytes intermediate_ca_pem = 3; // Intermediate CA
 }
 
 message GoodbyeRequest {
@@ -83,67 +101,71 @@ message ShieldControlMessage {
   oneof body {
     // Connector → Shield
     ResourceInstruction resource_instruction = 1;
-    ReEnrollSignal      re_enroll            = 2;
-    Ping                ping                 = 3;
+    ReEnrollSignal re_enroll = 2;
+    Ping ping = 3;
     // Shield → Connector
-    ShieldHealthReport  health_report        = 4;
-    ResourceAck         resource_ack         = 5;
-    Pong                pong                 = 6;
-    DiscoveryReport     discovery_report     = 7;
+    ShieldHealthReport health_report = 4;
+    ResourceAck resource_ack = 5;
+    Pong pong = 6;
+    DiscoveryReport discovery_report = 7;
     // Connector → Shield
-    TunnelOpen          tunnel_open          = 8;
+    TunnelOpen tunnel_open = 8;
     // Shield → Connector
-    TunnelOpened        tunnel_opened        = 9;
+    TunnelOpened tunnel_opened = 9;
     // Bidirectional
-    TunnelData          tunnel_data          = 10;
-    TunnelClose         tunnel_close         = 11;
+    TunnelData tunnel_data = 10;
+    TunnelClose tunnel_close = 11;
+    // Connector → Shield
+    ResourceSnapshot resource_snapshot = 12;
+    // Shield → Connector
+    ResourceStateReport resource_state = 13;
   }
 }
 
 message TunnelOpen {
-  string connection_id = 1;  // UUID identifying this tunnel session
-  string destination   = 2;  // target IP or hostname
-  uint32 port          = 3;
-  string protocol      = 4;  // "tcp" or "udp"
+  string connection_id = 1; // UUID identifying this tunnel session
+  string destination = 2; // target IP or hostname
+  uint32 port = 3;
+  string protocol = 4; // "tcp" or "udp"
 }
 
 message TunnelOpened {
   string connection_id = 1;
-  bool   ok            = 2;
-  string error         = 3;  // set only on failure
+  bool ok = 2;
+  string error = 3; // set only on failure
 }
 
 message TunnelData {
   string connection_id = 1;
-  bytes  data          = 2;  // raw bytes (max 16 KB chunks)
+  bytes data = 2; // raw bytes (max 16 KB chunks)
 }
 
 message TunnelClose {
   string connection_id = 1;
-  string error         = 2;  // empty = clean close
+  string error = 2; // empty = clean close
 }
 
 message DiscoveredService {
-  string protocol     = 1;  // "tcp"
-  uint32 port         = 2;
-  string bound_ip     = 3;
-  string service_name = 4;  // empty string if unknown port
+  string protocol = 1; // "tcp"
+  uint32 port = 2;
+  string bound_ip = 3;
+  string service_name = 4; // empty string if unknown port
 }
 
 message DiscoveryReport {
-  string shield_id                   = 1;
-  uint64 seq                         = 2;  // monotonically increasing per shield session
-  repeated DiscoveredService added   = 3;  // services that appeared since last report
-  repeated DiscoveredService removed = 4;  // only port + protocol are meaningful here
-  uint64 fingerprint                 = 5;  // hash over current full port set
-  bool   full_sync                   = 6;  // true = replace-all, false = diff
+  string shield_id = 1;
+  uint64 seq = 2; // monotonically increasing per shield session
+  repeated DiscoveredService added = 3; // services that appeared since last report
+  repeated DiscoveredService removed = 4; // only port + protocol are meaningful here
+  uint64 fingerprint = 5; // hash over current full port set
+  bool full_sync = 6; // true = replace-all, false = diff
 }
 
 message ShieldHealthReport {
-  string version   = 1;
-  string hostname  = 2;
+  string version = 1;
+  string hostname = 2;
   string public_ip = 3;
-  string lan_ip    = 4;
+  string lan_ip = 4;
 }
 
 message ReEnrollSignal {}

@@ -1130,6 +1130,317 @@ Most recent first. Every agent appends an entry after their session.
 
 ---
 
+## 2026-06-05 — Claude (M2/M3/M4, ADR-004 Phase 2 release + Phase 3 reconciliation start)
+
+**What was done:**
+- Merged Phase 2 (desired-state snapshot resync) via PR #39; verified live: cached snapshot
+  replayed on shield (re)connect, applied with matching generation, dual delivery on protect
+  (instruction + live snapshot ~40ms apart), seamless recovery across shield restart.
+- Released `shield-v1.0.9` + `connector-v1.0.16` (version bumps on main, tag-triggered CI;
+  both workflows green, all assets incl. checksums published). Rollout via the auto-update
+  timers (semver compare vs CARGO_PKG_VERSION — bump-before-tag is mandatory).
+- Started Phase 3 (closed-loop reconciliation), steps 3.1–3.3 complete and building:
+  - protos: `ResourceStateReport` (shield oneof 13) + `ResourceStateBatch` (connector oneof 14)
+  - shield: `state_seq` bumped at all 4 active-set mutation points; `build_state_report()`
+    (sorted ids + fingerprint); report emitted on every heartbeat after the ack drain
+  - connector: `pending_state` latest-wins buffer + `drain_state_batch()` flushed on health tick
+- Reports now arrive at the controller every ~15s and hit the default case (harmless) until 3.4.
+
+**Key decisions:**
+- Reconciler's corrective action is simply `buildSnapshotMsg` re-push (Phase 2 replace-semantics
+  drops orphans + applies missing) — no new fix machinery, only new observation.
+- Hysteresis is mandatory: drift must persist 2 consecutive reports before resync; a `deleting`
+  tombstone must be absent 3 consecutive reports before reap. Counters in controller memory
+  (restart just delays action).
+- Reports describe the shield's in-memory intent state, not raw kernel nftables — manual nft
+  tampering is out of scope for Phase 3 (documented limitation).
+
+**What's next:**
+- 3.4: store helpers (`GetDeletingForShield`, `ReapTombstone`), `internal/connector/reconcile.go`
+  (security-scoped, hysteresis), `Recon` field on `EnrollmentHandler`, recv-loop case.
+- 3.5 Gate: SQL-injected orphan → auto-resync; delete-while-down + connector restart → report-
+  confirmed tombstone reap; verify no reconciler thrash during normal ops. Then commit/push/release.
+- Status details in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).
+
+---
+
+## 2026-06-08 — Claude (M3/M4, ADR-004 Phase 3 implemented + Gate 3 verified)
+
+**What was done:**
+- Completed Phase 3 (closed-loop reconciliation): steps 3.4 (controller reconciler) + 3.5 (gate).
+  - store: `GetDeletingForShield`, `ReapTombstone`.
+  - new `internal/connector/reconcile.go`: per-report security scope (shield ∈ reporting
+    connector+tenant); drift (orphan = reported∖desired, missing = desired∖reported) → 2-report
+    hysteresis → `buildSnapshotMsg` re-push; `deleting` tombstone absent 3 reports → reap.
+  - `Recon reconcileState` on `EnrollmentHandler`; `ResourceState` case in the recv loop.
+- Committed all of Phase 3 (3.1–3.4) to branch `feat/resource-state-reconciliation` (90cec17),
+  pushed. Hand-deployed branch binaries to connector (Archer) + shield (inkyank-01) via
+  systemctl stop / install / start (update timers stopped first); controller via local `go run`.
+- Gate 3 verified live: no-thrash (silent ~90s); organic orphan auto-resync with correct 2-report
+  hysteresis; Test 3 tombstone reap purely by reconciler in ~76s; `nft list` on the host confirmed
+  the resource_protect chain empty (rule dropped).
+
+**Key decisions / findings:**
+- `RecordAck` periodic re-verification heals DB corruption back to the shield's actual state — so
+  you cannot fake a stable orphan on a legitimately-enforced resource; only `deleting` (guarded by
+  `status != 'deleting'`) is immune, which is exactly why the reap test uses it.
+- OPEN: should `failed` (port-not-listening, rule WAS applied) be in `GetDesiredForShield`?
+  Currently excluded → reconciler strips the rule. Fail-closed alternative pending product call.
+- OPEN: dev `go run` controller returns `RenewCert not implemented` → shield cert will expire
+  (mTLS lockout risk, as seen 2026-06-03). Fix controller build before long deployments.
+
+**What's next:**
+- Decide `failed`-in-desired; if fail-closed, one-line change in `GetDesiredForShield` + retest.
+- Merge `feat/resource-state-reconciliation` PR; bump versions; tag → release shield+connector;
+  re-enable update timers on the deployed hosts.
+- Phase 4 (break-glass forceDelete, vestigial `deleted_at` cleanup, drift metrics) when desired.
+- Status detail in [[Decisions/ADR-004-Resource-Reconciliation]] (Phase 3 STATUS block).
+
+---
+
+## 2026-06-09 — Claude (M3/M4, ADR-004 fail-closed + Phase 3 release)
+
+**What was done:**
+- Merged fail-closed fix (PR #41): `GetDesiredForShield` now includes `failed` so a
+  port-not-listening resource (shield HAS the drop rule) keeps enforcement instead of being
+  stripped by the snapshot/reconciler. Doc + commit note the host-mismatch edge (benign re-push
+  thrash; common case stays in active, no thrash).
+- Bumped shield 1.0.9→1.0.10, connector 1.0.16→1.0.17 (PR #42); tagged shield-v1.0.10 +
+  connector-v1.0.17; both Build & Release workflows green; all assets (binaries, checksums,
+  install scripts, systemd units) published. First releases containing ADR-004 Phase 3.
+- ADR-004 complete: Phase 1 (tombstone delete) + Phase 2 (snapshot resync) on 1.0.9/1.0.16;
+  Phase 3 (closed-loop reconciliation) + fail-closed on 1.0.10/1.0.17. All phases live-verified.
+
+**Key decisions:**
+- Fail-closed for `failed` resources: admin intent is "protected"; don't strip a rule from a
+  temporarily-down service. Controller-only change (ships with controller deploy, not the
+  shield/connector release).
+
+**What's next:**
+- Roll deployed hosts onto 1.0.10/1.0.17: re-enable update timers (stopped during testing) or
+  `--check-update`. Ensure the controller is running latest main (carries the fail-closed change).
+- FIX `RenewCert not implemented` on the controller before any long-lived deploy — shield cert is
+  7-day, renewal starts ~48h before expiry; failing renewal = mTLS lockout (seen 2026-06-03).
+- Phase 4 (break-glass forceDelete, vestigial deleted_at cleanup, drift metrics) when desired.
+
+---
+
+## 2026-06-09 (later) — Claude (M3, shield cert renewal handler)
+
+**What was done:**
+- Root-caused the repeated `RenewCert not implemented` errors: the controller's ShieldService
+  never implemented `RenewCert`. Shield requests renewal correctly and the connector proxies it,
+  but the controller returned Unimplemented → shield cert (7-day) never renews → mTLS lockout
+  ~7 days after enrollment (same symptom as the 2026-06-03 incident, different cause).
+- Implemented `RenewCert` on the controller ShieldService (`internal/shield/renewal.go`):
+  proxied-identity trust model (caller is the connector via its own mTLS; verify the shield is
+  owned by that connector + trust domain + not revoked), then `pki.RenewShieldCert` (the
+  `public_key_der` field actually carries a CSR — proven by the working connector path), update
+  shields cert_serial/cert_not_after, return cert + CA chain.
+- Extracted SPIFFE context keys/accessors into a neutral `internal/spiffe` package to break the
+  connector↔shield import cycle; connector accessors now delegate (call sites unchanged); both
+  unary + streaming interceptors inject via `spiffe.WithIdentity`. Updated spiffe_test.
+- Controller builds + vets clean; connector package tests pass.
+
+**Key decisions:**
+- Controller-only fix — deployed shield/connector already request/proxy correctly; ships with a
+  controller deploy, no shield/connector release.
+- Trust chain for proxied renewal: controller trusts connector (mTLS, interceptor-verified) →
+  connector verified shield mTLS → controller confirms shield∈connector. A connector already
+  controls its shields' traffic, so this stays within the existing boundary.
+
+**What's next:**
+- Verify with a short CertTTL in a dev controller to watch a full renewal cycle (hard to trigger
+  otherwise — only fires within 48h of the 7-day expiry).
+- Merge + deploy the controller. Then Phase 4 (break-glass, deleted_at cleanup, drift metrics).
+
+---
+
+## 2026-06-10 — Claude (M2/M1, ADR-004 Phase 4.1 — break-glass forceDeleteResource)
+
+**What was done:**
+- Implemented the break-glass `forceDeleteResource(id)` mutation — the escape hatch for a resource
+  permanently stuck mid-operation (`protecting`/`deleting`) because its shield is gone and will
+  never ack removal. Hard-deletes the row in ANY state, deliberately bypassing the
+  confirmation-gated tombstone path.
+- New durable audit trail: migration `016_audit_logs.sql` (append-only `audit_logs` table:
+  tenant, actor user/email, dotted action, target type/id, JSONB details snapshot, created_at;
+  indexed by tenant+time and tenant+target). New `internal/audit` package with `Record()`
+  (write-and-log; a failed audit write is logged loudly but never fails the already-completed
+  action). Break-glass MUST leave a record since it skips the safety model.
+- Store `ForceDeleteRow` (tenant-scoped `DELETE` regardless of status). Resolver flow: snapshot the
+  row for audit → force-delete → audit-log `resource.force_delete` → best-effort
+  `PushSnapshotForShield` so a still-connected shield drops the now-removed rule (replace semantics).
+- Schema field gated `@hasRole(roles: [ADMIN])`; `make gqlgen` + `npm run codegen` regenerated.
+- Frontend: `ForceDeleteResource` mutation + a guarded "Force delete" button on `ResourceDetail`
+  that only appears when the resource is `transitional` (exactly where normal Delete is disabled),
+  behind a stern break-glass confirm explaining the shield-offline rule-residue caveat.
+- Controller `go build ./...` + `go vet` clean; frontend `tsc --noEmit` clean.
+
+**Key decisions:**
+- "Audit-logged" for a security break-glass means a durable, queryable DB record — not a log line.
+  Built a general `audit_logs` table (first consumer: force-delete; future mutations can adopt it),
+  matching the gap flagged in improvements.md 4.6.
+- Best-effort snapshot re-push on force-delete: if the shield is actually alive, the orphan rule is
+  dropped; if it's gone (the expected case), the push is a harmless no-op. Honest UI confirm states
+  a rule held by an offline shield persists until reinstall.
+
+**What's next:**
+- Phase 4.2: vestigial `deleted_at` / `'deleted'` status cleanup (Finding 8).
+- Phase 4.3: drift/reconcile metrics (`drift_detected`, `orphans_removed`, `tombstones_reaped`).
+- Phase 4.4: finalize `deleting` list/detail UX.
+- Migration 016 needs to run on existing DBs (manual psql or `down -v`) — it's additive (new table).
+
+---
+
+## 2026-06-10 (later) — Claude (M2/M1, ADR-004 Phase 4.2 — drop vestigial soft-delete, Finding 8)
+
+**What was done:**
+- Option A (drop the dead scaffolding) for the `resources` table's soft-delete leftovers. Resources
+  are hard-deleted and the real tombstone is `deleting` + ack-gated reap, so `deleted_at` was always
+  NULL, the `'deleted'` status unreachable, and seven `deleted_at IS NULL` filters were no-ops.
+- migration `017_resources_drop_soft_delete.sql`: drop `idx_resources_shield` + `idx_resources_pending`
+  → `DROP COLUMN deleted_at` → recreate both indexes without the `deleted_at IS NULL` predicate →
+  swap `resources_status_check` to drop `'deleted'` (enum now
+  pending|protecting|protected|unprotected|failed|deleting). Ordered so the column drop isn't blocked
+  by a dependent index.
+- `internal/resource/store.go`: removed all seven `deleted_at IS NULL` clauses (GetByID,
+  GetByRemoteNetwork, GetAll, GetPendingForShield, GetDesiredForShield, Update, RecordAck).
+- frontend: `resourceTone` in `Resources.tsx` + `ResourceDetail.tsx` aligned to the real enum —
+  dropped dead `'deleted'`/`'managing'`/`'removing'`; also FIXED a latent bug where `Resources.tsx`
+  had no tone for the real `deleting` state (fell through to `info`). Transitional arrays in
+  `ResourceDetail.tsx` trimmed to `['protecting','deleting']`.
+- Controller `go build ./...` + `go vet` clean; frontend `tsc --noEmit` clean.
+
+**Key decisions:**
+- Option A over B (repurpose `deleted_at` as a tombstone timestamp): `updated_at` already records
+  when `MarkDeleting` fired, and `deleted_at` on a `deleting` (not deleted) row is misleading.
+  Tombstone-age observability belongs in Phase 4.3 metrics, not a resurrected column.
+- SCOPE: only the `resources` table. The `'deleted'` status on workspaces/users/connectors/shields/
+  remote_networks is real in-use soft-delete — explicitly left untouched (a blind grep would break
+  shield/connector lifecycle).
+
+**What's next:**
+- Phase 4.3: drift/reconcile metrics (`drift_detected`, `orphans_removed`, `tombstones_reaped`).
+- Phase 4.4: finalize `deleting` list/detail UX.
+- Migrations 016 + 017 won't auto-apply on an existing DB (manual psql or `down -v`). 017 is
+  destructive-by-design (`DROP COLUMN`) but lossless — the column was always NULL.
+
+---
+
+## 2026-06-10 (later) — Claude (M2, ADR-004 Phase 4.3 — reconciler Prometheus metrics)
+
+**Pre-work — repo state check:** PR #43 (`fix/shield-cert-renewal`) merged to main; merged PR #44
+(`feat/resource-force-delete`, 4.1+4.2) → main is `3a96db0`. Branched `feat/reconcile-metrics` off
+fresh main (no stacking).
+
+**What was done:**
+- Made the closed-loop reconciler observable. Backend = `github.com/prometheus/client_golang`
+  (private registry); served on a SEPARATE internal listener (`METRICS_ADDR`, default
+  `127.0.0.1:9102`) — deliberately NOT the public mux (metrics leak operational data). Metrics-server
+  failure is logged, not fatal.
+- New `internal/metrics` package: collectors + typed helpers (`ReconcileReport`, `DriftDetected(kind)`,
+  `Resync`, `TombstoneReaped`, `SetReconcileGauges`) + `Handler()`. Known drift labels pre-created at 0
+  so series exist from startup (a CounterVec emits nothing until a label set is observed).
+- Wired into `internal/connector/reconcile.go` at the five event sites + gauge update at end of
+  `reconcileShield` (under the existing `Recon.mu`): reports, drift{orphan|missing}, resyncs,
+  tombstones_reaped, and current-state gauges (shields_drifting = drift entries >0; tombstones_pending
+  = len(absent)).
+- `main.go`: second goroutine listener serving `/metrics` on `METRICS_ADDR`.
+- Metrics unit test (httptest scrape asserts families + counter/gauge values). `go build`, `go vet ./...`,
+  `go test ./internal/metrics/...` + `./internal/connector/...` all green.
+
+**Key decisions:**
+- Renamed the wishlist `orphans_removed`/`missing_reapplied` → honest `drift_detected{kind}` +
+  `resyncs_total`. Removal happens on the shield via snapshot replace-semantics; the controller never
+  gets a per-orphan removal confirmation, only the orphan's absence in the next report. Don't ship a
+  metric that claims more precision than the controller has.
+- CARDINALITY: no shield_id/tenant_id/resource_id labels (unbounded → series explosion). Only `kind`.
+- `reconcile_tombstones_pending` sustained >0 = a gone shield = break-glass (4.1) candidate — directly
+  ties the metric back to the escape hatch.
+
+**What's next:**
+- Phase 4.4: finalize `deleting` list/detail UX (last Phase 4 item).
+- Deploy note: set `METRICS_ADDR` per env; point Prometheus at it. No DB migration in 4.3.
+
+---
+
+## 2026-06-10 (later) — Claude (M1, ADR-004 Phase 4.4 — `deleting` UX, completes Phase 4)
+
+**Pre-work — repo state check:** PR #45 (`feat/reconcile-metrics`, 4.3) merged → main is `6a98368`.
+Branched `feat/deleting-ux` off fresh main.
+
+**What was done (frontend only, no API change):**
+- `Resources.tsx`: fixed a real bug — `transitionalStates` was `["managing","protecting","removing"]`
+  (legacy states renamed away in mig 009, and MISSING the real `deleting`). A `deleting` row therefore
+  polled at the slow 30s interval, so after the reconciler reaped it the row lingered up to 30s and read
+  as a hung delete. Now `["protecting","deleting"]` → 3s polling, prompt disappearance.
+- `ResourceDetail.tsx`: during `deleting`, `isProtected` is false, which previously showed the
+  misleading "No shield is enforcing / Install a shield" hero AND a "Protect this resource" button.
+  Added (a) a dedicated amber deletion hero, (b) a "Removing" row in the Protection panel, and
+  suppressed the unprotected CTA in both. Copy explains the row persists until the shield confirms
+  removal (explicitly "not a hung delete") and points to Force delete (4.1) if the shield is gone.
+  Transitional spinner banner scoped to `protecting` so it doesn't duplicate the deletion hero.
+- `tsc --noEmit` + eslint clean.
+
+**Key decisions:**
+- The two stale-status spots (`Resources.tsx` poll set here; `resourceTone` in 4.2) are the same class
+  of bug from the mig-009 rename + the later `deleting` addition — worth a grep sweep for any other
+  `'managing'`/`'removing'` references in future work.
+
+**Phase 4 COMPLETE** — 4.1 break-glass + audit (PR #44), 4.2 drop soft-delete (PR #44), 4.3 reconciler
+metrics (PR #45), 4.4 deleting UX (this branch). ADR-004 fully delivered across Phases 1–4.
+
+**What's next (post-ADR-004 backlog, not Phase 4):**
+- Apply migrations 016 + 017 on existing DBs; re-enable shield/connector update timers (1.0.10/1.0.17).
+- Finding 7 (deferred): unprotect-against-dead-shield can stick in `protecting/remove` forever.
+- Verify RenewCert end-to-end with a short `CertTTL`.
+
+---
+
+## 2026-06-10 (later) — Claude (live verification of Phase 4 on the distributed stack + reconciler fix)
+
+**Setup:** controller + admin on dev box; connector on friend device 1; shield + resource on friend
+device 2 (`192.168.1.164`). Applied migrations 016 + 017 to the dev DB (audit_logs created; deleted_at
+dropped lossless — verified 0 non-null; 'deleted' removed from status check). Confirmed metrics endpoint
+serves on `127.0.0.1:9102`.
+
+**Verification — all 5 scenarios PASS:**
+1. Baseline protect — full pipeline works; reconciler stayed quiet (0 drift/resyncs) under 300+ healthy
+   reports (no-thrash confirmed under real traffic).
+2. Deleting UX + tombstone delete (shield online) — sub-second ack-driven reap (RecordAck, not the
+   reconciler); no audit row (correct — normal delete doesn't audit); list cleared promptly.
+3. Break-glass force-delete (shield offline) — resource stuck in `deleting`; UI showed the deletion hero
+   + Force delete button; force-delete removed the row AND wrote an `audit_logs` row
+   (action=`resource.force_delete`, real actor email, details snapshot incl. status=deleting). 016 works e2e.
+4. Drift metrics under orphan — SQL raw-deleted a protected row; reconciler detected orphan
+   (`shields_drifting`→1, no resync on report 1), fired resync on report 2 (`resyncs_total` 0→1,
+   `drift_detected{orphan}` →2), shield dropped the rule, drift cleared. 2-report hysteresis confirmed live.
+5. Reconciler reap + gauges — SQL-injected a synthetic `deleting` tombstone; `tombstones_pending`→1,
+   reaped after exactly 3 absent reports (`tombstones_reaped_total` 0→1, pending→0). 3-report hysteresis
+   confirmed live, via the reconciler path (not RecordAck).
+
+**Two findings the live run surfaced (both fixed on branch `fix/reconcile-tombstone-orphan`):**
+- **`tombstones_pending` help text was wrong.** A fully-disconnected shield sends no reports → reconciler
+  never runs → gauge stays 0 even with a stuck tombstone (proven in scenario 3). The "sustained >0 = gone
+  shield" framing was backwards. Corrected: real break-glass signal = row stuck in `deleting` + shield
+  `disconnected`, not this gauge.
+- **`drift_detected{orphan}` over-counted.** The drift pass classified a `deleting` tombstone still
+  enforced by the shield as an orphan (conflating normal deletes-in-progress with true zombies). Fixed in
+  `reconcile.go`: orphan classification now excludes known tombstones (`GetDeletingForShield`, fetched
+  before the drift pass); a still-enforced tombstone still sets `drift=true` (resync re-pushes the
+  removal — backstop for a lost remove instruction) but is not counted as an orphan. `orphan` now means a
+  TRUE zombie. `go build`/`vet`/`test` green.
+
+**What's next:**
+- Deploy the fix (controller restart) and optionally re-verify the orphan-vs-tombstone classification live
+  (flip a protected row to `deleting` via SQL while the shield keeps reporting it → old build counts orphan,
+  new build does not).
+- Still open: Prometheus scrape + corrected alert (`deleting`-age + shield disconnected); production deploy
+  of controller + 016/017; re-enable update timers; Finding 7; RenewCert short-TTL check.
+
+---
+
 ## 2026-06-12 — Codex (Sprint 10.1 Relay PKI and end-to-end security planning)
 
 **What was done:**

@@ -6,6 +6,7 @@ import {
   ProtectResourceDocument,
   UnprotectResourceDocument,
   DeleteResourceDocument,
+  ForceDeleteResourceDocument,
   ShieldStatus,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -61,7 +62,7 @@ function MetaCell({
 function resourceTone(status: string): 'ok' | 'warn' | 'danger' | 'muted' | 'info' {
   if (status === 'protected') return 'ok'
   if (status === 'failed') return 'danger'
-  if (status === 'protecting' || status === 'managing' || status === 'removing' || status === 'deleting') return 'warn'
+  if (status === 'protecting' || status === 'deleting') return 'warn'
   return 'muted'
 }
 
@@ -83,7 +84,7 @@ export default function ResourceDetail() {
 
   useEffect(() => {
     if (!resource) return
-    const transitional = ['managing', 'protecting', 'removing', 'deleting'].includes(resource.status)
+    const transitional = ['protecting', 'deleting'].includes(resource.status)
     startPolling(transitional ? 3000 : 10000)
   }, [resource, startPolling])
 
@@ -111,6 +112,14 @@ export default function ResourceDetail() {
     onError: (e) => toast.error(e.message),
   })
 
+  const [forceDeleteResource, { loading: forceDeleting }] = useMutation(ForceDeleteResourceDocument, {
+    onCompleted: () => {
+      toast.success('Resource force-deleted')
+      navigate('/resources')
+    },
+    onError: (e) => toast.error(e.message),
+  })
+
   function handleProtect() {
     if (!resourceId) return
     void protectResource({ variables: { id: resourceId } })
@@ -126,6 +135,22 @@ export default function ResourceDetail() {
     if (!resourceId) return
     if (!window.confirm('Delete this resource? This cannot be undone.')) return
     void deleteResource({ variables: { id: resourceId } })
+  }
+
+  function handleForceDelete() {
+    if (!resourceId) return
+    if (
+      !window.confirm(
+        'BREAK-GLASS: Force-delete this resource?\n\n' +
+          'This skips the safe removal flow and erases the record immediately, ' +
+          'even though it is mid-operation. Only use this if the shield is permanently gone.\n\n' +
+          'If the shield is still online it will drop the firewall rule. If it is offline, ' +
+          'any rule it holds stays until you reinstall.\n\n' +
+          'This action is audited and cannot be undone.'
+      )
+    )
+      return
+    void forceDeleteResource({ variables: { id: resourceId } })
   }
 
   if (loading && !resource) {
@@ -156,11 +181,12 @@ export default function ResourceDetail() {
   }
 
   const isProtected = resource.status === 'protected'
+  const isDeleting = resource.status === 'deleting'
   const shield = resource.shield
   // Mirror the backend gate: MarkProtecting requires the bound shield to be 'active'
   // (controller maps DB status → enum verbatim, so 'active' ⇔ ShieldStatus.Active).
   const canProtect = shield?.status === ShieldStatus.Active
-  const transitional = ['managing', 'protecting', 'removing', 'deleting'].includes(resource.status)
+  const transitional = ['protecting', 'deleting'].includes(resource.status)
 
   return (
     <div className="space-y-6">
@@ -237,6 +263,21 @@ export default function ResourceDetail() {
             {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             Delete
           </Button>
+          {/* Break-glass: only when the resource is stuck mid-operation, where the
+              normal Delete is blocked. Erases the record even though it can't be
+              confirmed-safe — audited server-side. */}
+          {transitional && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleForceDelete}
+              disabled={forceDeleting}
+              className="gap-2 border border-destructive/30 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            >
+              {forceDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <AlertTriangle className="h-4 w-4" />}
+              Force delete
+            </Button>
+          )}
         </div>
       </div>
 
@@ -263,6 +304,24 @@ export default function ResourceDetail() {
               <FileText className="h-4 w-4" />
               View policies
             </Button>
+          </div>
+        </div>
+      ) : isDeleting ? (
+        <div className="relative overflow-hidden rounded-2xl border border-[oklch(0.85_0.13_80/0.25)] bg-[oklch(0.85_0.13_80/0.07)] p-5">
+          <div className="flex items-center gap-4">
+            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[oklch(0.85_0.13_80/0.18)] text-[oklch(0.85_0.13_80)]">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="text-[10px] font-bold uppercase tracking-[0.1em] text-[oklch(0.85_0.13_80)]">Deleting</div>
+              <div className="text-lg font-bold">Removing the firewall rule{shield ? <> on <strong>{shield.name}</strong></> : ''}</div>
+              <div className="text-sm text-muted-foreground">
+                This resource stays listed until the shield confirms the rule is gone — it's then
+                removed automatically, usually within a few seconds. It is <strong>not</strong> a hung
+                delete. If the shield is offline and this doesn't clear, use <strong>Force delete</strong>{' '}
+                above to remove the record now (audited).
+              </div>
+            </div>
           </div>
         </div>
       ) : (
@@ -334,8 +393,9 @@ export default function ResourceDetail() {
         </div>
       )}
 
-      {/* Transitional state warning */}
-      {transitional && (
+      {/* Transitional state warning — `deleting` has its own hero above, so this
+          covers the in-flight `protecting` apply (and surfaces any error message). */}
+      {resource.status === 'protecting' && (
         <div className="flex items-center gap-3 rounded-2xl border border-[oklch(0.85_0.13_80/0.25)] bg-[oklch(0.85_0.13_80/0.07)] px-5 py-4">
           <Loader2 className="h-4 w-4 animate-spin text-[oklch(0.85_0.13_80)]" />
           <span className="text-sm font-medium capitalize text-[oklch(0.85_0.13_80)]">{resource.status}…</span>
@@ -455,7 +515,20 @@ export default function ResourceDetail() {
               <div className="mt-0.5 text-sm text-muted-foreground">How this resource is secured</div>
             </div>
             <div className="p-4">
-              {isProtected && shield ? (
+              {isDeleting ? (
+                <div className="flex items-center gap-3 rounded-xl border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.08)] px-4 py-3">
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[oklch(0.85_0.13_80/0.16)] text-[oklch(0.85_0.13_80)]">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-bold">{shield ? shield.name : 'Removing protection'}</div>
+                    <div className="text-[11px] font-mono text-muted-foreground">{shield ? shield.lanIp : resource.host}</div>
+                  </div>
+                  <span className="flex items-center gap-1.5 rounded-full border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.12)] px-2.5 py-0.5 text-[11px] font-bold text-[oklch(0.85_0.13_80)]">
+                    Removing
+                  </span>
+                </div>
+              ) : isProtected && shield ? (
                 <div className="flex items-center gap-3 rounded-xl border border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.08)] px-4 py-3">
                   <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[oklch(0.78_0.10_235/0.16)] text-[oklch(0.78_0.10_235)]">
                     <Shield className="h-4 w-4" />

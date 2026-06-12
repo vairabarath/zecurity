@@ -218,6 +218,12 @@ async fn run_once(
                 if !status.shields.is_empty() {
                     send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ShieldStatus(status)), }).await?;
                 }
+
+                // ADR-004 Phase 3: flush buffered shield actual-state reports
+                // upstream for reconciliation.
+                if let Some(state_batch) = shield_registry.drain_state_batch() {
+                    send_msg(&out_tx, state_batch).await?;
+                }
             }
 
             _ = discovery_ticker.tick() => {
@@ -247,6 +253,14 @@ async fn handle_controller_msg(
         Some(CBody::ResourceInstructions(batch)) => {
             for (shield_id, instr_batch) in batch.shield_resources {
                 shield_registry.push_instructions(&shield_id, instr_batch.instructions);
+            }
+            None
+        }
+        // ADR-004 Phase 2: desired-state snapshots — cache per shield and
+        // forward live if the shield is connected (replayed on shield reconnect).
+        Some(CBody::ResourceSnapshots(batch)) => {
+            for (shield_id, snapshot) in batch.shield_snapshots {
+                shield_registry.push_snapshot(&shield_id, snapshot);
             }
             None
         }

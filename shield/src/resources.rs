@@ -1,4 +1,6 @@
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,6 +33,13 @@ pub struct ActiveResource {
 pub struct SharedResourceState {
     pub active: Mutex<Vec<ActiveResource>>,
     pub acks: Mutex<Vec<ResourceAck>>,
+    /// Generation of the last applied ResourceSnapshot (ADR-004 Phase 2).
+    /// Stale snapshots (e.g. a cached replay racing a newer live push) are
+    /// dropped so an older truth can never overwrite a newer one.
+    pub last_snapshot_generation: Mutex<u64>,
+    /// Session-local sequence, bumped on every active-set mutation (ADR-004
+    /// Phase 3). Lets the controller order state reports within a session.
+    pub state_seq: Mutex<u64>,
 }
 
 impl SharedResourceState {
@@ -38,6 +47,8 @@ impl SharedResourceState {
         Self {
             active: Mutex::new(Vec::new()),
             acks: Mutex::new(Vec::new()),
+            last_snapshot_generation: Mutex::new(0),
+            state_seq: Mutex::new(0),
         }
     }
 
@@ -50,6 +61,33 @@ impl SharedResourceState {
     pub fn drain_acks(&self) -> Vec<ResourceAck> {
         let mut acks = self.acks.lock().unwrap();
         std::mem::take(&mut *acks)
+    }
+
+    pub fn bump_state_seq(&self) {
+        *self.state_seq.lock().unwrap() += 1;
+    }
+
+    /// Build the actual-state report from the in-memory active set (ADR-004
+    /// Phase 3). Reflects the shield's applied intent — not raw kernel state.
+    pub fn build_state_report(&self, shield_id: &str) -> crate::proto::ResourceStateReport {
+        let mut ids: Vec<String> = self
+            .active
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.resource_id.clone())
+            .collect();
+        ids.sort();
+        let mut hasher = DefaultHasher::new();
+        for id in &ids {
+            id.hash(&mut hasher);
+        }
+        crate::proto::ResourceStateReport {
+            shield_id: shield_id.to_string(),
+            generation: *self.state_seq.lock().unwrap(),
+            active_resource_ids: ids,
+            fingerprint: hasher.finish(),
+        }
     }
 }
 
@@ -267,6 +305,7 @@ pub async fn handle_apply(
             });
         }
     }
+    state.bump_state_seq();
 
     let snapshot = state.active.lock().unwrap().clone();
     match apply_nftables(&snapshot).await {
@@ -300,6 +339,7 @@ pub async fn handle_apply(
                 .lock()
                 .unwrap()
                 .retain(|r| r.resource_id != instruction.resource_id);
+            state.bump_state_seq();
             error!(
                 resource_id = %instruction.resource_id,
                 error = %e,
@@ -325,6 +365,7 @@ pub async fn handle_remove(
         .lock()
         .unwrap()
         .retain(|r| r.resource_id != instruction.resource_id);
+    state.bump_state_seq();
 
     let snapshot = state.active.lock().unwrap().clone();
     if let Err(e) = apply_nftables(&snapshot).await {
@@ -346,6 +387,100 @@ pub async fn handle_remove(
         verified_at: now_unix(),
         port_reachable: false,
     }
+}
+
+/// Apply an authoritative desired-state snapshot (ADR-004 Phase 2):
+/// replace the active set with exactly the snapshot contents and rebuild the
+/// chain — anything absent is dropped, anything missing is added. Acks every
+/// resource so the controller's protecting→protected transitions still happen
+/// when an apply was lost and the snapshot re-asserted it. Resources dropped
+/// by omission get no ack (explicit removes still arrive as instructions).
+pub async fn handle_snapshot(
+    snapshot: &crate::proto::ResourceSnapshot,
+    state: &Arc<SharedResourceState>,
+) -> Vec<ResourceAck> {
+    // Monotonic-apply guard: never let an older truth overwrite a newer one.
+    {
+        let mut last = state.last_snapshot_generation.lock().unwrap();
+        if snapshot.generation <= *last {
+            warn!(
+                generation = snapshot.generation,
+                last_applied = *last,
+                "ignoring stale resource snapshot"
+            );
+            return Vec::new();
+        }
+        *last = snapshot.generation;
+    }
+
+    let now = now_unix();
+    let mut acks = Vec::new();
+    let mut new_active = Vec::new();
+    for res in &snapshot.resources {
+        if !validate_host(&res.host) {
+            warn!(
+                resource_id = %res.resource_id,
+                host = %res.host,
+                "snapshot resource host does not match this shield's LAN IP — skipping"
+            );
+            acks.push(ResourceAck {
+                resource_id: res.resource_id.clone(),
+                status: "failed".to_string(),
+                error: "resource host does not match this shield's IP".to_string(),
+                verified_at: now,
+                port_reachable: false,
+            });
+            continue;
+        }
+        new_active.push(ActiveResource {
+            resource_id: res.resource_id.clone(),
+            host: res.host.clone(),
+            protocol: res.protocol.clone(),
+            port_from: res.port_from as u16,
+            port_to: res.port_to as u16,
+        });
+    }
+
+    // The replace: active becomes exactly the snapshot's (validated) contents.
+    *state.active.lock().unwrap() = new_active;
+    state.bump_state_seq();
+    let applied = state.active.lock().unwrap().clone();
+    match apply_nftables(&applied).await {
+        Ok(()) => {
+            info!(
+                resource_count = applied.len(),
+                generation = snapshot.generation,
+                "resource snapshot applied — chain rebuilt"
+            );
+            for r in &applied {
+                let reachable = check_port(&r.host, r.port_from);
+                acks.push(ResourceAck {
+                    resource_id: r.resource_id.clone(),
+                    status: if reachable { "protected" } else { "failed" }.to_string(),
+                    error: if reachable {
+                        String::new()
+                    } else {
+                        "port not listening".to_string()
+                    },
+                    verified_at: now,
+                    port_reachable: reachable,
+                });
+            }
+        }
+        Err(e) => {
+            error!(error = %e, "snapshot nftables apply failed");
+            for r in &applied {
+                acks.push(ResourceAck {
+                    resource_id: r.resource_id.clone(),
+                    status: "failed".to_string(),
+                    error: e.to_string(),
+                    verified_at: now,
+                    port_reachable: false,
+                });
+            }
+        }
+    }
+    acks
 }
 
 fn now_unix() -> i64 {

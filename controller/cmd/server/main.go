@@ -35,6 +35,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
@@ -276,6 +277,20 @@ func main() {
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
 		if err := grpcServer.Serve(grpcListener); err != nil {
 			log.Fatalf("grpc serve: %v", err)
+		}
+	}()
+
+	// Metrics on a SEPARATE internal listener — they leak operational data, so they
+	// must not sit on the public mux. Defaults to loopback; set METRICS_ADDR (e.g.
+	// ":9102") to expose to a network scraper behind your own firewall. A failure
+	// here is logged, not fatal — metrics are non-critical to serving traffic.
+	go func() {
+		metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
+		metricsMux := http.NewServeMux()
+		metricsMux.Handle("/metrics", metrics.Handler())
+		log.Printf("metrics listening on %s/metrics", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
+			log.Printf("metrics server stopped: %v", err)
 		}
 	}()
 
