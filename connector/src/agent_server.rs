@@ -25,9 +25,23 @@ use crate::shield_proto::{
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 
+/// Capacity of a connected shield's instruction forwarding channel. Sized with
+/// generous headroom so push_instructions' non-blocking try_send effectively never
+/// hits "Full" at realistic (one-per-mutation) instruction rates; a genuine Full is
+/// treated as overload and left to the snapshot/reconciler to repair.
+const SHIELD_INSTRUCTION_QUEUE_CAP: usize = 256;
+
 /// All per-shield mutable state behind a single lock.
 #[derive(Debug)]
 struct ShieldMaps {
+    /// Live per-shield instruction channels. INVARIANT: each channel has exactly
+    /// ONE producer — push_instructions, whose sole caller (handle_controller_msg)
+    /// is a single sequential loop. That single-producer property, NOT try_send, is
+    /// what preserves cross-push instruction order (F18): mpsc accepts concurrent
+    /// producers and interleaves them, so any future parallel/sharded controller
+    /// processing MUST partition by shield_id to keep this — otherwise ordering
+    /// breaks silently. Deltas need a serialization point; the snapshot (versioned,
+    /// idempotent) is the order-independent durable authority.
     instruction_txs: HashMap<String, mpsc::Sender<ResourceInstruction>>,
     resource_instructions: HashMap<String, Vec<ResourceInstruction>>,
     /// Live channel to forward snapshots to a connected shield.
@@ -96,23 +110,58 @@ impl ShieldRegistry {
         if instructions.is_empty() {
             return;
         }
-        let maybe_tx = self.maps.lock().instruction_txs.get(shield_id).cloned();
-
-        if let Some(tx) = maybe_tx {
-            let id = shield_id.to_string();
-            tokio::spawn(async move {
-                for instr in instructions {
-                    if tx.send(instr).await.is_err() {
-                        warn!(shield_id = %id, "shield instruction channel closed during push");
-                        break;
-                    }
+        // Decide-and-buffer atomically under one lock. If the shield is offline we
+        // MUST insert the buffer in the same critical section that observed the
+        // missing tx: otherwise a shield connecting in the gap inserts its tx and
+        // drains the (still empty) buffer before our write lands, stranding the
+        // instruction until the next reconnect. The connect handler inserts the tx
+        // BEFORE it drains, so any buffer present at drain time is delivered — which
+        // holds only if the check and the buffer write are one atomic step here.
+        // Mirrors push_snapshot's already-correct discipline.
+        let tx = {
+            let mut maps = self.maps.lock();
+            match maps.instruction_txs.get(shield_id).cloned() {
+                Some(tx) => tx,
+                None => {
+                    // Append, don't overwrite: a second offline push must not clobber
+                    // a batch already waiting for this shield.
+                    maps.resource_instructions
+                        .entry(shield_id.to_string())
+                        .or_default()
+                        .extend(instructions);
+                    return;
                 }
-            });
-        } else {
-            self.maps
-                .lock()
-                .resource_instructions
-                .insert(shield_id.to_string(), instructions);
+            }
+        };
+
+        // Forward in arrival order WITHOUT spawning. push_instructions is the sole
+        // producer for this channel (see the instruction_txs invariant), so one
+        // producer + this FIFO channel + the single drainer in control() preserves
+        // cross-push order (F18). try_send keeps it non-blocking: awaiting a full
+        // channel here would stall the dispatcher and head-of-line-block every other
+        // shield + acks on the shared controller stream.
+        //
+        // F19 — DELIBERATE best-effort delivery, not an oversight. On send failure we
+        // DROP the rest of the batch rather than re-buffering it. Recovery is the
+        // snapshot: the cached desired set is replayed on reconnect (covers a dropped
+        // apply) and the Phase 3 reaper confirms removals (covers a dropped remove), so
+        // a dropped delta is at most a self-healing latency blip — never permanent wrong
+        // state. Instruction delivery is the fast path; the versioned snapshot is the
+        // durable authority. Re-buffering here would reopen the F16 buffer race for
+        // latency the snapshot already covers — revisit only if reconnect reap/apply
+        // latency is ever shown to matter operationally.
+        for instr in instructions {
+            match tx.try_send(instr) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!(shield_id = %shield_id, "shield instruction channel closed during push (dropped; snapshot recovers on reconnect)");
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!(shield_id = %shield_id, "shield instruction channel full (dropped; snapshot/reconciler will repair)");
+                    break;
+                }
+            }
         }
     }
 
@@ -395,7 +444,7 @@ impl ShieldService for ShieldRegistry {
         let mut in_stream = request.into_inner();
 
         let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
-        let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(32);
+        let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(SHIELD_INSTRUCTION_QUEUE_CAP);
         let (snap_tx, mut snap_rx) = mpsc::channel::<ResourceSnapshot>(8);
         // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
@@ -603,5 +652,84 @@ impl ShieldService for ShieldRegistry {
         );
 
         Ok(Response::new(GoodbyeResponse { ok: true }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_registry() -> ShieldRegistry {
+        // connect_lazy never dials until first use; push_instructions' offline path
+        // never touches the channel, so this is a cheap, network-free registry.
+        let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let (ack_tx, _ack_rx) = mpsc::channel(8);
+        ShieldRegistry::new(
+            channel,
+            "test.example".to_string(),
+            "connector-1".to_string(),
+            ack_tx,
+        )
+    }
+
+    fn instr(id: &str) -> ResourceInstruction {
+        ResourceInstruction {
+            resource_id: id.to_string(),
+            host: "10.0.0.1".to_string(),
+            protocol: "tcp".to_string(),
+            port_from: 80,
+            port_to: 80,
+            action: "apply".to_string(),
+        }
+    }
+
+    // F17: while a shield is offline (no instruction_txs entry), a second push must
+    // APPEND to the buffered batch, not overwrite it. Regression guard for the
+    // `insert`→`entry().or_default().extend()` fix in push_instructions.
+    #[tokio::test]
+    async fn offline_pushes_append_not_overwrite() {
+        let reg = test_registry();
+        reg.push_instructions("shield-A", vec![instr("r1")]);
+        reg.push_instructions("shield-A", vec![instr("r2")]);
+
+        let maps = reg.maps.lock();
+        let buffered = maps
+            .resource_instructions
+            .get("shield-A")
+            .expect("buffered batch present for offline shield");
+        let ids: Vec<&str> = buffered.iter().map(|i| i.resource_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["r1", "r2"],
+            "second offline push must append, not overwrite the first"
+        );
+    }
+
+    // F18: with the shield online, instructions must reach the channel in push order
+    // across separate push_instructions calls. Under the old spawn-per-push this raced
+    // (each call spawned an independent task); the in-order try_send makes it
+    // deterministic. Relies on the single-producer invariant (this test is the only
+    // producer here, mirroring the sequential dispatcher).
+    #[tokio::test]
+    async fn online_pushes_preserve_arrival_order() {
+        let reg = test_registry();
+        let (tx, mut rx) = mpsc::channel::<ResourceInstruction>(8);
+        reg.maps
+            .lock()
+            .instruction_txs
+            .insert("shield-B".to_string(), tx);
+
+        reg.push_instructions("shield-B", vec![instr("a1")]);
+        reg.push_instructions("shield-B", vec![instr("a2"), instr("a3")]);
+
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            got.push(rx.recv().await.expect("instruction delivered").resource_id);
+        }
+        assert_eq!(
+            got,
+            vec!["a1", "a2", "a3"],
+            "instructions must arrive in push order"
+        );
     }
 }

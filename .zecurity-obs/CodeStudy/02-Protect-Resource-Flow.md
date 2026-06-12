@@ -50,7 +50,7 @@ status: in-progress
 - [x] **Piece 2** — Controller resolver ✅
 - [x] **Piece 3** — Controller DB write (state machine) ✅ (findings recorded; fixes deferred)
 - [x] **Piece 4** — Controller → Connector delivery ✅ (ADR-004 Phase 2/3 landed; F10 fixed)
-- [ ] **Piece 5** — Connector receives + queues
+- [x] **Piece 5** — Connector receives + queues ✅ (F16/F17/F18 fixed; F19 accepted/recorded)
 - [ ] **Piece 6** — Connector → Shield forwarding (:9091)
 - [ ] **Piece 7** — Shield applies firewall rule
 - [ ] **Piece 8** — Ack back: Shield → Connector → Controller
@@ -314,23 +314,54 @@ Verified: `go build`/`go vet`/`go test -race ./internal/connector` clean; new un
 
 # Piece 5 — Connector Receives + Queues
 
-**Status:** ⬜ not reviewed
+**Status:** ✅ reviewed (2026-06-12) — F16/F17/F18 fixed; F19 accepted as deliberate best-effort (decision recorded)
 
-`handle_controller_msg` dispatches the batch → `ShieldRegistry::push_instructions`: send via mpsc if shield online, else buffer in `resource_instructions` map.
+`handle_controller_msg` (`control_stream.rs:244-265`) processes controller messages **sequentially**, fanning each batch out per-shield to `push_instructions` / `push_snapshot`. All per-shield state lives in one `ShieldMaps` behind a single `parking_lot::Mutex`.
 
 **Files**
-- `connector/src/control_stream.rs:247-251` — receive + dispatch
-- `connector/src/agent_server.rs:82-105` — `push_instructions`
-- `connector/src/agent_server.rs:28-34` — `ShieldMaps` buffer struct
+- `connector/src/control_stream.rs:244-265` — `handle_controller_msg` receive + per-shield dispatch (called from the controller-stream loop at `:183`)
+- `connector/src/agent_server.rs:30-43` — `ShieldMaps` state struct
+- `connector/src/agent_server.rs:95-132` — `push_instructions` (**F16/F17**)
+- `connector/src/agent_server.rs:137-152` — `push_snapshot` (race-free counterpart — the model the fix mirrors)
+- `connector/src/agent_server.rs:390-566` — shield-facing `control()`: connect-time snapshot replay + buffer drain (`:419-461`), live-forward select arms (`:530-547`), disconnect cleanup (`:556-560`)
 
 **To review**
-- [ ] Race: shield connects between `get(tx)` check and buffer insert
-- [ ] Buffer overwrite semantics (`insert` replaces prior buffered vec — lost instructions?)
-- [ ] `tokio::spawn` per-push ordering guarantees
-- [ ] Channel-closed handling (`warn` + break)
+- [x] Race: shield connects between `get(tx)` check and buffer insert — **F16, was real → ✅ fixed.**
+- [x] Buffer overwrite semantics (`insert` replaces prior buffered vec) — **F17, was real → ✅ fixed (append).**
+- [x] `tokio::spawn` per-push ordering guarantees — **F18, real → ✅ fixed (in-order `try_send`; single-producer invariant documented).**
+- [x] Channel-closed handling (`warn` + break) — **F19, drops-not-rebuffers → ✅ accepted as deliberate best-effort (decision recorded in code + doc).**
 
 **Notes**
-> _(findings go here)_
+
+The contrast that frames the whole piece: **`push_snapshot` is race-free; `push_instructions` was not.** `push_snapshot` (`:137-152`) updates the cache AND reads `snapshot_txs` under *one* lock, and the connect handler *replays from cache* (never removes it), so a concurrent connect can't strand anything (worst case is a double-send the shield's generation gate dedups). `push_instructions` lacked that discipline.
+
+🔴 **Finding F16 — connect-vs-buffer TOCTOU strands instructions. → ✅ FIXED (2026-06-12).**
+`push_instructions` read `instruction_txs` under one lock, **released it**, then (offline branch) re-took the lock to `insert` the buffer — two separate critical sections. Interleaving: push reads txs→None (shield offline) and releases; the shield connects (inserts its `tx` at `:405`, then its spawned drain removes the *still-empty* buffer at `:447` and goes live on `instr_rx`); push then writes the buffer. The instruction sits in `resource_instructions` **unsent until the next reconnect**. The connect handler's own invariant (insert tx *before* draining) is correct; the bug was purely that push let a write land *after* the drain.
+**Fix:** do the tx-check and the buffer write in **one** lock scope (`agent_server.rs:107-121`). If push observes no tx it buffers under that same lock, so it either sees the tx (→ live send) or the connect handler's drain (ordered after its tx-insert) is guaranteed to pick the buffer up.
+
+🔴 **Finding F17 — buffer overwrite drops instructions. → ✅ FIXED (2026-06-12).**
+The offline branch used `resource_instructions.insert(shield_id, instructions)` — a **replace**. Two pushes while a shield was offline → the second clobbered the first. **Fix:** `entry(shield_id).or_default().extend(instructions)` — append. Regression-guarded by `agent_server.rs` unit test `offline_pushes_append_not_overwrite` (constructs a network-free registry via `connect_lazy`, asserts two offline pushes accumulate in order). `cargo build` + `cargo test` clean.
+
+🔴 **Finding F18 — `tokio::spawn`-per-push lost cross-push ordering. → ✅ FIXED (2026-06-12).**
+Each online push spawned a detached task to drain into the channel; two pushes for the same shield raced, so `apply X` then `remove X` could deliver reversed → shield ends up enforcing X. Order was preserved *within* a push (the `for` loop) but not *across* pushes.
+**Fix:** drop the spawn; enqueue in arrival order with non-blocking `tx.try_send` (`agent_server.rs:push_instructions`). The per-shield ordered forwarder already exists — `instr_rx` is FIFO and the `control()` `select!` loop is its single drainer — so everything *from the channel onward* was already ordered; the bug was only in *feeding* it. A single sequential producer + FIFO channel + single drainer now preserves end-to-end order.
+**The load-bearing invariant (made explicit, not assumed):** ordering rests on **exactly one producer per shield queue**, NOT on `try_send` itself. `mpsc` is multi-producer and will silently interleave concurrent producers; `try_send` only avoids reordering *a single* producer's enqueues. Today that single producer is `handle_controller_msg` (a sequential loop). This is now documented as an INVARIANT on the `instruction_txs` field, with the rule that any future sharded/parallel controller processing **must partition by `shield_id`** (ordering key == concurrency key) or ordering breaks silently. Deeper point recorded too: deltas (apply/remove) require a serialization point; the versioned snapshot is the order-independent durable authority, so the instruction channel is explicitly the best-effort fast path.
+**Backpressure choice:** `try_send` over blocking `send` — awaiting a full channel would stall the dispatcher and head-of-line-block every other shield + acks on the shared controller stream. On Full we stop and let the snapshot/reconciler repair; channel cap bumped `32 → 256` (`SHIELD_INSTRUCTION_QUEUE_CAP`) so Full is unreachable at realistic rates. Verified: `cargo build` + `cargo test` clean; new unit test `online_pushes_preserve_arrival_order` (flaky under the old spawn, deterministic now).
+
+🟢 **Finding F19 — send-failure drops, doesn't re-buffer. → ✅ ACCEPTED as deliberate best-effort (decision recorded 2026-06-12; no behavior change).**
+On the online path, if `try_send` fails — `Closed` (shield disconnected mid-push) or `Full` (channel backed up) — we drop the rest of the batch rather than re-buffering. This is now an explicit design decision, documented in code at `push_instructions`.
+
+**Why not a bug:** F19 is a latency edge, not a correctness gap. `Full` is effectively unreachable (cap 256 vs one-instruction-per-mutation rates). A `Closed` drop is recovered by the snapshot — `apply` via the cached snapshot replayed on reconnect (`:419-442`), `remove` via snapshot-omission + the Phase 3 reaper. So a dropped delta self-heals; the only cost is a rare, slightly-slower reap when a `remove` is dropped during a mid-push disconnect.
+
+**Options considered:**
+- **A — accept best-effort (chosen).** Zero new code; correctness already guaranteed by the snapshot, and recovery is already wired (unconditional snapshot replay on reconnect).
+- **B — re-buffer on `Closed` only.** Marginal latency win, but reopens the **F16 buffer TOCTOU race** we just hardened, and needs split `Closed`≠`Full` handling — bad risk/value for something the snapshot already recovers.
+- **C — delete the instruction buffer entirely, rely 100% on the snapshot.** Intellectually cleanest (F16/F17 existed *because* the buffer exists), but loses fast offline removes and is a bigger change deserving its own review. Parked as a candidate.
+- **D — per-shield sequence numbers + consumer reorder.** Solves a problem the snapshot's versioning already solves; overkill.
+
+**Decision:** A. Instruction delivery is intentionally the best-effort fast path; the versioned snapshot is the durable authority. **Revisit trigger:** if telemetry shows reconnect-storm reap/apply latency that operators notice, do B (Closed-only re-buffer with F16 discipline), or scope C as a deliberate simplification.
+
+**Architectural note:** post-ADR-004 the instruction buffer is largely redundant with the snapshot cache for **applies** (the cache re-protects the full desired set on reconnect, latest-wins). Its remaining value is **fast removes** (explicit remove → `unprotected` ack → immediate reap) — the same logic as F12 on the controller side — so it's worth keeping and fixing, not deleting. Disconnect cleanup (`:556-560`) correctly preserves the snapshot cache as the recovery anchor while dropping the live tx entries.
 
 ---
 
