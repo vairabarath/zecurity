@@ -1465,3 +1465,28 @@ serves on `127.0.0.1:9102`.
 - M2 completes the PKI chain audit and Relay certificate provisioning phases.
 - M3 then implements Relay multi-workspace mTLS followed by peer-chain
   presentation and inner mTLS.
+
+---
+
+## 2026-06-12 — Codex (Sprint 10.1 Relay private-key ownership correction)
+
+**What was done:**
+- Updated Sprint 10.1 to require Relay-host generation of `relay.key` and
+  `relay.csr`.
+- Changed Controller provisioning to validate and sign only the Relay CSR,
+  returning `relay.crt` and `intermediate-ca.crt` without receiving or generating
+  the Relay private key.
+- Explicitly prohibited generating a separate self-signed Platform Intermediate
+  CA or placing Platform CA private keys on the Relay host.
+- Added Relay startup checks for key/certificate matching and exact Relay SPIFFE
+  identity.
+
+**Key decisions:**
+- Relay private-key ownership remains exclusively on the Relay host.
+- The existing Controller Platform Intermediate CA is the only issuer for Relay
+  server certificates.
+
+**What's next:**
+- M2 implements authenticated CSR signing and validation.
+- M3 consumes only the signed Relay leaf, Relay-owned key, and Intermediate CA
+  trust certificate.

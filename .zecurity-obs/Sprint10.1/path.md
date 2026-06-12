@@ -49,11 +49,37 @@ Platform Root CA                 MaxPathLen=2
 ### Peer authentication of Relay
 
 - Relay presents a server certificate signed by the Platform Intermediate CA.
+- Relay generates and retains its own private key. The private key never enters
+  the Controller, database, Sprint repository, or certificate-signing response.
+- Relay submits a CSR containing its requested SPIFFE URI and DNS/IP SANs to an
+  authenticated Controller provisioning command. The Controller validates the
+  request, signs it with the existing Platform Intermediate CA, and returns only
+  the Relay leaf certificate and Intermediate CA certificate.
 - Connector and Client trust the Platform Intermediate CA already included in
   their saved CA bundle.
 - Relay server SPIFFE format:
   `spiffe://<global-trust-domain>/relay/<relay-id>`.
 - Connector and Client require the configured exact Relay SPIFFE ID.
+
+### Relay certificate provisioning
+
+```text
+Relay host                              Controller PKI
+----------                              --------------
+Generate relay.key (0600)
+Generate relay.csr
+                     relay.csr  ------>
+                                      Validate requested identity and SANs
+                                      Sign with existing Intermediate CA key
+                    <------ relay.crt + intermediate-ca.crt
+Store relay.key, relay.crt,
+and intermediate-ca.crt
+```
+
+- Never generate a new Platform Intermediate CA for Relay deployment.
+- Never copy or export the Platform Root or Intermediate private keys.
+- Never commit `relay.key`, `relay.csr`, generated certificates, or CA private
+  keys to the Zecurity or standalone Relay repositories.
 
 ### End-to-end confidentiality
 
@@ -78,6 +104,7 @@ inner tunnel payload.
 |----------|--------|
 | Relay trust anchor | Platform Intermediate CA, provided as `RELAY_CLIENT_CA` |
 | Relay identity | Intermediate-signed server leaf with exact relay SPIFFE URI |
+| Relay private-key ownership | Generated and retained only on Relay host; Controller signs CSR only |
 | Peer chains | Connector and Client send `leaf + Workspace CA`; never send private keys |
 | Workspace isolation | Client and Connector leaf SPIFFE trust domains must match |
 | Message binding | Register connector ID/SPIFFE must exactly match peer certificate |
@@ -110,9 +137,9 @@ inner tunnel payload.
 > See [[Sprint10.1/Member2-Go/Phase2-Relay-Cert-Provisioning]].
 
 - [ ] **M2-B1** Add Relay SPIFFE identity helper and exact format.
-- [ ] **M2-B2** Add PKI method/tool to issue Intermediate-signed Relay server certificates.
-- [ ] **M2-B3** Export Relay cert, key, and Intermediate CA with restrictive permissions.
-- [ ] **M2-B4** Add certificate property and chain-validation tests.
+- [ ] **M2-B2** Add authenticated PKI method/tool that validates and signs a Relay-generated CSR.
+- [ ] **M2-B3** Return only Relay cert and Intermediate CA; document Relay-host key/CSR generation.
+- [ ] **M2-B4** Add certificate property, CSR-validation, and chain-validation tests.
 
 ### PHASE C — M3: Relay Multi-Workspace mTLS
 
@@ -152,6 +179,8 @@ inner tunnel payload.
 - [ ] Registration identity mismatch is rejected.
 - [ ] Cross-workspace Lookup is rejected.
 - [ ] Connector and Client reject a Relay certificate with the wrong SPIFFE ID.
+- [ ] Controller provisioning never receives, generates, stores, or returns the Relay private key.
+- [ ] Relay deployment contains no generated Platform Intermediate CA or CA private key.
 - [ ] Relay cannot observe TunnelRequest or resource payload plaintext.
 - [ ] Existing direct Client-to-Connector QUIC path still works.
 - [ ] Sprint 10 Connector registration and Client fallback can proceed using this trust contract.

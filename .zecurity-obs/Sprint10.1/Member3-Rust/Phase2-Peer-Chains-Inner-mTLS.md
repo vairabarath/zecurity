@@ -31,6 +31,7 @@ Client-to-Connector mTLS.
 2. Client sends `client leaf + Workspace CA`.
 3. Both trust Platform Intermediate CA from their existing CA bundle.
 4. Both require the configured exact Relay SPIFFE URI.
+5. Neither peer receives or trusts a Relay-created self-signed CA.
 
 ### Inner Client-to-Connector mTLS
 

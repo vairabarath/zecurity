@@ -27,6 +27,9 @@ workspaces using the Platform Intermediate CA as its only client trust anchor.
 ## Requirements
 
 1. Load `RELAY_TLS_CERT`, `RELAY_TLS_KEY`, and `RELAY_CLIENT_CA`.
+   - `RELAY_TLS_KEY` is the Relay-host-generated private key.
+   - `RELAY_TLS_CERT` and `RELAY_CLIENT_CA` are returned by Controller PKI after
+     signing the Relay-generated CSR.
 2. Require peer certificates during QUIC TLS handshake.
 3. Trust only the configured Platform Intermediate CA.
 4. Require peers to present `leaf + Workspace CA`.
@@ -41,6 +44,9 @@ spiffe://<workspace-domain>/client_device/<uuid>
    the verified certificate.
 7. On Lookup, require Client and stored Connector trust domains to match.
 8. Never accept a SPIFFE URI from JSON as proof of identity.
+9. Fail startup if the Relay leaf does not match the configured private key or
+   expected `RELAY_SPIFFE_ID`.
+10. Do not generate, load, or require any CA private key in the Relay process.
 
 ## Test Matrix
 
