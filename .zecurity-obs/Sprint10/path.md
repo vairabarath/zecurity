@@ -15,6 +15,11 @@ tags:
 > **Read this before writing a single line of code.**
 > This file is the source of truth for execution order. Following it prevents merge conflicts, broken builds, and blocked teammates.
 
+> **Security prerequisite:** Complete [[Sprint10.1/path]] before enabling Relay
+> Connector registration or Client fallback. Sprint 10.1 defines Relay
+> certificate provisioning, multi-workspace chain validation, and inner
+> Client-to-Connector mTLS so the Relay cannot inspect tunnel payloads.
+
 ---
 
 ## Sprint Goal

@@ -1127,3 +1127,30 @@ Most recent first. Every agent appends an entry after their session.
 
 **What's next:**
 - Verify `nft list ruleset` on a Shield host shows no `iifname "zecurity0"` rule in `resource_protect`, then test LAN block plus client access through Connector → Shield.
+
+---
+
+## 2026-06-12 — Codex (Sprint 10.1 Relay PKI and end-to-end security planning)
+
+**What was done:**
+- Added `.zecurity-obs/Sprint10.1/path.md` and four M2/M3 phase specifications.
+- Defined multi-workspace Relay verification using the Platform Intermediate CA,
+  with Connector and Client peers presenting `leaf + Workspace CA`.
+- Added Relay certificate provisioning requirements and exact SPIFFE/message
+  identity binding.
+- Added inner Client-to-Connector TLS 1.3 mTLS as a requirement so Relay-bridged
+  tunnel payloads remain confidential from the Relay.
+- Marked Sprint 10 Relay registration and fallback as dependent on Sprint 10.1.
+
+**Key decisions:**
+- Relay trusts the Platform Intermediate CA and does not call the Controller
+  during connection handling.
+- Existing source CA path constraints are the intended hierarchy:
+  Root `MaxPathLen=2`, Intermediate `MaxPathLen=1`, Workspace `MaxPathLen=0`.
+- Stored legacy CA material must be audited and fail closed rather than silently
+  regenerated.
+
+**What's next:**
+- M2 completes the PKI chain audit and Relay certificate provisioning phases.
+- M3 then implements Relay multi-workspace mTLS followed by peer-chain
+  presentation and inner mTLS.
