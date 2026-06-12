@@ -119,7 +119,7 @@ func main() {
 	)
 	inviteHandler := invitation.NewHandler(inviteStore, inviteEmailer)
 
-	policyStore := policy.NewStore(db.Pool)
+	policyStore := policy.NewStore(db.Pool, envOr("RELAY_ADDR", ""))
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
 
