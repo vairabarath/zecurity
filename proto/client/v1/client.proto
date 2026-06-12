@@ -108,6 +108,9 @@ message ACLSnapshot {
   int64  generated_at            = 3;
   repeated ACLEntry entries      = 4;
   string connector_tunnel_addr   = 5; // QUIC tunnel address of the active connector, e.g. "192.168.1.x:9092"
+  string relay_addr              = 6; // relay QUIC address, e.g. "relay.example.com:9093" — empty = relay disabled
+  string connector_id            = 7; // connector UUID — client sends this in relay LookupMsg
+  string connector_spiffe        = 8; // full connector SPIFFE URI — reserved for E2E validation (later sprint)
 }
 
 message ACLEntry {
