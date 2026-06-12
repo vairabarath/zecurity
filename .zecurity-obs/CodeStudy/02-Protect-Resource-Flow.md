@@ -2,7 +2,7 @@
 type: code-study
 flow: protect-resource-end-to-end
 created: 2026-06-01
-status: in-progress
+status: complete
 ---
 
 # Code Study 02 — Protect Resource Flow End-to-End
@@ -51,9 +51,9 @@ status: in-progress
 - [x] **Piece 3** — Controller DB write (state machine) ✅ (findings recorded; fixes deferred)
 - [x] **Piece 4** — Controller → Connector delivery ✅ (ADR-004 Phase 2/3 landed; F10 fixed)
 - [x] **Piece 5** — Connector receives + queues ✅ (F16/F17/F18 fixed; F19 accepted/recorded)
-- [ ] **Piece 6** — Connector → Shield forwarding (:9091)
-- [ ] **Piece 7** — Shield applies firewall rule
-- [ ] **Piece 8** — Ack back: Shield → Connector → Controller
+- [x] **Piece 6** — Connector → Shield forwarding (:9091) ✅ (well-built; F20 low/accepted)
+- [x] **Piece 7** — Shield applies firewall rule ✅ (F21 atomic flush+rebuild fixed)
+- [x] **Piece 8** — Ack back: Shield → Connector → Controller ✅ (F22 cleanup; loop closed)
 
 ---
 
@@ -367,71 +367,109 @@ On the online path, if `try_send` fails — `Closed` (shield disconnected mid-pu
 
 # Piece 6 — Connector → Shield Forwarding (:9091)
 
-**Status:** ⬜ not reviewed
+**Status:** ✅ reviewed (2026-06-12) — well-built; no fixes. One low/accepted note (F20).
 
-The `control()` gRPC handler on `:9091`. On shield connect: drain buffered instructions. Live: forward via `instr_rx`. Piggybacked on `ShieldControlMessage`.
+The `control()` gRPC handler on `:9091`. On shield connect: replay cached snapshot → drain buffered instructions → forward live. mTLS-mandatory, identity bound to the shield's SPIFFE cert SAN.
 
 **Files**
-- `connector/src/agent_server.rs:342-472` — `control()` handler
-- `connector/src/agent_server.rs:370-387` — drain buffered on connect
-- `connector/src/agent_server.rs:450-458` — forward live instructions
+- `connector/src/agent_server.rs:262-297` — `serve()`: `:9091` TLS server (mandatory mTLS, workspace-CA client root)
+- `connector/src/agent_server.rs:301-348` — `extract_shield_identity` (Control-stream identity from cert SAN)
+- `connector/src/agent_server.rs:390-461` — `control()` connect: identity verify, channel registration, snapshot replay + buffer drain
+- `connector/src/agent_server.rs:463-566` — `select!` live-forward loop + disconnect cleanup
 
 **To review**
-- [ ] Drain-then-subscribe ordering (no gap between buffered drain and live channel)
-- [ ] mTLS / SPIFFE verification on the shield connection
-- [ ] Channel capacity (32) backpressure behavior
+- [x] Drain-then-subscribe ordering — ✅ correct: live channel registered *before* the spawn, then one sequential task does snapshot → buffer-drain → live select loop. No loss gap, no reorder.
+- [x] mTLS / SPIFFE verification — ✅ correct: mandatory mTLS, `shield_id` derived from the verified cert SAN (never client-supplied), path-injection guard, trust-domain scoping.
+- [x] Channel capacity backpressure — characterized as **F20** (low, accepted): per-shield-isolated, self-heals.
 
 **Notes**
-> _(findings go here)_
+
+✅ **mTLS / SPIFFE — correct and well-designed.** `serve()` sets `ServerTlsConfig … .client_ca_root(workspace_ca).client_auth_optional(false)` — a shield **cannot handshake** without a cert chaining to the workspace CA (rustls validates chain + signature + validity). `extract_shield_identity` then derives `shield_id` from the verified leaf cert's SPIFFE SAN (`spiffe://{trust_domain}/shield/{id}`), **never from a client-supplied field**, so a shield can only claim the identity in its CA-signed cert — no spoofing. Hardening: `!id.contains('/')` blocks SPIFFE path-injection; the `{trust_domain}` prefix enforces cross-workspace isolation.
+
+✅ **Drain-then-subscribe ordering — no gap, no reorder.** `instr_tx`/`snap_tx` are registered into the maps **synchronously, before the spawn** (`:403-408`). The spawned task then runs **sequentially**: replay cached snapshot (`:419-442`) → drain offline buffer (`:444-461`) → `select!` loop reading `instr_rx`/`snap_rx` (`:463+`). Because the live channel exists before the spawn, a push arriving during connect lands in the channel buffer (not lost) and is delivered as "live" *after* the older offline-buffer drain → delivery order is always **snapshot → buffered(older) → live(newer)**, all from one sequential task. (Harmless edge: a `push_snapshot` racing the connect can double-send a snapshot; the shield's generation gate dedups it.)
+
+🟡 **Finding F20 (low, accepted — no fix) — single `select!` loop couples send-backpressure to recv-processing.**
+The loop forwards to the shield via `out_tx.send(...).await` (cap 32). A shield that stops draining its receive stream fills `out_tx`, blocking the loop on the send — which also stops it polling `in_stream` (the shield's acks/health/state). Backpressure chain: slow shield → `out_tx` full → loop blocks → `instr_rx` (256) fills → `push_instructions` `try_send` drops (F19, snapshot recovers). Same *class* as F14, but materially less severe: **one loop per shield**, so a wedged shield blocks only *itself* (no cross-shield head-of-line blocking), and it **self-heals** when gRPC keepalive tears down the dead connection (`send` errors → loop exits → shield marked disconnected → clean reconnect). The F14-style writer/reader split would be symmetric but low-value given the isolation + self-heal; **recorded as a known characteristic, not fixed.** Revisit only if a slow shield is shown to delay its own ack/state processing in a way that matters operationally.
+
+**Observation (not a finding) — authn without shield↔connector authz.** The connector *authenticates* any workspace shield (CA + SPIFFE) but doesn't *authorize* the shield-to-connector assignment, so it would accept a same-workspace shield that connects to the "wrong" connector. That's a misconfiguration, not a vuln (same trust domain), and the controller's ownership check in `handleResourceState` (`reconcile.go:43-51`) rejects reconcile reports from a non-owning connector. Left as-is.
 
 ---
 
 # Piece 7 — Shield Applies Firewall Rule
 
-**Status:** ⬜ not reviewed
+**Status:** ✅ reviewed (2026-06-12) — well-built; **F21 (fail-open atomicity) fixed**.
 
-`handle_instruction` → `handle_apply` → `validate_host` (`resource.host == detect_lan_ip()`) → `apply_nftables` (flush + atomic rebuild of `resource_protect` chain) → `check_port` → builds `ResourceAck`.
+`handle_instruction` → `handle_apply` → `validate_host` (`resource.host == detect_lan_ip()`) → `apply_nftables` (atomic flush+rebuild of `resource_protect`) → `check_port` → builds `ResourceAck`.
 
 **Files**
-- `shield/src/resources.rs:211-227` — `handle_instruction` dispatch
-- `shield/src/resources.rs:229-317` — `handle_apply`
-- `shield/src/resources.rs:56-64` — `validate_host`
-- `shield/src/resources.rs:93-164` — `apply_nftables` (flush + atomic rebuild)
+- `shield/src/resources.rs:249-265` — `handle_instruction` dispatch (apply/remove)
+- `shield/src/resources.rs:267-357` — `handle_apply` (validate → mutate active → apply → rollback)
+- `shield/src/resources.rs:94-102` — `validate_host`; `:104-110` — `check_port`
+- `shield/src/resources.rs:112-201` — `build_protect_ruleset` + `apply_nftables` (atomic, **F21**)
+- `shield/src/resources.rs:506-603` — `iif_accept_rule` / `source_accept_rule` / `port_drop_rule`
 - `shield/src/util.rs:34-56` — `detect_lan_ip`
 
 **To review**
-- [ ] Host validation correctness (`127.0.0.1` shortcut + RFC-1918 match)
-- [ ] Atomic flush+rebuild of `resource_protect` chain (never appended)
-- [ ] State rollback on nftables failure (`retain` removes failed resource)
-- [ ] `check_port` → `status` mapping (`protected` vs `failed` on "port not listening")
-- [ ] Three rules per resource: `iif lo accept`, `127.0.0.0/8 accept`, `port drop`
+- [x] Host validation — ✅ correct: `127.0.0.1` shortcut + exact match against `detect_lan_ip()` (RFC-1918, virtual ifaces skipped); fail-closed when no LAN IP.
+- [x] Atomic flush+rebuild — **was NOT atomic → F21, fixed.** Now a single transaction.
+- [x] State rollback on nftables failure — ✅ correct *once atomic*: on `Err`, the failed resource is `retain`-removed from `active`; with the F21 fix the kernel rolls back to the old ruleset, so `active` and kernel stay consistent (before F21 they diverged — see below).
+- [x] `check_port` → status mapping — ✅ correct (and subtle): measures "is the service listening?" via loopback (which the rules accept), so `protected` = rules applied + service up, `failed` = rules applied but service down; the drop rule stays either way.
+- [x] Three rules per resource — ✅ correct ZTNA shape: `iif lo accept` → `saddr 127.0.0.0/8 accept` → `port drop` (first-match order), for tcp/udp/both. Port reachable only via loopback/tunnel, closed to LAN/internet.
 
 **Notes**
-> _(findings go here)_
+
+🔴 **Finding F21 (important, security fail-open) — `apply_nftables` flush+rebuild was NOT atomic. → ✅ FIXED (2026-06-12).**
+The rebuild was **two separate nftables transactions**: (1) delete the whole `resource_protect` chain, then (2) re-add chain + rules. Two consequences:
+1. **Steady-state fail-open flicker** — between the two commits the chain doesn't exist, so its drop rules are gone and every protected port is briefly **open**. On *every* apply/snapshot/reconnect/resync.
+2. **Partial-failure fail-open (worse)** — if transaction 2 failed after transaction 1 committed, the chain stayed **deleted → all resources unprotected**, while `handle_apply`'s rollback only removed the *one* failing resource from the in-memory `active` set. So the shield kept **reporting the other resources as protected while the kernel enforced nothing** — control/data-plane divergence until the next successful apply.
+
+This violated the stated invariant (CLAUDE.md: *"chain resource_protect always flushed + rebuilt atomically — never appended"*).
+
+**Fix:** rebuild in **one** transaction using `flush chain` instead of delete-then-readd. `build_protect_ruleset` now emits a single batch: `add table` (idempotent) → `add chain` (idempotent, keeps the Input hook + Accept policy installed throughout) → `NfCmd::Flush(Chain)` → `add rule …`. nftables commits the whole batch atomically: old rules hold until the swap, and a failed apply **rolls back wholesale** (old rules intact → never unprotected → `active` stays consistent with the kernel). Semantics change from *"destroy old → build new"* to *"prepare next state → atomic commit swap."* `chain_exists()` (the pre-query that drove the delete) removed.
+**Tests:** `build_protect_ruleset` split out (pure) so ordering is unit-testable without a kernel — `flush_precedes_rule_adds` (flushing *after* the adds would wipe them → fail-open) and `rebuild_is_single_transaction`. `cargo build` + `cargo test` clean. Recommend a live-stack confirmation (root + kernel) as the final gate, per the ADR-004 Phase-1 verification pattern.
+
+**Note (not a finding) — `source_accept_rule(127.0.0.0/8)` trusts source IP.** Rule ② accepts by source address (spoofable in principle); rule ① (`iif lo`) accepts by incoming interface (not spoofable). In practice the kernel's martian/`rp_filter` drops `127/8` arriving on a non-loopback interface, so ② can't be abused — it's mostly redundant with `iif lo`. Documentation-level; left as-is.
+
+**Future direction (your note):** once atomic, full-chain rebuild is the correct default. Incremental atomic rule updates (add/delete by handle, diffing desired vs live) only earn their complexity at scale (many resources/shield with frequent churn). Not now.
 
 ---
 
 # Piece 8 — Ack Back: Shield → Connector → Controller
 
-**Status:** ⬜ not reviewed
+**Status:** ✅ reviewed (2026-06-12) — well-built; closes the loop. One minor cleanup (F22).
 
-Shield emits `ResourceAck` (immediately on apply + drained on next heartbeat). Connector forwards via `ack_tx` → `ResourceAckBatch`. Controller updates DB → `protected`/`failed`.
+Shield emits `ResourceAck` (immediately on change **and** re-drained every heartbeat). Connector forwards via `ack_tx` → `ResourceAckBatch` (immediate 1-ack batch + coalesced on health tick). Controller `RecordAck` flips `protecting` → `protected`/`failed` (or reaps a `deleting` tombstone).
 
 **Files**
-- `shield/src/control_stream.rs:137-144` — drain acks on heartbeat tick
-- `shield/src/control_stream.rs:173-187` — immediate ack on instruction
-- `connector/src/agent_server.rs:412-414` — receive `ResourceAck` from shield
-- `connector/src/control_stream.rs:190-207` — forward as `ResourceAckBatch` to controller
-- _(Controller-side ack handler — locate during review)_
+- `shield/src/control_stream.rs:135-144` — heartbeat tick: `drain_acks()` re-send + state report
+- `shield/src/control_stream.rs:183-213` — immediate ack on instruction / snapshot (`store_ack` + send)
+- `shield/src/resources.rs:203-247` — `run_health_check_loop`: periodic re-verify → `store_ack`
+- `connector/src/agent_server.rs:535-536` — receive `Body::ResourceAck` → `ack_tx`
+- `connector/src/control_stream.rs:190-207` — forward as `ResourceAckBatch` (immediate + health-tick coalesce)
+- `controller/internal/connector/control_stream.go:471-480` — `handleResourceAcks`
+- `controller/internal/resource/store.go:517-553` — `RecordAck` (terminal-state flip + tombstone reap + stale-ack guards)
 
 **To review**
-- [ ] Double-send: ack sent immediately AND drained on heartbeat — dedup needed?
-- [ ] Controller-side handler that flips `protecting` → `protected`/`failed` (find it)
-- [ ] `verified_at` / `port_reachable` persistence
-- [ ] Idempotency of ack application
+- [x] Double-send / dedup — ✅ no dedup needed; the redundancy is the **reliability mechanism** (see below).
+- [x] Controller-side handler — ✅ found: `handleResourceAcks` → `RecordAck`.
+- [x] `verified_at` / `port_reachable` persistence — `verified_at`→`last_verified_at` ✅; `port_reachable` **not persisted** → **F22** (cleaned up).
+- [x] Idempotency — ✅ idempotent + stale-ack-guarded.
 
 **Notes**
-> _(findings go here)_
+
+✅ **Dual-send is by design — latency + reliability, no dedup needed.** Each ack is `store_ack`'d **and** sent immediately (`control_stream.rs:184-189`), then re-sent on every heartbeat via `drain_acks()` (`:137-144`), and `run_health_check_loop` continually refreshes the store by re-checking each active port. Two jobs: **immediate = low-latency** `protecting → protected` transition; **periodic re-ack = self-healing reliability** — if an immediate ack is lost (transient connector/controller disconnect), the next heartbeat re-sends it (at-least-once without an ack-of-ack), and it refreshes `last_verified_at` / catches a service going down or recovering. Durable across reconnect: `store_ack` runs *before* the send and `SharedResourceState` outlives the stream loop, so a failed immediate send isn't lost — it goes out next heartbeat. `store_ack` is latest-wins per resource (`retain` + `push`), so the store never sends stale duplicates or grows unbounded.
+
+✅ **Idempotent + stale-ack guards — what makes the dual-send safe.** `RecordAck` (`store.go:517-553`) re-applies an ack as an idempotent UPDATE (same status re-set, `last_verified_at` bumped), with three guards that prevent duplicates/reorders from corrupting in-flight intent:
+- `status != 'deleting'` — a tombstone is only ever reaped (via the `unprotected`-DELETE path), never UPDATE'd back to life.
+- `NOT (status='protecting' AND pending_action='remove' AND $2 != 'unprotected')` — a late `"protected"` ack can't undo an in-flight unprotect. *Example:* admin unprotects X (`protecting`/`remove`); a stale heartbeat `"protected"` ack arrives → blocked.
+- `NOT (status='protecting' AND pending_action='apply' AND $2='unprotected')` — mirror: a stale `"unprotected"` ack can't undo an in-flight apply.
+
+🟡 **Finding F22 (minor) — `port_reachable` accepted by `RecordAck` but never persisted. → ✅ FIXED (2026-06-12).**
+`RecordAck`'s signature took `portReachable bool`, but the UPDATE never referenced it and there's no `port_reachable` column. No information lost (it's redundant with `status`: `protected` ⟺ reachable; `"port not listening"` ⟺ not) — but the parameter was a small lie in the contract. **Fix:** dropped the param from the signature and the one call site (`control_stream.go:handleResourceAcks`), with a comment recording why reachability isn't persisted separately. `go build`/`go vet` clean.
+
+**Note (scale, not a finding):** the heartbeat re-acks *every* active resource *every* tick → O(resources) idempotent UPDATEs per shield per heartbeat. Fine now; at thousands of resources/shield, re-ack only on change (the immediate path already covers changes) and let the Phase-3 state report carry liveness.
+
+**Loop closed:** click "Protect" → DB `protecting` → push/snapshot → connector → shield enforces (atomic nftables, F21) → `ResourceAck` flows back → `RecordAck` → DB `protected`. End to end.
 
 ---
 
@@ -448,6 +486,7 @@ Shield emits `ResourceAck` (immediately on apply + drained on next heartbeat). C
 8. **Reconciler held a global mutex across DB + network I/O** (Piece 4 Finding F10) — ✅ **FIXED (2026-06-11):** lock narrowed to the in-memory hysteresis maps only; all I/O moved outside it.
 9. ~~**Snapshot `Generation` is non-monotonic wall-clock**~~ (Piece 4 Finding F11) — ✅ **FIXED (2026-06-11):** replaced wall-clock millis with a per-shield monotonic counter bumped only on desired-content change (fingerprint over `desiredForShield`'s rows), stored as opaque columns (migration 018). Desired-state rule stays single-sourced in Go — no trigger, no SQL predicate. Verified end-to-end against real Postgres.
 7. **Vestigial soft-delete + stale index** (Piece 3, Findings 8/9) — `deleted_at`/`'deleted'` scaffolding is dead (hard-delete); `idx_resources_managing` matches zero rows post-rename. **Folded into ADR-004 (Phase 1 index fix, Phase 4 cleanup).**
+10. ~~**Shield firewall rebuild not atomic → fail-open**~~ (Piece 7 Finding F21) — ✅ **FIXED (2026-06-12):** `apply_nftables` rebuilt via delete-chain then re-add in two transactions, leaving a fail-open window every rebuild and **all** resources unprotected on a partial failure (while still reported protected). Replaced with a single atomic `flush chain` + rebuild batch (old rules hold until commit; failed apply rolls back wholesale). The security property is *old protection stays in force until the new ruleset commits.* Connector-side delivery (F18) and shield-side enforcement (F21) are the two halves of "best-effort fast path, atomic durable state."
 
 ---
 

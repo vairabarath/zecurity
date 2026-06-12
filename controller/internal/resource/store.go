@@ -514,7 +514,11 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 }
 
 // RecordAck processes a ResourceAck from Shield and updates the resource status.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
+// The ack's port_reachable is intentionally not a parameter: it carries no
+// information beyond `status` (protected ⟺ reachable; "port not listening" ⟺ not),
+// and there is no port_reachable column to persist it to. verified_at IS persisted
+// as last_verified_at.
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) error {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
