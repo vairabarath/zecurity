@@ -57,6 +57,28 @@ status: complete
 
 ---
 
+## Follow-Ups / Next Session
+
+> All 8 pieces reviewed and merged. These are the items left to pick up — prioritized.
+> (Captured 2026-06-12; continue from here.)
+
+**Must-do before production**
+- [ ] **F21 live-stack verification** — the shield atomic nftables flush+rebuild (`shield/src/resources.rs` `build_protect_ruleset`/`apply_nftables`) is unit-tested for *structure* only; the kernel apply needs root. On the dev stack: protect a resource → trigger a snapshot re-push → confirm **no enforcement gap** during the rebuild, and that a **forced apply-failure leaves the old rules intact** (no fail-open). See Piece 7 / F21.
+- [ ] **Run migration `018_shield_snapshot_generation.sql` on staging/prod** before the new controller binary serves traffic there (it reads `shields.snapshot_generation`). Already applied on dev.
+
+**Genuinely open — needs a decision (never resolved)**
+- [ ] **Piece 3 Finding 7** — unprotect against a permanently-dead/revoked shield can stick in `protecting` forever (no shield to ack). ADR-004 didn't cover it. Options: resolve unprotect-against-dead-shield straight to `unprotected`, or add a timeout sweep out of `protecting`.
+
+**Accepted-by-design — revisit only on trigger (not action items now)**
+- [ ] **F19** (best-effort instruction delivery, drop-on-failure) — revisit only if telemetry shows reconnect-storm reap/apply latency operators notice.
+- [ ] **F20** (per-shield `select!` loop couples send-backpressure to recv) — revisit only if a slow shield is shown to delay its own ack/state processing materially.
+- [ ] **Piece 8 scale note** — heartbeat re-acks every active resource every tick (O(resources) idempotent UPDATEs/shield/tick). At thousands of resources/shield, re-ack only on change and lean on the Phase-3 state report for liveness.
+
+**Architectural suggestion (from the NAT discussion — optional, not a finding)**
+- [ ] Replace the connector's `api.ipify.org` public-IP echo (`connector/src/controller_client.rs:fetch_public_ip`) with the **controller-observed source IP** (free, from the existing mTLS connection), and add an **active reachability probe** from the controller to the connector's advertised QUIC port — use that as the source of truth for "direct vs relayed," with private-vs-public comparison only as a UI hint. (Relay-based data plane → no STUN needed.)
+
+---
+
 # Piece 1 — Admin UI Trigger
 
 **Status:** ✅ reviewed (2026-06-01)
