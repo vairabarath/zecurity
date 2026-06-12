@@ -35,12 +35,13 @@ type AccessRuleRow struct {
 
 // Store wraps a pgxpool and provides policy DB operations.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	relayAddr string
 }
 
 // NewStore creates a Store.
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(pool *pgxpool.Pool, relayAddr string) *Store {
+	return &Store{pool: pool, relayAddr: relayAddr}
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────

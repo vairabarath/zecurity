@@ -135,21 +135,25 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 	// Look up the active connector's LAN address so clients know which QUIC
 	// tunnel endpoint to connect to. Connector QUIC always runs on port 9092.
 	// lan_addr may be stored as "ip:port" (gRPC port 9091) — extract only the host.
-	var connectorTunnelAddr string
-	var lanAddr string
+	var connectorTunnelAddr, connectorID, connectorSPIFFE string
+	var lanAddr, trustDomain string
 	_ = pool.QueryRow(ctx,
-		`SELECT COALESCE(lan_addr, '') FROM connectors
+		`SELECT COALESCE(lan_addr, ''), id::text, COALESCE(trust_domain, '')
+		 FROM connectors
 		 WHERE tenant_id = $1
 		   AND status = 'active'
 		 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1`,
 		workspaceID,
-	).Scan(&lanAddr)
+	).Scan(&lanAddr, &connectorID, &trustDomain)
 	if lanAddr != "" {
 		host := lanAddr
 		if h, _, err := net.SplitHostPort(lanAddr); err == nil {
 			host = h
 		}
 		connectorTunnelAddr = host + ":9092"
+	}
+	if connectorID != "" && trustDomain != "" {
+		connectorSPIFFE = "spiffe://" + trustDomain + "/connector/" + connectorID
 	}
 
 	return &clientv1.ACLSnapshot{
@@ -158,5 +162,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		GeneratedAt:          time.Now().Unix(),
 		Entries:              entries,
 		ConnectorTunnelAddr:  connectorTunnelAddr,
+		RelayAddr:            store.relayAddr,
+		ConnectorId:          connectorID,
+		ConnectorSpiffe:      connectorSPIFFE,
 	}, nil
 }
