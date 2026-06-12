@@ -124,7 +124,7 @@ struct JwtClaims {
 
 impl StoredWorkspaceState {
     pub fn from_login(result: LoginResult) -> Self {
-        let claims = decode_claims(&result.session.access_token).unwrap_or_default(); // comes from the login result
+        let claims = decode_claims(&result.session.access_token).unwrap_or_default();
         Self {
             schema_version: appmeta::SCHEMA_VERSION,
             workspace: StoredWorkspace {

@@ -92,7 +92,7 @@ async fn run_once(
 
     // Discovery: set up interval, consume its immediate first tick, then send full sync.
     let mut discovery_tick =
-        tokio::time::interval( Duration::from_secs(cfg.discovery_interval_secs));
+        tokio::time::interval(Duration::from_secs(cfg.discovery_interval_secs));
     discovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     discovery_tick.tick().await; // consume the immediate first tick
 
@@ -296,16 +296,11 @@ async fn build_client(
     state: &ShieldState,
     cfg: &ShieldConfig,
 ) -> Result<ShieldServiceClient<tonic::transport::Channel>> {
-
-    // path object creation for cross platform safe
     let state_dir = Path::new(&cfg.state_dir);
-
-    //reads the certificate from the file path using the path object
     let ca_pem = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
     let cert_pem = tokio::fs::read(state_dir.join("shield.crt")).await?;
     let key_pem = tokio::fs::read(state_dir.join("shield.key")).await?;
 
-    //function call for creating the channel
     let channel = tls::build_connector_channel(
         &ca_pem,
         &cert_pem,

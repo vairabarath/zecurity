@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { Laptop, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
@@ -9,6 +9,13 @@ import {
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog'
 import { EmptyState, StatusPill, relativeTime } from '@/lib/console'
 
 type Device = GetClientDevicesQuery['clientDevices'][number]
@@ -17,135 +24,148 @@ function shortId(id: string): string {
   return id.length > 10 ? `${id.slice(0, 8)}…` : id
 }
 
-function formatExpiry(notAfter: string | null | undefined): string {
-  if (!notAfter) return '—'
-  const d = new Date(notAfter)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+function DeviceRow({
+  device,
+  onRevoke,
+}: {
+  device: Device
+  onRevoke: (id: string, name: string) => void
+}) {
+  const isRevoked = !!device.revokedAt
+  return (
+    <div className={`admin-table-row grid-cols-[1fr_80px_1fr_130px_130px_130px_100px_80px] ${isRevoked ? 'opacity-60' : ''}`}>
+      <span className="font-mono text-[12px] truncate" title={device.id}>
+        {shortId(device.id)}
+      </span>
+      <span className="text-[12.5px] text-muted-foreground capitalize">{device.os}</span>
+      <span className="truncate text-[13px]">{device.commonName}</span>
+      <span className="text-[12.5px] text-muted-foreground">{relativeTime(device.createdAt)}</span>
+      <span className="text-[12.5px] text-muted-foreground">{relativeTime(device.lastSeenAt)}</span>
+      <span className="text-[12.5px] text-muted-foreground">
+        {device.certNotAfter ? new Date(device.certNotAfter).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}
+      </span>
+      <StatusPill label={isRevoked ? 'Revoked' : 'Active'} tone={isRevoked ? 'danger' : 'ok'} />
+      <div>
+        {!isRevoked && (
+          <button
+            onClick={() => onRevoke(device.id, device.commonName)}
+            className="grid h-8 w-8 place-items-center rounded-xl border border-border text-muted-foreground transition-colors hover:border-destructive hover:text-destructive"
+            title="Revoke device"
+          >
+            <ShieldOff className="h-3.5 w-3.5" />
+          </button>
+        )}
+      </div>
+    </div>
+  )
 }
 
 export default function DeviceManagement() {
-  const { data, loading } = useQuery(GetClientDevicesDocument, {
+  const { data, loading, refetch } = useQuery(GetClientDevicesDocument, {
     fetchPolicy: 'cache-and-network',
-    pollInterval: 30000,
+    pollInterval: 30_000,
   })
+  const [revokeDevice, { loading: revoking }] = useMutation(RevokeDeviceDocument)
 
-  const [revokeDevice, { loading: revoking }] = useMutation(RevokeDeviceDocument, {
-    refetchQueries: [{ query: GetClientDevicesDocument }],
-    awaitRefetchQueries: true,
-  })
+  const [confirmId, setConfirmId] = useState<string | null>(null)
+  const [confirmName, setConfirmName] = useState('')
 
-  const devices = useMemo<Device[]>(() => data?.clientDevices ?? [], [data])
+  const devices = data?.clientDevices ?? []
   const activeCount = devices.filter((d) => !d.revokedAt).length
 
-  async function handleRevoke(device: Device) {
-    if (!window.confirm(`Revoke device "${device.name}"? The client will be rejected on its next connection.`)) return
+  function openConfirm(id: string, name: string) {
+    setConfirmId(id)
+    setConfirmName(name)
+  }
+
+  function closeConfirm() {
+    setConfirmId(null)
+    setConfirmName('')
+  }
+
+  async function handleRevoke() {
+    if (!confirmId) return
     try {
-      await revokeDevice({ variables: { deviceId: device.id } })
-      toast.success('Device revoked.')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to revoke device.'
-      toast.error(msg)
+      await revokeDevice({ variables: { deviceId: confirmId } })
+      toast('Device revoked.')
+      await refetch()
+    } catch {
+      toast('Failed to revoke device.')
+    } finally {
+      closeConfirm()
     }
   }
 
   return (
     <div className="space-y-6">
       <div className="page-header">
-        <div>
-          <h2 className="page-title">Devices</h2>
-          <p className="page-subtitle">Enrolled client devices in this workspace.</p>
+        <div className="flex items-center gap-3">
+          <div className="grid h-10 w-10 place-items-center rounded-xl bg-primary/10 text-primary">
+            <Laptop className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-[18px] font-semibold tracking-[-0.01em]">Devices</h1>
+            <p className="text-[13px] text-muted-foreground">Enrolled client devices across your workspace</p>
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-[oklch(0.82_0.12_160)]">
-            <span className="status-pill-dot bg-[oklch(0.82_0.12_160)]" />
-            <span className="font-bold">{activeCount}</span> active
-          </span>
-          <span className="status-pill border-border bg-secondary text-muted-foreground">
-            <span className="font-bold text-foreground">{devices.length}</span> total
-          </span>
-        </div>
+        {devices.length > 0 && (
+          <StatusPill label={`${activeCount} active`} tone="ok" />
+        )}
       </div>
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-[1200px] items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_120px] gap-4 px-5 py-4">
-            {['Device', 'OS', 'SPIFFE ID', 'Cert Expires', 'Last Seen', 'Status', 'Actions'].map((label, index) => (
-              <div key={label} className={`table-head-label ${index === 6 ? 'text-right' : ''}`}>{label}</div>
-            ))}
+          <div className="grid min-w-[900px] grid-cols-[1fr_80px_1fr_130px_130px_130px_100px_80px] gap-4 table-head">
+            <span>Device ID</span>
+            <span>OS</span>
+            <span>Common Name</span>
+            <span>Enrolled</span>
+            <span>Last Seen</span>
+            <span>Cert Expires</span>
+            <span>Status</span>
+            <span></span>
           </div>
 
-          {loading && !data ? (
-            <div className="min-w-[1200px] p-5 space-y-3">
-              {Array.from({ length: 5 }).map((_, index) => (
-                <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
+          {loading && devices.length === 0 && (
+            <div className="flex flex-col gap-2 p-3">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 rounded-2xl" />
               ))}
             </div>
-          ) : devices.length === 0 ? (
+          )}
+
+          {!loading && devices.length === 0 && (
             <EmptyState
               icon={<Laptop className="h-6 w-6" />}
-              title="No enrolled devices"
-              description="Devices appear here as users enroll through the client."
+              title="No enrolled devices."
+              description="Devices appear here after users run zecurity login."
             />
-          ) : (
-            <div className="min-w-[1200px]">
-              {devices.map((device) => {
-                const revoked = !!device.revokedAt
-                return (
-                  <div key={device.id} className="admin-table-row grid items-center grid-cols-[1.4fr_120px_1.5fr_160px_140px_120px_120px] gap-4 px-5 py-4">
-                    <div className="flex min-w-0 items-center gap-3">
-                      <span className="grid h-9 w-9 place-items-center rounded-xl border border-[oklch(0.78_0.09_310/0.25)] bg-[oklch(0.78_0.09_310/0.14)] text-[oklch(0.78_0.09_310)]">
-                        <Laptop className="h-4 w-4" />
-                      </span>
-                      <div className="min-w-0">
-                        <div className="truncate text-[15px] font-bold leading-tight">{device.name}</div>
-                        <div className="truncate font-mono text-[10.5px] tracking-tight text-muted-foreground/70">
-                          {shortId(device.id)}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="truncate text-sm text-muted-foreground">{device.os || '—'}</div>
-
-                    <div className="truncate font-mono text-[12px] text-muted-foreground/80" title={device.spiffeId ?? ''}>
-                      {device.spiffeId ?? '—'}
-                    </div>
-
-                    <div className="font-mono text-[12.5px] text-muted-foreground/80">
-                      {formatExpiry(device.certNotAfter)}
-                    </div>
-
-                    <div className="font-mono text-[12.5px] text-muted-foreground/80">
-                      {relativeTime(device.lastSeenAt)}
-                    </div>
-
-                    <div>
-                      <StatusPill label={revoked ? 'revoked' : 'active'} tone={revoked ? 'danger' : 'ok'} />
-                    </div>
-
-                    <div className="text-right">
-                      {revoked ? (
-                        <span className="text-[12.5px] text-muted-foreground/60">—</span>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={revoking}
-                          onClick={() => handleRevoke(device)}
-                          className="gap-1.5 text-[oklch(0.75_0.16_25)] hover:bg-[oklch(0.75_0.16_25/0.1)]"
-                        >
-                          <ShieldOff className="h-3.5 w-3.5" />
-                          Revoke
-                        </Button>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
           )}
+
+          {devices.map((device) => (
+            <DeviceRow key={device.id} device={device} onRevoke={openConfirm} />
+          ))}
         </div>
       </div>
+
+      <Dialog open={!!confirmId} onOpenChange={(open) => { if (!open) closeConfirm() }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke device?</DialogTitle>
+          </DialogHeader>
+          <p className="text-[13.5px] text-muted-foreground">
+            Revoke <span className="font-semibold text-foreground">{confirmName}</span>? The device will be blocked on its next tunnel attempt once the Connector refreshes the CRL (up to 5 minutes).
+          </p>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeConfirm} disabled={revoking}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleRevoke} disabled={revoking}>
+              {revoking ? 'Revoking…' : 'Revoke'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

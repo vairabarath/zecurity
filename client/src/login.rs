@@ -29,10 +29,10 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // code_challenge is sent to the controller in InitiateAuth.
     // code_verifier is kept locally and sent in TokenExchange.
     // The controller verifies SHA256(code_verifier) == code_challenge.
-    let mut verifier_bytes = [0u8; 32]; // create empty 32 sized array
-    rand::thread_rng().fill_bytes(&mut verifier_bytes); // fills the randome 0's and 1's bytes there
-    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes); // creates bash64 encode
-    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes())); // create again a base64 encode for the code verifier this is code challenge
+    let mut verifier_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut verifier_bytes);
+    let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+    let code_challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
 
     // Local callback server — receives the ctrl_code from the controller's
     // redirect after it handles the Google OAuth callback server-side.
@@ -40,19 +40,19 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     let tx = Arc::new(tokio::sync::Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
 
-    let app = Router::new().route( // definition only for the rout handler
+    let app = Router::new().route(
         "/callback",
         get(move |Query(params): Query<HashMap<String, String>>| {
             let tx = tx_clone.clone();
             async move {
-                if let Some(code) = params.get("code") { // http://127.0.0.1:53721/callback?code=XYZ then 'code = "XYZ"'
+                if let Some(code) = params.get("code") {
                     if let Some(sender) = tx.lock().await.take() {
                         let _ = sender.send(code.clone());
                     }
                 }
                 Html(
                     "<html><body><h2>Authentication complete. \
-                     You can close this tab.</h2></body></html>", // after the login complete the message is showed to the client
+                     You can close this tab.</h2></body></html>",
                 )
             }
         }),
@@ -70,7 +70,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // the Google URL directly. The controller's fixed /api/clients/callback
     // is embedded in auth_url as the redirect_uri.
     println!("Initiating authentication...");
-    let initiated = grpc //this is send to the controller for the browser to open the login flow
+    let initiated = grpc
         .initiate_auth(InitiateAuthRequest {
             workspace_slug: conf.workspace.clone(),
             code_challenge,
@@ -98,32 +98,32 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     // SHA256(code_verifier) == code_challenge from InitiateAuth (PKCE).
     println!("Exchanging token...");
     let tok = grpc
-        .token_exchange(TokenExchangeRequest { // validtates the ctrl_code in service.go
+        .token_exchange(TokenExchangeRequest {
             session_id: initiated.session_id,
             ctrl_code,
             code_verifier,
             invite_token: invite_token.unwrap_or_default(),
         })
         .await?
-        .into_inner(); //accesstoken, refreshtoken, expiresin, email
+        .into_inner();
 
     // Generate P-384 keypair in memory — never written to disk.
     println!("Generating device certificate...");
-    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?; // generates private key and public key
+    let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)?;
     let private_key_pem = key_pair.serialize_pem();
 
     let hostname = hostname::get()
         .unwrap_or_default()
         .to_string_lossy()
-        .to_string(); // gets the device name and make this as owner of the value
+        .to_string();
     let os = std::env::consts::OS.to_string();
 
-    let mut params = CertificateParams::default(); // creates empty certificate request parameters
-    params.distinguished_name = DistinguishedName::new(); // creates empty x.509 identity fields initialy cn = "", o="", ou = "" all empty
+    let mut params = CertificateParams::default();
+    params.distinguished_name = DistinguishedName::new();
     params
         .distinguished_name
-        .push(rcgen::DnType::CommonName, &hostname); // adds cn = desktop-abc123 'the host name'
-    let csr_pem = params.serialize_request(&key_pair)?.pem()?;// creates the signing request contains public key and cn and signature using the private key
+        .push(rcgen::DnType::CommonName, &hostname);
+    let csr_pem = params.serialize_request(&key_pair)?.pem()?;
 
     // EnrollDevice — unchanged from the original flow.
     let enroll = grpc
@@ -132,12 +132,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             csr_pem,
             device_name: hostname.clone(),
             os: os.clone(),
-        })/*{
-                                                "access_token": "jwt...",
-                                                "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----",
-                                                "device_name": "DESKTOP-ABC123",
-                                                "os": "linux"
-                                                } */
+        })
         .await?
         .into_inner();
 

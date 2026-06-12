@@ -3,7 +3,6 @@ import { NavLink, useLocation } from 'react-router-dom'
 import {
   Box,
   ChevronDown,
-  Download,
   Laptop,
   LayoutDashboard,
   Network,
@@ -136,13 +135,6 @@ export function Sidebar() {
           <NavItem key={item.to} {...item} />
         ))}
         <TeamSection />
-        {user?.role === 'ADMIN' && (
-          <>
-            <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
-            <NavItem to="/devices"        label="Devices"        icon={Laptop} />
-            <NavItem to="/client-install" label="Install Client" icon={Download} />
-          </>
-        )}
       </nav>
 
       <div className="mx-1 mt-3 rounded-[14px] border border-border bg-secondary/70 p-3">
