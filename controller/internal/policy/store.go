@@ -35,12 +35,13 @@ type AccessRuleRow struct {
 
 // Store wraps a pgxpool and provides policy DB operations.
 type Store struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	relayAddr string
 }
 
 // NewStore creates a Store.
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(pool *pgxpool.Pool, relayAddr string) *Store {
+	return &Store{pool: pool, relayAddr: relayAddr}
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────
@@ -306,6 +307,21 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 		out = append(out, r)
 	}
 	return out, rows.Err()
+			/*
+			out = [
+			{
+				ResourceID:"res-1",
+				GroupID:"grp-dev",
+			},
+			{
+				ResourceID:"res-1",
+				GroupID:"grp-admin",
+			},
+			{
+				ResourceID:"res-2",
+				GroupID:"grp-admin",
+			},
+		]*/
 }
 
 // ListActiveDeviceSPIFFEsForGroup returns non-revoked client device SPIFFE IDs

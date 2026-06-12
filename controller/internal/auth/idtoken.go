@@ -60,7 +60,7 @@ func VerifyGoogleIDToken(ctx context.Context, idToken, clientID string) (*Google
 		return nil, fmt.Errorf("parse id_token: %w", err)
 	}
 
-	kid, ok := unverified.Header["kid"].(string)
+	kid, ok := unverified.Header["kid"].(string) //key id 
 	if !ok || kid == "" {
 		return nil, fmt.Errorf("id_token missing kid header")
 	}

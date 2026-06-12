@@ -44,6 +44,22 @@ pub async fn run() -> Result<()> {
 
     let state = runtime::new_shared();
 
+        //     pub struct RuntimeState {
+        //     pub schema_version: u32,
+        //     pub workspace: Option<WorkspaceInfo>,
+        //     pub user: Option<UserInfo>,
+        //     pub device: Option<DeviceInfo>,
+        //     pub session: Option<SessionInfo>,
+        //     pub resources: Vec<Resource>,
+        //     pub last_sync_at: Option<i64>,
+        //    
+        //     pub acl_snapshot: Option<AclSnapshot>,
+        //    
+        //     pub acl_last_sync_at: Option<i64>,
+        //     
+        //     pub tun_handle: Option<Arc<TunHandle>>,
+        // }
+
     // Load encrypted durable state on startup if present.
     if let Ok(stored) = state_store::load_workspace_state(&conf.workspace) {
         let mut s = state.write().await;
@@ -76,7 +92,7 @@ pub async fn run() -> Result<()> {
             .with_context(|| format!("create socket directory {}", parent.display()))?;
     }
 
-    let listener = UnixListener::bind(&socket_path)
+    let listener = UnixListener::bind(&socket_path) // this is like an api for the daemon and the client commands zecurity-client status -> .sock -> daemon -> goes to the main.rs and match is worked and continue. this is the cli commands communication channel
         .with_context(|| format!("bind IPC socket {}", socket_path.display()))?;
 
     info!(path = %socket_path.display(), "IPC socket ready");
@@ -135,8 +151,8 @@ async fn handle_connection(
                 kind: "Error".into(),
                 error: Some("malformed JSON request".into()),
                 ..Default::default()
-            },
-            false,
+            }, // response
+            false, // shutdown return message
         ),
     };
 
@@ -678,11 +694,11 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
     };
 
     let snapshot = fetch_acl_snapshot(conf, &ca_pem, &access_token, &device_id).await?;
-    let result = AclSyncResult {
-        version: snapshot.version,
-        entry_count: snapshot.entries.len(),
-        synced_at: now_unix(),
-    };
+    let result = AclSyncResult {     //result = AclSyncResult {
+        version: snapshot.version,                  //     version: 17,
+        entry_count: snapshot.entries.len(),        //     entry_count: 2,
+        synced_at: now_unix(),                      //     synced_at: 1781100000,
+    };                                              // }
 
     let mut s = state.write().await;
     s.acl_snapshot = Some(snapshot);

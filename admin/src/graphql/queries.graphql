@@ -298,6 +298,7 @@ query GetGroup($id: ID!) {
 query GetConnectorLogs($limit: Int) {
   connectorLogs(limit: $limit) {
     id
+    workspaceId
     connectorId
     message
     createdAt

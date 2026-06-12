@@ -169,7 +169,13 @@ async fn list_routes_v4(handle: &Handle) -> Result<Vec<(IpAddr, u8)>> {
     let mut routes = handle
         .route()
         .get(rtnetlink::IpVersion::V4)
-        .execute();
+        .execute();  /*default via 192.168.1.1
+
+                        192.168.1.0/24 dev eth0
+
+                        10.1.0.0/16 dev docker0
+
+                        172.17.0.0/16 dev docker0 */
     let mut result = Vec::new();
     while let Some(msg) = routes.try_next().await? {
         let prefix_len = msg.header.destination_prefix_length;
