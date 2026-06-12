@@ -94,7 +94,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = ConnectorConfig::load()?;
 
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&cfg.log_level).unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     info!(

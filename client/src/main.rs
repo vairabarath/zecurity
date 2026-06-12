@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install default crypto provider");
 
-    let cli = Cli::parse(); // cli {command: Commands::Daemon}
+    let cli = Cli::parse();
     match cli.command {
         Commands::Setup {
             workspace,
@@ -86,6 +86,6 @@ async fn main() -> anyhow::Result<()> {
         Commands::Logout => cmd::logout::run().await,
         Commands::Up => cmd::up::run().await,
         Commands::Down => cmd::down::run().await,
-        Commands::Daemon => daemon::run().await, //matches Commands::Daemon && calls run function in the daemon package
+        Commands::Daemon => daemon::run().await,
     }
 }

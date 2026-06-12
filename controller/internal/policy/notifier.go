@@ -34,8 +34,8 @@ func (n *Notifier) NotifyPolicyChange(_ context.Context, workspaceID string) err
 	n.mu.Lock()
 	v, ok := n.versions[workspaceID]
 	if !ok {
-		v = &atomic.Uint64{}  // initiate as '0' , v = 0
-		n.versions[workspaceID] = v // now the 
+		v = &atomic.Uint64{}
+		n.versions[workspaceID] = v
 	}
 	n.mu.Unlock()
 

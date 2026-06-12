@@ -36,15 +36,11 @@ export default function Login() {
   const [lookupWorkspace] = useLazyQuery(LookupWorkspaceDocument)
   const [lookupByEmail] = useLazyQuery(LookupWorkspacesByEmailDocument)
   const [initiateAuth] = useMutation(InitiateAuthDocument)
-  // runs only if the user clicks the button 
 
-  // Only for the slug clearance
   function handleSlugChange(value: string) {
     setSlug(value.toLowerCase().replace(/[^a-z0-9-]/g, ''))
     setError(null)
   }
-  
-// cals backend function
 
   async function handleEndpointSubmit(event: FormEvent) {
     event.preventDefault()

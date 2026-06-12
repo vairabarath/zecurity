@@ -73,14 +73,7 @@ while getopts ":fh" opt; do
 done
 
 # ── Checks ──────────────────────────────────────────────────────────────────
-
-# checks is this root or not
-
 [[ $EUID -eq 0 ]] || err "must run as root (use sudo)"
-
-
-# these are for the version checking if it is missing exits installer
-
 command -v curl     >/dev/null || err "curl is required"
 command -v systemctl >/dev/null || err "systemctl is required (systemd hosts only)"
 command -v sha256sum >/dev/null || err "sha256sum is required"
