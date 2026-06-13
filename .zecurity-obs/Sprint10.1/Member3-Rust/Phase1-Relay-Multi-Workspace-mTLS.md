@@ -67,4 +67,34 @@ cargo build
 
 ## Post-Phase Fixes
 
-*(Empty)*
+### Relay Multi-Workspace TLS Configuration
+
+- Added `relay/src/tls.rs` to build a QUIC/rustls server configuration that
+  requires peer certificates and trusts only the provisioned Platform
+  Intermediate CA.
+- Relay startup now validates that its provisioned leaf has the expected Relay
+  SPIFFE ID and matches its private key.
+- Added post-handshake peer identity extraction that requires peers to present
+  `leaf + Workspace CA` and accepts only exact Connector or Client-device
+  SPIFFE roles.
+- Added focused tests for exact Relay identity, key mismatch, leaf-only peer
+  rejection, disallowed roles, and Connectors from two different workspaces.
+- Wired the QUIC listener into Relay startup using `RELAY_BIND`, defaulting to
+  `0.0.0.0:9093`.
+- The listener rejects connections unless their authenticated certificate
+  identity resolves to an allowed Connector or Client-device SPIFFE role.
+- Added `session.rs` Register and Lookup handling:
+  - Connector registration ID and SPIFFE ID must exactly match the authenticated
+    Connector certificate.
+  - Connector registrations are removed when their QUIC connection closes.
+  - Client Lookup requires the authenticated `client_device` role and the same
+    workspace trust domain as the registered Connector.
+  - Reused Client QUIC connections can carry multiple concurrent Lookup streams.
+  - Successful Lookup streams are bridged bidirectionally without interpreting
+    tunneled payload bytes.
+
+Current startup environment:
+
+```text
+RELAY_BIND=0.0.0.0:9093
+```

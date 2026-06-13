@@ -1,17 +1,19 @@
 use std::env;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use anyhow::{bail, Context, Result};
 use uuid::Uuid;
 
 const DEFAULT_STATE_DIR: &str = "pki";
 const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_RELAY_BIND: &str = "0.0.0.0:9093";
 
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
     pub relay_id: String,
     pub controller_addr: String,
     pub controller_http_addr: String,
+    pub bind_addr: SocketAddr,
     pub ca_fingerprint: String,
     pub state_dir: String,
     pub dns_sans: Vec<String>,
@@ -41,6 +43,10 @@ impl RelayConfig {
             relay_id,
             controller_addr,
             controller_http_addr,
+            bind_addr: env::var("RELAY_BIND")
+                .unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_owned())
+                .parse()
+                .context("RELAY_BIND must be a socket address")?,
             ca_fingerprint,
             state_dir: env::var("RELAY_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.to_owned()),
             dns_sans: comma_separated("RELAY_DNS_SANS"),
@@ -98,5 +104,13 @@ mod tests {
     fn parses_ip_sans() {
         let values = vec!["10.0.0.5".to_owned(), "2001:db8::1".to_owned()];
         assert_eq!(parse_ip_sans(&values).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn default_relay_bind_is_valid() {
+        assert_eq!(
+            DEFAULT_RELAY_BIND.parse::<SocketAddr>().unwrap().port(),
+            9093
+        );
     }
 }

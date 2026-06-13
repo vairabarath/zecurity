@@ -1516,3 +1516,25 @@ serves on `127.0.0.1:9102`.
 - The current target is a platform-level Relay listener that trusts the
   Platform Intermediate CA and accepts valid Connector chains from any
   workspace.
+
+---
+
+## 2026-06-13 — Codex (Relay multi-workspace TLS configuration)
+
+**What was done:**
+- Added the Relay QUIC/rustls server configuration using the provisioned Relay
+  leaf/key and Platform Intermediate CA as the only peer trust anchor.
+- Required peer certificates and `leaf + Workspace CA` presentation.
+- Added authenticated peer SPIFFE extraction for Connector and Client-device
+  roles from any workspace.
+- Wired TLS material validation and the `RELAY_BIND` QUIC accept loop into
+  Relay startup. Invalid authenticated peer identities are rejected before
+  session handling.
+- Added certificate-bound Connector Register, same-workspace Client Lookup,
+  reusable Lookup streams, registration cleanup, and bidirectional stream
+  bridging in `relay/src/session.rs`.
+
+**Verification:**
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with expected unused-code warnings while the QUIC
+  listener/session files remain pending.

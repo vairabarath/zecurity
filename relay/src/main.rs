@@ -1,11 +1,13 @@
 mod appmeta;
 mod config;
 mod csr;
+mod listener;
 mod protocol;
 mod provision;
+mod session;
 mod spiffe;
 mod state;
-// mod tls;
+mod tls;
 
 pub mod relay {
     pub mod v1 {
@@ -15,6 +17,7 @@ pub mod relay {
 
 use anyhow::Result;
 use config::RelayConfig;
+use std::fs;
 use tracing::info;
 
 #[tokio::main]
@@ -36,10 +39,21 @@ async fn main() -> Result<()> {
     );
 
     let material = provision::ensure_provisioned(&cfg).await?;
+    let relay_certificate = fs::read(&material.certificate_path)?;
+    let relay_key = fs::read(&material.key_path)?;
+    let intermediate_ca = fs::read(&material.intermediate_ca_path)?;
+    let server_config = tls::build_server_config(
+        &relay_certificate,
+        &relay_key,
+        &intermediate_ca,
+        &cfg.relay_id,
+    )?;
     info!(
         certificate = %material.certificate_path.display(),
         intermediate_ca = %material.intermediate_ca_path.display(),
-        "Relay provisioned; QUIC listener and Heartbeat RPC are not implemented yet"
+        bind_addr = %cfg.bind_addr,
+        "Relay provisioned; starting multi-workspace mTLS QUIC listener"
     );
-    Ok(())
+
+    listener::run_listener(cfg.bind_addr, server_config, state::RelayState::new()).await
 }
