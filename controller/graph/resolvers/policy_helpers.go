@@ -51,7 +51,7 @@ func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, resourceID string
 		        r.remote_network_id, rn.name
 		 FROM resources r
 		 JOIN remote_networks rn ON rn.id = r.remote_network_id
-		 WHERE r.id = $1 AND r.deleted_at IS NULL`,
+		 WHERE r.id = $1`,
 		resourceID,
 	).Scan(
 		&res.ID, &res.Name, &description, &res.Host, &res.Protocol, &res.PortFrom, &res.PortTo,

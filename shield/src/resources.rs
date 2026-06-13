@@ -102,11 +102,17 @@ pub fn validate_host(resource_host: &str) -> bool {
 }
 
 pub fn check_port(host: &str, port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &format!("{}:{}", host, port).parse().unwrap(),
-        Duration::from_secs(2),
-    )
-    .is_ok()
+    // Hosts reaching here are validated IPs (127.0.0.1 or detect_lan_ip()), so this
+    // parses in practice — but never panic on a malformed address: an unparseable
+    // host is simply treated as not-listening (fail to `failed`, not a shield crash).
+    let addr = match format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(host = host, port = port, "check_port: unparseable address, treating as unreachable");
+            return false;
+        }
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
 }
 
 /// Build the single atomic nftables transaction that (re)builds `resource_protect`.
@@ -537,15 +543,22 @@ fn source_accept_rule(
     source: &str,
 ) -> Rule<'static> {
     // Parse "addr/len" into a Prefix expression. Fall back to plain string for
-    // single-host addresses (no slash), which nftables resolves correctly.
-    let source_expr: Expression<'static> = if let Some((addr, len)) = source.split_once('/') {
-        let len: u32 = len.parse().expect("invalid prefix length in source rule");
-        Expression::Named(NamedExpression::Prefix(Prefix {
-            addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
-            len,
-        }))
-    } else {
-        Expression::String(Cow::Owned(source.to_string()))
+    // single-host addresses (no slash), which nftables resolves correctly. A
+    // malformed prefix length also falls back to the plain-string form rather than
+    // panicking — today `source` is always the hardcoded "127.0.0.0/8", but never let
+    // a bad rule string crash the shield mid-apply.
+    let source_expr: Expression<'static> = match source.split_once('/') {
+        Some((addr, len)) => match len.parse::<u32>() {
+            Ok(len) => Expression::Named(NamedExpression::Prefix(Prefix {
+                addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
+                len,
+            })),
+            Err(_) => {
+                warn!(source = source, "invalid prefix length in source rule, using literal");
+                Expression::String(Cow::Owned(source.to_string()))
+            }
+        },
+        None => Expression::String(Cow::Owned(source.to_string())),
     };
 
     Rule {
