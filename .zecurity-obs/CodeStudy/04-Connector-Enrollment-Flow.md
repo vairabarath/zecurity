@@ -100,6 +100,24 @@ copies + runs on server ──────────────────�
 
 ---
 
+# Identity Reference (SPIFFE)
+
+> Consolidated quick-reference for the identities this flow issues and verifies — pulled together from the per-stage SPIFFE builders so you don't have to reconstruct them. Definitions live in [appmeta/identity.go](controller/internal/appmeta/identity.go) (Go) and [connector/src/appmeta.rs](connector/src/appmeta.rs) (Rust).
+
+| Identity | Format | Go | Rust |
+|---|---|---|---|
+| Vendor trust domain | `zecurity.in` | `identity.go:28` | `appmeta.rs` |
+| Workspace trust domain | `ws-{slug}.zecurity.in` | `identity.go:66-68` | — |
+| Controller | `spiffe://zecurity.in/controller/global` | `identity.go:32` | `appmeta.rs:39` |
+| Connector | `spiffe://{trust_domain}/connector/{connector_id}` | `identity.go:77-79` | `appmeta.rs:95-100` |
+| Shield | `spiffe://{trust_domain}/shield/{shield_id}` | `identity.go:82-84` | — |
+
+**Chain:** connector leaf ← **Workspace CA** (per-tenant, `workspace_ca_keys`) ← **Intermediate CA** (platform, `ca_intermediate`) ← Root.
+**Key type everywhere:** EC **P-384** (ECDSA P-384 / SHA-384).
+**Connector cert TTL:** 7 days (`CONNECTOR_CERT_TTL`). The connector leaf carries **both** `ClientAuth` (it is a client to the controller) **and** `ServerAuth` (it is a TLS server to shields on `:9091`) EKUs — which is why the same leaf works in Stage 30's mTLS channel and the `:9091` server.
+
+---
+
 # Half A — Admin Generates Token
 
 ## Stage 1 — Admin Opens /connectors, Clicks Add Connector
@@ -440,6 +458,12 @@ The script:
 6. `systemctl daemon-reload && systemctl enable --now zecurity-connector`
 
 Systemd launches the binary. Install done.
+
+**Deployment hardening details** (additive to the 6-step summary above):
+- **Binary integrity** — the script downloads the arch-matched release (`connector-linux-amd64` / `connector-linux-arm64`) and **verifies its SHA-256 against `checksums.txt`** before installing; a mismatch aborts.
+- **CA pre-seed** — it also fetches `/ca.crt` to `/etc/zecurity/ca.crt` during install (the enrollment flow re-fetches and pins it in Stage 14–15 regardless).
+- **systemd sandboxing** — [zecurity-connector.service](connector/systemd/zecurity-connector.service) runs `ProtectSystem=strict`, `NoNewPrivileges`, `SystemCallFilter=@system-service`, grants only `CAP_NET_ADMIN` / `CAP_NET_RAW`, and limits writes to `ReadWritePaths=/var/lib/zecurity-connector /etc/zecurity`.
+- **Docker alternative** — [docker-compose.yml](connector/docker-compose.yml) runs the published image with `network_mode: host` + `NET_ADMIN` / `NET_RAW`, persisting `/var/lib/zecurity-connector`; same env vars, with `ENROLLMENT_TOKEN` dropped after first run.
 
 ## Stage 12 — Connector Boots, Enters Enrollment Flow
 
