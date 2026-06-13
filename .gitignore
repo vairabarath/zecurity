@@ -52,6 +52,8 @@ completed/
 client/target/
 connector/target/
 shield/target/
+relay/target/
+relay/pki/*.key
 
 # Design handoff
 zecurity-handoff/
