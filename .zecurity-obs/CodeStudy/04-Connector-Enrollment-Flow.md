@@ -100,6 +100,61 @@ copies + runs on server ──────────────────�
 
 ---
 
+## Study Tracker
+
+> Review **one stage at a time** against the live code. Tick a box when you've walked that stage and confirmed the doc matches the source. Record anything you find **inline in that stage's section** (add a `**Findings**` block under it) — this tracker stays just a map of what's been reviewed. No findings are recorded yet.
+
+**Half A — Admin Generates Token**
+- [ ] Stage 1 — Admin opens /connectors, clicks Add Connector
+- [ ] Stage 2 — Apollo sends the mutation
+- [ ] Stage 3 — Middleware → gqlgen → resolver
+- [ ] Stage 4 — Verify remote network is active
+- [ ] Stage 5 — INSERT INTO connectors (status='pending')
+- [ ] Stage 6 — Compute the CA fingerprint
+- [ ] Stage 7 — Sign the enrollment JWT
+- [ ] Stage 8 — Store the JTI in Redis
+- [ ] Stage 9 — UPDATE connector row + build install command
+- [ ] Stage 10 — Frontend shows install command
+
+**Half B — Server Side (connector enrolls)**
+- [ ] Stage 11 — Admin runs the install command
+- [ ] Stage 12 — Connector boots, enters enrollment flow
+- [ ] Stage 13 — Parse JWT payload (no signature verify)
+- [ ] Stage 14 — Fetch /ca.crt over plain HTTP
+- [ ] Stage 15 — Verify CA fingerprint (MITM defense)
+- [ ] Stage 16 — Generate EC P-384 keypair, save mode 0600
+- [ ] Stage 17 — Build CSR with CN + SPIFFE SAN URI
+- [ ] Stage 18 — Open gRPC TLS channel rooted in verified CA
+- [ ] Stage 19 — Call Enroll RPC
+
+**Controller-Side Enrollment Handler**
+- [ ] Stage 20 — Verify the JWT
+- [ ] Stage 21 — Atomic BurnEnrollmentJTI
+- [ ] Stage 22 — Verify connector row is pending, tenant matches
+- [ ] Stage 23 — Verify workspace is active
+- [ ] Stage 24 — Parse CSR, verify signature, verify SPIFFE SAN
+- [ ] Stage 25 — Workspace CA signs the connector cert
+- [ ] Stage 26 — UPDATE connectors → active
+- [ ] Stage 27 — Return EnrollResponse
+
+**Back On the Connector**
+- [ ] Stage 28 — Save cert, CA chain, state.json
+- [ ] Stage 29 — Best-effort clean up connector.conf
+
+**Stage 30 — Connector Becomes Operational**
+- [ ] 30.0 — Re-read state.json
+- [ ] 30.1 — Build controller mTLS channel
+- [ ] 30.2 — ShieldRegistry + spawn :9091 server
+- [ ] 30.3 — Auto-updater spawn
+- [ ] 30.4 — Cert store + empty PolicyCache
+- [ ] 30.5 — LAN IP for QUIC advertise
+- [ ] 30.6 — CRL manager + spawn refresh
+- [ ] 30.7 — TLS + QUIC listeners on :9092
+- [ ] 30.8 — Notify systemd READY + spawn watchdog
+- [ ] 30.9 — run_control_stream (heartbeats + ACL snapshots, blocks forever)
+
+---
+
 # Identity Reference (SPIFFE)
 
 > Consolidated quick-reference for the identities this flow issues and verifies — pulled together from the per-stage SPIFFE builders so you don't have to reconstruct them. Definitions live in [appmeta/identity.go](controller/internal/appmeta/identity.go) (Go) and [connector/src/appmeta.rs](connector/src/appmeta.rs) (Rust).
