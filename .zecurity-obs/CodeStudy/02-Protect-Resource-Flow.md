@@ -238,6 +238,12 @@ A row leaves `protecting` ONLY via `RecordAck` or reconnect replay (`GetPendingF
 🟡 **Finding 8 (minor) — vestigial soft-delete scaffolding. ✅ FIXED (2026-06-10, ADR-004 Phase 4.2, Option A).**
 Schema has `deleted_at` (mig 007) + `'deleted'` status (008/009) + ~5 `deleted_at IS NULL` filters, but `SoftDelete` hard-deletes (`DELETE FROM`). So `deleted_at` is never set → all those filters are no-ops, `'deleted'` status is unreachable, function name lies, UI `'deleted'` tone is dead. Cleanup: rename to `Delete` + drop dead filters/status, OR restore real soft-delete (the latter also helps Finding 5).
 > **Resolution:** dropped the scaffolding (migration `017_resources_drop_soft_delete.sql`: `DROP COLUMN deleted_at`, rebuilt both partial indexes without the predicate, removed `'deleted'` from `resources_status_check`); stripped all seven `deleted_at IS NULL` filters in `store.go`; aligned `resourceTone` in both `Resources.tsx` and `ResourceDetail.tsx` to the real enum (also fixed a missing `deleting` tone in `Resources.tsx`). Only the `resources` table was touched — the `'deleted'` soft-delete on workspaces/users/connectors/shields/remote_networks is real and untouched.
+>
+> ⚠️ **Correction (2026-06-13, re-review):** the "all seven … in `store.go`" claim was **incomplete** — two more `resources.deleted_at IS NULL` filters lived in the **policy** package and were missed, so migration 017's `DROP COLUMN deleted_at` would have broken them at runtime (`column r.deleted_at does not exist`):
+> - `controller/internal/policy/store.go:292` — `ListEnabledRulesWithResources` (the ACL compiler — Sprint 8's active feature).
+> - `controller/graph/resolvers/policy_helpers.go:54` — `loadResourceByID` (policy GraphQL responses).
+>
+> Both filters removed (`go build`/`go vet` clean). Lesson: the original cleanup grep was scoped to `resource/store.go`; a repo-wide `deleted_at` grep is the correct scope when dropping a column.
 
 🟡 **Finding 9 (minor, perf) — stale partial index after state rename.**
 Mig 007 `idx_resources_managing ON resources(shield_id,status) WHERE status IN ('managing','removing')`; mig 009 renamed those states to `protecting` but never recreated the index → it now matches **zero rows**, and `GetPendingForShield`'s `WHERE shield_id=$1 AND status='protecting'` has no supporting partial index. Replace predicate with `WHERE status='protecting'`.
@@ -452,6 +458,12 @@ This violated the stated invariant (CLAUDE.md: *"chain resource_protect always f
 
 **Note (not a finding) — `source_accept_rule(127.0.0.0/8)` trusts source IP.** Rule ② accepts by source address (spoofable in principle); rule ① (`iif lo`) accepts by incoming interface (not spoofable). In practice the kernel's martian/`rp_filter` drops `127/8` arriving on a non-loopback interface, so ② can't be abused — it's mostly redundant with `iif lo`. Documentation-level; left as-is.
 
+🟢 **Hardening (2026-06-13, re-review) — removed two `unwrap`/`expect` panic sites.** Both were safe in practice (inputs are validated IPs / the hardcoded `127.0.0.0/8`) but would have panicked the shield mid-apply on malformed input:
+- `check_port` (`resources.rs:104`) — `format!("{host}:{port}").parse().unwrap()` → now matches on the parse and treats an unparseable address as **not-listening** (resource goes `failed`, shield stays up). `run_health_check_loop` re-parses stored hosts without re-validating, so this is the realistic exposure.
+- `source_accept_rule` (`resources.rs:540`) — `len.parse().expect(...)` on the prefix length → now **falls back to the plain-string source form** with a `warn!` instead of panicking.
+
+`cargo build` + the F21 unit tests (`flush_precedes_rule_adds`, `rebuild_is_single_transaction`) clean.
+
 **Future direction (your note):** once atomic, full-chain rebuild is the correct default. Incremental atomic rule updates (add/delete by handle, diffing desired vs live) only earn their complexity at scale (many resources/shield with frequent churn). Not now.
 
 ---
@@ -507,7 +519,7 @@ Shield emits `ResourceAck` (immediately on change **and** re-drained every heart
 6. ~~**Delete of `protected` orphans shield firewall rule** + **fail-open after reboot** (6b) + **stuck `protecting`** (6)~~ — ✅ **Resolved (Piece 4)** by ADR-004 Phase 2/3, now landed: tombstone delete + reap, desired-state snapshot on reconnect (restores `protected`/`failed` after reboot), closed-loop reconciler. **Still open:** protect/unprotect shield-active **asymmetry** (Piece 3 Finding 7 — unprotect against a dead shield can stick); decision deferred. Invariant held: *never destroy intent until effect is observably confirmed.*
 8. **Reconciler held a global mutex across DB + network I/O** (Piece 4 Finding F10) — ✅ **FIXED (2026-06-11):** lock narrowed to the in-memory hysteresis maps only; all I/O moved outside it.
 9. ~~**Snapshot `Generation` is non-monotonic wall-clock**~~ (Piece 4 Finding F11) — ✅ **FIXED (2026-06-11):** replaced wall-clock millis with a per-shield monotonic counter bumped only on desired-content change (fingerprint over `desiredForShield`'s rows), stored as opaque columns (migration 018). Desired-state rule stays single-sourced in Go — no trigger, no SQL predicate. Verified end-to-end against real Postgres.
-7. **Vestigial soft-delete + stale index** (Piece 3, Findings 8/9) — `deleted_at`/`'deleted'` scaffolding is dead (hard-delete); `idx_resources_managing` matches zero rows post-rename. **Folded into ADR-004 (Phase 1 index fix, Phase 4 cleanup).**
+7. **Vestigial soft-delete + stale index** (Piece 3, Findings 8/9) — `deleted_at`/`'deleted'` scaffolding is dead (hard-delete); `idx_resources_managing` matches zero rows post-rename. **Folded into ADR-004 (Phase 1 index fix, Phase 4 cleanup).** ⚠️ **Re-review correction (2026-06-13):** the Phase 4.2 cleanup missed two `resources.deleted_at IS NULL` filters in the **policy** package (`policy/store.go:292` ACL compiler, `policy_helpers.go:54`) that migration 017's `DROP COLUMN` would have broken at runtime — both now removed. See Piece 3 Finding 8 resolution note.
 10. ~~**Shield firewall rebuild not atomic → fail-open**~~ (Piece 7 Finding F21) — ✅ **FIXED (2026-06-12):** `apply_nftables` rebuilt via delete-chain then re-add in two transactions, leaving a fail-open window every rebuild and **all** resources unprotected on a partial failure (while still reported protected). Replaced with a single atomic `flush chain` + rebuild batch (old rules hold until commit; failed apply rolls back wholesale). The security property is *old protection stays in force until the new ruleset commits.* Connector-side delivery (F18) and shield-side enforcement (F21) are the two halves of "best-effort fast path, atomic durable state."
 
 ---

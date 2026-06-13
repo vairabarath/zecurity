@@ -288,8 +288,7 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 		 FROM access_rules ar
 		 JOIN resources r ON r.id = ar.resource_id
 		 WHERE ar.workspace_id = $1
-		   AND ar.enabled = TRUE
-		   AND r.deleted_at IS NULL`,
+		   AND ar.enabled = TRUE`,
 		workspaceID,
 	)
 	if err != nil {
