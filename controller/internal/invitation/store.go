@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,7 +38,13 @@ func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 // CreateInvitation inserts a new pending invitation and a workspace_members row
 // with status 'invited' and user_id NULL (the user does not exist yet).
 // Token is 32 random bytes encoded as lowercase hex (64 hex chars, 256 bits entropy).
+//
+// Email is lowercased + trimmed at entry so lookups against OAuth-supplied
+// (always-lowercase) emails match regardless of admin input casing.
+// See: ADR-005 Email Normalization.
 func (s *Store) CreateInvitation(ctx context.Context, email, workspaceID, invitedBy string) (*Invitation, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, fmt.Errorf("generate token: %w", err)
@@ -110,7 +117,11 @@ func (s *Store) GetByToken(ctx context.Context, token string) (*Invitation, erro
 // workspace_members row: sets user_id, status='active', and joined_at.
 // The caller must already be authenticated to the invited workspace
 // (JWT tenant_id == invitation workspace_id — enforced in handler).
+//
+// Email is normalized for consistency with CreateInvitation (ADR-005).
 func (s *Store) AcceptInvitation(ctx context.Context, token, workspaceID, userID, email string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)

@@ -150,16 +150,16 @@ func TestIssueRefreshToken_StoredInRedis(t *testing.T) {
 		t.Fatal("expected non-empty refresh token")
 	}
 
-	// Token should be in Redis.
-	stored, found, err := rc.GetRefreshToken(context.Background(), "user-rt")
+	// Token should be in Redis (now stored as a RefreshSession).
+	stored, found, err := rc.GetRefreshSession(context.Background(), "user-rt")
 	if err != nil {
-		t.Fatalf("GetRefreshToken: %v", err)
+		t.Fatalf("GetRefreshSession: %v", err)
 	}
 	if !found {
-		t.Fatal("refresh token not found in Redis")
+		t.Fatal("refresh session not found in Redis")
 	}
-	if stored != token {
-		t.Fatalf("stored token %q != returned token %q", stored, token)
+	if stored.Token != token {
+		t.Fatalf("stored token %q != returned token %q", stored.Token, token)
 	}
 }
 

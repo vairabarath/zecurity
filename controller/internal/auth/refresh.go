@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -50,11 +53,19 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 		}
 
 		// Parse JWT skipping claims validation (exp check) — we just need the identity.
+		// Signature IS verified; expiry IS NOT (refresh accepts expired tokens by design).
+		//
+		// P9-F1: explicitly enforce HS256 in the keyFunc — without this, an attacker
+		// presenting a token with alg=none (or RS256 confusion) could bypass signature.
+		// Mirrors session.go::verifyAccessToken and middleware/auth.go::AuthMiddleware.
 		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
 		claims := &jwtClaims{}
 		_, err = parser.ParseWithClaims(
 			extractBearer(authHeader), claims,
 			func(t *jwt.Token) (interface{}, error) {
+				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+					return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+				}
 				return []byte(s.cfg.JWTSecret), nil
 			},
 		)
@@ -83,23 +94,33 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 			}
 		}
 
-		// Step 3 — Look up stored refresh token in Redis by user_id.
-		// Called: redis.go → GetRefreshToken()
-		storedToken, found, err := s.redisClient.GetRefreshToken(ctx, userID)
+		// Step 3 — Look up stored refresh session in Redis by user_id.
+		// Called: valkey.go → GetRefreshSession()
+		stored, found, err := s.redisClient.GetRefreshSession(ctx, userID)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		if !found {
-			// Token expired (>7 days) or user signed out.
+			// Idle TTL expired or user signed out.
 			writeJSONError(w, http.StatusUnauthorized, "refresh token expired")
 			return
 		}
 
 		// Step 4 — Compare tokens using constant-time comparison.
 		// Prevents timing attacks that could leak the stored token byte-by-byte.
-		if subtle.ConstantTimeCompare([]byte(cookieToken), []byte(storedToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(cookieToken), []byte(stored.Token)) != 1 {
 			writeJSONError(w, http.StatusUnauthorized, "refresh token mismatch")
+			return
+		}
+
+		// ADR-006: enforce absolute lifetime cap from the initial OAuth signin.
+		// Beyond this, the user must re-authenticate via the full OAuth flow.
+		// MaxLifetimeAt=0 means "no cap" — only set on legacy sessions issued
+		// before this code shipped; treat as still-valid for the rolling TTL window.
+		if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
+			s.redisClient.DeleteRefreshToken(ctx, userID)
+			writeJSONError(w, http.StatusUnauthorized, "refresh token max lifetime exceeded")
 			return
 		}
 
@@ -111,13 +132,43 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 			return
 		}
 
-		// Slide the refresh token TTL so active users are never logged out.
-		// Only truly inactive users (no requests for 7 days) will be logged out.
+		// ADR-006 — Rotate the refresh token on every use.
+		// Generate a new 256-bit token, replace the stored value (preserving
+		// OriginalIAT and MaxLifetimeAt), and overwrite the cookie. The old
+		// token value is now invalid — a replay attempt by a stolen cookie
+		// will fail the constant-time compare on its next refresh.
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "token rotate failed")
+			return
+		}
+		newToken := base64.RawURLEncoding.EncodeToString(raw)
+
 		ttl, perr := time.ParseDuration(s.cfg.JWTRefreshTTL)
 		if perr != nil {
 			ttl = 7 * 24 * time.Hour
 		}
-		s.redisClient.SetRefreshToken(ctx, userID, cookieToken, ttl)
+
+		rotated := RefreshSession{
+			Token:         newToken,
+			OriginalIAT:   stored.OriginalIAT,
+			MaxLifetimeAt: stored.MaxLifetimeAt,
+		}
+		if err := s.redisClient.SetRefreshSession(ctx, userID, rotated, ttl); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "token rotate failed")
+			return
+		}
+
+		// Set new cookie value. Attributes mirror what callback.go set on initial issue.
+		http.SetCookie(w, &http.Cookie{
+			Name:     "refresh_token",
+			Value:    newToken,
+			Path:     "/auth/refresh",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   true,
+			MaxAge:   int(ttl.Seconds()),
+		})
 
 		// Step 6 — Return new access JWT in JSON body.
 		w.Header().Set("Content-Type", "application/json")

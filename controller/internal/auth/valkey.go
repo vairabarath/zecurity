@@ -92,19 +92,37 @@ func (r *valkeyClient) GetAndDeletePKCEState(ctx context.Context, state string) 
 	return codeVerifier, workspaceName, true, nil
 }
 
-func (r *valkeyClient) SetRefreshToken(ctx context.Context, userID, token string, ttl time.Duration) error {
-	return r.rdb.Set(ctx, refreshKey(userID), token, ttl).Err()
+// RefreshSession is the Redis payload for a user's active refresh token.
+//
+// Token rotates on every refresh; OriginalIAT and MaxLifetimeAt are preserved
+// across rotations to enforce an absolute lifetime cap. See ADR-006.
+type RefreshSession struct {
+	Token         string `json:"token"`
+	OriginalIAT   int64  `json:"original_iat"`    // Unix seconds — initial login time
+	MaxLifetimeAt int64  `json:"max_lifetime_at"` // Unix seconds — hard expiry, ignored if 0
 }
 
-func (r *valkeyClient) GetRefreshToken(ctx context.Context, userID string) (string, bool, error) {
+func (r *valkeyClient) SetRefreshSession(ctx context.Context, userID string, sess RefreshSession, ttl time.Duration) error {
+	payload, err := json.Marshal(sess)
+	if err != nil {
+		return fmt.Errorf("marshal refresh session: %w", err)
+	}
+	return r.rdb.Set(ctx, refreshKey(userID), string(payload), ttl).Err()
+}
+
+func (r *valkeyClient) GetRefreshSession(ctx context.Context, userID string) (RefreshSession, bool, error) {
 	val, err := r.rdb.Get(ctx, refreshKey(userID)).Result()
 	if err == valkeycompat.Nil {
-		return "", false, nil
+		return RefreshSession{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get refresh token: %w", err)
+		return RefreshSession{}, false, fmt.Errorf("get refresh session: %w", err)
 	}
-	return val, true, nil
+	var sess RefreshSession
+	if err := json.Unmarshal([]byte(val), &sess); err != nil {
+		return RefreshSession{}, false, fmt.Errorf("unmarshal refresh session: %w", err)
+	}
+	return sess, true, nil
 }
 
 func (r *valkeyClient) DeleteRefreshToken(ctx context.Context, userID string) error {
