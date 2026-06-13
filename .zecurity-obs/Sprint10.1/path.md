@@ -196,4 +196,16 @@ inner tunnel payload.
 
 ## Post-Sprint Fixes
 
-*(Empty — add fixes here as discovered during testing)*
+### Relay CSR Validation Hardening
+
+- Replaced Relay UUID regex validation with canonical `google/uuid` parsing.
+- Kept SAN allowlist enforcement in the PKI signer as defense-in-depth while
+  leaving allowlist policy selection to the future `Provision` handler.
+- Aligned Relay ECDSA leaf key usage with existing workspace-signed leaves and
+  added focused CSR validation tests.
+- Added the initial server-authenticated TLS `Provision` RPC; the reserved
+  provisioning-token field remains ignored until authenticated provisioning is
+  implemented.
+- Added the Relay-side verified-CA TLS provisioning client. It generates the
+  CSR in memory, validates the returned identity and CA, and persists the Relay
+  key/certificate material before future listener and heartbeat startup.

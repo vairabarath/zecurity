@@ -10,15 +10,11 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
-
-// relayIDRegex matches canonical 8-4-4-4-12 lowercase-hex UUIDs.
-// The proto contract (ProvisionRequest.relay_id) says UUID; enforce it here.
-var relayIDRegex = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 // SignRelayCert signs a relay's CSR with the Platform Intermediate CA.
 //
@@ -46,53 +42,9 @@ func (s *serviceImpl) SignRelayCert(
 	if s.intermediateKey == nil {
 		return nil, fmt.Errorf("intermediate CA not initialized")
 	}
-	if !relayIDRegex.MatchString(relayID) {
-		return nil, fmt.Errorf("invalid relay id %q: must be a lowercase UUID", relayID)
-	}
-	if csr == nil {
-		return nil, fmt.Errorf("nil CSR")
-	}
-
-	// 1. Proof-of-possession.
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("csr self-signature: %w", err)
-	}
-
-	// 2. SPIFFE URI: exactly one, matches expected.
-	expectedSPIFFE := appmeta.RelaySPIFFEID(relayID)
-	if len(csr.URIs) != 1 || csr.URIs[0].String() != expectedSPIFFE {
-		return nil, fmt.Errorf("csr URI SAN: want exactly one %q, got %v", expectedSPIFFE, csr.URIs)
-	}
-
-	// 3. Key algorithm: EC P-384 only.
-	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
-	if !ok || pub.Curve != elliptic.P384() {
-		return nil, fmt.Errorf("csr public key: want ECDSA P-384")
-	}
-
-	// 4. SAN allowlist enforcement.
-	dnsAllow := make(map[string]struct{}, len(dnsNames))
-	for _, d := range dnsNames {
-		dnsAllow[d] = struct{}{}
-	}
-	for _, d := range csr.DNSNames {
-		if _, ok := dnsAllow[d]; !ok {
-			return nil, fmt.Errorf("csr DNS SAN %q not in allowlist", d)
-		}
-	}
-	ipAllow := make([]net.IP, len(ipAddresses))
-	copy(ipAllow, ipAddresses)
-	for _, csrIP := range csr.IPAddresses {
-		matched := false
-		for _, allowed := range ipAllow {
-			if csrIP.Equal(allowed) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return nil, fmt.Errorf("csr IP SAN %s not in allowlist", csrIP)
-		}
+	expectedSPIFFE, err := validateRelayCSR(relayID, csr, dnsNames, ipAddresses)
+	if err != nil {
+		return nil, err
 	}
 
 	// 5. Build template.
@@ -117,7 +69,7 @@ func (s *serviceImpl) SignRelayCert(
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
@@ -152,4 +104,52 @@ func (s *serviceImpl) SignRelayCert(
 		NotBefore:         notBefore,
 		NotAfter:          notAfter,
 	}, nil
+}
+
+func validateRelayCSR(relayID string, csr *x509.CertificateRequest, dnsNames []string, ipAddresses []net.IP) (string, error) {
+	parsedRelayID, err := uuid.Parse(relayID)
+	if err != nil || parsedRelayID.String() != relayID {
+		return "", fmt.Errorf("invalid relay id %q: must be a canonical lowercase UUID", relayID)
+	}
+	if csr == nil {
+		return "", fmt.Errorf("nil CSR")
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return "", fmt.Errorf("csr self-signature: %w", err)
+	}
+
+	expectedSPIFFE := appmeta.RelaySPIFFEID(relayID)
+	if len(csr.URIs) != 1 || csr.URIs[0].String() != expectedSPIFFE {
+		return "", fmt.Errorf("csr URI SAN: want exactly one %q, got %v", expectedSPIFFE, csr.URIs)
+	}
+
+	pub, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok || pub.Curve != elliptic.P384() {
+		return "", fmt.Errorf("csr public key: want ECDSA P-384")
+	}
+
+	dnsAllow := make(map[string]struct{}, len(dnsNames))
+	for _, dnsName := range dnsNames {
+		dnsAllow[dnsName] = struct{}{}
+	}
+	for _, dnsName := range csr.DNSNames {
+		if _, ok := dnsAllow[dnsName]; !ok {
+			return "", fmt.Errorf("csr DNS SAN %q not in allowlist", dnsName)
+		}
+	}
+
+	for _, csrIP := range csr.IPAddresses {
+		allowed := false
+		for _, allowedIP := range ipAddresses {
+			if csrIP.Equal(allowedIP) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", fmt.Errorf("csr IP SAN %s not in allowlist", csrIP)
+		}
+	}
+
+	return expectedSPIFFE, nil
 }

@@ -28,7 +28,7 @@ const (
 type RelayServiceClient interface {
 	// Called once during Relay provisioning.
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
-	// Authentication is provided by a short-lived, single-use provisioning token.
+	// Provisioning-token authentication is reserved for a future implementation.
 	Provision(ctx context.Context, in *ProvisionRequest, opts ...grpc.CallOption) (*ProvisionResponse, error)
 }
 
@@ -56,7 +56,7 @@ func (c *relayServiceClient) Provision(ctx context.Context, in *ProvisionRequest
 type RelayServiceServer interface {
 	// Called once during Relay provisioning.
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
-	// Authentication is provided by a short-lived, single-use provisioning token.
+	// Provisioning-token authentication is reserved for a future implementation.
 	Provision(context.Context, *ProvisionRequest) (*ProvisionResponse, error)
 	mustEmbedUnimplementedRelayServiceServer()
 }

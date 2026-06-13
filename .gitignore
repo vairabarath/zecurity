@@ -55,6 +55,7 @@ shield/target/
 relay/target/
 relay/pki/*.key
 relay/pki/*.csr
+relay/pki/*.der
 relay/pki/*.crt
 
 # Design handoff

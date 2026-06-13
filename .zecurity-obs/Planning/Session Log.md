@@ -1464,3 +1464,55 @@ serves on `127.0.0.1:9102`.
 - Implement the authenticated Controller `Provision` handler and PKI signing method.
 - Add requested DNS/IP SAN fields and enforce the SAN allowlist during provisioning.
 - Define and implement the mTLS `Heartbeat` RPC and Relay health persistence.
+
+---
+
+## 2026-06-13 — Codex (Relay Provision RPC)
+
+**What was done:**
+- Added and registered `controller/internal/relay.Service.Provision`.
+- Kept `provisioning_token` reserved and ignored per the current proto contract;
+  authenticated/single-use provisioning remains future work.
+- Added canonical Relay UUID, DNS SAN, and IP SAN validation before PKI signing.
+- Hardened PKI Relay CSR validation and aligned ECDSA leaf key usage.
+- Completed Relay CSR output conversion from PEM to DER for
+  `ProvisionRequest.csr_der`.
+
+**Verification:**
+- `go test ./internal/relay ./internal/pki/...`: passed.
+- `go build ./...`: passed.
+- Relay `cargo test`: 12 passed.
+- Connector package tests require Docker and could not run in the sandbox.
+
+**What's next:**
+- Add the Relay-side TLS gRPC client call to `RelayService.Provision`.
+- Add authenticated provisioning when the reserved token field is activated.
+
+---
+
+## 2026-06-13 — Codex (Relay Provision client)
+
+**What was done:**
+- Added Relay environment configuration for controller addresses, Relay ID,
+  pinned CA fingerprint, state directory, and optional DNS/IP SANs.
+- Added the Relay-side TLS `Provision` request using a locally generated P-384
+  DER CSR and an Intermediate CA fetched from `/ca.crt` only after fingerprint
+  verification.
+- Validated the response metadata, leaf SPIFFE URI, and returned Intermediate
+  CA fingerprint before storing `relay.key`, `relay.crt`, and
+  `intermediate-ca.crt`.
+- Wired provisioning into Relay startup. The mTLS QUIC listener and heartbeat
+  remain pending because their runtime/protobuf contracts are not implemented.
+
+**Verification:**
+- Relay `cargo test`: 16 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+- Controller `go test ./internal/relay ./internal/pki/...`: passed.
+- Controller `go build ./...`: passed.
+
+**Post-pull scope clarification:**
+- Relay registration/JWT/Valkey support remains future work and is not required
+  by the current Relay provisioning client or `Provision` RPC.
+- The current target is a platform-level Relay listener that trusts the
+  Platform Intermediate CA and accepts valid Connector chains from any
+  workspace.

@@ -30,10 +30,10 @@ private key; the Controller validates and signs only the Relay CSR.
 ```text
 Relay host:
   1. Generate relay.key locally.
-  2. Generate relay.csr requesting:
+  2. Generate a DER-encoded relay CSR requesting:
      spiffe://<global-trust-domain>/relay/<relay-id>
      plus configured DNS/IP SANs.
-  3. Submit relay.csr and relay-id to authenticated Controller provisioning tool.
+  3. Submit the DER CSR and relay-id to the Controller Provision RPC.
 
 Controller:
   4. Parse CSR and verify its self-signature.
@@ -43,6 +43,7 @@ Controller:
 
 Relay host:
   8. Store relay.key, relay.crt, and intermediate-ca.crt.
+  9. On later starts, reuse the complete stored certificate material.
 ```
 
 ## Current Relay RPC Contract
@@ -50,22 +51,42 @@ Relay host:
 Source of truth: `proto/relay/v1/relay.proto`
 
 - `Provision(ProvisionRequest)`: server-authenticated TLS bootstrap request
-  carrying a single-use provisioning token, Relay ID, CSR, version, and
-  hostname.
-- DNS/IP SAN fields are not yet represented in `ProvisionRequest`; add them
-  before implementing SAN allowlist validation and certificate issuance.
+  carrying Relay ID, DER CSR, version, hostname, and operator-confirmed DNS/IP
+  SAN allowlists.
+- `provisioning_token` is reserved in the proto but ignored by the current
+  implementation. Authenticated/single-use provisioning is deferred.
+- The current `Provision` handler validates the requested SAN allowlist.
+  `SignRelayCert` independently enforces that the CSR contains no DNS/IP SAN
+  outside that allowlist before signing.
 - The heartbeat RPC is intentionally deferred. Define it before implementing
   periodic mTLS-authenticated Relay health reporting.
 - The Relay private key is never represented in or sent through the protobuf
   contract.
+- The Relay fetches `/ca.crt` for TLS bootstrap and requires
+  `RELAY_CA_FINGERPRINT` to verify that certificate before connecting.
+- The Relay validates the returned Relay ID, SPIFFE URI, leaf-certificate
+  SPIFFE URI, and Intermediate CA fingerprint before storing any material.
 
 ## Required Relay Files
 
 ```text
 relay.key                generated locally; mode 0600; never committed
-relay.csr                generated locally; temporary; never committed
+relay.csr.der            generated in memory; sent to Controller; not persisted
 relay.crt                returned by Controller PKI
 intermediate-ca.crt      returned by Controller PKI
+```
+
+## Relay Startup Environment
+
+```text
+RELAY_ID                 canonical lowercase Relay UUID
+CONTROLLER_ADDR          Controller gRPC host:port
+CONTROLLER_HTTP_ADDR     optional Controller HTTP host:port; defaults to host:8080
+RELAY_CA_FINGERPRINT     required SHA-256 hex fingerprint for fetched /ca.crt
+RELAY_STATE_DIR          optional artifact directory; defaults to pki
+RELAY_DNS_SANS           optional comma-separated DNS SAN allowlist and CSR SANs
+RELAY_IP_SANS            optional comma-separated canonical IP SAN allowlist and CSR SANs
+LOG_LEVEL                optional tracing filter; defaults to info
 ```
 
 ## Requirements
@@ -93,7 +114,8 @@ RELAY_SPIFFE_ID
 ```
 
 11. Implement `relay.v1.RelayService` Controller handlers:
-    - `Provision` validates the token and CSR before issuing the Relay leaf.
+    - `Provision` validates the request and CSR before issuing the Relay leaf.
+      Token validation is deferred until authenticated provisioning is enabled.
     - Define and implement `Heartbeat`; require mTLS and record Relay
       health/status.
 
@@ -122,4 +144,31 @@ cargo build
 
 ## Post-Phase Fixes
 
-*(Empty)*
+### Fix: Canonical Relay UUID and CSR Validation
+
+**Issue:** Relay IDs were validated with a UUID-shaped regex and Relay server
+certificates included ECDSA `KeyEncipherment`, unlike existing workspace-signed
+ECDSA leaves.
+
+**Fix Applied:**
+- Parse Relay IDs with `google/uuid` and require the canonical lowercase,
+  hyphenated representation.
+- Keep SAN allowlist enforcement in `SignRelayCert` as defense-in-depth; the
+  future `Provision` handler remains responsible for deciding the allowlist.
+- Use `DigitalSignature` only for Relay ECDSA leaf certificates.
+- Add focused tests for canonical UUIDs, exact Relay SPIFFE URI, P-384 keys,
+  and DNS/IP SAN allowlist rejection.
+
+### Current Provision RPC Scope
+
+- Added and registered `controller/internal/relay.Service.Provision`.
+- Provision uses server-authenticated TLS and currently ignores the reserved
+  `provisioning_token`.
+- Relay IDs, DER CSR, DNS SANs, and IP SANs are validated before PKI signing.
+- Single-use authenticated provisioning remains a future implementation.
+- Added Relay startup configuration and the TLS `Provision` client.
+- Relay verifies the fetched CA fingerprint, sends its CSR, validates the
+  returned identity/certificates, and stores `relay.key`, `relay.crt`, and
+  `intermediate-ca.crt`.
+- Building the mTLS QUIC listener and sending heartbeat messages remain pending
+  until their runtime and protobuf contracts are implemented.

@@ -8,6 +8,7 @@ import (
 
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -153,10 +154,12 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		// Skip Enroll RPCs — neither connector nor shield has a certificate
-		// during enrollment; both authenticate via JWT instead.
+		// Skip bootstrap RPCs because the caller has no certificate yet.
+		// Connector and Shield authenticate with JWTs. Relay Provision currently
+		// uses server-authenticated TLS only; token authentication is deferred.
 		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
-			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName {
+			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName ||
+			info.FullMethod == relaypb.RelayService_Provision_FullMethodName {
 			return handler(ctx, req)
 		}
 

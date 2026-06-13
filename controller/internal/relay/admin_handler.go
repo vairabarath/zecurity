@@ -3,8 +3,6 @@ package relay
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 	"time"
 
@@ -49,17 +47,25 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
 	}
-	for _, s := range req.IPAllowlist {
-		if net.ParseIP(s) == nil {
-			http.Error(w, fmt.Sprintf("invalid ip_allowlist entry %q", s), http.StatusBadRequest)
-			return
-		}
+	dnsAllowlist, err := validateDNSSANs(req.DNSAllowlist)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ipAddresses, err := validateIPSANs(req.IPAllowlist)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ipAllowlist := make([]string, len(ipAddresses))
+	for i, ip := range ipAddresses {
+		ipAllowlist[i] = ip.String()
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	relayID, err := h.Store.CreateRelay(ctx, req.Name, req.DNSAllowlist, req.IPAllowlist)
+	relayID, err := h.Store.CreateRelay(ctx, req.Name, dnsAllowlist, ipAllowlist)
 	if err != nil {
 		http.Error(w, "failed to create relay: "+err.Error(), http.StatusInternalServerError)
 		return

@@ -24,6 +24,7 @@ import (
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
@@ -108,6 +109,7 @@ func main() {
 	}
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
+	relaySvc := relay.NewService(pkiService, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour))
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)
@@ -256,6 +258,7 @@ func main() {
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
+	relaypb.RegisterRelayServiceServer(grpcServer, relaySvc)
 
 	clientSvc := clientsvc.NewService(
 		db.Pool,

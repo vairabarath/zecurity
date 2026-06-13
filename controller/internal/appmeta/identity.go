@@ -95,7 +95,8 @@ func ClientSPIFFEID(trustDomain, deviceID string) string {
 // Unlike connector/client/shield, the relay is a platform-level service —
 // it lives at the global trust domain, not a per-workspace one.
 //
-// Example: relayID "us-east-1" → "spiffe://zecurity.in/relay/us-east-1"
+// Example: relayID "550e8400-e29b-41d4-a716-446655440000"
+// → "spiffe://zecurity.in/relay/550e8400-e29b-41d4-a716-446655440000"
 //
 // Used in SignRelayCert (Go) and the relay's own CSR generation (Rust, mirrored).
 func RelaySPIFFEID(relayID string) string {

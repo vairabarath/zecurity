@@ -7,7 +7,7 @@ option go_package = "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1;re
 service RelayService {
   // Called once during Relay provisioning.
   // Uses server-authenticated TLS because the Relay has no certificate yet.
-  // Authentication is provided by a short-lived, single-use provisioning token.
+  // Provisioning-token authentication is reserved for a future implementation.
   rpc Provision(ProvisionRequest) returns (ProvisionResponse);
 
   // Sent periodically after provisioning.
@@ -16,8 +16,8 @@ service RelayService {
 }
 
 message ProvisionRequest {
-  string provisioning_token = 1; // short-lived, single-use operator-issued token ignored for future0
-  string relay_id = 2; // UUID; must match the token and requested SPIFFE URI
+  string provisioning_token = 1; // reserved for future authenticated provisioning; currently ignored
+  string relay_id = 2; // canonical lowercase UUID; must match the requested SPIFFE URI
   bytes csr_der = 3; // DER-encoded PKCS#10 CSR; Relay private key never leaves the host
   string version = 4; // CARGO_PKG_VERSION
   string hostname = 5;
