@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -43,6 +44,15 @@ type Service interface {
 	// a short-lived client certificate carrying the client SPIFFE ID as URI SAN.
 	// Called by: client.Service.EnrollDevice (Sprint 7).
 	SignClientCert(ctx context.Context, tenantID, deviceID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ClientCertResult, error)
+
+	// SignRelayCert signs an operator-supplied Relay CSR with the Platform
+	// Intermediate CA. The Relay host keeps the private key — the controller
+	// only sees and validates the CSR.
+	//
+	// dnsNames / ipAddresses are the operator-confirmed SAN allowlist: any
+	// DNS/IP SAN in the CSR not on these lists is rejected. Pass nil for
+	// either to forbid that SAN type.
+	SignRelayCert(ctx context.Context, relayID string, csr *x509.CertificateRequest, dnsNames []string, ipAddresses []net.IP, certTTL time.Duration) (*RelayCertResult, error)
 
 	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
 	// for the controller gRPC endpoint. The certificate is signed by the
@@ -105,6 +115,17 @@ type ControllerServerTLSResult struct {
 	PrivateKeyPEM  string
 	NotBefore      time.Time
 	NotAfter       time.Time
+}
+
+// RelayCertResult is what the operator gets back from SignRelayCert.
+// IntermediateCAPEM lets the relay populate RELAY_CLIENT_CA (the trust
+// bundle it presents to inbound mTLS peers).
+type RelayCertResult struct {
+	CertificatePEM    string
+	IntermediateCAPEM string
+	Serial            string
+	NotBefore         time.Time
+	NotAfter          time.Time
 }
 
 // serviceImpl is the concrete PKI service used inside the controller.

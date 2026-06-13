@@ -21,6 +21,12 @@ message ProvisionRequest {
   bytes csr_der = 3; // DER-encoded PKCS#10 CSR; Relay private key never leaves the host
   string version = 4; // CARGO_PKG_VERSION
   string hostname = 5;
+
+  // Operator-confirmed SAN allowlist. The Controller enforces that every DNS
+  // and IP SAN in the CSR is present in these lists. Pass empty lists to
+  // forbid that SAN type entirely (SPIFFE URI only).
+  repeated string dns_sans = 6;
+  repeated string ip_sans  = 7; // IPv4 / IPv6 in textual form (e.g. "10.0.0.5", "2001:db8::1")
 }
 
 message ProvisionResponse {

@@ -41,12 +41,14 @@ const (
 	SPIFFERoleAgent      = "agent" // future sprint — plumbed now
 	SPIFFERoleController = "controller"
 	SPIFFERoleClient     = "client" // Sprint 7 — end-user device certificates
+	SPIFFERoleRelay      = "relay"  // Sprint 10.1 — platform-level relay service
 
 	// PKI cert subject CN prefixes — keeps cert naming consistent.
 	PKIConnectorCNPrefix = "connector-" // CN = "connector-<connectorID>"
 	PKIAgentCNPrefix     = "agent-"     // CN = "agent-<agentID>" — future
 	PKIShieldCNPrefix    = "shield-"    // CN = "shield-<shieldID>"
 	PKIClientCNPrefix    = "client-"    // CN = "client-<deviceID>"
+	PKIRelayCNPrefix     = "relay-"     // CN = "relay-<relayID>" — Sprint 10.1
 
 	// Shield networking constants.
 	ShieldInterfaceName = "zecurity0"
@@ -86,4 +88,16 @@ func ShieldSPIFFEID(trustDomain, shieldID string) string {
 // ClientSPIFFEID builds the full SPIFFE URI for a client device certificate.
 func ClientSPIFFEID(trustDomain, deviceID string) string {
 	return "spiffe://" + trustDomain + "/" + SPIFFERoleClient + "/" + deviceID
+}
+
+// RelaySPIFFEID builds the full SPIFFE URI for a relay certificate.
+//
+// Unlike connector/client/shield, the relay is a platform-level service —
+// it lives at the global trust domain, not a per-workspace one.
+//
+// Example: relayID "us-east-1" → "spiffe://zecurity.in/relay/us-east-1"
+//
+// Used in SignRelayCert (Go) and the relay's own CSR generation (Rust, mirrored).
+func RelaySPIFFEID(relayID string) string {
+	return "spiffe://" + SPIFFEGlobalTrustDomain + "/" + SPIFFERoleRelay + "/" + relayID
 }
