@@ -119,7 +119,6 @@ impl TunnelPool {
                 .collect::<Result<Vec<_>, _>>()
                 .context("parse device cert PEM")?
         };
-        
         let trust_domain = extract_client_trust_domain(
             cert_chain
                 .first()

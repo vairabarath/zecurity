@@ -473,7 +473,7 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 		if err := resource.RecordAck(
 			ctx, h.Pool, tenantID,
 			ack.ResourceId, ack.Status, ack.Error,
-			ack.VerifiedAt, ack.PortReachable,
+			ack.VerifiedAt,
 		); err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 		}

@@ -12,14 +12,6 @@ import (
 // Member 4 depends on this interface.
 // Member 2 writes the concrete implementation.
 // Neither touches the other's files.
-//
-// Implementation map (interface → concrete file):
-//   InitiateAuth     → oidc.go:31
-//   CallbackHandler  → callback.go:34
-//   RefreshHandler   → refresh.go
-//   ExchangeCode     → exchange.go
-//   VerifyIDToken    → idtoken.go
-//   IssueAccessToken → session.go
 type Service interface {
 	// InitiateAuth builds the IdP redirect URL with PKCE.
 	// Called by the initiateAuth GraphQL mutation resolver.

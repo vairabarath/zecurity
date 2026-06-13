@@ -82,12 +82,12 @@ export default function App() {
         <Route path="/resources" element={<Resources />} />
         <Route path="/resources/:resourceId" element={<ResourceDetail />} />
         <Route path="/resource-discovery" element={<ResourceDiscovery />} />
-        <Route path="/topology"          element={<TopologyPage />} />
-        <Route path="/users"             element={<TeamUsers />} />
-        <Route path="/groups"            element={<Groups />} />
-        <Route path="/groups/:id"        element={<GroupDetail />} />
-        <Route path="/access-log"        element={<AccessLog />} />
-        <Route path="/devices"           element={<DeviceManagement />} />
+        <Route path="/topology" element={<TopologyPage />} />
+        <Route path="/users" element={<TeamUsers />} />
+        <Route path="/groups" element={<Groups />} />
+        <Route path="/groups/:id" element={<GroupDetail />} />
+        <Route path="/access-log" element={<AccessLog />} />
+        <Route path="/devices" element={<DeviceManagement />} />
       </Route>
     </Routes>
   )

@@ -32,17 +32,5 @@ export const authLink = new ApolloLink((operation, forward) => {
     },
   }))
 
-// opreation =
-//   {
-//   operationName: "InitiateAuth",
-
-//   context: {
-//     headers: {
-//       Authorization: "Bearer ...",
-//       X-Public-Operation:
-//         "InitiateAuth"
-//     }
-//   }
-// }
   return forward(operation)
 })

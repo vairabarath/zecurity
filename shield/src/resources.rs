@@ -9,7 +9,7 @@ use nftables::{
     batch::Batch,
     expr::{Expression, Meta, MetaKey, NamedExpression, Payload, PayloadField, Prefix, Range},
     helper,
-    schema::{Chain, NfListObject, NfObject, Rule, Table},
+    schema::{Chain, FlushObject, NfCmd, NfListObject, Rule, Table},
     stmt::{Accept, Drop, Match, Operator, Statement},
     types::{NfChainPolicy, NfChainType, NfFamily, NfHook},
 };
@@ -109,42 +109,25 @@ pub fn check_port(host: &str, port: u16) -> bool {
     .is_ok()
 }
 
-async fn chain_exists() -> Result<bool> {
-    let ruleset = helper::get_current_ruleset_async()
-        .await
-        .context("failed to query nftables ruleset")?;
-
-    Ok(ruleset.objects.iter().any(|obj| {
-        matches!(
-            obj,
-            NfObject::ListObject(NfListObject::Chain(Chain {
-                family: NfFamily::INet,
-                table,
-                name,
-                ..
-            })) if table.as_ref() == TABLE && name.as_ref() == PROTECT_CHAIN
-        )
-    }))
-}
-
-/// Flush and atomically rebuild `chain resource_protect` for the given resource list.
-pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
-    if chain_exists().await? {
-        let mut del = Batch::new();
-        del.delete(NfListObject::Chain(Chain {
-            family: NfFamily::INet,
-            table: TABLE.into(),
-            name: PROTECT_CHAIN.into(),
-            ..Chain::default()
-        }));
-        helper::apply_ruleset_async(&del.to_nftables())
-            .await
-            .context("failed to flush resource_protect chain")?;
-    }
-
+/// Build the single atomic nftables transaction that (re)builds `resource_protect`.
+/// Split out from application so the command ordering — critically, `flush` BEFORE the
+/// rule adds — is unit-testable without a kernel.
+///
+/// The whole thing is ONE transaction, so it commits as a swap: the old drop rules stay
+/// in force until the kernel atomically replaces them with the new ruleset. This is the
+/// security-critical property (F21) — PREPARE the next state, then commit; never
+/// "destroy old protection, then build new". The previous version deleted the chain in
+/// one transaction and re-added it in a second, which (a) left a fail-open window on
+/// every rebuild while the chain was absent, and (b) — far worse — left every resource
+/// unprotected if the re-add failed after the delete committed, while in-memory state
+/// still reported them protected (control/data-plane divergence).
+///
+/// `add table`/`add chain` are idempotent (no-op if present; also recover if
+/// network::setup() failed); `flush chain` clears the old rules in the same commit while
+/// the chain object — and thus its Input hook and Accept policy — stays installed
+/// throughout, so enforcement never lapses.
+fn build_protect_ruleset(resources: &[ActiveResource]) -> nftables::schema::Nftables<'static> {
     let mut batch = Batch::new();
-    // Ensure the parent table exists. `add table` is idempotent — no-op if
-    // network::setup() already created it, but recovers if setup() failed.
     batch.add(NfListObject::Table(Table {
         family: NfFamily::INet,
         name: TABLE.into(),
@@ -160,6 +143,16 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         policy: Some(NfChainPolicy::Accept),
         ..Chain::default()
     }));
+    // Clear existing rules in the SAME transaction. `add chain; flush chain` is the
+    // standard atomic-reload idiom. ORDERING IS LOAD-BEARING: this flush MUST precede
+    // the rule adds below — flushing after would wipe the new rules and leave the chain
+    // empty (fail-open). Guarded by `flush_precedes_rule_adds`.
+    batch.add_cmd(NfCmd::Flush(FlushObject::Chain(Chain {
+        family: NfFamily::INet,
+        table: TABLE.into(),
+        name: PROTECT_CHAIN.into(),
+        ..Chain::default()
+    })));
 
     for res in resources {
         let protos: &[&str] = match res.protocol.as_str() {
@@ -190,13 +183,19 @@ pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
         }
     }
 
-    helper::apply_ruleset_async(&batch.to_nftables())
+    batch.to_nftables()
+}
+
+/// Atomically (re)build `chain resource_protect` and commit it to the kernel in a
+/// single nftables transaction. See build_protect_ruleset for the atomicity rationale.
+pub async fn apply_nftables(resources: &[ActiveResource]) -> Result<()> {
+    helper::apply_ruleset_async(&build_protect_ruleset(resources))
         .await
         .context("failed to apply resource_protect chain")?;
 
     info!(
         resource_count = resources.len(),
-        "rebuilt nftables resource_protect chain"
+        "rebuilt nftables resource_protect chain (atomic flush+rebuild)"
     );
     Ok(())
 }
@@ -599,5 +598,59 @@ fn port_drop_rule(protocol: &str, port_expr: Expression<'static>) -> Rule<'stati
             Statement::Drop(Some(Drop {})),
         ]),
         ..Rule::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nftables::schema::NfObject;
+
+    fn res(id: &str, port: u16) -> ActiveResource {
+        ActiveResource {
+            resource_id: id.to_string(),
+            host: "10.0.0.1".to_string(),
+            protocol: "tcp".to_string(),
+            port_from: port,
+            port_to: port,
+        }
+    }
+
+    // F21: the rebuild must flush the chain BEFORE adding the new rules, in one batch.
+    // Flushing AFTER the adds would wipe the new rules → empty chain → policy Accept →
+    // every protected port wide open (fail-open). This guards that ordering.
+    #[test]
+    fn flush_precedes_rule_adds() {
+        let ruleset = build_protect_ruleset(&[res("r1", 8080)]);
+        let objs = ruleset.objects.as_ref();
+
+        let flush_idx = objs
+            .iter()
+            .position(|o| matches!(o, NfObject::CmdObject(NfCmd::Flush(FlushObject::Chain(_)))))
+            .expect("rebuild must flush the protect chain");
+        let first_rule_idx = objs
+            .iter()
+            .position(|o| matches!(o, NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(_)))))
+            .expect("rebuild must add rules");
+
+        assert!(
+            flush_idx < first_rule_idx,
+            "flush (idx {flush_idx}) must precede rule adds (idx {first_rule_idx}); \
+             flushing after would wipe the new rules and fail open"
+        );
+    }
+
+    // Sanity: the whole rebuild is ONE Nftables transaction (atomic swap on commit),
+    // not multiple batches. table + chain + flush + 3 rules (tcp) = 6 commands.
+    #[test]
+    fn rebuild_is_single_transaction() {
+        let ruleset = build_protect_ruleset(&[res("r1", 8080)]);
+        let objs = ruleset.objects.as_ref();
+        assert_eq!(objs.len(), 6, "expected table+chain+flush+3 rules in one batch");
+        let rule_adds = objs
+            .iter()
+            .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(_)))))
+            .count();
+        assert_eq!(rule_adds, 3, "expected 3 rules: lo-accept, localhost-accept, port-drop");
     }
 }

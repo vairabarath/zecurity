@@ -48,23 +48,23 @@ func putSession(id string, sess *authSession) {
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
 	now := time.Now()
-	for k, v := range sessionStore { // k = id , v = sess
+	for k, v := range sessionStore {
 		if now.After(v.ExpiresAt) {
 			delete(sessionStore, k)
 		}
 	}
-	sessionStore[id] = sess // this is map so we can add new valuse with the help of the key = id
+	sessionStore[id] = sess
 }
 
-func getSession(id string) (*authSession, bool) {// get the session from the stored key
+func getSession(id string) (*authSession, bool) {
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
-	s, ok := sessionStore[id]  // returns the value for the key that is stored in the s
+	s, ok := sessionStore[id]
 	if !ok || time.Now().After(s.ExpiresAt) {
 		delete(sessionStore, id)
 		return nil, false
 	}
-	return s, true  // returns the value for the key to the calling function 
+	return s, true
 }
 
 // consumeSession deletes and returns the session atomically — single-use.

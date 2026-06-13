@@ -10,71 +10,7 @@ pub async fn run() -> Result<()> {
     let conf = load()?;
 
     println!("Authenticating...");
-    let result = login::run(&conf, None).await?; /* the values are = 
-        workspace: WorkspaceInfo {
-            id: String::new(),
-            name: conf.workspace.clone(),
-            slug: conf.workspace.clone(),
-            trust_domain: extract_trust_domain(&enroll.spiffe_id),
-        },
-        user: UserInfo {
-            id: String::new(),
-            email: tok.email.clone(),
-            role: String::new(),
-        },
-        device: DeviceInfo {
-            id: enroll.device_id,
-            spiffe_id: enroll.spiffe_id,
-            certificate_pem: enroll.certificate_pem,
-            private_key_pem,
-            ca_cert_pem,
-            cert_expires_at,
-            hostname,
-            os,
-        },
-        session: SessionInfo {
-            access_token: tok.access_token,
-            refresh_token: tok.refresh_token,
-            expires_at: now + tok.expires_in,
-        }, 
-        
-        -> actual values <-
-        ###################
-        LoginResult {
-            workspace: WorkspaceInfo {
-                id: "",
-                name: "acme",
-                slug: "acme",
-                trust_domain: "acme.zecurity.io",
-            },
-
-            user: UserInfo {
-                id: "",
-                email: "alice@company.com",
-                role: "",
-            },
-
-            device: DeviceInfo {
-                id: "dev-001",
-                spiffe_id: "spiffe://acme.zecurity.io/client/dev-001",
-
-                certificate_pem: "...",
-                private_key_pem: "...",
-                ca_cert_pem: "...",
-
-                cert_expires_at: 1784000000,
-
-                hostname: "ubuntu-server",
-                os: "linux",
-            },
-
-            session: SessionInfo {
-                access_token: "jwt-access-token",
-                refresh_token: "jwt-refresh-token",
-                expires_at: 1780000000,
-            },
-        }
-        */
+    let result = login::run(&conf, None).await?;
 
     let email = result.user.email.clone();
     let workspace = result.workspace.name.clone();
@@ -106,14 +42,5 @@ pub async fn run() -> Result<()> {
     println!("Logged in as {}", email);
     println!("Workspace: {}", workspace);
     println!("Device ID: {}", device_id);
-    let resp = ensure_daemon_and_send(&IpcRequest::Up).await?;
-    if resp.ok {
-        println!("Zecurity is up.");
-    } else {
-        anyhow::bail!(
-            "{}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        );
-    }
     Ok(())
 }
