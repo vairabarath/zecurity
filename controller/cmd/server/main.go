@@ -40,6 +40,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
@@ -198,6 +199,21 @@ func main() {
 		),
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
+
+	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
+	// Platform-level (no WorkspaceGuard); admin-only.
+	relayStore := relay.NewStore(db.Pool)
+	relayAdminHandler := &relay.AdminHandler{
+		Store:     relayStore,
+		Redis:     valkeycompat.NewAdapter(connectorValkey),
+		JWTSecret: mustEnv("JWT_SECRET"),
+	}
+	relayCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.RequireRole("admin")(
+			http.HandlerFunc(relayAdminHandler.Create),
+		),
+	)
+	mux.Handle("POST /api/relays", relayCreateRoute)
 
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
