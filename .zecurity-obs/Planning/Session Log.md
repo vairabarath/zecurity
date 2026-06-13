@@ -1438,3 +1438,29 @@ serves on `127.0.0.1:9102`.
   new build does not).
 - Still open: Prometheus scrape + corrected alert (`deleting`-age + shield disconnected); production deploy
   of controller + 016/017; re-enable update timers; Finding 7; RenewCert short-TTL check.
+
+---
+
+## 2026-06-13 — Codex (Sprint 10.1 Relay provisioning RPC contract)
+
+**What was done:**
+- Added `proto/relay/v1/relay.proto` with the initial server-authenticated TLS
+  `Provision` RPC contract.
+- Wired Relay Rust protobuf client generation and generated Controller Go stubs.
+- Removed the generated Relay CSR from version control and ignored Relay keys,
+  CSRs, certificates, and Cargo build output.
+- Updated Sprint 10.1 Phase B planning to record the completed protocol contract
+  and pending Controller provisioning/heartbeat work.
+
+**Verification:**
+- Relay `cargo test`: 12 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+- Controller `go build ./...`: passed.
+- `buf generate`: passed.
+- `buf lint`: still fails on pre-existing repository-wide proto root and control
+  stream naming rules affecting Connector, Shield, Client, and Relay packages.
+
+**What's next:**
+- Implement the authenticated Controller `Provision` handler and PKI signing method.
+- Add requested DNS/IP SAN fields and enforce the SAN allowlist during provisioning.
+- Define and implement the mTLS `Heartbeat` RPC and Relay health persistence.

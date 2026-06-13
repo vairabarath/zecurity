@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package relay.v1;
+
+option go_package = "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1;relayv1";
+
+service RelayService {
+  // Called once during Relay provisioning.
+  // Uses server-authenticated TLS because the Relay has no certificate yet.
+  // Authentication is provided by a short-lived, single-use provisioning token.
+  rpc Provision(ProvisionRequest) returns (ProvisionResponse);
+
+  // Sent periodically after provisioning.
+  // Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
+  // rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message ProvisionRequest {
+  string provisioning_token = 1; // short-lived, single-use operator-issued token ignored for future0
+  string relay_id = 2; // UUID; must match the token and requested SPIFFE URI
+  bytes csr_der = 3; // DER-encoded PKCS#10 CSR; Relay private key never leaves the host
+  string version = 4; // CARGO_PKG_VERSION
+  string hostname = 5;
+}
+
+message ProvisionResponse {
+  bytes certificate_pem = 1; // Intermediate-signed Relay server leaf
+  bytes intermediate_ca_pem = 2; // Platform Intermediate CA trust bundle
+  string relay_id = 3; // confirmed Relay UUID
+  string spiffe_id = 4; // confirmed global Relay SPIFFE identity
+  int64 cert_not_after_unix = 5;
+  int64 cert_not_before_unix = 6;
+}

@@ -54,6 +54,8 @@ connector/target/
 shield/target/
 relay/target/
 relay/pki/*.key
+relay/pki/*.csr
+relay/pki/*.crt
 
 # Design handoff
 zecurity-handoff/

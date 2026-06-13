@@ -3,7 +3,7 @@ type: phase
 sprint: 10.1
 member: M2
 phase: 2
-status: planned
+status: in-progress
 depends_on:
   - Sprint10.1-M2-Phase1
 ---
@@ -45,6 +45,20 @@ Relay host:
   8. Store relay.key, relay.crt, and intermediate-ca.crt.
 ```
 
+## Current Relay RPC Contract
+
+Source of truth: `proto/relay/v1/relay.proto`
+
+- `Provision(ProvisionRequest)`: server-authenticated TLS bootstrap request
+  carrying a single-use provisioning token, Relay ID, CSR, version, and
+  hostname.
+- DNS/IP SAN fields are not yet represented in `ProvisionRequest`; add them
+  before implementing SAN allowlist validation and certificate issuance.
+- The heartbeat RPC is intentionally deferred. Define it before implementing
+  periodic mTLS-authenticated Relay health reporting.
+- The Relay private key is never represented in or sent through the protobuf
+  contract.
+
 ## Required Relay Files
 
 ```text
@@ -78,6 +92,11 @@ RELAY_CLIENT_CA
 RELAY_SPIFFE_ID
 ```
 
+11. Implement `relay.v1.RelayService` Controller handlers:
+    - `Provision` validates the token and CSR before issuing the Relay leaf.
+    - Define and implement `Heartbeat`; require mTLS and record Relay
+      health/status.
+
 ## Explicitly Forbidden
 
 Do not add or run a script equivalent to:
@@ -96,6 +115,9 @@ model.
 cd controller
 go test ./internal/pki/...
 go build ./...
+cd ../relay
+cargo test
+cargo build
 ```
 
 ## Post-Phase Fixes
