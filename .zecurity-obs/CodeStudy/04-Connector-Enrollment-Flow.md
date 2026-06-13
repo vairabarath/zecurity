@@ -92,7 +92,7 @@ copies + runs on server ──────────────────�
                                             │                                             refresh CRL + spawn 5min loop
                                             │                                             notify systemd READY=1
                                             │                                             spawn watchdog
-                                            │◀──Heartbeat (every 30s)─────────────────────────│
+                                            │◀──Heartbeat (every 15s)─────────────────────────│
                                             │ ──HeartbeatAck + ACLSnapshot───────────────────▶│
                                             │                                           PolicyCache populated
                                             │                                           devices can authorize
@@ -452,7 +452,7 @@ Curl pipes [connector-install.sh](connector/scripts/connector-install.sh) into b
 The script:
 1. Create `zecurity` system user (no login, no shell) — connector runs as this user, NOT as root
 2. Download connector binary from GitHub release → `/usr/local/bin/zecurity-connector`
-3. Write `/etc/zecurity/connector.conf` mode 0600 with env vars persisted as KEY=VALUE
+3. Write `/etc/zecurity/connector.conf` mode **0660** `root:zecurity` with env vars persisted as KEY=VALUE — group-writable so the connector (running as `zecurity`) can rewrite it after enrollment to strip `ENROLLMENT_TOKEN` (Stage 29)
 4. Create `/var/lib/zecurity-connector/` state directory, chown to `zecurity` user
 5. Install systemd units — `zecurity-connector.service` + `zecurity-connector-update.timer`
 6. `systemctl daemon-reload && systemctl enable --now zecurity-connector`
@@ -1465,7 +1465,7 @@ loop {
             }
         }
 
-        // Heartbeat tick (every 30s)
+        // Heartbeat tick (every 15s — HEALTH_INTERVAL_SECS)
         _ = hb_interval.tick() => {
             tx.send(heartbeat_msg(...)).await?;
         }
@@ -1482,7 +1482,7 @@ What flows on this stream:
 
 | Direction | Messages |
 |---|---|
-| Connector → Controller | `Heartbeat` (30s), `Goodbye` (shutdown), `ResourceAck` (forwarded from Shields), `ConnectorLog` (access events) |
+| Connector → Controller | `Heartbeat` (15s — connector's `HEALTH_INTERVAL_SECS`), `Goodbye` (shutdown), `ResourceAck` (forwarded from Shields), `ConnectorLog` (access events) |
 | Controller → Connector | `HeartbeatAck` (with `ACLSnapshot`), `ResourceInstructions`, `DiscoveryRequest` |
 
 **ACL snapshots ride on heartbeat replies.** No separate RPC. Saves bandwidth + complexity. First heartbeat reply populates the empty PolicyCache — devices that were getting default-denied can now authorize.
@@ -1666,7 +1666,7 @@ main.rs (Stage 30):
       outer reconnect loop:
         open bidirectional stream to /ConnectorService/Control
         inner session loop (tokio::select!):
-          - send Heartbeat every 30s
+          - send Heartbeat every 15s (HEALTH_INTERVAL_SECS; controller's 30s CONNECTOR_HEARTBEAT_INTERVAL is the disconnect-watcher tick, not the send rate)
           - receive HeartbeatAck (with ACLSnapshot) → policy_cache.update
           - receive ResourceInstructions → forward to Shield
           - drain ack_rx → forward Shield acks upstream
