@@ -152,6 +152,15 @@ func Init(ctx context.Context, pool *pgxpool.Pool) (Service, error) {
 		}
 	}
 
+	rootCert, rootKey, err := svc.loadRootCA(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pki audit: load root: %w", err)
+	}
+	rootKey.D.SetInt64(0) // audit needs only the certificate
+	if err := auditCAConstraints(rootCert, svc.intermediateKey.cert); err != nil {
+		return nil, err // fail closed — controller refuses to start
+	}
+
 	return svc, nil
 }
 
