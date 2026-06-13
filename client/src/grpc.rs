@@ -20,6 +20,7 @@ pub async fn connect_grpc(
     Ok(ClientServiceClient::new(channel))
 }
 
+
 fn controller_host(controller_address: &str) -> String {
     if let Some(rest) = controller_address.strip_prefix('[') {
         if let Some((host, _)) = rest.split_once(']') {

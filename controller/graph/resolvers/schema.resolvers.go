@@ -131,6 +131,8 @@ func (r *queryResolver) LookupWorkspace(ctx context.Context, slug string) (*grap
 // Public query — no JWT required. Lists active workspaces a given email belongs to.
 // Used by the login page for returning users to pick a workspace.
 func (r *queryResolver) LookupWorkspacesByEmail(ctx context.Context, email string) (*graph.WorkspaceListResult, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+
 	rows, err := r.Pool.Query(ctx,
 		`SELECT DISTINCT w.id, w.name, w.slug
 		   FROM workspaces w
