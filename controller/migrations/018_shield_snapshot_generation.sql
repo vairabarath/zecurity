@@ -14,6 +14,8 @@
 -- writes), is consistent with the content it stamps, and survives controller
 -- restarts. Nothing in SQL knows the desired-state rule, so it cannot drift from Go.
 
+-- IF NOT EXISTS so a manual re-apply is a safe no-op (there is no migration-
+-- tracking table; staging/prod is applied by hand with psql).
 ALTER TABLE shields
-    ADD COLUMN snapshot_generation  BIGINT NOT NULL DEFAULT 0,
-    ADD COLUMN snapshot_fingerprint TEXT   NOT NULL DEFAULT '';
+    ADD COLUMN IF NOT EXISTS snapshot_generation  BIGINT NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS snapshot_fingerprint TEXT   NOT NULL DEFAULT '';
