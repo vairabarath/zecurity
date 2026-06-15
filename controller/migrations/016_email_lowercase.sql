@@ -16,14 +16,16 @@
 BEGIN;
 
 -- workspace_members: collapse case-duplicate rows before lowercasing.
--- Keep the row with the longest history (lowest created_at), drop the rest.
+-- Keep the row with the longest history (earliest invited_at), drop the rest.
+-- NOTE: workspace_members has no created_at column (migration 013) — its
+-- creation timestamp is invited_at; the tiebreak on id keeps it deterministic.
 DELETE FROM workspace_members wm_outer
  WHERE EXISTS (
      SELECT 1 FROM workspace_members wm_inner
       WHERE wm_inner.workspace_id = wm_outer.workspace_id
         AND LOWER(wm_inner.email) = LOWER(wm_outer.email)
-        AND (wm_inner.created_at < wm_outer.created_at
-             OR (wm_inner.created_at = wm_outer.created_at
+        AND (wm_inner.invited_at < wm_outer.invited_at
+             OR (wm_inner.invited_at = wm_outer.invited_at
                  AND wm_inner.id < wm_outer.id))
  );
 
