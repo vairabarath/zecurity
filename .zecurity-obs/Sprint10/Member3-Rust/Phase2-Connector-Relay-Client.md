@@ -3,7 +3,7 @@ type: phase
 sprint: 10
 member: M3
 phase: 2
-status: planned
+status: done
 ---
 
 # M3 Phase 2 — Connector Relay Client
@@ -118,4 +118,15 @@ cd connector && cargo build
 
 ## Post-Phase Fixes
 
-*(Empty — add fixes here as discovered)*
+### Fix: Wire Registered Connection to Inner-mTLS Relay Handler
+
+**Issue:** Relay client and handler modules compiled, but Connector startup did
+not launch registration or accept streams opened by Relay.
+
+**Fix Applied:**
+- Added `RELAY_ADDR` and exact `RELAY_SPIFFE_ID` Connector configuration.
+- Connector startup constructs `RelayHandler` and launches persistent
+  registration without blocking normal Connector operation.
+- After registration succeeds, the same outer QUIC connection is passed to
+  `RelayHandler::run`.
+- Relay hostnames are resolved again on every reconnect.

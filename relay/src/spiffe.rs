@@ -4,7 +4,7 @@ use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::*;
 
 const CONNECTOR_ROLE: &str = "connector";
-const CLIENT_ROLE: &str = "client_device";
+const CLIENT_ROLE: &str = "client";
 const RELAY_ROLE: &str = "relay";
 
 #[derive(Debug, Clone)]
@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn validates_client() {
         assert!(validate_client_spiffe(&format!(
-            "spiffe://workspace-a.example/client_device/{ID}"
+            "spiffe://workspace-a.example/client/{ID}"
         )));
     }
 
@@ -173,8 +173,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_client_device_as_relay() {
-        let uri = format!("spiffe://zecurity.in/client_device/{ID}");
+    fn rejects_client_as_relay() {
+        let uri = format!("spiffe://zecurity.in/client/{ID}");
 
         assert!(validate_relay_spiffe(&uri).is_none());
     }
@@ -197,8 +197,8 @@ mod tests {
     #[test]
     fn compares_workspaces() {
         let connector = format!("spiffe://workspace-a.example/connector/{ID}");
-        let client = format!("spiffe://workspace-a.example/client_device/{ID}");
-        let other_client = format!("spiffe://workspace-b.example/client_device/{ID}");
+        let client = format!("spiffe://workspace-a.example/client/{ID}");
+        let other_client = format!("spiffe://workspace-b.example/client/{ID}");
 
         assert!(same_workspace(&connector, &client));
         assert!(!same_workspace(&connector, &other_client));

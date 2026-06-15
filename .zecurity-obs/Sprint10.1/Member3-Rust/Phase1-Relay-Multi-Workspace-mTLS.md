@@ -37,7 +37,7 @@ workspaces using the Platform Intermediate CA as its only client trust anchor.
 
 ```text
 spiffe://<workspace-domain>/connector/<uuid>
-spiffe://<workspace-domain>/client_device/<uuid>
+spiffe://<workspace-domain>/client/<uuid>
 ```
 
 6. On Register, require message `connector_id` and `spiffe_id` to exactly match
@@ -75,19 +75,19 @@ cargo build
 - Relay startup now validates that its provisioned leaf has the expected Relay
   SPIFFE ID and matches its private key.
 - Added post-handshake peer identity extraction that requires peers to present
-  `leaf + Workspace CA` and accepts only exact Connector or Client-device
+  `leaf + Workspace CA` and accepts only exact Connector or Client
   SPIFFE roles.
 - Added focused tests for exact Relay identity, key mismatch, leaf-only peer
   rejection, disallowed roles, and Connectors from two different workspaces.
 - Wired the QUIC listener into Relay startup using `RELAY_BIND`, defaulting to
   `0.0.0.0:9093`.
 - The listener rejects connections unless their authenticated certificate
-  identity resolves to an allowed Connector or Client-device SPIFFE role.
+  identity resolves to an allowed Connector or Client SPIFFE role.
 - Added `session.rs` Register and Lookup handling:
   - Connector registration ID and SPIFFE ID must exactly match the authenticated
     Connector certificate.
   - Connector registrations are removed when their QUIC connection closes.
-  - Client Lookup requires the authenticated `client_device` role and the same
+  - Client Lookup requires the authenticated `client` role and the same
     workspace trust domain as the registered Connector.
   - Reused Client QUIC connections can carry multiple concurrent Lookup streams.
   - Successful Lookup streams are bridged bidirectionally without interpreting
@@ -98,3 +98,14 @@ Current startup environment:
 ```text
 RELAY_BIND=0.0.0.0:9093
 ```
+
+### Fix: Match Controller-Issued Client SPIFFE Role
+
+**Issue:** Relay expected `client_device`, but the Controller issues Client
+certificates with `spiffe://<workspace>/client/<device-id>`.
+
+**Root Cause:** Relay used a stale role name that did not match
+`appmeta.SPIFFERoleClient`.
+
+**Fix Applied:** Relay TLS peer validation, Lookup authorization, workspace
+checks, messages, and tests now require the authoritative `client` role.

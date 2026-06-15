@@ -26,6 +26,8 @@ mod enrollment;
 pub mod net_util;
 pub mod policy;
 pub mod quic_listener;
+mod relay_client;
+mod relay_handler;
 mod renewal;
 pub mod tls;
 mod updater;
@@ -69,7 +71,7 @@ use std::path::Path;
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use config::ConnectorConfig;
 use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
@@ -252,6 +254,53 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("device tunnel listeners spawned on :9092 (TLS+QUIC)");
+
+    match (&cfg.relay_addr, &cfg.relay_spiffe_id) {
+        (Some(relay_addr), Some(relay_spiffe_id)) => {
+            if relay_addr.trim().is_empty() {
+                bail!("RELAY_ADDR must not be empty");
+            }
+            relay_client::validate_relay_spiffe_id(relay_spiffe_id)
+                .context("invalid RELAY_SPIFFE_ID")?;
+            let relay_addr = relay_addr.clone();
+            let relay_handler = Arc::new(
+                relay_handler::RelayHandler::new(
+                    &cert_store,
+                    acl.clone(),
+                    tunnel_hub.clone(),
+                    crl_manager.clone(),
+                    connector_id.clone(),
+                    ctrl_tx.clone(),
+                )
+                .context("build Connector Relay stream handler")?,
+            );
+            let relay_spiffe_id = relay_spiffe_id.clone();
+            let connector_spiffe_id =
+                appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
+            let cert_pem = cert_store.cert_pem.clone();
+            let key_pem = cert_store.key_pem.clone();
+            let ca_bundle = cert_store.workspace_ca_pem.clone();
+            let intermediate_bundle = ca_bundle.clone();
+
+            info!(relay_addr, "Relay registration task spawning");
+            tokio::spawn(async move {
+                relay_client::maintain_registration(
+                    relay_addr,
+                    relay_spiffe_id,
+                    connector_id,
+                    connector_spiffe_id,
+                    cert_pem,
+                    key_pem,
+                    ca_bundle,
+                    intermediate_bundle,
+                    relay_handler,
+                )
+                .await;
+            });
+        }
+        (None, None) => info!("Relay registration disabled"),
+        _ => bail!("RELAY_ADDR and RELAY_SPIFFE_ID must be configured together"),
+    }
 
     watchdog::notify_ready();
     watchdog::spawn_watchdog();

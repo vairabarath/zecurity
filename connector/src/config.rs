@@ -20,6 +20,8 @@
 //
 // Optional fields (have defaults):
 //   connector_id                — None until enrollment completes (Phase 5 writes it)
+//   relay_addr                  — None disables Relay registration
+//   relay_spiffe_id             — exact Relay SPIFFE URI; required with relay_addr
 //   auto_update_enabled         — false (Phase 7 updater checks this)
 //   log_level                   — "info"
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
@@ -65,6 +67,16 @@ pub struct ConnectorConfig {
     /// Stored in state.json and read on subsequent startups.
     #[serde(default)]
     pub connector_id: Option<String>,
+
+    /// Relay QUIC address, for example `relay.example.com:9093`.
+    /// Relay registration is disabled when this and `relay_spiffe_id` are unset.
+    #[serde(default)]
+    pub relay_addr: Option<String>,
+
+    /// Exact Relay SPIFFE URI, for example
+    /// `spiffe://zecurity.in/relay/550e8400-e29b-41d4-a716-446655440000`.
+    #[serde(default)]
+    pub relay_spiffe_id: Option<String>,
 
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]

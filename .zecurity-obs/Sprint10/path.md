@@ -169,14 +169,14 @@ This is a **two-member sprint** (M2 + M3 only). M1 (Frontend) and M4 (Client/Shi
 > **Depends on:** M3-C (relay service running, or at least the protocol known).
 > See `Sprint10/Member3-Rust/Phase2-Connector-Relay-Client.md`.
 
-- [ ] **M3-D1** `connector/src/relay_client.rs` — NEW:
+- [x] **M3-D1** `connector/src/relay_client.rs` — NEW:
   - `RelayClient::new(relay_addr, connector_id, tls_config)` 
   - `connect_and_register()` — opens QUIC connection to relay, sends `RegisterMsg`, keeps connection alive
   - `maintain_registration()` — reconnect loop: on disconnect, wait 5s, reconnect
   - Spawned as a background task; does not block connector startup
-- [ ] **M3-D2** `connector/src/main.rs` — After existing listeners are up, if `relay_addr` is set in config, spawn `relay_client::maintain_registration()`
-- [ ] **M3-D3** `connector/src/config.rs` — Add `relay_addr: Option<String>` field; read from `RELAY_ADDR` env var
-- [ ] **M3-D4** Build check: `cd connector && cargo build` passes
+- [x] **M3-D2** `connector/src/main.rs` — After existing listeners are up, if `relay_addr` is set in config, spawn `relay_client::maintain_registration()`
+- [x] **M3-D3** `connector/src/config.rs` — Add `relay_addr: Option<String>` field; read from `RELAY_ADDR` env var
+- [x] **M3-D4** Build check: `cd connector && cargo build` passes
 
 ---
 

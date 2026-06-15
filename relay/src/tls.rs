@@ -83,7 +83,7 @@ fn authenticated_identity_from_chain(chain: &[CertificateDer<'_>]) -> Result<Par
         .context("peer certificate has no exact SPIFFE URI")?;
     let identity =
         parse_spiffe(&spiffe_uri).context("peer certificate has malformed SPIFFE URI")?;
-    if identity.role != "connector" && identity.role != "client_device" {
+    if identity.role != "connector" && identity.role != "client" {
         bail!(
             "peer SPIFFE role {:?} is not allowed by Relay",
             identity.role

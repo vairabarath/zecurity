@@ -45,14 +45,9 @@ pub async fn handle_connection(
             Ok(())
         }
         HandshakeMsg::Lookup { connector_id } => {
-            if identity.role != "client_device" {
-                write_ack(
-                    &mut send,
-                    false,
-                    Some("Lookup requires client_device identity"),
-                )
-                .await?;
-                bail!("Lookup requires client_device identity");
+            if identity.role != "client" {
+                write_ack(&mut send, false, Some("Lookup requires client identity")).await?;
+                bail!("Lookup requires client identity");
             }
 
             spawn_lookup(send, recv, connector_id, identity.clone(), state.clone());
@@ -236,7 +231,7 @@ mod tests {
     #[test]
     fn client_cannot_register_as_connector() {
         let mut identity = connector_identity();
-        identity.role = "client_device".to_owned();
+        identity.role = "client".to_owned();
         assert!(validate_register(&identity, CONNECTOR_ID, &identity.uri).is_err());
     }
 }

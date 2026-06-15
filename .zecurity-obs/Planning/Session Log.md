@@ -1538,3 +1538,98 @@ serves on `127.0.0.1:9102`.
 - Relay `cargo test`: 25 passed.
 - Relay `cargo build`: passed with expected unused-code warnings while the QUIC
   listener/session files remain pending.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay client)
+
+**What was done:**
+- Added the Connector Relay QUIC client with persistent registration and a
+  five-second reconnect loop.
+- Added exact Relay SPIFFE verification, Platform Intermediate-only trust,
+  Connector leaf plus Workspace CA presentation, `ztna-relay-v1` ALPN, and
+  length-prefixed JSON Register/ACK handling.
+- Added the Connector module declaration so the implementation is compiled.
+
+**Verification:**
+- Connector Relay client tests: 3 passed.
+- Connector `cargo build`: passed with existing and expected unused-code
+  warnings until startup wiring is added.
+
+**What's next:**
+- Add Relay address/identity configuration and spawn `maintain_registration`
+  from Connector startup.
+- Add inner Client-to-Connector mTLS before dispatching Relay-opened streams.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay stream handler)
+
+**What was done:**
+- Added `connector/src/relay_handler.rs` to accept streams opened by Relay.
+- Required inner Client-to-Connector TLS 1.3 mTLS before passing traffic to the
+  existing device tunnel ACL and routing handler.
+- Restricted inner Client trust to the Connector's Workspace CA and validated
+  an exact same-workspace `client` SPIFFE URI with a canonical UUID.
+
+**Verification:**
+- Connector `cargo test`: 20 passed.
+- Connector `cargo build`: passed with expected unused-code warnings until
+  Relay startup wiring is added.
+
+**What's next:**
+- Implement the Client-side inner mTLS initiator.
+
+---
+
+## 2026-06-15 — Codex (Relay Client SPIFFE role compatibility)
+
+**What was done:**
+- Changed Relay Client authentication and Lookup authorization from the stale
+  `client_device` role to the Controller-issued `client` SPIFFE role.
+- Updated Relay workspace-isolation and role-validation tests.
+
+**Verification:**
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay runtime wiring)
+
+**What was done:**
+- Added `RELAY_ADDR` and `RELAY_SPIFFE_ID` Connector configuration.
+- Wired Connector startup to construct `RelayHandler`, register persistently
+  with Relay, and accept Relay-opened streams on the registered connection.
+- Added hostname resolution on each reconnect and fail-fast validation for
+  incomplete Relay configuration.
+
+**Verification:**
+- Connector `cargo test`: 20 passed.
+- Connector `cargo build`: passed with existing warnings.
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with existing warnings.
+
+**What's next:**
+- Implement `client/src/relay_pool.rs`, Client Lookup, inner mTLS initiation,
+  and direct-first Relay fallback.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.2 Client Relay plan)
+
+**What was done:**
+- Deferred Client Relay implementation into a dedicated Sprint 10.2 plan.
+- Added phases for ACL Relay discovery, Client RelayPool and inner mTLS,
+  direct-first fallback wiring, and integration/security validation.
+- Documented the required `relay_spiffe_id` discovery field, common
+  authenticated stream abstraction, authoritative `client` SPIFFE role, and
+  rule that policy denial must never trigger Relay fallback.
+
+**Implementation status:**
+- No Client or Controller Relay-fallback implementation was retained.
+- Completed Relay and Connector runtime changes remain unchanged.
+
+**What's next:**
+- Start Sprint 10.2 Phase A by landing the ACL Relay discovery protobuf and
+  Controller population contract.
