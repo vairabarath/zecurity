@@ -1,6 +1,7 @@
 mod appmeta;
 mod config;
 mod csr;
+mod heartbeat;
 mod listener;
 mod protocol;
 mod provision;
@@ -47,6 +48,8 @@ async fn main() -> Result<()> {
         &relay_key,
         &intermediate_ca,
         &cfg.relay_id,
+        cfg.runtime_limits.max_bidi_streams,
+        cfg.runtime_limits.idle_timeout,
     )?;
     info!(
         certificate = %material.certificate_path.display(),
@@ -55,5 +58,14 @@ async fn main() -> Result<()> {
         "Relay provisioned; starting multi-workspace mTLS QUIC listener"
     );
 
-    listener::run_listener(cfg.bind_addr, server_config, state::RelayState::new()).await
+    let state = state::RelayState::new();
+    tokio::spawn(heartbeat::run(
+        cfg.clone(),
+        relay_certificate.clone(),
+        relay_key.clone(),
+        intermediate_ca.clone(),
+        state.clone(),
+    ));
+
+    listener::run_listener(cfg.bind_addr, server_config, state, cfg.runtime_limits).await
 }

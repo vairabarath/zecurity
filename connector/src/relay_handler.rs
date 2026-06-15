@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
@@ -6,7 +7,8 @@ use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use rustls_pemfile::{certs, private_key};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 use x509_parser::extensions::GeneralName;
@@ -34,6 +36,8 @@ pub struct RelayHandler {
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    handshake_timeout: Duration,
+    stream_permits: Arc<Semaphore>,
 }
 
 impl RelayHandler {
@@ -44,7 +48,10 @@ impl RelayHandler {
         crl_manager: CrlManager,
         connector_id: String,
         control_tx: mpsc::Sender<ControlMessage>,
+        handshake_timeout_secs: u64,
+        max_tunnel_streams: usize,
     ) -> Result<Self> {
+        validate_runtime_limits(handshake_timeout_secs, max_tunnel_streams)?;
         let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(store)?;
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(tls_config)),
@@ -54,6 +61,8 @@ impl RelayHandler {
             crl_manager,
             connector_id,
             control_tx,
+            handshake_timeout: Duration::from_secs(handshake_timeout_secs),
+            stream_permits: Arc::new(Semaphore::new(max_tunnel_streams)),
         })
     }
 
@@ -64,8 +73,20 @@ impl RelayHandler {
                 .accept_bi()
                 .await
                 .context("accept Relay-opened Connector stream")?;
+            let permit = match self.stream_permits.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    warn!(
+                        rejection_reason = "relay_tunnel_stream_limit",
+                        "rejecting Relay tunnel stream because capacity is exhausted"
+                    );
+                    reject_stream(send, recv);
+                    continue;
+                }
+            };
             let handler = self.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(error) = handler.handle_stream(send, recv).await {
                     warn!(%error, "Relay tunnel stream failed");
                 }
@@ -77,10 +98,9 @@ impl RelayHandler {
         // The Relay only bridges these bytes. Inner TLS authenticates the
         // Client directly and hides tunnel payloads from the Relay.
         let relay_stream = tokio::io::join(recv, send);
-        let tls_stream = self
-            .acceptor
-            .accept(relay_stream)
+        let tls_stream = timeout(self.handshake_timeout, self.acceptor.accept(relay_stream))
             .await
+            .context("inner Client-to-Connector mTLS handshake timed out")?
             .context("inner Client-to-Connector mTLS handshake")?;
 
         let (client_spiffe_id, cert_serial) = {
@@ -110,6 +130,18 @@ impl RelayHandler {
         )
         .await
     }
+}
+
+fn reject_stream(mut send: SendStream, mut recv: RecvStream) {
+    let _ = send.reset(0u32.into());
+    let _ = recv.stop(0u32.into());
+}
+
+fn validate_runtime_limits(handshake_timeout_secs: u64, max_tunnel_streams: usize) -> Result<()> {
+    if handshake_timeout_secs == 0 || max_tunnel_streams == 0 {
+        bail!("Relay inner handshake timeout and tunnel stream limit must be greater than zero");
+    }
+    Ok(())
 }
 
 fn build_inner_tls_server_config(store: &CertStore) -> Result<(ServerConfig, String)> {
@@ -268,5 +300,12 @@ mod tests {
         assert!(parse_spiffe_identity("spiffe://ws/client/id/extra").is_err());
         assert!(parse_spiffe_identity("https://ws/client/id").is_err());
         assert!(parse_spiffe_identity("spiffe://user@ws/client/id").is_err());
+    }
+
+    #[test]
+    fn relay_runtime_limits_must_be_positive() {
+        validate_runtime_limits(10, 256).unwrap();
+        assert!(validate_runtime_limits(0, 256).is_err());
+        assert!(validate_runtime_limits(10, 0).is_err());
     }
 }

@@ -1633,3 +1633,85 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Start Sprint 10.2 Phase A by landing the ACL Relay discovery protobuf and
   Controller population contract.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 Relay and Connector hardening plan)
+
+**What was done:**
+- Added Sprint 10.3 as a production-hardening sprint for the completed Relay
+  and Connector runtime.
+- Converted the runtime review findings into owned phases for authenticated
+  provisioning and heartbeat, resource and routing limits, certificate
+  lifecycle and trust-bundle hardening, and integration/security gates.
+- Documented acceptance criteria for single-use provisioning tokens, bounded
+  runtime work, stale registration eviction, online certificate renewal,
+  relationship-based CA selection, canonical UUID enforcement, and mTLS Relay
+  heartbeat persistence.
+
+**Implementation status:**
+- Planning only; no Controller, Relay, Connector, Client, or protobuf runtime
+  code was changed.
+
+**What's next:**
+- Start Sprint 10.3 M2 Phase 1 with provisioning-token enforcement and the
+  Relay heartbeat protobuf/runtime contract.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 Relay runtime limits and timeouts)
+
+**What was done:**
+- Added configurable Relay QUIC idle timeout, keepalive, incoming-stream limit,
+  authenticated connection limit, and active Lookup bridge limit.
+- Added deadlines for Relay QUIC handshake, initial stream acceptance, and
+  framed Register/Lookup messages.
+- Added a bounded Connector Relay tunnel-stream task limit and inner
+  Client-to-Connector mTLS handshake timeout.
+- Added focused tests for positive runtime-limit validation and semaphore
+  capacity/release behavior.
+
+**Verification:**
+- Relay `cargo test`: 27 passed.
+- Relay `cargo build`: passed.
+- Connector `cargo test`: 21 passed.
+- Connector `cargo build`: passed.
+
+**What's next:**
+- Continue Sprint 10.3 M3 Phase 1 with stale Connector eviction, negative ACKs
+  for Connector stream-open failures, and canonical lowercase Relay UUID
+  enforcement.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 mTLS Relay heartbeat)
+
+**What was done:**
+- Defined and generated the Relay Heartbeat protobuf RPC.
+- Added a periodic Relay-side heartbeat client using the provisioned Relay
+  certificate/key as its Controller mTLS identity.
+- Added Controller Relay certificate-chain verification against the Platform
+  Intermediate CA before SPIFFE context injection.
+- Added the Controller Heartbeat handler and persisted active status,
+  last-heartbeat time, version, hostname, certificate serial, and expiry.
+- Updated Relay certificate issuance to include both `ServerAuth` and
+  `ClientAuth`.
+
+**Verification:**
+- Controller Relay tests passed.
+- Controller PKI tests passed.
+- Controller Connector interceptor tests compile; runtime suite requires
+  Docker-backed Valkey.
+- Controller `go build ./...` passed.
+- Relay `cargo test`: 28 passed.
+- Relay `cargo build`: passed.
+- Connector `cargo test`: 21 passed.
+- Connector `cargo build`: passed.
+
+**Deployment note:**
+- Existing Relay certificates issued with only `ServerAuth` must be
+  reprovisioned before heartbeat mTLS can succeed.
+
+**What's next:**
+- Implement authenticated single-use Relay provisioning and stale/offline
+  heartbeat health transitions.

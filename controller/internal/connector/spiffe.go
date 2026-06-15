@@ -207,6 +207,11 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 				return nil, status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
 			}
 		}
+		if role == appmeta.SPIFFERoleRelay {
+			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return nil, status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+		}
 
 		// Build the full SPIFFE URI for context injection.
 		spiffeID := "spiffe://" + trustDomain + "/" + role + "/" + entityID
@@ -216,6 +221,28 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 
 		return handler(ctx, req)
 	}
+}
+
+func verifyRelayCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {
+	if trustDomain != appmeta.SPIFFEGlobalTrustDomain {
+		return fmt.Errorf("relay trust domain must be %q", appmeta.SPIFFEGlobalTrustDomain)
+	}
+	intermediateCA, err := store.GetIntermediateCA(ctx)
+	if err != nil {
+		return fmt.Errorf("load intermediate CA: %w", err)
+	}
+	if intermediateCA == nil {
+		return fmt.Errorf("intermediate CA not found")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(intermediateCA)
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("verify leaf against intermediate CA: %w", err)
+	}
+	return nil
 }
 
 func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {

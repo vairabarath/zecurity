@@ -511,6 +511,11 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 				return status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
 			}
 		}
+		if role == appmeta.SPIFFERoleRelay {
+			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+		}
 
 		spiffeID := "spiffe://" + trustDomain + "/" + role + "/" + entityID
 		ctx = spiffe.WithIdentity(ctx, spiffeID, role, entityID, trustDomain)

@@ -109,7 +109,8 @@ func main() {
 	}
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
-	relaySvc := relay.NewService(pkiService, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour))
+	relayStore := relay.NewStore(db.Pool)
+	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour))
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)
@@ -204,7 +205,6 @@ func main() {
 
 	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
 	// Platform-level (no WorkspaceGuard); admin-only.
-	relayStore := relay.NewStore(db.Pool)
 	relayAdminHandler := &relay.AdminHandler{
 		Store:     relayStore,
 		Redis:     valkeycompat.NewAdapter(connectorValkey),

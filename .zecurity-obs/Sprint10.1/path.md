@@ -141,7 +141,7 @@ inner tunnel payload.
 - [ ] **M2-B2** Add authenticated PKI method/tool that validates and signs a Relay-generated CSR.
 - [ ] **M2-B3** Return only Relay cert and Intermediate CA; document Relay-host key/CSR generation.
 - [ ] **M2-B4** Add certificate property, CSR-validation, and chain-validation tests.
-- [ ] **M2-B5** Define and implement the mTLS Relay heartbeat RPC and Relay health persistence.
+- [x] **M2-B5** Define and implement the mTLS Relay heartbeat RPC and Relay health persistence.
 
 ### PHASE C — M3: Relay Multi-Workspace mTLS
 

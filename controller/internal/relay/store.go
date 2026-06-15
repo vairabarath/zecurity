@@ -109,3 +109,28 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 	}
 	return nil
 }
+
+// RecordHeartbeat marks an authenticated Relay healthy and refreshes its
+// runtime and certificate metadata.
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relays
+		    SET status            = 'active',
+		        cert_serial       = $2,
+		        cert_not_after    = $3,
+		        version           = NULLIF($4, ''),
+		        hostname          = NULLIF($5, ''),
+		        last_heartbeat_at = NOW(),
+		        updated_at        = NOW()
+		  WHERE id = $1
+		    AND status <> 'deleted'`,
+		id, certSerial, certNotAfter, version, hostname,
+	)
+	if err != nil {
+		return fmt.Errorf("record relay heartbeat: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRelayNotFound
+	}
+	return nil
+}

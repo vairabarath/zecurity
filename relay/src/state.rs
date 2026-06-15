@@ -47,6 +47,10 @@ impl RelayState {
         self.connectors.get(connector_id).map(|entry| entry.clone())
     }
 
+    pub fn connector_count(&self) -> usize {
+        self.connectors.len()
+    }
+
     pub fn remove_connector(&self, connector_id: &str, registration_id: Uuid) {
         if let Some(entry) = self.connectors.get(connector_id) {
             if entry.registration_id == registration_id {

@@ -271,6 +271,8 @@ async fn main() -> anyhow::Result<()> {
                     crl_manager.clone(),
                     connector_id.clone(),
                     ctrl_tx.clone(),
+                    cfg.relay_inner_handshake_timeout_secs,
+                    cfg.relay_max_tunnel_streams as usize,
                 )
                 .context("build Connector Relay stream handler")?,
             );
@@ -294,6 +296,8 @@ async fn main() -> anyhow::Result<()> {
                     ca_bundle,
                     intermediate_bundle,
                     relay_handler,
+                    cfg.relay_max_tunnel_streams,
+                    cfg.relay_idle_timeout_secs,
                 )
                 .await;
             });

@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion8
 
 const (
 	RelayService_Provision_FullMethodName = "/relay.v1.RelayService/Provision"
+	RelayService_Heartbeat_FullMethodName = "/relay.v1.RelayService/Heartbeat"
 )
 
 // RelayServiceClient is the client API for RelayService service.
@@ -30,6 +31,9 @@ type RelayServiceClient interface {
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
 	// Provisioning-token authentication is reserved for a future implementation.
 	Provision(ctx context.Context, in *ProvisionRequest, opts ...grpc.CallOption) (*ProvisionResponse, error)
+	// Sent periodically after provisioning.
+	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
+	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
 }
 
 type relayServiceClient struct {
@@ -50,6 +54,16 @@ func (c *relayServiceClient) Provision(ctx context.Context, in *ProvisionRequest
 	return out, nil
 }
 
+func (c *relayServiceClient) Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HeartbeatResponse)
+	err := c.cc.Invoke(ctx, RelayService_Heartbeat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RelayServiceServer is the server API for RelayService service.
 // All implementations must embed UnimplementedRelayServiceServer
 // for forward compatibility
@@ -58,6 +72,9 @@ type RelayServiceServer interface {
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
 	// Provisioning-token authentication is reserved for a future implementation.
 	Provision(context.Context, *ProvisionRequest) (*ProvisionResponse, error)
+	// Sent periodically after provisioning.
+	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
+	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
 	mustEmbedUnimplementedRelayServiceServer()
 }
 
@@ -67,6 +84,9 @@ type UnimplementedRelayServiceServer struct {
 
 func (UnimplementedRelayServiceServer) Provision(context.Context, *ProvisionRequest) (*ProvisionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Provision not implemented")
+}
+func (UnimplementedRelayServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
 }
 func (UnimplementedRelayServiceServer) mustEmbedUnimplementedRelayServiceServer() {}
 
@@ -99,6 +119,24 @@ func _RelayService_Provision_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayService_Heartbeat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HeartbeatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayServiceServer).Heartbeat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayService_Heartbeat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayServiceServer).Heartbeat(ctx, req.(*HeartbeatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RelayService_ServiceDesc is the grpc.ServiceDesc for RelayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -109,6 +147,10 @@ var RelayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Provision",
 			Handler:    _RelayService_Provision_Handler,
+		},
+		{
+			MethodName: "Heartbeat",
+			Handler:    _RelayService_Heartbeat_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -20,11 +20,12 @@ type Service struct {
 	relaypb.UnimplementedRelayServiceServer
 
 	pki     pki.Service
+	store   heartbeatStore
 	certTTL time.Duration
 }
 
-func NewService(pkiSvc pki.Service, certTTL time.Duration) *Service {
-	return &Service{pki: pkiSvc, certTTL: certTTL}
+func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {
+	return &Service{pki: pkiSvc, store: store, certTTL: certTTL}
 }
 
 // Provision validates and signs a Relay-generated CSR.

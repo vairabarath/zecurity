@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use quinn::{Connection, Endpoint, IdleTimeout, RecvStream, SendStream, VarInt};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{
@@ -56,7 +56,12 @@ impl RelayClient {
         key_pem: &[u8],
         workspace_ca_bundle_pem: &[u8],
         intermediate_ca_bundle_pem: &[u8],
+        max_incoming_bidi_streams: u32,
+        idle_timeout: Duration,
     ) -> Result<Self> {
+        if max_incoming_bidi_streams == 0 || idle_timeout.is_zero() {
+            bail!("Relay QUIC stream limit and idle timeout must be greater than zero");
+        }
         let tls_config = build_relay_tls_config(
             relay_spiffe_id,
             cert_pem,
@@ -68,7 +73,13 @@ impl RelayClient {
             .context("build Relay QUIC TLS config")?;
         let mut client_config = quinn::ClientConfig::new(Arc::new(quic_config));
         let mut transport = quinn::TransportConfig::default();
-        transport.keep_alive_interval(Some(Duration::from_secs(10)));
+        transport
+            .max_concurrent_bidi_streams(VarInt::from_u32(max_incoming_bidi_streams))
+            .max_idle_timeout(Some(
+                IdleTimeout::try_from(idle_timeout)
+                    .context("Relay QUIC idle timeout is too large")?,
+            ))
+            .keep_alive_interval(Some(idle_timeout / 3));
         client_config.transport_config(Arc::new(transport));
 
         let mut endpoint =
@@ -135,6 +146,8 @@ pub async fn maintain_registration(
     workspace_ca_bundle_pem: Vec<u8>,
     intermediate_ca_bundle_pem: Vec<u8>,
     relay_handler: Arc<RelayHandler>,
+    max_incoming_bidi_streams: u32,
+    idle_timeout_secs: u64,
 ) {
     loop {
         let result = async {
@@ -146,6 +159,8 @@ pub async fn maintain_registration(
                 &key_pem,
                 &workspace_ca_bundle_pem,
                 &intermediate_ca_bundle_pem,
+                max_incoming_bidi_streams,
+                Duration::from_secs(idle_timeout_secs),
             )
             .await?;
             client.register(&connector_id, &spiffe_id).await?;

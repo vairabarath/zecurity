@@ -53,7 +53,7 @@ func TestProvisionCurrentContract(t *testing.T) {
 			NotAfter:          now.Add(time.Hour),
 		},
 	}
-	service := NewService(fake, time.Hour)
+	service := NewService(fake, nil, time.Hour)
 
 	response, err := service.Provision(context.Background(), &relaypb.ProvisionRequest{
 		ProvisioningToken: "ignored-until-future-auth",

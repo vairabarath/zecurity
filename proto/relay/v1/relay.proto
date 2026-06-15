@@ -12,7 +12,7 @@ service RelayService {
 
   // Sent periodically after provisioning.
   // Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
-  // rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
 message ProvisionRequest {
@@ -36,4 +36,16 @@ message ProvisionResponse {
   string spiffe_id = 4; // confirmed global Relay SPIFFE identity
   int64 cert_not_after_unix = 5;
   int64 cert_not_before_unix = 6;
+}
+
+message HeartbeatRequest {
+  string version = 1;
+  string hostname = 2;
+  uint64 uptime_seconds = 3;
+  uint64 registered_connectors = 4;
+}
+
+message HeartbeatResponse {
+  int64 server_time_unix = 1;
+  uint32 next_heartbeat_seconds = 2;
 }

@@ -1,23 +1,45 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
+use tokio::sync::Semaphore;
+use tokio::time::timeout;
 use tracing::{info, warn};
 
+use crate::config::RuntimeLimits;
 use crate::protocol::{decode_message, encode_message, HandshakeMsg, RelayAck, MAX_MSG_SIZE};
 use crate::spiffe::{same_workspace, ParsedSpiffe};
 use crate::state::RelayState;
+
+#[derive(Clone)]
+pub struct SessionLimits {
+    handshake_timeout: Duration,
+    message_timeout: Duration,
+    lookup_permits: Arc<Semaphore>,
+}
+
+impl SessionLimits {
+    pub fn new(limits: &RuntimeLimits) -> Self {
+        Self {
+            handshake_timeout: limits.handshake_timeout,
+            message_timeout: limits.message_timeout,
+            lookup_permits: Arc::new(Semaphore::new(limits.max_lookup_bridges)),
+        }
+    }
+}
 
 pub async fn handle_connection(
     connection: Connection,
     identity: ParsedSpiffe,
     state: Arc<RelayState>,
+    limits: SessionLimits,
 ) -> Result<()> {
-    let (mut send, mut recv) = connection
-        .accept_bi()
+    let (mut send, mut recv) = timeout(limits.handshake_timeout, connection.accept_bi())
         .await
+        .context("Relay initial stream timed out")?
         .context("accept Relay handshake stream")?;
-    let message: HandshakeMsg = read_message(&mut recv).await?;
+    let message: HandshakeMsg = read_message(&mut recv, limits.message_timeout).await?;
 
     match message {
         HandshakeMsg::Register {
@@ -50,15 +72,23 @@ pub async fn handle_connection(
                 bail!("Lookup requires client identity");
             }
 
-            spawn_lookup(send, recv, connector_id, identity.clone(), state.clone());
+            spawn_lookup(
+                send,
+                recv,
+                connector_id,
+                identity.clone(),
+                state.clone(),
+                limits.clone(),
+            );
             while let Ok((mut send, mut recv)) = connection.accept_bi().await {
-                let message: HandshakeMsg = match read_message(&mut recv).await {
-                    Ok(message) => message,
-                    Err(error) => {
-                        warn!(error = %error, "invalid Relay Lookup message");
-                        continue;
-                    }
-                };
+                let message: HandshakeMsg =
+                    match read_message(&mut recv, limits.message_timeout).await {
+                        Ok(message) => message,
+                        Err(error) => {
+                            warn!(error = %error, "invalid Relay Lookup message");
+                            continue;
+                        }
+                    };
                 let HandshakeMsg::Lookup { connector_id } = message else {
                     let _ = write_ack(
                         &mut send,
@@ -68,7 +98,14 @@ pub async fn handle_connection(
                     .await;
                     continue;
                 };
-                spawn_lookup(send, recv, connector_id, identity.clone(), state.clone());
+                spawn_lookup(
+                    send,
+                    recv,
+                    connector_id,
+                    identity.clone(),
+                    state.clone(),
+                    limits.clone(),
+                );
             }
             Ok(())
         }
@@ -81,8 +118,25 @@ fn spawn_lookup(
     connector_id: String,
     identity: ParsedSpiffe,
     state: Arc<RelayState>,
+    limits: SessionLimits,
 ) {
+    let permit = match limits.lookup_permits.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            tokio::spawn(async move {
+                let mut send = send;
+                let _ = write_ack(&mut send, false, Some("Relay Lookup capacity exhausted")).await;
+                warn!(
+                    connector_id = %connector_id,
+                    rejection_reason = "lookup_limit",
+                    "Relay Lookup rejected because capacity is exhausted"
+                );
+            });
+            return;
+        }
+    };
     tokio::spawn(async move {
+        let _permit = permit;
         if let Err(error) = handle_lookup_stream(send, recv, &connector_id, &identity, &state).await
         {
             warn!(connector_id = %connector_id, error = %error, "Relay Lookup failed");
@@ -132,7 +186,16 @@ async fn handle_lookup_stream(
     pipe_streams(client_send, client_recv, connector_send, connector_recv).await
 }
 
-async fn read_message<T: for<'a> serde::Deserialize<'a>>(recv: &mut RecvStream) -> Result<T> {
+async fn read_message<T: for<'a> serde::Deserialize<'a>>(
+    recv: &mut RecvStream,
+    message_timeout: Duration,
+) -> Result<T> {
+    timeout(message_timeout, read_message_inner(recv))
+        .await
+        .context("Relay framed message timed out")?
+}
+
+async fn read_message_inner<T: for<'a> serde::Deserialize<'a>>(recv: &mut RecvStream) -> Result<T> {
     let mut length = [0u8; 4];
     recv.read_exact(&mut length)
         .await
@@ -203,6 +266,7 @@ fn validate_register(identity: &ParsedSpiffe, connector_id: &str, spiffe_id: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RuntimeLimits;
 
     const CONNECTOR_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -233,5 +297,22 @@ mod tests {
         let mut identity = connector_identity();
         identity.role = "client".to_owned();
         assert!(validate_register(&identity, CONNECTOR_ID, &identity.uri).is_err());
+    }
+
+    #[test]
+    fn lookup_capacity_is_bounded_and_released() {
+        let limits = SessionLimits::new(&RuntimeLimits {
+            max_connections: 1,
+            max_lookup_bridges: 1,
+            max_bidi_streams: 1,
+            idle_timeout: Duration::from_secs(1),
+            handshake_timeout: Duration::from_secs(1),
+            message_timeout: Duration::from_secs(1),
+        });
+
+        let permit = limits.lookup_permits.clone().try_acquire_owned().unwrap();
+        assert!(limits.lookup_permits.clone().try_acquire_owned().is_err());
+        drop(permit);
+        assert!(limits.lookup_permits.clone().try_acquire_owned().is_ok());
     }
 }

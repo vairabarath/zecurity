@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
-use quinn::{Connection, ServerConfig};
+use quinn::{Connection, IdleTimeout, ServerConfig, TransportConfig, VarInt};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
@@ -21,6 +21,8 @@ pub fn build_server_config(
     key_pem: &[u8],
     intermediate_ca_pem: &[u8],
     expected_relay_id: &str,
+    max_bidi_streams: u32,
+    idle_timeout: std::time::Duration,
 ) -> Result<ServerConfig> {
     let cert_chain = parse_certificates(cert_pem, "Relay certificate")?;
     if cert_chain.len() != 1 {
@@ -59,7 +61,17 @@ pub fn build_server_config(
 
     let quic_config = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
         .context("build Relay QUIC TLS config")?;
-    Ok(ServerConfig::with_crypto(Arc::new(quic_config)))
+    let mut transport = TransportConfig::default();
+    transport
+        .max_concurrent_bidi_streams(VarInt::from_u32(max_bidi_streams))
+        .max_idle_timeout(Some(
+            IdleTimeout::try_from(idle_timeout).context("Relay idle timeout is too large")?,
+        ))
+        .keep_alive_interval(Some(idle_timeout / 3));
+
+    let mut server_config = ServerConfig::with_crypto(Arc::new(quic_config));
+    server_config.transport_config(Arc::new(transport));
+    Ok(server_config)
 }
 
 /// Extract the authenticated Connector or Client identity after a QUIC
@@ -175,23 +187,44 @@ mod tests {
     #[test]
     fn accepts_exact_relay_identity_and_matching_key() {
         let (cert, key) = self_signed_relay(RELAY_ID);
-        build_server_config(&cert, &key, &cert, RELAY_ID).unwrap();
+        build_server_config(
+            &cert,
+            &key,
+            &cert,
+            RELAY_ID,
+            128,
+            std::time::Duration::from_secs(60),
+        )
+        .unwrap();
     }
 
     #[test]
     fn rejects_wrong_relay_identity() {
         let (cert, key) = self_signed_relay(RELAY_ID);
-        assert!(
-            build_server_config(&cert, &key, &cert, "9b2d5cae-5820-4702-adf4-231680852b11")
-                .is_err()
-        );
+        assert!(build_server_config(
+            &cert,
+            &key,
+            &cert,
+            "9b2d5cae-5820-4702-adf4-231680852b11",
+            128,
+            std::time::Duration::from_secs(60),
+        )
+        .is_err());
     }
 
     #[test]
     fn rejects_mismatched_private_key() {
         let (cert, _) = self_signed_relay(RELAY_ID);
         let (_, wrong_key) = self_signed_relay(RELAY_ID);
-        assert!(build_server_config(&cert, &wrong_key, &cert, RELAY_ID).is_err());
+        assert!(build_server_config(
+            &cert,
+            &wrong_key,
+            &cert,
+            RELAY_ID,
+            128,
+            std::time::Duration::from_secs(60),
+        )
+        .is_err());
     }
 
     #[test]

@@ -20,7 +20,8 @@ private key; the Controller validates and signs only the Relay CSR.
 
 - Issuer: Platform Intermediate CA
 - SPIFFE URI: `spiffe://<global-trust-domain>/relay/<relay-id>`
-- Extended Key Usage: `ServerAuth`
+- Extended Key Usage: `ServerAuth` + `ClientAuth` so the same Relay identity
+  can authenticate its Controller heartbeat mTLS connection
 - DNS/IP SANs: configured Relay public names/addresses
 - Private key: generated on Relay host, stored with `0600`, never sent to Controller
 - Relay client trust bundle: Platform Intermediate CA certificate
@@ -58,8 +59,8 @@ Source of truth: `proto/relay/v1/relay.proto`
 - The current `Provision` handler validates the requested SAN allowlist.
   `SignRelayCert` independently enforces that the CSR contains no DNS/IP SAN
   outside that allowlist before signing.
-- The heartbeat RPC is intentionally deferred. Define it before implementing
-  periodic mTLS-authenticated Relay health reporting.
+- The heartbeat RPC is implemented. It derives Relay identity from the
+  authenticated certificate and records Relay health metadata.
 - The Relay private key is never represented in or sent through the protobuf
   contract.
 - The Relay fetches `/ca.crt` for TLS bootstrap and requires
@@ -170,5 +171,4 @@ ECDSA leaves.
 - Relay verifies the fetched CA fingerprint, sends its CSR, validates the
   returned identity/certificates, and stores `relay.key`, `relay.crt`, and
   `intermediate-ca.crt`.
-- Building the mTLS QUIC listener and sending heartbeat messages remain pending
-  until their runtime and protobuf contracts are implemented.
+- The mTLS QUIC listener and periodic mTLS heartbeat client are implemented.
