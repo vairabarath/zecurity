@@ -431,12 +431,35 @@ func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 	return GetByID(ctx, db, tenantID, id)
 }
 
-// MarkUnprotecting transitions a resource to protecting status with pending_action='remove'.
+// MarkUnprotecting removes protection from a resource.
+//
+// Normally it transitions to 'protecting'/pending_action='remove' and waits for
+// the shield to ack the nftables removal. But if the bound shield is REVOKED or
+// gone (no shields row), there is no shield left to apply the removal or ack it,
+// and the firewall rule died with the shield — so parking in 'protecting' would
+// hang forever waiting for an ack that can never arrive (Finding 7). In that case
+// we resolve straight to the terminal 'unprotected' state in the same atomic
+// UPDATE (deciding off the shield status, so there is no TOCTOU). A merely
+// disconnected/offline-but-not-revoked shield still takes the normal path: it
+// picks up the pending remove and acks it on reconnect.
+//
+// pending_action stays 'remove' in both branches — it is only meaningful while
+// status='protecting', and the normal terminal path (RecordAck) also leaves it at
+// 'remove' when it flips to 'unprotected', so the resolve-through end-state is
+// identical: ('unprotected', 'remove').
 func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`UPDATE resources
-		    SET status = 'protecting', pending_action = 'remove',
+		    SET status = CASE
+		            WHEN COALESCE(
+		                     (SELECT s.status FROM shields s WHERE s.id = resources.shield_id),
+		                     'revoked'
+		                 ) = 'revoked'
+		            THEN 'unprotected'   -- shield revoked or gone: nothing to ack (Finding 7)
+		            ELSE 'protecting'    -- live/recoverable shield: normal remove + ack path
+		        END,
+		        pending_action = 'remove',
 		        updated_at = NOW()
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status = 'protected'
