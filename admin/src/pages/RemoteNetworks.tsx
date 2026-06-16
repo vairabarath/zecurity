@@ -35,7 +35,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ScanModal } from '@/components/ScanModal'
-import { EmptyState, EntityIcon, StatusPill } from '@/lib/console'
+import { EmptyState, ErrorState, EntityIcon, StatusPill } from '@/lib/console'
 
 const locationConfig: Record<NetworkLocation, { label: string; icon: typeof Home }> = {
   [NetworkLocation.Home]: { label: 'Home', icon: Home },
@@ -59,7 +59,7 @@ export default function RemoteNetworks() {
   const [scanTarget, setScanTarget] = useState<{ networkId: string; connectorId: string } | null>(null)
   const [connectorSelections, setConnectorSelections] = useState<Record<string, string>>({})
 
-  const { data, loading } = useQuery(GetRemoteNetworksDocument, {
+  const { data, loading, error, refetch } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
   })
@@ -171,6 +171,14 @@ export default function RemoteNetworks() {
               <Skeleton className="mt-6 h-24 w-full rounded-2xl bg-secondary" />
             </div>
           ))}
+        </div>
+      ) : error && networks.length === 0 ? (
+        <div className="surface-card">
+          <ErrorState
+            title="Couldn't load remote networks"
+            description="Something went wrong fetching your networks. This is a load error, not an empty workspace."
+            action={<Button onClick={() => refetch()}>Retry</Button>}
+          />
         </div>
       ) : networks.length === 0 ? (
         <div className="surface-card">

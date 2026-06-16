@@ -12,6 +12,7 @@ import (
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
 
 // querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
@@ -107,7 +108,7 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 	).Scan(&shieldID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("no shield installed on host %s in this remote network", host)
+			return "", apperr.UserErrorf("no shield installed on host %s in this remote network", host)
 		}
 		return "", fmt.Errorf("auto-match shield: %w", err)
 	}

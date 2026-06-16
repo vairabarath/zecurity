@@ -10,7 +10,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
 import { Skeleton } from '@/components/ui/skeleton'
-import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
+import { EmptyState, ErrorState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
 type NetworkConnector = GetRemoteNetworksQuery['remoteNetworks'][number]['connectors'][number] & {
   networkId: string
@@ -31,7 +31,7 @@ export default function AllConnectors() {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
 
-  const { data, loading } = useQuery(GetRemoteNetworksDocument, {
+  const { data, loading, error, refetch } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
   })
@@ -129,6 +129,12 @@ export default function AllConnectors() {
                 <Skeleton key={index} className="h-16 rounded-2xl bg-secondary" />
               ))}
             </div>
+          ) : error && networks.length === 0 ? (
+            <ErrorState
+              title="Couldn't load connectors"
+              description="Something went wrong fetching your networks and connectors. This is a load error, not an empty workspace."
+              action={<Button onClick={() => refetch()}>Retry</Button>}
+            />
           ) : filteredConnectors.length === 0 ? (
             <EmptyState
               title="No connectors match the current filters"

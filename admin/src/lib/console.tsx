@@ -71,6 +71,32 @@ export function EmptyState({
   )
 }
 
+// ErrorState mirrors EmptyState but signals a load FAILURE (danger tone) rather
+// than "nothing exists" — so a failed query is never mistaken for an empty list.
+// The action slot is typically a Retry button.
+export function ErrorState({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon?: ReactNode
+  title: string
+  description: string
+  action?: ReactNode
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
+      <div className="mb-4 grid h-14 w-14 place-items-center rounded-full border border-destructive/30 bg-destructive/10 text-destructive">
+        {icon ?? <AlertTriangle className="h-6 w-6" />}
+      </div>
+      <h3 className="text-lg font-semibold">{title}</h3>
+      <p className="mt-2 max-w-md text-sm text-muted-foreground">{description}</p>
+      {action ? <div className="mt-5">{action}</div> : null}
+    </div>
+  )
+}
+
 export function EntityIcon({ type }: { type: 'network' | 'connector' | 'shield' | 'resource' }) {
   const config = {
     network: {

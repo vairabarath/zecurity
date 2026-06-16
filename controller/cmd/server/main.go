@@ -146,6 +146,9 @@ func main() {
 			},
 		}),
 	)
+	// Fail-closed error masking: only apperr.UserError + gqlgen parse/validation
+	// errors reach clients; raw resolver/DB errors are logged and genericized.
+	gqlSrv.SetErrorPresenter(resolvers.ErrorPresenter)
 
 	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
 	// enables it by default via extension.Introspection{}, which exposes the
