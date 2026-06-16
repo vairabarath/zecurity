@@ -92,28 +92,41 @@ func (s *serviceImpl) issueAccessToken(userID, tenantID, role, email string) (st
 	return signed, nil
 }
 
-// issueRefreshToken creates a random 256-bit refresh token,
-// stores it in Redis keyed to the user_id, and returns the token value.
-// The raw token is set as an httpOnly cookie by the caller — never returned in the body.
+// issueRefreshToken creates a random 256-bit refresh token, stores it in
+// Redis as a RefreshSession (token + original_iat + max_lifetime_at) and
+// returns the token value.
+//
+// The raw token is set as an httpOnly cookie by the caller — never in body.
 // Called by: CallbackHandler() in callback.go (Step 9).
+//
+// ADR-006: original_iat is preserved across rotations; max_lifetime_at caps
+// the absolute session lifetime independently of the rolling idle TTL.
 func (s *serviceImpl) issueRefreshToken(ctx context.Context, userID string) (string, error) {
-	// Generate random token: 32 bytes = 256 bits of entropy.
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", fmt.Errorf("generate refresh token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 
-	// Parse TTL from config (default 7 days).
 	ttl, err := time.ParseDuration(s.cfg.JWTRefreshTTL)
 	if err != nil {
 		ttl = 7 * 24 * time.Hour
 	}
 
-	// Store in Redis keyed by user_id.
-	// Called: redis.go → SetRefreshToken()
-	if err := s.redisClient.SetRefreshToken(ctx, userID, token, ttl); err != nil {
-		return "", fmt.Errorf("store refresh token: %w", err)
+	maxLifetime, err := time.ParseDuration(s.cfg.JWTRefreshMaxLifetime)
+	if err != nil {
+		maxLifetime = 30 * 24 * time.Hour
+	}
+
+	now := time.Now().Unix()
+	sess := RefreshSession{
+		Token:         token,
+		OriginalIAT:   now,
+		MaxLifetimeAt: now + int64(maxLifetime.Seconds()),
+	}
+
+	if err := s.redisClient.SetRefreshSession(ctx, userID, sess, ttl); err != nil {
+		return "", fmt.Errorf("store refresh session: %w", err)
 	}
 
 	return token, nil

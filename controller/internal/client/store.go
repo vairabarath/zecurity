@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -78,6 +79,8 @@ func upsertUser(
 	tenantID, email, provider, providerSub string,
 	createIfMissing bool,
 ) (*userRow, bool, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+
 	var u userRow
 	err := db.QueryRow(ctx,
 		`SELECT id, role

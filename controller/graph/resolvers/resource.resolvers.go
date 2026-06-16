@@ -78,8 +78,13 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 		return nil, fmt.Errorf("unprotectResource: %w", err)
 	}
 
-	r.ConnectorRegistry.PushInstruction(row)
-	connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	// Only instruct a shield when there is one to instruct. If the bound shield was
+	// revoked/gone, MarkUnprotecting resolved straight to 'unprotected' (Finding 7):
+	// no shield to remove the rule or ack, so there is nothing to push.
+	if row.Status == "protecting" {
+		r.ConnectorRegistry.PushInstruction(row)
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	}
 	return toResourceGQL(row), nil
 }
 

@@ -102,11 +102,17 @@ pub fn validate_host(resource_host: &str) -> bool {
 }
 
 pub fn check_port(host: &str, port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &format!("{}:{}", host, port).parse().unwrap(),
-        Duration::from_secs(2),
-    )
-    .is_ok()
+    // Hosts reaching here are validated IPs (127.0.0.1 or detect_lan_ip()), so this
+    // parses in practice — but never panic on a malformed address: an unparseable
+    // host is simply treated as not-listening (fail to `failed`, not a shield crash).
+    let addr = match format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(_) => {
+            warn!(host = host, port = port, "check_port: unparseable address, treating as unreachable");
+            return false;
+        }
+    };
+    std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok()
 }
 
 /// Build the single atomic nftables transaction that (re)builds `resource_protect`.
@@ -537,15 +543,22 @@ fn source_accept_rule(
     source: &str,
 ) -> Rule<'static> {
     // Parse "addr/len" into a Prefix expression. Fall back to plain string for
-    // single-host addresses (no slash), which nftables resolves correctly.
-    let source_expr: Expression<'static> = if let Some((addr, len)) = source.split_once('/') {
-        let len: u32 = len.parse().expect("invalid prefix length in source rule");
-        Expression::Named(NamedExpression::Prefix(Prefix {
-            addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
-            len,
-        }))
-    } else {
-        Expression::String(Cow::Owned(source.to_string()))
+    // single-host addresses (no slash), which nftables resolves correctly. A
+    // malformed prefix length also falls back to the plain-string form rather than
+    // panicking — today `source` is always the hardcoded "127.0.0.0/8", but never let
+    // a bad rule string crash the shield mid-apply.
+    let source_expr: Expression<'static> = match source.split_once('/') {
+        Some((addr, len)) => match len.parse::<u32>() {
+            Ok(len) => Expression::Named(NamedExpression::Prefix(Prefix {
+                addr: Box::new(Expression::String(Cow::Owned(addr.to_string()))),
+                len,
+            })),
+            Err(_) => {
+                warn!(source = source, "invalid prefix length in source rule, using literal");
+                Expression::String(Cow::Owned(source.to_string()))
+            }
+        },
+        None => Expression::String(Cow::Owned(source.to_string())),
     };
 
     Rule {
@@ -652,5 +665,121 @@ mod tests {
             .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(_)))))
             .count();
         assert_eq!(rule_adds, 3, "expected 3 rules: lo-accept, localhost-accept, port-drop");
+    }
+
+    // ---- F21 live-kernel verification (gated) -------------------------------
+    // These apply real rulesets to the running kernel, so they need root +
+    // CAP_NET_ADMIN and must NOT touch a real host firewall. Run them inside a
+    // throwaway rootless network namespace, where you are root and nftables is
+    // fully isolated from the host:
+    //
+    //   cargo test -p zecurity-shield --lib resources::tests::live_nft --no-run
+    //   unshare -rn <the compiled test binary> live_nft --ignored --nocapture
+    //
+    // (or simply: unshare -rn cargo test -p zecurity-shield --lib live_nft --ignored --nocapture)
+    // They are #[ignore] so normal `cargo test` / CI skips them.
+
+    /// True iff the protect chain currently exists AND carries its port-drop
+    /// rule. The chain's only `drop` statement is the port-drop rule (policy is
+    /// `accept`), so "chain lists OK and contains drop" == "the port is defended".
+    /// A flushed/missing chain → no `drop` → returns false.
+    fn chain_drop_present() -> bool {
+        match std::process::Command::new("nft")
+            .args(["list", "chain", "inet", TABLE, PROTECT_CHAIN])
+            .output()
+        {
+            Ok(o) => o.status.success() && String::from_utf8_lossy(&o.stdout).contains("drop"),
+            Err(_) => false,
+        }
+    }
+
+    // F21 (a): no enforcement gap during a rebuild. A concurrent observer hammers
+    // `nft list chain` while we re-apply (flush+rebuild) 50 times. Because each
+    // apply is ONE atomic `nft -f` batch, the observer must only ever see the old
+    // or the new complete ruleset — never an empty/undefended chain mid-swap.
+    #[test]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    fn live_nft_rebuild_no_gap() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let resources = vec![res("r1", 8080)];
+
+        // Reach steady state first so the sampler never races initial chain creation.
+        helper::apply_ruleset(&build_protect_ruleset(&resources)).expect("initial apply");
+        assert!(chain_drop_present(), "drop rule must be present after the initial apply");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let samples = Arc::new(AtomicU64::new(0));
+        let gaps = Arc::new(AtomicU64::new(0));
+        let (s, g, stp) = (samples.clone(), gaps.clone(), stop.clone());
+
+        let sampler = std::thread::spawn(move || {
+            while !stp.load(Ordering::Relaxed) {
+                s.fetch_add(1, Ordering::Relaxed);
+                if !chain_drop_present() {
+                    g.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+
+        for _ in 0..50 {
+            helper::apply_ruleset(&build_protect_ruleset(&resources)).expect("rebuild apply");
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        sampler.join().unwrap();
+
+        let total = samples.load(Ordering::Relaxed);
+        let gap = gaps.load(Ordering::Relaxed);
+        eprintln!("[F21 no-gap] {total} samples across 50 rebuilds; {gap} saw the port undefended");
+        assert!(total > 0, "sampler took no samples");
+        assert_eq!(gap, 0, "port observed undefended {gap}/{total} times during rebuild — fail-open gap");
+    }
+
+    // F21 (b): a failed apply leaves the old rules intact (no fail-open). We inject
+    // a single transaction that flushes the chain and then adds a rule the kernel
+    // rejects (jump to a nonexistent chain) — the exact `flush chain; add rule …`
+    // shape build_protect_ruleset emits, but with a failing add. Because nft applies
+    // `-f` atomically, the flush MUST roll back with the failed add, so the prior
+    // ruleset survives. This is the worse half of the original F21 bug.
+    #[test]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    fn live_nft_failed_apply_preserves_rules() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let resources = vec![res("r1", 8080)];
+        helper::apply_ruleset(&build_protect_ruleset(&resources)).expect("good apply");
+        assert!(chain_drop_present(), "drop rule must be present after the good apply");
+
+        let script = format!(
+            "flush chain inet {TABLE} {PROTECT_CHAIN}\n\
+             add rule inet {TABLE} {PROTECT_CHAIN} tcp dport 8080 jump nonexistent_chain_zzz\n"
+        );
+        let mut child = Command::new("nft")
+            .args(["-f", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn nft");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            !out.status.success(),
+            "injected apply should fail (jump to nonexistent chain); nft said: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        assert!(
+            chain_drop_present(),
+            "old drop rule must survive a failed apply — the flush has to roll back too (F21 no fail-open)"
+        );
     }
 }
