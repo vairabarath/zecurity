@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
 // CompileACLSnapshot builds a fresh ACLSnapshot for the given workspace by
@@ -76,18 +77,20 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 	// increments on the next policy mutation — that is acceptable.
 	version := notifier.Version(workspaceID)
 
-	// Look up the active connector's LAN address so clients know which QUIC
-	// tunnel endpoint to connect to. Connector QUIC always runs on port 9092.
-	// lan_addr may be stored as "ip:port" (gRPC port 9091) — extract only the host.
-	var connectorTunnelAddr string
-	var lanAddr string
+	// Look up the active connector. Returns lan_addr (for connector_tunnel_addr),
+	// id and trust_domain (used to derive connector_spiffe). Single query.
+	// lan_addr may be stored as "ip:port" (gRPC port 9091) — extract only the host;
+	// connector QUIC always runs on port 9092.
+	var connectorTunnelAddr, connectorID, connectorSPIFFE string
+	var lanAddr, trustDomain string
 	_ = pool.QueryRow(ctx,
-		`SELECT COALESCE(lan_addr, '') FROM connectors
+		`SELECT COALESCE(lan_addr, ''), id::text, COALESCE(trust_domain, '')
+		 FROM connectors
 		 WHERE tenant_id = $1
 		   AND status = 'active'
 		 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1`,
 		workspaceID,
-	).Scan(&lanAddr)
+	).Scan(&lanAddr, &connectorID, &trustDomain)
 	if lanAddr != "" {
 		host := lanAddr
 		if h, _, err := net.SplitHostPort(lanAddr); err == nil {
@@ -95,12 +98,27 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		}
 		connectorTunnelAddr = host + ":9092"
 	}
+	if connectorID != "" && trustDomain != "" {
+		connectorSPIFFE = appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
+	}
+
+	// Sprint 10.2 — relay discovery. Emit relay_addr + relay_spiffe_id only if
+	// both are set on the Store (operator configured both env vars at startup).
+	var relayAddr, relaySPIFFEID string
+	if store.relayAddr != "" && store.relaySPIFFEID != "" {
+		relayAddr = store.relayAddr
+		relaySPIFFEID = store.relaySPIFFEID
+	}
 
 	return &clientv1.ACLSnapshot{
-		WorkspaceId:          workspaceID,
-		Version:              version,
-		GeneratedAt:          time.Now().Unix(),
-		Entries:              entries,
-		ConnectorTunnelAddr:  connectorTunnelAddr,
+		WorkspaceId:         workspaceID,
+		Version:             version,
+		GeneratedAt:         time.Now().Unix(),
+		Entries:             entries,
+		ConnectorTunnelAddr: connectorTunnelAddr,
+		ConnectorId:         connectorID,
+		ConnectorSpiffe:     connectorSPIFFE,
+		RelayAddr:           relayAddr,
+		RelaySpiffeId:       relaySPIFFEID,
 	}, nil
 }

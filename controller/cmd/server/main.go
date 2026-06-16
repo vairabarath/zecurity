@@ -123,7 +123,12 @@ func main() {
 	)
 	inviteHandler := invitation.NewHandler(inviteStore, inviteEmailer)
 
-	policyStore := policy.NewStore(db.Pool)
+	relayAddr := envOr("RELAY_ADDR", "")
+	relaySPIFFEID := envOr("RELAY_SPIFFE_ID", "")
+	if (relayAddr == "") != (relaySPIFFEID == "") {
+		log.Fatalf("RELAY_ADDR and RELAY_SPIFFE_ID must be set together (both or neither)")
+	}
+	policyStore := policy.NewStore(db.Pool, relayAddr, relaySPIFFEID)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
 

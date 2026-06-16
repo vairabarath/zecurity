@@ -108,6 +108,14 @@ message ACLSnapshot {
   int64  generated_at            = 3;
   repeated ACLEntry entries      = 4;
   string connector_tunnel_addr   = 5; // QUIC tunnel address of the active connector, e.g. "192.168.1.x:9092"
+
+  // Sprint 10.2 — relay discovery (fields 6-9). Populated together or all
+  // empty. Empty means relay fallback is disabled and the client stays in
+  // direct-only mode.
+  string relay_addr       = 6; // relay QUIC public address, e.g. "relay.example.com:9093"
+  string connector_id     = 7; // active connector UUID — client sends this in relay Lookup
+  string connector_spiffe = 8; // full connector SPIFFE URI for inner-mTLS peer verification
+  string relay_spiffe_id  = 9; // SPIFFE URI of the relay, e.g. "spiffe://zecurity.in/relay/<id>". Empty when relay disabled. Required whenever relay_addr is set.
 }
 
 message ACLEntry {
