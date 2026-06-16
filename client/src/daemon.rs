@@ -12,10 +12,12 @@ use crate::grpc::{self, client_v1::GetAclSnapshotRequest};
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
+use crate::relay_pool::RelayPool;
 use crate::runtime::{
     self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
+use crate::transport::{ClientTransport, RelayContext};
 use crate::tun::TunManager;
 use crate::tunnel_pool::TunnelPool;
 
@@ -427,18 +429,13 @@ async fn handle_up(
         Some(d) => d,
     };
 
-    // Build QUIC tunnel pool from device mTLS cert.
-    let pool = match TunnelPool::new(
-        &device.certificate_pem,
-        &device.private_key_pem,
-        &device.ca_cert_pem,
-    ) {
-        Ok(p) => Arc::new(p),
+    let transport = match build_client_transport(&acl, &device) {
+        Ok(transport) => Arc::new(transport),
         Err(e) => {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some(format!("failed to build tunnel pool: {}", e)),
+                error: Some(format!("failed to build client transport: {}", e)),
                 ..Default::default()
             }
         }
@@ -494,25 +491,8 @@ async fn handle_up(
         }
     };
 
-    // Resolve connector tunnel address: prefer the address embedded in the
-    // ACL snapshot (populated from the connector's live lan_addr in the DB),
-    // then fall back to config, then compiled-in default.
-    let connector_addr = {
-        let from_snapshot = acl.connector_tunnel_addr.as_str();
-        if !from_snapshot.is_empty() {
-            from_snapshot.to_string()
-        } else {
-            config::load()
-                .map(|c| c.connector().to_string())
-                .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string())
-        }
-    };
-    let connector_socket: SocketAddr = connector_addr
-        .parse()
-        .unwrap_or_else(|_| "127.0.0.1:9092".parse().unwrap());
-
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, acl, pool, connector_socket).await {
+        if let Err(e) = net_stack::run(dev, acl, transport).await {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -693,6 +673,59 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
         "ACL snapshot synced"
     );
     Ok(result)
+}
+
+fn build_client_transport(
+    acl: &crate::grpc::client_v1::AclSnapshot,
+    device: &DeviceInfo,
+) -> Result<ClientTransport> {
+    let relay_fields = [
+        !acl.relay_addr.is_empty(),
+        !acl.connector_id.is_empty(),
+        !acl.connector_spiffe.is_empty(),
+        !acl.relay_spiffe_id.is_empty(),
+    ];
+    let all_relay = relay_fields.iter().all(|p| *p);
+    let any_relay = relay_fields.iter().any(|p| *p);
+
+    if any_relay && !all_relay {
+        anyhow::bail!(
+            "ACL snapshot relay discovery is incomplete; relay_addr, connector_id, connector_spiffe, and relay_spiffe_id must be populated together"
+        );
+    }
+
+    let connector_addr = if !acl.connector_tunnel_addr.is_empty() {
+        acl.connector_tunnel_addr.clone()
+    } else {
+        crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
+    };
+    let connector_socket: SocketAddr = connector_addr
+        .parse()
+        .with_context(|| format!("parse connector tunnel address {connector_addr}"))?;
+    let direct = Arc::new(TunnelPool::new(
+        &device.certificate_pem,
+        &device.private_key_pem,
+        &device.ca_cert_pem,
+    )?);
+
+    let relay = if all_relay {
+        let pool = Arc::new(RelayPool::new(
+            &device.certificate_pem,
+            &device.private_key_pem,
+            &device.ca_cert_pem,
+            &acl.relay_spiffe_id,
+        )?);
+        Some(RelayContext {
+            pool,
+            relay_addr: acl.relay_addr.clone(),
+            connector_id: acl.connector_id.clone(),
+            connector_spiffe: acl.connector_spiffe.clone(),
+        })
+    } else {
+        None
+    };
+
+    Ok(ClientTransport::new(direct, connector_socket, relay))
 }
 
 fn now_unix() -> i64 {
