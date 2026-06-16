@@ -125,8 +125,8 @@ func main() {
 
 	relayAddr := envOr("RELAY_ADDR", "")
 	relaySPIFFEID := envOr("RELAY_SPIFFE_ID", "")
-	if (relayAddr == "") != (relaySPIFFEID == "") {
-		log.Fatalf("RELAY_ADDR and RELAY_SPIFFE_ID must be set together (both or neither)")
+	if err := policy.ValidateRelayConfig(relayAddr, relaySPIFFEID); err != nil {
+		log.Fatalf("invalid relay config: %v", err)
 	}
 	policyStore := policy.NewStore(db.Pool, relayAddr, relaySPIFFEID)
 	policyCache := policy.NewSnapshotCache()
