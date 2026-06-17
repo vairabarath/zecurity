@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,7 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
@@ -153,6 +155,18 @@ func main() {
 			},
 		}),
 	)
+
+	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
+	// enables it by default via extension.Introspection{}, which exposes the
+	// full schema to any caller of /graphql. This is the standard pentest
+	// finding (CWE-200). Closes STAGE3-F1 of the connector flow audit.
+	//
+	// The introspectionDisabler extension below runs AFTER NewDefaultServer's
+	// extension.Introspection (extensions are applied in install order; the
+	// later one wins for shared OperationContext fields).
+	if os.Getenv("ENV") != "development" {
+		gqlSrv.Use(introspectionDisabler{})
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
@@ -343,6 +357,27 @@ func routeGraphQL(protected, public http.Handler) http.Handler {
 
 		protected.ServeHTTP(w, r)
 	})
+}
+
+// introspectionDisabler is a gqlgen extension that turns introspection OFF
+// per request by flipping OperationContext.DisableIntrospection back to true.
+//
+// gqlgen's NewDefaultServer installs extension.Introspection{}, which sets
+// DisableIntrospection=false (enabling introspection). Installing this
+// extension AFTER it flips the field back so introspection queries
+// (__schema, __type) return an error to the caller. See STAGE3-F1.
+type introspectionDisabler struct{}
+
+func (introspectionDisabler) ExtensionName() string { return "DisableIntrospection" }
+
+func (introspectionDisabler) Validate(_ graphql.ExecutableSchema) error { return nil }
+
+func (introspectionDisabler) MutateOperationContext(
+	_ context.Context,
+	opCtx *graphql.OperationContext,
+) *gqlerror.Error {
+	opCtx.DisableIntrospection = true
+	return nil
 }
 
 func healthHandler() http.Handler {
