@@ -54,7 +54,7 @@ impl RelayConfig {
             env::var("CONTROLLER_HTTP_ADDR").unwrap_or_else(|_| derive_http_addr(&controller_addr));
         let ca_fingerprint = required_env("RELAY_CA_FINGERPRINT")?.to_ascii_lowercase();
         if ca_fingerprint.len() != 64
-            || !ca_fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !ca_fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) // between 0-9, a-f, A-F
         {
             bail!("RELAY_CA_FINGERPRINT must be a 64-character SHA-256 hex digest");
         }
@@ -64,11 +64,11 @@ impl RelayConfig {
             controller_addr,
             controller_http_addr,
             bind_addr: env::var("RELAY_BIND")
-                .unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_owned())
-                .parse()
+                .unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_owned()) // assign the default value
+                .parse()// socket address object
                 .context("RELAY_BIND must be a socket address")?,
             ca_fingerprint,
-            state_dir: env::var("RELAY_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.to_owned()),
+            state_dir: env::var("RELAY_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.to_owned()), // pki
             dns_sans: comma_separated("RELAY_DNS_SANS"),
             ip_sans: parse_ip_sans(&comma_separated("RELAY_IP_SANS"))?,
             log_level: env::var("LOG_LEVEL").unwrap_or_else(|_| DEFAULT_LOG_LEVEL.to_owned()),
@@ -103,6 +103,44 @@ impl RelayConfig {
                 DEFAULT_HEARTBEAT_INTERVAL_SECS,
             )?),
         })
+        /*RelayConfig {
+            relay_id: "550e8400-e29b-41d4-a716-446655440000",
+
+            controller_addr:
+                "controller.example.com:9090",
+
+            controller_http_addr:
+                "controller.example.com:8080",
+
+            bind_addr:
+                0.0.0.0:9093,
+
+            ca_fingerprint:
+                "...",
+
+            state_dir:
+                "pki",
+
+            dns_sans:
+                [],
+
+            ip_sans:
+                [],
+
+            log_level:
+                "debug",
+
+            runtime_limits: RuntimeLimits {
+                max_connections: 1024,
+                max_lookup_bridges: 4096,
+                max_bidi_streams: 128,
+                idle_timeout: 60s,
+                handshake_timeout: 10s,
+                message_timeout: 10s,
+            },
+
+            heartbeat_interval: 30s,
+        } */
     }
 }
 

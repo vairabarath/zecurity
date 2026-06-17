@@ -28,13 +28,18 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
     if paths.exists() {
         info!(state_dir = %cfg.state_dir, "Relay certificate material already exists");
         return Ok(paths);
-    }
+    } 
+    // if paths.exists = ture then the remaining is not executed
 
     let ca_pem = fetch_ca_cert(&cfg.controller_http_addr).await?;
     verify_ca_fingerprint(&ca_pem, &cfg.ca_fingerprint)?;
     info!("verified controller Intermediate CA fingerprint");
 
-    let material = generate_relay_csr(&cfg.relay_id, &cfg.dns_sans, &cfg.ip_sans)?;
+    let material = generate_relay_csr(&cfg.relay_id, &cfg.dns_sans, &cfg.ip_sans)?;/*RelayCsr {
+                                                                                                private_key_pem,
+                                                                                                csr_der,
+                                                                                            } */
+                                                                                           
     let response = send_provision_request(cfg, &ca_pem, material.csr_der).await?;
     validate_response(&cfg.relay_id, &cfg.ca_fingerprint, &response)?;
     paths.store(
@@ -53,7 +58,7 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
 
 impl ProvisionedRelay {
     fn new(state_dir: &str) -> Self {
-        let state_dir = Path::new(state_dir);
+        let state_dir = Path::new(state_dir); // converts path object
         Self {
             key_path: state_dir.join("relay.key"),
             certificate_path: state_dir.join("relay.crt"),
