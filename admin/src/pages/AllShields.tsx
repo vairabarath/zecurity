@@ -10,7 +10,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { InstallCommandModal } from '@/components/InstallCommandModal'
 import { Skeleton } from '@/components/ui/skeleton'
-import { EmptyState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
+import { EmptyState, ErrorState, EntityIcon, StatusPill, relativeTime } from '@/lib/console'
 
 type NetworkShield = GetRemoteNetworksQuery['remoteNetworks'][number]['shields'][number] & {
   networkId: string
@@ -27,7 +27,7 @@ function statusTone(status: ShieldStatus): 'ok' | 'warn' | 'danger' | 'muted' {
 export default function AllShields() {
   const [showAdd, setShowAdd] = useState(false)
 
-  const { data, loading } = useQuery(GetRemoteNetworksDocument, {
+  const { data, loading, error, refetch } = useQuery(GetRemoteNetworksDocument, {
     fetchPolicy: 'cache-and-network',
     pollInterval: 30000,
   })
@@ -78,6 +78,12 @@ export default function AllShields() {
                 <Skeleton key={index} className="h-14 rounded-2xl bg-secondary" />
               ))}
             </div>
+          ) : error && networks.length === 0 ? (
+            <ErrorState
+              title="Couldn't load shields"
+              description="Something went wrong fetching your networks and shields. This is a load error, not an empty workspace."
+              action={<Button onClick={() => refetch()}>Retry</Button>}
+            />
           ) : allShields.length === 0 ? (
             <EmptyState
               title="No shields enrolled"

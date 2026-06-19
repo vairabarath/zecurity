@@ -12,6 +12,7 @@ import { CreateResourceModal } from "@/components/CreateResourceModal";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   EmptyState,
+  ErrorState,
   EntityIcon,
   StatusPill,
   relativeTime,
@@ -68,7 +69,7 @@ export default function Resources() {
   const { data: networkData } = useQuery(GetRemoteNetworksDocument);
   const networks = networkData?.remoteNetworks ?? [];
 
-  const { data, loading, refetch, startPolling } = useQuery(
+  const { data, loading, error, refetch, startPolling } = useQuery(
     GetAllResourcesDocument,
     {
       fetchPolicy: "cache-and-network",
@@ -160,6 +161,12 @@ export default function Resources() {
                 />
               ))}
             </div>
+          ) : error && resources.length === 0 ? (
+            <ErrorState
+              title="Couldn't load resources"
+              description="Something went wrong fetching your resources. This is a load error, not an empty workspace."
+              action={<Button onClick={() => refetch()}>Retry</Button>}
+            />
           ) : resources.length === 0 ? (
             <EmptyState
               title="No resources defined"
