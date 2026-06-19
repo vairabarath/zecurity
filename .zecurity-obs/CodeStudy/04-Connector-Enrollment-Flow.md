@@ -249,7 +249,7 @@ if (connectorId) navigate(`/connectors/${connectorId}`)
 - **`refetchQueries`** — Apollo re-runs `GetRemoteNetworks` after success so the new connector appears in lists
 - **`awaitRefetchQueries: true`** — wait for refetch to complete BEFORE resolving the await; ensures the detail page finds the new connector
 
-[authLink](admin/src/apollo/links/auth.ts#L18) attaches `Authorization: Bearer <admin's JWT>`. Not in `PUBLIC_OPERATIONS` → no `X-Public-Operation` → server routes through protected chain.
+[authLink](admin/src/apollo/links/auth.ts) attaches `Authorization: Bearer <admin's JWT>` when a token exists, and nothing else. (As of ADR-010 the client no longer declares public operations — the `X-Public-Operation` header and the `PUBLIC_OPERATIONS` list were removed; the server classifies public-vs-protected by parsing the request itself.)
 
 ## Stage 3 — Middleware → gqlgen → Resolver
 
@@ -258,7 +258,7 @@ if (connectorId) navigate(`/connectors/${connectorId}`)
 mux.Handle("/graphql", routeGraphQL(protected, gqlSrv))
 ```
 
-`routeGraphQL` ([main.go line 290](controller/cmd/server/main.go#L290)) checks `X-Public-Operation`. Empty → routes to `protected`.
+`routeGraphQL` ([main.go](controller/cmd/server/main.go)) now **parses the request body server-side** and routes to `public` only if it is a single query/mutation whose every root field is in the server's `publicRootFields` allowlist (`initiateAuth`, `lookupWorkspace`, `lookupWorkspacesByEmail`); anything else (incl. all of `GenerateConnectorToken`) falls through to `protected`. No client header is involved (ADR-010).
 
 `protected` chain:
 ```go
