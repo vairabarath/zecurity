@@ -249,6 +249,8 @@ if (connectorId) navigate(`/connectors/${connectorId}`)
 - **`refetchQueries`** — Apollo re-runs `GetRemoteNetworks` after success so the new connector appears in lists
 - **`awaitRefetchQueries: true`** — wait for refetch to complete BEFORE resolving the await; ensures the detail page finds the new connector
 
+> **✅ RESOLVED (2026-06-19, F3 — data-ownership refactor).** The `awaitRefetchQueries: true` above (and on the shield path) was a workaround for `ConnectorDetail` having no source of its own — it `.find()`-ed the connector *inside* the workspace-wide `GetRemoteNetworks`, so the create flow had to block on that full refetch before navigating. Fixed by making the detail pages **own their data via by-id queries**: `ConnectorDetail` now uses `GetConnector(id)` (+ `GetRemoteNetwork(remoteNetworkId)` for the name, `GetShields(remoteNetworkId)` for siblings), with **zero dependency on the `GetRemoteNetworks` cache** — mirroring `ShieldDetail`, which already worked this way (`GetShield(id)`). `awaitRefetchQueries` was removed on both create paths; the `refetchQueries` list refresh is now **background-only**, so create navigates immediately. `revokeConnector` refetches `GetConnector(id)` (not the workspace query the page no longer reads). No `cache.modify`/`writeFragment`/fabricated entries.
+
 [authLink](admin/src/apollo/links/auth.ts) attaches `Authorization: Bearer <admin's JWT>` when a token exists, and nothing else. (As of ADR-010 the client no longer declares public operations — the `X-Public-Operation` header and the `PUBLIC_OPERATIONS` list were removed; the server classifies public-vs-protected by parsing the request itself.)
 
 ## Stage 3 — Middleware → gqlgen → Resolver
