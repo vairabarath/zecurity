@@ -60,15 +60,13 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 		return nil, fmt.Errorf("generate shield token: insert shield: %w", err)
 	}
 
-	_, installCmd, err := r.ShieldSvc.GenerateShieldToken(ctx, remoteNetworkID, tc.TenantID, tc.TenantID, shieldID, name)
-	if err != nil {
-		return nil, fmt.Errorf("generate shield token: %w", err)
-	}
-
-	return &graph.ShieldToken{
-		ShieldID:       shieldID,
-		InstallCommand: installCmd,
-	}, nil
+	// Token minting is lazy: the create path only reserves the pending row with a
+	// placeholder connector. The real connector selection + enrollment token
+	// (JWT + Redis jti + install command) happen on demand in the REST endpoint
+	// POST /api/shields/{id}/token (which calls ShieldSvc.GenerateShieldToken)
+	// when the detail page loads. See ADR-008. Keeps the credential off the
+	// GraphQL/Apollo-cache surface and avoids minting a token that's discarded.
+	return &graph.ShieldToken{ShieldID: shieldID}, nil
 }
 
 // RevokeShield is the resolver for the revokeShield field.
