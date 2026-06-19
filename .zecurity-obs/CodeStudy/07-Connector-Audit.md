@@ -83,3 +83,61 @@ still works. Type definition at
 [main.go:347-360](controller/cmd/server/main.go#L347-L360).
 
 **Status**: ✅ Fixed.
+
+> Note: when ADR-009 Tier 1 lands, this shim will be replaced by a cleaner
+> conditional install (skip `extension.Introspection{}` entirely outside dev,
+> rather than install+disable). Same security outcome, less code.
+
+---
+
+### STAGE3-F2 — No GraphQL query complexity/depth limit (🟠 High)
+
+[main.go:128](controller/cmd/server/main.go#L128) — `handler.NewDefaultServer`
+does not configure any complexity or depth limit. The schema's cyclic
+relationships (`Connector.remoteNetwork ↔ RemoteNetwork.connectors`,
+`Resource.shield ↔ Shield.remoteNetwork`) allow an attacker to construct a
+single query whose cost grows exponentially with nesting. With no limit,
+the GraphQL executor accepts these and stalls Postgres on JOINs / N+1
+fetches.
+
+**CWE-770 — Allocation of Resources Without Limits or Throttling**
+**OWASP API Security Top 10 — API4:2023**
+
+Combined with **STAGE3-F1** (introspection — now fixed) and **STAGE3-F5**
+(raw pgx error leaks), an attacker could enumerate the schema, find the
+deepest cyclic chain, and submit a bomb that hangs the DB.
+
+**Fix decision**: documented in [[Decisions/ADR-009-GraphQL-DoS-Hardening]].
+4-tier layered approach (complexity → rate-limit → per-tenant → edge).
+Tier 1 (complexity + depth + transport hardening) is a single `gqlSrv`
+restructure — ~15 LOC — pending team discussion.
+
+**Status**: 📝 Documented in ADR-009, awaiting team discussion before fix.
+
+---
+
+### STAGE3-F3 — GraphQL GET transport enabled (🟠 High)
+
+[main.go:128](controller/cmd/server/main.go#L128) — `NewDefaultServer`
+installs `transport.GET` by default, allowing GraphQL queries via
+`GET /graphql?query=...&variables=...`. The Apollo frontend never uses GET,
+but the endpoint accepts manual GET requests. Query content (including
+sensitive arguments like emails or IDs) then ends up in:
+
+- Reverse-proxy access logs (nginx / ALB / Cloudflare standard log line)
+- Browser history
+- `Referer` header on outbound navigation
+- Browser / CDN cache
+- Bookmarks / screen shares / copy-as-cURL exports
+
+**CWE-598 — Information Exposure Through Query Strings in GET Request**
+
+Industry convention for security-sensitive GraphQL APIs is **POST only**
+(GitHub, Shopify, Linear, Apollo's own production guidance).
+
+**Fix decision**: bundled into [[Decisions/ADR-009-GraphQL-DoS-Hardening]]
+Tier 1 — same `gqlSrv` restructure that adds complexity limits also drops
+the GET transport. Folding the two fixes together keeps the diff small
+and review burden low.
+
+**Status**: 📝 Documented in ADR-009 (Tier 1), awaiting team discussion.
