@@ -253,6 +253,8 @@ if (connectorId) navigate(`/connectors/${connectorId}`)
 
 [authLink](admin/src/apollo/links/auth.ts) attaches `Authorization: Bearer <admin's JWT>` when a token exists, and nothing else. (As of ADR-010 the client no longer declares public operations — the `X-Public-Operation` header and the `PUBLIC_OPERATIONS` list were removed; the server classifies public-vs-protected by parsing the request itself.)
 
+> **✅ RESOLVED (2026-06-19, F4 — errorLink token-refresh trigger).** [errorLink](admin/src/apollo/links/error.ts) refreshes the access token and retries on auth failure. The refresh trigger is a **401**: AuthMiddleware returns HTTP 401 (`application/json`) for any missing/malformed/invalid/**expired** token (`writeJSON401`), and Apollo v4 surfaces every non-2xx as a `ServerError` (it throws before parsing the body, so a 401 is *never* a `CombinedGraphQLErrors`). The old `isUnauthorizedError` had three branches; only the `statusCode === 401` one could ever fire — the `CombinedGraphQLErrors`/`code: UNAUTHORIZED` and `instanceof Response` branches were dead. Simplified to Apollo's idiomatic guard: `ServerError.is(error) && error.statusCode === 401`. Refresh-retry confirmed working. Note: `@hasRole` "forbidden" returns HTTP **200** GraphQL errors and correctly does **not** trigger a refresh (refreshing can't grant a missing role).
+
 ## Stage 3 — Middleware → gqlgen → Resolver
 
 [main.go line 156](controller/cmd/server/main.go#L156):

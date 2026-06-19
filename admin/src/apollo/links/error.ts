@@ -1,6 +1,6 @@
 import { Observable } from 'rxjs'
 import { ErrorLink } from '@apollo/client/link/error'
-import { CombinedGraphQLErrors } from '@apollo/client/errors'
+import { ServerError } from '@apollo/client/errors'
 import type { ApolloLink } from '@apollo/client/core'
 import { useAuthStore } from '@/store/auth'
 
@@ -61,20 +61,19 @@ async function refreshAccessToken(): Promise<string | null> {
   }
 }
 
-// Check if the error is an UNAUTHORIZED error.
-// Apollo v4 returns HTTP 401 as a network error (not a GraphQL error),
-// so we must check both CombinedGraphQLErrors and network-level status.
+// Is this a token-expiry (refresh-worthy) error?
+//
+// The controller's AuthMiddleware returns HTTP 401 (application/json) for any
+// missing / malformed / invalid / expired token. Apollo v4 surfaces every
+// non-2xx response as a ServerError (it throws before parsing the body, so a 401
+// is NEVER a CombinedGraphQLErrors), and ServerError exposes `.statusCode`. So a
+// 401 ServerError is the single, reliable refresh trigger.
+//
+// Note: authorization failures from the @hasRole directive come back as HTTP 200
+// GraphQL errors ("forbidden") — those must NOT trigger a refresh, since
+// refreshing the token can't grant a missing role. Keying on 401 only is correct.
 function isUnauthorizedError(error: unknown): boolean {
-  if (CombinedGraphQLErrors.is(error)) {
-    return error.errors.some((e) => (e.extensions?.code as string) === 'UNAUTHORIZED')
-  }
-  if (error instanceof Error && 'statusCode' in error) {
-    return (error as unknown as { statusCode: number }).statusCode === 401
-  }
-  if (error instanceof Response) {
-    return error.status === 401
-  }
-  return false
+  return ServerError.is(error) && error.statusCode === 401
 }
 
 // ErrorLink intercepts GraphQL errors.
