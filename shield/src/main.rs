@@ -135,9 +135,9 @@ async fn main() -> anyhow::Result<()> {
             interface_addr = %state.interface_addr,
             "shield already enrolled, resuming"
         );
-        if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
-            warn!(error = %e, "network setup failed (non-fatal)");
-        }
+        // if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
+        //     warn!(error = %e, "network setup failed (non-fatal)");
+        // }
         state
     } else {
         // First run — enrollment flow (Phase I)
