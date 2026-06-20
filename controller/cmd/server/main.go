@@ -125,12 +125,7 @@ func main() {
 	)
 	inviteHandler := invitation.NewHandler(inviteStore, inviteEmailer)
 
-	relayAddr := envOr("RELAY_ADDR", "")
-	relaySPIFFEID := envOr("RELAY_SPIFFE_ID", "")
-	if err := policy.ValidateRelayConfig(relayAddr, relaySPIFFEID); err != nil {
-		log.Fatalf("invalid relay config: %v", err)
-	}
-	policyStore := policy.NewStore(db.Pool, relayAddr, relaySPIFFEID)
+	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
 

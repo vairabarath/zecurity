@@ -35,16 +35,13 @@ type AccessRuleRow struct {
 
 // Store wraps a pgxpool and provides policy DB operations.
 type Store struct {
-	pool          *pgxpool.Pool
-	relayAddr     string // RELAY_ADDR env — empty disables relay discovery
-	relaySPIFFEID string // RELAY_SPIFFE_ID env — must be set together with RELAY_ADDR
+	pool *pgxpool.Pool
 }
 
-// NewStore creates a Store.
-// relayAddr and relaySPIFFEID must be set together; if either is empty, relay
-// discovery is disabled and the ACL snapshot returns empty relay fields.
-func NewStore(pool *pgxpool.Pool, relayAddr, relaySPIFFEID string) *Store {
-	return &Store{pool: pool, relayAddr: relayAddr, relaySPIFFEID: relaySPIFFEID}
+// NewStore creates a Store. Relay discovery now comes from the relays table
+// at ACL-compile time (see compiler.go), not from env-var config.
+func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
 }
 
 // ── Groups ────────────────────────────────────────────────────────────────

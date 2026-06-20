@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
+
+const defaultRelayPort = "9093"
 
 // CompileACLSnapshot builds a fresh ACLSnapshot for the given workspace by
 // walking: enabled access_rules → groups → group members → client device SPIFFE IDs.
@@ -102,12 +105,44 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		connectorSPIFFE = appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
 	}
 
-	// Sprint 10.2 — relay discovery. Emit relay_addr + relay_spiffe_id only if
-	// both are set on the Store (operator configured both env vars at startup).
+	// Sprint 10.3 — Source the relay endpoint from the live relays table.
+	// Prefer public_addr (operator-set or auto-inferred when observed scope is
+	// public). Fall back to observed_ip:9093 when only the observed peer
+	// address is known. Skip rows that are loopback/link-local/unknown — those
+	// addresses aren't reachable by clients. No row → all four relay fields
+	// stay empty, which the client interprets as "direct-only, no relay path".
 	var relayAddr, relaySPIFFEID string
-	if store.relayAddr != "" && store.relaySPIFFEID != "" {
-		relayAddr = store.relayAddr
-		relaySPIFFEID = store.relaySPIFFEID
+	var (
+		relayRowID   string
+		publicAddr   *string
+		observedIP   *string
+		observedPort *int
+		addressScope *string
+	)
+	_ = pool.QueryRow(ctx,
+		`SELECT id::text, public_addr, observed_ip::text, observed_port, address_scope
+		   FROM relays
+		  WHERE status = 'active'
+		    AND (
+		          public_addr IS NOT NULL
+		          OR (observed_ip IS NOT NULL
+		              AND address_scope IN ('public', 'private'))
+		        )
+		  ORDER BY last_heartbeat_at DESC NULLS LAST
+		  LIMIT 1`,
+	).Scan(&relayRowID, &publicAddr, &observedIP, &observedPort, &addressScope)
+	switch {
+	case publicAddr != nil && *publicAddr != "":
+		relayAddr = *publicAddr
+	case observedIP != nil && *observedIP != "":
+		port := defaultRelayPort
+		if observedPort != nil && *observedPort > 0 {
+			port = strconv.Itoa(*observedPort)
+		}
+		relayAddr = net.JoinHostPort(*observedIP, port)
+	}
+	if relayAddr != "" {
+		relaySPIFFEID = appmeta.RelaySPIFFEID(relayRowID)
 	}
 
 	return &clientv1.ACLSnapshot{

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
 // TestCompileACLSnapshot_RelayDiscovery verifies the five contract bullets
@@ -57,8 +58,9 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 	notifier := NewNotifier(NewSnapshotCache())
 
 	t.Run("relay disabled", func(t *testing.T) {
+		// No row in the relays table → ACL snapshot's relay fields stay empty.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-disabled")
-		store := NewStore(testPool, "", "")
+		store := NewStore(testPool)
 		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -69,24 +71,27 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		}
 	})
 
-	t.Run("relay enabled", func(t *testing.T) {
+	t.Run("relay enabled via public_addr", func(t *testing.T) {
+		// Active relay row with public_addr set → ACL emits that address and a
+		// SPIFFE ID derived from the row's UUID.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-enabled")
-		const addr, spi = "relay.x:9093", "spiffe://td/relay/r1"
-		store := NewStore(testPool, addr, spi)
+		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.x:9093", "", "public")
+		store := NewStore(testPool)
 		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
-		if snap.RelayAddr != addr || snap.RelaySpiffeId != spi {
+		wantSPIFFE := appmeta.RelaySPIFFEID(relayID)
+		if snap.RelayAddr != "relay.x:9093" || snap.RelaySpiffeId != wantSPIFFE {
 			t.Fatalf("relay enabled: want (%q, %q), got (%q, %q)",
-				addr, spi, snap.RelayAddr, snap.RelaySpiffeId)
+				"relay.x:9093", wantSPIFFE, snap.RelayAddr, snap.RelaySpiffeId)
 		}
 	})
 
 	t.Run("active connector present", func(t *testing.T) {
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-conn")
 		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-a", "10.0.0.5")
-		store := NewStore(testPool, "", "")
+		store := NewStore(testPool)
 		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -105,7 +110,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 	t.Run("no active connector", func(t *testing.T) {
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-no-conn")
-		store := NewStore(testPool, "", "")
+		store := NewStore(testPool)
 		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -116,20 +121,24 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		}
 	})
 
-	t.Run("backwards compatibility", func(t *testing.T) {
+	t.Run("connector and entries unaffected by relay presence", func(t *testing.T) {
+		// Equivalent of the old "backwards compatibility" test: confirm that
+		// connector/entries fields don't drift when a relay row enters the DB.
+		// Same workspace, two compiles — first with no relay row, then with one.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-compat")
 		_ = mustInsertActiveConnector(t, ctx, testPool, wsID, "td-c", "10.0.0.50")
+		store := NewStore(testPool)
 
-		noRelay := NewStore(testPool, "", "")
-		withRelay := NewStore(testPool, "relay.x:9093", "spiffe://td/relay/r1")
-
-		s1, err := CompileACLSnapshot(ctx, noRelay, notifier, testPool, wsID)
+		s1, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
-			t.Fatalf("noRelay compile: %v", err)
+			t.Fatalf("first compile: %v", err)
 		}
-		s2, err := CompileACLSnapshot(ctx, withRelay, notifier, testPool, wsID)
+
+		_ = mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
+
+		s2, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
-			t.Fatalf("withRelay compile: %v", err)
+			t.Fatalf("second compile: %v", err)
 		}
 
 		if s1.ConnectorTunnelAddr != s2.ConnectorTunnelAddr {
@@ -143,6 +152,11 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 			if s1.Entries[i].String() != s2.Entries[i].String() {
 				t.Fatalf("Entries[%d] drift: %v vs %v", i, s1.Entries[i], s2.Entries[i])
 			}
+		}
+		// And the second compile must now carry relay fields.
+		if s2.RelayAddr == "" || s2.RelaySpiffeId == "" {
+			t.Fatalf("second compile should have populated relay fields, got addr=%q spiffe=%q",
+				s2.RelayAddr, s2.RelaySpiffeId)
 		}
 	})
 }
@@ -216,6 +230,41 @@ func mustInsertWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 	).Scan(&id)
 	if err != nil {
 		t.Fatalf("insert workspace %q: %v", slug, err)
+	}
+	return id
+}
+
+// mustInsertActiveRelay creates a relays row with status='active', a recent
+// heartbeat, and the supplied address metadata. Returns the relay UUID.
+// observedIP may be empty when only public_addr is set; addressScope must be
+// one of 'public'/'private' (or empty when no observed_ip is provided).
+func mustInsertActiveRelay(t *testing.T, ctx context.Context, pool *pgxpool.Pool, publicAddr, observedIP, addressScope string) string {
+	t.Helper()
+	var (
+		pubArg   any
+		ipArg    any
+		scopeArg any
+		portArg  any
+	)
+	if publicAddr != "" {
+		pubArg = publicAddr
+	}
+	if observedIP != "" {
+		ipArg = observedIP
+		portArg = 9093
+		if addressScope != "" {
+			scopeArg = addressScope
+		}
+	}
+	var id string
+	err := pool.QueryRow(ctx,
+		`INSERT INTO relays (name, status, public_addr, observed_ip, observed_port, address_scope, last_heartbeat_at)
+		 VALUES ('test-relay', 'active', $1, $2::inet, $3, $4, NOW())
+		 RETURNING id::text`,
+		pubArg, ipArg, portArg, scopeArg,
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("insert relay: %v", err)
 	}
 	return id
 }
