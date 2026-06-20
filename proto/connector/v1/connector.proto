@@ -95,6 +95,15 @@ message ConnectorControlMessage {
 message ConnectorLog {
   string connector_id = 1;
   string message = 2; // e.g. "dest=192.168.1.10:443 path=direct allowed"
+  string resource_id = 3;
+  string client_spiffe_id = 4;
+  string route_type = 5; // "connector" or "shield"; empty when no ACL entry matched
+  string destination = 6;
+  uint32 port = 7;
+  string protocol = 8;
+  string action = 9; // "allow", "deny", or "error"
+  string error = 10;
+  int64 occurred_at_unix = 11;
 }
 
 message ResourceInstructionBatch {

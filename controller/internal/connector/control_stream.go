@@ -3,12 +3,14 @@ package connector
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
@@ -470,12 +472,19 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, connectorID 
 
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
 	for _, ack := range batch.Acks {
-		if err := resource.RecordAck(
+		routeChanged, err := resource.RecordAck(
 			ctx, h.Pool, tenantID,
 			ack.ResourceId, ack.Status, ack.Error,
 			ack.VerifiedAt,
-		); err != nil {
+		)
+		if err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
+			continue
+		}
+		if routeChanged && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+				log.Printf("control stream: notify policy change resource_id=%s: %v", ack.ResourceId, err)
+			}
 		}
 	}
 }
@@ -607,10 +616,54 @@ func (h *EnrollmentHandler) handleScanReport(ctx context.Context, connectorID st
 }
 
 func (h *EnrollmentHandler) handleConnectorLog(ctx context.Context, tenantID, connectorID string, entry *pb.ConnectorLog) {
+	// Resolve the client SPIFFE ID to device + user when present. A miss is not
+	// fatal — leave both columns NULL so legacy logs and pre-ACL-match denies
+	// still land in the table.
+	var deviceID, userID *string
+	if entry.ClientSpiffeId != "" {
+		var d, u string
+		err := h.Pool.QueryRow(ctx,
+			`SELECT id::text, user_id::text
+			   FROM client_devices
+			  WHERE spiffe_id = $1
+			  LIMIT 1`,
+			entry.ClientSpiffeId,
+		).Scan(&d, &u)
+		switch {
+		case err == nil:
+			deviceID = &d
+			userID = &u
+		case errors.Is(err, pgx.ErrNoRows):
+			// unknown SPIFFE — leave both nil, keep the log
+		default:
+			log.Printf("control stream: resolve client spiffe %s: %v", entry.ClientSpiffeId, err)
+		}
+	}
+
+	// occurred_at: use what the connector sent if non-zero; else fall through
+	// to NOW() via the SQL coalesce so legacy emitters still get a timestamp.
+	var occurredAt *time.Time
+	if entry.OccurredAtUnix > 0 {
+		t := time.Unix(entry.OccurredAtUnix, 0).UTC()
+		occurredAt = &t
+	}
+
 	_, err := h.Pool.Exec(ctx,
-		`INSERT INTO connector_logs (workspace_id, connector_id, message)
-		 VALUES ($1, $2, $3)`,
+		`INSERT INTO connector_logs
+		     (workspace_id, connector_id, message,
+		      resource_id, client_spiffe_id, client_device_id, user_id,
+		      route_type, destination, port, protocol, action, error,
+		      occurred_at)
+		 VALUES ($1, $2, $3,
+		         NULLIF($4, '')::uuid, NULLIF($5, ''), $6::uuid, $7::uuid,
+		         NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, 0)::int, NULLIF($11, ''),
+		         NULLIF($12, ''), NULLIF($13, ''),
+		         COALESCE($14, NOW()))`,
 		tenantID, connectorID, entry.Message,
+		entry.ResourceId, entry.ClientSpiffeId, deviceID, userID,
+		entry.RouteType, entry.Destination, int(entry.Port), entry.Protocol,
+		entry.Action, entry.Error,
+		occurredAt,
 	)
 	if err != nil {
 		log.Printf("control stream: insert connector log connector=%s: %v", connectorID, err)

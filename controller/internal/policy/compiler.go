@@ -34,6 +34,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 	spiffeSet := make(map[entryKey]map[string]struct{})
 	names := make(map[entryKey]string)
 	shieldIDs := make(map[entryKey]string)
+	routeTypes := make(map[entryKey]string)
 
 	for _, rule := range rules {
 		key := entryKey{
@@ -43,9 +44,14 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 			protocol:   rule.Protocol,
 		}
 		if _, ok := spiffeSet[key]; !ok {
+			routeType, err := routeTypeForResource(rule.Status, rule.ShieldID)
+			if err != nil {
+				return nil, fmt.Errorf("compile acl: resource %s: %w", rule.ResourceID, err)
+			}
 			spiffeSet[key] = make(map[string]struct{})
 			names[key] = rule.Name
 			shieldIDs[key] = rule.ShieldID
+			routeTypes[key] = routeType
 		}
 
 		spiffes, err := store.ListActiveDeviceSPIFFEsForGroup(ctx, workspaceID, rule.GroupID)
@@ -70,7 +76,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 			Port:             key.port,
 			Protocol:         key.protocol,
 			AllowedSpiffeIds: ids,
-			RouteType:        "shield",
+			RouteType:        routeTypes[key],
 			ShieldId:         shieldIDs[key],
 		})
 	}
@@ -156,4 +162,18 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		RelayAddr:           relayAddr,
 		RelaySpiffeId:       relaySPIFFEID,
 	}, nil
+}
+
+func routeTypeForResource(status, shieldID string) (string, error) {
+	switch status {
+	case "pending", "unprotected":
+		return "connector", nil
+	case "protecting", "protected", "failed":
+		if shieldID == "" {
+			return "", fmt.Errorf("status %q requires a shield", status)
+		}
+		return "shield", nil
+	default:
+		return "", fmt.Errorf("unsupported resource status %q", status)
+	}
 }

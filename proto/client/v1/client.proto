@@ -125,6 +125,6 @@ message ACLEntry {
   string protocol                    = 4;
   repeated string allowed_spiffe_ids = 5;
   string name                        = 6;
-  string route_type                  = 7; // "direct" or "shield"
+  string route_type                  = 7; // "connector" or "shield"
   string shield_id                   = 8; // set when route_type == "shield"
 }

@@ -279,17 +279,20 @@ type CompilerResourceRow struct {
 	Protocol   string
 	GroupID    string
 	ShieldID   string
+	Status     string
 }
 
 // ListEnabledRulesWithResources returns all enabled access_rules joined with
 // resource host/port/name for a workspace. Used by the ACL compiler.
 func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID string) ([]*CompilerResourceRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ar.resource_id, r.name, r.host, r.port_from, r.protocol, ar.group_id, r.shield_id
+		`SELECT ar.resource_id, r.name, r.host, r.port_from, r.protocol, ar.group_id,
+		        COALESCE(r.shield_id::text, ''), r.status
 		 FROM access_rules ar
 		 JOIN resources r ON r.id = ar.resource_id
 		 WHERE ar.workspace_id = $1
-		   AND ar.enabled = TRUE`,
+		   AND ar.enabled = TRUE
+		   AND r.status != 'deleting'`,
 		workspaceID,
 	)
 	if err != nil {
@@ -300,7 +303,7 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 	var out []*CompilerResourceRow
 	for rows.Next() {
 		r := &CompilerResourceRow{}
-		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID); err != nil {
+		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID, &r.Status); err != nil {
 			return nil, fmt.Errorf("scan rule row: %w", err)
 		}
 		out = append(out, r)
