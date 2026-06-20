@@ -95,8 +95,14 @@ go build ./...
   it matches the presented leaf, and never trusts a request Relay ID.
 - Controller records active status, `last_heartbeat_at`, version, hostname,
   certificate serial, and certificate expiry.
+- Controller records every authenticated Relay heartbeat into Valkey as a
+  short-lived liveness key.
+- Controller writes Relay health/address metadata to Postgres only when
+  heartbeat metadata changes or the DB write marker is older than
+  `RELAY_HEARTBEAT_DB_WRITE_INTERVAL`.
 - Controller records the authenticated heartbeat peer address into Relay DB
-  metadata: `observed_ip`, `observed_port`, and `address_scope`.
+  metadata when a DB write is due: `observed_ip`, `observed_port`, and
+  `address_scope`.
 - Controller sets `public_addr` only when the observed heartbeat peer IP is
   public/global; private, loopback, link-local, or unknown addresses are
   recorded for operations but are not treated as client-discovery addresses.
@@ -117,8 +123,12 @@ connection.
   `controller/internal/relay/heartbeat.go`.
 - Added address classification:
   `public`, `private`, `loopback`, `link_local`, or `unknown`.
+- Added Valkey heartbeat liveness keys in
+  `controller/internal/relay/heartbeat.go`; Postgres writes are throttled by
+  `RELAY_HEARTBEAT_DB_WRITE_INTERVAL`.
 - Updated `controller/internal/relay/store.go` so `RecordHeartbeat` persists
-  address metadata with the existing Relay health record.
+  address metadata with the existing Relay health record when a DB write is
+  due.
 - Public heartbeat peer IPs derive `public_addr` as `<observed_ip>:9093`.
   Private/LAN addresses are intentionally not promoted to `public_addr`.
 - Added focused heartbeat tests for persistence and public-address

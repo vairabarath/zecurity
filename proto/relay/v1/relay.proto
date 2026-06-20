@@ -43,6 +43,7 @@ message HeartbeatRequest {
   string hostname = 2;
   uint64 uptime_seconds = 3;
   uint64 registered_connectors = 4;
+  uint32 listen_port = 5; // relay's actual listener port (e.g. 9093); used to build public_addr
 }
 
 message HeartbeatResponse {

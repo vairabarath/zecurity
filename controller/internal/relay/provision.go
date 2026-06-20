@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/valkey-io/valkey-go/valkeycompat"
 	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
@@ -22,11 +23,27 @@ type Service struct {
 
 	pki     pki.Service
 	store   heartbeatStore
+	redis   valkeycompat.Cmdable
 	certTTL time.Duration
+
+	heartbeatDBWriteInterval time.Duration
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {
-	return &Service{pki: pkiSvc, store: store, certTTL: certTTL}
+	return &Service{
+		pki:                      pkiSvc,
+		store:                    store,
+		certTTL:                  certTTL,
+		heartbeatDBWriteInterval: 5 * time.Minute,
+	}
+}
+
+func (s *Service) WithHeartbeatCache(redis valkeycompat.Cmdable, dbWriteInterval time.Duration) *Service {
+	s.redis = redis
+	if dbWriteInterval > 0 {
+		s.heartbeatDBWriteInterval = dbWriteInterval
+	}
+	return s
 }
 
 // Provision validates and signs a Relay-generated CSR.
@@ -57,7 +74,7 @@ func (s *Service) Provision(ctx context.Context, req *relaypb.ProvisionRequest) 
 
 	cert, err := s.pki.SignRelayCert(ctx, relayID, csr, dnsSANs, ipSANs, s.certTTL)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "sign Relay certificate: %v", err)
+		return nil, status.Errorf(codes.Internal, "sign Relay certificate: %v", err)
 	}
 
 	// Canonicalize IP SANs to []string for DB persistence. make() guarantees

@@ -112,7 +112,11 @@ func main() {
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	relayStore := relay.NewStore(db.Pool)
-	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour))
+	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
+		WithHeartbeatCache(
+			valkeycompat.NewAdapter(connectorValkey),
+			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
+		)
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)

@@ -73,6 +73,7 @@ async fn run_connected(
             hostname: hostname.to_owned(),
             uptime_seconds: started_at.elapsed().as_secs(),
             registered_connectors: state.connector_count() as u64,
+            listen_port: cfg.bind_addr.port() as u32,
         });
         request.set_timeout(RPC_TIMEOUT);
         let response = client

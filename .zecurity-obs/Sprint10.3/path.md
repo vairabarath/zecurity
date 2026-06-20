@@ -63,7 +63,7 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 | Certificate lifecycle | Renew before expiry and reload Relay/Connector runtime material |
 | CA selection | Validate certificate properties and chain relationships, never first/last position |
 | Relay health | Send mTLS heartbeat and persist last-seen/status in Controller |
-| Relay address observation | Persist the authenticated heartbeat peer IP/port and classify scope; only infer `public_addr` when the observed IP is public |
+| Relay address observation | Store frequent heartbeat liveness in Valkey; persist peer IP/port/scope to Postgres only when metadata changes or DB last-seen is due |
 
 ## Execution Path
 

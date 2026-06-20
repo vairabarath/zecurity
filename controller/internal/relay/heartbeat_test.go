@@ -82,12 +82,25 @@ func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
 		Addr: &net.TCPAddr{IP: net.ParseIP("8.8.8.8"), Port: 54321},
 	})
 
-	got := observeRelayPeerAddress(ctx)
+	// listen_port reported by relay — should override the hardcoded default.
+	got := observeRelayPeerAddress(ctx, 9093)
 	if got.ObservedIP != "8.8.8.8" ||
 		got.ObservedPort != 54321 ||
 		got.Scope != "public" ||
 		got.PublicAddr != "8.8.8.8:9093" {
 		t.Fatalf("unexpected observation: %+v", got)
+	}
+
+	// Zero listen_port falls back to the hardcoded default.
+	gotFallback := observeRelayPeerAddress(ctx, 0)
+	if gotFallback.PublicAddr != "8.8.8.8:9093" {
+		t.Fatalf("expected fallback to default port, got: %+v", gotFallback)
+	}
+
+	// Non-default listen_port is used as-is.
+	gotCustom := observeRelayPeerAddress(ctx, 19093)
+	if gotCustom.PublicAddr != "8.8.8.8:19093" {
+		t.Fatalf("expected custom port in PublicAddr, got: %+v", gotCustom)
 	}
 }
 
