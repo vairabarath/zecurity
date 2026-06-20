@@ -63,6 +63,7 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 | Certificate lifecycle | Renew before expiry and reload Relay/Connector runtime material |
 | CA selection | Validate certificate properties and chain relationships, never first/last position |
 | Relay health | Send mTLS heartbeat and persist last-seen/status in Controller |
+| Relay address observation | Persist the authenticated heartbeat peer IP/port and classify scope; only infer `public_addr` when the observed IP is public |
 
 ## Execution Path
 
@@ -74,6 +75,7 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 - [ ] **M2-A2** Atomically burn the provisioning JTI and reject replay.
 - [x] **M2-A3** Define and generate the Relay heartbeat protobuf contract.
 - [x] **M2-A4** Authenticate heartbeat identity through mTLS and persist health.
+- [x] **M2-A4.1** Persist Relay heartbeat peer address metadata (`observed_ip`, `observed_port`, `address_scope`, `public_addr` when public).
 - [ ] **M2-A5** Add provisioning, replay, identity, and heartbeat tests.
 
 ### Phase B — M3: Relay Runtime Resource & Routing Hardening
@@ -133,6 +135,7 @@ M3-B runtime/resource hardening ────────────────
 - [ ] Controller never signs a Relay CSR without a valid Relay-bound single-use token.
 - [ ] Reusing, modifying, or using an expired provisioning token fails closed.
 - [ ] Relay heartbeat uses mTLS identity and Controller persists Relay health.
+- [ ] Relay heartbeat stores observed peer address metadata without treating private/LAN addresses as public client discovery addresses.
 - [ ] Slow or excessive connections/streams cannot grow tasks without bounds.
 - [ ] Connector inner TLS handshakes time out and release capacity.
 - [ ] Lookup never routes to a known-closed Connector registration.

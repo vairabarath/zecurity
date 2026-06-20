@@ -95,8 +95,42 @@ go build ./...
   it matches the presented leaf, and never trusts a request Relay ID.
 - Controller records active status, `last_heartbeat_at`, version, hostname,
   certificate serial, and certificate expiry.
+- Controller records the authenticated heartbeat peer address into Relay DB
+  metadata: `observed_ip`, `observed_port`, and `address_scope`.
+- Controller sets `public_addr` only when the observed heartbeat peer IP is
+  public/global; private, loopback, link-local, or unknown addresses are
+  recorded for operations but are not treated as client-discovery addresses.
 - Relay heartbeat reconnects independently after Controller/network failure;
   the Relay QUIC listener continues running.
+
+### Patch: Relay Heartbeat Address Observation
+
+**Issue:** Relay heartbeat proved the Relay identity and health, but the
+Controller did not persist the address it observed for the authenticated Relay
+connection.
+
+**Fix Applied:**
+- Added Relay DB metadata columns via
+  `controller/migrations/020_relay_update_table.sql`:
+  `public_addr`, `observed_ip`, `observed_port`, and `address_scope`.
+- Added heartbeat peer-address extraction in
+  `controller/internal/relay/heartbeat.go`.
+- Added address classification:
+  `public`, `private`, `loopback`, `link_local`, or `unknown`.
+- Updated `controller/internal/relay/store.go` so `RecordHeartbeat` persists
+  address metadata with the existing Relay health record.
+- Public heartbeat peer IPs derive `public_addr` as `<observed_ip>:9093`.
+  Private/LAN addresses are intentionally not promoted to `public_addr`.
+- Added focused heartbeat tests for persistence and public-address
+  classification.
+
+**Verification:**
+
+```bash
+cd controller
+go test ./internal/relay/...
+go build ./...
+```
 
 The Relay certificate EKU contract is now:
 

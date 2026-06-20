@@ -67,24 +67,26 @@ func (s *Service) Provision(ctx context.Context, req *relaypb.ProvisionRequest) 
 	for i, ip := range ipSANs {
 		ipStrs[i] = ip.String()
 	}
-	if err := s.store.MarkProvisioned(ctx, relayID, cert.Serial, cert.NotAfter, req.Version, req.Hostname); err != nil {
-		if !errors.Is(err, ErrRelayNotFound) {
-			return nil, status.Errorf(codes.Internal, "record Relay provisioning: %v", err)
-		}
-		// Self-provisioning path: no pre-existing row from POST /api/relays.
-		// Insert one now with the SANs the relay asked us to sign.
-		if err := s.store.InsertProvisionedRelay(
-			ctx,
-			relayID,
-			req.Hostname,
-			dnsSANs,
-			ipStrs,
-			cert.Serial,
-			cert.NotAfter,
-			req.Version,
-			req.Hostname,
-		); err != nil {
-			return nil, status.Errorf(codes.Internal, "create Relay row: %v", err)
+	if s.store != nil {
+		if err := s.store.MarkProvisioned(ctx, relayID, cert.Serial, cert.NotAfter, req.Version, req.Hostname); err != nil {
+			if !errors.Is(err, ErrRelayNotFound) {
+				return nil, status.Errorf(codes.Internal, "record Relay provisioning: %v", err)
+			}
+			// Self-provisioning path: no pre-existing row from POST /api/relays.
+			// Insert one now with the SANs the relay asked us to sign.
+			if err := s.store.InsertProvisionedRelay(
+				ctx,
+				relayID,
+				req.Hostname,
+				dnsSANs,
+				ipStrs,
+				cert.Serial,
+				cert.NotAfter,
+				req.Version,
+				req.Hostname,
+			); err != nil {
+				return nil, status.Errorf(codes.Internal, "create Relay row: %v", err)
+			}
 		}
 	}
 	return &relaypb.ProvisionResponse{

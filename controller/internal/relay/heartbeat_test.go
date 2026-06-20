@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"math/big"
+	"net"
 	"net/url"
 	"testing"
 	"time"
@@ -23,15 +24,31 @@ type fakeHeartbeatStore struct {
 	certNotAfter time.Time
 	version      string
 	hostname     string
+	observedIP   string
+	observedPort int
+	addressScope string
+	publicAddr   string
 	err          error
 }
 
-func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {
+func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
 	s.id = id
 	s.certSerial = certSerial
 	s.certNotAfter = certNotAfter
 	s.version = version
 	s.hostname = hostname
+	s.observedIP = observedIP
+	s.observedPort = observedPort
+	s.addressScope = addressScope
+	s.publicAddr = publicAddr
+	return s.err
+}
+
+func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, time.Time, string, string) error {
+	return s.err
+}
+
+func (s *fakeHeartbeatStore) InsertProvisionedRelay(context.Context, string, string, []string, []string, string, time.Time, string, string) error {
 	return s.err
 }
 
@@ -53,8 +70,24 @@ func TestHeartbeatRecordsAuthenticatedRelay(t *testing.T) {
 	}
 	if store.id != testRelayID || store.certSerial != "2a" ||
 		store.version != "1.2.3" || store.hostname != "relay-a" ||
+		store.observedIP != "192.168.1.71" || store.observedPort != 54321 ||
+		store.addressScope != "private" || store.publicAddr != "" ||
 		!store.certNotAfter.Equal(notAfter) {
 		t.Fatalf("unexpected heartbeat persistence: %+v", store)
+	}
+}
+
+func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
+	ctx := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("8.8.8.8"), Port: 54321},
+	})
+
+	got := observeRelayPeerAddress(ctx)
+	if got.ObservedIP != "8.8.8.8" ||
+		got.ObservedPort != 54321 ||
+		got.Scope != "public" ||
+		got.PublicAddr != "8.8.8.8:9093" {
+		t.Fatalf("unexpected observation: %+v", got)
 	}
 }
 
@@ -91,6 +124,7 @@ func relayHeartbeatContext(t *testing.T, role, contextRelayID, certificateRelayI
 		appmeta.SPIFFEGlobalTrustDomain,
 	)
 	return peer.NewContext(ctx, &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("192.168.1.71"), Port: 54321},
 		AuthInfo: credentials.TLSInfo{
 			State: tls.ConnectionState{
 				PeerCertificates: []*x509.Certificate{leaf},

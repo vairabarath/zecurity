@@ -30,6 +30,10 @@ type RelayRow struct {
 	CertNotAfter       *time.Time
 	Version            *string
 	Hostname           *string
+	PublicAddr         *string
+	ObservedIP         *string
+	ObservedPort       *int
+	AddressScope       *string
 	LastHeartbeatAt    *time.Time
 }
 
@@ -71,12 +75,14 @@ func (s *Store) LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, name, status, dns_allowlist, ip_allowlist,
 		        enrollment_token_jti, cert_serial, cert_not_after,
-		        version, hostname, last_heartbeat_at
+		        version, hostname, public_addr, observed_ip::text,
+		        observed_port, address_scope, last_heartbeat_at
 		   FROM relays WHERE id = $1`,
 		id,
 	).Scan(&r.ID, &r.Name, &r.Status, &r.DNSAllowlist, &r.IPAllowlist,
 		&r.EnrollmentTokenJTI, &r.CertSerial, &r.CertNotAfter,
-		&r.Version, &r.Hostname, &r.LastHeartbeatAt)
+		&r.Version, &r.Hostname, &r.PublicAddr, &r.ObservedIP,
+		&r.ObservedPort, &r.AddressScope, &r.LastHeartbeatAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrRelayNotFound
 	}
@@ -140,7 +146,7 @@ func (s *Store) InsertProvisionedRelay(ctx context.Context, id, name string, dns
 
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
 // runtime and certificate metadata.
-func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
 		    SET status            = 'active',
@@ -148,11 +154,15 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        cert_not_after    = $3,
 		        version           = NULLIF($4, ''),
 		        hostname          = NULLIF($5, ''),
+		        observed_ip       = NULLIF($6, '')::inet,
+		        observed_port     = NULLIF($7, 0),
+		        address_scope     = NULLIF($8, ''),
+		        public_addr       = NULLIF($9, ''),
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND status <> 'deleted'`,
-		id, certSerial, certNotAfter, version, hostname,
+		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr,
 	)
 	if err != nil {
 		return fmt.Errorf("record relay heartbeat: %w", err)
