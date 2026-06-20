@@ -262,18 +262,6 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // ever exposed. Best-effort — log a warning if we can't write.
     cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
 
-    // ── Step 12: Network setup ────────────────────────────────────────────────
-    //
-    // Create the local `zecurity0` TUN interface and install the base nftables
-    // table. This is intentionally best-effort for Sprint 4:
-    //   - enrollment already succeeded at this point
-    //   - certs/state are safely on disk
-    //   - if Linux networking setup fails, the operator can still inspect logs,
-    //     fix host permissions, and restart the service without re-enrolling
-    // if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
-    //     warn!(error = %e, "network setup failed (non-fatal for now)");
-    // }
-
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)
 }

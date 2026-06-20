@@ -110,6 +110,34 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 	return nil
 }
 
+// InsertProvisionedRelay creates a relays row for a self-provisioning relay
+// (one that arrived at Provision without a pre-existing POST /api/relays).
+// Status lands directly at 'active' since the cert has already been signed.
+// ON CONFLICT keeps it race-safe if two Provision calls land in parallel.
+func (s *Store) InsertProvisionedRelay(ctx context.Context, id, name string, dnsAllowlist, ipAllowlist []string, certSerial string, certNotAfter time.Time, version, hostname string) error {
+	if name == "" {
+		name = "relay-" + id
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO relays
+		     (id, name, status, dns_allowlist, ip_allowlist,
+		      cert_serial, cert_not_after, version, hostname, updated_at)
+		 VALUES ($1, $2, 'active', $3, $4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NOW())
+		 ON CONFLICT (id) DO UPDATE
+		    SET status         = 'active',
+		        cert_serial    = EXCLUDED.cert_serial,
+		        cert_not_after = EXCLUDED.cert_not_after,
+		        version        = EXCLUDED.version,
+		        hostname       = EXCLUDED.hostname,
+		        updated_at     = NOW()`,
+		id, name, dnsAllowlist, ipAllowlist, certSerial, certNotAfter, version, hostname,
+	)
+	if err != nil {
+		return fmt.Errorf("insert provisioned relay: %w", err)
+	}
+	return nil
+}
+
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
 // runtime and certificate metadata.
 func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {

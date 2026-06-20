@@ -46,9 +46,15 @@ impl RelayPool {
         ca_bundle_pem: &str,
         relay_spiffe_id: &str,
     ) -> Result<Self> {
-        let client_cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
+        let mut client_cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
         let client_private_key = parse_private_key_der(key_pem, "device")?;
         let ca_bundle = parse_ca_bundle(ca_bundle_pem)?;
+
+        // Relay's mTLS verifier needs the workspace CA in the chain to reach
+        // the platform root; the device leaf alone fails with UnknownIssuer.
+        if client_cert_chain.len() == 1 {
+            client_cert_chain.push(ca_bundle.workspace_ca.clone());
+        }
 
         let relay_roots =
             root_store_from_cert(&ca_bundle.intermediate_ca, "platform intermediate CA")?;

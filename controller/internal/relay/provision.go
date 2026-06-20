@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -57,6 +58,34 @@ func (s *Service) Provision(ctx context.Context, req *relaypb.ProvisionRequest) 
 	cert, err := s.pki.SignRelayCert(ctx, relayID, csr, dnsSANs, ipSANs, s.certTTL)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "sign Relay certificate: %v", err)
+	}
+
+	// Canonicalize IP SANs to []string for DB persistence. make() guarantees
+	// a non-nil slice even when ipSANs is empty, so pgx sends '{}' rather
+	// than NULL (ip_allowlist is NOT NULL).
+	ipStrs := make([]string, len(ipSANs))
+	for i, ip := range ipSANs {
+		ipStrs[i] = ip.String()
+	}
+	if err := s.store.MarkProvisioned(ctx, relayID, cert.Serial, cert.NotAfter, req.Version, req.Hostname); err != nil {
+		if !errors.Is(err, ErrRelayNotFound) {
+			return nil, status.Errorf(codes.Internal, "record Relay provisioning: %v", err)
+		}
+		// Self-provisioning path: no pre-existing row from POST /api/relays.
+		// Insert one now with the SANs the relay asked us to sign.
+		if err := s.store.InsertProvisionedRelay(
+			ctx,
+			relayID,
+			req.Hostname,
+			dnsSANs,
+			ipStrs,
+			cert.Serial,
+			cert.NotAfter,
+			req.Version,
+			req.Hostname,
+		); err != nil {
+			return nil, status.Errorf(codes.Internal, "create Relay row: %v", err)
+		}
 	}
 	return &relaypb.ProvisionResponse{
 		CertificatePem:    []byte(cert.CertificatePEM),

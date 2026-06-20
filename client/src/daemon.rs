@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -700,8 +700,10 @@ fn build_client_transport(
         crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
     };
     let connector_socket: SocketAddr = connector_addr
-        .parse()
-        .with_context(|| format!("parse connector tunnel address {connector_addr}"))?;
+        .to_socket_addrs()
+        .with_context(|| format!("resolve connector tunnel address {connector_addr}"))?
+        .next()
+        .with_context(|| format!("connector tunnel address {connector_addr} resolved to no addresses"))?;
     let direct = Arc::new(TunnelPool::new(
         &device.certificate_pem,
         &device.private_key_pem,
