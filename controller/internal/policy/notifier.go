@@ -14,6 +14,17 @@ type Notifier struct {
 	cache    *SnapshotCache
 	mu       sync.Mutex
 	versions map[string]*atomic.Uint64
+
+	// pushHook, if set, is invoked after each successful NotifyPolicyChange
+	// (post version-bump, post cache-invalidate) to drive proactive ACL
+	// propagation. It is registered once at startup via RegisterPushHook,
+	// before serving, and only read afterward — so no lock guards it. The hook
+	// MUST be non-blocking: NotifyPolicyChange runs on the mutation request
+	// path, so the hook must schedule its own async work and return promptly.
+	// It takes only the workspaceID (no ctx) by design, so the async worker is
+	// forced to mint its own background context rather than capture a
+	// request-scoped one that is cancelled when the mutation returns.
+	pushHook func(workspaceID string)
 }
 
 // NewNotifier creates a Notifier backed by the given cache.
@@ -41,7 +52,22 @@ func (n *Notifier) NotifyPolicyChange(_ context.Context, workspaceID string) err
 
 	v.Add(1)
 	n.cache.Invalidate(workspaceID)
+
+	// Fire the proactive-push hook after the version is bumped and the cache is
+	// invalidated, so a hook that recompiles observes the new version and a cold
+	// cache. The hook is non-blocking by contract.
+	if n.pushHook != nil {
+		n.pushHook(workspaceID)
+	}
 	return nil
+}
+
+// RegisterPushHook installs the proactive-push callback fired after every
+// successful NotifyPolicyChange. Call it once during startup wiring, before the
+// server begins handling mutations. The callback must return quickly and
+// schedule its own async work (see the pushHook field doc).
+func (n *Notifier) RegisterPushHook(fn func(workspaceID string)) {
+	n.pushHook = fn
 }
 
 // Version returns the current policy version for workspaceID (0 if never changed).

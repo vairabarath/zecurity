@@ -263,6 +263,13 @@ func main() {
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
 
+	// Proactive ACL propagation: after a policy change bumps the version and
+	// invalidates the cache, push the fresh snapshot to all connected connectors
+	// in the workspace immediately instead of waiting for the next heartbeat.
+	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
+
 	clientSvc := clientsvc.NewService(
 		db.Pool,
 		authSvc,

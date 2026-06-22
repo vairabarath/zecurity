@@ -1,10 +1,88 @@
 package connector
 
 import (
+	"sync"
 	"testing"
 
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 )
+
+func testClient(connectorID, tenantID string) *connectorStreamClient {
+	return &connectorStreamClient{
+		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID: connectorID,
+		tenantID:    tenantID,
+	}
+}
+
+// TestClientsForWorkspace_FiltersByTenant: only clients whose tenantID matches
+// are returned.
+func TestClientsForWorkspace_FiltersByTenant(t *testing.T) {
+	r := NewConnectorRegistry()
+	r.add("c1", testClient("c1", "ws-A"))
+	r.add("c2", testClient("c2", "ws-A"))
+	r.add("c3", testClient("c3", "ws-B"))
+
+	got := r.ClientsForWorkspace("ws-A")
+	if len(got) != 2 {
+		t.Fatalf("want 2 clients for ws-A, got %d", len(got))
+	}
+	for _, c := range got {
+		if c.tenantID != "ws-A" {
+			t.Fatalf("returned client from wrong workspace: %s", c.tenantID)
+		}
+	}
+}
+
+// TestClientsForWorkspace_EmptyWhenNone: an unknown workspace yields an empty
+// slice (and no nil dereference when ranged over).
+func TestClientsForWorkspace_EmptyWhenNone(t *testing.T) {
+	r := NewConnectorRegistry()
+	r.add("c1", testClient("c1", "ws-A"))
+	got := r.ClientsForWorkspace("ws-unknown")
+	if len(got) != 0 {
+		t.Fatalf("want 0 clients, got %d", len(got))
+	}
+	for range got { // must not panic
+	}
+}
+
+// TestClientsForWorkspace_ReturnsCopy: mutating the registry after the call does
+// not change the already-returned slice (callers send outside the lock).
+func TestClientsForWorkspace_ReturnsCopy(t *testing.T) {
+	r := NewConnectorRegistry()
+	r.add("c1", testClient("c1", "ws-A"))
+	got := r.ClientsForWorkspace("ws-A")
+	r.remove("c1")
+	if len(got) != 1 {
+		t.Fatalf("returned slice changed after remove: got %d", len(got))
+	}
+}
+
+// TestRegistry_ConcurrentAddRemoveScan hammers add/remove/get/ClientsForWorkspace
+// concurrently under -race to prove the RWMutex protects all access paths.
+func TestRegistry_ConcurrentAddRemoveScan(t *testing.T) {
+	r := NewConnectorRegistry()
+	const workers = 8
+	const iters = 300
+	var wg sync.WaitGroup
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			id := "c" + string(rune('a'+w))
+			ws := "ws-" + string(rune('a'+(w%3)))
+			for i := 0; i < iters; i++ {
+				r.add(id, testClient(id, ws))
+				_ = r.get(id)
+				_ = r.ClientsForWorkspace(ws)
+				r.remove(id)
+			}
+		}(w)
+	}
+	wg.Wait()
+}
 
 // TestConnectorSendFailsFastWhenQueueFull asserts the F14 liveness guarantee:
 // send() enqueues into the outbound mailbox and, when the mailbox is full (a
