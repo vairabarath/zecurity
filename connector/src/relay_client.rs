@@ -11,10 +11,14 @@ use rustls::{
 };
 use rustls_pemfile::{certs, private_key};
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::proto::connector_control_message;
+use crate::proto::{ConnectorControlMessage, ConnectorRelayState};
+use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
 use crate::relay_handler::RelayHandler;
 
 const RELAY_ALPN: &[u8] = b"ztna-relay-v1";
@@ -136,6 +140,12 @@ impl RelayClient {
 }
 
 /// Maintain Connector registration until the task is cancelled.
+///
+/// Reports the current relay attachment state via:
+///   1. `attachment_slot` — shared RwLock read by the control-stream health
+///      tick to populate ConnectorHealthReport fields 6-8.
+///   2. `lifecycle_tx` — mpsc sender that forwards ConnectorRelayState on
+///      every attach/detach transition via the existing control-stream channel.
 pub async fn maintain_registration(
     relay_addr: String,
     relay_spiffe_id: String,
@@ -148,7 +158,16 @@ pub async fn maintain_registration(
     relay_handler: Arc<RelayHandler>,
     max_incoming_bidi_streams: u32,
     idle_timeout_secs: u64,
+    attachment_slot: RelayAttachmentSlot,
+    lifecycle_tx: mpsc::Sender<ConnectorControlMessage>,
 ) {
+    // A connector's relay identity is embedded in the SPIFFE ID as the trailing UUID.
+    // Already validated before calling this function.
+    let relay_id = relay_spiffe_id
+        .strip_prefix("spiffe://zecurity.in/relay/")
+        .expect("relay SPIFFE ID validated upstream")
+        .to_string();
+
     loop {
         let result = async {
             let resolved_addr = resolve_relay_addr(&relay_addr).await?;
@@ -164,14 +183,59 @@ pub async fn maintain_registration(
             )
             .await?;
             client.register(&connector_id, &spiffe_id).await?;
+
+            // Registration succeeded — update shared relay attachment state
+            // and emit lifecycle event: connected.
+            let attached_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let attachment = RelayAttachment {
+                relay_id: relay_id.clone(),
+                relay_spiffe_id: relay_spiffe_id.clone(),
+                attached_at,
+            };
+            *attachment_slot.write().await = Some(attachment);
+            let _ = lifecycle_tx
+                .send(ConnectorControlMessage {
+                    body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
+                        connector_id: connector_id.clone(),
+                        relay_id: relay_id.clone(),
+                        relay_spiffe_id: relay_spiffe_id.clone(),
+                        observed_at_unix: attached_at,
+                        reason: "connected".to_string(),
+                    })),
+                })
+                .await;
+
             relay_handler.clone().run(client.connection()).await
         }
         .await;
 
-        match result {
+        match &result {
             Ok(()) => info!(relay_addr, "Relay registration connection closed"),
             Err(error) => warn!(%relay_addr, %error, "Relay registration failed"),
         }
+
+        // Session ended (clean close or error) — clear shared state and emit
+        // lifecycle event: disconnected.
+        let detached_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        *attachment_slot.write().await = None;
+        let _ = lifecycle_tx
+            .send(ConnectorControlMessage {
+                body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
+                    connector_id: connector_id.clone(),
+                    relay_id: String::new(),
+                    relay_spiffe_id: String::new(),
+                    observed_at_unix: detached_at,
+                    reason: "disconnected".to_string(),
+                })),
+            })
+            .await;
+
         tokio::time::sleep(RECONNECT_DELAY).await;
     }
 }

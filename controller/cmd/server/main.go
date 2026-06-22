@@ -273,6 +273,7 @@ func main() {
 		PolicyStore:    policyStore,
 		PolicyCache:    policyCache,
 		PolicyNotifier: policyNotifier,
+		RelayStore:     relayStore,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)

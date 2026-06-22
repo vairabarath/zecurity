@@ -89,6 +89,11 @@ message ConnectorControlMessage {
     ResourceSnapshotBatch resource_snapshots = 13;
     // Connector → Controller
     ResourceStateBatch resource_state = 14;
+    // Connector → Controller — lifecycle transition for relay attachment.
+    // Sent on attach/detach; the same state is also re-asserted in every
+    // ConnectorHealthReport so a lost message self-heals within one
+    // heartbeat interval.
+    ConnectorRelayState relay_state = 15;
   }
 }
 
@@ -128,6 +133,27 @@ message ConnectorHealthReport {
   string public_ip = 3;
   string lan_addr = 4;
   uint64 acl_version = 5; // connector's currently loaded ACL snapshot version; 0 means none
+
+  // Sprint 10.4 — connector reports its current relay attachment so the
+  // controller can keep connector_relay_placement up to date even if a
+  // ConnectorRelayState transition message was lost. Empty relay_id means
+  // "not currently attached to any relay".
+  string relay_id               = 6;
+  string relay_spiffe_id        = 7; // optional, for debug / cross-check
+  int64  relay_attached_at_unix = 8; // unix seconds; 0 when not attached
+}
+
+// Sent on the existing Control stream whenever the connector's relay
+// attachment state changes (connect, disconnect, switch). The controller
+// trusts connector_id from the authenticated cert SAN — never from this
+// body. Heartbeat re-asserts the same state, so a lost transition is
+// recovered within one heartbeat interval.
+message ConnectorRelayState {
+  string connector_id      = 1; // controller cross-checks against cert SAN
+  string relay_id          = 2; // empty for "detached"
+  string relay_spiffe_id   = 3; // optional
+  int64  observed_at_unix  = 4; // connector-local time of the transition
+  string reason            = 5; // "connected", "disconnected", "switched", ...
 }
 
 message ShieldStatusUpdate {

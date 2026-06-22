@@ -26,6 +26,20 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// RelayPlacementStore is the subset of relay.Store used by the connector
+// control-stream handlers. Defined as an interface for testability.
+type RelayPlacementStore interface {
+	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error)
+	DeletePlacement(ctx context.Context, connectorID string) (bool, error)
+	BumpLastConfirmed(ctx context.Context, connectorID string) error
+}
+
+// PolicyChangeNotifier is the subset of policy.Notifier used by the
+// relay-placement handlers. Defined as an interface for testability.
+type PolicyChangeNotifier interface {
+	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+}
+
 // ConnectorRegistry tracks active bidirectional Control streams.
 // The resolver calls PushResourceInstruction to deliver instructions in real time.
 // If the connector is offline, the instruction stays in DB and is delivered on reconnect.
@@ -327,6 +341,8 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			h.handleConnectorLog(ctx, tenantID, connectorID, entry)
 		case *pb.ConnectorControlMessage_ResourceState:
 			h.handleResourceState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ResourceState).ResourceState)
+		case *pb.ConnectorControlMessage_RelayState:
+			h.handleConnectorRelayState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_RelayState).RelayState)
 		default:
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
@@ -424,8 +440,86 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
 	}
+
+	// Process relay attachment from heartbeat. Non-empty relay_id means the
+	// connector claims to be attached; empty means detached. The UPSERT returns
+	// true iff the relay actually changed, so we only invalidate the policy
+	// cache on a real placement transition — not on every heartbeat.
+	if h.RelayStore != nil {
+		if r.RelayId != "" {
+			attachedAt := time.Unix(r.RelayAttachedAtUnix, 0).UTC()
+			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
+			if err != nil {
+				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay placement connector=%s: %v", connectorID, err)
+				}
+			}
+		} else {
+			// Empty relay_id — connector is not attached. Delete any stale placement.
+			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+			if err != nil {
+				log.Printf("control stream: delete relay placement from heartbeat connector=%s: %v", connectorID, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay detach connector=%s: %v", connectorID, err)
+				}
+			}
+		}
+	}
+
 	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
 		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	}
+}
+
+func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {
+	connectorID := client.connectorID
+
+	// Cross-check: the connector_id in the message body must match the
+	// authenticated SPIFFE identity from the mTLS cert.
+	if r.ConnectorId != "" && r.ConnectorId != connectorID {
+		log.Printf("control stream: relay state connector_id mismatch: body=%s cert=%s — ignoring", r.ConnectorId, connectorID)
+		return
+	}
+
+	log.Printf("control stream: relay state connector=%s relay=%s reason=%s", connectorID, r.RelayId, r.Reason)
+
+	if h.RelayStore == nil {
+		return
+	}
+
+	switch r.Reason {
+	case "connected", "switched":
+		if r.RelayId == "" {
+			log.Printf("control stream: relay state connector=%s reason=%s with empty relay_id — ignoring", connectorID, r.Reason)
+			return
+		}
+		attachedAt := time.Unix(r.ObservedAtUnix, 0).UTC()
+		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "event")
+		if err != nil {
+			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay event connector=%s: %v", connectorID, err)
+			}
+		}
+	case "disconnected":
+		changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+		if err != nil {
+			log.Printf("control stream: delete relay placement from event connector=%s: %v", connectorID, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay detach event connector=%s: %v", connectorID, err)
+			}
+		}
+	default:
+		log.Printf("control stream: relay state unknown reason=%s connector=%s — ignoring", r.Reason, connectorID)
 	}
 }
 
@@ -434,9 +528,16 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		return nil
 	}
 
+	// policy.CompileACLSnapshot expects a concrete *policy.Notifier. At runtime
+	// h.PolicyNotifier is always a *policy.Notifier, so the assertion is safe.
+	policyNotifier, _ := h.PolicyNotifier.(*policy.Notifier)
+	if policyNotifier == nil {
+		return nil
+	}
+
 	snap, ok := h.PolicyCache.Get(client.tenantID)
 	if !ok {
-		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, policyNotifier, h.Pool, client.tenantID)
 		if err != nil {
 			return fmt.Errorf("compile ACL snapshot: %w", err)
 		}

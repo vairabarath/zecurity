@@ -111,12 +111,9 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		connectorSPIFFE = appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
 	}
 
-	// Sprint 10.3 — Source the relay endpoint from the live relays table.
-	// Prefer public_addr (operator-set or auto-inferred when observed scope is
-	// public). Fall back to observed_ip:9093 when only the observed peer
-	// address is known. Skip rows that are loopback/link-local/unknown — those
-	// addresses aren't reachable by clients. No row → all four relay fields
-	// stay empty, which the client interprets as "direct-only, no relay path".
+	// Source the relay endpoint from the connector_relay_placement table via
+	// a per-connector join. Unlike the previous global ORDER BY/LIMIT 1 approach,
+	// this resolves the exact relay that the connector is currently attached to.
 	var relayAddr, relaySPIFFEID string
 	var (
 		relayRowID   string
@@ -126,16 +123,13 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 		addressScope *string
 	)
 	_ = pool.QueryRow(ctx,
-		`SELECT id::text, public_addr, observed_ip::text, observed_port, address_scope
-		   FROM relays
-		  WHERE status = 'active'
-		    AND (
-		          public_addr IS NOT NULL
-		          OR (observed_ip IS NOT NULL
-		              AND address_scope IN ('public', 'private'))
-		        )
-		  ORDER BY last_heartbeat_at DESC NULLS LAST
-		  LIMIT 1`,
+		`SELECT r.id::text, r.public_addr,
+		        r.observed_ip::text, r.observed_port, r.address_scope
+		   FROM connector_relay_placement cp
+		   JOIN relays r ON r.id = cp.relay_id
+		  WHERE cp.connector_id = $1
+		    AND r.status = 'active'`,
+		connectorID,
 	).Scan(&relayRowID, &publicAddr, &observedIP, &observedPort, &addressScope)
 	switch {
 	case publicAddr != nil && *publicAddr != "":

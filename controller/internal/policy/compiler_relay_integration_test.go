@@ -20,6 +20,11 @@ import (
 // populates ConnectorId+ConnectorSpiffe, no-active-connector leaves them
 // empty, and backwards compatibility of the non-relay fields.
 //
+// Note: the relay query now uses a per-connector join on
+// connector_relay_placement → relays instead of a global ORDER BY/LIMIT 1.
+// Tests that expect relay fields to be populated must also insert a placement
+// row linking the connector to the relay.
+//
 // Requires PKI_TEST_DATABASE_URL pointing at a Postgres role with CREATE
 // DATABASE privilege; otherwise skips.
 func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
@@ -73,9 +78,12 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 	t.Run("relay enabled via public_addr", func(t *testing.T) {
 		// Active relay row with public_addr set → ACL emits that address and a
-		// SPIFFE ID derived from the row's UUID.
+		// SPIFFE ID derived from the row's UUID. Requires an active connector
+		// and a connector_relay_placement row linking them.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-enabled")
+		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-a", "10.0.0.5")
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.x:9093", "", "public")
+		mustInsertPlacement(t, ctx, testPool, connID, relayID)
 		store := NewStore(testPool)
 		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
@@ -123,18 +131,23 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 	t.Run("connector and entries unaffected by relay presence", func(t *testing.T) {
 		// Equivalent of the old "backwards compatibility" test: confirm that
-		// connector/entries fields don't drift when a relay row enters the DB.
-		// Same workspace, two compiles — first with no relay row, then with one.
+		// connector/entries fields don't drift when a relay+placement row enters the DB.
+		// Same workspace, two compiles — first with no relay/placement, then with both.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-compat")
-		_ = mustInsertActiveConnector(t, ctx, testPool, wsID, "td-c", "10.0.0.50")
+		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-c", "10.0.0.50")
 		store := NewStore(testPool)
 
 		s1, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
 			t.Fatalf("first compile: %v", err)
 		}
+		if s1.RelayAddr != "" || s1.RelaySpiffeId != "" {
+			t.Fatalf("first compile (no relay): want empty relay fields, got addr=%q spiffe=%q",
+				s1.RelayAddr, s1.RelaySpiffeId)
+		}
 
-		_ = mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
+		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
+		mustInsertPlacement(t, ctx, testPool, connID, relayID)
 
 		s2, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
 		if err != nil {
@@ -267,6 +280,21 @@ func mustInsertActiveRelay(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		t.Fatalf("insert relay: %v", err)
 	}
 	return id
+}
+
+// mustInsertPlacement creates a connector_relay_placement row linking the
+// given connector to the given relay. Panics on failure.
+func mustInsertPlacement(t *testing.T, ctx context.Context, pool *pgxpool.Pool, connectorID, relayID string) {
+	t.Helper()
+	_, err := pool.Exec(ctx,
+		`INSERT INTO connector_relay_placement (connector_id, relay_id, attached_at, last_confirmed, source)
+		 VALUES ($1, $2, NOW(), NOW(), 'heartbeat')
+		 ON CONFLICT (connector_id) DO NOTHING`,
+		connectorID, relayID,
+	)
+	if err != nil {
+		t.Fatalf("insert placement connector=%s relay=%s: %v", connectorID, relayID, err)
+	}
 }
 
 // mustInsertActiveConnector creates a remote_networks row + a connectors row

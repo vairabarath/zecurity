@@ -26,6 +26,7 @@ mod enrollment;
 pub mod net_util;
 pub mod policy;
 pub mod quic_listener;
+mod relay_attachment;
 mod relay_client;
 mod relay_handler;
 mod renewal;
@@ -210,6 +211,11 @@ async fn main() -> anyhow::Result<()> {
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
 
+    // Shared relay-attachment state. Written by relay_client on register
+    // success / session end; read by control_stream when building each
+    // ConnectorHealthReport.
+    let relay_attachment_slot = relay_attachment::new_slot();
+
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
         let store = cert_store.clone();
@@ -285,6 +291,8 @@ async fn main() -> anyhow::Result<()> {
             let intermediate_bundle = ca_bundle.clone();
 
             info!(relay_addr, "Relay registration task spawning");
+            let attachment_slot = relay_attachment_slot.clone();
+            let lifecycle_tx = ctrl_tx.clone();
             tokio::spawn(async move {
                 relay_client::maintain_registration(
                     relay_addr,
@@ -298,6 +306,8 @@ async fn main() -> anyhow::Result<()> {
                     relay_handler,
                     cfg.relay_max_tunnel_streams,
                     cfg.relay_idle_timeout_secs,
+                    attachment_slot,
+                    lifecycle_tx,
                 )
                 .await;
             });
@@ -317,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
         ack_rx,
         ctrl_rx,
         policy_cache,
+        relay_attachment_slot,
     )
     .await
 }

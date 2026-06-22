@@ -146,6 +146,71 @@ func (s *Store) InsertProvisionedRelay(ctx context.Context, id, name string, dns
 
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
 // runtime and certificate metadata.
+// UpsertPlacement inserts or updates a connector_relay_placement row.
+// Returns true when the relay_id actually changed (new attachment or different relay)
+// so the caller can decide whether to invalidate the policy cache.
+func (s *Store) UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error) {
+	var changed bool
+	err := s.pool.QueryRow(ctx, `
+		WITH old AS (
+			SELECT relay_id FROM connector_relay_placement WHERE connector_id = $1
+		), upsert AS (
+			INSERT INTO connector_relay_placement
+			     (connector_id, relay_id, attached_at, last_confirmed, source)
+			VALUES ($1, $2, $3, NOW(), $4)
+			ON CONFLICT (connector_id) DO UPDATE
+			SET relay_id       = EXCLUDED.relay_id,
+			    attached_at    = EXCLUDED.attached_at,
+			    last_confirmed = NOW(),
+			    source         = EXCLUDED.source
+			RETURNING connector_id
+		)
+		SELECT
+			CASE
+				WHEN NOT EXISTS (SELECT 1 FROM old) THEN true
+				WHEN EXISTS (SELECT 1 FROM old WHERE old.relay_id IS DISTINCT FROM $2) THEN true
+				ELSE false
+			END AS changed
+	`, connectorID, relayID, attachedAt, source).Scan(&changed)
+	if err != nil {
+		return false, fmt.Errorf("upsert placement: %w", err)
+	}
+	return changed, nil
+}
+
+// DeletePlacement removes a connector_relay_placement row.
+// Returns true when a row was actually deleted (the connector had a placement).
+func (s *Store) DeletePlacement(ctx context.Context, connectorID string) (bool, error) {
+	var changed bool
+	err := s.pool.QueryRow(ctx, `
+		WITH old AS (
+			SELECT connector_id FROM connector_relay_placement WHERE connector_id = $1
+		), del AS (
+			DELETE FROM connector_relay_placement WHERE connector_id = $1
+			RETURNING connector_id
+		)
+		SELECT EXISTS (SELECT 1 FROM old) AS changed
+	`, connectorID).Scan(&changed)
+	if err != nil {
+		return false, fmt.Errorf("delete placement: %w", err)
+	}
+	return changed, nil
+}
+
+// BumpLastConfirmed updates the last_confirmed timestamp for a connector's
+// placement row without changing the relay. It does NOT return a changed
+// signal — the caller must NOT trigger a policy notification from this.
+func (s *Store) BumpLastConfirmed(ctx context.Context, connectorID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE connector_relay_placement SET last_confirmed = NOW() WHERE connector_id = $1`,
+		connectorID,
+	)
+	if err != nil {
+		return fmt.Errorf("bump last confirmed: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
