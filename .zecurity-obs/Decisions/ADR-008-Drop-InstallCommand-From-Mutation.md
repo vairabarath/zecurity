@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: accepted
 date: 2026-06-13
 related:
   - "[[CodeStudy/04-Connector-Enrollment-Flow]]"
@@ -226,7 +226,7 @@ re-introducing the request via another client.
 - The reviewer also flagged **STAGE1-F5** (`X-Public-Operation` header trust
   pattern as a class concern) — that is a separate cross-cutting issue and
   warrants its own ADR (proposed: ADR-009).
-- Fix is deferred. This ADR documents the decision; implementation pending.
+- **Implemented 2026-06-19** on branch `fix/lazy-enrollment-token-mint` — see the Implementation Note below.
 
 ### Related observation (out of scope for this ADR)
 
@@ -236,3 +236,34 @@ new JTI — but the OLD JTI is still in Redis under its old key with its
 original TTL. Multiple valid enrollment tokens can therefore be in flight
 per pending connector during regeneration windows. That's a Stage 8/9
 concern and not in scope for ADR-008.
+
+## Implementation Note (2026-06-19)
+
+> Added during implementation by a follow-up reviewer. **Confirm with the ADR
+> author (Yogesh) that this scope extension is agreed.**
+
+The decision as originally written (drop the field from the response) closes the
+**Apollo-cache exposure (P1)** but does **not** stop the wasteful mint: the create
+resolver builds `installCommand` in its body, so it still signs a JWT and writes
+Redis (`enrollment:jti:*`) on every create regardless of what the client selects.
+Removing the field from the selection/struct/schema only stops *returning* the
+token, not *creating* it.
+
+So implementation extended the scope to also make minting **lazy** (call this
+**S2**), which is what actually closes the double-mint / orphaned-token (P2):
+
+- `GenerateConnectorToken` / `GenerateShieldToken` now only validate + reserve the
+  `pending` row and return the ID. The slug lookup, CA-fingerprint,
+  `GenerateEnrollmentToken`, `StoreEnrollmentJTI`, and `UPDATE … enrollment_token_jti`
+  were removed from the create path (for shields, the `ShieldSvc.GenerateShieldToken`
+  call was removed; the placeholder-connector INSERT stays to satisfy the FK).
+- `installCommand` removed from both mutations + the `ConnectorToken` / `ShieldToken`
+  GraphQL types (the original S1 decision).
+- **All** issuance now flows through the existing REST endpoints
+  (`POST /api/{connectors,shields}/{id}/token`) on detail-page load — unchanged.
+
+Safe because `enrollment_token_jti` is nullable and enrollment burns the jti carried
+in the *presented JWT* via Redis (`enrollment.go`), not from the row column.
+
+The "Related observation" above (re-mint orphans the prior jti → multiple valid
+tokens) remains **out of scope** and is tracked as a separate follow-up (S3).

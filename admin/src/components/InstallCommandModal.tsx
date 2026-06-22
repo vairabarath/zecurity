@@ -82,11 +82,13 @@ export function InstallCommandModal({
             remoteNetworkId: networkId,
             shieldName: agentName.trim(),
           } as GenerateShieldTokenMutationVariables,
+          // Background list refresh only — do NOT await. The detail page owns its
+          // data via GetShield(id), so navigation needn't wait on a workspace-wide
+          // refetch.
           refetchQueries: [
             { query: GetRemoteNetworksDocument },
             { query: GetShieldsDocument, variables: { remoteNetworkId: networkId } as GetShieldsQueryVariables },
           ],
-          awaitRefetchQueries: true,
         })
         const shieldId = result.data?.generateShieldToken.shieldId
         handleClose()
@@ -101,8 +103,10 @@ export function InstallCommandModal({
           remoteNetworkId: networkId,
           connectorName: agentName.trim(),
         } as GenerateConnectorTokenMutationVariables,
+        // Background list refresh only — do NOT await. ConnectorDetail owns its
+        // data via GetConnector(id), so navigation needn't wait on a
+        // workspace-wide refetch.
         refetchQueries: [{ query: GetRemoteNetworksDocument }],
-        awaitRefetchQueries: true,
       })
 
       const connectorId = result.data?.generateConnectorToken.connectorId

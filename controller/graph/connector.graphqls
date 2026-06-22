@@ -89,6 +89,5 @@ enum ConnectorStatus {
 }
 
 type ConnectorToken {
-  connectorId:    ID!
-  installCommand: String!
+  connectorId: ID!
 }

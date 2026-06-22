@@ -47,8 +47,7 @@ type ConnectorLog struct {
 }
 
 type ConnectorToken struct {
-	ConnectorID    string `json:"connectorId"`
-	InstallCommand string `json:"installCommand"`
+	ConnectorID string `json:"connectorId"`
 }
 
 type CreateResourceInput struct {
@@ -150,8 +149,7 @@ type Shield struct {
 }
 
 type ShieldToken struct {
-	ShieldID       string `json:"shieldId"`
-	InstallCommand string `json:"installCommand"`
+	ShieldID string `json:"shieldId"`
 }
 
 type UpdateResourceInput struct {

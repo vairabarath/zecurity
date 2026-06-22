@@ -22,7 +22,6 @@ mutation DeleteRemoteNetwork($id: ID!) {
 mutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {
   generateConnectorToken(remoteNetworkId: $remoteNetworkId, connectorName: $connectorName) {
     connectorId
-    installCommand
   }
 }
 
@@ -37,7 +36,6 @@ mutation DeleteConnector($id: ID!) {
 mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
   generateShieldToken(remoteNetworkId: $remoteNetworkId, shieldName: $shieldName) {
     shieldId
-    installCommand
   }
 }
 

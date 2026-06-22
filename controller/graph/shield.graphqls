@@ -23,8 +23,7 @@ enum ShieldStatus {
 }
 
 type ShieldToken {
-  shieldId:       ID!
-  installCommand: String!
+  shieldId: ID!
 }
 
 extend type Mutation {

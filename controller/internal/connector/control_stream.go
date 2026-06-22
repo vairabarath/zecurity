@@ -28,7 +28,7 @@ import (
 // The resolver calls PushResourceInstruction to deliver instructions in real time.
 // If the connector is offline, the instruction stays in DB and is delivered on reconnect.
 type ConnectorRegistry struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
 }
 
@@ -95,9 +95,29 @@ func (r *ConnectorRegistry) remove(connectorID string) {
 }
 
 func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.clients[connectorID]
+}
+
+// ClientsForWorkspace returns the live clients whose tenantID matches
+// workspaceID. The result is a fresh slice built under the read lock; callers
+// MUST send on it only after this returns (the lock is already released), never
+// while holding any registry lock. A connector disconnecting between this
+// snapshot and a later send is benign: send fails fast on the orphaned mailbox
+// and the connector recovers its ACL on its next heartbeat. O(N) over all
+// connected connectors — acceptable at current scale; a workspace index is a
+// later optimization gated on profiling.
+func (r *ConnectorRegistry) ClientsForWorkspace(workspaceID string) []*connectorStreamClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*connectorStreamClient
+	for _, c := range r.clients {
+		if c.tenantID == workspaceID {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // buildSnapshotMsg builds the authoritative desired-state snapshot message for
