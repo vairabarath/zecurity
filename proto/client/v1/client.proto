@@ -102,12 +102,34 @@ message GetACLSnapshotResponse {
   ACLSnapshot snapshot = 1;
 }
 
+// ACLConnector holds the tunnel endpoint for one Connector instance.
+message ACLConnector {
+  string connector_id          = 1;
+  string connector_tunnel_addr = 2; // host:9092 QUIC
+  string connector_spiffe      = 3;
+}
+
+// ACLRemoteNetwork groups the connectors serving a single remote network.
+// Connectors is empty when no active connector currently exists for this
+// remote network. The client must treat resources in this network as
+// temporarily unavailable.
+message ACLRemoteNetwork {
+  string remote_network_id         = 1;
+  string name                      = 2;
+  repeated ACLConnector connectors = 3;
+}
+
 message ACLSnapshot {
-  uint64 version                 = 1;
-  string workspace_id            = 2;
-  int64  generated_at            = 3;
-  repeated ACLEntry entries      = 4;
-  string connector_tunnel_addr   = 5; // QUIC tunnel address of the active connector, e.g. "192.168.1.x:9092"
+  uint64 version                            = 1;
+  string workspace_id                       = 2;
+  int64  generated_at                       = 3;
+  repeated ACLEntry entries                 = 4;
+  reserved 5;                               // was: connector_tunnel_addr
+  string relay_addr                         = 6; // relay QUIC public address, e.g. "relay.example.com:9093"
+  reserved 7;                               // was: connector_id
+  reserved 8;                               // was: connector_spiffe
+  string relay_spiffe_id                    = 9; // SPIFFE URI of the relay. Required whenever relay_addr is set.
+  repeated ACLRemoteNetwork remote_networks = 10;
 }
 
 message ACLEntry {
@@ -117,6 +139,7 @@ message ACLEntry {
   string protocol                    = 4;
   repeated string allowed_spiffe_ids = 5;
   string name                        = 6;
-  string route_type                  = 7; // "direct" or "shield"
+  string route_type                  = 7; // "connector" or "shield"
   string shield_id                   = 8; // set when route_type == "shield"
+  string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
 }

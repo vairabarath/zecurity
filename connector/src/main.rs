@@ -26,6 +26,9 @@ mod enrollment;
 pub mod net_util;
 pub mod policy;
 pub mod quic_listener;
+mod relay_attachment;
+mod relay_client;
+mod relay_handler;
 mod renewal;
 pub mod tls;
 mod updater;
@@ -69,7 +72,7 @@ use std::path::Path;
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use config::ConnectorConfig;
 use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
@@ -208,6 +211,11 @@ async fn main() -> anyhow::Result<()> {
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
 
+    // Shared relay-attachment state. Written by relay_client on register
+    // success / session end; read by control_stream when building each
+    // ConnectorHealthReport.
+    let relay_attachment_slot = relay_attachment::new_slot();
+
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
         let store = cert_store.clone();
@@ -253,6 +261,61 @@ async fn main() -> anyhow::Result<()> {
 
     info!("device tunnel listeners spawned on :9092 (TLS+QUIC)");
 
+    match (&cfg.relay_addr, &cfg.relay_spiffe_id) {
+        (Some(relay_addr), Some(relay_spiffe_id)) => {
+            if relay_addr.trim().is_empty() {
+                bail!("RELAY_ADDR must not be empty");
+            }
+            relay_client::validate_relay_spiffe_id(relay_spiffe_id)
+                .context("invalid RELAY_SPIFFE_ID")?;
+            let relay_addr = relay_addr.clone();
+            let relay_handler = Arc::new(
+                relay_handler::RelayHandler::new(
+                    &cert_store,
+                    acl.clone(),
+                    tunnel_hub.clone(),
+                    crl_manager.clone(),
+                    connector_id.clone(),
+                    ctrl_tx.clone(),
+                    cfg.relay_inner_handshake_timeout_secs,
+                    cfg.relay_max_tunnel_streams as usize,
+                )
+                .context("build Connector Relay stream handler")?,
+            );
+            let relay_spiffe_id = relay_spiffe_id.clone();
+            let connector_spiffe_id =
+                appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
+            let cert_pem = cert_store.cert_pem.clone();
+            let key_pem = cert_store.key_pem.clone();
+            let ca_bundle = cert_store.workspace_ca_pem.clone();
+            let intermediate_bundle = ca_bundle.clone();
+
+            info!(relay_addr, "Relay registration task spawning");
+            let attachment_slot = relay_attachment_slot.clone();
+            let lifecycle_tx = ctrl_tx.clone();
+            tokio::spawn(async move {
+                relay_client::maintain_registration(
+                    relay_addr,
+                    relay_spiffe_id,
+                    connector_id,
+                    connector_spiffe_id,
+                    cert_pem,
+                    key_pem,
+                    ca_bundle,
+                    intermediate_bundle,
+                    relay_handler,
+                    cfg.relay_max_tunnel_streams,
+                    cfg.relay_idle_timeout_secs,
+                    attachment_slot,
+                    lifecycle_tx,
+                )
+                .await;
+            });
+        }
+        (None, None) => info!("Relay registration disabled"),
+        _ => bail!("RELAY_ADDR and RELAY_SPIFFE_ID must be configured together"),
+    }
+
     watchdog::notify_ready();
     watchdog::spawn_watchdog();
 
@@ -264,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
         ack_rx,
         ctrl_rx,
         policy_cache,
+        relay_attachment_slot,
     )
     .await
 }

@@ -8,6 +8,7 @@ import (
 
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -153,10 +154,12 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		// Skip Enroll RPCs — neither connector nor shield has a certificate
-		// during enrollment; both authenticate via JWT instead.
+		// Skip bootstrap RPCs because the caller has no certificate yet.
+		// Connector and Shield authenticate with JWTs. Relay Provision currently
+		// uses server-authenticated TLS only; token authentication is deferred.
 		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
-			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName {
+			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName ||
+			info.FullMethod == relaypb.RelayService_Provision_FullMethodName {
 			return handler(ctx, req)
 		}
 
@@ -204,6 +207,11 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 				return nil, status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
 			}
 		}
+		if role == appmeta.SPIFFERoleRelay {
+			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return nil, status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+		}
 
 		// Build the full SPIFFE URI for context injection.
 		spiffeID := "spiffe://" + trustDomain + "/" + role + "/" + entityID
@@ -213,6 +221,28 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 
 		return handler(ctx, req)
 	}
+}
+
+func verifyRelayCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {
+	if trustDomain != appmeta.SPIFFEGlobalTrustDomain {
+		return fmt.Errorf("relay trust domain must be %q", appmeta.SPIFFEGlobalTrustDomain)
+	}
+	intermediateCA, err := store.GetIntermediateCA(ctx)
+	if err != nil {
+		return fmt.Errorf("load intermediate CA: %w", err)
+	}
+	if intermediateCA == nil {
+		return fmt.Errorf("intermediate CA not found")
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(intermediateCA)
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return fmt.Errorf("verify leaf against intermediate CA: %w", err)
+	}
+	return nil
 }
 
 func verifyConnectorCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {

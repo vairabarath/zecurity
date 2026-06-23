@@ -1,4 +1,5 @@
-use std::net::{IpAddr, SocketAddr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -8,15 +9,20 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::config;
-use crate::grpc::{self, client_v1::GetAclSnapshotRequest};
+use crate::grpc::{
+    self,
+    client_v1::{AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
+};
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
+use crate::relay_pool::RelayPool;
 use crate::runtime::{
     self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
-use crate::tun::TunManager;
+use crate::transport::{ClientTransport, RelayContext};
+use crate::tun::{AllowedFlow, TunManager};
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
@@ -223,9 +229,15 @@ async fn handle_request(
             }
 
             let s = state.read().await;
+            let my_spiffe = s
+                .device
+                .as_ref()
+                .map(|d| d.spiffe_id.as_str())
+                .unwrap_or("");
             let resources = s.acl_snapshot.as_ref().map(|snap| {
                 snap.entries
                     .iter()
+                    .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe))
                     .map(|e| IpcResource {
                         name: e.name.clone(),
                         address: e.address.clone(),
@@ -443,18 +455,41 @@ async fn handle_up(
         Some(d) => d,
     };
 
-    // Build QUIC tunnel pool from device mTLS cert.
-    let pool = match TunnelPool::new(
-        &device.certificate_pem,
-        &device.private_key_pem,
-        &device.ca_cert_pem,
+    // Filter to only entries this device is permitted to access.
+    let my_spiffe = device.spiffe_id.clone();
+    let allowed_entries: Vec<AclEntry> = acl
+        .entries
+        .iter()
+        .filter(|e| {
+            e.allowed_spiffe_ids
+                .iter()
+                .any(|id| id == my_spiffe.as_str())
+        })
+        .cloned()
+        .collect();
+
+    if allowed_entries.is_empty() {
+        return IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some("no accessible resources for this device — check group membership".into()),
+            ..Default::default()
+        };
+    }
+
+    let transports = match build_transports_by_resource(
+        &allowed_entries,
+        &acl.remote_networks,
+        &device,
+        &acl.relay_addr,
+        &acl.relay_spiffe_id,
     ) {
-        Ok(p) => Arc::new(p),
+        Ok(t) => Arc::new(t),
         Err(e) => {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some(format!("failed to build tunnel pool: {}", e)),
+                error: Some(format!("failed to build client transport: {}", e)),
                 ..Default::default()
             }
         }
@@ -473,31 +508,41 @@ async fn handle_up(
         }
     };
 
-    // Collect resource IPs from ACL snapshot.
-    let ips: Vec<IpAddr> = acl
-        .entries
+    // Mark only the allowed TCP destination flows into the Zecurity route table.
+    // Other ports on the same IP stay on the normal kernel route.
+    let allowed_flows: Vec<AllowedFlow> = allowed_entries
         .iter()
-        .filter_map(|e| e.address.parse::<IpAddr>().ok())
+        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
+        .filter_map(|e| {
+            let IpAddr::V4(ip) = e.address.parse::<IpAddr>().ok()? else {
+                return None;
+            };
+            Some(AllowedFlow {
+                ip,
+                port: e.port as u16,
+            })
+        })
         .collect();
 
-    // Check for route conflicts before installing anything.
-    if let Err(e) = mgr.check_conflicts(&ips).await {
+    if allowed_flows.is_empty() {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
-            error: Some(format!("route conflict: {}", e)),
+            error: Some("no TCP resources available for this device".into()),
             ..Default::default()
         };
     }
 
-    // Install one /32 route per resource IP.
-    for ip in &ips {
-        if let Err(e) = mgr.add_route(*ip).await {
-            warn!(ip = %ip, error = %e, "failed to add route (skipping)");
-        }
+    if let Err(e) = mgr.configure_allowed_flows(&allowed_flows) {
+        return IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some(format!("failed to configure split-tunnel routes: {}", e)),
+            ..Default::default()
+        };
     }
 
-    let route_count = ips.len();
+    let route_count = allowed_flows.len();
     let dev = match mgr.take_device() {
         Some(d) => d,
         None => {
@@ -510,25 +555,8 @@ async fn handle_up(
         }
     };
 
-    // Resolve connector tunnel address: prefer the address embedded in the
-    // ACL snapshot (populated from the connector's live lan_addr in the DB),
-    // then fall back to config, then compiled-in default.
-    let connector_addr = {
-        let from_snapshot = acl.connector_tunnel_addr.as_str();
-        if !from_snapshot.is_empty() {
-            from_snapshot.to_string()
-        } else {
-            config::load()
-                .map(|c| c.connector().to_string())
-                .unwrap_or_else(|_| crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string())
-        }
-    };
-    let connector_socket: SocketAddr = connector_addr
-        .parse()
-        .unwrap_or_else(|_| "127.0.0.1:9092".parse().unwrap());
-
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, acl, pool, connector_socket).await {
+        if let Err(e) = net_stack::run(dev, allowed_entries, transports).await {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -709,6 +737,97 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
         "ACL snapshot synced"
     );
     Ok(result)
+}
+
+// Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
+//
+// Three cases at lookup time (enforced in net_stack):
+//   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
+//   Some(None)    — managed resource, connector offline → fail closed
+//   None (absent) — unmanaged traffic, not in ACL       → bypass via SO_MARK NIC
+fn build_transports_by_resource(
+    entries: &[AclEntry],
+    remote_networks: &[AclRemoteNetwork],
+    device: &DeviceInfo,
+    relay_addr: &str,
+    relay_spiffe_id: &str,
+) -> Result<HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>>> {
+    let relay_addr = relay_addr.to_string();
+    let relay_spiffe_id = relay_spiffe_id.to_string();
+    let relay_base_present = !relay_addr.is_empty() && !relay_spiffe_id.is_empty();
+
+    // Build remote_network_id → Option<ClientTransport>.
+    // None means the RN is known but has no active connector.
+    let mut rn_transport: HashMap<String, Option<Arc<ClientTransport>>> = HashMap::new();
+    for rn in remote_networks {
+        let Some(connector) = rn.connectors.first() else {
+            // Connector offline — insert None so resources fail closed, not bypassed.
+            rn_transport.insert(rn.remote_network_id.clone(), None);
+            continue;
+        };
+
+        let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
+            connector.connector_tunnel_addr.clone()
+        } else {
+            crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
+        };
+        let connector_socket: SocketAddr = connector_addr
+            .to_socket_addrs()
+            .with_context(|| format!("resolve connector tunnel address {connector_addr}"))?
+            .next()
+            .with_context(|| {
+                format!("connector tunnel address {connector_addr} resolved to no addresses")
+            })?;
+
+        let direct = Arc::new(TunnelPool::new(
+            &device.certificate_pem,
+            &device.private_key_pem,
+            &device.ca_cert_pem,
+        )?);
+
+        let relay = if relay_base_present
+            && !connector.connector_id.is_empty()
+            && !connector.connector_spiffe.is_empty()
+        {
+            let pool = Arc::new(RelayPool::new(
+                &device.certificate_pem,
+                &device.private_key_pem,
+                &device.ca_cert_pem,
+                &relay_spiffe_id,
+            )?);
+            Some(RelayContext {
+                pool,
+                relay_addr: relay_addr.clone(),
+                connector_id: connector.connector_id.clone(),
+                connector_spiffe: connector.connector_spiffe.clone(),
+            })
+        } else {
+            None
+        };
+
+        rn_transport.insert(
+            rn.remote_network_id.clone(),
+            Some(Arc::new(ClientTransport::new(
+                direct,
+                connector_socket,
+                relay,
+            ))),
+        );
+    }
+
+    // Fan out: map each resource (Ipv4Addr, port) to its RN's transport slot.
+    // Resources in RNs absent from rn_transport (shouldn't happen) are omitted.
+    let mut out: HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>> = HashMap::new();
+    for entry in entries {
+        let Ok(ip) = entry.address.parse::<IpAddr>() else {
+            continue;
+        };
+        let IpAddr::V4(v4) = ip else { continue };
+        if let Some(slot) = rn_transport.get(&entry.remote_network_id) {
+            out.insert((v4, entry.port as u16), slot.clone());
+        }
+    }
+    Ok(out)
 }
 
 fn now_unix() -> i64 {

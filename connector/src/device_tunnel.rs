@@ -4,6 +4,7 @@
 // either direct or via Shield relay.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -206,10 +207,20 @@ where
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
-                client_spiffe_id, req.destination, req.port, req.protocol,
-            ),
+            AccessLogFields {
+                resource_id:      "",
+                client_spiffe_id: &client_spiffe_id,
+                route_type:       "",
+                destination:      &req.destination,
+                port:             req.port,
+                protocol:         &req.protocol,
+                action:           "deny",
+                error:            "no_acl_match",
+                legacy_message: format!(
+                    "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
+                    client_spiffe_id, req.destination, req.port, req.protocol,
+                ),
+            },
         )
         .await;
         return Err(anyhow!("access denied"));
@@ -234,14 +245,24 @@ where
             emit_access_log(
                 control_tx,
                 connector_id,
-                &format!(
-                    "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
-                    client_spiffe_id,
-                    acl_entry.resource_id,
-                    req.destination,
-                    req.port,
-                    req.protocol,
-                ),
+                AccessLogFields {
+                    resource_id:      &acl_entry.resource_id,
+                    client_spiffe_id: &client_spiffe_id,
+                    route_type:       "shield",
+                    destination:      &req.destination,
+                    port:             req.port,
+                    protocol:         &req.protocol,
+                    action:           "error",
+                    error:            "missing_shield_id",
+                    legacy_message: format!(
+                        "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
+                        client_spiffe_id,
+                        acl_entry.resource_id,
+                        req.destination,
+                        req.port,
+                        req.protocol,
+                    ),
+                },
             )
             .await;
             return Err(anyhow!(
@@ -269,15 +290,25 @@ where
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
-                client_spiffe_id,
-                acl_entry.resource_id,
-                req.destination,
-                req.port,
-                req.protocol,
-                shield_id,
-            ),
+            AccessLogFields {
+                resource_id:      &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type:       "shield",
+                destination:      &req.destination,
+                port:             req.port,
+                protocol:         &req.protocol,
+                action:           "allow",
+                error:            "",
+                legacy_message: format!(
+                    "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                    shield_id,
+                ),
+            },
         )
         .await;
 
@@ -297,14 +328,60 @@ where
         return Ok(());
     }
 
-    // direct route
+    // Connector route — direct TCP/UDP bridge from the connector to the
+    // resource. `"direct"` is kept as a temporary legacy alias for older
+    // ACL snapshots; new compilations emit `"connector"`.
+    if acl_entry.route_type != "connector" && acl_entry.route_type != "direct" {
+        tracing::error!(
+            spiffe_id = %client_spiffe_id,
+            resource_id = %acl_entry.resource_id,
+            route_type = %acl_entry.route_type,
+            "access denied — unknown route_type",
+        );
+        let response = TunnelResponse {
+            ok: false,
+            error: Some(format!("unknown route_type {:?}", acl_entry.route_type)),
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+        send_response(&mut stream, &response).await?;
+        emit_access_log(
+            control_tx,
+            connector_id,
+            AccessLogFields {
+                resource_id:      &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type:       &acl_entry.route_type,
+                destination:      &req.destination,
+                port:             req.port,
+                protocol:         &req.protocol,
+                action:           "error",
+                error:            "unknown_route_type",
+                legacy_message: format!(
+                    "deny spiffe_id={} resource={} dest={}:{} proto={} reason=unknown_route_type={}",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                    acl_entry.route_type,
+                ),
+            },
+        )
+        .await;
+        return Err(anyhow!(
+            "unknown route_type {:?} for resource {}",
+            acl_entry.route_type,
+            acl_entry.resource_id
+        ));
+    }
+
     tracing::info!(
         spiffe_id = %client_spiffe_id,
         resource_id = %acl_entry.resource_id,
         dest = %req.destination,
         port = req.port,
         proto = %req.protocol,
-        route = "direct",
+        route = "connector",
         "access allowed",
     );
 
@@ -318,10 +395,20 @@ where
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-            ),
+            AccessLogFields {
+                resource_id:      &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type:       "connector",
+                destination:      &req.destination,
+                port:             req.port,
+                protocol:         &req.protocol,
+                action:           "allow",
+                error:            "",
+                legacy_message: format!(
+                    "allow spiffe_id={} resource={} dest={}:{} proto={} route=connector",
+                    client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+                ),
+            },
         )
         .await;
 
@@ -330,14 +417,34 @@ where
     }
 
     let target = format!("{}:{}", req.destination, req.port);
-    let resource_conn_result = TcpStream::connect(&target).await;
-    let mut resource_conn = match resource_conn_result {
+    let mut resource_conn = match TcpStream::connect(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
             c
         }
         Err(e) => {
             tracing::error!(resource_id = %acl_entry.resource_id, dest = %target, error = %e, "tunnel_opened error");
+            // Resource unreachable from the connector — audit as an `error`
+            // action rather than a `deny` (which is reserved for policy denial).
+            emit_access_log(
+                control_tx,
+                connector_id,
+                AccessLogFields {
+                    resource_id:      &acl_entry.resource_id,
+                    client_spiffe_id: &client_spiffe_id,
+                    route_type:       "connector",
+                    destination:      &req.destination,
+                    port:             req.port,
+                    protocol:         &req.protocol,
+                    action:           "error",
+                    error:            &format!("connect_failed: {}", e),
+                    legacy_message: format!(
+                        "error spiffe_id={} resource={} dest={}:{} proto={} reason=connect_failed: {}",
+                        client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, e,
+                    ),
+                },
+            )
+            .await;
             return Err(anyhow!("failed to connect to {}: {}", target, e));
         }
     };
@@ -351,10 +458,20 @@ where
     emit_access_log(
         control_tx,
         connector_id,
-        &format!(
-            "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-        ),
+        AccessLogFields {
+            resource_id:      &acl_entry.resource_id,
+            client_spiffe_id: &client_spiffe_id,
+            route_type:       "connector",
+            destination:      &req.destination,
+            port:             req.port,
+            protocol:         &req.protocol,
+            action:           "allow",
+            error:            "",
+            legacy_message: format!(
+                "allow spiffe_id={} resource={} dest={}:{} proto={} route=connector",
+                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+            ),
+        },
     )
     .await;
 
@@ -409,15 +526,43 @@ where
     Ok(())
 }
 
-async fn emit_access_log(
+/// Typed access-log fields the connector forwards to the controller. Mirrors
+/// the structured columns in connector_logs added by migration 021.
+struct AccessLogFields<'a> {
+    resource_id:      &'a str,
+    client_spiffe_id: &'a str,
+    route_type:       &'a str,
+    destination:      &'a str,
+    port:             u16,
+    protocol:         &'a str,
+    action:           &'a str, // "allow" | "deny" | "error"
+    error:            &'a str,
+    legacy_message:   String,
+}
+
+async fn emit_access_log<'a>(
     control_tx: &mpsc::Sender<ControlMessage>,
-    connector_id: &str,
-    message: &str,
+    _connector_id: &str,
+    fields: AccessLogFields<'a>,
 ) {
+    let occurred_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     let log_msg = ControlMessage {
         body: Some(crate::proto::connector_control_message::Body::ConnectorLog(
             crate::proto::ConnectorLog {
-                message: format!("[device_tunnel] {}", message),
+                message:          format!("[device_tunnel] {}", fields.legacy_message),
+                resource_id:      fields.resource_id.to_string(),
+                client_spiffe_id: fields.client_spiffe_id.to_string(),
+                route_type:       fields.route_type.to_string(),
+                destination:      fields.destination.to_string(),
+                port:             fields.port as u32,
+                protocol:         fields.protocol.to_string(),
+                action:           fields.action.to_string(),
+                error:            fields.error.to_string(),
+                occurred_at_unix: occurred_at,
                 ..Default::default()
             },
         )),

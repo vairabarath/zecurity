@@ -1438,3 +1438,280 @@ serves on `127.0.0.1:9102`.
   new build does not).
 - Still open: Prometheus scrape + corrected alert (`deleting`-age + shield disconnected); production deploy
   of controller + 016/017; re-enable update timers; Finding 7; RenewCert short-TTL check.
+
+---
+
+## 2026-06-13 — Codex (Sprint 10.1 Relay provisioning RPC contract)
+
+**What was done:**
+- Added `proto/relay/v1/relay.proto` with the initial server-authenticated TLS
+  `Provision` RPC contract.
+- Wired Relay Rust protobuf client generation and generated Controller Go stubs.
+- Removed the generated Relay CSR from version control and ignored Relay keys,
+  CSRs, certificates, and Cargo build output.
+- Updated Sprint 10.1 Phase B planning to record the completed protocol contract
+  and pending Controller provisioning/heartbeat work.
+
+**Verification:**
+- Relay `cargo test`: 12 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+- Controller `go build ./...`: passed.
+- `buf generate`: passed.
+- `buf lint`: still fails on pre-existing repository-wide proto root and control
+  stream naming rules affecting Connector, Shield, Client, and Relay packages.
+
+**What's next:**
+- Implement the authenticated Controller `Provision` handler and PKI signing method.
+- Add requested DNS/IP SAN fields and enforce the SAN allowlist during provisioning.
+- Define and implement the mTLS `Heartbeat` RPC and Relay health persistence.
+
+---
+
+## 2026-06-13 — Codex (Relay Provision RPC)
+
+**What was done:**
+- Added and registered `controller/internal/relay.Service.Provision`.
+- Kept `provisioning_token` reserved and ignored per the current proto contract;
+  authenticated/single-use provisioning remains future work.
+- Added canonical Relay UUID, DNS SAN, and IP SAN validation before PKI signing.
+- Hardened PKI Relay CSR validation and aligned ECDSA leaf key usage.
+- Completed Relay CSR output conversion from PEM to DER for
+  `ProvisionRequest.csr_der`.
+
+**Verification:**
+- `go test ./internal/relay ./internal/pki/...`: passed.
+- `go build ./...`: passed.
+- Relay `cargo test`: 12 passed.
+- Connector package tests require Docker and could not run in the sandbox.
+
+**What's next:**
+- Add the Relay-side TLS gRPC client call to `RelayService.Provision`.
+- Add authenticated provisioning when the reserved token field is activated.
+
+---
+
+## 2026-06-13 — Codex (Relay Provision client)
+
+**What was done:**
+- Added Relay environment configuration for controller addresses, Relay ID,
+  pinned CA fingerprint, state directory, and optional DNS/IP SANs.
+- Added the Relay-side TLS `Provision` request using a locally generated P-384
+  DER CSR and an Intermediate CA fetched from `/ca.crt` only after fingerprint
+  verification.
+- Validated the response metadata, leaf SPIFFE URI, and returned Intermediate
+  CA fingerprint before storing `relay.key`, `relay.crt`, and
+  `intermediate-ca.crt`.
+- Wired provisioning into Relay startup. The mTLS QUIC listener and heartbeat
+  remain pending because their runtime/protobuf contracts are not implemented.
+
+**Verification:**
+- Relay `cargo test`: 16 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+- Controller `go test ./internal/relay ./internal/pki/...`: passed.
+- Controller `go build ./...`: passed.
+
+**Post-pull scope clarification:**
+- Relay registration/JWT/Valkey support remains future work and is not required
+  by the current Relay provisioning client or `Provision` RPC.
+- The current target is a platform-level Relay listener that trusts the
+  Platform Intermediate CA and accepts valid Connector chains from any
+  workspace.
+
+---
+
+## 2026-06-13 — Codex (Relay multi-workspace TLS configuration)
+
+**What was done:**
+- Added the Relay QUIC/rustls server configuration using the provisioned Relay
+  leaf/key and Platform Intermediate CA as the only peer trust anchor.
+- Required peer certificates and `leaf + Workspace CA` presentation.
+- Added authenticated peer SPIFFE extraction for Connector and Client-device
+  roles from any workspace.
+- Wired TLS material validation and the `RELAY_BIND` QUIC accept loop into
+  Relay startup. Invalid authenticated peer identities are rejected before
+  session handling.
+- Added certificate-bound Connector Register, same-workspace Client Lookup,
+  reusable Lookup streams, registration cleanup, and bidirectional stream
+  bridging in `relay/src/session.rs`.
+
+**Verification:**
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with expected unused-code warnings while the QUIC
+  listener/session files remain pending.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay client)
+
+**What was done:**
+- Added the Connector Relay QUIC client with persistent registration and a
+  five-second reconnect loop.
+- Added exact Relay SPIFFE verification, Platform Intermediate-only trust,
+  Connector leaf plus Workspace CA presentation, `ztna-relay-v1` ALPN, and
+  length-prefixed JSON Register/ACK handling.
+- Added the Connector module declaration so the implementation is compiled.
+
+**Verification:**
+- Connector Relay client tests: 3 passed.
+- Connector `cargo build`: passed with existing and expected unused-code
+  warnings until startup wiring is added.
+
+**What's next:**
+- Add Relay address/identity configuration and spawn `maintain_registration`
+  from Connector startup.
+- Add inner Client-to-Connector mTLS before dispatching Relay-opened streams.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay stream handler)
+
+**What was done:**
+- Added `connector/src/relay_handler.rs` to accept streams opened by Relay.
+- Required inner Client-to-Connector TLS 1.3 mTLS before passing traffic to the
+  existing device tunnel ACL and routing handler.
+- Restricted inner Client trust to the Connector's Workspace CA and validated
+  an exact same-workspace `client` SPIFFE URI with a canonical UUID.
+
+**Verification:**
+- Connector `cargo test`: 20 passed.
+- Connector `cargo build`: passed with expected unused-code warnings until
+  Relay startup wiring is added.
+
+**What's next:**
+- Implement the Client-side inner mTLS initiator.
+
+---
+
+## 2026-06-15 — Codex (Relay Client SPIFFE role compatibility)
+
+**What was done:**
+- Changed Relay Client authentication and Lookup authorization from the stale
+  `client_device` role to the Controller-issued `client` SPIFFE role.
+- Updated Relay workspace-isolation and role-validation tests.
+
+**Verification:**
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with existing dead-code warnings.
+
+---
+
+## 2026-06-15 — Codex (Connector Relay runtime wiring)
+
+**What was done:**
+- Added `RELAY_ADDR` and `RELAY_SPIFFE_ID` Connector configuration.
+- Wired Connector startup to construct `RelayHandler`, register persistently
+  with Relay, and accept Relay-opened streams on the registered connection.
+- Added hostname resolution on each reconnect and fail-fast validation for
+  incomplete Relay configuration.
+
+**Verification:**
+- Connector `cargo test`: 20 passed.
+- Connector `cargo build`: passed with existing warnings.
+- Relay `cargo test`: 25 passed.
+- Relay `cargo build`: passed with existing warnings.
+
+**What's next:**
+- Implement `client/src/relay_pool.rs`, Client Lookup, inner mTLS initiation,
+  and direct-first Relay fallback.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.2 Client Relay plan)
+
+**What was done:**
+- Deferred Client Relay implementation into a dedicated Sprint 10.2 plan.
+- Added phases for ACL Relay discovery, Client RelayPool and inner mTLS,
+  direct-first fallback wiring, and integration/security validation.
+- Documented the required `relay_spiffe_id` discovery field, common
+  authenticated stream abstraction, authoritative `client` SPIFFE role, and
+  rule that policy denial must never trigger Relay fallback.
+
+**Implementation status:**
+- No Client or Controller Relay-fallback implementation was retained.
+- Completed Relay and Connector runtime changes remain unchanged.
+
+**What's next:**
+- Start Sprint 10.2 Phase A by landing the ACL Relay discovery protobuf and
+  Controller population contract.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 Relay and Connector hardening plan)
+
+**What was done:**
+- Added Sprint 10.3 as a production-hardening sprint for the completed Relay
+  and Connector runtime.
+- Converted the runtime review findings into owned phases for authenticated
+  provisioning and heartbeat, resource and routing limits, certificate
+  lifecycle and trust-bundle hardening, and integration/security gates.
+- Documented acceptance criteria for single-use provisioning tokens, bounded
+  runtime work, stale registration eviction, online certificate renewal,
+  relationship-based CA selection, canonical UUID enforcement, and mTLS Relay
+  heartbeat persistence.
+
+**Implementation status:**
+- Planning only; no Controller, Relay, Connector, Client, or protobuf runtime
+  code was changed.
+
+**What's next:**
+- Start Sprint 10.3 M2 Phase 1 with provisioning-token enforcement and the
+  Relay heartbeat protobuf/runtime contract.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 Relay runtime limits and timeouts)
+
+**What was done:**
+- Added configurable Relay QUIC idle timeout, keepalive, incoming-stream limit,
+  authenticated connection limit, and active Lookup bridge limit.
+- Added deadlines for Relay QUIC handshake, initial stream acceptance, and
+  framed Register/Lookup messages.
+- Added a bounded Connector Relay tunnel-stream task limit and inner
+  Client-to-Connector mTLS handshake timeout.
+- Added focused tests for positive runtime-limit validation and semaphore
+  capacity/release behavior.
+
+**Verification:**
+- Relay `cargo test`: 27 passed.
+- Relay `cargo build`: passed.
+- Connector `cargo test`: 21 passed.
+- Connector `cargo build`: passed.
+
+**What's next:**
+- Continue Sprint 10.3 M3 Phase 1 with stale Connector eviction, negative ACKs
+  for Connector stream-open failures, and canonical lowercase Relay UUID
+  enforcement.
+
+---
+
+## 2026-06-15 — Codex (Sprint 10.3 mTLS Relay heartbeat)
+
+**What was done:**
+- Defined and generated the Relay Heartbeat protobuf RPC.
+- Added a periodic Relay-side heartbeat client using the provisioned Relay
+  certificate/key as its Controller mTLS identity.
+- Added Controller Relay certificate-chain verification against the Platform
+  Intermediate CA before SPIFFE context injection.
+- Added the Controller Heartbeat handler and persisted active status,
+  last-heartbeat time, version, hostname, certificate serial, and expiry.
+- Updated Relay certificate issuance to include both `ServerAuth` and
+  `ClientAuth`.
+
+**Verification:**
+- Controller Relay tests passed.
+- Controller PKI tests passed.
+- Controller Connector interceptor tests compile; runtime suite requires
+  Docker-backed Valkey.
+- Controller `go build ./...` passed.
+- Relay `cargo test`: 28 passed.
+- Relay `cargo build`: passed.
+- Connector `cargo test`: 21 passed.
+- Connector `cargo build`: passed.
+
+**Deployment note:**
+- Existing Relay certificates issued with only `ServerAuth` must be
+  reprovisioned before heartbeat mTLS can succeed.
+
+**What's next:**
+- Implement authenticated single-use Relay provisioning and stale/offline
+  heartbeat health transitions.

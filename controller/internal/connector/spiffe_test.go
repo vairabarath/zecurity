@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -131,7 +132,8 @@ func TestContextAccessors_EmptyContext(t *testing.T) {
 // ── TrustDomainValidator tests ──────────────────────────────────────────────
 
 type mockWorkspaceStore struct {
-	workspaces map[string]*WorkspaceLookup
+	workspaces     map[string]*WorkspaceLookup
+	intermediateCA *x509.Certificate
 }
 
 func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string) (*WorkspaceLookup, error) {
@@ -147,7 +149,23 @@ func (m *mockWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context, do
 }
 
 func (m *mockWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
-	return nil, nil
+	return m.intermediateCA, nil
+}
+
+func TestVerifyRelayCertificate(t *testing.T) {
+	intermediate, intermediateKey := makeTestCA(t)
+	relay := makeTestRelayLeaf(t, intermediate, intermediateKey)
+	store := &mockWorkspaceStore{intermediateCA: intermediate}
+
+	if err := verifyRelayCertificate(context.Background(), store, appmeta.SPIFFEGlobalTrustDomain, relay); err != nil {
+		t.Fatalf("valid Relay certificate rejected: %v", err)
+	}
+	if err := verifyRelayCertificate(context.Background(), store, "workspace.example", relay); err == nil {
+		t.Fatal("Relay certificate accepted for workspace trust domain")
+	}
+	if err := verifyRelayCertificate(context.Background(), &mockWorkspaceStore{}, appmeta.SPIFFEGlobalTrustDomain, relay); err == nil {
+		t.Fatal("Relay certificate accepted without Intermediate CA")
+	}
 }
 
 func TestNewTrustDomainValidator_GlobalDomain(t *testing.T) {
@@ -225,5 +243,59 @@ func certWithURIs(t *testing.T, rawURI string) *x509.Certificate {
 		t.Fatalf("parse cert: %v", err)
 	}
 
+	return cert
+}
+
+func makeTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse CA certificate: %v", err)
+	}
+	return cert, key
+}
+
+func makeTestRelayLeaf(t *testing.T, issuer *x509.Certificate, issuerKey *ecdsa.PrivateKey) *x509.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate Relay key: %v", err)
+	}
+	uri, err := url.Parse(appmeta.RelaySPIFFEID("550e8400-e29b-41d4-a716-446655440000"))
+	if err != nil {
+		t.Fatalf("parse Relay SPIFFE URI: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(11),
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		URIs:         []*url.URL{uri},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, issuer, &key.PublicKey, issuerKey)
+	if err != nil {
+		t.Fatalf("create Relay certificate: %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parse Relay certificate: %v", err)
+	}
 	return cert
 }

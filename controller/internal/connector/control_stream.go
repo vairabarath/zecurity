@@ -3,12 +3,14 @@ package connector
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
@@ -24,6 +26,20 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
+
+// RelayPlacementStore is the subset of relay.Store used by the connector
+// control-stream handlers. Defined as an interface for testability.
+type RelayPlacementStore interface {
+	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error)
+	DeletePlacement(ctx context.Context, connectorID string) (bool, error)
+	BumpLastConfirmed(ctx context.Context, connectorID string) error
+}
+
+// PolicyChangeNotifier is the subset of policy.Notifier used by the
+// relay-placement handlers. Defined as an interface for testability.
+type PolicyChangeNotifier interface {
+	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+}
 
 // ConnectorRegistry tracks active bidirectional Control streams.
 // The resolver calls PushResourceInstruction to deliver instructions in real time.
@@ -346,6 +362,8 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			h.handleConnectorLog(ctx, tenantID, connectorID, entry)
 		case *pb.ConnectorControlMessage_ResourceState:
 			h.handleResourceState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ResourceState).ResourceState)
+		case *pb.ConnectorControlMessage_RelayState:
+			h.handleConnectorRelayState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_RelayState).RelayState)
 		default:
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
@@ -443,8 +461,86 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
 	}
+
+	// Process relay attachment from heartbeat. Non-empty relay_id means the
+	// connector claims to be attached; empty means detached. The UPSERT returns
+	// true iff the relay actually changed, so we only invalidate the policy
+	// cache on a real placement transition — not on every heartbeat.
+	if h.RelayStore != nil {
+		if r.RelayId != "" {
+			attachedAt := time.Unix(r.RelayAttachedAtUnix, 0).UTC()
+			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
+			if err != nil {
+				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay placement connector=%s: %v", connectorID, err)
+				}
+			}
+		} else {
+			// Empty relay_id — connector is not attached. Delete any stale placement.
+			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+			if err != nil {
+				log.Printf("control stream: delete relay placement from heartbeat connector=%s: %v", connectorID, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay detach connector=%s: %v", connectorID, err)
+				}
+			}
+		}
+	}
+
 	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
 		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	}
+}
+
+func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {
+	connectorID := client.connectorID
+
+	// Cross-check: the connector_id in the message body must match the
+	// authenticated SPIFFE identity from the mTLS cert.
+	if r.ConnectorId != "" && r.ConnectorId != connectorID {
+		log.Printf("control stream: relay state connector_id mismatch: body=%s cert=%s — ignoring", r.ConnectorId, connectorID)
+		return
+	}
+
+	log.Printf("control stream: relay state connector=%s relay=%s reason=%s", connectorID, r.RelayId, r.Reason)
+
+	if h.RelayStore == nil {
+		return
+	}
+
+	switch r.Reason {
+	case "connected", "switched":
+		if r.RelayId == "" {
+			log.Printf("control stream: relay state connector=%s reason=%s with empty relay_id — ignoring", connectorID, r.Reason)
+			return
+		}
+		attachedAt := time.Unix(r.ObservedAtUnix, 0).UTC()
+		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "event")
+		if err != nil {
+			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay event connector=%s: %v", connectorID, err)
+			}
+		}
+	case "disconnected":
+		changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+		if err != nil {
+			log.Printf("control stream: delete relay placement from event connector=%s: %v", connectorID, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay detach event connector=%s: %v", connectorID, err)
+			}
+		}
+	default:
+		log.Printf("control stream: relay state unknown reason=%s connector=%s — ignoring", r.Reason, connectorID)
 	}
 }
 
@@ -457,13 +553,13 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	// change is not cached as stale (ADR-013). The version gate below is
 	// unchanged: it still skips the push when the connector is already current.
 	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier.(*policy.Notifier), client.tenantID)
 	})
 	if err != nil {
 		return fmt.Errorf("compile ACL snapshot: %w", err)
 	}
 
-	if connectorVersion == snap.Version {
+	if connectorVersion != 0 && connectorVersion == snap.Version {
 		log.Printf("control stream: connector ACL already current connector=%s version=%d entries=%d", client.connectorID, snap.Version, len(snap.Entries))
 		return nil
 	}
@@ -491,12 +587,19 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, connectorID 
 
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
 	for _, ack := range batch.Acks {
-		if err := resource.RecordAck(
+		routeChanged, err := resource.RecordAck(
 			ctx, h.Pool, tenantID,
 			ack.ResourceId, ack.Status, ack.Error,
 			ack.VerifiedAt,
-		); err != nil {
+		)
+		if err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
+			continue
+		}
+		if routeChanged && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+				log.Printf("control stream: notify policy change resource_id=%s: %v", ack.ResourceId, err)
+			}
 		}
 	}
 }
@@ -530,6 +633,11 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		if role == appmeta.SPIFFERoleConnector {
 			if err := verifyConnectorCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
+			}
+		}
+		if role == appmeta.SPIFFERoleRelay {
+			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
 			}
 		}
 
@@ -623,10 +731,54 @@ func (h *EnrollmentHandler) handleScanReport(ctx context.Context, connectorID st
 }
 
 func (h *EnrollmentHandler) handleConnectorLog(ctx context.Context, tenantID, connectorID string, entry *pb.ConnectorLog) {
+	// Resolve the client SPIFFE ID to device + user when present. A miss is not
+	// fatal — leave both columns NULL so legacy logs and pre-ACL-match denies
+	// still land in the table.
+	var deviceID, userID *string
+	if entry.ClientSpiffeId != "" {
+		var d, u string
+		err := h.Pool.QueryRow(ctx,
+			`SELECT id::text, user_id::text
+			   FROM client_devices
+			  WHERE spiffe_id = $1
+			  LIMIT 1`,
+			entry.ClientSpiffeId,
+		).Scan(&d, &u)
+		switch {
+		case err == nil:
+			deviceID = &d
+			userID = &u
+		case errors.Is(err, pgx.ErrNoRows):
+			// unknown SPIFFE — leave both nil, keep the log
+		default:
+			log.Printf("control stream: resolve client spiffe %s: %v", entry.ClientSpiffeId, err)
+		}
+	}
+
+	// occurred_at: use what the connector sent if non-zero; else fall through
+	// to NOW() via the SQL coalesce so legacy emitters still get a timestamp.
+	var occurredAt *time.Time
+	if entry.OccurredAtUnix > 0 {
+		t := time.Unix(entry.OccurredAtUnix, 0).UTC()
+		occurredAt = &t
+	}
+
 	_, err := h.Pool.Exec(ctx,
-		`INSERT INTO connector_logs (workspace_id, connector_id, message)
-		 VALUES ($1, $2, $3)`,
+		`INSERT INTO connector_logs
+		     (workspace_id, connector_id, message,
+		      resource_id, client_spiffe_id, client_device_id, user_id,
+		      route_type, destination, port, protocol, action, error,
+		      occurred_at)
+		 VALUES ($1, $2, $3,
+		         NULLIF($4, '')::uuid, NULLIF($5, ''), $6::uuid, $7::uuid,
+		         NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, 0)::int, NULLIF($11, ''),
+		         NULLIF($12, ''), NULLIF($13, ''),
+		         COALESCE($14, NOW()))`,
 		tenantID, connectorID, entry.Message,
+		entry.ResourceId, entry.ClientSpiffeId, deviceID, userID,
+		entry.RouteType, entry.Destination, int(entry.Port), entry.Protocol,
+		entry.Action, entry.Error,
+		occurredAt,
 	)
 	if err != nil {
 		log.Printf("control stream: insert connector log connector=%s: %v", connectorID, err)

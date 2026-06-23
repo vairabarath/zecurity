@@ -31,6 +31,7 @@ import (
 	"github.com/vektah/gqlparser/v2/parser"
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
@@ -47,6 +48,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
@@ -114,6 +116,12 @@ func main() {
 	}
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
+	relayStore := relay.NewStore(db.Pool)
+	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
+		WithHeartbeatCache(
+			valkeycompat.NewAdapter(connectorValkey),
+			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
+		)
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)
@@ -221,6 +229,20 @@ func main() {
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
+	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
+	// Platform-level (no WorkspaceGuard); admin-only.
+	relayAdminHandler := &relay.AdminHandler{
+		Store:     relayStore,
+		Redis:     valkeycompat.NewAdapter(connectorValkey),
+		JWTSecret: mustEnv("JWT_SECRET"),
+	}
+	relayCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.RequireRole("admin")(
+			http.HandlerFunc(relayAdminHandler.Create),
+		),
+	)
+	mux.Handle("POST /api/relays", relayCreateRoute)
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -259,9 +281,11 @@ func main() {
 		PolicyStore:    policyStore,
 		PolicyCache:    policyCache,
 		PolicyNotifier: policyNotifier,
+		RelayStore:     relayStore,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
+	relaypb.RegisterRelayServiceServer(grpcServer, relaySvc)
 
 	// Proactive ACL propagation: after a policy change bumps the version and
 	// invalidates the cache, push the fresh snapshot to all connected connectors

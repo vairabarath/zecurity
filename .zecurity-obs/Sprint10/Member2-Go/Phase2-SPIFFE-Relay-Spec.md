@@ -10,7 +10,13 @@ status: planned
 
 ## What You're Building
 
-Design ownership phase — M2 owns the security spec that the relay must enforce. M3 implements it in `relay/src/spiffe.rs`. M2 reviews that implementation.
+This is a **design ownership phase** — M2 owns the security spec that the relay must enforce. M3 implements it in `relay/src/spiffe.rs`. M2 reviews that implementation before Phase E is checked off.
+
+## Files to Touch
+
+| File | Change |
+|------|--------|
+| This file | Write the spec below |
 
 ---
 
@@ -18,52 +24,57 @@ Design ownership phase — M2 owns the security spec that the relay must enforce
 
 ### Connector Certificate (RegisterMsg side)
 
-- URI SAN MUST match: `spiffe://<trust_domain>/connector/<uuid>`
-- Reject if: no URI SAN, wrong path prefix, non-UUID ID
+- Peer certificate MUST have a URI SAN
+- URI SAN MUST match format: `spiffe://<trust_domain>/connector/<uuid>`
+- `<trust_domain>` is the workspace trust domain (derived from the `ConnectorSPIFFE` stored in `RelayState`)
+- Reject if: no URI SAN, wrong prefix path, non-UUID ID portion
 
 ### Client Device Certificate (LookupMsg side)
 
-- URI SAN MUST match: `spiffe://<trust_domain>/client_device/<uuid>`
-- Reject if: no URI SAN, wrong path prefix
+- Peer certificate MUST have a URI SAN
+- URI SAN MUST match format: `spiffe://<trust_domain>/client_device/<uuid>`
+- Reject if: no URI SAN, wrong prefix path
 
 ### Workspace Isolation Rule
 
-When client sends `LookupMsg { connector_id }`:
-1. Extract `trust_domain` from client SPIFFE URI
-2. Extract `trust_domain` from stored connector SPIFFE URI
-3. They MUST be equal — different trust domains = different workspaces = reject
-4. Error: `"workspace mismatch: client and connector are in different workspaces"`
+When a client sends `LookupMsg { connector_id }`:
+1. Relay looks up the connector entry by `connector_id`
+2. Extract `trust_domain` from client SPIFFE URI
+3. Extract `trust_domain` from stored connector SPIFFE URI
+4. **They MUST be equal.** Different trust domains = different workspaces = reject.
+5. Error message: `"workspace mismatch: client and connector are in different workspaces"`
 
-### Functions in `relay/src/spiffe.rs`
+### Implementation in `relay/src/spiffe.rs`
 
 ```rust
-pub fn extract_spiffe_uri(cert: &[u8]) -> Option<String>
+pub fn extract_spiffe_uri(cert: &rustls::Certificate) -> Option<String>
 pub fn parse_trust_domain(spiffe_uri: &str) -> Option<&str>
 pub fn validate_connector_spiffe(spiffe_uri: &str) -> bool
 pub fn validate_client_spiffe(spiffe_uri: &str) -> bool
 pub fn same_workspace(connector_spiffe: &str, client_spiffe: &str) -> bool
 ```
 
-All return `false`/`None` on malformed input — never panic.
+All functions return `false`/`None` on malformed input — never panic, never log full cert contents.
 
 ### What Relay Does NOT Check
 
-- Does NOT verify client SPIFFE is in any ACL (Connector handles this)
-- Does NOT call the controller
-- Does NOT validate certificate expiry (mTLS handles this)
+- Relay does NOT verify that the client SPIFFE ID is in any ACL
+- Relay does NOT call the controller
+- Relay does NOT validate certificate expiry (mTLS handles this)
+- Access control is handled by the Connector when the tunnel is established (same as direct path)
 
 ---
 
 ## Review Checklist (M2 reviews M3's implementation)
 
-- [ ] `validate_connector_spiffe` rejects `spiffe://domain/shield/id`
-- [ ] `validate_client_spiffe` rejects `spiffe://domain/connector/id`
-- [ ] `same_workspace` returns false for different trust domains
+- [ ] `validate_connector_spiffe` rejects `spiffe://domain/shield/id` (wrong role)
+- [ ] `validate_client_spiffe` rejects `spiffe://domain/connector/id` (wrong role)
+- [ ] `same_workspace` returns false for `spiffe://workspace-a/...` vs `spiffe://workspace-b/...`
 - [ ] Functions return false for empty strings — no panics
-- [ ] No logging of full certificate contents
+- [ ] No logging of full certificate contents (PII/security risk)
 
 ---
 
 ## Post-Phase Fixes
 
-*(Empty)*
+*(Empty — add fixes here as discovered)*

@@ -37,7 +37,6 @@ mod appmeta;
 mod config;
 mod crypto;
 mod enrollment;
-mod network;
 mod tls;
 mod types;
 mod updater;
@@ -124,9 +123,7 @@ async fn main() -> anyhow::Result<()> {
     let state_path = Path::new(&cfg.state_dir).join("state.json");
 
     let state: ShieldState = if state_path.exists() {
-        // Already enrolled — load state from disk, then restore network.
-        // nftables rules and TUN interfaces don't survive reboots, so
-        // network::setup() must run on every startup, not just enrollment.
+        // Already enrolled — load state from disk.
         let state = ShieldState::load(&cfg.state_dir)?;
         info!(
             shield_id    = %state.shield_id,
@@ -135,9 +132,6 @@ async fn main() -> anyhow::Result<()> {
             interface_addr = %state.interface_addr,
             "shield already enrolled, resuming"
         );
-        // if let Err(e) = network::setup(&state.interface_addr, &state.connector_addr).await {
-        //     warn!(error = %e, "network setup failed (non-fatal)");
-        // }
         state
     } else {
         // First run — enrollment flow (Phase I)
@@ -148,7 +142,6 @@ async fn main() -> anyhow::Result<()> {
         //   3. Generate EC P-384 keypair + CSR
         //   4. Call controller Enroll RPC (plain TLS)
         //   5. Save cert, key, CA chain, and state.json to state_dir
-        //   6. Call network::setup() to create zecurity0 interface
         info!("no state.json found — starting enrollment");
         enrollment::enroll(&cfg).await?
     };

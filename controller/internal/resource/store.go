@@ -12,8 +12,10 @@ import (
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/yourorg/ztna/controller/internal/apperr"
+	// "github.com/yourorg/ztna/controller/internal/apperr"
 )
+
+var ErrNoMatchingShield = errors.New("no active shield installed on resource host")
 
 // querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
 // single-source desired-state query can run either standalone or inside the
@@ -69,7 +71,7 @@ type CreateInput struct {
 const resourceSelectCols = `
 	r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
 	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
-	r.shield_id, r.remote_network_id,
+	COALESCE(r.shield_id::text, ''), r.remote_network_id,
 	s.name, s.status, COALESCE(s.connector_id::text, ''),
 	rn.name`
 
@@ -93,8 +95,8 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 	return &row, nil
 }
 
-// AutoMatchShield finds a shield whose lan_ip matches the given host within a specific remote network.
-// remote_network_id is required: the same private IP can exist in multiple remote networks behind different NATs.
+// AutoMatchShield finds an active shield whose LAN IP matches the resource host
+// within its remote network. The same private IP may exist in multiple networks.
 func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remoteNetworkID string) (shieldID string, err error) {
 	err = db.QueryRow(ctx,
 		`SELECT id
@@ -102,33 +104,39 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 		  WHERE lan_ip = $1
 		    AND tenant_id = $2
 		    AND remote_network_id = $3
-		    AND status NOT IN ('revoked', 'deleted')
+		    AND status = 'active'
 		  LIMIT 1`,
 		host, tenantID, remoteNetworkID,
 	).Scan(&shieldID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", apperr.UserErrorf("no shield installed on host %s in this remote network", host)
+			return "", fmt.Errorf("%w: %s", ErrNoMatchingShield, host)
 		}
 		return "", fmt.Errorf("auto-match shield: %w", err)
 	}
 	return shieldID, nil
 }
 
-// Create inserts a new resource, auto-matching the shield by host IP within the specified remote network.
+// Create inserts an unprotected resource. A matching active Shield is retained
+// as a convenience for a later Protect operation, but is not required.
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
 	shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNoMatchingShield) {
 		return nil, err
+	}
+	var shieldArg any
+	if shieldID != "" {
+		shieldArg = shieldID
 	}
 
 	var id string
 	err = db.QueryRow(ctx,
 		`INSERT INTO resources
-		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host, port_from, port_to)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host,
+		     port_from, port_to, status, pending_action)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unprotected', 'remove')
 		 RETURNING id`,
-		tenantID, input.RemoteNetworkID, shieldID,
+		tenantID, input.RemoteNetworkID, shieldArg,
 		input.Name, input.Description, input.Protocol, input.Host, input.PortFrom, input.PortTo,
 	).Scan(&id)
 	if err != nil {
@@ -408,24 +416,36 @@ func joinSets(sets []string) string {
 	return b.String()
 }
 
-// MarkProtecting transitions a resource to protecting status with pending_action='apply'.
-// Rejects if the assigned shield is not active — prevents instructions going to an
-// offline shield where they would sit until the shield reconnects anyway.
+// MarkProtecting atomically matches an active Shield and transitions the
+// resource to protected intent. ACL routing becomes Shield-based immediately.
 func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	var discardedID string
 	err := db.QueryRow(ctx,
-		`UPDATE resources
-		    SET status = 'protecting', pending_action = 'apply',
+		`WITH candidate AS (
+		     SELECT s.id
+		       FROM resources r
+		       JOIN shields s
+		         ON s.tenant_id = r.tenant_id
+		        AND s.remote_network_id = r.remote_network_id
+		        AND s.lan_ip = r.host
+		        AND s.status = 'active'
+		      WHERE r.id = $1 AND r.tenant_id = $2
+		        AND r.status = ANY($3)
+		      ORDER BY CASE WHEN s.id = r.shield_id THEN 0 ELSE 1 END
+		      LIMIT 1
+		 )
+		 UPDATE resources r
+		    SET shield_id = candidate.id,
+		        status = 'protecting', pending_action = 'apply',
 		        error_message = NULL, updated_at = NOW()
-		  WHERE id = $1 AND tenant_id = $2
-		    AND status = ANY($3)
-		    AND (SELECT status FROM shields WHERE id = resources.shield_id) = 'active'
-		 RETURNING id`,
+		   FROM candidate
+		  WHERE r.id = $1 AND r.tenant_id = $2
+		 RETURNING r.id`,
 		id, tenantID, []string{"pending", "failed", "unprotected"},
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("protect resource: resource not found, invalid state, or shield is offline")
+			return nil, fmt.Errorf("protect resource: resource not found, invalid state, or no active shield is installed on its host")
 		}
 		return nil, fmt.Errorf("protect resource: %w", err)
 	}
@@ -542,7 +562,7 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 // information beyond `status` (protected ⟺ reachable; "port not listening" ⟺ not),
 // and there is no port_reachable column to persist it to. verified_at IS persisted
 // as last_verified_at.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) error {
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (bool, error) {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
@@ -551,13 +571,13 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 			resourceID, tenantID,
 		)
 		if err != nil {
-			return fmt.Errorf("record ack (reap): %w", err)
+			return false, fmt.Errorf("record ack (reap): %w", err)
 		}
 		if ct.RowsAffected() > 0 {
-			return nil
+			return true, nil
 		}
 	}
-	_, err := db.Exec(ctx,
+	ct, err := db.Exec(ctx,
 		`UPDATE resources
 		    SET status           = $2,
 		        error_message    = NULLIF($3, ''),
@@ -572,9 +592,9 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		resourceID, status, errMsg, verifiedAt, tenantID,
 	)
 	if err != nil {
-		return fmt.Errorf("record ack: %w", err)
+		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return nil
+	return status == "unprotected" && ct.RowsAffected() > 0, nil
 }
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {
