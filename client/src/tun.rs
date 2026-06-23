@@ -35,6 +35,10 @@ impl TunManager {
             .await
             .context("get zecurity0 interface index")?;
 
+        // Install bypass policy rule: marked packets (SO_MARK=0x5a) skip the TUN
+        // and route via the normal kernel main table. Used for unmanaged traffic.
+        add_fwmark_rule();
+
         Ok(Self {
             dev: Some(dev),
             routes: Vec::new(),
@@ -68,6 +72,7 @@ impl TunManager {
 
     /// Remove all routes installed in this session and drop the TUN device.
     pub async fn cleanup(mut self) -> Result<()> {
+        del_fwmark_rule();
         for ip in self.routes.drain(..) {
             let _ = del_host_route(&self.handle, ip, self.if_index).await;
         }
@@ -163,6 +168,18 @@ async fn del_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()
         .execute()
         .await
         .with_context(|| format!("rtnetlink del route {}", ip))
+}
+
+fn add_fwmark_rule() {
+    let _ = std::process::Command::new("ip")
+        .args(["rule", "add", "fwmark", "0x5a", "lookup", "main", "priority", "49"])
+        .status();
+}
+
+fn del_fwmark_rule() {
+    let _ = std::process::Command::new("ip")
+        .args(["rule", "del", "fwmark", "0x5a", "lookup", "main", "priority", "49"])
+        .status();
 }
 
 async fn list_routes_v4(handle: &Handle) -> Result<Vec<(IpAddr, u8)>> {

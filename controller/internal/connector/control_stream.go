@@ -537,7 +537,7 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 
 	snap, ok := h.PolicyCache.Get(client.tenantID)
 	if !ok {
-		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, policyNotifier, h.Pool, client.tenantID)
+		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, policyNotifier, client.tenantID)
 		if err != nil {
 			return fmt.Errorf("compile ACL snapshot: %w", err)
 		}
@@ -545,7 +545,7 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		snap = compiled
 	}
 
-	if connectorVersion == snap.Version {
+	if connectorVersion != 0 && connectorVersion == snap.Version {
 		log.Printf("control stream: connector ACL already current connector=%s version=%d entries=%d", client.connectorID, snap.Version, len(snap.Entries))
 		return nil
 	}

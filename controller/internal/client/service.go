@@ -432,7 +432,7 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	}
 
 	// Cache miss — compile from DB.
-	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, s.pool, workspaceID)
+	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, workspaceID)
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.
 		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)

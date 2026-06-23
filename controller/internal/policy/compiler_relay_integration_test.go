@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
@@ -66,7 +67,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		// No row in the relays table → ACL snapshot's relay fields stay empty.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-disabled")
 		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
@@ -78,14 +79,11 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 	t.Run("relay enabled via public_addr", func(t *testing.T) {
 		// Active relay row with public_addr set → ACL emits that address and a
-		// SPIFFE ID derived from the row's UUID. Requires an active connector
-		// and a connector_relay_placement row linking them.
+		// SPIFFE ID derived from the row's UUID.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-enabled")
-		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-a", "10.0.0.5")
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.x:9093", "", "public")
-		mustInsertPlacement(t, ctx, testPool, connID, relayID)
 		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
@@ -96,48 +94,146 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		}
 	})
 
-	t.Run("active connector present", func(t *testing.T) {
-		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-conn")
-		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-a", "10.0.0.5")
+	t.Run("relay enabled via public observed ip", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-public-observed")
+		relayID := mustInsertActiveRelay(t, ctx, testPool, "", "8.8.8.8", "public")
 		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
-		if snap.ConnectorId != connID {
-			t.Fatalf("ConnectorId: want %q, got %q", connID, snap.ConnectorId)
-		}
-		wantSPIFFE := "spiffe://td-a/connector/" + connID
-		if snap.ConnectorSpiffe != wantSPIFFE {
-			t.Fatalf("ConnectorSpiffe: want %q, got %q", wantSPIFFE, snap.ConnectorSpiffe)
-		}
-		if snap.ConnectorTunnelAddr != "10.0.0.5:9092" {
-			t.Fatalf("ConnectorTunnelAddr: want %q, got %q", "10.0.0.5:9092", snap.ConnectorTunnelAddr)
+		wantSPIFFE := appmeta.RelaySPIFFEID(relayID)
+		if snap.RelayAddr != "8.8.8.8:9093" || snap.RelaySpiffeId != wantSPIFFE {
+			t.Fatalf("relay observed public: want (%q, %q), got (%q, %q)",
+				"8.8.8.8:9093", wantSPIFFE, snap.RelayAddr, snap.RelaySpiffeId)
 		}
 	})
 
-	t.Run("no active connector", func(t *testing.T) {
-		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-no-conn")
+	t.Run("relay private observed ip is not discoverable", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-private-observed")
+		_ = mustInsertActiveRelay(t, ctx, testPool, "", "192.168.1.71", "private")
 		store := NewStore(testPool)
-		snap, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
 		}
-		if snap.ConnectorId != "" || snap.ConnectorSpiffe != "" {
-			t.Fatalf("no active connector: want both empty, got id=%q spiffe=%q",
-				snap.ConnectorId, snap.ConnectorSpiffe)
+		if snap.RelayAddr != "" || snap.RelaySpiffeId != "" {
+			t.Fatalf("private observed relay should not be discoverable, got addr=%q spiffe=%q",
+				snap.RelayAddr, snap.RelaySpiffeId)
 		}
 	})
 
-	t.Run("connector and entries unaffected by relay presence", func(t *testing.T) {
-		// Equivalent of the old "backwards compatibility" test: confirm that
-		// connector/entries fields don't drift when a relay+placement row enters the DB.
-		// Same workspace, two compiles — first with no relay/placement, then with both.
+	t.Run("multi-RN: each entry routes to its own connector", func(t *testing.T) {
+		// Two remote networks, two connectors, two resources (one per RN).
+		// Snapshot must emit two ACLRemoteNetwork entries each referencing the
+		// correct connector, and each ACLEntry must carry the correct remote_network_id.
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-multi-rn")
+		grpID := mustInsertGroup(t, ctx, testPool, wsID, "grp-multi")
+		userID := mustInsertUser(t, ctx, testPool, wsID)
+		mustAddGroupMember(t, ctx, testPool, grpID, userID)
+		devID := mustInsertClientDevice(t, ctx, testPool, wsID, userID, "spiffe://td/client/dev1")
+
+		rnID1, connID1 := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-one", "td-one", "10.1.0.1")
+		rnID2, connID2 := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-two", "td-two", "10.2.0.1")
+		r1ID := mustInsertResource(t, ctx, testPool, wsID, rnID1, "res-one", "10.1.0.10", 80)
+		r2ID := mustInsertResource(t, ctx, testPool, wsID, rnID2, "res-two", "10.2.0.10", 80)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, r1ID, grpID)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, r2ID, grpID)
+		_ = devID
+
+		store := NewStore(testPool)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+
+		if len(snap.RemoteNetworks) != 2 {
+			t.Fatalf("want 2 remote_networks, got %d", len(snap.RemoteNetworks))
+		}
+
+		rnByID := make(map[string]*clientv1.ACLRemoteNetwork)
+		for _, rn := range snap.RemoteNetworks {
+			rnByID[rn.RemoteNetworkId] = rn
+		}
+
+		rn1 := rnByID[rnID1]
+		if rn1 == nil || len(rn1.Connectors) != 1 || rn1.Connectors[0].ConnectorId != connID1 {
+			t.Fatalf("rn1 connector mismatch: %+v", rn1)
+		}
+		if rn1.Connectors[0].ConnectorTunnelAddr != "10.1.0.1:9092" {
+			t.Fatalf("rn1 tunnel addr: want 10.1.0.1:9092, got %q", rn1.Connectors[0].ConnectorTunnelAddr)
+		}
+
+		rn2 := rnByID[rnID2]
+		if rn2 == nil || len(rn2.Connectors) != 1 || rn2.Connectors[0].ConnectorId != connID2 {
+			t.Fatalf("rn2 connector mismatch: %+v", rn2)
+		}
+		if rn2.Connectors[0].ConnectorTunnelAddr != "10.2.0.1:9092" {
+			t.Fatalf("rn2 tunnel addr: want 10.2.0.1:9092, got %q", rn2.Connectors[0].ConnectorTunnelAddr)
+		}
+
+		entryByResource := make(map[string]*clientv1.ACLEntry)
+		for _, e := range snap.Entries {
+			entryByResource[e.ResourceId] = e
+		}
+		if entryByResource[r1ID].RemoteNetworkId != rnID1 {
+			t.Fatalf("r1 remote_network_id: want %q, got %q", rnID1, entryByResource[r1ID].RemoteNetworkId)
+		}
+		if entryByResource[r2ID].RemoteNetworkId != rnID2 {
+			t.Fatalf("r2 remote_network_id: want %q, got %q", rnID2, entryByResource[r2ID].RemoteNetworkId)
+		}
+	})
+
+	t.Run("RN with no active connector: entry present, connectors empty", func(t *testing.T) {
+		// A resource belongs to a remote network that has no active connector.
+		// Compilation must not fail. The ACLRemoteNetwork entry must be present
+		// with an empty connectors list so clients can report "unavailable".
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-no-conn-rn")
+		grpID := mustInsertGroup(t, ctx, testPool, wsID, "grp-no-conn")
+		userID := mustInsertUser(t, ctx, testPool, wsID)
+		mustAddGroupMember(t, ctx, testPool, grpID, userID)
+		_ = mustInsertClientDevice(t, ctx, testPool, wsID, userID, "spiffe://td/client/dev2")
+
+		rnID := mustInsertRemoteNetwork(t, ctx, testPool, wsID, "rn-offline")
+		// No connector inserted for this RN.
+		rID := mustInsertResource(t, ctx, testPool, wsID, rnID, "res-offline", "10.3.0.1", 443)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, rID, grpID)
+
+		store := NewStore(testPool)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		if err != nil {
+			t.Fatalf("compile must not fail when connector absent: %v", err)
+		}
+
+		if len(snap.RemoteNetworks) != 1 {
+			t.Fatalf("want 1 remote_network, got %d", len(snap.RemoteNetworks))
+		}
+		rn := snap.RemoteNetworks[0]
+		if rn.RemoteNetworkId != rnID {
+			t.Fatalf("remote_network_id: want %q, got %q", rnID, rn.RemoteNetworkId)
+		}
+		if len(rn.Connectors) != 0 {
+			t.Fatalf("connectors must be empty, got %d", len(rn.Connectors))
+		}
+		if len(snap.Entries) != 1 || snap.Entries[0].ResourceId != rID {
+			t.Fatalf("entry must still be present: %+v", snap.Entries)
+		}
+	})
+
+	t.Run("entries unaffected by relay presence", func(t *testing.T) {
+		// Confirm entries and remote_networks don't drift when a relay row is added.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-compat")
-		connID := mustInsertActiveConnector(t, ctx, testPool, wsID, "td-c", "10.0.0.50")
-		store := NewStore(testPool)
+		grpID := mustInsertGroup(t, ctx, testPool, wsID, "grp-compat")
+		userID := mustInsertUser(t, ctx, testPool, wsID)
+		mustAddGroupMember(t, ctx, testPool, grpID, userID)
+		_ = mustInsertClientDevice(t, ctx, testPool, wsID, userID, "spiffe://td/client/dev3")
 
-		s1, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		rnID, _ := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-compat", "td-c", "10.0.0.50")
+		rID := mustInsertResource(t, ctx, testPool, wsID, rnID, "res-compat", "10.0.0.60", 8080)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, rID, grpID)
+
+		store := NewStore(testPool)
+		s1, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("first compile: %v", err)
 		}
@@ -146,30 +242,25 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 				s1.RelayAddr, s1.RelaySpiffeId)
 		}
 
-		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
-		mustInsertPlacement(t, ctx, testPool, connID, relayID)
+		_ = mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
 
-		s2, err := CompileACLSnapshot(ctx, store, notifier, testPool, wsID)
+		s2, err := CompileACLSnapshot(ctx, store, notifier, wsID)
 		if err != nil {
 			t.Fatalf("second compile: %v", err)
 		}
 
-		if s1.ConnectorTunnelAddr != s2.ConnectorTunnelAddr {
-			t.Fatalf("ConnectorTunnelAddr drift: %q vs %q",
-				s1.ConnectorTunnelAddr, s2.ConnectorTunnelAddr)
-		}
 		if len(s1.Entries) != len(s2.Entries) {
 			t.Fatalf("Entries len drift: %d vs %d", len(s1.Entries), len(s2.Entries))
 		}
-		for i := range s1.Entries {
-			if s1.Entries[i].String() != s2.Entries[i].String() {
-				t.Fatalf("Entries[%d] drift: %v vs %v", i, s1.Entries[i], s2.Entries[i])
-			}
+		if len(s1.RemoteNetworks) != len(s2.RemoteNetworks) {
+			t.Fatalf("RemoteNetworks len drift: %d vs %d", len(s1.RemoteNetworks), len(s2.RemoteNetworks))
 		}
-		// And the second compile must now carry relay fields.
 		if s2.RelayAddr == "" || s2.RelaySpiffeId == "" {
-			t.Fatalf("second compile should have populated relay fields, got addr=%q spiffe=%q",
+			t.Fatalf("second compile should have relay fields, got addr=%q spiffe=%q",
 				s2.RelayAddr, s2.RelaySpiffeId)
+		}
+		if s1.RelayAddr != "" {
+			t.Fatalf("first compile should have no relay, got %q", s1.RelayAddr)
 		}
 	})
 }
@@ -282,36 +373,26 @@ func mustInsertActiveRelay(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	return id
 }
 
-// mustInsertPlacement creates a connector_relay_placement row linking the
-// given connector to the given relay. Panics on failure.
-func mustInsertPlacement(t *testing.T, ctx context.Context, pool *pgxpool.Pool, connectorID, relayID string) {
+// mustInsertRemoteNetwork creates a remote_networks row and returns its UUID.
+func mustInsertRemoteNetwork(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID, name string) string {
 	t.Helper()
-	_, err := pool.Exec(ctx,
-		`INSERT INTO connector_relay_placement (connector_id, relay_id, attached_at, last_confirmed, source)
-		 VALUES ($1, $2, NOW(), NOW(), 'heartbeat')
-		 ON CONFLICT (connector_id) DO NOTHING`,
-		connectorID, relayID,
-	)
-	if err != nil {
-		t.Fatalf("insert placement connector=%s relay=%s: %v", connectorID, relayID, err)
-	}
-}
-
-// mustInsertActiveConnector creates a remote_networks row + a connectors row
-// with status='active' and the given trust_domain + lan_addr. Returns the
-// connector UUID. The compiler's "active connector lookup" query targets
-// exactly this shape.
-func mustInsertActiveConnector(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID, trustDomain, lanAddr string) string {
-	t.Helper()
-	var rnID string
+	var id string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO remote_networks (tenant_id, name, location)
-		 VALUES ($1, 'test-network', 'home')
+		 VALUES ($1, $2, 'home')
 		 RETURNING id::text`,
-		tenantID,
-	).Scan(&rnID); err != nil {
-		t.Fatalf("insert remote_networks: %v", err)
+		tenantID, name,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert remote_network %q: %v", name, err)
 	}
+	return id
+}
+
+// mustInsertRNWithConnector creates a remote_network + active connector in one call.
+// Returns (remoteNetworkID, connectorID).
+func mustInsertRNWithConnector(t *testing.T, ctx context.Context, pool *pgxpool.Pool, tenantID, rnName, trustDomain, lanAddr string) (string, string) {
+	t.Helper()
+	rnID := mustInsertRemoteNetwork(t, ctx, pool, tenantID, rnName)
 	var connID string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO connectors (tenant_id, remote_network_id, name, status, trust_domain, lan_addr, last_heartbeat_at)
@@ -319,7 +400,91 @@ func mustInsertActiveConnector(t *testing.T, ctx context.Context, pool *pgxpool.
 		 RETURNING id::text`,
 		tenantID, rnID, trustDomain, lanAddr,
 	).Scan(&connID); err != nil {
-		t.Fatalf("insert connector: %v", err)
+		t.Fatalf("insert connector for rn %q: %v", rnName, err)
 	}
-	return connID
+	return rnID, connID
+}
+
+// mustInsertGroup creates a groups row and returns its UUID.
+func mustInsertGroup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, name string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO groups (workspace_id, name)
+		 VALUES ($1, $2)
+		 RETURNING id::text`,
+		workspaceID, name,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert group %q: %v", name, err)
+	}
+	return id
+}
+
+// mustInsertUser creates a users row and returns its UUID.
+func mustInsertUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO users (workspace_id, email, role)
+		 VALUES ($1, gen_random_uuid()::text || '@test.example', 'member')
+		 RETURNING id::text`,
+		workspaceID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	return id
+}
+
+// mustAddGroupMember adds a user to a group.
+func mustAddGroupMember(t *testing.T, ctx context.Context, pool *pgxpool.Pool, groupID, userID string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO group_members (group_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+		groupID, userID,
+	); err != nil {
+		t.Fatalf("add group member: %v", err)
+	}
+}
+
+// mustInsertClientDevice creates a client_devices row with a SPIFFE ID.
+func mustInsertClientDevice(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, userID, spiffeID string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO client_devices (workspace_id, user_id, name, spiffe_id, status)
+		 VALUES ($1, $2, 'test-device', $3, 'active')
+		 RETURNING id::text`,
+		workspaceID, userID, spiffeID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert client_device: %v", err)
+	}
+	return id
+}
+
+// mustInsertResource creates a resources row in the given remote network.
+func mustInsertResource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, remoteNetworkID, name, host string, port int) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO resources (tenant_id, remote_network_id, name, host, port_from, protocol, status)
+		 VALUES ($1, $2, $3, $4, $5, 'tcp', 'protected')
+		 RETURNING id::text`,
+		workspaceID, remoteNetworkID, name, host, port,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert resource %q: %v", name, err)
+	}
+	return id
+}
+
+// mustAssignResourceToGroup creates an enabled access_rules row.
+func mustAssignResourceToGroup(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, resourceID, groupID string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO access_rules (workspace_id, resource_id, group_id, enabled)
+		 VALUES ($1, $2, $3, TRUE)
+		 ON CONFLICT (resource_id, group_id) DO UPDATE SET enabled = TRUE`,
+		workspaceID, resourceID, groupID,
+	); err != nil {
+		t.Fatalf("assign resource to group: %v", err)
+	}
 }

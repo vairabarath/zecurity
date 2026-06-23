@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tun::AsyncDevice;
 
-use crate::grpc::client_v1::AclSnapshot;
+use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
 
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
@@ -114,8 +114,8 @@ struct ActiveRelay {
 
 pub async fn run(
     dev: AsyncDevice,
-    acl: Arc<AclSnapshot>,
-    transport: Arc<ClientTransport>,
+    allowed_entries: Vec<AclEntry>,
+    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>>>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -154,9 +154,8 @@ pub async fn run(
     config.random_seed = rand::random();
     let mut iface = Interface::new(config, &mut tun_dev, smoltcp_now());
 
-    // Collect TCP resources from the ACL snapshot.
-    let resource_entries: Vec<(Ipv4Addr, u16)> = acl
-        .entries
+    // Collect TCP resources from the allowed (SPIFFE-filtered) entries.
+    let resource_entries: Vec<(Ipv4Addr, u16)> = allowed_entries
         .iter()
         .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
         .filter_map(|e| {
@@ -226,16 +225,42 @@ pub async fn run(
                     },
                 );
 
-                let pool_c = transport.clone();
                 let dest = ip.to_string();
-                tracing::info!(dest = %dest, port, "new TCP connection — spawning QUIC relay");
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        relay_tcp_to_quic(pool_c, dest, port, tcp_to_quic_rx, quic_to_tcp_tx).await
-                    {
-                        tracing::warn!(error = %e, "QUIC relay ended");
+                tracing::info!(dest = %dest, port, "new TCP connection");
+                match transports.get(&(ip, port)) {
+                    Some(Some(transport)) => {
+                        // Managed resource, connector online → tunnel via QUIC.
+                        let pool_c = transport.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = relay_tcp_to_quic(
+                                pool_c,
+                                dest,
+                                port,
+                                tcp_to_quic_rx,
+                                quic_to_tcp_tx,
+                            )
+                            .await
+                            {
+                                tracing::warn!(error = %e, "QUIC relay ended");
+                            }
+                        });
                     }
-                });
+                    Some(None) => {
+                        // Managed resource, connector offline → fail closed.
+                        // Dropping the channels causes smoltcp to RST the connection.
+                        tracing::warn!(dest = %dest, port, "connector offline — failing closed for managed resource");
+                    }
+                    None => {
+                        // Not in ACL — unmanaged traffic → bypass via SO_MARK NIC.
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                relay_tcp_bypass(dest, port, tcp_to_quic_rx, quic_to_tcp_tx).await
+                            {
+                                tracing::warn!(error = %e, "bypass relay ended");
+                            }
+                        });
+                    }
+                }
             }
         }
 
@@ -375,6 +400,69 @@ async fn relay_tcp_to_quic(
         }
     }
 
+    let _ = send.shutdown().await;
+    Ok(())
+}
+
+/// Bypass relay for unmanaged traffic (not in ACL).
+///
+/// Opens a real TCP socket with SO_MARK=0x5a so it routes via the kernel's
+/// main table (priority 49 ip rule), bypassing the TUN device entirely.
+/// This allows non-Zecurity ports to reach the local network normally.
+async fn relay_tcp_bypass(
+    destination: String,
+    port: u16,
+    mut tcp_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
+) -> Result<()> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::net::SocketAddr;
+
+    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    sock.set_mark(0x5a_u32)?;
+    sock.set_nonblocking(true)?;
+
+    let addr: SocketAddr = format!("{}:{}", destination, port)
+        .parse()
+        .map_err(|e| anyhow!("bypass: invalid address {}:{}: {}", destination, port, e))?;
+    // Non-blocking connect; WouldBlock is expected and handled by tokio below.
+    let _ = sock.connect(&addr.into());
+
+    let stream =
+        tokio::net::TcpStream::from_std(std::net::TcpStream::from(sock)).map_err(|e| {
+            anyhow!(
+                "bypass: convert to tokio stream for {}:{}: {}",
+                destination,
+                port,
+                e
+            )
+        })?;
+    // Wait for the non-blocking connect to complete.
+    stream.writable().await?;
+    if let Some(err) = stream.take_error()? {
+        return Err(anyhow!("bypass: connect to {}:{} failed: {}", destination, port, err));
+    }
+
+    tracing::info!(dest = %destination, port, "bypass relay open");
+
+    let (mut recv, mut send) = tokio::io::split(stream);
+    let mut buf = vec![0u8; 65536];
+    loop {
+        tokio::select! {
+            data = tcp_rx.recv() => {
+                match data {
+                    Some(b) => { if send.write_all(&b).await.is_err() { break; } }
+                    None => break,
+                }
+            }
+            result = recv.read(&mut buf) => {
+                match result {
+                    Ok(n) if n > 0 => { if tcp_tx.send(buf[..n].to_vec()).is_err() { break; } }
+                    _ => break,
+                }
+            }
+        }
+    }
     let _ = send.shutdown().await;
     Ok(())
 }
