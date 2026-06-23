@@ -116,6 +116,26 @@ restructure — ~15 LOC — pending team discussion.
 
 ---
 
+### STAGE3-F4 — WorkspaceGuard error message leaks workspace status (🟡 Low)
+
+[middleware/workspace.go:44-46](controller/internal/middleware/workspace.go#L44-L46)
+returned `fmt.Sprintf("workspace not active: %s", status)` in the 403 response
+body. This leaked the workspace's lifecycle state
+(`'provisioning'` / `'suspended'` / `'deleted'`) to any caller, enabling
+mild workspace enumeration / state recon.
+
+**CWE-209 — Information Exposure Through Error Messages**
+
+**Fix applied (2026-06-13)**: in
+[workspace.go:45-52](controller/internal/middleware/workspace.go#L45-L52),
+the specific status is now `log.Printf`'d server-side for ops debugging, and
+the response body returns a generic `"workspace inactive"`. Standard
+"log specific, return generic" pattern. Added `log` import.
+
+**Status**: ✅ Fixed.
+
+---
+
 ### STAGE3-F3 — GraphQL GET transport enabled (🟠 High)
 
 [main.go:128](controller/cmd/server/main.go#L128) — `NewDefaultServer`
@@ -139,5 +159,51 @@ Industry convention for security-sensitive GraphQL APIs is **POST only**
 Tier 1 — same `gqlSrv` restructure that adds complexity limits also drops
 the GET transport. Folding the two fixes together keeps the diff small
 and review burden low.
+
+**Status**: 📝 Documented in ADR-009 (Tier 1), awaiting team discussion.
+
+---
+
+### STAGE3-F5 — Raw pgx errors leak via default GraphQL ErrorPresenter (🟡 Medium)
+
+`handler.NewDefaultServer` uses gqlgen's default `ErrorPresenter`, which
+returns `err.Error()` verbatim in the GraphQL response body. The codebase's
+standard `fmt.Errorf("...: %w", err)` wrapping pattern then flows raw pgx
+errors all the way to the client.
+
+Example response when an admin creates a connector with a name that
+collides with an existing one ([connector.resolvers.go:88-92](controller/graph/resolvers/connector.resolvers.go#L88-L92)):
+
+```json
+{
+  "errors": [{
+    "message": "generate connector token: insert connector: ERROR: duplicate key value violates unique constraint \"connectors_name_key\" (SQLSTATE 23505)"
+  }]
+}
+```
+
+**Reveals**: table name (`connectors`), constraint name
+(`connectors_name_key`), column grouping, SQLSTATE codes, internal call-path
+breadcrumbs (`"insert connector"`, `"load intermediate CA"`, `"store jti"`).
+
+**CWE-209 — Information Exposure Through Error Messages**
+
+**Scope is global**: every resolver in the codebase uses
+`fmt.Errorf("%w")` for its error returns. After STAGE3-F1 (introspection)
+was fixed, this is the **next-easiest schema-discovery vector** for a
+pentester — craft invalid inputs, trigger DB errors, map the schema
+field-by-field from the leaked constraint/table names.
+
+Mirrors the HTTP-middleware pattern already adopted at
+[workspace.go:45-52](controller/internal/middleware/workspace.go#L45-L52)
+for STAGE3-F4.
+
+**Fix decision**: bundled into [[Decisions/ADR-009-GraphQL-DoS-Hardening]]
+Tier 1 — the same `gqlSrv` restructure also installs a global
+`SetErrorPresenter` that sanitizes wrapped errors. Once installed, ALL
+current and future resolvers benefit — no per-resolver discipline required.
+Incremental follow-up: refactor select resolver errors to structured
+`*gqlerror.Error` so user-meaningful messages (NOT_FOUND etc.) still pass
+through.
 
 **Status**: 📝 Documented in ADR-009 (Tier 1), awaiting team discussion.

@@ -12,11 +12,13 @@ tags:
   - dos
   - rate-limiting
   - transport
+  - error-handling
+  - information-disclosure
   - security
   - hardening
 ---
 
-# ADR-009 — GraphQL DoS Hardening (Complexity, Depth, Transport, Rate Limiting)
+# ADR-009 — GraphQL Hardening (Complexity, Depth, Transport, Error Sanitization, Rate Limiting)
 
 ## Context
 
@@ -79,16 +81,17 @@ A single defense is insufficient. Layered approach required.
 
 Implement DoS hardening in **three tiers**, deployed incrementally:
 
-### Tier 1 — GraphQL-level limits + transport hardening (this audit pass)
+### Tier 1 — GraphQL-level hardening (this audit pass)
 
-This tier rolls THREE related Stage 3 findings into one `gqlSrv` restructure
-because they touch the same setup code:
+This tier rolls FOUR related Stage 3 findings into one `gqlSrv` restructure
+because they all touch the same setup code:
 
 | Finding | What it adds |
 |---------|--------------|
-| STAGE3-F1 (introspection — already fixed) | conditional `introspectionDisabler{}` |
+| STAGE3-F1 (introspection — already fixed) | conditional `introspectionDisabler{}` (or skip-install in non-dev after restructure) |
 | STAGE3-F2 (no complexity/depth limit) | `FixedComplexityLimit(300)`, `FixedDepthLimit(10)` |
 | STAGE3-F3 (GET transport enabled) | drop `transport.GET`, keep only `POST` + `MultipartForm` |
+| **STAGE3-F5 (raw pgx errors leaked)** | **install global `ErrorPresenter` that sanitizes wrapped errors** |
 
 #### Code shape (Tier 1)
 
@@ -133,6 +136,21 @@ gqlSrv.Use(extension.FixedDepthLimit(10))
 gqlSrv.Use(extension.AutomaticPersistedQuery{
     Cache: lru.New[string](100),
 })
+
+// Error sanitization — STAGE3-F5.
+// Default ErrorPresenter returns err.Error() verbatim, which leaks
+// wrapped pgx errors (table names, constraint names, SQLSTATE codes)
+// to the client. Sanitize globally: structured *gqlerror.Error values
+// pass through (resolvers explicitly opt into user-facing messages),
+// everything else is logged server-side and returned as generic
+// "internal server error". CWE-209.
+gqlSrv.SetErrorPresenter(func(ctx context.Context, err error) *gqlerror.Error {
+    if gqlErr, ok := err.(*gqlerror.Error); ok {
+        return gqlErr
+    }
+    log.Printf("graphql resolver error: %v", err)
+    return gqlerror.Errorf("internal server error")
+})
 ```
 
 **Closes STAGE3-F1, STAGE3-F2, STAGE3-F3.** Bounds the cost of any single
@@ -146,6 +164,73 @@ before any DB call.
   is ~4-5 levels.
 - Transports kept: POST (mandatory), MultipartForm (currently unused; safe to
   keep for future file-upload mutations). Drop both if neither is used.
+
+#### Why install a global ErrorPresenter (STAGE3-F5 detail)
+
+`handler.NewDefaultServer` uses gqlgen's default error presenter, which
+returns `err.Error()` verbatim in `errors[].message`. The codebase's
+standard `fmt.Errorf("...: %w", err)` wrapping pattern then flows raw pgx
+errors all the way to the client.
+
+Example response when a `connectors.name` UNIQUE constraint fires:
+
+```json
+{
+  "errors": [{
+    "message": "generate connector token: insert connector: ERROR: duplicate key value violates unique constraint \"connectors_name_key\" (SQLSTATE 23505)"
+  }]
+}
+```
+
+Reveals: table name, constraint name, column grouping, SQLSTATE codes,
+internal call-path breadcrumbs (`"insert connector"`, `"load intermediate CA"`).
+
+**Scope is global**: every resolver in the codebase uses
+`fmt.Errorf("%w")` for its error returns. A global `ErrorPresenter`
+installed once on `gqlSrv` sanitizes errors from ALL current and future
+resolvers in one place — no resolver needs to remember to redact.
+
+**Mirrors the HTTP-middleware pattern** already adopted in
+[middleware/workspace.go for STAGE3-F4](controller/internal/middleware/workspace.go#L45-L52):
+"log specific, return generic." Together: layered defense at the HTTP
+middleware AND GraphQL resolver layers.
+
+#### UX consequence of STAGE3-F5 fix
+
+After the global presenter is in place, current resolver errors that ARE
+meant for the user (e.g. `"remote network not found"`) become generic
+`"internal server error"` because they use `fmt.Errorf`. This is degraded
+UX until those resolvers are refactored.
+
+**Two-part plan**:
+1. **Install the global presenter** (this PR) — closes the leak universally.
+2. **Incrementally refactor** select resolvers to use structured
+   `*gqlerror.Error` for user-meaningful cases:
+
+```go
+// Before:
+return nil, fmt.Errorf("generate connector token: remote network not found: %w", err)
+
+// After (structured, passes through the presenter unchanged):
+return nil, &gqlerror.Error{
+    Message:    "remote network not found",
+    Extensions: map[string]any{"code": "NOT_FOUND"},
+}
+```
+
+Initial refactor scope for `GenerateConnectorToken` (~6 wrapping points):
+
+| Current message | Refactor to |
+|-----------------|-------------|
+| `"remote network not found: %w"` | structured: NOT_FOUND |
+| `"remote network is %q, expected active"` | structured: REMOTE_NETWORK_INACTIVE |
+| `"insert connector: %w"` | leave generic (DB internals) |
+| `"workspace not found: %w"` | leave generic (shouldn't happen for authed user) |
+| `"load intermediate CA: %w"` | leave generic (infra issue) |
+| `"store jti: %w"`, `"save jti: %w"` | leave generic |
+
+Only ~2 of 6 wrapping points justify user-facing specifics. Other resolvers
+refactored incrementally as user-meaningful errors are identified.
 
 #### Why drop GET transport (STAGE3-F3 detail)
 
@@ -281,12 +366,12 @@ Worth adding as a SUPPLEMENT (defense in depth), but not as the primary fix.
 
 ## Plan
 
-### Phase 1 — Tier 1 (single restructure: F1 cleanup + F2 + F3)
+### Phase 1 — Tier 1 (single restructure: F1 cleanup + F2 + F3 + F5)
 
 1. In `controller/cmd/server/main.go`, replace `handler.NewDefaultServer(...)`
    with `handler.New(...)` + explicit transport / extension setup (see code
    shape above)
-2. Add imports for `transport`, `extension`, `lru`, `ast`
+2. Add imports for `transport`, `extension`, `lru`, `ast`, `gqlerror`
 3. Add explicit transports: POST + MultipartForm only (drop GET — STAGE3-F3)
 4. Conditional `extension.Introspection{}` install — dev only — STAGE3-F1
    (lets us delete the `introspectionDisabler{}` shim added earlier)
@@ -294,9 +379,21 @@ Worth adding as a SUPPLEMENT (defense in depth), but not as the primary fix.
 6. Add `extension.FixedDepthLimit(10)` — STAGE3-F2
 7. Keep `extension.AutomaticPersistedQuery` + `SetQueryCache(lru...)`
    for parity with the deprecated default
-8. Verify with `go vet` + smoke test (Apollo UI still works; introspection
-   blocked in non-dev; bomb query rejected with `complexity 1500 > 300`)
-9. Update `07-Connector-Audit.md`: mark F1 as ✅ (already), F2 as ✅, F3 as ✅
+8. Add `gqlSrv.SetErrorPresenter(...)` — STAGE3-F5 — sanitizes wrapped errors
+   globally, logs specifics server-side, returns generic to client
+9. Verify with `go vet` + smoke test:
+   - Apollo UI still works
+   - Introspection blocked in non-dev
+   - Bomb query rejected (`complexity 1500 > 300`)
+   - Trigger a constraint-violation mutation; confirm client gets
+     `"internal server error"` (NOT the constraint name) and server log
+     shows the full pgx error
+10. Update `07-Connector-Audit.md`: mark F1 as ✅ (already), F2 ✅,
+    F3 ✅, F5 ✅
+11. **Follow-up (separate PR / incremental)**: refactor 2 resolver errors
+    in `GenerateConnectorToken` to structured `*gqlerror.Error` for
+    user-meaningful messages (NOT_FOUND, REMOTE_NETWORK_INACTIVE) — see
+    table above
 
 ### Phase 2 — Tier 2 (separate change)
 
@@ -336,14 +433,20 @@ Future env vars (none required for Tier 1's hardcoded defaults):
 
 ## Notes
 
-- Closes audit findings **STAGE3-F2** AND **STAGE3-F3** in
+- Closes audit findings **STAGE3-F2**, **STAGE3-F3**, AND **STAGE3-F5** in
   [[CodeStudy/07-Connector-Audit]] in a single `gqlSrv` restructure
 - Folds in the cleanup of **STAGE3-F1** (introspection). The temporary
   `introspectionDisabler{}` shim added in the F1 fix becomes unnecessary
   after this restructure — extension.Introspection{} is simply not
   installed outside dev.
-- After both: schema discovery blocked (F1) AND cost-bomb blocked (F2) AND
-  query-in-URL leak surface eliminated (F3).
+- After Tier 1: schema discovery blocked (F1) AND cost-bomb blocked (F2)
+  AND query-in-URL leak surface eliminated (F3) AND raw DB error leak
+  blocked globally (F5).
+- F5 (ErrorPresenter) mirrors the same "log specific, return generic"
+  pattern already adopted at the HTTP middleware layer for **STAGE3-F4**
+  ([workspace.go:45-52](controller/internal/middleware/workspace.go#L45-L52),
+  already fixed). Together: layered defense across HTTP middleware AND
+  GraphQL resolvers.
 - Does NOT address **STAGE3-F5** (raw pgx errors leak via default
   ErrorPresenter) — separate concern; warrants its own follow-up.
 - Does NOT address **STAGE1-F5** (`X-Public-Operation` header trust
@@ -376,3 +479,18 @@ Future env vars (none required for Tier 1's hardcoded defaults):
 
 6. **Edge layer plan**: is there an existing reverse proxy / CDN strategy
    for production? If yes, can defer some application-level work.
+
+7. **(STAGE3-F5) UX policy on user-facing errors**: which classes of
+   resolver errors deserve meaningful messages vs generic? Suggested cut:
+   NOT_FOUND, ALREADY_EXISTS, INVALID_INPUT pass through with structured
+   messages; everything else (DB constraint, infra failures) returns
+   generic. Decide before refactoring resolver-side errors.
+
+8. **(STAGE3-F5) Error code taxonomy**: standardize on codes like
+   `NOT_FOUND` / `FORBIDDEN` / `RATE_LIMITED` / `INVALID_INPUT` /
+   `INTERNAL`? Frontend can then handle uniformly via `extensions.code`.
+   Not blocking Tier 1 — can ship presenter first, refine codes later.
+
+9. **(STAGE3-F5) Logging destination**: `log.Printf` writes to stdout.
+   If structured logging (slog / zap) is on the roadmap, the presenter
+   should use that instead of stdlib `log`.
