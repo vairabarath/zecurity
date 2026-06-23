@@ -11,7 +11,7 @@ import (
 )
 
 // TestPushACLSnapshot_DeliversCachedAndRespectsGate verifies the heartbeat path
-// after the GetOrCompile conversion (ADR-011): on a cache hit it delivers the
+// after the GetOrCompile conversion (ADR-013): on a cache hit it delivers the
 // cached snapshot when the connector lags, and skips the push (version gate)
 // when the connector is already current. DB-free — the cache is pre-seeded so
 // GetOrCompile's fast-path Get hits and no compile runs. The epoch mechanism
@@ -19,7 +19,7 @@ import (
 func TestPushACLSnapshot_DeliversCachedAndRespectsGate(t *testing.T) {
 	const ws = "ws-A"
 	cache := policy.NewSnapshotCache()
-	// Seed via the public epoch-aware store (Set is unexported after the ADR-011 seal).
+	// Seed via the public epoch-aware store (Set is unexported after the ADR-013 seal).
 	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, cache.Epoch(ws))
 
 	h := &EnrollmentHandler{

@@ -133,7 +133,7 @@ func TestPushWorkspace_SendQueueFull(t *testing.T) {
 // TestPushWorkspace_Coalesces drives the real notifier path: a burst of five
 // policy changes arriving while one compile is in flight collapses to a bounded
 // number of compiles (not five), and the connector ends at the latest version.
-// With epoch CAS (ADR-011), the in-flight compile #1 is rejected because the
+// With epoch CAS (ADR-013), the in-flight compile #1 is rejected because the
 // burst advanced the epoch, so exactly one recompile (#2) produces the latest
 // snapshot and the trailing latch iteration serves it from cache. The latch
 // coalesces the five triggers into a single pending recompile — not five
@@ -266,7 +266,7 @@ func TestPusher_ConcurrentPushAndDisconnect(t *testing.T) {
 // into an empty (just-invalidated) slot. This is independent of ACLPusher's
 // latch and also affects the heartbeat and client-pull compile sites.
 //
-// Fixed by the SnapshotCache invalidation epoch / CAS (ADR-011): the burst bumps
+// Fixed by the SnapshotCache invalidation epoch / CAS (ADR-013): the burst bumps
 // the epoch, GetOrCompile's SetIfEpoch rejects compile #1's stale result, and a
 // recompile delivers the latest version. This test is the active regression
 // guard for that fix.
