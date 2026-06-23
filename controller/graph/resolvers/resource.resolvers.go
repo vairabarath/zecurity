@@ -40,16 +40,27 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input graph.UpdateResourceInput) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
-	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, resource.UpdateInput{
+	updIn := resource.UpdateInput{
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,
-	})
+	}
+	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
+	}
+
+	// Only invalidate the per-workspace ACL snapshot when the update touched a
+	// compiler-visible field (name/protocol/port_from). description/port_to/
+	// remote_network_id are invisible to the compiler, so changing only those
+	// must not churn the ACL version or trigger a fan-out push.
+	if resource.ACLRelevantUpdate(updIn) {
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return nil, fmt.Errorf("updateResource notify: %w", err)
+		}
 	}
 
 	return toResourceGQL(row), nil
@@ -114,6 +125,10 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
 			return false, fmt.Errorf("deleteResource: %w", err)
 		}
+		// The row left the ACL compiler's output — invalidate the workspace snapshot.
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("deleteResource notify: %w", err)
+		}
 		return true, nil
 	}
 }
@@ -165,6 +180,11 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	// so it drops the rule for the resource we just removed.
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	}
+
+	// The row left the ACL compiler's output — invalidate the workspace snapshot.
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return false, fmt.Errorf("forceDeleteResource notify: %w", err)
 	}
 
 	return true, nil

@@ -397,6 +397,17 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	return GetByID(ctx, db, tenantID, id)
 }
 
+// ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
+// compiler actually reads (ListEnabledRulesWithResources selects name, host,
+// port_from, protocol, shield_id). host is not editable via UpdateInput, so only
+// name/protocol/port_from matter here. description, port_to and remote_network_id
+// are invisible to the compiler, so changing only those must not invalidate the
+// per-workspace ACL snapshot. Callers use this to decide whether to fire
+// NotifyPolicyChange after an UpdateResource.
+func ACLRelevantUpdate(input UpdateInput) bool {
+	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil
+}
+
 func joinSets(sets []string) string {
 	var b strings.Builder
 	for i, s := range sets {
@@ -542,7 +553,13 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 // information beyond `status` (protected ⟺ reachable; "port not listening" ⟺ not),
 // and there is no port_reachable column to persist it to. verified_at IS persisted
 // as last_verified_at.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) error {
+// RecordAck records a shield's ack of a resource instruction. It returns
+// reaped=true only when an 'unprotected' ack physically removed a 'deleting'
+// tombstone (the DELETE below) — that is the one path where the resource leaves
+// the ACL compiler's output, so the caller must fire NotifyPolicyChange.
+// Status updates (protected/failed/unprotected without a tombstone) never change
+// compiler-visible data, so they return reaped=false.
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (reaped bool, err error) {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
@@ -551,13 +568,13 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 			resourceID, tenantID,
 		)
 		if err != nil {
-			return fmt.Errorf("record ack (reap): %w", err)
+			return false, fmt.Errorf("record ack (reap): %w", err)
 		}
 		if ct.RowsAffected() > 0 {
-			return nil
+			return true, nil
 		}
 	}
-	_, err := db.Exec(ctx,
+	_, err = db.Exec(ctx,
 		`UPDATE resources
 		    SET status           = $2,
 		        error_message    = NULLIF($3, ''),
@@ -572,9 +589,9 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		resourceID, status, errMsg, verifiedAt, tenantID,
 	)
 	if err != nil {
-		return fmt.Errorf("record ack: %w", err)
+		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {
