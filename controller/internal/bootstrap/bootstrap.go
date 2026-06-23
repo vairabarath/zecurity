@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"unicode"
 
@@ -28,14 +29,30 @@ type Service struct {
 
 // Bootstrap creates a new workspace for a first-time user or returns the
 // existing membership for a returning user.
+//
+// Email is normalized to lowercase at entry so it matches stored invites
+// regardless of admin input casing. See: ADR-005 Email Normalization.
 func (s *Service) Bootstrap(
 	ctx context.Context,
 	email, provider, providerSub, name string,
 ) (*Result, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+
+	// F14 — provider allowlist. Only google is wired today; reject unknown
+	// values defensively so a future caller can't pass an arbitrary string.
+	if provider != "google" {
+		return nil, fmt.Errorf("unsupported provider: %q", provider)
+	}
+
 	var existingUserID string
 	var existingTenantID string
 	var existingRole string
 
+	// NOTE (F12): this query does not filter by users.status or
+	// workspaces.status. When a "Suspend User" or "Suspend Workspace"
+	// admin feature ships, harden this query (and lookupWorkspacesByEmail)
+	// to require status='active' on both tables. Schema already supports
+	// 'suspended'/'deleted' enum values; auth path must follow.
 	err := s.Pool.QueryRow(
 		ctx,
 		`SELECT id, tenant_id, role
@@ -47,16 +64,22 @@ func (s *Service) Bootstrap(
 	).Scan(&existingUserID, &existingTenantID, &existingRole)
 
 	if err == nil {
-		_, updateErr := s.Pool.Exec(
-			ctx,
-			`UPDATE users
-			 SET last_login_at = NOW(), updated_at = NOW()
-			 WHERE id = $1`,
-			existingUserID,
-		)
-		if updateErr != nil {
-			fmt.Printf("warning: update last_login_at failed for user %s: %v\n", existingUserID, updateErr)
-		}
+		// F13 — fire-and-forget last_login_at update so a slow metadata
+		// write doesn't add latency to login. Uses Background context
+		// because the request ctx may be canceled before the goroutine runs.
+		userID := existingUserID
+		go func() {
+			_, uErr := s.Pool.Exec(
+				context.Background(),
+				`UPDATE users
+				 SET last_login_at = NOW(), updated_at = NOW()
+				 WHERE id = $1`,
+				userID,
+			)
+			if uErr != nil {
+				log.Printf("bootstrap: update last_login_at failed for user %s: %v", userID, uErr)
+			}
+		}()
 
 		return &Result{
 			TenantID: existingTenantID,

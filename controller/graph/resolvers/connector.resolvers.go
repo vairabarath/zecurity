@@ -7,17 +7,14 @@ package resolvers
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	pgx "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
-	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -72,16 +69,21 @@ func (r *mutationResolver) DeleteRemoteNetwork(ctx context.Context, id string) (
 func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*graph.ConnectorToken, error) {
 	tc := tenant.MustGet(ctx)
 
+	name, vErr := validateAgentName("connector", connectorName)
+	if vErr != nil {
+		return nil, vErr
+	}
+
 	var rnStatus string
 	err := r.TenantDB.QueryRow(ctx,
 		`SELECT status FROM remote_networks WHERE id = $1 AND tenant_id = $2`,
 		remoteNetworkID, tc.TenantID,
 	).Scan(&rnStatus)
 	if err != nil {
-		return nil, fmt.Errorf("generate connector token: remote network not found: %w", err)
+		return nil, apperr.UserErrorf("remote network not found")
 	}
 	if rnStatus != "active" {
-		return nil, fmt.Errorf("generate connector token: remote network is %q, expected active", rnStatus)
+		return nil, apperr.UserErrorf("remote network is %q, expected active", rnStatus)
 	}
 
 	var connectorID string
@@ -89,85 +91,22 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 		`INSERT INTO connectors (tenant_id, remote_network_id, name)
 		 VALUES ($1, $2, $3)
 		 RETURNING id`,
-		tc.TenantID, remoteNetworkID, connectorName,
+		tc.TenantID, remoteNetworkID, name,
 	).Scan(&connectorID)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return nil, apperr.UserErrorf("a connector named %q already exists", name)
+		}
 		return nil, fmt.Errorf("generate connector token: insert connector: %w", err)
 	}
 
-	var workspaceSlug string
-	err = r.Pool.QueryRow(ctx,
-		`SELECT slug FROM workspaces WHERE id = $1`,
-		tc.TenantID,
-	).Scan(&workspaceSlug)
-	if err != nil {
-		return nil, fmt.Errorf("generate connector token: workspace not found: %w", err)
-	}
-
-	var certPEM string
-	err = r.Pool.QueryRow(ctx,
-		`SELECT certificate_pem FROM ca_intermediate LIMIT 1`,
-	).Scan(&certPEM)
-	if err != nil {
-		return nil, fmt.Errorf("generate connector token: load intermediate CA: %w", err)
-	}
-
-	block, _ := pem.Decode([]byte(certPEM))
-	if block == nil {
-		return nil, fmt.Errorf("generate connector token: failed to decode intermediate CA PEM")
-	}
-	fingerprint := sha256.Sum256(block.Bytes)
-	caFingerprint := hex.EncodeToString(fingerprint[:])
-
-	tokenString, jti, err := connector.GenerateEnrollmentToken(
-		r.ConnectorCfg,
-		connectorID,
-		tc.TenantID,
-		workspaceSlug,
-		caFingerprint,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("generate connector token: %w", err)
-	}
-
-	err = connector.StoreEnrollmentJTI(ctx, r.Redis, jti, connectorID, r.ConnectorCfg.EnrollmentTokenTTL)
-	if err != nil {
-		return nil, fmt.Errorf("generate connector token: store jti: %w", err)
-	}
-
-	err = r.TenantDB.Exec(ctx,
-		`UPDATE connectors SET enrollment_token_jti = $1, updated_at = NOW()
-		  WHERE id = $2 AND tenant_id = $3`,
-		jti, connectorID, tc.TenantID,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("generate connector token: save jti: %w", err)
-	}
-
-	controllerAddr := os.Getenv("CONTROLLER_ADDR")
-	if controllerAddr == "" {
-		controllerAddr = "localhost:" + r.ConnectorCfg.GRPCPort
-	}
-	controllerHTTPAddr := os.Getenv("CONTROLLER_HTTP_ADDR")
-	if controllerHTTPAddr == "" {
-		if colon := strings.LastIndex(controllerAddr, ":"); colon != -1 {
-			controllerHTTPAddr = controllerAddr[:colon] + ":8080"
-		} else {
-			controllerHTTPAddr = "localhost:8080"
-		}
-	}
-	installCmd := fmt.Sprintf(
-		"curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/connector/scripts/connector-install.sh | \\\n"+
-			"  sudo CONTROLLER_ADDR=%s \\\n"+
-			"  CONTROLLER_HTTP_ADDR=%s \\\n"+
-			"  ENROLLMENT_TOKEN=%s \\\n"+
-			"  bash",
-		controllerAddr, controllerHTTPAddr, tokenString,
-	)
-	return &graph.ConnectorToken{
-		ConnectorID:    connectorID,
-		InstallCommand: installCmd,
-	}, nil
+	// Token minting is lazy: the create path only reserves the pending row.
+	// The enrollment token (JWT + Redis jti + install command) is issued on
+	// demand by the REST endpoint POST /api/connectors/{id}/token when the
+	// detail page loads. See ADR-008. This keeps the credential off the
+	// GraphQL/Apollo-cache surface and avoids minting a token that's discarded.
+	return &graph.ConnectorToken{ConnectorID: connectorID}, nil
 }
 
 // RevokeConnector is the resolver for the revokeConnector field.

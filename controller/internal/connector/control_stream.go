@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -28,7 +29,7 @@ import (
 // The resolver calls PushResourceInstruction to deliver instructions in real time.
 // If the connector is offline, the instruction stays in DB and is delivered on reconnect.
 type ConnectorRegistry struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
 }
 
@@ -37,17 +38,49 @@ func NewConnectorRegistry() *ConnectorRegistry {
 	return &ConnectorRegistry{clients: make(map[string]*connectorStreamClient)}
 }
 
+// connectorSendQueueSize bounds a connector's outbound mailbox. A wedged connector
+// (one that stops draining its stream) fills this, after which sends fail fast
+// rather than blocking the caller; the dropped message is recovered by reconnect
+// replay or the Phase 3 reconciler. Sized for normal bursts (snapshot + acks + ACL).
+const connectorSendQueueSize = 128
+
 type connectorStreamClient struct {
 	stream      pb.ConnectorService_ControlServer
-	sendMu      sync.Mutex
+	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
 }
 
+// send enqueues a message for the writer goroutine. It never blocks the caller: if
+// the mailbox is full (connector not draining) it fails fast, so a wedged connector
+// can't stall a GraphQL resolver or the reconciler on the socket write. gRPC permits
+// only one concurrent Send, which runWriter (the sole sender) guarantees.
 func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
-	c.sendMu.Lock()
-	defer c.sendMu.Unlock()
-	return c.stream.Send(msg)
+	select {
+	case c.outbound <- msg:
+		return nil
+	default:
+		return fmt.Errorf("connector %s send queue full", c.connectorID)
+	}
+}
+
+// runWriter is the only goroutine that calls stream.Send. It drains the outbound
+// mailbox until the stream context is cancelled (connector disconnect / handler
+// exit) or a Send fails (broken stream) — in which case the recv loop also observes
+// the error and tears the connection down. A blocking Send on a wedged connector
+// blocks only this goroutine; callers have already failed fast in send().
+func (c *connectorStreamClient) runWriter(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-c.outbound:
+			if err := c.stream.Send(msg); err != nil {
+				log.Printf("control stream: send to connector %s failed: %v", c.connectorID, err)
+				return
+			}
+		}
+	}
 }
 
 func (r *ConnectorRegistry) add(connectorID string, c *connectorStreamClient) {
@@ -63,22 +96,45 @@ func (r *ConnectorRegistry) remove(connectorID string) {
 }
 
 func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.clients[connectorID]
 }
 
+// ClientsForWorkspace returns the live clients whose tenantID matches
+// workspaceID. The result is a fresh slice built under the read lock; callers
+// MUST send on it only after this returns (the lock is already released), never
+// while holding any registry lock. A connector disconnecting between this
+// snapshot and a later send is benign: send fails fast on the orphaned mailbox
+// and the connector recovers its ACL on its next heartbeat. O(N) over all
+// connected connectors — acceptable at current scale; a workspace index is a
+// later optimization gated on profiling.
+func (r *ConnectorRegistry) ClientsForWorkspace(workspaceID string) []*connectorStreamClient {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*connectorStreamClient
+	for _, c := range r.clients {
+		if c.tenantID == workspaceID {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // buildSnapshotMsg builds the authoritative desired-state snapshot message for
-// one shield (ADR-004 Phase 2). Generation is wall-clock millis — good enough
-// for "drop stale cached copies"; Phase 3 replaces this with reconciliation.
+// one shield (ADR-004 Phase 2). The desired set and its monotonic generation come
+// from resource.BuildShieldSnapshot — the generation is a per-shield counter
+// bumped only when the desired content actually changes, so the shield's
+// `generation <= last` gate dedups unchanged re-pushes and resolves out-of-order
+// deliveries (see F11). It is NOT wall-clock and not derived in this layer.
 func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*pb.ConnectorControlMessage, error) {
-	desired, err := resource.GetDesiredForShield(ctx, db, shieldID)
+	snap, err := resource.BuildShieldSnapshot(ctx, db, shieldID)
 	if err != nil {
 		return nil, fmt.Errorf("buildSnapshotMsg: %w", err)
 	}
 
-	resources := make([]*shieldpb.ResourceInstruction, 0, len(desired))
-	for _, row := range desired {
+	resources := make([]*shieldpb.ResourceInstruction, 0, len(snap.Resources))
+	for _, row := range snap.Resources {
 		resources = append(resources, &shieldpb.ResourceInstruction{
 			ResourceId: row.ID,
 			Host:       row.Host,
@@ -92,7 +148,7 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*
 		Body: &pb.ConnectorControlMessage_ResourceSnapshots{
 			ResourceSnapshots: &pb.ResourceSnapshotBatch{
 				ShieldSnapshots: map[string]*shieldpb.ResourceSnapshot{
-					shieldID: {Resources: resources, Generation: uint64(time.Now().UnixMilli())},
+					shieldID: {Resources: resources, Generation: snap.Generation},
 				},
 			},
 		},
@@ -204,9 +260,20 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
-	client := &connectorStreamClient{stream: stream, connectorID: connectorID, tenantID: tenantID}
+	client := &connectorStreamClient{
+		stream:      stream,
+		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID: connectorID,
+		tenantID:    tenantID,
+	}
 	h.Registry.add(connectorID, client)
 	defer h.Registry.remove(connectorID)
+
+	// A single writer goroutine owns stream.Send; every send goes through
+	// client.send (enqueue). This decouples resolvers and the reconciler from the
+	// socket write, so a wedged connector can block only this goroutine — which
+	// unblocks when ctx is cancelled (handler returns) or the Send fails.
+	go client.runWriter(ctx)
 
 	_, _ = h.Pool.Exec(ctx,
 		`UPDATE connectors SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1`,
@@ -223,15 +290,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 
 	log.Printf("control stream: connector %s connected", connectorID)
 
-	// Flush gRPC headers by sending an initial Ping. This ensures the client-side
-	// .control().await call resolves immediately.
+	// Flush gRPC headers by enqueuing an initial Ping (the writer sends it first,
+	// resolving the client-side .control().await immediately). Enqueue can't fail on
+	// a fresh empty mailbox; if it ever did, the recv loop would surface the break.
 	if err := client.send(&pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_Ping{
 			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
 		},
 	}); err != nil {
-		log.Printf("control stream: initial ping to connector %s failed: %v", connectorID, err)
-		return err
+		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
 	}
 
 	// Deliver any instructions that queued while the connector was offline.
@@ -313,12 +380,24 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 			log.Printf("control stream: build snapshot for shield %s: %v", shieldID, err)
 		}
 
+		// The snapshot above is the authoritative APPLY path: it enforces the full
+		// desired set (protected/failed/protecting-apply) and acks each resource, so
+		// protect completions still happen on reconnect. It only drops removed
+		// resources by OMISSION, without an ack — so explicit 'remove' instructions
+		// must still be delivered for tombstones ('deleting') and in-flight unprotects
+		// ('protecting'/remove): handle_remove emits the 'unprotected' ack that reaps
+		// a tombstone immediately (the state-report reconciler is the slower backstop).
+		// 'apply' instructions are intentionally NOT re-sent — the snapshot already
+		// covers them — avoiding a redundant second chain rebuild + duplicate ack.
 		pending, err := resource.GetPendingForShield(ctx, h.Pool, shieldID)
-		if err != nil || len(pending) == 0 {
+		if err != nil {
 			continue
 		}
 		instrs := make([]*shieldpb.ResourceInstruction, 0, len(pending))
 		for _, r := range pending {
+			if r.PendingAction != "remove" {
+				continue // applies are delivered by the snapshot above
+			}
 			instrs = append(instrs, &shieldpb.ResourceInstruction{
 				ResourceId: r.ID,
 				Host:       r.Host,
@@ -327,6 +406,9 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 				PortTo:     int32(r.PortTo),
 				Action:     r.PendingAction,
 			})
+		}
+		if len(instrs) == 0 {
+			continue
 		}
 		msg := &pb.ConnectorControlMessage{
 			Body: &pb.ConnectorControlMessage_ResourceInstructions{
@@ -371,14 +453,14 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		return nil
 	}
 
-	snap, ok := h.PolicyCache.Get(client.tenantID)
-	if !ok {
-		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
-		if err != nil {
-			return fmt.Errorf("compile ACL snapshot: %w", err)
-		}
-		h.PolicyCache.Set(client.tenantID, compiled)
-		snap = compiled
+	// GetOrCompile uses the cache's epoch CAS so a compile raced by a policy
+	// change is not cached as stale (ADR-013). The version gate below is
+	// unchanged: it still skips the push when the connector is already current.
+	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+	})
+	if err != nil {
+		return fmt.Errorf("compile ACL snapshot: %w", err)
 	}
 
 	if connectorVersion == snap.Version {
@@ -412,7 +494,7 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 		if err := resource.RecordAck(
 			ctx, h.Pool, tenantID,
 			ack.ResourceId, ack.Status, ack.Error,
-			ack.VerifiedAt, ack.PortReachable,
+			ack.VerifiedAt,
 		); err != nil {
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 		}

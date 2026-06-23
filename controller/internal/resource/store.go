@@ -2,14 +2,25 @@ package resource
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 )
+
+// querier is the read surface shared by *pgxpool.Pool and pgx.Tx, so the
+// single-source desired-state query can run either standalone or inside the
+// snapshot transaction.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
 
 // Row holds a resource record with joined shield + network names.
 type Row struct {
@@ -97,7 +108,7 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 	).Scan(&shieldID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", fmt.Errorf("no shield installed on host %s in this remote network", host)
+			return "", apperr.UserErrorf("no shield installed on host %s in this remote network", host)
 		}
 		return "", fmt.Errorf("auto-match shield: %w", err)
 	}
@@ -199,9 +210,11 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 	return result, rows.Err()
 }
 
-// GetDesiredForShield returns the complete set of resources that should be
-// enforced on a shield right now. Used to build the authoritative
-// ResourceSnapshot pushed on (re)connect and by the reconciler (ADR-004).
+// desiredForShield is the SINGLE definition of a shield's desired set — the
+// complete set of resources that should be enforced on it right now. Everything
+// that needs "what should this shield be enforcing" (snapshot build, reconciler
+// drift detection) routes through here, so the predicate cannot drift between
+// callers or into SQL elsewhere.
 //
 // Includes (fail-closed):
 //   - protected
@@ -214,15 +227,15 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 //
 // 'deleting', 'unprotected', 'pending', and 'protecting/remove' are intentionally
 // absent — the shield's replace-semantics drops anything not listed here.
-func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
-	rows, err := db.Query(ctx,
+func desiredForShield(ctx context.Context, q querier, shieldID string) ([]*PendingRow, error) {
+	rows, err := q.Query(ctx,
 		`SELECT id, host, protocol, port_from, port_to, pending_action
-	    	FROM resources
-		WHERE shield_id = $1
-		 AND (status IN ('protected', 'failed') OR (status = 'protecting' AND pending_action = 'apply'))`,
+		   FROM resources
+		  WHERE shield_id = $1
+		    AND (status IN ('protected', 'failed')
+		         OR (status = 'protecting' AND pending_action = 'apply'))`,
 		shieldID,
 	)
-
 	if err != nil {
 		return nil, fmt.Errorf("get desired resources: %w", err)
 	}
@@ -236,7 +249,94 @@ func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 		}
 		result = append(result, &r)
 	}
-	return result, nil
+	return result, rows.Err()
+}
+
+// GetDesiredForShield returns the shield's desired set for read-only callers
+// (the reconciler's drift detection). Snapshot delivery uses BuildShieldSnapshot
+// instead, which pairs the same set with a generation.
+func GetDesiredForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
+	return desiredForShield(ctx, db, shieldID)
+}
+
+// SnapshotResult is a shield's desired set paired with the monotonic generation
+// that stamps it.
+type SnapshotResult struct {
+	Generation uint64
+	Resources  []*PendingRow
+}
+
+// BuildShieldSnapshot returns the shield's desired set with a generation suitable
+// for the shield's `generation <= last` staleness gate (ADR-004 Phase 2 / F11).
+//
+// Generation is opaque bookkeeping, never a desired-state rule: we hash the exact
+// rows desiredForShield returns and bump the stored generation only when that
+// fingerprint changes. Everything runs in one transaction with a row lock on the
+// shield, so concurrent builders serialize and the (generation, fingerprint,
+// content) triple stays consistent — a later-committed desired state always yields
+// a higher generation, which is what lets the shield resolve out-of-order
+// deliveries. Identical content reuses the generation, so the shield dedups it and
+// metadata/audit writes never churn the value.
+func BuildShieldSnapshot(ctx context.Context, db *pgxpool.Pool, shieldID string) (*SnapshotResult, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		gen      int64
+		storedFP string
+	)
+	// Lock the shield row: without it two concurrent builders could read the same
+	// generation and assign it to different content.
+	if err := tx.QueryRow(ctx,
+		`SELECT snapshot_generation, snapshot_fingerprint FROM shields WHERE id = $1 FOR UPDATE`,
+		shieldID,
+	).Scan(&gen, &storedFP); err != nil {
+		return nil, fmt.Errorf("lock shield for snapshot: %w", err)
+	}
+
+	desired, err := desiredForShield(ctx, tx, shieldID)
+	if err != nil {
+		return nil, err
+	}
+
+	if fp := fingerprintDesired(desired); fp != storedFP {
+		gen++
+		if _, err := tx.Exec(ctx,
+			`UPDATE shields SET snapshot_generation = $2, snapshot_fingerprint = $3 WHERE id = $1`,
+			shieldID, gen, fp,
+		); err != nil {
+			return nil, fmt.Errorf("bump snapshot generation: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit snapshot tx: %w", err)
+	}
+	return &SnapshotResult{Generation: uint64(gen), Resources: desired}, nil
+}
+
+// fingerprintDesired is a stable content hash of a desired set. Sorted by resource
+// ID so a reordered query result is not mistaken for a change.
+//
+// It hashes EXACTLY the fields the snapshot's ResourceInstruction carries on the
+// wire — id, host, protocol, ports. pending_action is deliberately excluded: a
+// snapshot has no per-row action (every listed row means "enforce this"), so
+// hashing it would couple the generation to controller bookkeeping and churn the
+// version without any change the shield can observe. A row entering or leaving the
+// desired set is already reflected by its id appearing/disappearing here.
+func fingerprintDesired(rows []*PendingRow) string {
+	sorted := make([]*PendingRow, len(rows))
+	copy(sorted, rows)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	h := sha256.New()
+	for _, r := range sorted {
+		fmt.Fprintf(h, "%s|%s|%s|%d|%d\n", r.ID, r.Host, r.Protocol, r.PortFrom, r.PortTo)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // UpdateInput holds the fields that can be changed on an existing resource.
@@ -332,12 +432,35 @@ func MarkProtecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 	return GetByID(ctx, db, tenantID, id)
 }
 
-// MarkUnprotecting transitions a resource to protecting status with pending_action='remove'.
+// MarkUnprotecting removes protection from a resource.
+//
+// Normally it transitions to 'protecting'/pending_action='remove' and waits for
+// the shield to ack the nftables removal. But if the bound shield is REVOKED or
+// gone (no shields row), there is no shield left to apply the removal or ack it,
+// and the firewall rule died with the shield — so parking in 'protecting' would
+// hang forever waiting for an ack that can never arrive (Finding 7). In that case
+// we resolve straight to the terminal 'unprotected' state in the same atomic
+// UPDATE (deciding off the shield status, so there is no TOCTOU). A merely
+// disconnected/offline-but-not-revoked shield still takes the normal path: it
+// picks up the pending remove and acks it on reconnect.
+//
+// pending_action stays 'remove' in both branches — it is only meaningful while
+// status='protecting', and the normal terminal path (RecordAck) also leaves it at
+// 'remove' when it flips to 'unprotected', so the resolve-through end-state is
+// identical: ('unprotected', 'remove').
 func MarkUnprotecting(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (*Row, error) {
 	var discardedID string
 	err := db.QueryRow(ctx,
 		`UPDATE resources
-		    SET status = 'protecting', pending_action = 'remove',
+		    SET status = CASE
+		            WHEN COALESCE(
+		                     (SELECT s.status FROM shields s WHERE s.id = resources.shield_id),
+		                     'revoked'
+		                 ) = 'revoked'
+		            THEN 'unprotected'   -- shield revoked or gone: nothing to ack (Finding 7)
+		            ELSE 'protecting'    -- live/recoverable shield: normal remove + ack path
+		        END,
+		        pending_action = 'remove',
 		        updated_at = NOW()
 		  WHERE id = $1 AND tenant_id = $2
 		    AND status = 'protected'
@@ -415,7 +538,11 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 }
 
 // RecordAck processes a ResourceAck from Shield and updates the resource status.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64, portReachable bool) error {
+// The ack's port_reachable is intentionally not a parameter: it carries no
+// information beyond `status` (protected ⟺ reachable; "port not listening" ⟺ not),
+// and there is no port_reachable column to persist it to. verified_at IS persisted
+// as last_verified_at.
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) error {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources

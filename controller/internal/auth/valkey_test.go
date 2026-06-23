@@ -114,33 +114,34 @@ func TestSetAndGetPKCEState_WithWorkspaceName(t *testing.T) {
 	}
 }
 
-func TestSetAndGetRefreshToken(t *testing.T) {
+func TestSetAndGetRefreshSession(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	if err := rc.SetRefreshToken(ctx, "user-1", "token-abc", 7*24*time.Hour); err != nil {
-		t.Fatalf("SetRefreshToken: %v", err)
+	want := RefreshSession{Token: "token-abc", OriginalIAT: 1700000000, MaxLifetimeAt: 1700000000 + 30*24*3600}
+	if err := rc.SetRefreshSession(ctx, "user-1", want, 7*24*time.Hour); err != nil {
+		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
-	val, found, err := rc.GetRefreshToken(ctx, "user-1")
+	got, found, err := rc.GetRefreshSession(ctx, "user-1")
 	if err != nil {
-		t.Fatalf("GetRefreshToken: %v", err)
+		t.Fatalf("GetRefreshSession: %v", err)
 	}
 	if !found {
 		t.Fatal("expected found=true")
 	}
-	if val != "token-abc" {
-		t.Fatalf("expected token-abc, got %s", val)
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 
-func TestGetRefreshToken_NotFound(t *testing.T) {
+func TestGetRefreshSession_NotFound(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	_, found, err := rc.GetRefreshToken(ctx, "nonexistent-user")
+	_, found, err := rc.GetRefreshSession(ctx, "nonexistent-user")
 	if err != nil {
-		t.Fatalf("GetRefreshToken: %v", err)
+		t.Fatalf("GetRefreshSession: %v", err)
 	}
 	if found {
 		t.Fatal("expected found=false for nonexistent key")
@@ -151,17 +152,18 @@ func TestDeleteRefreshToken(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	if err := rc.SetRefreshToken(ctx, "user-del", "token-del", time.Hour); err != nil {
-		t.Fatalf("SetRefreshToken: %v", err)
+	sess := RefreshSession{Token: "token-del"}
+	if err := rc.SetRefreshSession(ctx, "user-del", sess, time.Hour); err != nil {
+		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
 	if err := rc.DeleteRefreshToken(ctx, "user-del"); err != nil {
 		t.Fatalf("DeleteRefreshToken: %v", err)
 	}
 
-	_, found, err := rc.GetRefreshToken(ctx, "user-del")
+	_, found, err := rc.GetRefreshSession(ctx, "user-del")
 	if err != nil {
-		t.Fatalf("GetRefreshToken after delete: %v", err)
+		t.Fatalf("GetRefreshSession after delete: %v", err)
 	}
 	if found {
 		t.Fatal("expected found=false after delete")
@@ -172,16 +174,17 @@ func TestRefreshToken_Expired(t *testing.T) {
 	rc, mr := newTestValkey(t)
 	ctx := context.Background()
 
-	if err := rc.SetRefreshToken(ctx, "user-ttl", "token-ttl", time.Hour); err != nil {
-		t.Fatalf("SetRefreshToken: %v", err)
+	sess := RefreshSession{Token: "token-ttl"}
+	if err := rc.SetRefreshSession(ctx, "user-ttl", sess, time.Hour); err != nil {
+		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
 	// Fast-forward past the TTL.
 	mr.FastForward(2 * time.Hour)
 
-	_, found, err := rc.GetRefreshToken(ctx, "user-ttl")
+	_, found, err := rc.GetRefreshSession(ctx, "user-ttl")
 	if err != nil {
-		t.Fatalf("GetRefreshToken: %v", err)
+		t.Fatalf("GetRefreshSession: %v", err)
 	}
 	if found {
 		t.Fatal("expected found=false after TTL expiry")

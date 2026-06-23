@@ -11,13 +11,20 @@ import (
 	"fmt"
 
 	pgx "github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // GenerateShieldToken is the resolver for the generateShieldToken field.
 func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetworkID string, shieldName string) (*graph.ShieldToken, error) {
 	tc := tenant.MustGet(ctx)
+
+	name, vErr := validateAgentName("shield", shieldName)
+	if vErr != nil {
+		return nil, vErr
+	}
 
 	// Select a placeholder connector to satisfy the NOT NULL FK constraint.
 	// token.go's selectConnector overwrites this with the least-loaded connector.
@@ -33,7 +40,7 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 	).Scan(&placeholderConnectorID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("generate shield token: no active connector found in remote network")
+			return nil, apperr.UserErrorf("no active connector found in remote network")
 		}
 		return nil, fmt.Errorf("generate shield token: lookup connector: %w", err)
 	}
@@ -43,21 +50,23 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status)
 		 VALUES ($1, $2, $3, $4, 'pending')
 		 RETURNING id`,
-		tc.TenantID, remoteNetworkID, placeholderConnectorID, shieldName,
+		tc.TenantID, remoteNetworkID, placeholderConnectorID, name,
 	).Scan(&shieldID)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
+			return nil, apperr.UserErrorf("a shield named %q already exists", name)
+		}
 		return nil, fmt.Errorf("generate shield token: insert shield: %w", err)
 	}
 
-	_, installCmd, err := r.ShieldSvc.GenerateShieldToken(ctx, remoteNetworkID, tc.TenantID, tc.TenantID, shieldID, shieldName)
-	if err != nil {
-		return nil, fmt.Errorf("generate shield token: %w", err)
-	}
-
-	return &graph.ShieldToken{
-		ShieldID:       shieldID,
-		InstallCommand: installCmd,
-	}, nil
+	// Token minting is lazy: the create path only reserves the pending row with a
+	// placeholder connector. The real connector selection + enrollment token
+	// (JWT + Redis jti + install command) happen on demand in the REST endpoint
+	// POST /api/shields/{id}/token (which calls ShieldSvc.GenerateShieldToken)
+	// when the detail page loads. See ADR-008. Keeps the credential off the
+	// GraphQL/Apollo-cache surface and avoids minting a token that's discarded.
+	return &graph.ShieldToken{ShieldID: shieldID}, nil
 }
 
 // RevokeShield is the resolver for the revokeShield field.

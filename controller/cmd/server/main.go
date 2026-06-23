@@ -1,12 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -15,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/99designs/gqlgen/graphql"
 	"github.com/99designs/gqlgen/graphql/handler"
 	"github.com/99designs/gqlgen/graphql/playground"
 	"github.com/jackc/pgx/v5"
@@ -22,6 +26,9 @@ import (
 	"github.com/joho/godotenv"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/vektah/gqlparser/v2/ast"
+	"github.com/vektah/gqlparser/v2/gqlerror"
+	"github.com/vektah/gqlparser/v2/parser"
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
@@ -144,6 +151,21 @@ func main() {
 			},
 		}),
 	)
+	// Fail-closed error masking: only apperr.UserError + gqlgen parse/validation
+	// errors reach clients; raw resolver/DB errors are logged and genericized.
+	gqlSrv.SetErrorPresenter(resolvers.ErrorPresenter)
+
+	// Disable GraphQL introspection outside dev — gqlgen's NewDefaultServer
+	// enables it by default via extension.Introspection{}, which exposes the
+	// full schema to any caller of /graphql. This is the standard pentest
+	// finding (CWE-200). Closes STAGE3-F1 of the connector flow audit.
+	//
+	// The introspectionDisabler extension below runs AFTER NewDefaultServer's
+	// extension.Introspection (extensions are applied in install order; the
+	// later one wins for shared OperationContext fields).
+	if os.Getenv("ENV") != "development" {
+		gqlSrv.Use(introspectionDisabler{})
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
@@ -241,6 +263,13 @@ func main() {
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
 
+	// Proactive ACL propagation: after a policy change bumps the version and
+	// invalidates the cache, push the fresh snapshot to all connected connectors
+	// in the workspace immediately instead of waiting for the next heartbeat.
+	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
+
 	clientSvc := clientsvc.NewService(
 		db.Pool,
 		authSvc,
@@ -299,26 +328,119 @@ func main() {
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
-// publicOperations is the set of GraphQL operation names that may be called
-// without a JWT. The frontend sets `X-Public-Operation: <OperationName>` for
-// these via admin/src/apollo/links/auth.ts. Names match the PascalCase
-// `mutation ... { ... }` / `query ... { ... }` names in admin/src/graphql/.
-var publicOperations = map[string]struct{}{
-	"InitiateAuth":            {}, // login redirect (Member 2)
-	"LookupWorkspace":         {}, // signup slug availability (Member 1 login flow)
-	"LookupWorkspacesByEmail": {}, // login workspace picker (Member 1 login flow)
+// publicRootFields are the GraphQL root fields callable WITHOUT authentication —
+// the pre-login entry points (login redirect + workspace discovery). This map is
+// the SOLE source of truth for public routing: there is no client header and no
+// duplicated frontend list. The allowlist is keyed on schema FIELD names (the
+// server-executed contract), not client-chosen operation names.
+//
+// NOTE: `workspace`, `me`, `myDevices` have no @hasRole but DO require a tenant
+// (they call tenant.MustGet) — they are authenticated, not public, and are
+// intentionally absent here so they keep routing through the auth middleware.
+var publicRootFields = map[string]struct{}{
+	"initiateAuth":            {}, // login redirect
+	"lookupWorkspace":         {}, // signup slug availability / login flow
+	"lookupWorkspacesByEmail": {}, // login workspace picker
 }
 
+// routeGraphQL decides server-side whether a /graphql request may bypass the auth
+// middleware. The decision is derived solely from the parsed request body (no
+// client-controlled header): a request is public only if it is a single
+// query/mutation whose every root field is in publicRootFields. Any ambiguity is
+// fail-closed to the protected (auth-required) handler.
 func routeGraphQL(protected, public http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		op := r.Header.Get("X-Public-Operation")
-		if _, ok := publicOperations[op]; ok {
+		if isPublicGraphQLRequest(r) {
 			public.ServeHTTP(w, r)
 			return
 		}
-
 		protected.ServeHTTP(w, r)
 	})
+}
+
+// isPublicGraphQLRequest reads and restores the request body, then classifies it.
+// Only JSON POST bodies are eligible; everything else (GET, multipart form,
+// websocket upgrade, OPTIONS) is treated as protected.
+func isPublicGraphQLRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		return false
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return false
+	}
+	// Restore the body so the downstream gqlgen handler can read it again.
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return requestSelectsOnlyPublicFields(body)
+}
+
+// requestSelectsOnlyPublicFields is the pure routing predicate (no net/http
+// types, so it is unit-testable). It returns true only if body is a single
+// GraphQL query/mutation whose every root selection is a plain field listed in
+// publicRootFields. It is fail-closed on every deviation: batch arrays,
+// APQ-hash-only (empty query), multiple operations, subscriptions, fragment
+// spreads / inline fragments at the root, unknown fields, or parse errors all
+// return false.
+func requestSelectsOnlyPublicFields(body []byte) bool {
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(body, &params); err != nil {
+		return false // not a single JSON object (e.g. a batch array) or malformed
+	}
+	if strings.TrimSpace(params.Query) == "" {
+		return false // APQ hash-only request, or no query present
+	}
+
+	doc, err := parser.ParseQuery(&ast.Source{Input: params.Query})
+	if err != nil || doc == nil {
+		return false
+	}
+	if len(doc.Operations) != 1 {
+		return false // multi-operation document — which one runs is ambiguous
+	}
+	op := doc.Operations[0]
+	if op.Operation != ast.Query && op.Operation != ast.Mutation {
+		return false // subscriptions are never public
+	}
+	if len(op.SelectionSet) == 0 {
+		return false
+	}
+	for _, sel := range op.SelectionSet {
+		field, ok := sel.(*ast.Field)
+		if !ok {
+			return false // fragment spread or inline fragment at the root → protected
+		}
+		// Match on the real field name, never the alias.
+		if _, public := publicRootFields[field.Name]; !public {
+			return false
+		}
+	}
+	return true
+}
+
+// introspectionDisabler is a gqlgen extension that turns introspection OFF
+// per request by flipping OperationContext.DisableIntrospection back to true.
+//
+// gqlgen's NewDefaultServer installs extension.Introspection{}, which sets
+// DisableIntrospection=false (enabling introspection). Installing this
+// extension AFTER it flips the field back so introspection queries
+// (__schema, __type) return an error to the caller. See STAGE3-F1.
+type introspectionDisabler struct{}
+
+func (introspectionDisabler) ExtensionName() string { return "DisableIntrospection" }
+
+func (introspectionDisabler) Validate(_ graphql.ExecutableSchema) error { return nil }
+
+func (introspectionDisabler) MutateOperationContext(
+	_ context.Context,
+	opCtx *graphql.OperationContext,
+) *gqlerror.Error {
+	opCtx.DisableIntrospection = true
+	return nil
 }
 
 func healthHandler() http.Handler {

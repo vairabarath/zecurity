@@ -82,8 +82,7 @@ type ComplexityRoot struct {
 	}
 
 	ConnectorToken struct {
-		ConnectorID    func(childComplexity int) int
-		InstallCommand func(childComplexity int) int
+		ConnectorID func(childComplexity int) int
 	}
 
 	DiscoveredService struct {
@@ -222,8 +221,7 @@ type ComplexityRoot struct {
 	}
 
 	ShieldToken struct {
-		InstallCommand func(childComplexity int) int
-		ShieldID       func(childComplexity int) int
+		ShieldID func(childComplexity int) int
 	}
 
 	User struct {
@@ -511,12 +509,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ConnectorToken.ConnectorID(childComplexity), true
-	case "ConnectorToken.installCommand":
-		if e.ComplexityRoot.ConnectorToken.InstallCommand == nil {
-			break
-		}
-
-		return e.ComplexityRoot.ConnectorToken.InstallCommand(childComplexity), true
 
 	case "DiscoveredService.boundIp":
 		if e.ComplexityRoot.DiscoveredService.BoundIP == nil {
@@ -1371,12 +1363,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Shield.Version(childComplexity), true
 
-	case "ShieldToken.installCommand":
-		if e.ComplexityRoot.ShieldToken.InstallCommand == nil {
-			break
-		}
-
-		return e.ComplexityRoot.ShieldToken.InstallCommand(childComplexity), true
 	case "ShieldToken.shieldId":
 		if e.ComplexityRoot.ShieldToken.ShieldID == nil {
 			break
@@ -1680,8 +1666,6 @@ func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, fiel
 	switch field.Name {
 	case "connectorId":
 		return ec.fieldContext_ConnectorToken_connectorId(ctx, field)
-	case "installCommand":
-		return ec.fieldContext_ConnectorToken_installCommand(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ConnectorToken", field.Name)
 }
@@ -1854,8 +1838,6 @@ func (ec *executionContext) childFields_ShieldToken(ctx context.Context, field g
 	switch field.Name {
 	case "shieldId":
 		return ec.fieldContext_ShieldToken_shieldId(ctx, field)
-	case "installCommand":
-		return ec.fieldContext_ShieldToken_installCommand(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ShieldToken", field.Name)
 }
@@ -3469,29 +3451,6 @@ func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, fie
 }
 func (ec *executionContext) fieldContext_ConnectorToken_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type ID does not have child fields"))
-}
-
-func (ec *executionContext) _ConnectorToken_installCommand(ctx context.Context, field graphql.CollectedField, obj *ConnectorToken) (ret graphql.Marshaler) {
-	return graphql.ResolveField(
-		ctx,
-		ec.OperationContext,
-		field,
-		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return ec.fieldContext_ConnectorToken_installCommand(ctx, field)
-		},
-		func(ctx context.Context) (any, error) {
-			return obj.InstallCommand, nil
-		},
-		nil,
-		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
-			return ec.marshalNString2string(ctx, selections, v)
-		},
-		true,
-		true,
-	)
-}
-func (ec *executionContext) fieldContext_ConnectorToken_installCommand(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _DiscoveredService_shieldId(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
@@ -7751,29 +7710,6 @@ func (ec *executionContext) fieldContext_ShieldToken_shieldId(_ context.Context,
 	return graphql.NewScalarFieldContext("ShieldToken", field, false, false, errors.New("field of type ID does not have child fields"))
 }
 
-func (ec *executionContext) _ShieldToken_installCommand(ctx context.Context, field graphql.CollectedField, obj *ShieldToken) (ret graphql.Marshaler) {
-	return graphql.ResolveField(
-		ctx,
-		ec.OperationContext,
-		field,
-		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return ec.fieldContext_ShieldToken_installCommand(ctx, field)
-		},
-		func(ctx context.Context) (any, error) {
-			return obj.InstallCommand, nil
-		},
-		nil,
-		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
-			return ec.marshalNString2string(ctx, selections, v)
-		},
-		true,
-		true,
-	)
-}
-func (ec *executionContext) fieldContext_ShieldToken_installCommand(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
-	return graphql.NewScalarFieldContext("ShieldToken", field, false, false, errors.New("field of type String does not have child fields"))
-}
-
 func (ec *executionContext) _User_id(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -9626,11 +9562,6 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
-		case "installCommand":
-			out.Values[i] = ec._ConnectorToken_installCommand(ctx, field, obj)
-			if out.Values[i] == graphql.Null {
-				out.Invalids++
-			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -10895,11 +10826,6 @@ func (ec *executionContext) _ShieldToken(ctx context.Context, sel ast.SelectionS
 			out.Values[i] = graphql.MarshalString("ShieldToken")
 		case "shieldId":
 			out.Values[i] = ec._ShieldToken_shieldId(ctx, field, obj)
-			if out.Values[i] == graphql.Null {
-				out.Invalids++
-			}
-		case "installCommand":
-			out.Values[i] = ec._ShieldToken_installCommand(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

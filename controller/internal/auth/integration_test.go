@@ -77,7 +77,7 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	authSvcIface, err := NewService(Config{
 		Pool:               pool,
 		BootstrapService:   bootstrapSvc,
-		JWTSecret:          "phase-7-auth-jwt-secret",
+		JWTSecret:          "phase-7-auth-jwt-secret-32-bytes!!",
 		JWTIssuer:          "zecurity-controller",
 		GoogleClientID:     "test-google-client-id",
 		GoogleClientSecret: "test-google-client-secret",
@@ -178,14 +178,14 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected first callback to create user without last_login_at")
 	}
 
-	storedRefresh, found, err := svc.redisClient.GetRefreshToken(ctx, userID)
+	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID)
 	if err != nil {
-		t.Fatalf("GetRefreshToken: %v", err)
+		t.Fatalf("GetRefreshSession: %v", err)
 	}
-	if !found || storedRefresh == "" {
-		t.Fatalf("expected refresh token to be stored in Redis")
+	if !found || storedRefresh.Token == "" {
+		t.Fatalf("expected refresh session to be stored in Redis")
 	}
-	if storedRefresh != firstRefreshCookie.Value {
+	if storedRefresh.Token != firstRefreshCookie.Value {
 		t.Fatalf("expected refresh cookie to match Redis refresh token")
 	}
 

@@ -270,9 +270,9 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     //   - certs/state are safely on disk
     //   - if Linux networking setup fails, the operator can still inspect logs,
     //     fix host permissions, and restart the service without re-enrolling
-    if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
-        warn!(error = %e, "network setup failed (non-fatal for now)");
-    }
+    // if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
+    //     warn!(error = %e, "network setup failed (non-fatal for now)");
+    // }.
 
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)

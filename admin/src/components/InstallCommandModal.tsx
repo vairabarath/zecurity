@@ -82,11 +82,13 @@ export function InstallCommandModal({
             remoteNetworkId: networkId,
             shieldName: agentName.trim(),
           } as GenerateShieldTokenMutationVariables,
+          // Background list refresh only — do NOT await. The detail page owns its
+          // data via GetShield(id), so navigation needn't wait on a workspace-wide
+          // refetch.
           refetchQueries: [
             { query: GetRemoteNetworksDocument },
             { query: GetShieldsDocument, variables: { remoteNetworkId: networkId } as GetShieldsQueryVariables },
           ],
-          awaitRefetchQueries: true,
         })
         const shieldId = result.data?.generateShieldToken.shieldId
         handleClose()
@@ -101,8 +103,10 @@ export function InstallCommandModal({
           remoteNetworkId: networkId,
           connectorName: agentName.trim(),
         } as GenerateConnectorTokenMutationVariables,
+        // Background list refresh only — do NOT await. ConnectorDetail owns its
+        // data via GetConnector(id), so navigation needn't wait on a
+        // workspace-wide refetch.
         refetchQueries: [{ query: GetRemoteNetworksDocument }],
-        awaitRefetchQueries: true,
       })
 
       const connectorId = result.data?.generateConnectorToken.connectorId
@@ -152,6 +156,7 @@ export function InstallCommandModal({
                     onChange={(event) => setAgentName(event.target.value)}
                     placeholder="e.g. prod-shield-01"
                     className="h-11 rounded-xl border-border bg-secondary px-4"
+                    maxLength={64}
                     autoFocus
                   />
                   <p className="mt-2 text-sm text-muted-foreground">
@@ -206,11 +211,13 @@ export function InstallCommandModal({
                     </button>
                     <button
                       type="button"
-                      onClick={() => setPlatform('docker')}
-                      className={`flex h-10 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${platform === 'docker' ? 'bg-card text-foreground' : 'text-muted-foreground'}`}
+                      disabled
+                      title="Docker install coming soon"
+                      className="flex h-10 cursor-not-allowed items-center justify-center gap-2 rounded-xl text-sm font-semibold text-muted-foreground/50"
                     >
                       <Server className="h-4 w-4" />
                       Docker
+                      <span className="ml-1 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">Soon</span>
                     </button>
                   </div>
                   <p className="mt-2 text-sm text-muted-foreground">Windows & macOS are not currently supported.</p>
@@ -276,6 +283,7 @@ export function InstallCommandModal({
                   onChange={(event) => setAgentName(event.target.value)}
                   placeholder="e.g. prod-connector-01"
                   className="h-11 rounded-xl border-border bg-secondary px-4"
+                  maxLength={64}
                   autoFocus
                 />
                 <p className="mt-2 text-sm text-muted-foreground">
@@ -330,11 +338,13 @@ export function InstallCommandModal({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setPlatform('docker')}
-                    className={`flex h-10 items-center justify-center gap-2 rounded-xl text-sm font-semibold transition ${platform === 'docker' ? 'bg-card text-foreground' : 'text-muted-foreground'}`}
+                    disabled
+                    title="Docker install coming soon"
+                    className="flex h-10 cursor-not-allowed items-center justify-center gap-2 rounded-xl text-sm font-semibold text-muted-foreground/50"
                   >
                     <Server className="h-4 w-4" />
                     Docker
+                    <span className="ml-1 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide">Soon</span>
                   </button>
                 </div>
                 <p className="mt-2 text-sm text-muted-foreground">Windows & macOS are not currently supported.</p>

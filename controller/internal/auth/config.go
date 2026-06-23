@@ -28,9 +28,16 @@ type Config struct {
 	// Parsed by time.ParseDuration in session.go.
 	JWTAccessTTL string
 
-	// JWTRefreshTTL is the refresh token lifetime, e.g. "168h" (7 days).
+	// JWTRefreshTTL is the rolling idle TTL for the refresh token, e.g. "168h"
+	// (7 days). After this window of inactivity, the Redis key expires.
 	// Parsed by time.ParseDuration in session.go.
 	JWTRefreshTTL string
+
+	// JWTRefreshMaxLifetime is the absolute lifetime cap from initial issuance,
+	// e.g. "720h" (30 days). Even with continuous refresh activity, the session
+	// must end after this window. See ADR-006.
+	// Parsed by time.ParseDuration in session.go and refresh.go.
+	JWTRefreshMaxLifetime string
 
 	// GoogleClientID is the OAuth 2.0 client ID from Google Cloud Console.
 	// Used in: oidc.go (auth URL), idtoken.go (aud verification), exchange.go (token exchange).
@@ -68,6 +75,14 @@ type serviceImpl struct {
 	bootstrapSvc *bootstrap.Service
 }
 
+// minJWTSecretBytes is the floor on JWT_SECRET length, in bytes.
+//
+// 32 bytes = 256 bits, matching HS256's hash output. Below this, the HMAC
+// becomes vulnerable to offline brute-force given enough observed JWTs.
+// Keeping the check here prevents accidental deployments with weak secrets
+// (e.g. JWT_SECRET=x, JWT_SECRET=changeme). See ADR-007.
+const minJWTSecretBytes = 32
+
 // NewService constructs the auth service and connects to Redis.
 // Called by: main.go (once at startup, before HTTP server starts).
 // Returns the Service interface so callers never see the concrete struct.
@@ -75,6 +90,13 @@ func NewService(cfg Config) (Service, error) {
 	// Validate required fields — fail fast at startup, not at first request.
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("auth: JWTSecret is required")
+	}
+	if len(cfg.JWTSecret) < minJWTSecretBytes {
+		return nil, fmt.Errorf(
+			"auth: JWTSecret must be at least %d bytes (got %d). "+
+				"Generate with: openssl rand -base64 48",
+			minJWTSecretBytes, len(cfg.JWTSecret),
+		)
 	}
 	if cfg.GoogleClientID == "" {
 		return nil, fmt.Errorf("auth: GoogleClientID is required")
@@ -98,6 +120,9 @@ func NewService(cfg Config) (Service, error) {
 	}
 	if cfg.JWTRefreshTTL == "" {
 		cfg.JWTRefreshTTL = "168h"
+	}
+	if cfg.JWTRefreshMaxLifetime == "" {
+		cfg.JWTRefreshMaxLifetime = "720h" // 30 days — ADR-006
 	}
 
 	// Connect to Valkey — verifies connectivity with a PING.

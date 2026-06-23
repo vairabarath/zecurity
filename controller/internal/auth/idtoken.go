@@ -38,6 +38,11 @@ var jwksCache struct {
 const jwksURL = "https://www.googleapis.com/oauth2/v3/certs"
 const jwksCacheTTL = 1 * time.Hour
 
+// jwksHTTPClient is used for JWKS fetches. A dedicated client with an explicit
+// timeout prevents login flows from blocking indefinitely if Google's JWKS
+// endpoint becomes slow or unreachable (P6-F1).
+var jwksHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 // VerifyGoogleIDToken verifies a Google id_token and returns the claims.
 // Called by: CallbackHandler() in callback.go (Step 5).
 //
@@ -173,7 +178,7 @@ func fetchGoogleJWKS(ctx context.Context) (map[string]*rsa.PublicKey, error) {
 		return nil, fmt.Errorf("build jwks request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := jwksHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch jwks: %w", err)
 	}

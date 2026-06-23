@@ -44,7 +44,10 @@ function AdminLayout() {
   const { isReady } = useRequireAuth()
   const { user } = useAuthStore()
   if (!isReady) return null
-  if (user && user.role !== 'ADMIN') return <Navigate to="/install" replace />
+  // Default-deny: redirect unless we have a confirmed ADMIN user. A null/roleless
+  // user must NOT fall through to the admin shell, even though useRequireAuth
+  // populates user before isReady today — don't rely on that invariant here.
+  if (!user || user.role !== 'ADMIN') return <Navigate to="/install" replace />
   return <AppShell />
 }
 

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,7 +43,11 @@ func WorkspaceGuard(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			}
 
 			if status != "active" {
-				writeJSON403(w, fmt.Sprintf("workspace not active: %s", status))
+				// STAGE3-F4: log specifics server-side, return generic to caller.
+				// Avoids leaking lifecycle state ('provisioning'/'suspended'/'deleted')
+				// in the 403 response body. CWE-209.
+				log.Printf("workspace_guard: workspace=%s status=%s blocked", tc.TenantID, status)
+				writeJSON403(w, "workspace inactive")
 				return
 			}
 

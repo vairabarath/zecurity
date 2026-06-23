@@ -2,11 +2,11 @@ package resolvers
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -23,12 +23,12 @@ import (
 func HasRole(ctx context.Context, _ any, next graphql.Resolver, roles []graph.Role) (any, error) {
 	tc, ok := tenant.Get(ctx)
 	if !ok {
-		return nil, fmt.Errorf("unauthenticated")
+		return nil, apperr.UserErrorf("unauthenticated")
 	}
 	for _, r := range roles {
 		if strings.EqualFold(string(r), tc.Role) { // graph.Role is "ADMIN"; tc.Role is "admin"
 			return next(ctx)
 		}
 	}
-	return nil, fmt.Errorf("forbidden: requires one of roles %v", roles)
+	return nil, apperr.UserErrorf("forbidden: requires one of roles %v", roles)
 }

@@ -18,6 +18,8 @@ import {
   ConnectorStatus,
   DeleteConnectorDocument,
   DeleteShieldDocument,
+  GetConnectorDocument,
+  GetRemoteNetworkDocument,
   GetRemoteNetworksDocument,
   GetShieldsDocument,
   RevokeConnectorDocument,
@@ -116,21 +118,23 @@ export default function ConnectorDetail() {
   const navigate = useNavigate()
   const accessToken = useAuthStore((state) => state.accessToken)
 
-  const { data, loading } = useQuery(GetRemoteNetworksDocument, {
+  // The detail page owns its data via the by-id query — it does NOT depend on
+  // the workspace-wide GetRemoteNetworks cache (mirrors ShieldDetail).
+  const { data, loading } = useQuery(GetConnectorDocument, {
+    variables: { id: connectorId! },
+    skip: !connectorId,
     pollInterval: 10000,
     fetchPolicy: 'cache-and-network',
   })
 
-  const found = data?.remoteNetworks
-    .flatMap((network) => network.connectors.map((connector) => ({
-      ...connector,
-      networkId: network.id,
-      networkName: network.name,
-    })))
-    .find((connector) => connector.id === connectorId)
+  const found = data?.connector
+  const networkId = found?.remoteNetworkId
 
-  const networkId = found?.networkId
-  const networkName = found?.networkName ?? 'Network'
+  const { data: networkData } = useQuery(GetRemoteNetworkDocument, {
+    variables: { id: networkId ?? '' },
+    skip: !networkId,
+  })
+  const networkName = networkData?.remoteNetwork?.name ?? 'Network'
 
   const { data: shieldsData } = useQuery(GetShieldsDocument, {
     variables: { remoteNetworkId: networkId ?? '' },
@@ -189,7 +193,12 @@ export default function ConnectorDetail() {
   }
 
   const [revokeConnector, { loading: revoking }] = useMutation(RevokeConnectorDocument, {
-    refetchQueries: [{ query: GetRemoteNetworksDocument }],
+    // Refetch the by-id query so this page's status updates; refresh the list in
+    // the background for when the user navigates back.
+    refetchQueries: [
+      { query: GetConnectorDocument, variables: { id: connectorId } },
+      { query: GetRemoteNetworksDocument },
+    ],
   })
   const [deleteConnector, { loading: deleting }] = useMutation(DeleteConnectorDocument, {
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
@@ -336,7 +345,7 @@ export default function ConnectorDetail() {
                 <div className="flex items-center gap-2">
                   <div className="rounded-xl bg-secondary p-1">
                     <button className="rounded-lg bg-card px-4 py-2 text-sm font-semibold">Linux</button>
-                    <button className="rounded-lg px-4 py-2 text-sm font-semibold text-muted-foreground">Docker</button>
+                    <button disabled title="Docker install coming soon" className="cursor-not-allowed rounded-lg px-4 py-2 text-sm font-semibold text-muted-foreground/50">Docker <span className="ml-1 rounded bg-card px-1.5 py-0.5 text-[10px] uppercase tracking-wide">Soon</span></button>
                   </div>
                   <Button variant="outline" size="sm" onClick={handleCopy} disabled={!installCommand} className="gap-2">
                     {copied ? <CheckCircle className="h-4 w-4 text-primary" /> : <Copy className="h-4 w-4" />}
