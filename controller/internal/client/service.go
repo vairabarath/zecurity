@@ -426,19 +426,16 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 
 	workspaceID := claims.TenantID
 
-	// Serve from cache when available.
-	if snap, ok := s.policyCache.Get(workspaceID); ok {
-		return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
-	}
-
-	// Cache miss — compile from DB.
-	snap, err := policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, s.pool, workspaceID)
+	// Serve from cache, or compile under the epoch CAS so a compile raced by a
+	// policy change is not cached as stale (ADR-011).
+	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
+		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, s.pool, workspaceID)
+	})
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.
 		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)
 	}
 
-	s.policyCache.Set(workspaceID, snap)
 	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
 }
 

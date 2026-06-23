@@ -131,11 +131,13 @@ func TestPushWorkspace_SendQueueFull(t *testing.T) {
 }
 
 // TestPushWorkspace_Coalesces drives the real notifier path: a burst of five
-// policy changes arriving while one compile is in flight collapses to a single
-// compile, and the connector still ends up at the latest version. This proves
-// both coalescing (5 triggers -> 1 compile) and latest-wins: the burst's cache
-// invalidations all precede the in-flight compile's Set, so the trailing
-// iteration serves the freshly-cached latest snapshot without recompiling.
+// policy changes arriving while one compile is in flight collapses to a bounded
+// number of compiles (not five), and the connector ends at the latest version.
+// With epoch CAS (ADR-011), the in-flight compile #1 is rejected because the
+// burst advanced the epoch, so exactly one recompile (#2) produces the latest
+// snapshot and the trailing latch iteration serves it from cache. The latch
+// coalesces the five triggers into a single pending recompile — not five
+// separate compile/push cycles.
 func TestPushWorkspace_Coalesces(t *testing.T) {
 	reg := NewConnectorRegistry()
 	c1 := testClient("c1", "ws-A")
@@ -148,13 +150,19 @@ func TestPushWorkspace_Coalesces(t *testing.T) {
 	var count int64
 	var mu sync.Mutex
 
+	// Only the first compile blocks (so the burst can pile up while it is in
+	// flight); the epoch-forced recompile runs free.
 	blockingCompile := func(_ context.Context, _ *policy.Store, _ *policy.Notifier, _ *pgxpool.Pool, ws string) (*clientv1.ACLSnapshot, error) {
 		mu.Lock()
 		count++
+		first := count == 1
 		mu.Unlock()
-		entered <- struct{}{}
-		<-release
-		return &clientv1.ACLSnapshot{WorkspaceId: ws, Version: notifier.Version(ws)}, nil
+		v := notifier.Version(ws) // version read at compile start
+		if first {
+			entered <- struct{}{}
+			<-release
+		}
+		return &clientv1.ACLSnapshot{WorkspaceId: ws, Version: v}, nil
 	}
 	p := newTestPusher(reg, cache, blockingCompile)
 	notifier.RegisterPushHook(p.PushWorkspace)
@@ -168,26 +176,24 @@ func TestPushWorkspace_Coalesces(t *testing.T) {
 		t.Fatal("timed out waiting for compile entry")
 	}
 
-	// Burst while #1 is blocked — these set pending once (collapsed) and each
-	// invalidates the cache before #1's Set lands.
+	// Burst while #1 is blocked — each bumps the epoch and sets the latch's
+	// pending bit (collapsed into one).
 	_ = notifier.NotifyPolicyChange(ctx, "ws-A") // #2
 	_ = notifier.NotifyPolicyChange(ctx, "ws-A") // #3
 	_ = notifier.NotifyPolicyChange(ctx, "ws-A") // #4
 	_ = notifier.NotifyPolicyChange(ctx, "ws-A") // #5
 
-	select { // finish #1; trailing iteration serves the cached latest snapshot
-	case release <- struct{}{}:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out releasing compile")
-	}
+	close(release) // finish #1; its stale result is rejected by the epoch CAS
 
 	waitDrained(t, p, "ws-A")
 
 	mu.Lock()
 	got := count
 	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("5 changes during one in-flight compile produced %d compiles, want 1 (coalesced)", got)
+	// #1 (rejected by epoch CAS) + #2 (fresh, stored); the trailing latch
+	// iteration is a cache hit, not a compile. Far fewer than the 5 triggers.
+	if got != 2 {
+		t.Fatalf("5 changes produced %d compiles, want 2 (stale-rejected + one recompile)", got)
 	}
 
 	// The connector must end up at the latest version (5), not a stale one.
@@ -260,11 +266,11 @@ func TestPusher_ConcurrentPushAndDisconnect(t *testing.T) {
 // into an empty (just-invalidated) slot. This is independent of ACLPusher's
 // latch and also affects the heartbeat and client-pull compile sites.
 //
-// The fix is an invalidation epoch / CAS in the cache+compile flow (see audit).
-// Until that lands this test is skipped; remove the Skip to reproduce the bug.
+// Fixed by the SnapshotCache invalidation epoch / CAS (ADR-011): the burst bumps
+// the epoch, GetOrCompile's SetIfEpoch rejects compile #1's stale result, and a
+// recompile delivers the latest version. This test is the active regression
+// guard for that fix.
 func TestPushWorkspace_StaleInsertDefersLastChange(t *testing.T) {
-	t.Skip("known correctness gap: stale-insert defers last change; tracked separately, fix = cache invalidation epoch/CAS. Remove Skip to reproduce.")
-
 	reg := NewConnectorRegistry()
 	c1 := testClient("c1", "ws-A")
 	reg.add("c1", c1)

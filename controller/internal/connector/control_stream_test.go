@@ -1,11 +1,54 @@
 package connector
 
 import (
+	"context"
 	"sync"
 	"testing"
 
+	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	"github.com/yourorg/ztna/controller/internal/policy"
 )
+
+// TestPushACLSnapshot_DeliversCachedAndRespectsGate verifies the heartbeat path
+// after the GetOrCompile conversion (ADR-011): on a cache hit it delivers the
+// cached snapshot when the connector lags, and skips the push (version gate)
+// when the connector is already current. DB-free — the cache is pre-seeded so
+// GetOrCompile's fast-path Get hits and no compile runs. The epoch mechanism
+// itself is covered by the policy-package cache tests.
+func TestPushACLSnapshot_DeliversCachedAndRespectsGate(t *testing.T) {
+	const ws = "ws-A"
+	cache := policy.NewSnapshotCache()
+	// Seed via the public epoch-aware store (Set is unexported after the ADR-011 seal).
+	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, cache.Epoch(ws))
+
+	h := &EnrollmentHandler{
+		PolicyStore:    policy.NewStore(nil), // non-nil for the guard; never used on a cache hit
+		PolicyCache:    cache,
+		PolicyNotifier: policy.NewNotifier(cache),
+	}
+
+	// Connector behind (v1) -> receives the cached v2.
+	lagging := testClient("c1", ws)
+	if err := h.pushACLSnapshot(context.Background(), lagging, 1); err != nil {
+		t.Fatalf("pushACLSnapshot (lagging): %v", err)
+	}
+	if len(lagging.outbound) != 1 {
+		t.Fatalf("lagging connector got %d messages, want 1", len(lagging.outbound))
+	}
+	if v := (<-lagging.outbound).GetAclSnapshot().GetVersion(); v != 2 {
+		t.Fatalf("delivered version %d, want 2", v)
+	}
+
+	// Connector current (v2) -> version gate skips the push.
+	current := testClient("c2", ws)
+	if err := h.pushACLSnapshot(context.Background(), current, 2); err != nil {
+		t.Fatalf("pushACLSnapshot (current): %v", err)
+	}
+	if len(current.outbound) != 0 {
+		t.Fatalf("current connector got %d messages, want 0 (gate should skip)", len(current.outbound))
+	}
+}
 
 func testClient(connectorID, tenantID string) *connectorStreamClient {
 	return &connectorStreamClient{
