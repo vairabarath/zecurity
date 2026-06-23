@@ -251,14 +251,12 @@ pub async fn run(
                         tracing::warn!(dest = %dest, port, "connector offline — failing closed for managed resource");
                     }
                     None => {
-                        // Not in ACL — unmanaged traffic → bypass via SO_MARK NIC.
-                        tokio::spawn(async move {
-                            if let Err(e) =
-                                relay_tcp_bypass(dest, port, tcp_to_quic_rx, quic_to_tcp_tx).await
-                            {
-                                tracing::warn!(error = %e, "bypass relay ended");
-                            }
-                        });
+                        // The listener set is already built from allowed ACL entries.
+                        // Missing transport here means malformed snapshot/RN data, so
+                        // fail closed instead of bypassing a managed destination.
+                        tracing::warn!(dest = %dest, port, "no transport for managed resource — failing closed");
+                        drop(tcp_to_quic_rx);
+                        drop(quic_to_tcp_tx);
                     }
                 }
             }
@@ -400,69 +398,6 @@ async fn relay_tcp_to_quic(
         }
     }
 
-    let _ = send.shutdown().await;
-    Ok(())
-}
-
-/// Bypass relay for unmanaged traffic (not in ACL).
-///
-/// Opens a real TCP socket with SO_MARK=0x5a so it routes via the kernel's
-/// main table (priority 49 ip rule), bypassing the TUN device entirely.
-/// This allows non-Zecurity ports to reach the local network normally.
-async fn relay_tcp_bypass(
-    destination: String,
-    port: u16,
-    mut tcp_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
-) -> Result<()> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    use std::net::SocketAddr;
-
-    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    sock.set_mark(0x5a_u32)?;
-    sock.set_nonblocking(true)?;
-
-    let addr: SocketAddr = format!("{}:{}", destination, port)
-        .parse()
-        .map_err(|e| anyhow!("bypass: invalid address {}:{}: {}", destination, port, e))?;
-    // Non-blocking connect; WouldBlock is expected and handled by tokio below.
-    let _ = sock.connect(&addr.into());
-
-    let stream =
-        tokio::net::TcpStream::from_std(std::net::TcpStream::from(sock)).map_err(|e| {
-            anyhow!(
-                "bypass: convert to tokio stream for {}:{}: {}",
-                destination,
-                port,
-                e
-            )
-        })?;
-    // Wait for the non-blocking connect to complete.
-    stream.writable().await?;
-    if let Some(err) = stream.take_error()? {
-        return Err(anyhow!("bypass: connect to {}:{} failed: {}", destination, port, err));
-    }
-
-    tracing::info!(dest = %destination, port, "bypass relay open");
-
-    let (mut recv, mut send) = tokio::io::split(stream);
-    let mut buf = vec![0u8; 65536];
-    loop {
-        tokio::select! {
-            data = tcp_rx.recv() => {
-                match data {
-                    Some(b) => { if send.write_all(&b).await.is_err() { break; } }
-                    None => break,
-                }
-            }
-            result = recv.read(&mut buf) => {
-                match result {
-                    Ok(n) if n > 0 => { if tcp_tx.send(buf[..n].to_vec()).is_err() { break; } }
-                    _ => break,
-                }
-            }
-        }
-    }
     let _ = send.shutdown().await;
     Ok(())
 }

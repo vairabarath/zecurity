@@ -9,7 +9,10 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::config;
-use crate::grpc::{self, client_v1::{AclEntry, AclRemoteNetwork, GetAclSnapshotRequest}};
+use crate::grpc::{
+    self,
+    client_v1::{AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
+};
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
@@ -19,7 +22,7 @@ use crate::runtime::{
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
-use crate::tun::TunManager;
+use crate::tun::{AllowedFlow, TunManager};
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
@@ -210,7 +213,11 @@ async fn handle_request(
             }
 
             let s = state.read().await;
-            let my_spiffe = s.device.as_ref().map(|d| d.spiffe_id.as_str()).unwrap_or("");
+            let my_spiffe = s
+                .device
+                .as_ref()
+                .map(|d| d.spiffe_id.as_str())
+                .unwrap_or("");
             let resources = s.acl_snapshot.as_ref().map(|snap| {
                 snap.entries
                     .iter()
@@ -437,7 +444,11 @@ async fn handle_up(
     let allowed_entries: Vec<AclEntry> = acl
         .entries
         .iter()
-        .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe.as_str()))
+        .filter(|e| {
+            e.allowed_spiffe_ids
+                .iter()
+                .any(|id| id == my_spiffe.as_str())
+        })
         .cloned()
         .collect();
 
@@ -481,30 +492,41 @@ async fn handle_up(
         }
     };
 
-    // Collect IPs only from allowed entries — route only what this device can access.
-    let ips: Vec<IpAddr> = allowed_entries
+    // Mark only the allowed TCP destination flows into the Zecurity route table.
+    // Other ports on the same IP stay on the normal kernel route.
+    let allowed_flows: Vec<AllowedFlow> = allowed_entries
         .iter()
-        .filter_map(|e| e.address.parse::<IpAddr>().ok())
+        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
+        .filter_map(|e| {
+            let IpAddr::V4(ip) = e.address.parse::<IpAddr>().ok()? else {
+                return None;
+            };
+            Some(AllowedFlow {
+                ip,
+                port: e.port as u16,
+            })
+        })
         .collect();
 
-    // Check for route conflicts before installing anything.
-    if let Err(e) = mgr.check_conflicts(&ips).await {
+    if allowed_flows.is_empty() {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
-            error: Some(format!("route conflict: {}", e)),
+            error: Some("no TCP resources available for this device".into()),
             ..Default::default()
         };
     }
 
-    // Install one /32 route per resource IP.
-    for ip in &ips {
-        if let Err(e) = mgr.add_route(*ip).await {
-            warn!(ip = %ip, error = %e, "failed to add route (skipping)");
-        }
+    if let Err(e) = mgr.configure_allowed_flows(&allowed_flows) {
+        return IpcResponse {
+            ok: false,
+            kind: "Up".into(),
+            error: Some(format!("failed to configure split-tunnel routes: {}", e)),
+            ..Default::default()
+        };
     }
 
-    let route_count = ips.len();
+    let route_count = allowed_flows.len();
     let dev = match mgr.take_device() {
         Some(d) => d,
         None => {
@@ -769,7 +791,11 @@ fn build_transports_by_resource(
 
         rn_transport.insert(
             rn.remote_network_id.clone(),
-            Some(Arc::new(ClientTransport::new(direct, connector_socket, relay))),
+            Some(Arc::new(ClientTransport::new(
+                direct,
+                connector_socket,
+                relay,
+            ))),
         );
     }
 
