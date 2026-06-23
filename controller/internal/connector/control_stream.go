@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -452,14 +453,14 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		return nil
 	}
 
-	snap, ok := h.PolicyCache.Get(client.tenantID)
-	if !ok {
-		compiled, err := policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
-		if err != nil {
-			return fmt.Errorf("compile ACL snapshot: %w", err)
-		}
-		h.PolicyCache.Set(client.tenantID, compiled)
-		snap = compiled
+	// GetOrCompile uses the cache's epoch CAS so a compile raced by a policy
+	// change is not cached as stale (ADR-011). The version gate below is
+	// unchanged: it still skips the push when the connector is already current.
+	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+	})
+	if err != nil {
+		return fmt.Errorf("compile ACL snapshot: %w", err)
 	}
 
 	if connectorVersion == snap.Version {

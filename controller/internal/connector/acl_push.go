@@ -116,15 +116,15 @@ func (p *ACLPusher) pushOnce(workspaceID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), aclPushTimeout)
 	defer cancel()
 
-	snap, ok := p.cache.Get(workspaceID)
-	if !ok {
-		compiled, err := p.compile(ctx, p.store, p.notifier, p.pool, workspaceID)
-		if err != nil {
-			log.Printf("acl push: compile workspace %s: %v", workspaceID, err)
-			return
-		}
-		p.cache.Set(workspaceID, compiled)
-		snap = compiled
+	// GetOrCompile captures the cache epoch before compiling and stores via an
+	// epoch CAS, so a snapshot built from a now-superseded view is dropped rather
+	// than poisoning the freshly-invalidated slot (ADR-011).
+	snap, err := p.cache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
+		return p.compile(ctx, p.store, p.notifier, p.pool, workspaceID)
+	})
+	if err != nil {
+		log.Printf("acl push: compile workspace %s: %v", workspaceID, err)
+		return
 	}
 
 	clients := p.registry.ClientsForWorkspace(workspaceID)
