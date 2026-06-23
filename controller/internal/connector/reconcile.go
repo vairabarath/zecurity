@@ -167,10 +167,19 @@ func (h *EnrollmentHandler) reconcileShield(ctx context.Context, db *pgxpool.Poo
 			metrics.Resync()
 		}
 	}
+	var anyReaped bool
 	for _, rid := range toReap {
 		if reaped, _ := resource.ReapTombstone(ctx, db, client.tenantID, report.ShieldId, rid); reaped {
+			anyReaped = true
 			metrics.TombstoneReaped()
 			log.Printf("reconcile: tombstone %s confirmed absent x%d — reaped", rid, absentReportsBeforeReap)
+		}
+	}
+	// A reap physically removed a tombstoned resource from the ACL compiler's
+	// output — invalidate the workspace ACL snapshot once for this report.
+	if anyReaped && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+			log.Printf("reconcile: notify after reap tenant=%s: %v", client.tenantID, err)
 		}
 	}
 
