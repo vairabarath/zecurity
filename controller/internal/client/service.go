@@ -427,7 +427,7 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	workspaceID := claims.TenantID
 
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
-	// policy change is not cached as stale (ADR-011).
+	// policy change is not cached as stale (ADR-013).
 	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
 		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, s.pool, workspaceID)
 	})

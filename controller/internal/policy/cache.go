@@ -23,7 +23,7 @@ type SnapshotCache struct {
 	// epoch is the per-workspace invalidation counter. Invalidate bumps it; a
 	// compile captures it before reading any state and SetIfEpoch stores only if
 	// it is unchanged, so a snapshot built from a now-superseded view is dropped
-	// instead of poisoning the slot (ADR-011).
+	// instead of poisoning the slot (ADR-013).
 	epoch map[string]uint64
 }
 
@@ -57,7 +57,7 @@ func (c *SnapshotCache) Epoch(workspaceID string) uint64 {
 // still overwrites — connector_tunnel_addr can refresh on a connector heartbeat
 // without a policy version bump, and the latest routing hint should win.
 //
-// set is epoch-unaware and unexported (ADR-011 seal): the only store paths
+// set is epoch-unaware and unexported (ADR-013 seal): the only store paths
 // available to callers are GetOrCompile (epoch CAS) and SetIfEpoch, so no caller
 // can plant a stale snapshot that bypasses the epoch check.
 func (c *SnapshotCache) set(workspaceID string, snapshot *clientv1.ACLSnapshot) {

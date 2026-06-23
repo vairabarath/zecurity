@@ -454,7 +454,7 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	}
 
 	// GetOrCompile uses the cache's epoch CAS so a compile raced by a policy
-	// change is not cached as stale (ADR-011). The version gate below is
+	// change is not cached as stale (ADR-013). The version gate below is
 	// unchanged: it still skips the push when the connector is already current.
 	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
 		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
