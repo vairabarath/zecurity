@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use crate::policy::PolicyCache;
 
 use crate::agent_server::ShieldRegistry;
+use crate::relay_attachment::RelayAttachmentSlot;
 use crate::config::ConnectorConfig;
 use crate::controller_client::{
     build_channel, fetch_public_ip, verify_controller_spiffe_preflight,
@@ -41,6 +42,7 @@ pub async fn run_control_stream(
     mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
     mut log_rx: mpsc::Receiver<crate::ControlMessage>,
     policy_cache: Arc<PolicyCache>,
+    relay_attachment_slot: RelayAttachmentSlot,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -76,6 +78,7 @@ pub async fn run_control_stream(
             &version,
             &public_ip,
             &policy_cache,
+            &relay_attachment_slot,
         )
         .await
         {
@@ -108,6 +111,19 @@ async fn send_msg(
         .map_err(|_| anyhow::anyhow!("outbound channel closed"))
 }
 
+/// Read the current relay attachment and return (relay_id, relay_spiffe_id, attached_at_unix).
+/// Fields are empty/zero when no relay is attached.
+fn relay_attachment_fields(slot: &RelayAttachmentSlot) -> (String, String, i64) {
+    if let Some(guard) = slot.try_read().ok() {
+        match &*guard {
+            Some(a) => (a.relay_id.clone(), a.relay_spiffe_id.clone(), a.attached_at),
+            None => (String::new(), String::new(), 0),
+        }
+    } else {
+        (String::new(), String::new(), 0)
+    }
+}
+
 async fn run_once(
     cfg: &ConnectorConfig,
     state: &mut EnrollmentState,
@@ -119,6 +135,7 @@ async fn run_once(
     version: &str,
     public_ip: &str,
     policy_cache: &Arc<PolicyCache>,
+    relay_attachment_slot: &RelayAttachmentSlot,
 ) -> Result<()> {
     let cert_store =
         CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for control stream")?;
@@ -150,18 +167,25 @@ async fn run_once(
     );
 
     // Send initial ConnectorHealthReport on connect.
-    out_tx
-        .send(ConnectorControlMessage {
-            body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
-                version: version.to_string(),
-                hostname: hostname.to_string(),
-                public_ip: public_ip.to_string(),
-                lan_addr: lan_addr.to_string(),
-                acl_version: policy_cache.version(),
-            })),
-        })
-        .await
-        .context("failed to send initial health report")?;
+    {
+        let (relay_id, relay_spiffe_id, relay_attached_at_unix) =
+            relay_attachment_fields(relay_attachment_slot);
+        out_tx
+            .send(ConnectorControlMessage {
+                body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
+                    version: version.to_string(),
+                    hostname: hostname.to_string(),
+                    public_ip: public_ip.to_string(),
+                    lan_addr: lan_addr.to_string(),
+                    acl_version: policy_cache.version(),
+                    relay_id,
+                    relay_spiffe_id,
+                    relay_attached_at_unix,
+                })),
+            })
+            .await
+            .context("failed to send initial health report")?;
+    }
 
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     // Consume the immediate first tick so we don't double-send health on connect.
@@ -206,13 +230,20 @@ async fn run_once(
                     send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ResourceAcks(ResourceAckBatch { acks })), }).await?;
                 }
 
-                send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
-                    version: version.to_string(),
-                    hostname: hostname.to_string(),
-                    public_ip: public_ip.to_string(),
-                    lan_addr: lan_addr.to_string(),
-                    acl_version: policy_cache.version(),
-                })), }).await?;
+                {
+                    let (relay_id, relay_spiffe_id, relay_attached_at_unix) =
+                        relay_attachment_fields(relay_attachment_slot);
+                    send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
+                        version: version.to_string(),
+                        hostname: hostname.to_string(),
+                        public_ip: public_ip.to_string(),
+                        lan_addr: lan_addr.to_string(),
+                        acl_version: policy_cache.version(),
+                        relay_id,
+                        relay_spiffe_id,
+                        relay_attached_at_unix,
+                    })), }).await?;
+                }
 
                 let status = shield_registry.get_shield_status_batch();
                 if !status.shields.is_empty() {

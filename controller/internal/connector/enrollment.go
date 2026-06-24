@@ -30,7 +30,8 @@ type EnrollmentHandler struct {
 
 	PolicyStore    *policy.Store
 	PolicyCache    *policy.SnapshotCache
-	PolicyNotifier *policy.Notifier
+	PolicyNotifier PolicyChangeNotifier
+	RelayStore     RelayPlacementStore
 
 	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
 }

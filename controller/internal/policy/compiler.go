@@ -6,51 +6,122 @@ import (
 	"net"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
-// CompileACLSnapshot builds a fresh ACLSnapshot for the given workspace by
-// walking: enabled access_rules → groups → group members → client device SPIFFE IDs.
+const defaultRelayPort = "9093"
+
+// CompileACLSnapshot builds a fresh ACLSnapshot for the given workspace.
+//
+// Routing model: Resource → remote_network_id → ACLRemoteNetwork → connectors[].
+// Every referenced Remote Network appears in the snapshot even if it has no
+// active connector — those appear with an empty connectors list and clients
+// must treat their resources as temporarily unavailable.
 //
 // Returns an error (and no snapshot) on any DB failure — callers must default-deny.
-func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, pool *pgxpool.Pool, workspaceID string) (*clientv1.ACLSnapshot, error) {
+func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, workspaceID string) (*clientv1.ACLSnapshot, error) {
 	rules, err := store.ListEnabledRulesWithResources(ctx, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("compile acl: list rules: %w", err)
 	}
 
-	// Aggregate SPIFFE IDs per resource, deduplicating across groups.
+	// Collect unique group IDs and build the authoritative remote-network map
+	// from rule rows (which carry RN id+name via JOIN).
 	type entryKey struct {
 		resourceID string
 		address    string
 		port       uint32
 		protocol   string
 	}
-	spiffeSet := make(map[entryKey]map[string]struct{})
 	names := make(map[entryKey]string)
 	shieldIDs := make(map[entryKey]string)
+	routeTypes := make(map[entryKey]string)
+	rnByKey := make(map[entryKey]string)     // entryKey → remote_network_id
+	keyGroups := make(map[entryKey][]string) // groups contributing to each entry
+
+	groupIDSet := make(map[string]struct{})
+	rnNames := make(map[string]string) // remote_network_id → name (authoritative set)
 
 	for _, rule := range rules {
-		key := entryKey{
-			resourceID: rule.ResourceID,
-			address:    rule.Address,
-			port:       rule.Port,
-			protocol:   rule.Protocol,
-		}
-		if _, ok := spiffeSet[key]; !ok {
-			spiffeSet[key] = make(map[string]struct{})
+		key := entryKey{rule.ResourceID, rule.Address, rule.Port, rule.Protocol}
+		if _, ok := names[key]; !ok {
+			routeType, err := routeTypeForResource(rule.Status, rule.ShieldID)
+			if err != nil {
+				return nil, fmt.Errorf("compile acl: resource %s: %w", rule.ResourceID, err)
+			}
 			names[key] = rule.Name
 			shieldIDs[key] = rule.ShieldID
+			routeTypes[key] = routeType
+			rnByKey[key] = rule.RemoteNetworkID
 		}
+		keyGroups[key] = append(keyGroups[key], rule.GroupID)
+		groupIDSet[rule.GroupID] = struct{}{}
+		rnNames[rule.RemoteNetworkID] = rule.RemoteNetworkName
+	}
 
-		spiffes, err := store.ListActiveDeviceSPIFFEsForGroup(ctx, workspaceID, rule.GroupID)
-		if err != nil {
-			return nil, fmt.Errorf("compile acl: spiffes for group %s: %w", rule.GroupID, err)
+	groupIDs := make([]string, 0, len(groupIDSet))
+	for id := range groupIDSet {
+		groupIDs = append(groupIDs, id)
+	}
+
+	rnIDs := make([]string, 0, len(rnNames))
+	for id := range rnNames {
+		rnIDs = append(rnIDs, id)
+	}
+
+	// Batch SPIFFE fetch — one query for all groups.
+	groupSPIFFEs, err := store.ListActiveDeviceSPIFFEsForGroups(ctx, workspaceID, groupIDs)
+	if err != nil {
+		return nil, fmt.Errorf("compile acl: batch spiffes: %w", err)
+	}
+
+	// Batch connector fetch — all active connectors for the referenced RNs.
+	connectorRows, err := store.GetConnectorsForRemoteNetworks(ctx, rnIDs)
+	if err != nil {
+		return nil, fmt.Errorf("compile acl: connector lookup: %w", err)
+	}
+
+	// Seed ACLRemoteNetwork map from rnNames (every RN starts with empty connectors).
+	rnMap := make(map[string]*clientv1.ACLRemoteNetwork, len(rnNames))
+	for rnID, rnName := range rnNames {
+		rnMap[rnID] = &clientv1.ACLRemoteNetwork{
+			RemoteNetworkId: rnID,
+			Name:            rnName,
+			Connectors:      []*clientv1.ACLConnector{},
 		}
-		for _, s := range spiffes {
-			spiffeSet[key][s] = struct{}{}
+	}
+	// Populate connectors from query results.
+	for _, row := range connectorRows {
+		host := row.LanAddr
+		if h, _, err := net.SplitHostPort(row.LanAddr); err == nil {
+			host = h
 		}
+		tunnelAddr := ""
+		if host != "" {
+			tunnelAddr = host + ":9092"
+		}
+		spiffe := ""
+		if row.ConnectorID != "" && row.TrustDomain != "" {
+			spiffe = appmeta.ConnectorSPIFFEID(row.TrustDomain, row.ConnectorID)
+		}
+		rnMap[row.RemoteNetworkID].Connectors = append(rnMap[row.RemoteNetworkID].Connectors, &clientv1.ACLConnector{
+			ConnectorId:         row.ConnectorID,
+			ConnectorTunnelAddr: tunnelAddr,
+			ConnectorSpiffe:     spiffe,
+		})
+	}
+
+	// Build ACL entries, aggregating SPIFFEs per resource across groups.
+	spiffeSet := make(map[entryKey]map[string]struct{})
+	for key, groups := range keyGroups {
+		set := make(map[string]struct{})
+		for _, gid := range groups {
+			for _, s := range groupSPIFFEs[gid] {
+				set[s] = struct{}{}
+			}
+		}
+		spiffeSet[key] = set
 	}
 
 	entries := make([]*clientv1.ACLEntry, 0, len(spiffeSet))
@@ -66,41 +137,57 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, p
 			Port:             key.port,
 			Protocol:         key.protocol,
 			AllowedSpiffeIds: ids,
-			RouteType:        "shield",
+			RouteType:        routeTypes[key],
 			ShieldId:         shieldIDs[key],
+			RemoteNetworkId:  rnByKey[key],
 		})
 	}
 
-	// Use the notifier's monotonic version so downstream clients can detect
-	// policy changes. After a controller restart the counter resets to 0 but
-	// increments on the next policy mutation — that is acceptable.
-	version := notifier.Version(workspaceID)
+	// Collect remote networks into a stable slice.
+	remoteNetworks := make([]*clientv1.ACLRemoteNetwork, 0, len(rnMap))
+	for _, rn := range rnMap {
+		remoteNetworks = append(remoteNetworks, rn)
+	}
 
-	// Look up the active connector's LAN address so clients know which QUIC
-	// tunnel endpoint to connect to. Connector QUIC always runs on port 9092.
-	// lan_addr may be stored as "ip:port" (gRPC port 9091) — extract only the host.
-	var connectorTunnelAddr string
-	var lanAddr string
-	_ = pool.QueryRow(ctx,
-		`SELECT COALESCE(lan_addr, '') FROM connectors
-		 WHERE tenant_id = $1
-		   AND status = 'active'
-		 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1`,
-		workspaceID,
-	).Scan(&lanAddr)
-	if lanAddr != "" {
-		host := lanAddr
-		if h, _, err := net.SplitHostPort(lanAddr); err == nil {
-			host = h
+	// Relay discovery — workspace-scoped.
+	var relayAddr, relaySPIFFEID string
+	relay, err := store.GetActiveRelay(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("compile acl: relay lookup: %w", err)
+	}
+	if relay != nil {
+		switch {
+		case relay.PublicAddr != "":
+			relayAddr = relay.PublicAddr
+		case relay.AddressScope == "public" && relay.ObservedIP != "":
+			relayAddr = net.JoinHostPort(relay.ObservedIP, defaultRelayPort)
 		}
-		connectorTunnelAddr = host + ":9092"
+		if relayAddr != "" {
+			relaySPIFFEID = appmeta.RelaySPIFFEID(relay.ID)
+		}
 	}
 
 	return &clientv1.ACLSnapshot{
-		WorkspaceId:          workspaceID,
-		Version:              version,
-		GeneratedAt:          time.Now().Unix(),
-		Entries:              entries,
-		ConnectorTunnelAddr:  connectorTunnelAddr,
+		WorkspaceId:    workspaceID,
+		Version:        notifier.Version(workspaceID),
+		GeneratedAt:    time.Now().Unix(),
+		Entries:        entries,
+		RemoteNetworks: remoteNetworks,
+		RelayAddr:      relayAddr,
+		RelaySpiffeId:  relaySPIFFEID,
 	}, nil
+}
+
+func routeTypeForResource(status, shieldID string) (string, error) {
+	switch status {
+	case "pending", "unprotected":
+		return "connector", nil
+	case "protecting", "protected", "failed":
+		if shieldID == "" {
+			return "", fmt.Errorf("status %q requires a shield", status)
+		}
+		return "shield", nil
+	default:
+		return "", fmt.Errorf("unsupported resource status %q", status)
+	}
 }

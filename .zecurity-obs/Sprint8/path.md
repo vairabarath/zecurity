@@ -265,3 +265,26 @@ See full fix details in [[Sprint8/Member2-Go-Proto-DB/Phase1-Policy-Schema]] →
 **Fix:** M1 added the three missing functions to `policy_helpers.go`. Both `loadGroup` and `loadResourceWithGroups` are defined on `*Resolver` (the base struct) so both `mutationResolver` and `queryResolver` can access them via embedding.
 
 See full fix details in [[Sprint8/Member3-Go-Controller/Phase1-Policy-Compiler]] → Post-Phase Fixes.
+
+---
+
+### Red Team Security Findings — M4 Client Daemon (2026-06-23)
+
+Post-install security audit of the client daemon on `relay-preparation` branch. 10 findings across CRITICAL/HIGH/MEDIUM/LOW. Full details in [[Sprint8/Member4-Rust-Client-Connector/Phase1-ACL-Snapshot-Handling]] → Post-Phase Fixes.
+
+**Summary by severity:**
+
+| # | Severity | Title | File |
+|---|----------|-------|------|
+| 1 | CRITICAL | `GetToken` IPC leaks bearer token to any same-user process | `daemon.rs:269` |
+| 2 | CRITICAL | `PostLoginState` accepts arbitrary private key injection | `daemon.rs:291` |
+| 3 | HIGH | `LoadState` hot-swaps daemon identity from disk at any time | `daemon.rs:250` |
+| 4 | HIGH | nftables table + route table 105 have no watchdog — silently bypassable | `tun.rs:9` |
+| 5 | HIGH | `Sync` IPC has no rate limit → controller DoS; 60s revocation lag | `daemon.rs:660` |
+| 6 | HIGH | `check_same_user` fails open on non-Linux (macOS/BSD) | `ipc.rs:124` |
+| 7 | MEDIUM | `Shutdown` IPC leaves nftables rules orphaned on daemon kill | `daemon.rs:154` |
+| 8 | MEDIUM | AES key stored adjacent to ciphertext in same directory | `state_store.rs:231` |
+| 9 | MEDIUM | JWT claims decoded without signature verification | `state_store.rs:539` |
+| 10 | LOW | `ZECURITY_DAEMON_SOCKET` env var allows socket path override | `ipc.rs:92` |
+
+Priority fixes: #1 and #2 (IPC token/key leak), #4 (nftables watchdog), #7 (orphaned rules on shutdown).

@@ -6,8 +6,10 @@ mod grpc;
 mod ipc;
 mod login;
 mod net_stack;
+mod relay_pool;
 mod runtime;
 mod state_store;
+mod transport;
 mod tun;
 mod tunnel_pool;
 mod cmd {

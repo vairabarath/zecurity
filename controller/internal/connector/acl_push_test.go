@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -15,14 +14,14 @@ import (
 
 // newTestPusher builds an ACLPusher with an injected compile function and a real
 // (empty) cache + registry. store/pool are unused because compile is injected.
-func newTestPusher(reg *ConnectorRegistry, cache *policy.SnapshotCache, compile func(context.Context, *policy.Store, *policy.Notifier, *pgxpool.Pool, string) (*clientv1.ACLSnapshot, error)) *ACLPusher {
+func newTestPusher(reg *ConnectorRegistry, cache *policy.SnapshotCache, compile func(context.Context, *policy.Store, *policy.Notifier, string) (*clientv1.ACLSnapshot, error)) *ACLPusher {
 	p := NewACLPusher(reg, nil, cache, nil, nil)
 	p.compile = compile
 	return p
 }
 
-func okCompile(version uint64) func(context.Context, *policy.Store, *policy.Notifier, *pgxpool.Pool, string) (*clientv1.ACLSnapshot, error) {
-	return func(_ context.Context, _ *policy.Store, _ *policy.Notifier, _ *pgxpool.Pool, ws string) (*clientv1.ACLSnapshot, error) {
+func okCompile(version uint64) func(context.Context, *policy.Store, *policy.Notifier, string) (*clientv1.ACLSnapshot, error) {
+	return func(_ context.Context, _ *policy.Store, _ *policy.Notifier, ws string) (*clientv1.ACLSnapshot, error) {
 		return &clientv1.ACLSnapshot{WorkspaceId: ws, Version: version}, nil
 	}
 }
@@ -95,7 +94,7 @@ func TestPushWorkspace_CompileErrorNoPush(t *testing.T) {
 	c := testClient("c1", "ws-A")
 	reg.add("c1", c)
 
-	failCompile := func(context.Context, *policy.Store, *policy.Notifier, *pgxpool.Pool, string) (*clientv1.ACLSnapshot, error) {
+	failCompile := func(context.Context, *policy.Store, *policy.Notifier, string) (*clientv1.ACLSnapshot, error) {
 		return nil, errors.New("boom")
 	}
 	p := newTestPusher(reg, policy.NewSnapshotCache(), failCompile)
@@ -152,7 +151,7 @@ func TestPushWorkspace_Coalesces(t *testing.T) {
 
 	// Only the first compile blocks (so the burst can pile up while it is in
 	// flight); the epoch-forced recompile runs free.
-	blockingCompile := func(_ context.Context, _ *policy.Store, _ *policy.Notifier, _ *pgxpool.Pool, ws string) (*clientv1.ACLSnapshot, error) {
+	blockingCompile := func(_ context.Context, _ *policy.Store, _ *policy.Notifier, ws string) (*clientv1.ACLSnapshot, error) {
 		mu.Lock()
 		count++
 		first := count == 1
@@ -286,7 +285,7 @@ func TestPushWorkspace_StaleInsertDefersLastChange(t *testing.T) {
 	// compiler does at compiler.go:77), then does slow work. Only the first
 	// compile (the in-flight one for change #1) blocks; a hypothetical recompile
 	// returns the fresh latest version immediately.
-	compile := func(_ context.Context, _ *policy.Store, _ *policy.Notifier, _ *pgxpool.Pool, ws string) (*clientv1.ACLSnapshot, error) {
+	compile := func(_ context.Context, _ *policy.Store, _ *policy.Notifier, ws string) (*clientv1.ACLSnapshot, error) {
 		mu.Lock()
 		calls++
 		first := calls == 1

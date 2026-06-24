@@ -51,19 +51,19 @@ func TestSet_RejectsOlder(t *testing.T) {
 }
 
 // TestSet_EqualVersionOverwrites: equal versions must overwrite, because the
-// connector_tunnel_addr can refresh on a connector heartbeat without a policy
+// relay routing metadata (relay_addr) can refresh on a heartbeat without a policy
 // version bump. The guard uses >=, not >.
 func TestSet_EqualVersionOverwrites(t *testing.T) {
 	c := NewSnapshotCache()
 	first := snap("ws", 7)
-	first.ConnectorTunnelAddr = "10.0.0.1:9092"
+	first.RelayAddr = "relay1.example.com:9093"
 	second := snap("ws", 7)
-	second.ConnectorTunnelAddr = "10.0.0.2:9092"
+	second.RelayAddr = "relay2.example.com:9093"
 	c.set("ws", first)
 	c.set("ws", second)
 	got, _ := c.Get("ws")
-	if got.ConnectorTunnelAddr != "10.0.0.2:9092" {
-		t.Fatalf("equal-version refresh dropped: want 10.0.0.2:9092, got %q", got.ConnectorTunnelAddr)
+	if got.RelayAddr != "relay2.example.com:9093" {
+		t.Fatalf("equal-version refresh dropped: want relay2.example.com:9093, got %q", got.RelayAddr)
 	}
 }
 

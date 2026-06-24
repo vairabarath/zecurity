@@ -69,7 +69,11 @@ impl PolicyCache {
         let entry = snapshot
             .entries
             .iter()
-            .find(|e| e.address == address && e.port == port as u32 && e.protocol == protocol)?;
+            .find(|e| {
+                e.address == address
+                    && e.port == port as u32
+                    && e.protocol.eq_ignore_ascii_case(protocol)
+            })?;
         Some(ResourceAcl {
             resource_id: entry.resource_id.clone(),
             allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
@@ -96,7 +100,7 @@ mod tests {
             workspace_id: "ws-test".into(),
             generated_at: 0,
             entries,
-            connector_tunnel_addr: String::new(),
+            ..Default::default()
         }
     }
 

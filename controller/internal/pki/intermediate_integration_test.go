@@ -99,8 +99,8 @@ func TestIntermediateCAIntegration(t *testing.T) {
 		t.Fatalf("unexpected intermediate common name: %s", intermediateCert.Subject.CommonName)
 	}
 
-	if intermediateCert.MaxPathLen != 0 || !intermediateCert.MaxPathLenZero {
-		t.Fatalf("expected intermediate MaxPathLen=0 with MaxPathLenZero=true")
+	if intermediateCert.MaxPathLen != 1 || intermediateCert.MaxPathLenZero {
+		t.Fatalf("expected intermediate MaxPathLen=1 with MaxPathLenZero=false")
 	}
 
 	roots := x509.NewCertPool()

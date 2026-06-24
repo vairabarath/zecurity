@@ -43,8 +43,10 @@ pub async fn run_control_stream(
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => {
+                // Debug formatting includes the full anyhow source chain;
+                // Display would only print the outermost context.
                 error!(
-                    error = %e,
+                    error = ?e,
                     backoff_secs,
                     "control stream error, reconnecting with backoff"
                 );

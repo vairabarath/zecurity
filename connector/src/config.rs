@@ -20,6 +20,8 @@
 //
 // Optional fields (have defaults):
 //   connector_id                — None until enrollment completes (Phase 5 writes it)
+//   relay_addr                  — None disables Relay registration
+//   relay_spiffe_id             — exact Relay SPIFFE URI; required with relay_addr
 //   auto_update_enabled         — false (Phase 7 updater checks this)
 //   log_level                   — "info"
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
@@ -37,6 +39,9 @@ pub const CONFIG_FILE_PATH: &str = "/etc/zecurity/connector.conf";
 const DEFAULT_STATE_DIR: &str = "/var/lib/zecurity-connector";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
+const DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_RELAY_MAX_TUNNEL_STREAMS: u32 = 256;
+const DEFAULT_RELAY_IDLE_TIMEOUT_SECS: u64 = 60;
 
 /// Connector configuration.
 ///
@@ -65,6 +70,28 @@ pub struct ConnectorConfig {
     /// Stored in state.json and read on subsequent startups.
     #[serde(default)]
     pub connector_id: Option<String>,
+
+    /// Relay QUIC address, for example `relay.example.com:9093`.
+    /// Relay registration is disabled when this and `relay_spiffe_id` are unset.
+    #[serde(default)]
+    pub relay_addr: Option<String>,
+
+    /// Exact Relay SPIFFE URI, for example
+    /// `spiffe://zecurity.in/relay/550e8400-e29b-41d4-a716-446655440000`.
+    #[serde(default)]
+    pub relay_spiffe_id: Option<String>,
+
+    /// Deadline for Client-to-Connector inner mTLS through Relay.
+    #[serde(default = "default_relay_inner_handshake_timeout_secs")]
+    pub relay_inner_handshake_timeout_secs: u64,
+
+    /// Maximum concurrent Relay tunnel streams, including inner mTLS handshakes.
+    #[serde(default = "default_relay_max_tunnel_streams")]
+    pub relay_max_tunnel_streams: u32,
+
+    /// Outer Connector-to-Relay QUIC idle timeout.
+    #[serde(default = "default_relay_idle_timeout_secs")]
+    pub relay_idle_timeout_secs: u64,
 
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]
@@ -100,6 +127,18 @@ fn default_log_level() -> String {
 
 fn default_update_check_interval_secs() -> u64 {
     DEFAULT_UPDATE_CHECK_INTERVAL_SECS
+}
+
+fn default_relay_inner_handshake_timeout_secs() -> u64 {
+    DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS
+}
+
+fn default_relay_max_tunnel_streams() -> u32 {
+    DEFAULT_RELAY_MAX_TUNNEL_STREAMS
+}
+
+fn default_relay_idle_timeout_secs() -> u64 {
+    DEFAULT_RELAY_IDLE_TIMEOUT_SECS
 }
 
 fn default_state_dir() -> String {

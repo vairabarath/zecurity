@@ -1,16 +1,26 @@
-use std::net::IpAddr;
+use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
-use netlink_packet_route::{
-    route::{RouteAddress, RouteAttribute, RouteMessage},
-    AddressFamily,
-};
 use rtnetlink::Handle;
+
+const ZECURITY_TABLE: &str = "zecurity_client";
+const ZECURITY_CHAIN: &str = "output";
+const ZECURITY_MARK: &str = "0x5a";
+const ZECURITY_ROUTE_TABLE: &str = "105";
+const ZECURITY_RULE_PRIORITY: &str = "49";
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AllowedFlow {
+    pub ip: Ipv4Addr,
+    pub port: u16,
+}
 
 pub struct TunManager {
     dev: Option<tun::AsyncDevice>,
-    routes: Vec<IpAddr>,
+    policy_ips: Vec<Ipv4Addr>,
     if_index: u32,
     handle: Handle,
 }
@@ -37,27 +47,96 @@ impl TunManager {
 
         Ok(Self {
             dev: Some(dev),
-            routes: Vec::new(),
+            policy_ips: Vec::new(),
             if_index,
             handle,
         })
     }
 
-    /// Verify no existing kernel route overlaps with any of the given IPs.
-    pub async fn check_conflicts(&self, ips: &[IpAddr]) -> Result<()> {
-        let existing = list_routes_v4(&self.handle).await?;
-        for ip in ips {
-            if existing.iter().any(|(route_ip, _)| route_ip == ip) {
-                anyhow::bail!("route conflict: {} is already in the kernel route table", ip);
-            }
+    /// Route only explicitly allowed TCP destination flows into zecurity0.
+    ///
+    /// nft marks matching local outbound packets before route lookup. The fwmark
+    /// rule then selects table 105, where only the allowed destination IPs point
+    /// at zecurity0. Other ports on the same IP remain unmarked and use the
+    /// normal kernel route.
+    pub fn configure_allowed_flows(&mut self, flows: &[AllowedFlow]) -> Result<()> {
+        cleanup_policy_routes();
+        if flows.is_empty() {
+            return Ok(());
         }
-        Ok(())
-    }
 
-    /// Add one /32 host route pointing to zecurity0.
-    pub async fn add_route(&mut self, ip: IpAddr) -> Result<()> {
-        add_host_route(&self.handle, ip, self.if_index).await?;
-        self.routes.push(ip);
+        let unique_flows: BTreeSet<AllowedFlow> = flows.iter().copied().collect();
+        let unique_ips: BTreeSet<Ipv4Addr> = unique_flows.iter().map(|flow| flow.ip).collect();
+
+        run_command("nft", &["add", "table", "inet", ZECURITY_TABLE])?;
+        run_command(
+            "nft",
+            &[
+                "add",
+                "chain",
+                "inet",
+                ZECURITY_TABLE,
+                ZECURITY_CHAIN,
+                "{ type route hook output priority mangle; policy accept; }",
+            ],
+        )?;
+
+        for flow in &unique_flows {
+            let ip = flow.ip.to_string();
+            let port = flow.port.to_string();
+            run_command(
+                "nft",
+                &[
+                    "add",
+                    "rule",
+                    "inet",
+                    ZECURITY_TABLE,
+                    ZECURITY_CHAIN,
+                    "ip",
+                    "daddr",
+                    &ip,
+                    "tcp",
+                    "dport",
+                    &port,
+                    "meta",
+                    "mark",
+                    "set",
+                    ZECURITY_MARK,
+                ],
+            )?;
+        }
+
+        run_command(
+            "ip",
+            &[
+                "rule",
+                "add",
+                "fwmark",
+                ZECURITY_MARK,
+                "lookup",
+                ZECURITY_ROUTE_TABLE,
+                "priority",
+                ZECURITY_RULE_PRIORITY,
+            ],
+        )?;
+
+        for ip in &unique_ips {
+            let prefix = format!("{ip}/32");
+            run_command(
+                "ip",
+                &[
+                    "route",
+                    "replace",
+                    &prefix,
+                    "dev",
+                    "zecurity0",
+                    "table",
+                    ZECURITY_ROUTE_TABLE,
+                ],
+            )?;
+        }
+
+        self.policy_ips = unique_ips.into_iter().collect();
         Ok(())
     }
 
@@ -68,9 +147,8 @@ impl TunManager {
 
     /// Remove all routes installed in this session and drop the TUN device.
     pub async fn cleanup(mut self) -> Result<()> {
-        for ip in self.routes.drain(..) {
-            let _ = del_host_route(&self.handle, ip, self.if_index).await;
-        }
+        cleanup_policy_routes();
+        self.policy_ips.clear();
         drop(self.dev.take());
         let _ = del_link_by_index(&self.handle, self.if_index).await;
         Ok(())
@@ -114,75 +192,40 @@ async fn del_link_by_index(handle: &Handle, if_index: u32) -> Result<()> {
         .with_context(|| format!("rtnetlink delete link index {}", if_index))
 }
 
-async fn add_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()> {
-    match ip {
-        IpAddr::V4(v4) => handle
-            .route()
-            .add()
-            .v4()
-            .destination_prefix(v4, 32)
-            .output_interface(if_index)
-            .execute()
-            .await
-            .with_context(|| format!("rtnetlink add route {}/32", ip)),
-        IpAddr::V6(v6) => handle
-            .route()
-            .add()
-            .v6()
-            .destination_prefix(v6, 128)
-            .output_interface(if_index)
-            .execute()
-            .await
-            .with_context(|| format!("rtnetlink add route {}/128", ip)),
-    }
+fn cleanup_policy_routes() {
+    let _ = Command::new("nft")
+        .args(["delete", "table", "inet", ZECURITY_TABLE])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("ip")
+        .args([
+            "rule",
+            "del",
+            "fwmark",
+            ZECURITY_MARK,
+            "lookup",
+            ZECURITY_ROUTE_TABLE,
+            "priority",
+            ZECURITY_RULE_PRIORITY,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("ip")
+        .args(["route", "flush", "table", ZECURITY_ROUTE_TABLE])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
-async fn del_host_route(handle: &Handle, ip: IpAddr, if_index: u32) -> Result<()> {
-    let (af, addr, prefix_len) = match ip {
-        IpAddr::V4(v4) => (
-            AddressFamily::Inet,
-            RouteAddress::Inet(v4),
-            32u8,
-        ),
-        IpAddr::V6(v6) => (
-            AddressFamily::Inet6,
-            RouteAddress::Inet6(v6),
-            128u8,
-        ),
-    };
-
-    let mut msg = RouteMessage::default();
-    msg.header.address_family = af;
-    msg.header.destination_prefix_length = prefix_len;
-    msg.attributes.push(RouteAttribute::Destination(addr));
-    msg.attributes.push(RouteAttribute::Oif(if_index));
-
-    handle
-        .route()
-        .del(msg)
-        .execute()
-        .await
-        .with_context(|| format!("rtnetlink del route {}", ip))
-}
-
-async fn list_routes_v4(handle: &Handle) -> Result<Vec<(IpAddr, u8)>> {
-    let mut routes = handle
-        .route()
-        .get(rtnetlink::IpVersion::V4)
-        .execute();
-    let mut result = Vec::new();
-    while let Some(msg) = routes.try_next().await? {
-        let prefix_len = msg.header.destination_prefix_length;
-        for attr in &msg.attributes {
-            if let RouteAttribute::Destination(addr) = attr {
-                let ip = match addr {
-                    RouteAddress::Inet(v4) => IpAddr::V4(*v4),
-                    RouteAddress::Inet6(v6) => IpAddr::V6(*v6),
-                    _ => continue,
-                };
-                result.push((ip, prefix_len));
-            }
-        }
+fn run_command(program: &str, args: &[&str]) -> Result<()> {
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("run {program} {}", args.join(" ")))?;
+    if !status.success() {
+        anyhow::bail!("{program} {} failed with {status}", args.join(" "));
     }
-    Ok(result)
+    Ok(())
 }
