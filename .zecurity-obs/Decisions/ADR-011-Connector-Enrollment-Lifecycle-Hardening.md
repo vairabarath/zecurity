@@ -175,15 +175,58 @@ if rnStatus != "active" {
 Closes the race window. Even if the JWT is held by an attacker, `Enroll`
 will reject it once the remote network is no longer active.
 
-### Fix B (defense in depth, for F3) — Cascade-revoke pending connectors on RN delete
+### Fix B (defense in depth, for F3) — Cascade-revoke pending connectors AND shields on RN delete; extend guard to shields
+
+A remote network has **two** child types: connectors and shields. The
+current guard only inspects `connectors`, so an RN containing active
+shields can still be soft-deleted (e.g. when all connectors are
+revoked but shields are still active). That produces an orphan
+shield in a `'deleted'` RN — invisible in the admin UI, still
+enforcing its last-known ACL on the customer machine, until its cert
+expires.
+
+Symmetric treatment: the guard must reject the delete if *either*
+table has a non-terminal child, and the cascade must clear pending
+rows in *both* tables.
+
+#### B.1 — Extend the guard to also block on non-terminal shields
 
 In `controller/graph/resolvers/connector.resolvers.go` inside
-`DeleteRemoteNetwork`, before the soft-delete UPDATE, revoke pending
-connectors:
+`DeleteRemoteNetwork`, add a second `NOT EXISTS` clause:
+
+```sql
+UPDATE remote_networks
+    SET status = 'deleted', updated_at = NOW()
+  WHERE id = $1
+    AND tenant_id = $2
+    AND status = 'active'
+    AND NOT EXISTS (
+        SELECT 1 FROM connectors
+         WHERE remote_network_id = $1
+           AND tenant_id = $2
+           AND status NOT IN ('pending', 'revoked')
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM shields
+         WHERE remote_network_id = $1
+           AND tenant_id = $2
+           AND status NOT IN ('pending', 'revoked')
+    )
+ RETURNING id
+```
+
+Same predicate (`status NOT IN ('pending', 'revoked')`) on both
+tables — pending and revoked are safe-to-discard, anything else
+blocks the delete.
+
+#### B.2 — Cascade-revoke pending rows in BOTH tables
+
+Before the soft-delete UPDATE, revoke pending connectors AND pending
+shields:
 
 ```go
 // Cascade-revoke pending connectors so their JWTs can no longer enroll.
-// Active/disconnected connectors block the delete entirely (existing guard);
+// Active/disconnected connectors block the delete entirely (extended guard above);
 // revoked connectors are already terminal, no change.
 _, err := r.TenantDB.Exec(ctx,
     `UPDATE connectors
@@ -196,10 +239,33 @@ _, err := r.TenantDB.Exec(ctx,
 if err != nil {
     return false, fmt.Errorf("delete remote network: revoke pending connectors: %w", err)
 }
+
+// Same for pending shields — their enrollment JWTs would otherwise stay
+// valid for 24h and could enroll into a deleted RN.
+_, err = r.TenantDB.Exec(ctx,
+    `UPDATE shields
+        SET status = 'revoked', updated_at = NOW()
+      WHERE remote_network_id = $1
+        AND tenant_id = $2
+        AND status = 'pending'`,
+    id, tc.TenantID,
+)
+if err != nil {
+    return false, fmt.Errorf("delete remote network: revoke pending shields: %w", err)
+}
 ```
 
-Belt-and-suspenders: even if Fix A is somehow bypassed, the connector row
-is no longer in `'pending'` so `Enroll` refuses.
+Belt-and-suspenders: even if Fix A is somehow bypassed, the
+connector/shield row is no longer in `'pending'` so `Enroll`
+refuses.
+
+> **Note on audit scope**: F3 as documented in this ADR is the
+> connector-side symptom (orphan invisible connector). The shield-side
+> symptom is structurally identical — orphan invisible shield with
+> stale ACL enforcement — and the fix lives in the same SQL guard, so
+> it's bundled here for implementation hygiene rather than in a
+> separate ADR. A dedicated shield-flow audit may surface additional
+> shield-only concerns; those will go in a separate ADR.
 
 ### Fix C (for F4) — Token regeneration deletes the previous JTI
 
