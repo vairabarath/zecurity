@@ -14,7 +14,6 @@ import (
 type fakeRelayStore struct {
 	upsertConnectorID string
 	upsertRelayID     string
-	upsertSource      string
 	deleteConnectorID string
 	bumpConnectorID   string
 	upsertChanged     bool
@@ -24,10 +23,9 @@ type fakeRelayStore struct {
 	bumpErr           error
 }
 
-func (f *fakeRelayStore) UpsertPlacement(_ context.Context, connectorID, relayID string, _ time.Time, source string) (bool, error) {
+func (f *fakeRelayStore) UpsertPlacement(_ context.Context, connectorID, relayID string, _ time.Time) (bool, error) {
 	f.upsertConnectorID = connectorID
 	f.upsertRelayID = relayID
-	f.upsertSource = source
 	return f.upsertChanged, f.upsertErr
 }
 
@@ -76,9 +74,6 @@ func TestHandleConnectorRelayState_Connected(t *testing.T) {
 	}
 	if store.upsertRelayID != "relay-xyz" {
 		t.Fatalf("expected upsert relay relay-xyz, got %q", store.upsertRelayID)
-	}
-	if store.upsertSource != "event" {
-		t.Fatalf("expected source 'event', got %q", store.upsertSource)
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
 		t.Fatalf("expected policy notification for ws-123, got %q", notifier.lastWorkspaceID)

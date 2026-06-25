@@ -18,7 +18,6 @@ CREATE TABLE connector_relay_placement (
     relay_id       UUID        NOT NULL,
     attached_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_confirmed TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    source         TEXT        NOT NULL CHECK (source IN ('event', 'heartbeat')),
     PRIMARY KEY (connector_id),
     FOREIGN KEY (connector_id) REFERENCES connectors(id) ON DELETE CASCADE,
     FOREIGN KEY (relay_id)     REFERENCES relays(id)     ON DELETE CASCADE

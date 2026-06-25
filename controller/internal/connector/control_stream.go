@@ -29,7 +29,7 @@ import (
 // RelayPlacementStore is the subset of relay.Store used by the connector
 // control-stream handlers. Defined as an interface for testability.
 type RelayPlacementStore interface {
-	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error)
+	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time) (bool, error)
 	DeletePlacement(ctx context.Context, connectorID string) (bool, error)
 	BumpLastConfirmed(ctx context.Context, connectorID string) error
 }
@@ -448,7 +448,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if h.RelayStore != nil {
 		if r.RelayId != "" {
 			attachedAt := time.Unix(r.RelayAttachedAtUnix, 0).UTC()
-			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
+			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt)
 			if err != nil {
 				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
 			} else if changed && h.PolicyNotifier != nil {
@@ -497,7 +497,7 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			return
 		}
 		attachedAt := time.Unix(r.ObservedAtUnix, 0).UTC()
-		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "event")
+		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt)
 		if err != nil {
 			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
 			return

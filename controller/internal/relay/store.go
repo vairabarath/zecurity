@@ -149,20 +149,19 @@ func (s *Store) InsertProvisionedRelay(ctx context.Context, id, name string, dns
 // UpsertPlacement inserts or updates a connector_relay_placement row.
 // Returns true when the relay_id actually changed (new attachment or different relay)
 // so the caller can decide whether to invalidate the policy cache.
-func (s *Store) UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error) {
+func (s *Store) UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time) (bool, error) {
 	var changed bool
 	err := s.pool.QueryRow(ctx, `
 		WITH old AS (
 			SELECT relay_id FROM connector_relay_placement WHERE connector_id = $1
 		), upsert AS (
 			INSERT INTO connector_relay_placement
-			     (connector_id, relay_id, attached_at, last_confirmed, source)
-			VALUES ($1, $2, $3, NOW(), $4)
+			     (connector_id, relay_id, attached_at, last_confirmed)
+			VALUES ($1, $2, $3, NOW())
 			ON CONFLICT (connector_id) DO UPDATE
 			SET relay_id       = EXCLUDED.relay_id,
 			    attached_at    = EXCLUDED.attached_at,
-			    last_confirmed = NOW(),
-			    source         = EXCLUDED.source
+			    last_confirmed = NOW()
 			RETURNING connector_id
 		)
 		SELECT
@@ -171,7 +170,7 @@ func (s *Store) UpsertPlacement(ctx context.Context, connectorID, relayID string
 				WHEN EXISTS (SELECT 1 FROM old WHERE old.relay_id IS DISTINCT FROM $2) THEN true
 				ELSE false
 			END AS changed
-	`, connectorID, relayID, attachedAt, source).Scan(&changed)
+	`, connectorID, relayID, attachedAt).Scan(&changed)
 	if err != nil {
 		return false, fmt.Errorf("upsert placement: %w", err)
 	}
