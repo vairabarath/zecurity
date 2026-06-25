@@ -227,8 +227,8 @@ Plan ahead: do not allocate fields 6+ in `ACLConnector` for other purposes befor
 
 ## Implementation Checklist
 
-- [ ] `proto/client/v1/client.proto` — add `relay_addr=4`, `relay_spiffe_id=5` to `ACLConnector`
-- [ ] `buf generate` — regenerate Go stubs
+- [x] `proto/client/v1/client.proto` — add `relay_addr=4`, `relay_spiffe_id=5` to `ACLConnector`
+- [x] `buf generate` — regenerate Go stubs
 - [ ] `store.go` — extend `RemoteNetworkConnectorsRow`; LEFT JOIN in `GetConnectorsForRemoteNetworks`
 - [ ] `compiler.go` — populate relay coords on `ACLConnector` in connector loop
 - [ ] `relay/heartbeat.go` — call `NotifyPolicyChange` when relay metadata changes

@@ -107,6 +107,10 @@ message ACLConnector {
   string connector_id          = 1;
   string connector_tunnel_addr = 2; // host:9092 QUIC
   string connector_spiffe      = 3;
+  // Transitional — Track A (ADR-014). Track B (ADR-015) moves relay routing
+  // to TransportSnapshot; reserve fields 4 and 5 at that point, never reuse.
+  string relay_addr            = 4; // relay QUIC address for this connector; empty = no relay
+  string relay_spiffe_id       = 5; // SPIFFE URI of the relay this connector is registered with
 }
 
 // ACLRemoteNetwork groups the connectors serving a single remote network.
