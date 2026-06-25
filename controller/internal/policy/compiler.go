@@ -105,10 +105,16 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 		if row.ConnectorID != "" && row.TrustDomain != "" {
 			spiffe = appmeta.ConnectorSPIFFEID(row.TrustDomain, row.ConnectorID)
 		}
+		relaySpiffe := ""
+		if row.RelayID != "" {
+			relaySpiffe = appmeta.RelaySPIFFEID(row.RelayID)
+		}
 		rnMap[row.RemoteNetworkID].Connectors = append(rnMap[row.RemoteNetworkID].Connectors, &clientv1.ACLConnector{
 			ConnectorId:         row.ConnectorID,
 			ConnectorTunnelAddr: tunnelAddr,
 			ConnectorSpiffe:     spiffe,
+			RelayAddr:           row.RelayAddr,
+			RelaySpiffeId:       relaySpiffe,
 		})
 	}
 

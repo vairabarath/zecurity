@@ -383,12 +383,16 @@ type RemoteNetworkConnectorsRow struct {
 	ConnectorID     string
 	LanAddr         string
 	TrustDomain     string
+	RelayAddr       string // empty if connector has no placement or relay has no public addr
+	RelayID         string // empty if no placement; used to build SPIFFE ID
 }
 
 // GetConnectorsForRemoteNetworks returns all active connectors for the given
 // remote network IDs. RNs with no active connector are simply absent from the
 // result — callers must seed entries for every RN first and then populate
 // connectors from this result to preserve partial-availability semantics.
+// Each row includes per-connector relay coordinates from connector_relay_placement
+// (LEFT JOIN so connectors without a placement still appear as direct-only).
 func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetworkIDs []string) ([]*RemoteNetworkConnectorsRow, error) {
 	if len(remoteNetworkIDs) == 0 {
 		return nil, nil
@@ -397,8 +401,20 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 		`SELECT c.remote_network_id::text,
 		        c.id::text,
 		        COALESCE(c.lan_addr, ''),
-		        COALESCE(c.trust_domain, '')
+		        COALESCE(c.trust_domain, ''),
+		        COALESCE(
+		          CASE
+		            WHEN r.public_addr IS NOT NULL AND r.public_addr != ''
+		              THEN r.public_addr
+		            WHEN r.address_scope = 'public' AND r.observed_ip IS NOT NULL
+		              THEN r.observed_ip::text || ':9093'
+		            ELSE ''
+		          END, ''
+		        ),
+		        COALESCE(r.id::text, '')
 		   FROM connectors c
+		   LEFT JOIN connector_relay_placement crp ON crp.connector_id = c.id
+		   LEFT JOIN relays r ON r.id = crp.relay_id AND r.status = 'active'
 		  WHERE c.remote_network_id = ANY($1::uuid[])
 		    AND c.status = 'active'
 		  ORDER BY c.remote_network_id, c.last_heartbeat_at DESC NULLS LAST`,
@@ -412,7 +428,7 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 	var out []*RemoteNetworkConnectorsRow
 	for rows.Next() {
 		r := &RemoteNetworkConnectorsRow{}
-		if err := rows.Scan(&r.RemoteNetworkID, &r.ConnectorID, &r.LanAddr, &r.TrustDomain); err != nil {
+		if err := rows.Scan(&r.RemoteNetworkID, &r.ConnectorID, &r.LanAddr, &r.TrustDomain, &r.RelayAddr, &r.RelayID); err != nil {
 			return nil, fmt.Errorf("scan connector row: %w", err)
 		}
 		out = append(out, r)
