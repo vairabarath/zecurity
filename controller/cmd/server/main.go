@@ -137,6 +137,7 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
+	relaySvc.WithPolicyNotifier(policyNotifier)
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
@@ -315,6 +316,7 @@ func main() {
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 	go shieldSvc.RunDisconnectWatcher(ctx)
+	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

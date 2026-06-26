@@ -407,7 +407,7 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 		            WHEN r.public_addr IS NOT NULL AND r.public_addr != ''
 		              THEN r.public_addr
 		            WHEN r.address_scope = 'public' AND r.observed_ip IS NOT NULL
-		              THEN r.observed_ip::text || ':9093'
+		              THEN host(r.observed_ip) || ':9093'
 		            ELSE ''
 		          END, ''
 		        ),
@@ -451,7 +451,7 @@ func (s *Store) GetActiveRelay(ctx context.Context) (*RelayDiscoveryRow, error) 
 	err := s.pool.QueryRow(ctx,
 		`SELECT id::text,
 		        COALESCE(public_addr, ''),
-		        COALESCE(observed_ip::text, ''),
+		        COALESCE(host(observed_ip), ''),
 		        COALESCE(address_scope, '')
 		   FROM relays
 		  WHERE status = 'active'

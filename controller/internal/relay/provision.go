@@ -21,10 +21,11 @@ import (
 type Service struct {
 	relaypb.UnimplementedRelayServiceServer
 
-	pki     pki.Service
-	store   heartbeatStore
-	redis   valkeycompat.Cmdable
-	certTTL time.Duration
+	pki      pki.Service
+	store    heartbeatStore
+	redis    valkeycompat.Cmdable
+	certTTL  time.Duration
+	notifier policyChangeNotifier
 
 	heartbeatDBWriteInterval time.Duration
 }
@@ -43,6 +44,11 @@ func (s *Service) WithHeartbeatCache(redis valkeycompat.Cmdable, dbWriteInterval
 	if dbWriteInterval > 0 {
 		s.heartbeatDBWriteInterval = dbWriteInterval
 	}
+	return s
+}
+
+func (s *Service) WithPolicyNotifier(n policyChangeNotifier) *Service {
+	s.notifier = n
 	return s
 }
 

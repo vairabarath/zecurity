@@ -465,8 +465,6 @@ async fn handle_up(
         &allowed_entries,
         &acl.remote_networks,
         &device,
-        &acl.relay_addr,
-        &acl.relay_spiffe_id,
     ) {
         Ok(t) => Arc::new(t),
         Err(e) => {
@@ -729,17 +727,11 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
 //   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
 //   Some(None)    — managed resource, connector offline → fail closed
 //   None (absent) — unmanaged traffic, not in ACL       → bypass via SO_MARK NIC
-fn build_transports_by_resource(
+pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
     device: &DeviceInfo,
-    relay_addr: &str,
-    relay_spiffe_id: &str,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>>> {
-    let relay_addr = relay_addr.to_string();
-    let relay_spiffe_id = relay_spiffe_id.to_string();
-    let relay_base_present = !relay_addr.is_empty() && !relay_spiffe_id.is_empty();
-
     // Build remote_network_id → Option<ClientTransport>.
     // None means the RN is known but has no active connector.
     let mut rn_transport: HashMap<String, Option<Arc<ClientTransport>>> = HashMap::new();
@@ -769,7 +761,10 @@ fn build_transports_by_resource(
             &device.ca_cert_pem,
         )?);
 
-        let relay = if relay_base_present
+        // Relay coords are per-connector (ACLConnector fields 4+5, populated by Gap 1).
+        // Empty relay_addr means this connector has no relay assignment — direct only.
+        let relay = if !connector.relay_addr.is_empty()
+            && !connector.relay_spiffe_id.is_empty()
             && !connector.connector_id.is_empty()
             && !connector.connector_spiffe.is_empty()
         {
@@ -777,11 +772,11 @@ fn build_transports_by_resource(
                 &device.certificate_pem,
                 &device.private_key_pem,
                 &device.ca_cert_pem,
-                &relay_spiffe_id,
+                &connector.relay_spiffe_id,
             )?);
             Some(RelayContext {
                 pool,
-                relay_addr: relay_addr.clone(),
+                relay_addr: connector.relay_addr.clone(),
                 connector_id: connector.connector_id.clone(),
                 connector_spiffe: connector.connector_spiffe.clone(),
             })

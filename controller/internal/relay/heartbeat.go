@@ -34,6 +34,11 @@ type heartbeatStore interface {
 	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
 	InsertProvisionedRelay(ctx context.Context, id, name string, dnsAllowlist, ipAllowlist []string, certSerial string, certNotAfter time.Time, version, hostname string) error
+	ListWorkspacesForRelay(ctx context.Context, relayID string) ([]string, error)
+}
+
+type policyChangeNotifier interface {
+	NotifyPolicyChange(ctx context.Context, workspaceID string) error
 }
 
 type relayAddressObservation struct {
@@ -69,10 +74,11 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	log.Printf("relay heartbeat: received from relay=%s version=%s hostname=%s cert_serial=%s cert_not_after=%s",
 		relayID, req.Version, req.Hostname, leaf.SerialNumber.Text(16), leaf.NotAfter.Format(time.RFC3339))
 
+	var metadataChanged bool
 	shouldWriteDB := true
 	if s.redis != nil {
-		var err error
-		shouldWriteDB, err = s.cacheRelayHeartbeat(
+		var cacheErr error
+		shouldWriteDB, metadataChanged, cacheErr = s.cacheRelayHeartbeat(
 			ctx,
 			relayID,
 			leaf.SerialNumber.Text(16),
@@ -81,10 +87,13 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 			req.Hostname,
 			addr,
 		)
-		if err != nil {
-			log.Printf("relay heartbeat: cache %s: %v", relayID, err)
+		if cacheErr != nil {
+			log.Printf("relay heartbeat: cache %s: %v", relayID, cacheErr)
 			shouldWriteDB = true
+			metadataChanged = true // conservative: assume changed on cache failure
 		}
+	} else {
+		metadataChanged = true // no cache: always notify
 	}
 	if !shouldWriteDB {
 		return &relaypb.HeartbeatResponse{
@@ -114,13 +123,32 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if err := s.markRelayHeartbeatDBWritten(ctx, relayID); err != nil {
 		log.Printf("relay heartbeat: mark db write %s: %v", relayID, err)
 	}
+	if metadataChanged {
+		s.notifyRelayWorkspaces(ctx, relayID)
+	}
 	return &relaypb.HeartbeatResponse{
 		ServerTimeUnix:       time.Now().UTC().Unix(),
 		NextHeartbeatSeconds: uint32(defaultHeartbeatInterval / time.Second),
 	}, nil
 }
 
-func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial string, certNotAfter time.Time, version, hostname string, addr relayAddressObservation) (bool, error) {
+func (s *Service) notifyRelayWorkspaces(ctx context.Context, relayID string) {
+	if s.notifier == nil {
+		return
+	}
+	workspaceIDs, err := s.store.ListWorkspacesForRelay(ctx, relayID)
+	if err != nil {
+		log.Printf("relay heartbeat: list workspaces for relay %s: %v", relayID, err)
+		return
+	}
+	for _, wsID := range workspaceIDs {
+		if err := s.notifier.NotifyPolicyChange(ctx, wsID); err != nil {
+			log.Printf("relay heartbeat: notify workspace %s: %v", wsID, err)
+		}
+	}
+}
+
+func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial string, certNotAfter time.Time, version, hostname string, addr relayAddressObservation) (shouldWriteDB bool, metadataChanged bool, err error) {
 	now := time.Now().UTC()
 	livenessTTL := 3 * defaultHeartbeatInterval
 	if s.heartbeatDBWriteInterval > livenessTTL {
@@ -128,29 +156,29 @@ func (s *Service) cacheRelayHeartbeat(ctx context.Context, relayID, certSerial s
 	}
 
 	if err := s.redis.Set(ctx, relayHeartbeatLastPrefix+relayID, strconv.FormatInt(now.Unix(), 10), livenessTTL).Err(); err != nil {
-		return true, fmt.Errorf("set liveness key: %w", err)
+		return true, true, fmt.Errorf("set liveness key: %w", err)
 	}
 
 	metadataKey := relayHeartbeatMetadataPrefix + relayID
 	metadataValue := relayHeartbeatMetadataValue(certSerial, certNotAfter, version, hostname, addr)
 	previousMetadata, err := s.redis.Get(ctx, metadataKey).Result()
 	if err != nil && err != valkeycompat.Nil {
-		return true, fmt.Errorf("get metadata key: %w", err)
+		return true, true, fmt.Errorf("get metadata key: %w", err)
 	}
-	metadataChanged := err == valkeycompat.Nil || previousMetadata != metadataValue
+	metadataChanged = err == valkeycompat.Nil || previousMetadata != metadataValue
 
 	dbMarkerKey := relayHeartbeatDBWritePrefix + relayID
 	_, err = s.redis.Get(ctx, dbMarkerKey).Result()
 	if err != nil && err != valkeycompat.Nil {
-		return true, fmt.Errorf("get db-write marker: %w", err)
+		return true, true, fmt.Errorf("get db-write marker: %w", err)
 	}
 	dbWriteDue := err == valkeycompat.Nil
 
 	if err := s.redis.Set(ctx, metadataKey, metadataValue, livenessTTL).Err(); err != nil {
-		return true, fmt.Errorf("set metadata key: %w", err)
+		return true, true, fmt.Errorf("set metadata key: %w", err)
 	}
 
-	return metadataChanged || dbWriteDue, nil
+	return metadataChanged || dbWriteDue, metadataChanged, nil
 }
 
 func (s *Service) markRelayHeartbeatDBWritten(ctx context.Context, relayID string) error {

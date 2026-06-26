@@ -428,9 +428,7 @@ mod tests {
     fn install_crypto_provider() {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .unwrap();
+            let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
 

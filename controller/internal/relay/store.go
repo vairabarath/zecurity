@@ -211,6 +211,61 @@ func (s *Store) BumpLastConfirmed(ctx context.Context, connectorID string) error
 	return nil
 }
 
+// ListWorkspacesForRelay returns the distinct workspace (tenant) IDs for all
+// connectors currently assigned to a relay via connector_relay_placement.
+// Used by the heartbeat handler to invalidate ACL snapshots when a relay's
+// address or metadata changes.
+func (s *Store) ListWorkspacesForRelay(ctx context.Context, relayID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT c.tenant_id::text
+		   FROM connector_relay_placement crp
+		   JOIN connectors c ON c.id = crp.connector_id
+		  WHERE crp.relay_id = $1`,
+		relayID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list workspaces for relay: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan workspace id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// EvictExpiredRelays marks active relays whose last heartbeat is older than
+// before as inactive. Returns the IDs of relays that were evicted so the
+// caller can notify affected workspaces.
+func (s *Store) EvictExpiredRelays(ctx context.Context, before time.Time) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`UPDATE relays
+		    SET status     = 'inactive',
+		        updated_at = NOW()
+		  WHERE status = 'active'
+		    AND last_heartbeat_at < $1
+		 RETURNING id::text`,
+		before,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("evict expired relays: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan evicted relay id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays

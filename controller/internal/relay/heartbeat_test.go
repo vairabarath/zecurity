@@ -29,6 +29,17 @@ type fakeHeartbeatStore struct {
 	addressScope string
 	publicAddr   string
 	err          error
+	workspaceIDs []string // returned by ListWorkspacesForRelay
+}
+
+type fakeNotifier struct {
+	called []string // workspace IDs NotifyPolicyChange was called with
+	err    error
+}
+
+func (n *fakeNotifier) NotifyPolicyChange(_ context.Context, workspaceID string) error {
+	n.called = append(n.called, workspaceID)
+	return n.err
 }
 
 func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
@@ -50,6 +61,13 @@ func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, ti
 
 func (s *fakeHeartbeatStore) InsertProvisionedRelay(context.Context, string, string, []string, []string, string, time.Time, string, string) error {
 	return s.err
+}
+
+func (s *fakeHeartbeatStore) ListWorkspacesForRelay(_ context.Context, _ string) ([]string, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.workspaceIDs, nil
 }
 
 func TestHeartbeatRecordsAuthenticatedRelay(t *testing.T) {
@@ -144,4 +162,45 @@ func relayHeartbeatContext(t *testing.T, role, contextRelayID, certificateRelayI
 			},
 		},
 	})
+}
+
+// TestHeartbeat_NotifiesWorkspacesOnMetadataChange — Gap 2 regression.
+// Without Redis the cache layer always sets metadataChanged=true, so the
+// heartbeat handler must call NotifyPolicyChange for every workspace that
+// has connectors assigned to this relay.
+func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
+	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-alpha", "ws-beta"}}
+	notifier := &fakeNotifier{}
+	service := NewService(nil, store, time.Hour).WithPolicyNotifier(notifier)
+	notAfter := time.Now().UTC().Add(time.Hour)
+	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)
+
+	if _, err := service.Heartbeat(ctx, &relaypb.HeartbeatRequest{Version: "1.0.0", Hostname: "relay-a"}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	if len(notifier.called) != 2 {
+		t.Fatalf("expected 2 NotifyPolicyChange calls, got %d: %v", len(notifier.called), notifier.called)
+	}
+	notified := make(map[string]bool, len(notifier.called))
+	for _, id := range notifier.called {
+		notified[id] = true
+	}
+	for _, wantID := range []string{"ws-alpha", "ws-beta"} {
+		if !notified[wantID] {
+			t.Fatalf("workspace %q was not notified; got calls: %v", wantID, notifier.called)
+		}
+	}
+}
+
+// TestHeartbeat_NoNotifierDoesNotPanic — Gap 2 regression.
+// Heartbeat must succeed when no notifier is wired (nil guard in notifyRelayWorkspaces).
+func TestHeartbeat_NoNotifierDoesNotPanic(t *testing.T) {
+	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-orphan"}}
+	service := NewService(nil, store, time.Hour) // no notifier
+	notAfter := time.Now().UTC().Add(time.Hour)
+	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)
+	if _, err := service.Heartbeat(ctx, &relaypb.HeartbeatRequest{Version: "1.0.0"}); err != nil {
+		t.Fatalf("Heartbeat with nil notifier: %v", err)
+	}
 }

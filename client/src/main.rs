@@ -1,6 +1,8 @@
 mod appmeta;
 mod config;
 mod daemon;
+#[cfg(test)]
+mod daemon_tests;
 mod error;
 mod grpc;
 mod ipc;

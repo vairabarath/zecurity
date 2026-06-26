@@ -220,6 +220,100 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		}
 	})
 
+	// ── Gap 1 regression tests ──────────────────────────────────────────────
+
+	t.Run("per-connector: connector with placement gets relay coords", func(t *testing.T) {
+		// A connector linked to a relay via connector_relay_placement must carry
+		// that relay's addr and SPIFFE ID on its ACLConnector entry.
+		// Old code (global relay lookup) would return the workspace relay for ALL
+		// connectors; new code reads the per-connector placement JOIN.
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-per-conn-relay")
+		grpID := mustInsertGroup(t, ctx, testPool, wsID, "grp-per-conn")
+		userID := mustInsertUser(t, ctx, testPool, wsID)
+		mustAddGroupMember(t, ctx, testPool, grpID, userID)
+		_ = mustInsertClientDevice(t, ctx, testPool, wsID, userID, "spiffe://td/client/dev-pcr")
+
+		rnID, connID := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-per-conn", "td-per-conn", "10.10.0.1")
+		rID := mustInsertResource(t, ctx, testPool, wsID, rnID, "res-per-conn", "10.10.0.10", 80)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, rID, grpID)
+
+		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.per:9093", "", "public")
+		mustInsertConnectorRelayPlacement(t, ctx, testPool, connID, relayID)
+
+		store := NewStore(testPool)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		if len(snap.RemoteNetworks) != 1 || len(snap.RemoteNetworks[0].Connectors) != 1 {
+			t.Fatalf("unexpected remote_networks: %+v", snap.RemoteNetworks)
+		}
+		conn := snap.RemoteNetworks[0].Connectors[0]
+		if conn.ConnectorId != connID {
+			t.Fatalf("connector_id mismatch: want %q, got %q", connID, conn.ConnectorId)
+		}
+		if conn.RelayAddr != "relay.per:9093" {
+			t.Fatalf("relay_addr: want %q, got %q", "relay.per:9093", conn.RelayAddr)
+		}
+		wantRelaySpiffe := appmeta.RelaySPIFFEID(relayID)
+		if conn.RelaySpiffeId != wantRelaySpiffe {
+			t.Fatalf("relay_spiffe_id: want %q, got %q", wantRelaySpiffe, conn.RelaySpiffeId)
+		}
+	})
+
+	t.Run("per-connector: connector without placement gets empty relay coords", func(t *testing.T) {
+		// Two connectors in separate remote networks. Only one has a placement.
+		// The unplaced connector must get empty relay fields even though an active
+		// relay exists in the system. Old global-relay code would give BOTH connectors
+		// the same relay addr; new per-connector JOIN gives each only its own.
+		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-mixed-relay")
+		grpID := mustInsertGroup(t, ctx, testPool, wsID, "grp-mixed")
+		userID := mustInsertUser(t, ctx, testPool, wsID)
+		mustAddGroupMember(t, ctx, testPool, grpID, userID)
+		_ = mustInsertClientDevice(t, ctx, testPool, wsID, userID, "spiffe://td/client/dev-mr")
+
+		rnID1, connID1 := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-with-relay", "td-with", "10.20.0.1")
+		rnID2, _ := mustInsertRNWithConnector(t, ctx, testPool, wsID, "rn-no-relay", "td-without", "10.20.0.2")
+		r1ID := mustInsertResource(t, ctx, testPool, wsID, rnID1, "res-with-relay", "10.20.0.10", 80)
+		r2ID := mustInsertResource(t, ctx, testPool, wsID, rnID2, "res-no-relay", "10.20.0.20", 80)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, r1ID, grpID)
+		mustAssignResourceToGroup(t, ctx, testPool, wsID, r2ID, grpID)
+
+		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.mixed:9093", "", "public")
+		mustInsertConnectorRelayPlacement(t, ctx, testPool, connID1, relayID)
+
+		store := NewStore(testPool)
+		snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+
+		byRN := make(map[string]*clientv1.ACLConnector)
+		for _, rn := range snap.RemoteNetworks {
+			if len(rn.Connectors) == 1 {
+				byRN[rn.RemoteNetworkId] = rn.Connectors[0]
+			}
+		}
+
+		connWith := byRN[rnID1]
+		if connWith == nil {
+			t.Fatalf("connector for rn %q missing from snapshot", rnID1)
+		}
+		if connWith.RelayAddr == "" || connWith.RelaySpiffeId == "" {
+			t.Fatalf("conn with placement: want non-empty relay fields, got addr=%q spiffe=%q",
+				connWith.RelayAddr, connWith.RelaySpiffeId)
+		}
+
+		connWithout := byRN[rnID2]
+		if connWithout == nil {
+			t.Fatalf("connector for rn %q missing from snapshot", rnID2)
+		}
+		if connWithout.RelayAddr != "" || connWithout.RelaySpiffeId != "" {
+			t.Fatalf("conn without placement: want empty relay fields, got addr=%q spiffe=%q",
+				connWithout.RelayAddr, connWithout.RelaySpiffeId)
+		}
+	})
+
 	t.Run("entries unaffected by relay presence", func(t *testing.T) {
 		// Confirm entries and remote_networks don't drift when a relay row is added.
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-compat")
@@ -323,12 +417,13 @@ func applyAllMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 // mustInsertWorkspace creates a workspace row keyed by slug; returns the id.
+// trust_domain is derived from the slug so it stays unique across test cases.
 func mustInsertWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, slug string) string {
 	t.Helper()
 	var id string
 	err := pool.QueryRow(ctx,
-		`INSERT INTO workspaces (slug, name, status)
-		 VALUES ($1, $1, 'active')
+		`INSERT INTO workspaces (slug, name, status, trust_domain)
+		 VALUES ($1, $1, 'active', $1 || '.test')
 		 RETURNING id::text`,
 		slug,
 	).Scan(&id)
@@ -342,6 +437,7 @@ func mustInsertWorkspace(t *testing.T, ctx context.Context, pool *pgxpool.Pool, 
 // heartbeat, and the supplied address metadata. Returns the relay UUID.
 // observedIP may be empty when only public_addr is set; addressScope must be
 // one of 'public'/'private' (or empty when no observed_ip is provided).
+// The relay row is deleted in t.Cleanup so it does not contaminate later subtests.
 func mustInsertActiveRelay(t *testing.T, ctx context.Context, pool *pgxpool.Pool, publicAddr, observedIP, addressScope string) string {
 	t.Helper()
 	var (
@@ -370,6 +466,11 @@ func mustInsertActiveRelay(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	if err != nil {
 		t.Fatalf("insert relay: %v", err)
 	}
+	t.Cleanup(func() {
+		if _, err := pool.Exec(ctx, `DELETE FROM relays WHERE id = $1`, id); err != nil {
+			t.Logf("cleanup relay %s: %v", id, err)
+		}
+	})
 	return id
 }
 
@@ -425,8 +526,8 @@ func mustInsertUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, works
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO users (workspace_id, email, role)
-		 VALUES ($1, gen_random_uuid()::text || '@test.example', 'member')
+		`INSERT INTO users (tenant_id, email, provider, provider_sub, role)
+		 VALUES ($1, gen_random_uuid()::text || '@test.example', 'test', gen_random_uuid()::text, 'member')
 		 RETURNING id::text`,
 		workspaceID,
 	).Scan(&id); err != nil {
@@ -451,8 +552,8 @@ func mustInsertClientDevice(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO client_devices (workspace_id, user_id, name, spiffe_id, status)
-		 VALUES ($1, $2, 'test-device', $3, 'active')
+		`INSERT INTO client_devices (workspace_id, user_id, name, os, spiffe_id)
+		 VALUES ($1, $2, 'test-device', 'linux', $3)
 		 RETURNING id::text`,
 		workspaceID, userID, spiffeID,
 	).Scan(&id); err != nil {
@@ -462,18 +563,33 @@ func mustInsertClientDevice(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 }
 
 // mustInsertResource creates a resources row in the given remote network.
+// Status 'unprotected' maps to route_type 'connector' without requiring a shield.
 func mustInsertResource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, remoteNetworkID, name, host string, port int) string {
 	t.Helper()
 	var id string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO resources (tenant_id, remote_network_id, name, host, port_from, protocol, status)
-		 VALUES ($1, $2, $3, $4, $5, 'tcp', 'protected')
+		 VALUES ($1, $2, $3, $4, $5, 'tcp', 'unprotected')
 		 RETURNING id::text`,
 		workspaceID, remoteNetworkID, name, host, port,
 	).Scan(&id); err != nil {
 		t.Fatalf("insert resource %q: %v", name, err)
 	}
 	return id
+}
+
+// mustInsertConnectorRelayPlacement links a connector to a relay in
+// connector_relay_placement. Required for Gap 1 per-connector relay tests.
+func mustInsertConnectorRelayPlacement(t *testing.T, ctx context.Context, pool *pgxpool.Pool, connectorID, relayID string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO connector_relay_placement (connector_id, relay_id, attached_at, last_confirmed, source)
+		 VALUES ($1, $2, NOW(), NOW(), 'heartbeat')
+		 ON CONFLICT (connector_id) DO UPDATE SET relay_id = EXCLUDED.relay_id`,
+		connectorID, relayID,
+	); err != nil {
+		t.Fatalf("insert connector_relay_placement: %v", err)
+	}
 }
 
 // mustAssignResourceToGroup creates an enabled access_rules row.
