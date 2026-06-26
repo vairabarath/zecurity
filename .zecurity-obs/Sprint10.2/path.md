@@ -59,31 +59,31 @@ The Relay may observe Lookup metadata, but must never observe `TunnelRequest`,
 
 > See [[Sprint10.2/Member2-Go/Phase1-ACL-Relay-Discovery]].
 
-- [ ] **M2-A1** Add ACL snapshot fields 6–9 without changing existing numbers.
-- [ ] **M2-A2** Populate active Connector ID and exact Connector SPIFFE.
-- [ ] **M2-A3** Read `RELAY_ADDR` and `RELAY_SPIFFE_ID` in Controller startup.
-- [ ] **M2-A4** Thread Relay configuration through Client and Connector ACL compilation.
-- [ ] **M2-A5** Regenerate protobuf stubs and pass Controller tests/build.
+- [x] **M2-A1** Add ACL snapshot fields 6–9 without changing existing numbers.
+- [x] **M2-A2** Populate active Connector ID and exact Connector SPIFFE.
+- [x] **M2-A3** Relay address resolved from DB (`connector_relay_placement` JOIN `relays`) — not from env var (superseded by ADR-014 Gap 1; env var approach dropped).
+- [x] **M2-A4** Per-connector relay coords populated on each `ACLConnector` in compiler loop; client reads from `connector.relay_addr` / `connector.relay_spiffe_id` (ADR-014 Gap 4).
+- [x] **M2-A5** Regenerate protobuf stubs and pass Controller tests/build.
 
 ### Phase B — M3: Client RelayPool & Inner mTLS
 
 > Depends on Phase A. See [[Sprint10.2/Member3-Rust/Phase1-Client-RelayPool-Inner-mTLS]].
 
-- [ ] **M3-B1** Add `client/src/relay_pool.rs`.
-- [ ] **M3-B2** Implement pooled outer Relay QUIC mTLS with exact Relay identity.
-- [ ] **M3-B3** Send framed `Lookup { connector_id }` and validate framed ACK.
-- [ ] **M3-B4** Establish inner TLS 1.3 mTLS and verify exact Connector SPIFFE.
-- [ ] **M3-B5** Return a common authenticated stream ready for `TunnelRequest`.
+- [x] **M3-B1** Add `client/src/relay_pool.rs`.
+- [x] **M3-B2** Implement pooled outer Relay QUIC mTLS with exact Relay identity.
+- [x] **M3-B3** Send framed `Lookup { connector_id }` and validate framed ACK.
+- [x] **M3-B4** Establish inner TLS 1.3 mTLS and verify exact Connector SPIFFE.
+- [x] **M3-B5** Return a common authenticated stream ready for `TunnelRequest`.
 
 ### Phase C — M3: Direct-First Fallback Wiring
 
 > Depends on Phase B. See [[Sprint10.2/Member3-Rust/Phase2-Direct-First-Fallback]].
 
-- [ ] **M3-C1** Preserve direct `TunnelPool` behavior behind the common stream API.
-- [ ] **M3-C2** Apply a 2-second timeout to direct stream establishment.
-- [ ] **M3-C3** Fall back to Relay only for direct connection failure/timeout.
-- [ ] **M3-C4** Thread optional `RelayPool` through daemon and net stack.
-- [ ] **M3-C5** Keep `RELAY_ADDR` empty behavior direct-only.
+- [x] **M3-C1** Preserve direct `TunnelPool` behavior behind the common stream API.
+- [x] **M3-C2** Apply a 2-second timeout to direct stream establishment.
+- [x] **M3-C3** Fall back to Relay only for direct connection failure/timeout.
+- [x] **M3-C4** Thread optional `RelayPool` through daemon and net stack.
+- [x] **M3-C5** Keep `RELAY_ADDR` empty behavior direct-only.
 
 ### Phase D — M3: Security & End-to-End Validation
 
@@ -115,9 +115,9 @@ Completed Relay + Connector runtime
 
 ## Final Build Gates
 
-- [ ] `buf generate`
+- [x] `buf generate`
 - [ ] `cd controller && go test ./internal/policy/... ./internal/client/... ./internal/connector/...`
-- [ ] `cd controller && go build ./...`
+- [x] `cd controller && go build ./...`
 - [ ] `cd client && cargo test && cargo build`
 - [ ] `cd connector && cargo test && cargo build`
 - [ ] `cd relay && cargo test && cargo build`

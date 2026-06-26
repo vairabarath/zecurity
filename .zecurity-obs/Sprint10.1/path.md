@@ -126,10 +126,10 @@ inner tunnel payload.
 
 > See [[Sprint10.1/Member2-Go/Phase1-PKI-Chain-Audit]].
 
-- [ ] **M2-A1** Add full-chain tests for Connector and Client leaves across two workspaces.
-- [ ] **M2-A2** Correct stale Root/Intermediate path-length test assertions.
-- [ ] **M2-A3** Add startup audit for deployed CA path constraints.
-- [ ] **M2-A4** Document remediation for legacy incompatible CA hierarchies.
+- [x] **M2-A1** Add full-chain tests for Connector and Client leaves across two workspaces.
+- [x] **M2-A2** Correct stale Root/Intermediate path-length test assertions.
+- [x] **M2-A3** Add startup audit for deployed CA path constraints.
+- [x] **M2-A4** Document remediation for legacy incompatible CA hierarchies.
 
 ### PHASE B — M2: Relay Certificate Provisioning
 
@@ -137,10 +137,10 @@ inner tunnel payload.
 > See [[Sprint10.1/Member2-Go/Phase2-Relay-Cert-Provisioning]].
 
 - [x] **M2-B0** Define the initial `relay.v1.RelayService.Provision` protobuf contract.
-- [ ] **M2-B1** Add Relay SPIFFE identity helper and exact format.
-- [ ] **M2-B2** Add authenticated PKI method/tool that validates and signs a Relay-generated CSR.
-- [ ] **M2-B3** Return only Relay cert and Intermediate CA; document Relay-host key/CSR generation.
-- [ ] **M2-B4** Add certificate property, CSR-validation, and chain-validation tests.
+- [x] **M2-B1** Add Relay SPIFFE identity helper and exact format.
+- [x] **M2-B2** Add authenticated PKI method/tool that validates and signs a Relay-generated CSR.
+- [x] **M2-B3** Return only Relay cert and Intermediate CA; document Relay-host key/CSR generation.
+- [x] **M2-B4** Add certificate property, CSR-validation, and chain-validation tests.
 - [x] **M2-B5** Define and implement the mTLS Relay heartbeat RPC and Relay health persistence.
 
 ### PHASE C — M3: Relay Multi-Workspace mTLS
@@ -148,27 +148,27 @@ inner tunnel payload.
 > Depends on Phase A and Phase B provisioning contract.
 > See [[Sprint10.1/Member3-Rust/Phase1-Relay-Multi-Workspace-mTLS]].
 
-- [ ] **M3-C1** Require client certificates and trust only `RELAY_CLIENT_CA`.
-- [ ] **M3-C2** Validate complete peer chains and exact Connector/Client SPIFFE formats.
-- [ ] **M3-C3** Bind `RegisterMsg` identity to the verified Connector certificate.
-- [ ] **M3-C4** Enforce same-workspace trust domain during Lookup.
-- [ ] **M3-C5** Add positive and negative multi-workspace TLS tests.
+- [x] **M3-C1** Require client certificates and trust only `RELAY_CLIENT_CA`.
+- [x] **M3-C2** Validate complete peer chains and exact Connector/Client SPIFFE formats.
+- [x] **M3-C3** Bind `RegisterMsg` identity to the verified Connector certificate.
+- [x] **M3-C4** Enforce same-workspace trust domain during Lookup.
+- [x] **M3-C5** Add positive and negative multi-workspace TLS tests.
 
 ### PHASE D — M3: Peer Chains & Inner mTLS
 
 > Depends on Phase C.
 > See [[Sprint10.1/Member3-Rust/Phase2-Peer-Chains-Inner-mTLS]].
 
-- [ ] **M3-D1** Connector presents `leaf + Workspace CA` to Relay and verifies exact Relay SPIFFE.
-- [ ] **M3-D2** Client presents `leaf + Workspace CA` to Relay and verifies exact Relay SPIFFE.
-- [ ] **M3-D3** Establish inner Client-to-Connector TLS 1.3 mTLS over bridged streams.
-- [ ] **M3-D4** Send TunnelRequest and resource bytes only after inner mTLS succeeds.
+- [x] **M3-D1** Connector presents `leaf + Workspace CA` to Relay and verifies exact Relay SPIFFE.
+- [x] **M3-D2** Client presents `leaf + Workspace CA` to Relay and verifies exact Relay SPIFFE.
+- [x] **M3-D3** Establish inner Client-to-Connector TLS 1.3 mTLS over bridged streams.
+- [x] **M3-D4** Send TunnelRequest and resource bytes only after inner mTLS succeeds.
 - [ ] **M3-D5** Add test proving Relay-observed bridged bytes do not contain plaintext payload.
 
 ## Final Build Gates
 
 - [ ] `cd controller && go test ./internal/pki/... ./internal/connector/...`
-- [ ] `cd controller && go build ./...`
+- [x] `cd controller && go build ./...`
 - [ ] `cd relay && cargo test && cargo build`
 - [ ] `cd connector && cargo test && cargo build`
 - [ ] `cd client && cargo test && cargo build`

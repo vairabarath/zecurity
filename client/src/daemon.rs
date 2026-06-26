@@ -461,21 +461,18 @@ async fn handle_up(
         };
     }
 
-    let transports = match build_transports_by_resource(
-        &allowed_entries,
-        &acl.remote_networks,
-        &device,
-    ) {
-        Ok(t) => Arc::new(t),
-        Err(e) => {
-            return IpcResponse {
-                ok: false,
-                kind: "Up".into(),
-                error: Some(format!("failed to build client transport: {}", e)),
-                ..Default::default()
+    let transports =
+        match build_transports_by_resource(&allowed_entries, &acl.remote_networks, &device) {
+            Ok(t) => Arc::new(t),
+            Err(e) => {
+                return IpcResponse {
+                    ok: false,
+                    kind: "Up".into(),
+                    error: Some(format!("failed to build client transport: {}", e)),
+                    ..Default::default()
+                }
             }
-        }
-    };
+        };
 
     // Create TUN device.
     let mut mgr = match TunManager::create().await {
@@ -745,6 +742,7 @@ pub(crate) fn build_transports_by_resource(
         let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
             connector.connector_tunnel_addr.clone()
         } else {
+            info!(connetor_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),"using default connector address address");
             crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
         };
         let connector_socket: SocketAddr = connector_addr

@@ -231,11 +231,11 @@ Plan ahead: do not allocate fields 6+ in `ACLConnector` for other purposes befor
 - [x] `buf generate` — regenerate Go stubs
 - [x] `store.go` — extend `RemoteNetworkConnectorsRow`; LEFT JOIN in `GetConnectorsForRemoteNetworks`
 - [x] `compiler.go` — populate relay coords on `ACLConnector` in connector loop
-- [ ] `relay/heartbeat.go` — call `NotifyPolicyChange` when relay metadata changes
-- [ ] `relay/expiry.go` — background eviction goroutine + notify on expiry
-- [ ] `client/src/daemon.rs` — update `build_transports_by_resource` signature + per-connector relay context
-- [ ] Build gate: `cd controller && go build ./...` and `cd client && cargo build`
-- [ ] Proto regeneration: `buf generate` + `cd admin && npm run codegen`
+- [x] `relay/heartbeat.go` — call `NotifyPolicyChange` when relay metadata changes
+- [x] `relay/expiry.go` — background eviction goroutine + notify on expiry
+- [x] `client/src/daemon.rs` — update `build_transports_by_resource` signature + per-connector relay context
+- [x] Build gate: `cd controller && go build ./...` and `cd client && cargo build`
+- [x] Proto regeneration: `buf generate` + `cd admin && npm run codegen`
 
 ---
 

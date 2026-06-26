@@ -71,8 +71,8 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 
 > See [[Sprint10.3/Member2-Go/Phase1-Authenticated-Provisioning-Heartbeat]].
 
-- [ ] **M2-A1** Require and verify a Relay-bound provisioning token.
-- [ ] **M2-A2** Atomically burn the provisioning JTI and reject replay.
+- [x] **M2-A1** Require and verify a Relay-bound provisioning token.
+- [x] **M2-A2** Atomically burn the provisioning JTI and reject replay.
 - [x] **M2-A3** Define and generate the Relay heartbeat protobuf contract.
 - [x] **M2-A4** Authenticate heartbeat identity through mTLS and persist health.
 - [x] **M2-A4.1** Persist Relay heartbeat peer address metadata (`observed_ip`, `observed_port`, `address_scope`, `public_addr` when public).
@@ -85,9 +85,9 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 
 - [x] **M3-B1** Add QUIC/session/handshake idle timeouts.
 - [x] **M3-B2** Add bounded connection, stream, and pending-handshake concurrency.
-- [ ] **M3-B3** Evict closed Connector registrations during Lookup/open failure.
-- [ ] **M3-B4** Return structured negative ACKs for routable protocol failures.
-- [ ] **M3-B5** Enforce canonical lowercase UUIDs in Relay SPIFFE parsing.
+- [x] **M3-B3** Evict closed Connector registrations during Lookup/open failure.
+- [x] **M3-B4** Return structured negative ACKs for routable protocol failures.
+- [x] **M3-B5** Enforce canonical lowercase UUIDs in Relay SPIFFE parsing.
 
 ### Phase C — M3: Certificate Lifecycle & Trust-Bundle Hardening
 
