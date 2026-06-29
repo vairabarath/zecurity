@@ -94,6 +94,9 @@ message ConnectorControlMessage {
     // ConnectorHealthReport so a lost message self-heals within one
     // heartbeat interval.
     ConnectorRelayState relay_state = 15;
+    // Field 16 reserved for TransportSnapshot (ADR-015).
+    // Controller → Connector — eligible relay pool with capacity labels (ADR-016).
+    LabelledRelayList relay_list = 17;
   }
 }
 
@@ -154,6 +157,27 @@ message ConnectorRelayState {
   string relay_spiffe_id   = 3; // optional
   int64  observed_at_unix  = 4; // connector-local time of the transition
   string reason            = 5; // "connected", "disconnected", "switched", ...
+}
+
+// Controller-assigned capacity tier for a relay (ADR-016). Exhausted relays
+// are dropped from LabelledRelayList entirely, so only High/Medium appear here.
+enum RelayCapacityLabel {
+  RELAY_CAPACITY_HIGH   = 0;
+  RELAY_CAPACITY_MEDIUM = 1;
+}
+
+message LabelledRelayInfo {
+  string             relay_id   = 1;
+  string             relay_addr = 2; // host:9093
+  string             spiffe_id  = 3;
+  RelayCapacityLabel label      = 4;
+}
+
+// Controller → Connector pushed pool of eligible relays. version is monotonic;
+// the connector skips re-probing when version is unchanged.
+message LabelledRelayList {
+  repeated LabelledRelayInfo relays  = 1;
+  uint64                     version = 2;
 }
 
 message ShieldStatusUpdate {
