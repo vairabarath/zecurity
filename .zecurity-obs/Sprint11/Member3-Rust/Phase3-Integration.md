@@ -55,3 +55,11 @@ Validate the full connector relay selection lifecycle against a real controller 
 cd connector && cargo build
 cd connector && cargo test
 ```
+
+## Implementation Checklist
+
+- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window
+- [ ] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable
+- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections
+- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops
+- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass

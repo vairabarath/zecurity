@@ -113,3 +113,13 @@ RELAY_LABEL_HOLDDOWN_SECS   = 60
 cd controller && go build ./...
 cd controller && go test ./internal/relay/... ./internal/connector/...
 ```
+
+## Implementation Checklist
+
+- [ ] **M2-C1** DB migration — add `connection_count`, `max_connections`, `capacity_label`, `pending_capacity_label`, `pending_label_since`, `last_label_changed_at` columns to `relays` table
+- [ ] **M2-C2** `controller/internal/relay/heartbeat.go` — persist `connection_count` and `max_connections` from heartbeat payload into DB
+- [ ] **M2-C3** `controller/internal/relay/heartbeat.go` — hysteresis state machine: compute `candidate_label`, manage pending/promotion fields, push `LabelledRelayList` only after hold-down elapsed
+- [ ] **M2-C4** `controller/internal/connector/control_stream.go` — push current `LabelledRelayList` on connector control stream open
+- [ ] **M2-C5** `controller/internal/connector/control_stream.go` — push updated `LabelledRelayList` on relay pool change (added, expired, addr/SPIFFE changed, label promoted)
+- [ ] **M2-C6** Unit tests: hysteresis transitions, hold-down timer, push-on-promotion only, relay inactive → removed from list
+- [ ] **Build gate:** `cd controller && go build ./...` and `go test ./internal/relay/... ./internal/connector/...` pass

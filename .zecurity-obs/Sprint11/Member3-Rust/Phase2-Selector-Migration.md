@@ -119,3 +119,14 @@ After drain completes: drop `active_conn`, promote `pending_conn` to `active_con
 cd connector && cargo build
 cd connector && cargo test
 ```
+
+## Implementation Checklist
+
+- [ ] **M3-D3** `connector/src/relay_selector.rs` (new) — full state machine: `Disconnected → Phase1Connected → BackgroundProbing → Phase3Migration → Failover → Backoff`; startup picks `ranked[0]` → random Tier 1 → random Tier 2 → backoff
+- [ ] **M3-D4** `connector/src/relay_selector.rs` — exhausted active relay → immediate migration (skip threshold); normal threshold = `current_score - best_score > max(current_score × 0.15, 10ms)`
+- [ ] **M3-D5** `connector/src/relay_selector.rs` — failover: filter ranking to current list → try in order → full probe → backoff
+- [ ] **M3-D6** `connector/src/control_stream.rs` — handle `ConnectorControlMessage::RelayList(list)` → send to selector via watch channel
+- [ ] **M3-D7** `connector/src/relay_client.rs` — dual-connection during Phase 3 drain: `pending_conn` receives new streams; `active_conn` drained until `RELAY_DRAIN_TIMEOUT_SECS` or empty; then promote
+- [ ] **M3-D8** `connector/src/config.rs` — remove `RELAY_ADDR` / `RELAY_SPIFFE_ID` static env vars
+- [ ] **Tests:** ranked[0] valid → no probe on startup; no Tier 1 → Tier 2 + warning; absent from list → immediate migration; threshold logic; make-before-break new-streams-only; drain force-close; failover skips absent entries; backoff caps
+- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass

@@ -15,6 +15,9 @@ const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_MESSAGE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const DEFAULT_MAX_PROBE_RATE: u32 = 10;
+const DEFAULT_MAX_CONCURRENT_PROBES: usize = 20;
+const DEFAULT_PROBE_TIMEOUT_MS: u64 = 2000;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeLimits {
@@ -24,6 +27,9 @@ pub struct RuntimeLimits {
     pub idle_timeout: Duration,
     pub handshake_timeout: Duration,
     pub message_timeout: Duration,
+    pub max_probe_rate: u32,
+    pub max_concurrent_probes: usize,
+    pub probe_timeout: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -96,6 +102,18 @@ impl RelayConfig {
                 message_timeout: Duration::from_secs(positive_env_u64(
                     "RELAY_MESSAGE_TIMEOUT_SECS",
                     DEFAULT_MESSAGE_TIMEOUT_SECS,
+                )?),
+                max_probe_rate: positive_env_u32(
+                    "RELAY_MAX_PROBE_RATE",
+                    DEFAULT_MAX_PROBE_RATE,
+                )?,
+                max_concurrent_probes: positive_env_usize(
+                    "RELAY_MAX_CONCURRENT_PROBES",
+                    DEFAULT_MAX_CONCURRENT_PROBES,
+                )?,
+                probe_timeout: Duration::from_millis(positive_env_u64(
+                    "RELAY_PROBE_TIMEOUT_MS",
+                    DEFAULT_PROBE_TIMEOUT_MS,
                 )?),
             },
             heartbeat_interval: Duration::from_secs(positive_env_u64(

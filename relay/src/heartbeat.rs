@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::config::RelayConfig;
 use crate::relay::v1::relay_service_client::RelayServiceClient;
 use crate::relay::v1::HeartbeatRequest;
+use crate::session::ACTIVE_STREAMS;
 use crate::state::RelayState;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
@@ -74,6 +75,8 @@ async fn run_connected(
             uptime_seconds: started_at.elapsed().as_secs(),
             registered_connectors: state.connector_count() as u64,
             listen_port: cfg.bind_addr.port() as u32,
+            connection_count: ACTIVE_STREAMS.load(std::sync::atomic::Ordering::Relaxed),
+            max_connections: cfg.runtime_limits.max_connections as u32,
         });
         request.set_timeout(RPC_TIMEOUT);
         let response = client

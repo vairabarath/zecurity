@@ -86,23 +86,23 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 > See [[Sprint11/Member2-Go/Phase1-Proto]].
 
-- [ ] **M2-A1** `proto/relay/v1/relay.proto` — add `connection_count` and `max_connections` to relay heartbeat
-- [ ] **M2-A2** `proto/relay/v1/relay.proto` — add `ProbeRequest` (with `request_id`) and `ProbeResponse` (echoing `request_id`)
-- [ ] **M2-A3** `proto/connector/v1/connector.proto` — add `RelayCapacityLabel` enum, `LabelledRelayInfo`, `LabelledRelayList` messages
-- [ ] **M2-A4** `proto/connector/v1/connector.proto` — add `relay_list = 17` to `ConnectorControlMessage` oneof body
-- [ ] **M2-A5** `buf generate` — regenerate Go stubs; confirm Rust prost stubs regenerate
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-A1** `proto/relay/v1/relay.proto` — add `connection_count` and `max_connections` to relay heartbeat
+- [x] **M2-A2** `proto/relay/v1/relay.proto` — add `ProbeRequest` (with `request_id`) and `ProbeResponse` (echoing `request_id`)
+- [x] **M2-A3** `proto/connector/v1/connector.proto` — add `RelayCapacityLabel` enum, `LabelledRelayInfo`, `LabelledRelayList` messages
+- [x] **M2-A4** `proto/connector/v1/connector.proto` — add `relay_list = 17` to `ConnectorControlMessage` oneof body
+- [x] **M2-A5** `buf generate` — regenerate Go stubs; confirm Rust prost stubs regenerate
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase B — M4: Relay Telemetry
 
 > Depends on Phase A. See [[Sprint11/Member4-Relay/Phase1-Telemetry]].
 
-- [ ] **M4-B1** `relay/src/config.rs` — add `RELAY_MAX_CONNECTIONS` env var
-- [ ] **M4-B2** `relay/src/session.rs` — add atomic counter for active bridged client streams; increment on bridge start, decrement on bridge end
-- [ ] **M4-B3** `relay/src/heartbeat.rs` (or equivalent) — include `connection_count` and `max_connections` in heartbeat payload
-- [ ] **M4-B4** `relay/src/session.rs` — add probe responder: detect `ProbeRequest` on new connection, respond with `ProbeResponse { connection_count, capacity, request_id }`, close without registering
-- [ ] **M4-B5** Relay-side probe abuse controls: per-connector rate limit, per-probe timeout, max concurrent probe cap, audit log on excessive attempts
-- [ ] **Build gate:** `cd relay && cargo build`
+- [x] **M4-B1** `relay/src/config.rs` — add `RELAY_MAX_CONNECTIONS` env var (already existed); add `RELAY_MAX_PROBE_RATE`, `RELAY_MAX_CONCURRENT_PROBES`, `RELAY_PROBE_TIMEOUT_MS` to `RuntimeLimits`
+- [x] **M4-B2** `relay/src/session.rs` — `pub static ACTIVE_STREAMS: AtomicU32`; `fetch_add(1)` before `pipe_streams`, `fetch_sub(1)` after
+- [x] **M4-B3** `relay/src/heartbeat.rs` — `HeartbeatRequest` populated with `connection_count` and `max_connections`
+- [x] **M4-B4** `relay/src/session.rs` — `HandshakeMsg::Probe` arm: reads `ProbeRequest`, writes `ProbeResponse { connection_count, capacity, request_id }`, closes without registering; connector SPIFFE role validated
+- [x] **M4-B5** Probe abuse controls: per-connector 60s rate window, concurrent semaphore cap, per-probe deadline, `warn!` on rejection; `ProbeResponse` struct + `Probe` variant added to `protocol.rs`
+- [x] **Build gate:** `cd relay && cargo build` clean; `cd relay && cargo test` — 28/28 passed
 
 ### Phase C — M2: Controller Label State Machine & List Push
 
@@ -148,11 +148,11 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 ## Final Build Gates
 
-- [ ] `buf generate`
-- [ ] `cd controller && go build ./...`
+- [x] `buf generate`
+- [x] `cd controller && go build ./...`
 - [ ] `cd controller && go test ./internal/relay/... ./internal/connector/...`
-- [ ] `cd relay && cargo build`
-- [ ] `cd relay && cargo test`
+- [x] `cd relay && cargo build`
+- [x] `cd relay && cargo test`
 - [ ] `cd connector && cargo build`
 - [ ] `cd connector && cargo test`
 

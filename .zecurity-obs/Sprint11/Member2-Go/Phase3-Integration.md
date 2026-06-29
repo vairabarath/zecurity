@@ -45,3 +45,11 @@ Verify end-to-end: controller pushes correct `LabelledRelayList`, connector repo
 cd controller && go build ./...
 cd controller && go test ./internal/relay/... ./internal/connector/... ./internal/policy/...
 ```
+
+## Implementation Checklist
+
+- [ ] **TEAM-E1** Two connectors on different relays → each `ConnectorRelayState` report recorded → ACL snapshot shows distinct `relay_addr` per `ACLConnector`
+- [ ] **TEAM-E2** Relay crosses 80% → exhausted after hold-down → dropped from list → connectors migrate → placement updated
+- [ ] **TEAM-E3** Connector restart → reads persisted ranking → online immediately → background re-probe fires
+- [ ] **TEAM-E4** No Tier 1 relays → Tier 2 fallback for startup → controller alert logged
+- [ ] **Build gate:** `cd controller && go build ./...` and `go test ./internal/relay/... ./internal/connector/... ./internal/policy/...` pass

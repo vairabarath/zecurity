@@ -1,22 +1,38 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use quinn::{Connection, RecvStream, SendStream};
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::config::RuntimeLimits;
-use crate::protocol::{decode_message, encode_message, HandshakeMsg, RelayAck, MAX_MSG_SIZE};
+use crate::protocol::{
+    decode_message, encode_message, HandshakeMsg, ProbeResponse, RelayAck, MAX_MSG_SIZE,
+};
 use crate::spiffe::{same_workspace, ParsedSpiffe};
 use crate::state::RelayState;
+
+pub static ACTIVE_STREAMS: AtomicU32 = AtomicU32::new(0);
+
+struct ProbeRateWindow {
+    count: u32,
+    window_start: Instant,
+}
 
 #[derive(Clone)]
 pub struct SessionLimits {
     handshake_timeout: Duration,
     message_timeout: Duration,
     lookup_permits: Arc<Semaphore>,
+    probe_permits: Arc<Semaphore>,
+    probe_timeout: Duration,
+    max_probe_rate: u32,
+    max_connections: usize,
+    probe_rate_tracker: Arc<Mutex<HashMap<String, ProbeRateWindow>>>,
 }
 
 impl SessionLimits {
@@ -25,6 +41,11 @@ impl SessionLimits {
             handshake_timeout: limits.handshake_timeout,
             message_timeout: limits.message_timeout,
             lookup_permits: Arc::new(Semaphore::new(limits.max_lookup_bridges)),
+            probe_permits: Arc::new(Semaphore::new(limits.max_concurrent_probes)),
+            probe_timeout: limits.probe_timeout,
+            max_probe_rate: limits.max_probe_rate,
+            max_connections: limits.max_connections,
+            probe_rate_tracker: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -42,6 +63,68 @@ pub async fn handle_connection(
     let message: HandshakeMsg = read_message(&mut recv, limits.message_timeout).await?;
 
     match message {
+        HandshakeMsg::Probe {
+            connector_id,
+            request_id,
+        } => {
+            if identity.role != "connector" {
+                bail!("Probe requires connector identity");
+            }
+            if connector_id.is_empty() {
+                bail!("Probe connector_id must be non-empty");
+            }
+
+            // Concurrent probe cap
+            let _permit = match limits.probe_permits.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(
+                        connector_id = %connector_id,
+                        rejection_reason = "probe_concurrency_limit",
+                        "Relay Probe rejected: concurrent limit reached"
+                    );
+                    return Ok(());
+                }
+            };
+
+            // Per-connector rate limit (max N per 60s window)
+            {
+                let mut tracker = limits.probe_rate_tracker.lock().await;
+                let now = Instant::now();
+                let window = tracker.entry(connector_id.clone()).or_insert(ProbeRateWindow {
+                    count: 0,
+                    window_start: now,
+                });
+                if now.duration_since(window.window_start) >= Duration::from_secs(60) {
+                    window.count = 0;
+                    window.window_start = now;
+                }
+                if window.count >= limits.max_probe_rate {
+                    warn!(
+                        connector_id = %connector_id,
+                        rejection_reason = "probe_rate_limit",
+                        "Relay Probe rejected: rate limit exceeded"
+                    );
+                    return Ok(());
+                }
+                window.count += 1;
+            }
+
+            let connection_count = ACTIVE_STREAMS.load(Ordering::Relaxed);
+            let capacity = limits.max_connections as u32;
+            let response = ProbeResponse {
+                connection_count,
+                capacity,
+                request_id,
+            };
+            let encoded = encode_message(&response).context("encode ProbeResponse")?;
+            timeout(limits.probe_timeout, send.write_all(&encoded))
+                .await
+                .context("Relay Probe response timed out")?
+                .context("write ProbeResponse")?;
+            // Connection closes naturally when send/recv are dropped — do not register.
+            Ok(())
+        }
         HandshakeMsg::Register {
             connector_id,
             spiffe_id,
@@ -183,7 +266,10 @@ async fn handle_lookup_stream(
         trust_domain = %identity.trust_domain,
         "bridging Client to Connector through Relay"
     );
-    pipe_streams(client_send, client_recv, connector_send, connector_recv).await
+    ACTIVE_STREAMS.fetch_add(1, Ordering::Relaxed);
+    let result = pipe_streams(client_send, client_recv, connector_send, connector_recv).await;
+    ACTIVE_STREAMS.fetch_sub(1, Ordering::Relaxed);
+    result
 }
 
 async fn read_message<T: for<'a> serde::Deserialize<'a>>(
@@ -308,6 +394,9 @@ mod tests {
             idle_timeout: Duration::from_secs(1),
             handshake_timeout: Duration::from_secs(1),
             message_timeout: Duration::from_secs(1),
+            max_probe_rate: 10,
+            max_concurrent_probes: 20,
+            probe_timeout: Duration::from_millis(2000),
         });
 
         let permit = limits.lookup_permits.clone().try_acquire_owned().unwrap();

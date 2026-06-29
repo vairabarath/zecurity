@@ -73,3 +73,12 @@ cd controller && go build ./...
 ```
 
 Confirm Rust prost stubs also regenerate cleanly for relay and connector crates.
+
+## Implementation Checklist
+
+- [x] **M2-A1** `proto/relay/v1/relay.proto` — add `connection_count = 6` and `max_connections = 7` to `HeartbeatRequest`
+- [x] **M2-A2** `proto/relay/v1/relay.proto` — add `ProbeRequest` (with `request_id`) and `ProbeResponse` (echoing `request_id`) messages
+- [x] **M2-A3** `proto/connector/v1/connector.proto` — add `RelayCapacityLabel` enum, `LabelledRelayInfo`, `LabelledRelayList` messages
+- [x] **M2-A4** `proto/connector/v1/connector.proto` — add `relay_list = 17` to `ConnectorControlMessage` oneof body; field 16 reserved for TransportSnapshot
+- [x] **M2-A5** `buf generate` — Go stubs regenerated; Rust prost stubs regenerated
+- [x] **Build gate:** `cd controller && go build ./...` passes

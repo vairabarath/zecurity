@@ -13,6 +13,17 @@ pub enum HandshakeMsg {
     Lookup {
         connector_id: String,
     },
+    Probe {
+        connector_id: String,
+        request_id: u64,
+    },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProbeResponse {
+    pub connection_count: u32,
+    pub capacity: u32,
+    pub request_id: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

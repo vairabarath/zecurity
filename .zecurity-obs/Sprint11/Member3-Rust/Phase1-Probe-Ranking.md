@@ -134,3 +134,11 @@ RELAY_DRAIN_TIMEOUT_SECS      = 30
 ```bash
 cd connector && cargo build
 ```
+
+## Implementation Checklist
+
+- [ ] **M3-D1** `connector/src/relay_probe.rs` (new) — `probe_relays()`: parallel QUIC mTLS dial, `request_id` generate + echo validate, QUIC peer SPIFFE validate against `LabelledRelayInfo.spiffe_id`, RTT measurement, score = `rtt_ms + ceil(fill_ratio × 50)`, concurrent cap via semaphore
+- [ ] **M3-D2** `connector/src/relay_ranking.rs` (new) — `RelayRanking` struct; `save()` atomic write (`.tmp` → rename); `load()` returning `None` on missing/corrupt; `valid_entries()` filtering absent/exhausted; `is_fresh()` (< 1h); `version_matches()`
+- [ ] **M3-D3** `connector/src/config.rs` — add `RELAY_REPROBE_INTERVAL_SECS` (300), `RELAY_MAX_CONCURRENT_PROBES` (5), `RELAY_RECONNECT_BASE_SECS` (5), `RELAY_RECONNECT_MAX_SECS` (120), `RELAY_RECONNECT_BACKOFF_FACTOR` (2.0), `RELAY_DRAIN_TIMEOUT_SECS` (30)
+- [ ] **Tests:** `request_id` mismatch → dropped; SPIFFE mismatch → failure; `valid_entries` filters correctly; `is_fresh` false for > 1h; atomic write leaves previous file on partial failure
+- [ ] **Build gate:** `cd connector && cargo build` passes
