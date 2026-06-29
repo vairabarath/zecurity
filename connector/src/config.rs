@@ -20,8 +20,6 @@
 //
 // Optional fields (have defaults):
 //   connector_id                — None until enrollment completes (Phase 5 writes it)
-//   relay_addr                  — None disables Relay registration
-//   relay_spiffe_id             — exact Relay SPIFFE URI; required with relay_addr
 //   auto_update_enabled         — false (Phase 7 updater checks this)
 //   log_level                   — "info"
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
@@ -42,6 +40,12 @@ const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
 const DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
 const DEFAULT_RELAY_MAX_TUNNEL_STREAMS: u32 = 256;
 const DEFAULT_RELAY_IDLE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RELAY_REPROBE_INTERVAL_SECS: u64 = 300;
+const DEFAULT_RELAY_MAX_CONCURRENT_PROBES: usize = 5;
+const DEFAULT_RELAY_RECONNECT_BASE_SECS: u64 = 5;
+const DEFAULT_RELAY_RECONNECT_MAX_SECS: u64 = 120;
+const DEFAULT_RELAY_RECONNECT_BACKOFF_FACTOR: f64 = 2.0;
+const DEFAULT_RELAY_DRAIN_TIMEOUT_SECS: u64 = 30;
 
 /// Connector configuration.
 ///
@@ -71,16 +75,6 @@ pub struct ConnectorConfig {
     #[serde(default)]
     pub connector_id: Option<String>,
 
-    /// Relay QUIC address, for example `relay.example.com:9093`.
-    /// Relay registration is disabled when this and `relay_spiffe_id` are unset.
-    #[serde(default)]
-    pub relay_addr: Option<String>,
-
-    /// Exact Relay SPIFFE URI, for example
-    /// `spiffe://zecurity.in/relay/550e8400-e29b-41d4-a716-446655440000`.
-    #[serde(default)]
-    pub relay_spiffe_id: Option<String>,
-
     /// Deadline for Client-to-Connector inner mTLS through Relay.
     #[serde(default = "default_relay_inner_handshake_timeout_secs")]
     pub relay_inner_handshake_timeout_secs: u64,
@@ -92,6 +86,33 @@ pub struct ConnectorConfig {
     /// Outer Connector-to-Relay QUIC idle timeout.
     #[serde(default = "default_relay_idle_timeout_secs")]
     pub relay_idle_timeout_secs: u64,
+
+    /// Sprint 11 ADR-016 — interval between background re-probes of the
+    /// labelled-relay list. Phase 2 consumes; Phase 1 lands the knob.
+    #[serde(default = "default_relay_reprobe_interval_secs")]
+    pub relay_reprobe_interval_secs: u64,
+
+    /// Maximum parallel relay probes during a single probe sweep.
+    #[serde(default = "default_relay_max_concurrent_probes")]
+    pub relay_max_concurrent_probes: usize,
+
+    /// Initial backoff after a relay disconnect before the connector
+    /// re-attempts attachment. Phase 3 consumes.
+    #[serde(default = "default_relay_reconnect_base_secs")]
+    pub relay_reconnect_base_secs: u64,
+
+    /// Backoff ceiling for relay reconnect attempts.
+    #[serde(default = "default_relay_reconnect_max_secs")]
+    pub relay_reconnect_max_secs: u64,
+
+    /// Multiplicative factor applied to the relay reconnect backoff each retry.
+    #[serde(default = "default_relay_reconnect_backoff_factor")]
+    pub relay_reconnect_backoff_factor: f64,
+
+    /// Grace period to drain active streams before tearing down an old relay
+    /// session during a rotation.
+    #[serde(default = "default_relay_drain_timeout_secs")]
+    pub relay_drain_timeout_secs: u64,
 
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]
@@ -139,6 +160,30 @@ fn default_relay_max_tunnel_streams() -> u32 {
 
 fn default_relay_idle_timeout_secs() -> u64 {
     DEFAULT_RELAY_IDLE_TIMEOUT_SECS
+}
+
+fn default_relay_reprobe_interval_secs() -> u64 {
+    DEFAULT_RELAY_REPROBE_INTERVAL_SECS
+}
+
+fn default_relay_max_concurrent_probes() -> usize {
+    DEFAULT_RELAY_MAX_CONCURRENT_PROBES
+}
+
+fn default_relay_reconnect_base_secs() -> u64 {
+    DEFAULT_RELAY_RECONNECT_BASE_SECS
+}
+
+fn default_relay_reconnect_max_secs() -> u64 {
+    DEFAULT_RELAY_RECONNECT_MAX_SECS
+}
+
+fn default_relay_reconnect_backoff_factor() -> f64 {
+    DEFAULT_RELAY_RECONNECT_BACKOFF_FACTOR
+}
+
+fn default_relay_drain_timeout_secs() -> u64 {
+    DEFAULT_RELAY_DRAIN_TIMEOUT_SECS
 }
 
 fn default_state_dir() -> String {

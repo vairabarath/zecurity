@@ -29,6 +29,9 @@ pub mod quic_listener;
 mod relay_attachment;
 mod relay_client;
 mod relay_handler;
+mod relay_probe;
+mod relay_ranking;
+mod relay_selector;
 mod renewal;
 pub mod tls;
 mod updater;
@@ -261,60 +264,59 @@ async fn main() -> anyhow::Result<()> {
 
     info!("device tunnel listeners spawned on :9092 (TLS+QUIC)");
 
-    match (&cfg.relay_addr, &cfg.relay_spiffe_id) {
-        (Some(relay_addr), Some(relay_spiffe_id)) => {
-            if relay_addr.trim().is_empty() {
-                bail!("RELAY_ADDR must not be empty");
-            }
-            relay_client::validate_relay_spiffe_id(relay_spiffe_id)
-                .context("invalid RELAY_SPIFFE_ID")?;
-            let relay_addr = relay_addr.clone();
-            let relay_handler = Arc::new(
-                relay_handler::RelayHandler::new(
-                    &cert_store,
-                    acl.clone(),
-                    tunnel_hub.clone(),
-                    crl_manager.clone(),
-                    connector_id.clone(),
-                    ctrl_tx.clone(),
-                    cfg.relay_inner_handshake_timeout_secs,
-                    cfg.relay_max_tunnel_streams as usize,
-                )
-                .context("build Connector Relay stream handler")?,
-            );
-            let relay_spiffe_id = relay_spiffe_id.clone();
-            let connector_spiffe_id =
-                appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
-            let cert_pem = cert_store.cert_pem.clone();
-            let key_pem = cert_store.key_pem.clone();
-            let ca_bundle = cert_store.workspace_ca_pem.clone();
-            let intermediate_bundle = ca_bundle.clone();
+    // Sprint 11 ADR-016: relay selector + watch channel for LabelledRelayList.
+    // The controller pushes labelled relays into the channel via the
+    // control stream; the selector subscribes, probes them, and runs the
+    // make-before-break attachment lifecycle.
+    let (relay_list_tx, relay_list_rx) = tokio::sync::watch::channel(None);
 
-            info!(relay_addr, "Relay registration task spawning");
-            let attachment_slot = relay_attachment_slot.clone();
-            let lifecycle_tx = ctrl_tx.clone();
-            tokio::spawn(async move {
-                relay_client::maintain_registration(
-                    relay_addr,
-                    relay_spiffe_id,
-                    connector_id,
-                    connector_spiffe_id,
-                    cert_pem,
-                    key_pem,
-                    ca_bundle,
-                    intermediate_bundle,
-                    relay_handler,
-                    cfg.relay_max_tunnel_streams,
-                    cfg.relay_idle_timeout_secs,
-                    attachment_slot,
-                    lifecycle_tx,
-                )
-                .await;
-            });
-        }
-        (None, None) => info!("Relay registration disabled"),
-        _ => bail!("RELAY_ADDR and RELAY_SPIFFE_ID must be configured together"),
-    }
+    let relay_handler = Arc::new(
+        relay_handler::RelayHandler::new(
+            &cert_store,
+            acl.clone(),
+            tunnel_hub.clone(),
+            crl_manager.clone(),
+            connector_id.clone(),
+            ctrl_tx.clone(),
+            cfg.relay_inner_handshake_timeout_secs,
+            cfg.relay_max_tunnel_streams as usize,
+        )
+        .context("build Connector Relay stream handler")?,
+    );
+    let connector_spiffe_id =
+        appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
+    let ca_bundle = cert_store.workspace_ca_pem.clone();
+    let selector_cfg = relay_selector::RelaySelectorConfig {
+        state_dir: std::path::PathBuf::from(&cfg.state_dir),
+        connector_id: connector_id.clone(),
+        connector_spiffe_id,
+        cert_pem: cert_store.cert_pem.clone(),
+        key_pem: cert_store.key_pem.clone(),
+        workspace_ca_pem: ca_bundle.clone(),
+        intermediate_ca_pem: ca_bundle,
+        max_incoming_bidi_streams: cfg.relay_max_tunnel_streams,
+        idle_timeout: std::time::Duration::from_secs(cfg.relay_idle_timeout_secs),
+        reprobe_interval: std::time::Duration::from_secs(cfg.relay_reprobe_interval_secs),
+        max_concurrent_probes: cfg.relay_max_concurrent_probes,
+        probe_timeout: std::time::Duration::from_millis(3000),
+        reconnect_base: std::time::Duration::from_secs(cfg.relay_reconnect_base_secs),
+        reconnect_max: std::time::Duration::from_secs(cfg.relay_reconnect_max_secs),
+        reconnect_backoff_factor: cfg.relay_reconnect_backoff_factor,
+        drain_timeout: std::time::Duration::from_secs(cfg.relay_drain_timeout_secs),
+    };
+    let selector_attachment_slot = relay_attachment_slot.clone();
+    let selector_ctrl_tx = ctrl_tx.clone();
+    tokio::spawn(async move {
+        relay_selector::run(
+            selector_cfg,
+            relay_handler,
+            selector_attachment_slot,
+            relay_list_rx,
+            selector_ctrl_tx,
+        )
+        .await
+    });
+    info!("Relay selector spawned (ADR-016)");
 
     watchdog::notify_ready();
     watchdog::spawn_watchdog();
@@ -328,6 +330,7 @@ async fn main() -> anyhow::Result<()> {
         ctrl_rx,
         policy_cache,
         relay_attachment_slot,
+        relay_list_tx,
     )
     .await
 }

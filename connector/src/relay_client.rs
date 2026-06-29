@@ -23,7 +23,6 @@ use crate::relay_handler::RelayHandler;
 
 const RELAY_ALPN: &[u8] = b"ztna-relay-v1";
 const MAX_MESSAGE_SIZE: usize = 16 * 1024;
-const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -139,106 +138,113 @@ impl RelayClient {
     }
 }
 
-/// Maintain Connector registration until the task is cancelled.
+/// Run one Connector→Relay registration cycle: connect, register, emit the
+/// `connected` lifecycle event, run the per-connection stream handler, and
+/// emit `disconnected` when the session ends. Returns when the underlying
+/// QUIC connection closes (for any reason); the caller decides whether to
+/// retry, switch relays, or give up.
 ///
-/// Reports the current relay attachment state via:
-///   1. `attachment_slot` — shared RwLock read by the control-stream health
-///      tick to populate ConnectorHealthReport fields 6-8.
-///   2. `lifecycle_tx` — mpsc sender that forwards ConnectorRelayState on
-///      every attach/detach transition via the existing control-stream channel.
-pub async fn maintain_registration(
-    relay_addr: String,
-    relay_spiffe_id: String,
-    connector_id: String,
-    spiffe_id: String,
-    cert_pem: Vec<u8>,
-    key_pem: Vec<u8>,
-    workspace_ca_bundle_pem: Vec<u8>,
-    intermediate_ca_bundle_pem: Vec<u8>,
+/// `on_registered` is signalled once registration succeeds — the Phase-2
+/// selector uses this to transition from "pending" to "active" before the
+/// stream handler starts blocking. The wrapper [`maintain_registration`]
+/// passes `None`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_session(
+    relay_addr: &str,
+    relay_spiffe_id: &str,
+    connector_id: &str,
+    spiffe_id: &str,
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    workspace_ca_bundle_pem: &[u8],
+    intermediate_ca_bundle_pem: &[u8],
     relay_handler: Arc<RelayHandler>,
     max_incoming_bidi_streams: u32,
-    idle_timeout_secs: u64,
+    idle_timeout: Duration,
     attachment_slot: RelayAttachmentSlot,
     lifecycle_tx: mpsc::Sender<ConnectorControlMessage>,
-) {
-    // A connector's relay identity is embedded in the SPIFFE ID as the trailing UUID.
-    // Already validated before calling this function.
+    on_registered: Option<tokio::sync::oneshot::Sender<()>>,
+) -> Result<()> {
+    // The relay's UUID is embedded in the trailing path segment of the SPIFFE
+    // URI — validated by upstream call sites before reaching this function.
     let relay_id = relay_spiffe_id
         .strip_prefix("spiffe://zecurity.in/relay/")
-        .expect("relay SPIFFE ID validated upstream")
+        .context("relay SPIFFE ID must be validated upstream")?
         .to_string();
 
-    loop {
-        let result = async {
-            let resolved_addr = resolve_relay_addr(&relay_addr).await?;
-            let client = RelayClient::connect(
-                resolved_addr,
-                &relay_spiffe_id,
-                &cert_pem,
-                &key_pem,
-                &workspace_ca_bundle_pem,
-                &intermediate_ca_bundle_pem,
-                max_incoming_bidi_streams,
-                Duration::from_secs(idle_timeout_secs),
-            )
-            .await?;
-            client.register(&connector_id, &spiffe_id).await?;
+    let result = async {
+        let resolved_addr = resolve_relay_addr(relay_addr).await?;
+        let client = RelayClient::connect(
+            resolved_addr,
+            relay_spiffe_id,
+            cert_pem,
+            key_pem,
+            workspace_ca_bundle_pem,
+            intermediate_ca_bundle_pem,
+            max_incoming_bidi_streams,
+            idle_timeout,
+        )
+        .await?;
+        client.register(connector_id, spiffe_id).await?;
 
-            // Registration succeeded — update shared relay attachment state
-            // and emit lifecycle event: connected.
-            let attached_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let attachment = RelayAttachment {
-                relay_id: relay_id.clone(),
-                relay_spiffe_id: relay_spiffe_id.clone(),
-                attached_at,
-            };
-            *attachment_slot.write().await = Some(attachment);
-            let _ = lifecycle_tx
-                .send(ConnectorControlMessage {
-                    body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
-                        connector_id: connector_id.clone(),
-                        relay_id: relay_id.clone(),
-                        relay_spiffe_id: relay_spiffe_id.clone(),
-                        observed_at_unix: attached_at,
-                        reason: "connected".to_string(),
-                    })),
-                })
-                .await;
-
-            relay_handler.clone().run(client.connection()).await
-        }
-        .await;
-
-        match &result {
-            Ok(()) => info!(relay_addr, "Relay registration connection closed"),
-            Err(error) => warn!(%relay_addr, %error, "Relay registration failed"),
-        }
-
-        // Session ended (clean close or error) — clear shared state and emit
-        // lifecycle event: disconnected.
-        let detached_at = std::time::SystemTime::now()
+        // Registration succeeded — publish the new attachment, fire the
+        // lifecycle event, and (optionally) signal the orchestrator.
+        let attached_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        *attachment_slot.write().await = None;
+        let attachment = RelayAttachment {
+            relay_id: relay_id.clone(),
+            relay_spiffe_id: relay_spiffe_id.to_string(),
+            attached_at,
+        };
+        attachment_slot.set_active(Some(attachment)).await;
         let _ = lifecycle_tx
             .send(ConnectorControlMessage {
                 body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
-                    connector_id: connector_id.clone(),
-                    relay_id: String::new(),
-                    relay_spiffe_id: String::new(),
-                    observed_at_unix: detached_at,
-                    reason: "disconnected".to_string(),
+                    connector_id: connector_id.to_string(),
+                    relay_id: relay_id.clone(),
+                    relay_spiffe_id: relay_spiffe_id.to_string(),
+                    observed_at_unix: attached_at,
+                    reason: "connected".to_string(),
                 })),
             })
             .await;
+        if let Some(tx) = on_registered {
+            let _ = tx.send(());
+        }
 
-        tokio::time::sleep(RECONNECT_DELAY).await;
+        relay_handler.clone().run(client.connection()).await
     }
+    .await;
+
+    match &result {
+        Ok(()) => info!(relay_addr, "Relay registration connection closed"),
+        Err(error) => warn!(%relay_addr, %error, "Relay session failed"),
+    }
+
+    // Session ended (clean close or error) — clear shared state and emit
+    // the disconnected lifecycle event.
+    let detached_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    attachment_slot.set_active(None).await;
+    let _ = lifecycle_tx
+        .send(ConnectorControlMessage {
+            body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
+                connector_id: connector_id.to_string(),
+                relay_id: String::new(),
+                relay_spiffe_id: String::new(),
+                observed_at_unix: detached_at,
+                reason: "disconnected".to_string(),
+            })),
+        })
+        .await;
+
+    result
 }
+
 
 async fn resolve_relay_addr(relay_addr: &str) -> Result<SocketAddr> {
     tokio::net::lookup_host(relay_addr)
@@ -424,7 +430,7 @@ fn parse_private_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>> {
         .context("Connector private key PEM contains no private key")
 }
 
-async fn write_message<T: Serialize>(send: &mut SendStream, message: &T) -> Result<()> {
+pub(crate) async fn write_message<T: Serialize>(send: &mut SendStream, message: &T) -> Result<()> {
     let body = serde_json::to_vec(message).context("encode Relay message")?;
     if body.len() > MAX_MESSAGE_SIZE {
         bail!("Relay message too large: {} bytes", body.len());
@@ -438,7 +444,7 @@ async fn write_message<T: Serialize>(send: &mut SendStream, message: &T) -> Resu
         .context("write Relay message body")
 }
 
-async fn read_message<T: for<'de> Deserialize<'de>>(recv: &mut RecvStream) -> Result<T> {
+pub(crate) async fn read_message<T: for<'de> Deserialize<'de>>(recv: &mut RecvStream) -> Result<T> {
     let mut length = [0u8; 4];
     recv.read_exact(&mut length)
         .await

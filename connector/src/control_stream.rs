@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -21,8 +21,8 @@ use crate::enrollment::EnrollmentState;
 use crate::proto::connector_control_message::Body as CBody;
 use crate::proto::{
     connector_service_client::ConnectorServiceClient, ConnectorControlMessage,
-    ConnectorHealthReport, ResourceAckBatch, ScanReport as ProtoScanReport,
-    ScanResult as ProtoScanResult,
+    ConnectorHealthReport, LabelledRelayList, ResourceAckBatch,
+    ScanReport as ProtoScanReport, ScanResult as ProtoScanResult,
 };
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
@@ -43,6 +43,7 @@ pub async fn run_control_stream(
     mut log_rx: mpsc::Receiver<crate::ControlMessage>,
     policy_cache: Arc<PolicyCache>,
     relay_attachment_slot: RelayAttachmentSlot,
+    relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -79,6 +80,7 @@ pub async fn run_control_stream(
             &public_ip,
             &policy_cache,
             &relay_attachment_slot,
+            &relay_list_tx,
         )
         .await
         {
@@ -111,16 +113,14 @@ async fn send_msg(
         .map_err(|_| anyhow::anyhow!("outbound channel closed"))
 }
 
-/// Read the current relay attachment and return (relay_id, relay_spiffe_id, attached_at_unix).
-/// Fields are empty/zero when no relay is attached.
+/// Read the active relay attachment and return (relay_id, relay_spiffe_id, attached_at_unix).
+/// Fields are empty/zero when no relay is attached. Phase-2 migrations expose
+/// only the active relay here — `pending` is invisible to the controller until
+/// it promotes to active.
 fn relay_attachment_fields(slot: &RelayAttachmentSlot) -> (String, String, i64) {
-    if let Some(guard) = slot.try_read().ok() {
-        match &*guard {
-            Some(a) => (a.relay_id.clone(), a.relay_spiffe_id.clone(), a.attached_at),
-            None => (String::new(), String::new(), 0),
-        }
-    } else {
-        (String::new(), String::new(), 0)
+    match slot.try_active() {
+        Some(a) => (a.relay_id, a.relay_spiffe_id, a.attached_at),
+        None => (String::new(), String::new(), 0),
     }
 }
 
@@ -136,6 +136,7 @@ async fn run_once(
     public_ip: &str,
     policy_cache: &Arc<PolicyCache>,
     relay_attachment_slot: &RelayAttachmentSlot,
+    relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
     let cert_store =
         CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for control stream")?;
@@ -204,7 +205,7 @@ async fn run_once(
                         return Ok(());
                     }
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache).await {
+                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, relay_list_tx).await {
                             return action;
                         }
                     }
@@ -272,6 +273,7 @@ async fn run_once(
 }
 
 /// Returns Some(Err) on fatal error, Some(Ok(())) to reconnect (e.g. after renewal), None to continue.
+#[allow(clippy::too_many_arguments)]
 async fn handle_controller_msg(
     msg: ConnectorControlMessage,
     shield_registry: &ShieldRegistry,
@@ -279,6 +281,7 @@ async fn handle_controller_msg(
     cfg: &ConnectorConfig,
     out_tx: &mpsc::Sender<ConnectorControlMessage>,
     policy_cache: &Arc<PolicyCache>,
+    relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(CBody::ResourceInstructions(batch)) => {
@@ -364,6 +367,23 @@ async fn handle_controller_msg(
             let workspace_id = snap.workspace_id.clone();
             policy_cache.update(snap);
             info!(version, %workspace_id, "ACL snapshot stored");
+            None
+        }
+        Some(CBody::RelayList(list)) => {
+            // Sprint 11 ADR-016: forward to the relay selector via the watch
+            // channel. The selector owns version-skip decisions; we just
+            // hand off the latest payload. A send error means the selector
+            // task has dropped its receiver — non-fatal for the control stream.
+            let version = list.version;
+            let relay_count = list.relays.len();
+            if relay_list_tx.send(Some(list)).is_err() {
+                warn!(
+                    version,
+                    "no relay selector listening; dropping LabelledRelayList push"
+                );
+            } else {
+                info!(version, relay_count, "received LabelledRelayList push");
+            }
             None
         }
         _ => None,
