@@ -108,13 +108,13 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 > Depends on Phase A + B. See [[Sprint11/Member2-Go/Phase2-Label-StateMachine]].
 
-- [ ] **M2-C1** DB migration — add columns to `relays`: `connection_count int`, `max_connections int`, `capacity_label text`, `pending_capacity_label text`, `pending_label_since timestamptz`, `last_label_changed_at timestamptz`
-- [ ] **M2-C2** `controller/internal/relay/heartbeat.go` — persist `connection_count` and `max_connections` from heartbeat payload
-- [ ] **M2-C3** `controller/internal/relay/heartbeat.go` — implement hysteresis state machine: compute `candidate_label`, manage pending/promotion fields, push `LabelledRelayList` only on promotion after hold-down elapsed
-- [ ] **M2-C4** `controller/internal/connector/control_stream.go` — push current `LabelledRelayList` on connector control stream open
-- [ ] **M2-C5** `controller/internal/connector/control_stream.go` — push updated `LabelledRelayList` when relay pool changes (relay added, removed/expired, address/SPIFFE changed, capacity label promoted)
-- [ ] **M2-C6** Unit tests: hysteresis transitions, hold-down timer, push-on-promotion only
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-C1** DB migration — add columns to `relays`: `connection_count int`, `max_connections int`, `capacity_label text`, `pending_capacity_label text`, `pending_label_since timestamptz`, `last_label_changed_at timestamptz`
+- [x] **M2-C2** `controller/internal/relay/heartbeat.go` — persist `connection_count` and `max_connections` from heartbeat payload
+- [x] **M2-C3** `controller/internal/relay/heartbeat.go` — implement hysteresis state machine: compute `candidate_label`, manage pending/promotion fields, push `LabelledRelayList` only on promotion after hold-down elapsed
+- [x] **M2-C4** `controller/internal/connector/control_stream.go` — push current `LabelledRelayList` on connector control stream open
+- [x] **M2-C5** `controller/internal/connector/control_stream.go` — push updated `LabelledRelayList` when relay pool changes (relay added, removed/expired, address/SPIFFE changed, capacity label promoted)
+- [x] **M2-C6** Unit tests: hysteresis transitions, hold-down timer, push-on-promotion only
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase D — M3: Connector Probe, Ranking, Selector, Migration
 

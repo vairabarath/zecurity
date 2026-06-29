@@ -139,6 +139,22 @@ func main() {
 	policyNotifier := policy.NewNotifier(policyCache)
 	relaySvc.WithPolicyNotifier(policyNotifier)
 
+	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
+	// connected connectors. Triggered on capacity-tier promotion, address
+	// changes, and eviction. Version is stamped with the broadcast time so
+	// it is strictly monotonic across pool changes — connectors compare
+	// against the version they last saw to decide whether to re-probe.
+	broadcastRelayList := func(ctx context.Context) {
+		list, err := relayStore.BuildLabelledRelayList(ctx)
+		if err != nil {
+			log.Printf("relay pool broadcast: build list: %v", err)
+			return
+		}
+		list.Version = uint64(time.Now().UTC().Unix())
+		connectorRegistry.BroadcastRelayList(list)
+	}
+	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
+
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
 			Resolvers: &resolvers.Resolver{
@@ -283,6 +299,7 @@ func main() {
 		PolicyCache:    policyCache,
 		PolicyNotifier: policyNotifier,
 		RelayStore:     relayStore,
+		RelayListSrc:   relayStore,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
@@ -316,7 +333,7 @@ func main() {
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
 	go shieldSvc.RunDisconnectWatcher(ctx)
-	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second)
+	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

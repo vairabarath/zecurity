@@ -28,6 +28,8 @@ type Service struct {
 	notifier policyChangeNotifier
 
 	heartbeatDBWriteInterval time.Duration
+	labelHoldDown            time.Duration
+	onPoolChange             func(ctx context.Context)
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {
@@ -36,7 +38,30 @@ func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration)
 		store:                    store,
 		certTTL:                  certTTL,
 		heartbeatDBWriteInterval: 5 * time.Minute,
+		labelHoldDown:            60 * time.Second,
 	}
+}
+
+// WithLabelHoldDown overrides RELAY_LABEL_HOLDDOWN_SECS (default 60s). A
+// capacity-tier candidate must remain stable for this duration before it is
+// promoted to capacity_label and pushed to connectors.
+func (s *Service) WithLabelHoldDown(d time.Duration) *Service {
+	if d > 0 {
+		s.labelHoldDown = d
+	}
+	return s
+}
+
+// WithRelayPoolBroadcaster registers a callback the heartbeat handler invokes
+// whenever the eligible relay pool changes (capacity-tier promotion, address
+// change, or new active relay). The callback is responsible for building the
+// current LabelledRelayList and fanning it out to connected connectors.
+// Defined here as a callback so the relay package does not import the
+// connector registry. Eviction broadcasts are wired separately via the same
+// callback in main.go.
+func (s *Service) WithRelayPoolBroadcaster(f func(ctx context.Context)) *Service {
+	s.onPoolChange = f
+	return s
 }
 
 func (s *Service) WithHeartbeatCache(redis valkeycompat.Cmdable, dbWriteInterval time.Duration) *Service {

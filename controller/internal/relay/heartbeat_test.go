@@ -19,17 +19,19 @@ import (
 )
 
 type fakeHeartbeatStore struct {
-	id           string
-	certSerial   string
-	certNotAfter time.Time
-	version      string
-	hostname     string
-	observedIP   string
-	observedPort int
-	addressScope string
-	publicAddr   string
-	err          error
-	workspaceIDs []string // returned by ListWorkspacesForRelay
+	id              string
+	certSerial      string
+	certNotAfter    time.Time
+	version         string
+	hostname        string
+	observedIP      string
+	observedPort    int
+	addressScope    string
+	publicAddr      string
+	connectionCount uint32
+	maxConnections  uint32
+	err             error
+	workspaceIDs    []string // returned by ListWorkspacesForRelay
 }
 
 type fakeNotifier struct {
@@ -42,7 +44,14 @@ func (n *fakeNotifier) NotifyPolicyChange(_ context.Context, workspaceID string)
 	return n.err
 }
 
-func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
+func (s *fakeHeartbeatStore) EvaluateCapacityLabel(_ context.Context, relayID string, _ time.Duration) (CapacityLabelTransition, error) {
+	return CapacityLabelTransition{
+		PreviousLabel: CapacityLabelHigh,
+		NewLabel:      CapacityLabelHigh,
+	}, s.err
+}
+
+func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
 	s.id = id
 	s.certSerial = certSerial
 	s.certNotAfter = certNotAfter
@@ -52,6 +61,8 @@ func (s *fakeHeartbeatStore) RecordHeartbeat(_ context.Context, id, certSerial s
 	s.observedPort = observedPort
 	s.addressScope = addressScope
 	s.publicAddr = publicAddr
+	s.connectionCount = connectionCount
+	s.maxConnections = maxConnections
 	return s.err
 }
 

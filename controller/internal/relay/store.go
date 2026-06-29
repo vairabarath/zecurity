@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	connectorpb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	"github.com/yourorg/ztna/controller/internal/appmeta"
 )
 
 var ErrRelayNotFound = errors.New("relay not found")
@@ -266,7 +269,158 @@ func (s *Store) EvictExpiredRelays(ctx context.Context, before time.Time) ([]str
 	return ids, rows.Err()
 }
 
-func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error {
+// CapacityLabelTransition reports the outcome of running the hysteresis
+// state machine on a single heartbeat. Promoted is true when the published
+// capacity_label changed (and connectors must therefore be told about it).
+type CapacityLabelTransition struct {
+	Promoted      bool
+	PreviousLabel string
+	NewLabel      string
+}
+
+// labelledRelayDefaultPort is the QUIC port a relay listens on when only an
+// observed IP is known (no public_addr override). Matches the connector / client
+// relay default; kept private to the package because the public surface is the
+// already-resolved relay_addr returned in LabelledRelayInfo.
+const labelledRelayDefaultPort = "9093"
+
+// BuildLabelledRelayList assembles the current ADR-016 eligibility list for
+// connector control-stream push. Includes only active relays whose published
+// capacity_label is high or medium and that have a routable address (either
+// an explicit public_addr or an observed public IP). The version field is
+// the latest last_label_changed_at observed across those rows, expressed as
+// epoch seconds — monotonic across promotions so the connector can skip a
+// re-probe when nothing has changed.
+func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.LabelledRelayList, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text,
+		       COALESCE(public_addr, ''),
+		       COALESCE(host(observed_ip), ''),
+		       COALESCE(address_scope, ''),
+		       capacity_label,
+		       EXTRACT(EPOCH FROM last_label_changed_at)::bigint
+		  FROM relays
+		 WHERE status = 'active'
+		   AND capacity_label IN ('high', 'medium')
+		   AND (public_addr IS NOT NULL OR address_scope = 'public')`)
+	if err != nil {
+		return nil, fmt.Errorf("list labelled relays: %w", err)
+	}
+	defer rows.Close()
+
+	list := &connectorpb.LabelledRelayList{}
+	for rows.Next() {
+		var (
+			id, publicAddr, observedIP, addrScope, label string
+			labelChangedAt                               int64
+		)
+		if err := rows.Scan(&id, &publicAddr, &observedIP, &addrScope, &label, &labelChangedAt); err != nil {
+			return nil, fmt.Errorf("scan labelled relay row: %w", err)
+		}
+		addr := publicAddr
+		if addr == "" && addrScope == "public" && observedIP != "" {
+			addr = net.JoinHostPort(observedIP, labelledRelayDefaultPort)
+		}
+		if addr == "" {
+			continue
+		}
+		var lbl connectorpb.RelayCapacityLabel
+		switch label {
+		case CapacityLabelHigh:
+			lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_HIGH
+		case CapacityLabelMedium:
+			lbl = connectorpb.RelayCapacityLabel_RELAY_CAPACITY_MEDIUM
+		default:
+			// Low / unrecognised — filtered out by the SQL guard, but skip
+			// defensively in case the enum drifts.
+			continue
+		}
+		list.Relays = append(list.Relays, &connectorpb.LabelledRelayInfo{
+			RelayId:   id,
+			RelayAddr: addr,
+			SpiffeId:  appmeta.RelaySPIFFEID(id),
+			Label:     lbl,
+		})
+		if uint64(labelChangedAt) > list.Version {
+			list.Version = uint64(labelChangedAt)
+		}
+	}
+	return list, rows.Err()
+}
+
+// EvaluateCapacityLabel runs the tier-label hysteresis state machine against
+// the current heartbeat counters persisted on the relay row. Behaviour:
+//   - If the computed candidate matches the published capacity_label, clear
+//     any in-flight pending fields (a transient candidate that didn't survive).
+//   - If the candidate differs from both the published label and the current
+//     pending label, start a new hold-down window.
+//   - If the candidate matches an in-flight pending label and the hold-down
+//     window has elapsed, promote it to capacity_label and stamp
+//     last_label_changed_at. Promoted = true so the caller can push the
+//     updated LabelledRelayList to connectors.
+//
+// Wraps the read-decide-write cycle in a transaction with SELECT ... FOR UPDATE
+// so two concurrent heartbeats can't race the state machine. Heartbeats are
+// already serialised per relay by the Redis db-write cache in practice, but
+// the lock is the correctness contract — not the cache.
+func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CapacityLabelTransition{}, fmt.Errorf("begin capacity-label tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var (
+		current          string
+		pending          *string
+		pendingSince     *time.Time
+		connectionCount  uint32
+		maxConnections   uint32
+	)
+	err = tx.QueryRow(ctx, `
+		SELECT capacity_label,
+		       pending_capacity_label,
+		       pending_label_since,
+		       connection_count,
+		       max_connections
+		  FROM relays
+		 WHERE id = $1
+		   AND status <> 'deleted'
+		 FOR UPDATE`, relayID).Scan(&current, &pending, &pendingSince, &connectionCount, &maxConnections)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CapacityLabelTransition{}, ErrRelayNotFound
+		}
+		return CapacityLabelTransition{}, fmt.Errorf("read capacity-label state: %w", err)
+	}
+
+	candidate := computeCandidateLabel(current, connectionCount, maxConnections)
+	decision := decideHysteresis(current, pending, pendingSince, candidate, time.Now().UTC(), holdDown)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE relays
+		   SET capacity_label         = $2,
+		       pending_capacity_label = $3,
+		       pending_label_since    = $4,
+		       last_label_changed_at  = CASE WHEN $5 THEN NOW() ELSE last_label_changed_at END,
+		       updated_at             = NOW()
+		 WHERE id = $1`, relayID, decision.NewLabel, decision.NewPending, decision.NewPendingSince, decision.Promoted)
+	if err != nil {
+		return CapacityLabelTransition{}, fmt.Errorf("write capacity-label state: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return CapacityLabelTransition{}, fmt.Errorf("commit capacity-label tx: %w", err)
+	}
+
+	return CapacityLabelTransition{
+		Promoted:      decision.Promoted,
+		PreviousLabel: current,
+		NewLabel:      decision.NewLabel,
+	}, nil
+}
+
+func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE relays
 		    SET status            = 'active',
@@ -278,11 +432,13 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        observed_port     = NULLIF($7, 0),
 		        address_scope     = NULLIF($8, ''),
 		        public_addr       = NULLIF($9, ''),
+		        connection_count  = $10,
+		        max_connections   = $11,
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND status <> 'deleted'`,
-		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr,
+		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections,
 	)
 	if err != nil {
 		return fmt.Errorf("record relay heartbeat: %w", err)

@@ -15,9 +15,12 @@ type expiryStore interface {
 // not been seen within expiry duration, then notifies the affected workspaces
 // so their ACL snapshots are recompiled without the dead relay.
 //
-// interval — how often to run the sweep (default: 60s)
-// expiry   — how long since last heartbeat before a relay is evicted (default: 90s = 3× heartbeat interval)
-func RunExpiryLoop(ctx context.Context, store expiryStore, notifier policyChangeNotifier, interval, expiry time.Duration) {
+// interval     — how often to run the sweep (default: 60s)
+// expiry       — how long since last heartbeat before a relay is evicted (default: 90s = 3× heartbeat interval)
+// onPoolChange — optional ADR-016 callback fired once per sweep that evicted
+//                at least one relay, so connectors receive a fresh
+//                LabelledRelayList without the dead relay. Nil-safe.
+func RunExpiryLoop(ctx context.Context, store expiryStore, notifier policyChangeNotifier, interval, expiry time.Duration, onPoolChange func(ctx context.Context)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -25,12 +28,12 @@ func RunExpiryLoop(ctx context.Context, store expiryStore, notifier policyChange
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runEviction(ctx, store, notifier, expiry)
+			runEviction(ctx, store, notifier, expiry, onPoolChange)
 		}
 	}
 }
 
-func runEviction(ctx context.Context, store expiryStore, notifier policyChangeNotifier, expiry time.Duration) {
+func runEviction(ctx context.Context, store expiryStore, notifier policyChangeNotifier, expiry time.Duration, onPoolChange func(ctx context.Context)) {
 	threshold := time.Now().UTC().Add(-expiry)
 	relayIDs, err := store.EvictExpiredRelays(ctx, threshold)
 	if err != nil {
@@ -49,5 +52,8 @@ func runEviction(ctx context.Context, store expiryStore, notifier policyChangeNo
 				log.Printf("relay expiry: notify workspace %s: %v", wsID, err)
 			}
 		}
+	}
+	if len(relayIDs) > 0 && onPoolChange != nil {
+		onPoolChange(ctx)
 	}
 }

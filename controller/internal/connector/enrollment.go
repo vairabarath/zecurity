@@ -32,6 +32,7 @@ type EnrollmentHandler struct {
 	PolicyCache    *policy.SnapshotCache
 	PolicyNotifier PolicyChangeNotifier
 	RelayStore     RelayPlacementStore
+	RelayListSrc   LabelledRelayListSource // ADR-016: source of LabelledRelayList for control-stream push
 
 	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
 }

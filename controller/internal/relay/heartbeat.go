@@ -31,10 +31,11 @@ const (
 )
 
 type heartbeatStore interface {
-	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string) error
+	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
 	InsertProvisionedRelay(ctx context.Context, id, name string, dnsAllowlist, ipAllowlist []string, certSerial string, certNotAfter time.Time, version, hostname string) error
 	ListWorkspacesForRelay(ctx context.Context, relayID string) ([]string, error)
+	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
 
 type policyChangeNotifier interface {
@@ -113,6 +114,8 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		addr.ObservedPort,
 		addr.Scope,
 		addr.PublicAddr,
+		req.ConnectionCount,
+		req.MaxConnections,
 	); err != nil {
 		log.Printf("relay heartbeat: record %s: %v", relayID, err)
 		if errors.Is(err, ErrRelayNotFound) {
@@ -123,8 +126,26 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if err := s.markRelayHeartbeatDBWritten(ctx, relayID); err != nil {
 		log.Printf("relay heartbeat: mark db write %s: %v", relayID, err)
 	}
-	if metadataChanged {
+
+	transition, evalErr := s.store.EvaluateCapacityLabel(ctx, relayID, s.labelHoldDown)
+	if evalErr != nil {
+		// A capacity-label failure must not fail the heartbeat itself —
+		// the relay row is already updated and the worst case is a delayed
+		// label promotion next heartbeat. Log and continue.
+		log.Printf("relay heartbeat: evaluate capacity label %s: %v", relayID, evalErr)
+	}
+	if transition.Promoted {
+		log.Printf("relay heartbeat: capacity label promoted relay=%s %s -> %s",
+			relayID, transition.PreviousLabel, transition.NewLabel)
+	}
+	if metadataChanged || transition.Promoted {
 		s.notifyRelayWorkspaces(ctx, relayID)
+		// ADR-016 C5: pool change → push fresh LabelledRelayList to all
+		// connected connectors. metadataChanged catches address/SPIFFE shifts
+		// and first-time eligibility; Promoted catches tier transitions.
+		if s.onPoolChange != nil {
+			s.onPoolChange(ctx)
+		}
 	}
 	return &relaypb.HeartbeatResponse{
 		ServerTimeUnix:       time.Now().UTC().Unix(),

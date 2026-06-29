@@ -35,6 +35,13 @@ type RelayPlacementStore interface {
 	BumpLastConfirmed(ctx context.Context, connectorID string) error
 }
 
+// LabelledRelayListSource builds the ADR-016 LabelledRelayList that the
+// controller pushes to connector control streams. Implemented by *relay.Store
+// (BuildLabelledRelayList). Defined as an interface so tests can stub it.
+type LabelledRelayListSource interface {
+	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
+}
+
 // PolicyChangeNotifier is the subset of policy.Notifier used by the
 // relay-placement handlers. Defined as an interface for testability.
 type PolicyChangeNotifier interface {
@@ -250,6 +257,29 @@ func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.Connecto
 	return c.send(msg)
 }
 
+// BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
+// connected connector. A wedged connector whose send queue is full is logged
+// and skipped — the next broadcast (or the C4 push at reconnect) will catch
+// it up. The pool change that triggered this broadcast is the source of
+// truth in the relay store; if delivery to a connector is lost it will sync
+// when its stream re-opens.
+func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
+	msg := &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	}
+	r.mu.RLock()
+	clients := make([]*connectorStreamClient, 0, len(r.clients))
+	for _, c := range r.clients {
+		clients = append(clients, c)
+	}
+	r.mu.RUnlock()
+	for _, c := range clients {
+		if err := c.send(msg); err != nil {
+			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
+		}
+	}
+}
+
 // Control implements ConnectorService.Control — the persistent bidirectional stream.
 func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) error {
 	ctx := stream.Context()
@@ -315,6 +345,18 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		},
 	}); err != nil {
 		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
+	}
+
+	// ADR-016 C4: push the current eligible relay pool so the connector can
+	// pick a Tier 1 relay at startup without waiting for the next pool change.
+	if h.RelayListSrc != nil {
+		if list, err := h.RelayListSrc.BuildLabelledRelayList(ctx); err != nil {
+			log.Printf("control stream: build labelled relay list for connector %s: %v", connectorID, err)
+		} else if err := client.send(&pb.ConnectorControlMessage{
+			Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+		}); err != nil {
+			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
+		}
 	}
 
 	// Deliver any instructions that queued while the connector was offline.

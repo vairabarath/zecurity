@@ -41,7 +41,7 @@ func TestRunEviction_EvictsAndNotifiesWorkspaces(t *testing.T) {
 	}
 	notifier := &fakeNotifier{}
 
-	runEviction(context.Background(), store, notifier, 90*time.Second)
+	runEviction(context.Background(), store, notifier, 90*time.Second, nil)
 
 	wantNotified := map[string]bool{"ws-a": true, "ws-b": true, "ws-c": true}
 	if len(notifier.called) != 3 {
@@ -58,7 +58,7 @@ func TestRunEviction_EvictsAndNotifiesWorkspaces(t *testing.T) {
 func TestRunEviction_EmptyEvictionIsNoop(t *testing.T) {
 	store := &fakeExpiryStore{evictedIDs: []string{}}
 	notifier := &fakeNotifier{}
-	runEviction(context.Background(), store, notifier, 90*time.Second)
+	runEviction(context.Background(), store, notifier, 90*time.Second, nil)
 	if len(notifier.called) != 0 {
 		t.Fatalf("expected no notifications for empty eviction, got %v", notifier.called)
 	}
@@ -69,7 +69,7 @@ func TestRunEviction_EmptyEvictionIsNoop(t *testing.T) {
 func TestRunEviction_StoreEvictErrorNoNotifications(t *testing.T) {
 	store := &fakeExpiryStore{evictErr: errors.New("db failure")}
 	notifier := &fakeNotifier{}
-	runEviction(context.Background(), store, notifier, 90*time.Second)
+	runEviction(context.Background(), store, notifier, 90*time.Second, nil)
 	if len(notifier.called) != 0 {
 		t.Fatalf("expected no notifications on store error, got %v", notifier.called)
 	}
@@ -83,7 +83,7 @@ func TestRunEviction_ThresholdEqualsNowMinusExpiry(t *testing.T) {
 	store := &fakeExpiryStore{evictedIDs: []string{}}
 	notifier := &fakeNotifier{}
 	before := time.Now().UTC()
-	runEviction(context.Background(), store, notifier, expiry)
+	runEviction(context.Background(), store, notifier, expiry, nil)
 	after := time.Now().UTC()
 
 	lo := before.Add(-expiry - time.Second)
