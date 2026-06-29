@@ -4,7 +4,7 @@
 **Track:** B — Architecture (migration phase)
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-26
-**Depends on:** ADR-015 (Transport Control Plane), ADR-016 (Placement Engine), ADR-017 (Transport Propagation)
+**Depends on:** ADR-015 (Transport Control Plane), ADR-016 (Tiered Relay Selection), ADR-017 (Transport Propagation)
 
 ---
 
@@ -28,7 +28,7 @@ This ADR does **not** redesign anything. It specifies:
 | `ACLConnector.relay_spiffe_id` | `client.proto` field 5 | Active — per-connector relay SPIFFE |
 | `ACLSnapshot.relay_addr` | `client.proto` field 6 | Deprecated — workspace-level fallback |
 | `ACLSnapshot.relay_spiffe_id` | `client.proto` field 9 | Deprecated — workspace-level fallback |
-| Connector `RELAY_ADDR` env var | `connector/src/config.rs:77` | Active — static relay assignment |
+| Connector `RELAY_ADDR` env var | `connector/src/config.rs:77` | **Removed in ADR-016/Sprint 11** — replaced by `LabelledRelayList` (field 17) dynamic selection |
 | `build_transports_by_resource` | `client/src/daemon.rs:727` | Reads relay from `ACLConnector` fields 4+5 |
 | `GetActiveRelay()` in compiler | `controller/internal/policy/compiler.go:160` | Active — populates deprecated fields 6+9 |
 
@@ -42,7 +42,7 @@ This ADR does **not** redesign anything. It specifies:
 | `ACLSnapshot` fields 6+9 | `client.proto` | **Reserved** — never reused |
 | `TransportSnapshot` | `connector.proto` field 16 | New — carries per-connector relay coords |
 | `GetTransportSnapshot` RPC | `client.proto` | New — client polls separate transport cache |
-| Connector `RELAY_ADDR` | `connector/src/config.rs` | **Removed** — relay assigned via TransportSnapshot |
+| Connector `RELAY_ADDR` | `connector/src/config.rs` | **Removed in ADR-016/Sprint 11** — relay selected via `LabelledRelayList` (field 17), not `TransportSnapshot` |
 | `GetActiveRelay()` | `compiler.go` | **Removed** — transport compiler owns relay data |
 
 ---
@@ -67,8 +67,8 @@ Ship the new proto messages and RPC. Nothing is removed. Old clients continue to
   message TransportSnapshot { ... }
   ```
 - Build Transport Compiler in controller
-- Build Placement Engine (ADR-016)
 - Controller pushes `TransportSnapshot` on control stream open alongside `ACLSnapshot`
+- Note: Placement Engine (old ADR-016) is superseded. ADR-016 now implements tiered relay selection via `LabelledRelayList` (field 17) — connector self-selects within controller-approved pool. `TransportSnapshot` (field 16) carries relay topology to the **client**, not to the connector.
 - Controller serves `GetTransportSnapshot` RPC
 
 **Client behavior:** Old clients ignore `GetTransportSnapshot`. New clients begin populating Transport Cache from it but **still fall back to ACLConnector fields 4+5** if Transport Cache is empty (convergence window safety).
@@ -77,17 +77,21 @@ Ship the new proto messages and RPC. Nothing is removed. Old clients continue to
 
 ---
 
-### Phase 2 — Connector Stops Using RELAY_ADDR (non-breaking)
+### Phase 2 — Connector Dynamic Relay Selection *(delivered by ADR-016 / Sprint 11)*
 
-Connector learns relay assignment from `TransportSnapshot` on stream open. `RELAY_ADDR` becomes optional and is only used as bootstrap fallback if no TransportSnapshot has arrived yet.
+> **This phase is now fully handled by ADR-016 (Tiered Relay Selection), not by TransportSnapshot.**
+>
+> ADR-016 introduces `LabelledRelayList` (field 17 on `ConnectorControlMessage`). The connector receives a capacity-labelled relay pool from the controller, instantly connects to a random Tier 1 relay, then background-probes and migrates via make-before-break. `RELAY_ADDR` is removed from connector config in Sprint 11.
+>
+> `TransportSnapshot` (field 16) is **not** the vehicle for connector relay assignment — it carries relay topology to the **client** only (see Phase 3).
 
-**Changes:**
-- `connector/src/config.rs` — `relay_addr` remains `Option<String>` but is now a bootstrap hint, not the source of truth
-- `connector/src/control_stream.rs` — handle `TransportSnapshot` body variant (field 16); send assigned relay over `watch` channel to `main.rs`
-- `connector/src/main.rs` — watch relay channel; spawn/replace `maintain_registration()` task when assignment changes
-- Direct-only mode if no TransportSnapshot received and no `RELAY_ADDR` set
+**Changes delivered by Sprint 11 (ADR-016):**
+- `connector/src/config.rs` — `RELAY_ADDR` / `RELAY_SPIFFE_ID` removed entirely
+- `connector/src/control_stream.rs` — handle `LabelledRelayList` body variant (field 17)
+- `connector/src/relay_selector.rs` — three-phase state machine (instant startup, background optimization, make-before-break)
+- Direct-only mode if no `LabelledRelayList` received and no persisted ranking available
 
-**Gate:** Connector receives relay assignment from controller and switches relay without restart. `RELAY_ADDR` unset + TransportSnapshot → relay works. `RELAY_ADDR` set + no TransportSnapshot → uses env var (bootstrap path).
+**Gate:** *(completed in Sprint 11)* Connector selects relay dynamically from controller-pushed list. `RELAY_ADDR` env var no longer required.
 
 ---
 
@@ -199,7 +203,7 @@ Each phase is independently rollbackable until Phase 4.
 | Phase | Rollback |
 |-------|---------|
 | 1 | Redeploy controller without Transport Compiler — clients and connectors ignore unknown fields |
-| 2 | Redeploy connector binary without TransportSnapshot handler — falls back to `RELAY_ADDR` env var |
+| 2 | *(delivered by ADR-016)* Redeploy connector binary without `relay_selector` — falls back to direct-only mode. `RELAY_ADDR` env var no longer available as fallback (removed in Sprint 11). |
 | 3 | Redeploy client binary — reads ACLConnector fields 4+5 again (still populated until Phase 4) |
 | 4 | **Cannot rollback** — reserved proto fields cannot be un-reserved. Roll forward only. Requires coordinated deploy with tested forward path. |
 
@@ -230,11 +234,13 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 - [ ] Controller pushes `TransportSnapshot` on control stream open (alongside ACLSnapshot)
 - [ ] Build gate: `cd controller && go build ./...` passes
 
-### Phase 2 — Connector Dynamic Relay Assignment
-- [ ] `connector/src/control_stream.rs` — handle `TransportSnapshot` body variant (field 16)
-- [ ] `connector/src/main.rs` — watch relay assignment channel; spawn/replace `maintain_registration()`
-- [ ] `connector/src/config.rs` — `relay_addr` becomes bootstrap hint only (keep field, change semantics)
-- [ ] Build gate: `cd connector && cargo build` passes
+### Phase 2 — Connector Dynamic Relay Selection *(delivered by ADR-016 / Sprint 11)*
+- [x] `connector/src/relay_selector.rs` (new) — three-phase state machine: instant startup, background optimization, make-before-break migration
+- [x] `connector/src/relay_probe.rs` (new) — parallel QUIC probe, scoring, `request_id` + SPIFFE validation
+- [x] `connector/src/relay_ranking.rs` (new) — persisted top-5 ranking, staleness check, atomic write
+- [x] `connector/src/control_stream.rs` — handle `LabelledRelayList` body variant (field 17)
+- [x] `connector/src/config.rs` — remove `RELAY_ADDR` / `RELAY_SPIFFE_ID`; add `RELAY_*` config vars
+- [x] Build gate: `cd connector && cargo build` passes
 
 ### Phase 3 — Client Transport Cache
 - [ ] `client/src/daemon.rs` — add `TransportCache`; fetch via `GetTransportSnapshot` alongside ACL
@@ -259,5 +265,5 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 
 | ADR | Topic |
 |-----|-------|
-| ADR-016 | Placement Engine — leader election, scheduling algorithm, epoch semantics |
+| ADR-016 | Tiered Relay Selection — capacity labelling, connector self-selection, make-before-break migration |
 | ADR-017 | Transport Propagation — fan-out, triggers, delivery guarantees, convergence SLA |

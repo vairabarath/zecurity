@@ -4,7 +4,7 @@
 **Track:** B — Architecture
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-26
-**Depends on:** ADR-015 (Transport Control Plane), ADR-016 (Placement Engine)
+**Depends on:** ADR-015 (Transport Control Plane), ADR-016 (Tiered Relay Selection)
 
 ---
 
@@ -97,7 +97,7 @@ func (n *Notifier) Version(connectorID string) uint64
 | Relay heartbeat expires (eviction) | `relay/expiry.go` | All connectors placed on that relay | `NotifyTopologyChange(workspaceID, connectorIDs)` |
 | Connector registers with relay | `connector/control_stream.go` | That connector only | `NotifyTopologyChange(workspaceID, []string{connectorID})` |
 | Connector reconnects (stream re-open) | `connector/control_stream.go` | That connector only | push current snapshot on stream open (no version bump needed) |
-| Placement Engine reassignment | `placement/engine.go` | Connectors moved to new relay | `NotifyTopologyChange(workspaceID, movedConnectorIDs)` |
+| Connector self-selects new relay (ADR-016) | `connector/control_stream.go` — on `ConnectorRelayState` received | That connector only | `NotifyTopologyChange(workspaceID, []string{connectorID})` |
 
 **Note:** Connector reconnect does not bump the transport version — it just pushes the
 current snapshot on stream open. A version bump is only warranted when placement
@@ -236,8 +236,7 @@ maintains a separate `transport_snapshot` field in `SharedState`, populated via 
 | Client polling interval | 60s (same as ACL) |
 | Max convergence window (client) | 120s (2 × poll interval) |
 
-**Observable:** Each connector includes `transport_version` in its heartbeat
-(field added in ADR-016). The controller exposes a metric:
+**Observable:** Each connector includes `transport_version` in its heartbeat. The controller exposes a metric:
 `transport_convergence{workspace=X}` = fraction of connected connectors whose
 reported `transport_version` equals the current compiled version.
 
@@ -245,7 +244,7 @@ reported `transport_version` equals the current compiled version.
 
 ## What This ADR Does NOT Define
 
-- Placement algorithm or leader election (ADR-016)
+- Relay selection algorithm, capacity labelling, or probe logic (ADR-016)
 - Migration from Track A ACLConnector relay fields to TransportSnapshot (ADR-018)
 - Full proto schema for `TransportSnapshot` (defined in ADR-015 and the proto files)
 
