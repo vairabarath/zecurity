@@ -122,11 +122,11 @@ cd connector && cargo test
 
 ## Implementation Checklist
 
-- [ ] **M3-D3** `connector/src/relay_selector.rs` (new) — full state machine: `Disconnected → Phase1Connected → BackgroundProbing → Phase3Migration → Failover → Backoff`; startup picks `ranked[0]` → random Tier 1 → random Tier 2 → backoff
-- [ ] **M3-D4** `connector/src/relay_selector.rs` — exhausted active relay → immediate migration (skip threshold); normal threshold = `current_score - best_score > max(current_score × 0.15, 10ms)`
-- [ ] **M3-D5** `connector/src/relay_selector.rs` — failover: filter ranking to current list → try in order → full probe → backoff
-- [ ] **M3-D6** `connector/src/control_stream.rs` — handle `ConnectorControlMessage::RelayList(list)` → send to selector via watch channel
-- [ ] **M3-D7** `connector/src/relay_client.rs` — dual-connection during Phase 3 drain: `pending_conn` receives new streams; `active_conn` drained until `RELAY_DRAIN_TIMEOUT_SECS` or empty; then promote
-- [ ] **M3-D8** `connector/src/config.rs` — remove `RELAY_ADDR` / `RELAY_SPIFFE_ID` static env vars
-- [ ] **Tests:** ranked[0] valid → no probe on startup; no Tier 1 → Tier 2 + warning; absent from list → immediate migration; threshold logic; make-before-break new-streams-only; drain force-close; failover skips absent entries; backoff caps
-- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass
+- [x] **M3-D3** `connector/src/relay_selector.rs` — state machine ships. **Structural simplification (vs phase doc):** flat `Disconnected / Connected(ActiveRelay) / Backoff` enum with `Migrating` and `Failover` folded into transient transitions (not long-lived states). Behaviorally equivalent. Bootstrap: warm path (`RelayRanking::load` → `valid_entries` → first that connects) → random Tier-1 (nanos-seeded rotation) → random Tier-2 (with warning) → Backoff.
+- [x] **M3-D4** `connector/src/relay_selector.rs` — `handle_list_change` migrates immediately on active-absent (skip threshold); `is_meaningful_improvement` enforces `delta > max(current_score × 0.15, 10ms)`. 5 unit-tested boundaries (5ms below floor; 14ms below ratio; 20ms accepted; 30→10 phase-doc example; equal/worse rejected).
+- [x] **M3-D5** `connector/src/relay_selector.rs` — `failover()`: ranking-first with 5s per-entry `tokio::time::timeout` → full `probe_relays` sweep → `Backoff`.
+- [x] **M3-D6** `connector/src/control_stream.rs` — `CBody::RelayList(list)` arm forwards into `watch::Sender<Option<LabelledRelayList>>`. Send-error is `warn!` not fatal (stream stays up if selector hasn't subscribed yet).
+- [x] **M3-D7** Make-before-break in `relay_selector::migrate`: spawns new `run_session` with `on_registered: oneshot::Sender<()>`, awaits register-OK before publishing `pending` + emitting `ConnectorRelayState{reason:"switched"}`, sleeps `drain_timeout`, aborts old session handle, calls `promote_pending`. **Note vs phase doc:** stream routing happens relay-side (clients pick via ACL push), so the phase-doc's "pending_conn receives new streams" is satisfied at the data-plane without explicit connector-side stream routing.
+- [x] **M3-D8** `connector/src/config.rs` — `relay_addr` + `relay_spiffe_id` fields and their doc comments removed. Connector now has zero static relay knowledge.
+- [x] **Tests:** 11 unit tests in `relay_selector` (5 threshold boundaries, 4 `random_pick_order` branches, `rotate`, `persist_top_5`). _Full scenario coverage (warm-start no-probe, immediate-migration on absent, make-before-break drain, failover order, backoff cap) lands in Phase 3 integration tests against a real in-process relay._
+- [x] **Build gate:** `cd connector && cargo build` passes; 52/52 unit tests green. Commit `9de4f50` on `integration/relay-merge`.

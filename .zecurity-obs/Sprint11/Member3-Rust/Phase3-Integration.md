@@ -58,8 +58,10 @@ cd connector && cargo test
 
 ## Implementation Checklist
 
-- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window
-- [ ] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable
-- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections
-- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops
-- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass
+- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window — _planned as `connector/tests/scenario2_warm_restart.rs`_
+- [ ] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable — _planned as `connector/tests/scenario4_probe_security.rs`_
+- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections — _planned as `connector/examples/load_test.rs`_
+- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops — _planned as `connector/tests/scenario3_migration.rs` (control-plane assertions in v1; data-plane stream-drop assertion `#[ignore]`-scaffolded for follow-up)_
+- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass — _connector build + 52 unit tests already green from Phases 1+2 (commit `9de4f50`); Phase 3 adds `cargo test --tests` integration suite + `--example load_test`_
+
+**Phase 3 status:** **Not started.** Preconditions complete: M2 proto (✅ `c6e4ab4`), M4 relay probe responder (✅ `7e07893`), M3 Phase 1 + Phase 2 (✅ `9de4f50`). Plan: `connector/tests/common/mod.rs` harness + 4 scenario tests + `examples/load_test.rs` + `Cargo.toml` `[dev-dependencies]` `tempfile` and `[features] test-hooks` (the broadcast hook is already in `relay_selector.rs` waiting for it).
