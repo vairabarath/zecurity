@@ -1,7 +1,7 @@
 # ADR-016: Tiered Background Optimization for Connector Relay Selection
 
 **Status:** Proposed
-**Track:** B — Architecture
+**Track:** B - Architecture
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-27
 **Depends on:** ADR-014 (Relay Stabilization), ADR-015 (Transport Control Plane)
@@ -11,86 +11,101 @@
 
 ## Purpose
 
-Define the relay selection mechanism for Track B. The controller acts as a coarse capacity filter — labelling relays by tier based on load — and the connector handles instant startup via random selection within the eligible tier, followed by silent background latency optimization with zero-drop migration.
+Define how connectors select relays without startup delay, thundering-herd behavior, or controller-side latency guessing.
 
-> Which component decides which relay a connector uses, and how is that decision made without startup delay or thundering herd?
-
----
-
-## Motivation
-
-**ADR-016 (Placement Engine)** is correct in principle but requires a leader lease, epoch management, and batch coordination — significant controller complexity for a problem the connector is better positioned to solve (network RTT is not observable from the controller).
-
-**ADR-016-Alt (Connector Self-Select)** has two blocking issues:
-1. The IP-proximity pre-filter (`XOR leading bits`) is unsound — numeric adjacency has near-zero correlation with RTT. It permanently excludes the lowest-latency relay before probing.
-2. It contradicts ADR-015's stated principle: *"Controller is the single source of truth. Connectors never choose relays."*
-
-**ADR-016 (this ADR)** resolves both:
-- The controller controls eligibility via capacity labels (grounded in real heartbeat data, not heuristic).
-- The connector chooses *within* the controller-approved eligible pool — consistent with ADR-015.
-- Instant startup (random selection from Tier 1) eliminates the probe-before-connect delay.
-- Background optimization with make-before-break migration eliminates packet loss on relay switch.
+The controller remains the source of truth for relay eligibility. It labels active relays by capacity and pushes the eligible set to connectors. Connectors choose and optimize only inside that controller-approved set: random startup selection first, then background latency probing and make-before-break migration with best-effort drain.
 
 ---
 
 ## Decision
 
-The controller labels each active relay with a capacity tier based on reported fill ratio. It pushes a `LabelledRelayList` to connectors via the control stream. Connectors pick a random Tier 1 relay at startup for zero-latency online, then asynchronously probe all eligible relays and migrate to the lowest-latency one if it is meaningfully better — establishing the new connection before cutting over the old one.
+The controller pushes a versioned `LabelledRelayList` to connectors over the existing connector control stream. A connector immediately registers with a random Tier 1 relay, then probes Tier 1 + Tier 2 relays in the background and migrates only when another relay is meaningfully better.
+
+This replaces two rejected approaches:
+
+- A controller placement engine: too much controller complexity, and the controller cannot observe connector-to-relay RTT.
+- Connector self-selection over all relays: violates controller-controlled eligibility and previously used an unsound IP-proximity heuristic.
+
+Relays are platform-level in v1. A valid relay may authenticate connectors and clients from all workspaces. Workspace isolation remains enforced by mTLS/SPIFFE, connector/client trust-domain checks, ACLs, and tunnel authorization, not by relay-list filtering.
 
 ---
 
-## Capacity Tiers
-
-| Tier | Fill Ratio | Connector Action |
-|---|---|---|
-| **High (Tier 1)** | enter < 45%, exit ≥ 50% | Eligible for instant startup + background optimization |
-| **Medium (Tier 2)** | enter < 75%, exit ≥ 80% | Eligible for background optimization only |
-| **Low / Exhausted** | ≥ 80% | Dropped from snapshot — connector never sees it |
+## Capacity And Eligibility
 
 `fill_ratio = connection_count / max_connections`
 
-Thresholds use a **dead-band** to prevent label oscillation: a relay must cross the entry threshold
-to gain a tier and the exit threshold to lose it — there is a gap between the two. A label change
-is not published to connectors until the new label has been stable for `RELAY_LABEL_HOLDDOWN_SECS`
-(default 60s). See Architectural Review — Gap 1 for rationale.
+`connection_count` means active bridged client relay streams across all workspaces. `registered_connectors` remains separate telemetry for observability and does not by itself make a relay exhausted.
 
-Thresholds are configurable: `RELAY_TIER1_ENTER`, `RELAY_TIER1_EXIT`, `RELAY_TIER2_ENTER`,
-`RELAY_TIER2_EXIT`, `RELAY_LABEL_HOLDDOWN_SECS`.
+| Tier | Thresholds | Connector behavior |
+|---|---|---|
+| High / Tier 1 | enter `< 45%`, exit `>= 50%` | Eligible for instant startup and background optimization |
+| Medium / Tier 2 | enter `< 75%`, exit `>= 80%` | Used for startup only if no Tier 1 exists; otherwise background optimization only |
+| Low / Exhausted | `>= 80%` | Not offered for new selection; existing attached connectors may continue until migration |
+
+Low/exhausted and inactive relays are omitted from `LabelledRelayList`; the proto intentionally has only High and Medium labels. Connectors treat absence from the current list as not eligible for new selection.
+
+All configurable values:
+
+| Variable | Default | Description |
+|---|---|---|
+| `RELAY_TIER1_ENTER` | 0.45 | fill_ratio below which a relay enters Tier 1 |
+| `RELAY_TIER1_EXIT` | 0.50 | fill_ratio at or above which a relay exits Tier 1 |
+| `RELAY_TIER2_ENTER` | 0.75 | fill_ratio below which a relay enters Tier 2 |
+| `RELAY_TIER2_EXIT` | 0.80 | fill_ratio at or above which a relay exits Tier 2 (becomes exhausted) |
+| `RELAY_LABEL_HOLDDOWN_SECS` | 60 | Minimum seconds a candidate label must be stable before promotion |
+| `RELAY_REPROBE_INTERVAL_SECS` | 300 | Background re-probe interval when on a healthy relay |
+| `RELAY_DRAIN_TIMEOUT_SECS` | 30 | Seconds to drain old relay before force-close on migration |
+| `RELAY_MAX_CONCURRENT_PROBES` | 5 | Max parallel probe connections per probe cycle |
+| `RELAY_RECONNECT_BASE_SECS` | 5 | Initial backoff delay on disconnected retry |
+| `RELAY_RECONNECT_MAX_SECS` | 120 | Maximum backoff delay cap |
+| `RELAY_RECONNECT_BACKOFF_FACTOR` | 2.0 | Exponential multiplier per retry |
+
+The controller applies hysteresis and hold-down before publishing a label change:
+
+1. Compute `candidate_label` from the latest heartbeat.
+2. If `candidate_label == capacity_label`, clear `pending_capacity_label` and `pending_label_since`.
+3. If `candidate_label != capacity_label` and differs from `pending_capacity_label`, set `pending_capacity_label = candidate_label` and `pending_label_since = now`.
+4. If `candidate_label == pending_capacity_label` and the hold-down elapsed, promote it: set `capacity_label = candidate_label`, set `last_label_changed_at = now`, clear pending fields, increment the relay-list version, and push a new `LabelledRelayList`.
+
+`last_label_changed_at` updates only on promotion.
+
+The existing `ListWorkspacesForRelay(ctx, relayID)` is not an eligibility table. It derives affected workspaces from `connector_relay_placement -> connectors.tenant_id` and is used to notify workspaces whose ACL snapshots may reference a relay that changed metadata, label, or expiry state.
 
 ---
 
-## Relay Telemetry Reporting
+## Protocol Changes
 
-Relays append connection count and configured capacity to their existing heartbeat payload:
-
-```protobuf
-// In RelayHeartbeat (proto/relay/v1/relay.proto):
-uint32 connection_count = N;    // current active registered connections
-uint32 max_connections  = N+1;  // configured ceiling (RELAY_MAX_CONNECTIONS env var)
-```
-
-The relay also responds to lightweight probe connections:
+Relay heartbeat adds active-stream capacity data:
 
 ```protobuf
-message ProbeRequest  { string connector_id = 1; }
-message ProbeResponse { uint32 connection_count = 1; uint32 capacity = 2; }
+// proto/relay/v1/relay.proto
+uint32 connection_count = N;    // active bridged client streams
+uint32 max_connections  = N+1;  // RELAY_MAX_CONNECTIONS
 ```
 
-After QUIC mTLS handshake, the relay detects `ProbeRequest` (distinct from `RegisterMsg`), responds with `ProbeResponse`, and closes the connection without registering the connector.
+The relay must add runtime instrumentation for this: increment when a client lookup bridge starts, decrement when that bridge ends, and report the current count in heartbeat and probe responses.
 
----
+Relay probing uses a lightweight request/response after QUIC mTLS:
 
-## Controller: Tiered Snapshot Generation
+```protobuf
+message ProbeRequest  {
+  string connector_id = 1;
+  uint64 request_id   = 2; // random nonce generated per probe; echoed by relay
+}
+message ProbeResponse {
+  uint32 connection_count = 1;
+  uint32 capacity         = 2;
+  uint64 request_id       = 3; // must match ProbeRequest.request_id
+}
+```
 
-On each relay heartbeat:
-1. Compute `fill_ratio = connection_count / max_connections`.
-2. Assign tier: `high` (< 0.50), `medium` (0.50–0.80), or drop (> 0.80).
-3. Update `relays.capacity_label` in DB.
-4. If the tier label changed → push updated `LabelledRelayList` to all active connector control streams.
+`ProbeResponse` has no status or error field in v1. On rate-limit, concurrent-limit, malformed, or unauthorized probe attempts, the relay closes the stream/connection. The connector treats close, timeout, or missing response as probe failure.
 
-Push also triggered on control stream open (current snapshot) and relay expiry (relay goes inactive).
+The connector must validate two things before accepting a probe result:
+1. `ProbeResponse.request_id` matches the outstanding `ProbeRequest.request_id` — discards stale, out-of-order, or replayed responses.
+2. The QUIC peer SPIFFE ID (from the mTLS handshake) matches `LabelledRelayInfo.spiffe_id` for that `relay_addr` — discards responses from wrong endpoints. A mismatch is treated as probe failure.
 
-### Proto
+Connector control stream adds:
 
 ```protobuf
 enum RelayCapacityLabel {
@@ -99,113 +114,74 @@ enum RelayCapacityLabel {
 }
 
 message LabelledRelayInfo {
-  string             relay_id  = 1;
-  string             relay_addr = 2; // host:9093
-  string             spiffe_id  = 3;
-  RelayCapacityLabel label      = 4;
+  string relay_id = 1;
+  string relay_addr = 2; // host:9093
+  string spiffe_id = 3;
+  RelayCapacityLabel label = 4;
 }
 
 message LabelledRelayList {
-  repeated LabelledRelayInfo relays  = 1;
-  uint64                     version = 2; // monotonic; connector skips re-probe if unchanged
+  repeated LabelledRelayInfo relays = 1;
+  uint64 version = 2;
 }
 
-// In ConnectorControlMessage oneof body:
+// ConnectorControlMessage oneof body:
 LabelledRelayList relay_list = 17;
 ```
 
-Field 16 is reserved for `TransportSnapshot` (ADR-015/ADR-017). Field 17 is the relay list.
+Field 16 remains reserved for `TransportSnapshot` (ADR-015/ADR-017). Field 17 is the relay list.
 
 ---
 
-## Connector: Three-Phase State Machine
+## Connector Behavior
 
-### Phase 1 — Instant Startup
+### Startup
 
-On receipt of `LabelledRelayList`:
-1. Filter to **Tier 1 (High)** relays only.
-2. Pick one **at random** — no network probes, no RTT measurement.
-3. Dial → mTLS handshake → register. Begin routing traffic immediately.
-4. Report chosen relay to controller via `ConnectorRelayState` (field 15, unchanged).
-5. Spawn Phase 2 background task.
+When a current `LabelledRelayList` is available:
 
-**Why random over jitter-hashed:** deterministic jitter spreads boot storms but creates reachability
-gaps when one connector ID always hashes to an overloaded relay. Uniform random distribution across
-Tier 1 at boot achieves the same spread with no bias.
+1. If a persisted relay ranking exists, connect to the first valid ranked relay. Valid means the relay is still present in the current `LabelledRelayList` as Tier 1 or Tier 2.
+2. If no valid ranked relay exists, choose a random Tier 1 relay.
+3. If no Tier 1 relay exists, choose a random Tier 2 relay and log a warning.
+4. If no Tier 1 or Tier 2 relay exists, enter disconnected/backoff and retry after `RELAY_REPROBE_INTERVAL_SECS`.
+5. Register with the relay, begin routing, report `ConnectorRelayState`, and start background probing.
 
-### Phase 2 — Background Optimization
+If no current relay list is available yet, a fresh state file may be used for fast reconnect to `ranked[0]`. When the list arrives, immediately revalidate: if the active relay is absent/exhausted, switch to the first valid ranked relay, then random Tier 1, then random Tier 2; if none exist, enter disconnected/backoff.
 
-Runs as an async task after Phase 1 registration is confirmed:
-1. Take all **Tier 1 + Tier 2** relays from the snapshot, excluding the current active relay.
-2. Execute parallel lightweight QUIC probe: `ProbeRequest → ProbeResponse`. Measure wall-clock RTT
-   from dial start to `ProbeResponse` received (includes handshake).
-3. Score each result: `score = rtt_ms + ceil(fill_ratio × 50)` (lower = better).
-4. Probe the current active relay too (to get a fresh score for comparison).
-5. If `(current_score - best_score) > max(current_score × 0.15, 10ms)` → trigger Phase 3.
-   Both conditions must hold: relative improvement > 15% **and** absolute improvement > 10ms.
-   This prevents noise-driven migrations on low-latency paths. See Architectural Review — Gap 2.
-6. Otherwise: hold current relay, re-probe after `RELAY_REPROBE_INTERVAL_SECS` (default 300s).
+### Background Optimization
 
-Re-probe also triggered immediately when `LabelledRelayList.version` increments.
+After registration:
 
-### Phase 3 — Make-Before-Break Migration
+1. Probe all Tier 1 + Tier 2 relays, including the current relay. Run at most `RELAY_MAX_CONCURRENT_PROBES` (default 5) probes in parallel; queue the rest.
+2. Measure RTT from dial start to `ProbeResponse`, including handshake time.
+3. Score each relay as `score = rtt_ms + ceil(fill_ratio * 50)`.
+4. **Exhausted active relay:** if the current relay is absent from the current `LabelledRelayList` (it crossed the exhausted threshold), skip the improvement threshold and migrate to the best valid relay immediately.
+5. **Normal migration:** migrate only if `current_score - best_score > max(current_score * 0.15, 10ms)`. Both relative (15%) and absolute (10ms) conditions must hold.
+6. Otherwise keep the current relay and re-probe after `RELAY_REPROBE_INTERVAL_SECS` (default 300s).
 
-When Phase 2 identifies a significantly better relay:
-1. **Dial new relay** — full mTLS handshake + registration. Do not cut over yet.
-2. Once new relay registration is confirmed: **route all new outbound streams** to the new relay.
-3. **Drain old relay** — allow open streams to close naturally. Force-close after `RELAY_DRAIN_TIMEOUT_SECS`
-   (default 30s = 2 × client poll interval of 15s). Clients re-sync within 15s and route new
-   requests to the new relay; existing sessions complete on the old relay within the drain window.
-   See Architectural Review — Gap 3.
-4. Tear down old relay connection.
-5. **Report** new placement via `ConnectorRelayState` to controller.
+A new `LabelledRelayList.version` triggers immediate re-probe.
 
-Controller on receipt of `ConnectorRelayState`:
-1. `UpsertPlacement(ctx, connectorID, relayID)` → `connector_relay_placement`
-2. `NotifyPolicyChange` per workspace
-3. ACL snapshot recompiles with updated `relay_addr` on `ACLConnector`
-4. Clients fetch updated snapshot → route to new relay
+### Migration
 
-### State Machine
+Migration is make-before-break:
 
-```
-Startup
-  │
-  ├─ state file present + fresh → connect to ranked[0] immediately
-  ├─ state file present + stale/version mismatch → connect to ranked[0] + re-probe in background
-  └─ state file missing → recv LabelledRelayList → pick random Tier1 → dial
-  │
-  ▼
-Phase1Connected  ←──────────────────────────────┐
-  │                                             │
-  ├─ spawn background probe task                │
-  │    → probe Tier1 + Tier2 relays             │
-  │    → persist top 5 to state file            │
-  │         ↓ improvement > max(15%, 10ms)      │
-  │    → dial new relay → register              │
-  │    → route new streams to new relay         │
-  │    → drain old relay (30s timeout)          │
-  │    → report ConnectorRelayState             │
-  └─────────────────────────────────────────────┘ (loop)
-  │
-  ├─ recv new LabelledRelayList.version → re-probe immediately
-  ├─ primary relay drops → attempt ranked[1..4] from state file → re-probe if all fail
-  └─ all relays unreachable → Disconnected (retry after backoff)
-```
+1. Dial and register with the new relay.
+2. After registration succeeds, route new outbound streams to the new relay.
+3. Keep the old relay connection alive for drain.
+4. Force-close the old relay after `RELAY_DRAIN_TIMEOUT_SECS` (default 30s).
+5. Report the new placement using `ConnectorRelayState`.
 
----
+`RELAY_DRAIN_TIMEOUT_SECS` (default 30s) is operator-configured independently. The recommended value is `2 × client ACL poll interval` (currently 15s → 30s), since new client requests should route to the new relay after their next poll. However, the connector has no visibility into the client poll interval — this is a documentation recommendation only, not a derived value. If the client poll interval changes, the operator must update `RELAY_DRAIN_TIMEOUT_SECS` accordingly.
 
-## Persisted Relay Ranking
+Controller handling of `ConnectorRelayState` remains:
 
-After every probe cycle, the connector writes the **top 5 scored relay entries** to a state file
-on disk. This serves two purposes:
+1. `UpsertPlacement(ctx, connectorID, relayID)` into `connector_relay_placement`.
+2. Notify affected policy cache/workspaces.
+3. ACL snapshots recompile with the updated relay placement.
+4. Clients fetch updated snapshots and route new requests to the new relay.
 
-1. **Instant failover** — when the active relay dies, the connector immediately attempts the next
-   ranked entry from the state file without any re-probe delay.
-2. **Fast restart** — when the connector process restarts, it reads the state file and connects to
-   `ranked[0]` immediately, with no cold-probe delay before routing traffic.
+### Persisted Ranking
 
-### State File Format
+After each probe cycle, the connector atomically writes the top 5 ranked relays to its state directory:
 
 ```json
 {
@@ -216,293 +192,106 @@ on disk. This serves two purposes:
       "rank": 0,
       "relay_id": "<uuid>",
       "relay_addr": "relay1.example.com:9093",
-      "spiffe_id": "spiffe://platform/relay/<uuid>",
+      "spiffe_id": "spiffe://zecurity.in/relay/<uuid>",
       "score": 12,
       "rtt_ms": 8,
       "fill_ratio": 0.08
     }
-    // ... up to rank 4
   ]
 }
 ```
 
-Stored in the connector state directory (same location as other connector durable state).
-The file is rewritten atomically (write to `.tmp`, rename) after every completed probe cycle.
+Startup validation:
 
-### Staleness Handling on Restart
-
-The connector checks two conditions when reading the state file at startup:
-
-| Condition | Action |
+| State file condition | Action |
 |---|---|
-| `probed_at` is **< 1 hour** ago AND `list_version` matches current `LabelledRelayList` | Trust ranking — connect to `ranked[0]` directly, skip Phase 1 random pick |
-| `probed_at` is **< 1 hour** ago but `list_version` differs (pool changed) | Use ranking for instant connect, immediately kick off background re-probe |
-| `probed_at` is **≥ 1 hour** ago (stale) | Use ranking for instant connect only, kick off background re-probe immediately |
-| State file missing or corrupt | Fall back to Phase 1 random Tier 1 pick |
+| Fresh (`probed_at < 1h`) and list version matches | Use first ranked relay still present as Tier 1 or Tier 2 |
+| Fresh but list version differs | Use first valid ranked relay, then re-probe immediately |
+| Stale (`probed_at >= 1h`) | Use first valid ranked relay, then re-probe immediately |
+| No current relay list yet | Use fresh `ranked[0]`; on list arrival, switch away immediately if it is absent/exhausted |
+| Missing/corrupt state | Random Tier 1, then Tier 2 fallback, then disconnected/backoff |
 
-In all cases the connector is online and routing traffic before the re-probe completes.
-The re-probe runs in the background and triggers Phase 3 migration if a better relay is found.
+Valid ranked relay means present in the current `LabelledRelayList` as Tier 1 or Tier 2. Absent means inactive, exhausted, or otherwise not eligible.
 
-### Ranking Depth: Top 5
-
-The ranking stores 5 entries (increased from 3) to provide greater failover depth:
-- `ranked[0]` — primary (active)
-- `ranked[1]` — first failover (no probe delay)
-- `ranked[2]` — second failover
-- `ranked[3]`, `ranked[4]` — deep fallback for multi-relay failures
+If the active relay drops unexpectedly:
+1. Filter persisted ranking to relays still present in the **current** `LabelledRelayList` as Tier 1 or Tier 2. Skip any entry absent from the current list — do not attempt dead or exhausted endpoints.
+2. Attempt the first valid ranked entry. If unreachable within 5s, try the next, down to `ranked[4]`.
+3. If all valid ranked entries fail, probe the current `LabelledRelayList` directly.
+4. If probing yields nothing, enter disconnected/backoff with exponential delay starting at `RELAY_RECONNECT_BASE_SECS` (default 5s), doubling each attempt up to `RELAY_RECONNECT_MAX_SECS` (default 120s), with jitter factor `RELAY_RECONNECT_BACKOFF_FACTOR` (default 2.0).
 
 ---
 
-## Failover
+## Operational Safeguards
 
-If the active relay connection drops unexpectedly (not a planned Phase 3 migration):
-1. Read `ranked[1]` from persisted state — no probe latency, survives process restart.
-2. Attempt `ranked[1]` immediately.
-3. If `ranked[1]` fails within 5s → attempt `ranked[2]`, then `ranked[3]`, then `ranked[4]`.
-4. If all 5 entries fail → trigger full re-probe of current `LabelledRelayList`.
-5. If re-probe yields nothing → direct-only mode, retry probe after 30s backoff.
-
-Persisted entries are invalidated when a new `LabelledRelayList` version arrives with a higher
-version number — they are replaced after the next probe cycle completes.
-
----
-
-## Load Balancing Analysis
-
-| Scenario | Behavior |
-|---|---|
-| 1,000 connectors boot simultaneously | Each picks a random Tier 1 relay. Uniform distribution. No probe storm. |
-| One Tier 1 relay fills to 80% | Label changes to `low` → dropped from next snapshot. Connectors re-probe and migrate away via Phase 3. |
-| Geographically skewed topology | Phase 2 RTT probe finds the nearest relay regardless of IP prefix — no XOR heuristic. |
-| All Tier 1 relays exhausted | Connectors fall back to Tier 2 for startup (controller should alert on this). |
-| Pool-change pushed to all connectors | Version increment triggers re-probe, but Phase 1 path is instant (no storm on startup). |
-
----
-
-## Comparison
-
-| Dimension | ADR-016 (Placement Engine) | ADR-016-Alt (Self-Select) | ADR-016 (This ADR) |
-|---|---|---|---|
-| Startup latency | Await assignment from controller | Probe before connecting | Zero — random Tier1 pick |
-| Load filter | LeastLoaded heuristic at assign time | IP XOR (unsound) | Capacity label from real heartbeat data |
-| RTT optimization | None (controller can't measure) | Yes, but blocked by bad pre-filter | Yes — background, after connected |
-| Packet loss on relay switch | N/A (connector stays put) | Full reconnect | Make-before-break: zero drop |
-| Controller complexity | High — leader lease, epoch | Low | Low — label compute + list push |
-| ADR-015 coherent | Yes | No | Yes — controller controls eligibility |
-| Thundering herd | N/A | Jitter (deterministic bias) | Random at startup (unbiased) |
-
----
-
-## Tradeoffs
-
-**Pros:**
-- Zero startup latency — connector is online and routing traffic before any probe completes.
-- No thundering herd — random Tier 1 pick at boot distributes load without storms.
-- RTT optimization uses real network measurement, not a proxy metric.
-- Make-before-break guarantees zero packet loss during relay migration.
-- Controller retains authority over the eligible pool (ADR-015 coherent).
-- No leader lease, no epoch, no batch coordination.
-
-**Cons:**
-- A connector may start on a suboptimal relay and take up to 5 minutes to migrate.
-- Brief window where two relay connections are open simultaneously (during Phase 3 drain).
-- More connector code than passive assignment — probe logic, state machine, drain timer.
-- `capacity_label` column adds a DB write on every heartbeat where tier changes.
-
----
-
-## Open Questions
-
-1. **Tier 1 exhausted at boot** — if no Tier 1 relays exist, connector falls back to Tier 2 for startup. Should the controller alert on this? Should the connector log a warning?
-2. **Migration threshold (15%)** — is this the right sensitivity? Lower = more migrations (churn), higher = slower convergence.
-3. **Drain timeout (30s)** — appropriate for expected stream lifetimes? Should it be configurable?
-4. **Capacity field source** — `RELAY_MAX_CONNECTIONS` env var is the simplest; dynamic derivation from system resources is possible but complex. Env var is recommended for v1.
-5. **Geographic policy** — if a workspace requires connectors to use relays in a specific region, the tier label alone cannot enforce it. A future ADR-016-C could add a `region` tag to `LabelledRelayInfo` that connectors filter on before Phase 1.
+- Random Tier 1 startup avoids probe storms during large connector restarts.
+- Tier hysteresis plus hold-down prevents label oscillation near thresholds.
+- Probe rejection is cheap: close the stream/connection and rely on connector timeout.
+- Probe abuse controls: per-connector rate limit, per-probe timeout, concurrent probe cap (`RELAY_MAX_CONCURRENT_PROBES`, default 5), and relay-side audit logs for excessive probe attempts.
+- Exhausted relays are not offered for new selection, but existing attached connectors may remain until normal migration.
+- Probe responses expose only aggregate relay load, not workspace-specific counts.
 
 ---
 
 ## Implementation Checklist
 
 ### Proto
-- [ ] `proto/relay/v1/relay.proto` — add `connection_count`, `max_connections` to relay heartbeat; add `ProbeRequest`, `ProbeResponse`
-- [ ] `proto/connector/v1/connector.proto` — add `RelayCapacityLabel`, `LabelledRelayInfo`, `LabelledRelayList`; add field 17 to `ConnectorControlMessage`
-- [ ] `buf generate` — regenerate Go + Rust stubs
+
+- Add relay heartbeat `connection_count` and `max_connections`.
+- Add `ProbeRequest` (with `request_id`) and `ProbeResponse` (echoing `request_id`).
+- Add `RelayCapacityLabel`, `LabelledRelayInfo`, and `LabelledRelayList`.
+- Add `relay_list = 17` to `ConnectorControlMessage`.
+- Run `buf generate`.
 
 ### Relay
-- [ ] `relay/src/config.rs` — add `RELAY_MAX_CONNECTIONS` env var
-- [ ] `relay/src/session.rs` — detect `ProbeRequest` on new connection, respond with `ProbeResponse { connection_count, capacity }`, close without registering
-- [ ] `relay/src/protocol.rs` — add `ProbeRequest` / `ProbeResponse` framing
+
+- Add `RELAY_MAX_CONNECTIONS`.
+- Track active bridged client streams separately from registered connectors.
+- Handle probe request/response without registering the connector.
+- Close probe streams on rate-limit, concurrent-limit, malformed, or unauthorized probes.
 
 ### Controller
-- [ ] `controller/internal/relay/heartbeat.go` — compute `fill_ratio` from heartbeat fields; update `relays.capacity_label`; push `LabelledRelayList` if label changed
-- [ ] `controller/internal/connector/control_stream.go` — push `LabelledRelayList` on stream open and on relay pool change
-- [ ] DB migration — add `capacity_label` column to `relays` table
+
+- Persist relay capacity metadata: `capacity_label`, `pending_capacity_label`, `pending_label_since`, `last_label_changed_at`, `connection_count`, `max_connections`.
+- Apply the exact pending-label state machine and push `LabelledRelayList` only after promotion.
+- Push current `LabelledRelayList` on connector control stream open. Push a new version when a relay is added, removed/expired, its public address/SPIFFE changes, or its promoted capacity label changes.
+- Preserve `ListWorkspacesForRelay(ctx, relayID)` as affected-workspace notification only; do not add workspace relay eligibility tables in v1.
 
 ### Connector
-- [ ] `connector/src/relay_probe.rs` (new) — parallel `ProbeRequest`/`ProbeResponse`, RTT measurement, score computation
-- [ ] `connector/src/relay_ranking.rs` (new) — top-5 `RelayRanking` struct, atomic state file write/read, staleness check on startup
-- [ ] `connector/src/relay_selector.rs` (new) — three-phase state machine: instant startup (from state file or random Tier1), background optimization, make-before-break migration
-- [ ] `connector/src/control_stream.rs` — handle `LabelledRelayList` → trigger Phase 1
-- [ ] `connector/src/relay_client.rs` — dual-connection support for Phase 3 drain
-- [ ] `connector/src/config.rs` — remove static `RELAY_ADDR`/`RELAY_SPIFFE_ID`; add `RELAY_REPROBE_INTERVAL_SECS`, `RELAY_MIGRATION_THRESHOLD_PCT`, `RELAY_DRAIN_TIMEOUT_SECS`
-- [ ] Build check: `cd connector && cargo build` passes
 
-### Tests
-- [ ] Unit: tier label computation (`fill_ratio → label`)
-- [ ] Unit: Phase 1 random selection distributes uniformly across Tier 1
-- [ ] Unit: Phase 2 score comparison with 15% threshold
-- [ ] Unit: Phase 3 make-before-break — new connection established before old torn down
-- [ ] Unit: state file write → process restart → connect to ranked[0] without re-probe
-- [ ] Unit: stale state file (> 1 hour) → connect to ranked[0] + background re-probe fires
-- [ ] Unit: state file version mismatch → connect to ranked[0] + re-probe fires immediately
-- [ ] Unit: ranked[0] unreachable on restart → fall through ranked[1..4] from state file
-- [ ] Simulation: 1,000 connectors boot → verify no single Tier 1 relay receives > 2× average connections
-- [ ] Integration: relay crosses 80% threshold → drops from snapshot → connectors migrate
-- [ ] Integration: controller records new `ConnectorRelayState` → ACL recompile → client routes correctly
+- Add relay probe, ranking, and selector modules.
+- Persist top 5 relay rankings with atomic write.
+- Validate persisted rankings against the current `LabelledRelayList` before reconnecting, except for temporary fast reconnect before the first list arrives.
+- Implement random Tier 1 startup, Tier 2 fallback, background scoring, thresholded migration, exhausted-active forced migration, and make-before-break drain.
+- Validate probe responses: check `request_id` matches and QUIC peer SPIFFE matches `LabelledRelayInfo.spiffe_id` before accepting result.
+- Validate persisted rankings against current `LabelledRelayList` before failover — skip absent/exhausted entries.
+- Implement exponential backoff on disconnected retry using `RELAY_RECONNECT_*` config.
+- Replace static `RELAY_ADDR` / `RELAY_SPIFFE_ID` configuration with control-stream relay selection; add all config vars from the configurable values table.
 
 ---
 
-## Architectural Review — Gaps Identified and Resolution
+## Test Plan
 
-This section documents findings from the design review of ADR-016 and its predecessors, including
-which issues remain open (with their fixes) and which were resolved by the existing system design.
-
----
-
-### Gap 1 — No Hysteresis on Tier Transitions *(Open — fix required)*
-
-**Issue:** Tier boundaries are hard thresholds (`fill_ratio < 0.50 = High`). A relay sitting at
-49.9% capacity is Tier 1. One new connection pushes it to 50.1% → label changes to Medium →
-controller pushes new `LabelledRelayList` → all connected connectors re-probe immediately. Some
-migrate away → fill drops to 49.9% → label flips back to High → re-probe again. At 1,000
-connectors, a relay oscillating on the 50% boundary triggers ~1,000 simultaneous re-probes every
-few seconds — a thundering herd caused by the design itself.
-
-**Fix applied:** Two mitigations combined:
-
-1. **Dead-band gap between tiers** — boundaries are asymmetric so a relay must cross a gap before
-   switching tier:
-   - Tier 1: enter when `fill_ratio < 0.45`, exit when `fill_ratio ≥ 0.50`
-   - Tier 2: enter when `fill_ratio < 0.75`, exit when `fill_ratio ≥ 0.80`
-   - Exhausted: enter when `fill_ratio ≥ 0.80`
-2. **Hold-down window** — a relay's label must remain stable for **60 seconds** before a
-   label-change push is issued to connectors. Transient spikes do not trigger re-probes.
-
-Thresholds and hold-down window are configurable via controller env vars
-(`RELAY_TIER1_ENTER`, `RELAY_TIER1_EXIT`, `RELAY_LABEL_HOLDDOWN_SECS`).
+- Unit: capacity label hysteresis and hold-down transitions.
+- Unit: relay active-stream counter increments/decrements around bridged client streams.
+- Unit: probe rate/concurrency rejection closes stream and connector treats it as failure.
+- Unit: startup ranking validation skips absent/exhausted relays.
+- Unit: random Tier 1 selection distributes boot load.
+- Unit: migration threshold requires both relative and absolute improvement.
+- Unit: active relay becomes exhausted (absent from list) → immediate migration regardless of score delta.
+- Unit: make-before-break does not switch new streams until new registration succeeds.
+- Unit: probe response with mismatched `request_id` is discarded.
+- Unit: probe response from wrong SPIFFE peer is treated as failure.
+- Unit: failover skips persisted ranking entries absent from current `LabelledRelayList`.
+- Unit: exponential backoff increments correctly and caps at `RELAY_RECONNECT_MAX_SECS`.
+- Integration: relay crosses exhausted threshold, disappears from new selection, and connectors migrate.
+- Integration: `ConnectorRelayState` updates `connector_relay_placement`, triggers ACL recompile, and clients route new requests to the new relay.
+- Simulation: 1,000 simultaneous connector startups do not place more than 2x average connections on any Tier 1 relay.
 
 ---
 
-### Gap 2 — Improvement Threshold Fails at Low RTT *(Open — fix required)*
+## Open Questions
 
-**Issue:** Migration triggers when best candidate score is `> 15%` better than current. At low
-RTT (e.g., current relay = 4ms, candidate = 3ms → 25% improvement = 1ms difference), this is
-below single-measurement jitter on a QUIC handshake (±1–2ms). Spurious migrations would fire
-constantly on local-network deployments.
-
-**Fix applied:** Threshold requires **both** conditions to be true:
-- Relative improvement > 15% **AND**
-- Absolute improvement > 10ms
-
-```
-migrate_if: (current_score - best_score) > max(current_score * 0.15, 10ms)
-```
-
-This prevents noise-driven migrations on low-latency paths while still catching meaningful
-improvements on high-latency paths (e.g., cross-region).
-
----
-
-### Gap 3 — Make-Before-Break "Zero Packet Loss" Claim Scope *(Resolved)*
-
-**Issue raised:** Make-before-break protects new streams but not existing open client sessions.
-After 30s drain timeout, open streams are force-closed. Clients using those streams would lose
-their session.
-
-**Why this is resolved by the existing system design:**
-
-The client synchronises with the controller every **15 seconds** by polling `GetACLSnapshot`.
-The migration flow is:
-
-```
-1. Connector registers on new relay
-2. Connector sends ConnectorRelayState to controller
-3. Controller: UpsertPlacement → NotifyPolicyChange → ACL recompiles
-4. Client polls GetACLSnapshot within ≤15s → receives updated relay_addr
-5. Client's NEW requests route to new relay silently
-6. Client's EXISTING open connections continue on old relay until they complete naturally
-7. Old relay connection drains and closes after 30s
-```
-
-Existing connections drain naturally within the 15s client sync window. The 30s drain timeout
-is calibrated to exactly `2 × client_poll_interval (15s)` — it covers the full sync window plus
-a 15s buffer for in-flight requests. No sessions are force-closed while a client still needs them.
-
-**Constraint this creates:** If the client poll interval changes, the drain timeout must change
-with it. The drain timeout is defined as `RELAY_DRAIN_TIMEOUT_SECS = 2 × client_poll_interval`.
-
----
-
-### Gap 4 — Cross-Workspace Probe Information Disclosure *(Resolved)*
-
-**Issue raised:** `ProbeRequest` allows any authenticated connector to probe any relay and learn
-its `connection_count` and `capacity` — including relays serving other workspaces.
-
-**Why this is resolved by the controller label mechanism:**
-
-The `LabelledRelayList` pushed to each connector is **workspace-scoped** — the controller builds
-it from relays that serve that connector's workspace only. A connector never receives relay entries
-for other workspaces and therefore never has the addresses to probe them.
-
-No changes to the probe protocol are needed. The access control is enforced at the list-delivery
-layer, not the probe layer.
-
----
-
-### Gap 5 — Current Relay Re-Probed via New Handshake *(Moderate — accepted)*
-
-**Issue:** Phase 2 probes the current active relay by opening a new QUIC handshake. This measures
-handshake RTT to an already-connected relay, not the latency of the existing persistent connection.
-The existing connection's heartbeat timing provides a more accurate RTT for free.
-
-**Resolution:** Accepted as a known approximation. The existing connection's heartbeat interval
-is coarse (30s) and not designed for latency measurement. A fresh probe gives a consistent
-measurement basis across all relays (same handshake-included RTT metric). The slight inaccuracy
-is acceptable given the 10ms absolute improvement floor (Gap 2 fix) — small RTT mismeasurements
-cannot trigger spurious migrations.
-
----
-
-### Gap 6 — ADR-016-Alt IP Proximity Pre-Filter *(Superseded)*
-
-**Issue (from ADR-016-Alt review):** The `ip_proximity_score` pre-filter (`XOR leading bits`)
-measures numeric IP adjacency which has near-zero correlation with RTT. It permanently excludes
-the lowest-latency relay before probing.
-
-**Why superseded:** ADR-016 eliminates the IP proximity pre-filter entirely. The capacity tier
-label — computed from real `connection_count / max_connections` data reported in relay heartbeats —
-replaces it as the pre-filter. The connector probes all Tier 1 + Tier 2 relays, not a
-heuristic-selected subset. RTT measurement determines the final ranking.
-
----
-
-### Gap 7 — ADR-016-Alt ADR-015 Conflict *(Superseded)*
-
-**Issue (from ADR-016-Alt review):** ADR-016-Alt stated "the controller does not assign a relay,"
-directly contradicting ADR-015's principle: *"Controller is the single source of truth. Connectors
-never choose relays."*
-
-**Why superseded:** ADR-016 resolves this by design. The controller controls **eligibility** via
-the labelled relay list — it decides which relays are available for each workspace. The connector
-selects **within** the controller-approved pool. This is coherent with ADR-015: the controller
-retains authority, the connector only measures what the controller cannot (network RTT).
-
----
-
-## Follow-up
-
-If ADR-016 is adopted:
-- ADR-016-Placement-Engine is superseded (deleted).
-- ADR-016-Alt-Connector-Self-Select is superseded (deleted).
-- ADR-017 (Transport Propagation) and ADR-018 (Migration Strategy) apply unchanged — only the mechanism that populates `connector_relay_placement` differs.
-- Geographic/policy-based placement (region filter on `LabelledRelayInfo`) should be ADR-016-C if required.
+- Should the controller alert when no Tier 1 relays exist and connectors must start on Tier 2?
+- Is the migration threshold of 15% and 10ms correct for production RTT variance?
+- Should `RELAY_DRAIN_TIMEOUT_SECS` be derived from the client ACL poll interval instead of configured independently?
+- Is `RELAY_MAX_CONNECTIONS` sufficient for v1, or should capacity later include CPU/memory/network telemetry?
