@@ -40,7 +40,7 @@ This ADR does **not** redesign anything. It specifies:
 |---------|----------|-------|
 | `ACLConnector` fields 4+5 | `client.proto` | **Reserved** — never reused |
 | `ACLSnapshot` fields 6+9 | `client.proto` | **Reserved** — never reused |
-| `TransportSnapshot` | `connector.proto` field 16 | New — carries per-connector relay coords |
+| `TransportSnapshot` | `connector.proto` field 16 + client RPC | New — publishes resulting per-connector relay coords from `connector_relay_placement` |
 | `GetTransportSnapshot` RPC | `client.proto` | New — client polls separate transport cache |
 | Connector `RELAY_ADDR` | `connector/src/config.rs` | **Removed in ADR-016/Sprint 11** — relay selected via `LabelledRelayList` (field 17), not `TransportSnapshot` |
 | `GetActiveRelay()` | `compiler.go` | **Removed** — transport compiler owns relay data |
@@ -68,7 +68,7 @@ Ship the new proto messages and RPC. Nothing is removed. Old clients continue to
   ```
 - Build Transport Compiler in controller
 - Controller pushes `TransportSnapshot` on control stream open alongside `ACLSnapshot`
-- Note: Placement Engine (old ADR-016) is superseded. ADR-016 now implements tiered relay selection via `LabelledRelayList` (field 17) — connector self-selects within controller-approved pool. `TransportSnapshot` (field 16) carries relay topology to the **client**, not to the connector.
+- Note: Placement Engine (old ADR-016) is superseded. ADR-016 now implements tiered relay selection via `LabelledRelayList` (field 17) — connector self-selects within the controller-approved pool, then reports `ConnectorRelayState`. `TransportSnapshot` (field 16 and the client RPC) carries the resulting relay topology; it is not an input to connector relay selection.
 - Controller serves `GetTransportSnapshot` RPC
 
 **Client behavior:** Old clients ignore `GetTransportSnapshot`. New clients begin populating Transport Cache from it but **still fall back to ACLConnector fields 4+5** if Transport Cache is empty (convergence window safety).
@@ -83,7 +83,7 @@ Ship the new proto messages and RPC. Nothing is removed. Old clients continue to
 >
 > ADR-016 introduces `LabelledRelayList` (field 17 on `ConnectorControlMessage`). The connector receives a capacity-labelled relay pool from the controller, instantly connects to a random Tier 1 relay, then background-probes and migrates via make-before-break. `RELAY_ADDR` is removed from connector config in Sprint 11.
 >
-> `TransportSnapshot` (field 16) is **not** the vehicle for connector relay assignment — it carries relay topology to the **client** only (see Phase 3).
+> `TransportSnapshot` (field 16 and the client RPC) is **not** the vehicle for connector relay assignment — it publishes the resulting connector→relay topology after ADR-016 selection. Clients consume it in Phase 3.
 
 **Changes delivered by Sprint 11 (ADR-016):**
 - `connector/src/config.rs` — `RELAY_ADDR` / `RELAY_SPIFFE_ID` removed entirely
@@ -174,7 +174,7 @@ message ACLSnapshot {
 ```protobuf
 oneof body {
   // ... existing fields 1–15 unchanged ...
-  TransportSnapshot transport_snapshot = 16;  // Controller → Connector
+  TransportSnapshot transport_snapshot = 16;  // Controller → Connector topology propagation, not relay selection
 }
 ```
 
@@ -191,7 +191,7 @@ oneof body {
 | `GetActiveRelay()` call in compiler | `compiler.go:160` | 4 | Delete lines 158–174 |
 | `RelayAddr`/`RelaySpiffeId` on ACLSnapshot | `compiler.go:176–184` | 4 | Remove from return struct |
 | `GetActiveRelay()` method | `store.go` | 4 | Delete if no other callers |
-| `relay_addr` on `ConnectorConfig` | `connector/src/config.rs:77` | 4 | Remove field entirely |
+| `relay_addr` on `ConnectorConfig` | `connector/src/config.rs` | ~~4~~ **2 ✓** | Removed in Sprint 11 (ADR-016) — no longer present |
 | Relay fallback in `build_transports_by_resource` | `client/src/daemon.rs:762–781` | 4 | Replace with Transport Cache lookup |
 
 ---

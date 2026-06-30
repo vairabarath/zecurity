@@ -83,7 +83,7 @@ uint32 connection_count = N;    // active bridged client streams
 uint32 max_connections  = N+1;  // RELAY_MAX_CONNECTIONS
 ```
 
-The relay must add runtime instrumentation for this: increment when a client lookup bridge starts, decrement when that bridge ends, and report the current count in heartbeat and probe responses.
+The relay must add runtime instrumentation for this: increment when a client lookup bridge starts, decrement when that bridge ends, and report the current count in heartbeat only. Probes do not include load data — they carry only the echoed `request_id`.
 
 Relay probing uses a lightweight request/response after QUIC mTLS. Probes do not expose relay load; load is reported only to the controller via heartbeat and represented to connectors only as `RelayCapacityLabel`.
 
@@ -225,7 +225,7 @@ If the active relay drops unexpectedly:
 - Probe rejection is cheap: close the stream/connection and rely on connector timeout.
 - Probe abuse controls: per-connector rate limit, per-probe timeout, concurrent probe cap (`RELAY_MAX_CONCURRENT_PROBES`, default 5), and relay-side audit logs for excessive probe attempts.
 - Exhausted relays are not offered for new selection, but existing attached connectors may remain until normal migration.
-- Probe responses expose only aggregate relay load, not workspace-specific counts.
+- Probe responses carry only `request_id`; relay load is never exposed to connectors through probes — it flows to the controller via heartbeat only.
 
 ---
 
