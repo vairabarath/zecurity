@@ -13,6 +13,13 @@
 Define the propagation pipeline for `TransportSnapshot` — how topology changes
 reach connectors and clients, independently of ACL policy propagation.
 
+`TransportSnapshot` does **not** assign relays to connectors. Connector relay
+selection is owned by ADR-016: the controller publishes a capacity-labelled
+`LabelledRelayList` and each connector self-selects, probes, migrates, and then
+reports the resulting `ConnectorRelayState`. `TransportSnapshot` publishes that
+resulting topology so clients can route through the correct relay for a
+connector.
+
 ---
 
 ## Problem
@@ -37,9 +44,11 @@ pushes it to all connectors in the workspace. This coupling has two costs:
 
 Introduce a `TransportNotifier` parallel to the existing `policy.Notifier`.
 Transport and ACL propagation are fully independent pipelines sharing no state.
+Transport propagation consumes relay placement state produced by ADR-016; it
+does not run capacity scoring, relay probing, or connector relay assignment.
 
 ```
-Topology event
+Topology/placement event
     ↓
 TransportNotifier.NotifyTopologyChange(affectedConnectorIDs []string)
     ↓
@@ -97,11 +106,15 @@ func (n *Notifier) Version(connectorID string) uint64
 | Relay heartbeat expires (eviction) | `relay/expiry.go` | All connectors placed on that relay | `NotifyTopologyChange(workspaceID, connectorIDs)` |
 | Connector registers with relay | `connector/control_stream.go` | That connector only | `NotifyTopologyChange(workspaceID, []string{connectorID})` |
 | Connector reconnects (stream re-open) | `connector/control_stream.go` | That connector only | push current snapshot on stream open (no version bump needed) |
-| Connector self-selects new relay (ADR-016) | `connector/control_stream.go` — on `ConnectorRelayState` received | That connector only | `NotifyTopologyChange(workspaceID, []string{connectorID})` |
+| Connector self-selects new relay (ADR-016) | `connector/control_stream.go` — after `ConnectorRelayState` updates `connector_relay_placement` | That connector only | `NotifyTopologyChange(workspaceID, []string{connectorID})` |
 
 **Note:** Connector reconnect does not bump the transport version — it just pushes the
 current snapshot on stream open. A version bump is only warranted when placement
 state actually changes.
+
+Relay capacity-label changes alone are handled by ADR-016 through
+`LabelledRelayList` pushes. They trigger transport propagation only after a
+connector changes placement and reports that change through `ConnectorRelayState`.
 
 ---
 
@@ -120,6 +133,10 @@ func CompileTransportSnapshot(
     workspaceID string,
 ) (*connectorv1.TransportSnapshot, error)
 ```
+
+The compiler reads current connector placement. `connector_relay_placement` is
+authoritative because it is updated from connector-reported `ConnectorRelayState`
+and re-asserted by connector health.
 
 The compiler reads:
 
@@ -175,7 +192,10 @@ func (c *SnapshotCache) Invalidate(workspaceID string)
 ## Control Stream Delivery (Connector)
 
 On stream open, the controller immediately pushes the current `TransportSnapshot`
-alongside the `ACLSnapshot` (same stream, field 16 on `ConnectorControlMessage`):
+alongside the `ACLSnapshot` (same stream, field 16 on `ConnectorControlMessage`).
+This is topology propagation only. The connector must not use this snapshot to
+choose its own relay; relay selection remains driven by ADR-016
+`LabelledRelayList` field 17.
 
 ```go
 // In control_stream.go — on new stream accepted:
@@ -231,7 +251,7 @@ maintains a separate `transport_snapshot` field in `SharedState`, populated via 
 
 | Metric | Target |
 |--------|--------|
-| Relay metadata change → connector receives new TransportSnapshot | < 2s |
+| Relay metadata or placement change → affected connector receives new TransportSnapshot | < 2s |
 | Relay expiry (90s heartbeat gap) → snapshot recompiled | < 95s total |
 | Client polling interval | 60s (same as ACL) |
 | Max convergence window (client) | 120s (2 × poll interval) |
@@ -245,6 +265,7 @@ reported `transport_version` equals the current compiled version.
 ## What This ADR Does NOT Define
 
 - Relay selection algorithm, capacity labelling, or probe logic (ADR-016)
+- Connector relay assignment; ADR-016 `LabelledRelayList` is the only connector relay selection input
 - Migration from Track A ACLConnector relay fields to TransportSnapshot (ADR-018)
 - Full proto schema for `TransportSnapshot` (defined in ADR-015 and the proto files)
 

@@ -155,5 +155,5 @@ async fn correct_probe_succeeds_baseline() {
 
     assert_eq!(results.len(), 1, "baseline probe must succeed");
     assert_eq!(results[0].relay_id, relay.relay_id);
-    assert!((results[0].fill_ratio - 0.07).abs() < 0.001);
+    // fill_ratio removed: relay load is controller-owned; probes are RTT-only (ADR-016)
 }
