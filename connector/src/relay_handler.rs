@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use rustls_pemfile::{certs, private_key};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
@@ -23,6 +24,61 @@ use crate::ControlMessage;
 
 const INNER_TUNNEL_ALPN: &[u8] = b"ztna-tunnel-v1";
 const CLIENT_ROLE: &str = "client";
+
+#[derive(Clone, Debug, Default)]
+pub struct RelayDrainTracker {
+    inner: Arc<RelayDrainTrackerInner>,
+}
+
+#[derive(Debug, Default)]
+struct RelayDrainTrackerInner {
+    active_streams: AtomicUsize,
+    idle_notify: Notify,
+}
+
+impl RelayDrainTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn active_streams(&self) -> usize {
+        self.inner.active_streams.load(Ordering::Acquire)
+    }
+
+    pub fn track_stream(&self) -> RelayStreamGuard {
+        self.inner.active_streams.fetch_add(1, Ordering::AcqRel);
+        RelayStreamGuard {
+            tracker: self.clone(),
+        }
+    }
+
+    pub async fn wait_for_idle(&self) {
+        loop {
+            let notified = self.inner.idle_notify.notified();
+            if self.active_streams() == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+pub struct RelayStreamGuard {
+    tracker: RelayDrainTracker,
+}
+
+impl Drop for RelayStreamGuard {
+    fn drop(&mut self) {
+        let previous = self
+            .tracker
+            .inner
+            .active_streams
+            .fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            self.tracker.inner.idle_notify.notify_waiters();
+        }
+    }
+}
 
 /// Handles Client streams opened by the Relay.
 ///
@@ -67,7 +123,11 @@ impl RelayHandler {
     }
 
     /// Accept Relay-opened streams until the outer Relay connection closes.
-    pub async fn run(self: Arc<Self>, connection: Connection) -> Result<()> {
+    pub async fn run(
+        self: Arc<Self>,
+        connection: Connection,
+        drain_tracker: RelayDrainTracker,
+    ) -> Result<()> {
         loop {
             let (send, recv) = connection
                 .accept_bi()
@@ -85,8 +145,10 @@ impl RelayHandler {
                 }
             };
             let handler = self.clone();
+            let stream_guard = drain_tracker.track_stream();
             tokio::spawn(async move {
                 let _permit = permit;
+                let _stream_guard = stream_guard;
                 if let Err(error) = handler.handle_stream(send, recv).await {
                     warn!(%error, "Relay tunnel stream failed");
                 }
@@ -275,8 +337,33 @@ fn validate_canonical_uuid(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[tokio::test]
+    async fn drain_tracker_waits_until_last_stream_guard_drops() {
+        let tracker = RelayDrainTracker::new();
+        let first = tracker.track_stream();
+        let second = tracker.track_stream();
+        assert_eq!(tracker.active_streams(), 2);
+
+        let waiter = tokio::spawn({
+            let tracker = tracker.clone();
+            async move {
+                tracker.wait_for_idle().await;
+            }
+        });
+
+        drop(first);
+        assert_eq!(tracker.active_streams(), 1);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!waiter.is_finished());
+
+        drop(second);
+        waiter.await.unwrap();
+        assert_eq!(tracker.active_streams(), 0);
+    }
 
     #[test]
     fn accepts_exact_client_identity_for_workspace() {

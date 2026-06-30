@@ -54,7 +54,7 @@ All configurable values:
 | `RELAY_TIER2_EXIT` | 0.80 | fill_ratio at or above which a relay exits Tier 2 (becomes exhausted) |
 | `RELAY_LABEL_HOLDDOWN_SECS` | 60 | Minimum seconds a candidate label must be stable before promotion |
 | `RELAY_REPROBE_INTERVAL_SECS` | 300 | Background re-probe interval when on a healthy relay |
-| `RELAY_DRAIN_TIMEOUT_SECS` | 30 | Seconds to drain old relay before force-close on migration |
+| `RELAY_DRAIN_TIMEOUT_SECS` | 120 | Maximum seconds to wait for the old relay to go idle before force-close on migration (hard cap; graceful drain closes earlier once active streams reach zero) |
 | `RELAY_MAX_CONCURRENT_PROBES` | 5 | Max parallel probe connections per probe cycle |
 | `RELAY_RECONNECT_BASE_SECS` | 5 | Initial backoff delay on disconnected retry |
 | `RELAY_RECONNECT_MAX_SECS` | 120 | Maximum backoff delay cap |
@@ -69,7 +69,7 @@ The controller applies hysteresis and hold-down before publishing a label change
 
 `last_label_changed_at` updates only on promotion.
 
-The existing `ListWorkspacesForRelay(ctx, relayID)` is not an eligibility table. It derives affected workspaces from `connector_relay_placement -> connectors.tenant_id` and is used to notify workspaces whose ACL snapshots may reference a relay that changed metadata, label, or expiry state.
+The existing `ListWorkspacesForRelay(ctx, relayID)` is not an eligibility table — it is affected-workspace discovery only. It derives the affected workspaces from `connector_relay_placement -> connectors.tenant_id`. Its sole purpose is Track A ACL relay-coordinate compatibility: when a relay's metadata (public address/SPIFFE) or expiry state changes, it identifies the workspaces whose ACL snapshots still carry that relay's coordinates so those snapshots can be refreshed for old clients. Capacity-label changes are **not** in scope here — they are handled entirely by `LabelledRelayList` pushes to connectors and do not require ACL recompilation by themselves.
 
 ---
 
@@ -164,11 +164,13 @@ Migration is make-before-break:
 
 1. Dial and register with the new relay.
 2. After registration succeeds, route new outbound streams to the new relay.
-3. Keep the old relay connection alive for drain.
-4. Force-close the old relay after `RELAY_DRAIN_TIMEOUT_SECS` (default 30s).
+3. Keep the old relay connection alive and serving its existing bridged streams.
+4. Drain gracefully: close the old relay as soon as its active bridged-stream count reaches zero. `RELAY_DRAIN_TIMEOUT_SECS` is a hard upper cap — if streams are still open when it elapses, force-close anyway.
 5. Report the new placement using `ConnectorRelayState`.
 
-`RELAY_DRAIN_TIMEOUT_SECS` (default 30s) is operator-configured independently. The recommended value is `2 × client ACL poll interval` (currently 15s → 30s), since new client requests should route to the new relay after their next poll. However, the connector has no visibility into the client poll interval — this is a documentation recommendation only, not a derived value. If the client poll interval changes, the operator must update `RELAY_DRAIN_TIMEOUT_SECS` accordingly.
+Drain is idle-based with a hard cap, not a fixed timer. The connector tracks the old relay session's active bridged-stream count and closes the connection the instant it falls to zero, so short-lived flows migrate with no force-close. `RELAY_DRAIN_TIMEOUT_SECS` (default 120s) bounds the wait so a stuck or long-lived stream cannot pin the old connection (and its share of the relay stream-permit pool) indefinitely.
+
+`RELAY_DRAIN_TIMEOUT_SECS` is operator-configured independently. New client requests route to the new relay only after their next ACL/transport poll, which runs on a 60s TTL (`ACL_REFRESH_TTL_SECS`; see ADR-017). ADR-017 puts the worst-case client convergence window at 120s (2 × the 60s poll interval), so the default 120s cap matches that window: in the common case a client has re-polled onto the new relay before the cap fires. Because the cap force-closes any streams still open when it elapses, a legitimately long-lived flow (SSH, RDP, large transfer) that outlives the cap is still severed. Operators expecting sessions longer than 120s should raise `RELAY_DRAIN_TIMEOUT_SECS` above their expected session length. The connector has no visibility into the client poll interval — this is a documentation recommendation only, not a derived value. If the client poll interval changes, the operator must update `RELAY_DRAIN_TIMEOUT_SECS` accordingly.
 
 Controller handling of `ConnectorRelayState` remains:
 
@@ -279,6 +281,7 @@ If the active relay drops unexpectedly:
 - Unit: connector probe score is RTT-only and ignores relay load.
 - Unit: active relay becomes exhausted (absent from list) → immediate migration regardless of score delta.
 - Unit: make-before-break does not switch new streams until new registration succeeds.
+- Unit: drain waits until the old session's active bridged-stream count reaches zero, then closes; the hard cap force-closes if streams remain.
 - Unit: probe response with mismatched `request_id` is discarded.
 - Unit: probe response from wrong SPIFFE peer is treated as failure.
 - Unit: failover skips persisted ranking entries absent from current `LabelledRelayList`.
@@ -293,5 +296,4 @@ If the active relay drops unexpectedly:
 
 - Should the controller alert when no Tier 1 relays exist and connectors must start on Tier 2?
 - Is the migration threshold of 15% and 10ms correct for production RTT variance?
-- Should `RELAY_DRAIN_TIMEOUT_SECS` be derived from the client ACL poll interval instead of configured independently?
 - Is `RELAY_MAX_CONNECTIONS` sufficient for v1, or should capacity later include CPU/memory/network telemetry?

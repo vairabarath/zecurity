@@ -250,12 +250,17 @@ impl ShieldRegistry {
         if maps.pending_state.is_empty() {
             return None;
         }
-        let reports: Vec<ResourceStateReport> =
-            maps.pending_state.drain().map(|(_, report)| report).collect();
+        let reports: Vec<ResourceStateReport> = maps
+            .pending_state
+            .drain()
+            .map(|(_, report)| report)
+            .collect();
         Some(crate::proto::ConnectorControlMessage {
-            body: Some(crate::proto::connector_control_message::Body::ResourceState(
-                crate::proto::ResourceStateBatch { reports },
-            )),
+            body: Some(
+                crate::proto::connector_control_message::Body::ResourceState(
+                    crate::proto::ResourceStateBatch { reports },
+                ),
+            ),
         })
     }
 
@@ -444,7 +449,8 @@ impl ShieldService for ShieldRegistry {
         let mut in_stream = request.into_inner();
 
         let (out_tx, out_rx) = mpsc::channel::<Result<ShieldControlMessage, Status>>(32);
-        let (instr_tx, mut instr_rx) = mpsc::channel::<ResourceInstruction>(SHIELD_INSTRUCTION_QUEUE_CAP);
+        let (instr_tx, mut instr_rx) =
+            mpsc::channel::<ResourceInstruction>(SHIELD_INSTRUCTION_QUEUE_CAP);
         let (snap_tx, mut snap_rx) = mpsc::channel::<ResourceSnapshot>(8);
         // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
@@ -453,7 +459,8 @@ impl ShieldService for ShieldRegistry {
             let mut maps = self.maps.lock();
             maps.instruction_txs
                 .insert(identity.shield_id.clone(), instr_tx);
-            maps.snapshot_txs.insert(identity.shield_id.clone(), snap_tx);
+            maps.snapshot_txs
+                .insert(identity.shield_id.clone(), snap_tx);
         }
         self.tunnel_hub
             .register_shield(identity.shield_id.clone(), tunnel_tx);

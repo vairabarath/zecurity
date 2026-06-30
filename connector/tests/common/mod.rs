@@ -97,17 +97,14 @@ pub fn make_test_certs(num_relays: usize) -> TestCerts {
 
     // ---- connector leaf ----
     let connector_id = Uuid::new_v4().to_string();
-    let connector_spiffe_id = format!(
-        "spiffe://workspace.zecurity.in/connector/{}",
-        connector_id
-    );
+    let connector_spiffe_id = format!("spiffe://workspace.zecurity.in/connector/{}", connector_id);
     let mut conn_params = CertificateParams::default();
     let mut conn_dn = DistinguishedName::new();
     conn_dn.push(DnType::CommonName, format!("connector-{connector_id}"));
     conn_params.distinguished_name = conn_dn;
-    conn_params
-        .subject_alt_names
-        .push(SanType::URI(connector_spiffe_id.clone().try_into().unwrap()));
+    conn_params.subject_alt_names.push(SanType::URI(
+        connector_spiffe_id.clone().try_into().unwrap(),
+    ));
     let conn_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
     let conn_cert = conn_params.signed_by(&conn_key, &issuer).unwrap();
     let conn_cert_pem = conn_cert.pem();
@@ -185,7 +182,10 @@ fn parse_pkcs8_pem(pem: &str) -> Vec<u8> {
 #[derive(Clone, Copy, Debug)]
 pub enum ProbeBehaviour {
     /// Echo `request_id`, advertise the given `(connection_count, capacity)`.
-    EchoCorrectly { connection_count: u32, capacity: u32 },
+    EchoCorrectly {
+        connection_count: u32,
+        capacity: u32,
+    },
     /// Echo `request_id + 1` — connector probe must drop the result.
     WrongRequestId,
     /// Accept the connection then close without responding.
@@ -209,7 +209,9 @@ impl ProbeRelay {
         // Build a rustls ServerConfig that requires client mTLS rooted in
         // the workspace CA. ALPN must match the connector's `RELAY_ALPN`.
         let mut roots = rustls::RootCertStore::empty();
-        roots.add(workspace_ca_der).context("add workspace CA root")?;
+        roots
+            .add(workspace_ca_der)
+            .context("add workspace CA root")?;
         let client_verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
             .build()
             .context("build client verifier")?;
@@ -303,17 +305,16 @@ async fn handle_probe_connection(
 ) -> Result<()> {
     let connection = incoming.await.context("accept QUIC connection")?;
 
-    let (mut send, mut recv) = tokio::time::timeout(
-        Duration::from_secs(5),
-        connection.accept_bi(),
-    )
-    .await
-    .context("accept_bi timeout")?
-    .context("accept_bi")?;
+    let (mut send, mut recv) = tokio::time::timeout(Duration::from_secs(5), connection.accept_bi())
+        .await
+        .context("accept_bi timeout")?
+        .context("accept_bi")?;
 
     // Read 4-byte length prefix + JSON body.
     let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await.context("read length prefix")?;
+    recv.read_exact(&mut len_buf)
+        .await
+        .context("read length prefix")?;
     let len = u32::from_be_bytes(len_buf) as usize;
     if len > PROBE_MAX_MSG_SIZE {
         return Err(anyhow!("message too large: {len}"));

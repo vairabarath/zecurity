@@ -66,14 +66,11 @@ impl PolicyCache {
     ) -> Option<ResourceAcl> {
         let guard = self.snapshot.read();
         let snapshot = guard.as_ref()?;
-        let entry = snapshot
-            .entries
-            .iter()
-            .find(|e| {
-                e.address == address
-                    && e.port == port as u32
-                    && e.protocol.eq_ignore_ascii_case(protocol)
-            })?;
+        let entry = snapshot.entries.iter().find(|e| {
+            e.address == address
+                && e.port == port as u32
+                && e.protocol.eq_ignore_ascii_case(protocol)
+        })?;
         Some(ResourceAcl {
             resource_id: entry.resource_id.clone(),
             allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),

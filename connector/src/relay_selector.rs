@@ -39,7 +39,7 @@ use crate::proto::{
 };
 use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
 use crate::relay_client;
-use crate::relay_handler::RelayHandler;
+use crate::relay_handler::{RelayDrainTracker, RelayHandler};
 use crate::relay_probe::{probe_relays, RelayProbeResult};
 use crate::relay_ranking::{now_unix_seconds, RankedEntry, RelayRanking};
 
@@ -74,6 +74,7 @@ pub struct RelaySelectorConfig {
 struct ActiveRelay {
     info: LabelledRelayInfo,
     handle: JoinHandle<anyhow::Result<()>>,
+    drain_tracker: RelayDrainTracker,
     last_score: Option<u64>,
 }
 
@@ -106,7 +107,9 @@ pub async fn run(
         let list = current_list.clone().expect("checked just above");
 
         state = match state {
-            State::Disconnected => bootstrap(&cfg, &list, &relay_handler, &attachment_slot, &ctrl_tx).await,
+            State::Disconnected => {
+                bootstrap(&cfg, &list, &relay_handler, &attachment_slot, &ctrl_tx).await
+            }
             State::Connected(active) => {
                 connected_step(
                     &cfg,
@@ -121,7 +124,9 @@ pub async fn run(
                 .await
             }
             State::Backoff { delay } => {
-                emit_event(SelectorEvent::EnteredBackoff { delay_ms: delay.as_millis() as u64 });
+                emit_event(SelectorEvent::EnteredBackoff {
+                    delay_ms: delay.as_millis() as u64,
+                });
                 tokio::time::sleep(delay).await;
                 let next = (delay.as_secs_f64() * cfg.reconnect_backoff_factor) as u64;
                 let _next_delay = Duration::from_secs(next.min(cfg.reconnect_max.as_secs()).max(1));
@@ -140,7 +145,9 @@ async fn bootstrap(
 ) -> State {
     if list.relays.is_empty() {
         warn!("LabelledRelayList is empty; entering backoff");
-        return State::Backoff { delay: cfg.reconnect_base };
+        return State::Backoff {
+            delay: cfg.reconnect_base,
+        };
     }
 
     // Warm path: persisted ranking, fresh, version matches.
@@ -152,14 +159,23 @@ async fn bootstrap(
             .valid_entries(list)
             .into_iter()
             .next()
-            .and_then(|entry| list.relays.iter().find(|r| r.relay_id == entry.relay_id).cloned())
+            .and_then(|entry| {
+                list.relays
+                    .iter()
+                    .find(|r| r.relay_id == entry.relay_id)
+                    .cloned()
+            })
             .map(|info| (info, ranking))
     });
 
     if let Some((info, _ranking)) = warm_candidate {
         info!(relay_id = %info.relay_id, "Selector picked ranked relay for warm start");
-        if let Some(active) = connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await {
-            emit_event(SelectorEvent::EnteredConnected { relay_id: active.info.relay_id.clone() });
+        if let Some(active) =
+            connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await
+        {
+            emit_event(SelectorEvent::EnteredConnected {
+                relay_id: active.info.relay_id.clone(),
+            });
             return State::Connected(active);
         }
         // Warm-start failed — fall through to random picks.
@@ -167,14 +183,20 @@ async fn bootstrap(
     }
 
     for info in random_pick_order(list) {
-        if let Some(active) = connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await {
-            emit_event(SelectorEvent::EnteredConnected { relay_id: active.info.relay_id.clone() });
+        if let Some(active) =
+            connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await
+        {
+            emit_event(SelectorEvent::EnteredConnected {
+                relay_id: active.info.relay_id.clone(),
+            });
             return State::Connected(active);
         }
     }
 
     warn!("All relays in current list failed to connect; entering backoff");
-    State::Backoff { delay: cfg.reconnect_base }
+    State::Backoff {
+        delay: cfg.reconnect_base,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,13 +251,25 @@ async fn handle_list_change(
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
 ) -> State {
-    let still_present = list.relays.iter().any(|r| r.relay_id == active.info.relay_id);
+    let still_present = list
+        .relays
+        .iter()
+        .any(|r| r.relay_id == active.info.relay_id);
     if !still_present {
         info!(
             relay_id = %active.info.relay_id,
             "Active relay absent from new list; migrating immediately"
         );
-        return migrate(cfg, list, active, relay_handler, attachment_slot, ctrl_tx, None).await;
+        return migrate(
+            cfg,
+            list,
+            active,
+            relay_handler,
+            attachment_slot,
+            ctrl_tx,
+            None,
+        )
+        .await;
     }
     // Same relay still listed: do a fresh probe sweep right away.
     reprobe_and_maybe_migrate(cfg, list, active, relay_handler, attachment_slot, ctrl_tx).await
@@ -280,7 +314,12 @@ async fn reprobe_and_maybe_migrate(
     let active_score = active.last_score.unwrap_or(u64::MAX);
     if let Some(best) = best {
         if is_meaningful_improvement(active_score, best.score) {
-            if let Some(info) = list.relays.iter().find(|r| r.relay_id == best.relay_id).cloned() {
+            if let Some(info) = list
+                .relays
+                .iter()
+                .find(|r| r.relay_id == best.relay_id)
+                .cloned()
+            {
                 info!(
                     from = %active.info.relay_id,
                     to = %info.relay_id,
@@ -288,7 +327,16 @@ async fn reprobe_and_maybe_migrate(
                     best_score = best.score,
                     "Migrating to better-scoring relay"
                 );
-                return migrate(cfg, list, active, relay_handler, attachment_slot, ctrl_tx, Some(best.score)).await;
+                return migrate(
+                    cfg,
+                    list,
+                    active,
+                    relay_handler,
+                    attachment_slot,
+                    ctrl_tx,
+                    Some(best.score),
+                )
+                .await;
             }
         }
     }
@@ -329,7 +377,14 @@ async fn migrate(
 
     for target in candidates {
         let (tx, rx) = oneshot::channel();
-        let new_handle = spawn_session(cfg, target.clone(), relay_handler.clone(), attachment_slot.clone(), ctrl_tx.clone(), Some(tx));
+        let (new_handle, new_tracker) = spawn_session(
+            cfg,
+            target.clone(),
+            relay_handler.clone(),
+            attachment_slot.clone(),
+            ctrl_tx.clone(),
+            Some(tx),
+        );
 
         // Wait for register-OK on the new connection, or for the new session
         // to die before that happens.
@@ -339,8 +394,9 @@ async fn migrate(
                     from: old.info.relay_id.clone(),
                     to: target.relay_id.clone(),
                 });
-                // Pending publishes after register-OK; heartbeat still
-                // reports old as active until drain expires.
+                // Pending marks the post-drain target. The old relay stays
+                // connected until its active stream count reaches zero or the
+                // drain timeout fires.
                 attachment_slot
                     .set_pending(Some(RelayAttachment {
                         relay_id: target.relay_id.clone(),
@@ -350,28 +406,47 @@ async fn migrate(
                     .await;
                 let _ = ctrl_tx
                     .send(ConnectorControlMessage {
-                        body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
-                            connector_id: cfg.connector_id.clone(),
-                            relay_id: target.relay_id.clone(),
-                            relay_spiffe_id: target.spiffe_id.clone(),
-                            observed_at_unix: now_unix_seconds(),
-                            reason: "switched".to_string(),
-                        })),
+                        body: Some(connector_control_message::Body::RelayState(
+                            ConnectorRelayState {
+                                connector_id: cfg.connector_id.clone(),
+                                relay_id: target.relay_id.clone(),
+                                relay_spiffe_id: target.spiffe_id.clone(),
+                                observed_at_unix: now_unix_seconds(),
+                                reason: "switched".to_string(),
+                            },
+                        )),
                     })
                     .await;
 
-                tokio::time::sleep(cfg.drain_timeout).await;
-                emit_event(SelectorEvent::DrainTimeoutFired);
+                if tokio::time::timeout(cfg.drain_timeout, old.drain_tracker.wait_for_idle())
+                    .await
+                    .is_err()
+                {
+                    emit_event(SelectorEvent::DrainTimeoutFired);
+                    warn!(
+                        relay_id = %old.info.relay_id,
+                        active_streams = old.drain_tracker.active_streams(),
+                        "old relay drain timed out with active streams still open"
+                    );
+                } else {
+                    info!(
+                        relay_id = %old.info.relay_id,
+                        "old relay drain completed after active streams reached zero"
+                    );
+                }
 
                 old.handle.abort();
                 attachment_slot.promote_pending().await;
 
                 emit_event(SelectorEvent::MigrationCompleted);
-                emit_event(SelectorEvent::EnteredConnected { relay_id: target.relay_id.clone() });
+                emit_event(SelectorEvent::EnteredConnected {
+                    relay_id: target.relay_id.clone(),
+                });
 
                 return State::Connected(ActiveRelay {
                     info: target,
                     handle: new_handle,
+                    drain_tracker: new_tracker,
                     last_score: None,
                 });
             }
@@ -405,7 +480,12 @@ async fn failover(
         .map(|r| {
             r.valid_entries(list)
                 .into_iter()
-                .filter_map(|entry| list.relays.iter().find(|i| i.relay_id == entry.relay_id).cloned())
+                .filter_map(|entry| {
+                    list.relays
+                        .iter()
+                        .find(|i| i.relay_id == entry.relay_id)
+                        .cloned()
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -413,13 +493,22 @@ async fn failover(
     for target in ranked_targets {
         if let Some(active) = tokio::time::timeout(
             FAILOVER_PER_ENTRY_BUDGET,
-            connect(cfg, target.clone(), relay_handler, attachment_slot, ctrl_tx, None),
+            connect(
+                cfg,
+                target.clone(),
+                relay_handler,
+                attachment_slot,
+                ctrl_tx,
+                None,
+            ),
         )
         .await
         .ok()
         .flatten()
         {
-            emit_event(SelectorEvent::EnteredConnected { relay_id: active.info.relay_id.clone() });
+            emit_event(SelectorEvent::EnteredConnected {
+                relay_id: active.info.relay_id.clone(),
+            });
             return State::Connected(active);
         }
     }
@@ -440,15 +529,26 @@ async fn failover(
     let mut ordered = results.clone();
     ordered.sort_by_key(|r| r.score);
     for result in ordered {
-        if let Some(info) = list.relays.iter().find(|r| r.relay_id == result.relay_id).cloned() {
-            if let Some(active) = connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await {
-                emit_event(SelectorEvent::EnteredConnected { relay_id: active.info.relay_id.clone() });
+        if let Some(info) = list
+            .relays
+            .iter()
+            .find(|r| r.relay_id == result.relay_id)
+            .cloned()
+        {
+            if let Some(active) =
+                connect(cfg, info, relay_handler, attachment_slot, ctrl_tx, None).await
+            {
+                emit_event(SelectorEvent::EnteredConnected {
+                    relay_id: active.info.relay_id.clone(),
+                });
                 return State::Connected(active);
             }
         }
     }
 
-    State::Backoff { delay: cfg.reconnect_base }
+    State::Backoff {
+        delay: cfg.reconnect_base,
+    }
 }
 
 /// Spawn a `run_session` task, await register-OK via the oneshot, and on
@@ -466,7 +566,14 @@ async fn connect(
         let (s, r) = oneshot::channel();
         (Some(s), Some(r))
     });
-    let handle = spawn_session(cfg, info.clone(), relay_handler.clone(), attachment_slot.clone(), ctrl_tx.clone(), tx);
+    let (handle, drain_tracker) = spawn_session(
+        cfg,
+        info.clone(),
+        relay_handler.clone(),
+        attachment_slot.clone(),
+        ctrl_tx.clone(),
+        tx,
+    );
 
     if let Some(rx) = rx {
         // Caller did not supply their own oneshot — wait here for register-OK.
@@ -474,6 +581,7 @@ async fn connect(
             Ok(()) => Some(ActiveRelay {
                 info,
                 handle,
+                drain_tracker,
                 last_score: None,
             }),
             Err(_) => {
@@ -488,6 +596,7 @@ async fn connect(
         Some(ActiveRelay {
             info,
             handle,
+            drain_tracker,
             last_score: None,
         })
     }
@@ -500,7 +609,7 @@ fn spawn_session(
     attachment_slot: RelayAttachmentSlot,
     ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
     on_registered: Option<oneshot::Sender<()>>,
-) -> JoinHandle<anyhow::Result<()>> {
+) -> (JoinHandle<anyhow::Result<()>>, RelayDrainTracker) {
     let cfg_owned = cfg.clone();
     let relay_addr = info.relay_addr;
     let relay_spiffe_id = info.spiffe_id;
@@ -512,7 +621,9 @@ fn spawn_session(
     let intermediate_ca_pem = cfg_owned.intermediate_ca_pem.clone();
     let max_streams = cfg_owned.max_incoming_bidi_streams;
     let idle_timeout = cfg_owned.idle_timeout;
-    tokio::spawn(async move {
+    let drain_tracker = RelayDrainTracker::new();
+    let session_drain_tracker = drain_tracker.clone();
+    let handle = tokio::spawn(async move {
         relay_client::run_session(
             &relay_addr,
             &relay_spiffe_id,
@@ -528,12 +639,18 @@ fn spawn_session(
             attachment_slot,
             ctrl_tx,
             on_registered,
+            session_drain_tracker,
         )
         .await
-    })
+    });
+    (handle, drain_tracker)
 }
 
-fn persist_ranking(state_dir: &std::path::Path, list_version: u64, results: &[RelayProbeResult]) -> usize {
+fn persist_ranking(
+    state_dir: &std::path::Path,
+    list_version: u64,
+    results: &[RelayProbeResult],
+) -> usize {
     let mut sorted: Vec<&RelayProbeResult> = results.iter().collect();
     sorted.sort_by_key(|r| r.score);
     let entries: Vec<RankedEntry> = sorted
@@ -586,9 +703,7 @@ fn random_pick_order(list: &LabelledRelayList) -> Vec<LabelledRelayInfo> {
     let rotated_tier2 = rotate(tier2, nanos);
 
     if !rotated_tier2.is_empty() && rotated_tier1.is_empty() {
-        warn!(
-            "no Tier-1 relays available; falling back to Tier-2 — this is a degraded mode"
-        );
+        warn!("no Tier-1 relays available; falling back to Tier-2 — this is a degraded mode");
     }
     rotated_tier1.extend(rotated_tier2);
     rotated_tier1
@@ -765,10 +880,8 @@ mod tests {
 
     #[test]
     fn persist_ranking_takes_top_5() {
-        let dir = std::env::temp_dir().join(format!(
-            "zecurity-selector-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("zecurity-selector-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let results: Vec<RelayProbeResult> = (0..10)
             .map(|i| RelayProbeResult {

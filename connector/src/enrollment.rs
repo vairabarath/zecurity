@@ -73,7 +73,8 @@ impl EnrollmentState {
         fs::create_dir_all(dir)
             .with_context(|| format!("failed to create state dir {}", dir.display()))?;
         let path = dir.join("state.json");
-        let json = serde_json::to_string_pretty(self).context("failed to serialize EnrollmentState")?;
+        let json =
+            serde_json::to_string_pretty(self).context("failed to serialize EnrollmentState")?;
         fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))
     }
 }

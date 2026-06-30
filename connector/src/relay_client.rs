@@ -19,7 +19,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::proto::connector_control_message;
 use crate::proto::{ConnectorControlMessage, ConnectorRelayState};
 use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
-use crate::relay_handler::RelayHandler;
+use crate::relay_handler::{RelayDrainTracker, RelayHandler};
 
 const RELAY_ALPN: &[u8] = b"ztna-relay-v1";
 const MAX_MESSAGE_SIZE: usize = 16 * 1024;
@@ -164,6 +164,7 @@ pub async fn run_session(
     attachment_slot: RelayAttachmentSlot,
     lifecycle_tx: mpsc::Sender<ConnectorControlMessage>,
     on_registered: Option<tokio::sync::oneshot::Sender<()>>,
+    drain_tracker: RelayDrainTracker,
 ) -> Result<()> {
     // The relay's UUID is embedded in the trailing path segment of the SPIFFE
     // URI — validated by upstream call sites before reaching this function.
@@ -201,20 +202,25 @@ pub async fn run_session(
         attachment_slot.set_active(Some(attachment)).await;
         let _ = lifecycle_tx
             .send(ConnectorControlMessage {
-                body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
-                    connector_id: connector_id.to_string(),
-                    relay_id: relay_id.clone(),
-                    relay_spiffe_id: relay_spiffe_id.to_string(),
-                    observed_at_unix: attached_at,
-                    reason: "connected".to_string(),
-                })),
+                body: Some(connector_control_message::Body::RelayState(
+                    ConnectorRelayState {
+                        connector_id: connector_id.to_string(),
+                        relay_id: relay_id.clone(),
+                        relay_spiffe_id: relay_spiffe_id.to_string(),
+                        observed_at_unix: attached_at,
+                        reason: "connected".to_string(),
+                    },
+                )),
             })
             .await;
         if let Some(tx) = on_registered {
             let _ = tx.send(());
         }
 
-        relay_handler.clone().run(client.connection()).await
+        relay_handler
+            .clone()
+            .run(client.connection(), drain_tracker)
+            .await
     }
     .await;
 
@@ -229,22 +235,23 @@ pub async fn run_session(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    attachment_slot.set_active(None).await;
+    attachment_slot.clear_active_if_relay(&relay_id).await;
     let _ = lifecycle_tx
         .send(ConnectorControlMessage {
-            body: Some(connector_control_message::Body::RelayState(ConnectorRelayState {
-                connector_id: connector_id.to_string(),
-                relay_id: String::new(),
-                relay_spiffe_id: String::new(),
-                observed_at_unix: detached_at,
-                reason: "disconnected".to_string(),
-            })),
+            body: Some(connector_control_message::Body::RelayState(
+                ConnectorRelayState {
+                    connector_id: connector_id.to_string(),
+                    relay_id: String::new(),
+                    relay_spiffe_id: String::new(),
+                    observed_at_unix: detached_at,
+                    reason: "disconnected".to_string(),
+                },
+            )),
         })
         .await;
 
     result
 }
-
 
 async fn resolve_relay_addr(relay_addr: &str) -> Result<SocketAddr> {
     tokio::net::lookup_host(relay_addr)

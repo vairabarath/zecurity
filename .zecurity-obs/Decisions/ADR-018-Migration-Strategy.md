@@ -124,7 +124,8 @@ Remove the deprecated relay fields from the ACL pipeline and reserve their proto
 | `controller/internal/policy/compiler.go:158–174` | Remove `GetActiveRelay()` block; remove `RelayAddr`/`RelaySpiffeId` from returned `ACLSnapshot` |
 | `controller/internal/policy/store.go` | `GetActiveRelay()` can be removed if no other callers |
 | `client/src/daemon.rs` | Remove ACLConnector fields 4+5 fallback path in `build_transports_by_resource` |
-| `connector/src/config.rs` | Remove `relay_addr` field entirely |
+
+`connector/src/config.rs` is **not** part of Phase 4: `relay_addr` / `RELAY_SPIFFE_ID` were already removed in Phase 2 (Sprint 11, ADR-016) when the connector switched to `LabelledRelayList` (field 17) dynamic selection. No connector config change remains for Phase 4.
 
 **buf generate** must be run after proto changes. All downstream codegen (Go stubs, admin TS hooks) must be regenerated.
 

@@ -11,7 +11,6 @@ use tracing::{error, info, warn};
 use crate::policy::PolicyCache;
 
 use crate::agent_server::ShieldRegistry;
-use crate::relay_attachment::RelayAttachmentSlot;
 use crate::config::ConnectorConfig;
 use crate::controller_client::{
     build_channel, fetch_public_ip, verify_controller_spiffe_preflight,
@@ -21,9 +20,10 @@ use crate::enrollment::EnrollmentState;
 use crate::proto::connector_control_message::Body as CBody;
 use crate::proto::{
     connector_service_client::ConnectorServiceClient, ConnectorControlMessage,
-    ConnectorHealthReport, LabelledRelayList, ResourceAckBatch,
-    ScanReport as ProtoScanReport, ScanResult as ProtoScanResult,
+    ConnectorHealthReport, LabelledRelayList, ResourceAckBatch, ScanReport as ProtoScanReport,
+    ScanResult as ProtoScanResult,
 };
+use crate::relay_attachment::RelayAttachmentSlot;
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
 use crate::tls::cert_store::CertStore;
@@ -138,8 +138,9 @@ async fn run_once(
     relay_attachment_slot: &RelayAttachmentSlot,
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
-    let cert_store =
-        CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for control stream")?;
+    let cert_store = CertStore::load_async(&cfg.state_dir)
+        .await
+        .context("failed to load cert store for control stream")?;
 
     info!("starting mTLS SPIFFE preflight check");
     verify_controller_spiffe_preflight(cfg, &cert_store)

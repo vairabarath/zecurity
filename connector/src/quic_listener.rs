@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use rustls;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use rustls;
 
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
@@ -33,9 +33,8 @@ pub async fn listen(
 ) -> Result<()> {
     let tls_config = build_device_tunnel_tls(&store)?;
 
-    let quic_server_cfg =
-        quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
-            .map_err(|e| anyhow::anyhow!("QUIC server config: {}", e))?;
+    let quic_server_cfg = quinn::crypto::rustls::QuicServerConfig::try_from(tls_config)
+        .map_err(|e| anyhow::anyhow!("QUIC server config: {}", e))?;
     let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server_cfg));
 
     let socket_addr: std::net::SocketAddr = addr
@@ -45,28 +44,39 @@ pub async fn listen(
 
     // Register the QUIC advertise address so device_tunnel includes it in responses.
     device_tunnel::set_quic_advertise_addr(advertise_addr.to_string());
-    info!("device tunnel (QUIC) listening on {} advertise={}", addr, advertise_addr);
+    info!(
+        "device tunnel (QUIC) listening on {} advertise={}",
+        addr, advertise_addr
+    );
 
     loop {
-        let Some(incoming) = endpoint.accept().await else { break };
+        let Some(incoming) = endpoint.accept().await else {
+            break;
+        };
 
-        let acl          = acl.clone();
-        let tunnel_hub   = tunnel_hub.clone();
-        let crl          = crl_manager.clone();
-        let conn_id      = connector_id.clone();
-        let ctrl_tx      = control_tx.clone();
+        let acl = acl.clone();
+        let tunnel_hub = tunnel_hub.clone();
+        let crl = crl_manager.clone();
+        let conn_id = connector_id.clone();
+        let ctrl_tx = control_tx.clone();
 
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
-                Err(e) => { warn!("QUIC connection error: {}", e); return; }
+                Err(e) => {
+                    warn!("QUIC connection error: {}", e);
+                    return;
+                }
             };
 
             // Extract SPIFFE ID and cert serial from the peer's mTLS certificate.
             // The certificate is available on the connection after the handshake.
             let (spiffe_id, cert_serial) = conn
                 .peer_identity()
-                .and_then(|id| id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok())
+                .and_then(|id| {
+                    id.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+                        .ok()
+                })
                 .and_then(|certs| certs.first().cloned())
                 .and_then(|cert| device_tunnel::extract_peer_info_pub(cert.as_ref()).ok())
                 .unwrap_or_else(|| {
@@ -81,22 +91,27 @@ pub async fn listen(
             loop {
                 let (send, recv) = match conn.accept_bi().await {
                     Ok(pair) => pair,
-                    Err(e) => { warn!("QUIC accept_bi: {}", e); break; }
+                    Err(e) => {
+                        warn!("QUIC accept_bi: {}", e);
+                        break;
+                    }
                 };
 
-                let stream   = tokio::io::join(recv, send);
-                let acl      = acl.clone();
-                let hub      = tunnel_hub.clone();
-                let crl      = crl.clone();
-                let conn_id  = conn_id.clone();
-                let ctrl_tx  = ctrl_tx.clone();
-                let sid      = spiffe_id.clone();
-                let serial   = cert_serial.clone();
+                let stream = tokio::io::join(recv, send);
+                let acl = acl.clone();
+                let hub = tunnel_hub.clone();
+                let crl = crl.clone();
+                let conn_id = conn_id.clone();
+                let ctrl_tx = ctrl_tx.clone();
+                let sid = spiffe_id.clone();
+                let serial = cert_serial.clone();
 
                 tokio::spawn(async move {
                     if let Err(e) = device_tunnel::handle_stream(
                         stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx,
-                    ).await {
+                    )
+                    .await
+                    {
                         warn!("QUIC stream error: {}", e);
                     }
                 });

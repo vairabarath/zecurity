@@ -58,11 +58,7 @@ impl RelayRanking {
                 .with_context(|| format!("fsync {}", tmp_path.display()))?;
         }
         fs::rename(&tmp_path, &final_path).with_context(|| {
-            format!(
-                "rename {} -> {}",
-                tmp_path.display(),
-                final_path.display()
-            )
+            format!("rename {} -> {}", tmp_path.display(), final_path.display())
         })?;
         Ok(())
     }

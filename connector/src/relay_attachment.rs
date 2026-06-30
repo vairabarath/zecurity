@@ -52,6 +52,18 @@ impl RelayAttachmentSlot {
         self.inner.write().await.active = attachment;
     }
 
+    pub async fn clear_active_if_relay(&self, relay_id: &str) {
+        let mut guard = self.inner.write().await;
+        if guard
+            .active
+            .as_ref()
+            .map(|active| active.relay_id.as_str() == relay_id)
+            .unwrap_or(false)
+        {
+            guard.active = None;
+        }
+    }
+
     pub async fn set_pending(&self, attachment: Option<RelayAttachment>) {
         self.inner.write().await.pending = attachment;
     }
