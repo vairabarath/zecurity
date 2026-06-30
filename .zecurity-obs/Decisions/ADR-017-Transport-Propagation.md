@@ -52,7 +52,7 @@ Topology/placement event
     ↓
 TransportNotifier.NotifyTopologyChange(affectedConnectorIDs []string)
     ↓
-TransportCache.Invalidate(connectorID)   ← per-connector, not per-workspace
+TransportCache.Invalidate(workspaceID)   ← snapshot is workspace-scoped
     ↓
 TransportCompiler.Compile(workspaceID)   ← one snapshot per workspace
     ↓
@@ -77,19 +77,24 @@ type Notifier struct {
     versions map[string]*atomic.Uint64 // connectorID → version
 
     // pushHook is fired after NotifyTopologyChange, non-blocking by contract.
-    // Receives the workspaceID so the async worker can compile + push the
-    // workspace TransportSnapshot. Mirrors policy.Notifier.RegisterPushHook.
-    pushHook func(workspaceID string)
+    // Mirrors policy.Notifier.RegisterPushHook.
+    //
+    // Architectural requirement: the push hook must receive or otherwise
+    // preserve the affected connector IDs so the worker compiles the workspace
+    // snapshot once but pushes only to affected connector streams — not
+    // broadcast to the entire workspace. The exact Go signature is
+    // implementation-defined when TransportNotifier is built.
+    pushHook func(workspaceID string) // exact signature TBD — see requirement above
 }
 
 func NewNotifier(cache *SnapshotCache) *Notifier
 
 // NotifyTopologyChange increments the version for each affected connector,
-// invalidates their cached slots, then fires pushHook(workspaceID) once.
-// workspaceID is used only for the push hook — the cache is keyed by connector.
+// invalidates the workspace snapshot cache, then fires pushHook once.
+// Versions are connector-scoped; the compiled snapshot cache is workspace-scoped.
 func (n *Notifier) NotifyTopologyChange(ctx context.Context, workspaceID string, affectedConnectorIDs []string) error
 
-func (n *Notifier) RegisterPushHook(fn func(workspaceID string))
+func (n *Notifier) RegisterPushHook(fn func(workspaceID string)) // exact signature TBD
 
 // Version returns the current transport version for connectorID (0 if never changed).
 func (n *Notifier) Version(connectorID string) uint64
@@ -174,6 +179,10 @@ Parallel to `policy.SnapshotCache`. Keyed by `workspaceID` (one snapshot per
 workspace, shared across all connectors in it — connectors filter client-side by
 remote network).
 
+Versioning remains connector-scoped even though the compiled snapshot is
+workspace-scoped. A relay placement change invalidates the workspace snapshot,
+then pushes the newly compiled snapshot only to affected connector streams.
+
 ```go
 // package transport
 
@@ -214,9 +223,10 @@ func (h *Handler) handleStream(stream connector_v1.ConnectorService_ConnectServe
 }
 ```
 
-The proactive push hook fires `NotifyTopologyChange` → pushes to all currently
-connected streams for the affected connectors. The push mechanism mirrors
-`acl_push.go` — a registry of live streams keyed by connectorID.
+The proactive push hook fires `NotifyTopologyChange` → compiles one workspace
+snapshot and pushes it to all currently connected streams for the affected
+connectors. The push mechanism mirrors `acl_push.go` — a registry of live
+streams keyed by connectorID.
 
 ---
 

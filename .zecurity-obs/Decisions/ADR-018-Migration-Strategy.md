@@ -236,7 +236,7 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 
 ### Phase 2 — Connector Dynamic Relay Selection *(delivered by ADR-016 / Sprint 11)*
 - [x] `connector/src/relay_selector.rs` (new) — three-phase state machine: instant startup, background optimization, make-before-break migration
-- [x] `connector/src/relay_probe.rs` (new) — parallel QUIC probe, scoring, `request_id` + SPIFFE validation
+- [x] `connector/src/relay_probe.rs` (new) — parallel QUIC probe, RTT-only scoring, `request_id` + SPIFFE validation
 - [x] `connector/src/relay_ranking.rs` (new) — persisted top-5 ranking, staleness check, atomic write
 - [x] `connector/src/control_stream.rs` — handle `LabelledRelayList` body variant (field 17)
 - [x] `connector/src/config.rs` — remove `RELAY_ADDR` / `RELAY_SPIFFE_ID`; add `RELAY_*` config vars
@@ -254,7 +254,7 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 - [ ] Remove `GetActiveRelay()` block from `compiler.go` lines 158–174
 - [ ] Remove `GetActiveRelay()` from `store.go` (verify no other callers)
 - [ ] Remove ACLConnector fallback from `client/src/daemon.rs`
-- [ ] Remove `relay_addr` from `connector/src/config.rs`
+- [x] Remove `relay_addr` from `connector/src/config.rs` — already completed in Phase 2 / Sprint 11
 - [ ] `cd admin && npm run codegen`
 - [ ] Full build gate: all four components clean
 - [ ] All existing tests pass with relay fields removed from ACL pipeline

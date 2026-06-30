@@ -173,9 +173,10 @@ Migration is make-before-break:
 Controller handling of `ConnectorRelayState` remains:
 
 1. `UpsertPlacement(ctx, connectorID, relayID)` into `connector_relay_placement`.
-2. Notify affected policy cache/workspaces.
-3. ACL snapshots recompile with the updated relay placement.
-4. Clients fetch updated snapshots and route new requests to the new relay.
+2. During the Track A compatibility window, notify affected policy cache/workspaces so ACL snapshots continue to carry relay coordinates for old clients.
+3. After ADR-017/ADR-018 Track B propagation is enabled, notify the transport pipeline instead; `TransportSnapshot` carries relay coordinates and ACL recompilation is not required for relay-only placement changes.
+4. During migration, the controller may perform both notifications until all clients have moved to `TransportSnapshot`.
+5. Clients fetch the updated ACL/transport data according to their version and route new requests to the new relay.
 
 ### Persisted Ranking
 
@@ -283,7 +284,7 @@ If the active relay drops unexpectedly:
 - Unit: failover skips persisted ranking entries absent from current `LabelledRelayList`.
 - Unit: exponential backoff increments correctly and caps at `RELAY_RECONNECT_MAX_SECS`.
 - Integration: relay crosses exhausted threshold, disappears from new selection, and connectors migrate.
-- Integration: `ConnectorRelayState` updates `connector_relay_placement`, triggers ACL recompile, and clients route new requests to the new relay.
+- Integration: `ConnectorRelayState` updates `connector_relay_placement`, triggers Track A ACL propagation and/or Track B transport propagation according to the migration phase, and clients route new requests to the new relay.
 - Simulation: 1,000 simultaneous connector startups do not place more than 2x average connections on any Tier 1 relay.
 
 ---
