@@ -58,10 +58,15 @@ cd connector && cargo test
 
 ## Implementation Checklist
 
-- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window — _planned as `connector/tests/scenario2_warm_restart.rs`_
-- [ ] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable — _planned as `connector/tests/scenario4_probe_security.rs`_
-- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections — _planned as `connector/examples/load_test.rs`_
-- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops — _planned as `connector/tests/scenario3_migration.rs` (control-plane assertions in v1; data-plane stream-drop assertion `#[ignore]`-scaffolded for follow-up)_
-- [ ] **Build gate:** `cd connector && cargo build` and `cargo test` pass — _connector build + 52 unit tests already green from Phases 1+2 (commit `9de4f50`); Phase 3 adds `cargo test --tests` integration suite + `--example load_test`_
+- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window — _planned as `connector/tests/scenario2_warm_restart.rs`. Pending: test relay needs a register-path handler + accept-loop extension._
+- [x] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable. **Ships as `connector/tests/scenario4_probe_security.rs`** — 4 tests green: baseline correct probe succeeds, wrong `request_id` rejected, wrong SPIFFE → `ExactRelaySpiffeVerifier` rejects mTLS, silent relay (no response) dropped. Tests run against a real in-process QUIC mTLS relay built with `rcgen` (workspace CA + leaves with SPIFFE URI SANs).
+- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections — _planned as `connector/examples/load_test.rs`. Pending: needs the register-path relay so the boot path completes._
+- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops — _planned as `connector/tests/scenario3_migration.rs` (control-plane assertions in v1; data-plane stream-drop assertion `#[ignore]`-scaffolded for follow-up). Pending: register-path relay + injectable latency._
+- [~] **Build gate:** `cd connector && cargo build` and `cargo test` pass. **Currently green:** 52 unit tests + 4 scenario4 integration tests + 1 doctest (`ignore`d after lib restructure made it runnable). Will re-verify after scenarios 1/2/3 land.
 
-**Phase 3 status:** **Not started.** Preconditions complete: M2 proto (✅ `c6e4ab4`), M4 relay probe responder (✅ `7e07893`), M3 Phase 1 + Phase 2 (✅ `9de4f50`). Plan: `connector/tests/common/mod.rs` harness + 4 scenario tests + `examples/load_test.rs` + `Cargo.toml` `[dev-dependencies]` `tempfile` and `[features] test-hooks` (the broadcast hook is already in `relay_selector.rs` waiting for it).
+**Phase 3 status:** **Partially done.**
+- ✅ Foundation merged: `src/lib.rs` (library surface for integration tests), `connector/Cargo.toml` dev-deps + `test-hooks` feature + `[[example]]`, `tests/common/mod.rs` shared harness with cert factory + probe-only in-process QUIC mTLS relay.
+- ✅ Scenario 4 (TEAM-E5) shipped — proves the harness works end-to-end and validates the connector's `ExactRelaySpiffeVerifier` + `request_id` echo check against a real QUIC peer.
+- ⏳ Scenarios 1/2/3 + load test need an extension to `tests/common/mod.rs`: a register-path test relay (responds to `HandshakeMsg::Register` with `RelayAck{ok:true}` and keeps the connection alive for the connector's `RelayHandler::run` accept loop), plus a `boot_selector` helper that constructs `RelaySelectorConfig` + spawns `relay_selector::run` and surfaces the `SelectorEvent` broadcast subscriber.
+
+Preconditions complete: M2 proto (✅ `c6e4ab4`), M2 controller Phase C (✅ `bee9884`), M4 relay probe responder (✅ `7e07893`), M3 Phase 1 + Phase 2 (✅ `9de4f50`).

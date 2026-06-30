@@ -36,3 +36,17 @@ parking_lot        = "0.12"
 [build-dependencies]
 tonic-build       = "0.14"
 tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+# Exposes a broadcast::Sender<SelectorEvent> on relay_selector so integration
+# tests and the load_test example can assert state transitions without sleeping.
+# Off by default — production builds strip the hook.
+test-hooks = []
+
+[[example]]
+name = "load_test"
+path = "examples/load_test.rs"
+required-features = ["test-hooks"]

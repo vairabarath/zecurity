@@ -12,63 +12,13 @@
 //   6. Run bidirectional Control stream to controller (control_stream.rs)
 //      — blocks with inner reconnect loop until process shutdown
 
-pub mod agent_server;
-pub mod agent_tunnel;
-mod appmeta;
-mod config;
-mod control_stream;
-mod controller_client;
-pub mod crl;
-mod crypto;
-pub mod device_tunnel;
-pub mod discovery;
-mod enrollment;
-pub mod net_util;
-pub mod policy;
-pub mod quic_listener;
-mod relay_attachment;
-mod relay_client;
-mod relay_handler;
-mod relay_probe;
-mod relay_ranking;
-mod relay_selector;
-mod renewal;
-pub mod tls;
-mod updater;
-mod util;
-mod watchdog;
-
-/// Generated gRPC client stubs from connector.proto.
-pub mod shield {
-    pub mod v1 {
-        tonic::include_proto!("shield.v1");
-    }
-}
-
-/// Generated client.v1 message types — used for ACLSnapshot referenced in connector.proto.
-pub mod client {
-    pub mod v1 {
-        tonic::include_proto!("client.v1");
-    }
-}
-/// Alias so existing agent_server.rs code can use `crate::shield_proto::*`.
-pub use shield::v1 as shield_proto;
-
-/// Type alias used by quic_listener.rs and device_tunnel.rs.
-/// Maps the spec name to the real ShieldRegistry type.
-pub type AgentRegistry = agent_server::ShieldRegistry;
-
-/// Type alias used by device_tunnel.rs for the control stream message type.
-pub type ControlMessage = proto::ConnectorControlMessage;
-
-/// Generated connector gRPC stubs.
-pub mod connector {
-    pub mod v1 {
-        tonic::include_proto!("connector.v1");
-    }
-}
-/// Alias so connector modules can use `proto::*`.
-pub use connector::v1 as proto;
+// All modules live in lib.rs so tests/ can link against them. Main pulls
+// them in via the library crate's namespace.
+use zecurity_connector::{
+    agent_server, appmeta, config, control_stream, controller_client, crl, device_tunnel,
+    enrollment, net_util, policy, proto, quic_listener, relay_attachment, relay_handler,
+    relay_selector, tls, updater, util, watchdog, ControlMessage,
+};
 
 use std::net::SocketAddr;
 use std::path::Path;
