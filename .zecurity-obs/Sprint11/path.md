@@ -100,7 +100,7 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 - [x] **M4-B1** `relay/src/config.rs` — add `RELAY_MAX_CONNECTIONS` env var (already existed); add `RELAY_MAX_PROBE_RATE`, `RELAY_MAX_CONCURRENT_PROBES`, `RELAY_PROBE_TIMEOUT_MS` to `RuntimeLimits`
 - [x] **M4-B2** `relay/src/session.rs` — `pub static ACTIVE_STREAMS: AtomicU32`; `fetch_add(1)` before `pipe_streams`, `fetch_sub(1)` after
 - [x] **M4-B3** `relay/src/heartbeat.rs` — `HeartbeatRequest` populated with `connection_count` and `max_connections`
-- [x] **M4-B4** `relay/src/session.rs` — `HandshakeMsg::Probe` arm: reads `ProbeRequest`, writes `ProbeResponse { connection_count, capacity, request_id }`, closes without registering; connector SPIFFE role validated
+- [x] **M4-B4** `relay/src/session.rs` — `HandshakeMsg::Probe` arm: reads `ProbeRequest`, writes `ProbeResponse { request_id }`, closes without registering; connector SPIFFE role validated. Relay load is reported only to the controller via heartbeat.
 - [x] **M4-B5** Probe abuse controls: per-connector 60s rate window, concurrent semaphore cap, per-probe deadline, `warn!` on rejection; `ProbeResponse` struct + `Probe` variant added to `protocol.rs`
 - [x] **Build gate:** `cd relay && cargo build` clean; `cd relay && cargo test` — 28/28 passed
 
@@ -120,7 +120,7 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 > Depends on Phase A + C. See [[Sprint11/Member3-Rust/Phase1-Probe-Ranking]], [[Sprint11/Member3-Rust/Phase2-Selector-Migration]].
 
-- [ ] **M3-D1** `connector/src/relay_probe.rs` (new) — parallel QUIC probe, RTT measurement, `request_id` generation and validation, QUIC peer SPIFFE validation against `LabelledRelayInfo.spiffe_id`, score computation (`rtt_ms + ceil(fill_ratio × 50)`), concurrent probe cap
+- [ ] **M3-D1** `connector/src/relay_probe.rs` (new) — parallel QUIC probe, RTT measurement, `request_id` generation and validation, QUIC peer SPIFFE validation against `LabelledRelayInfo.spiffe_id`, RTT-only score computation, concurrent probe cap. Connector must not consume relay `connection_count`.
 - [ ] **M3-D2** `connector/src/relay_ranking.rs` (new) — `RelayRanking` struct; atomic state file write/read (`list_version`, `probed_at`, top-5 entries); staleness check on startup; validation against current `LabelledRelayList`
 - [ ] **M3-D3** `connector/src/relay_selector.rs` (new) — three-phase state machine:
   - Startup: ranked[0] if valid → random Tier 1 → random Tier 2 → backoff

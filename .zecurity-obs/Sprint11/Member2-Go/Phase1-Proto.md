@@ -33,9 +33,7 @@ message ProbeRequest {
   uint64 request_id   = 2; // random nonce; relay must echo it
 }
 message ProbeResponse {
-  uint32 connection_count = 1;
-  uint32 capacity         = 2;
-  uint64 request_id       = 3; // must match ProbeRequest.request_id
+  uint64 request_id = 1; // must match ProbeRequest.request_id
 }
 ```
 

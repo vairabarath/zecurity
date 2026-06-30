@@ -31,8 +31,7 @@ pub struct RelayProbeResult {
     pub relay_addr: String,
     pub spiffe_id:  String,
     pub rtt_ms:     u64,
-    pub fill_ratio: f64,   // connection_count / capacity from ProbeResponse
-    pub score:      u64,   // rtt_ms + ceil(fill_ratio * 50)
+    pub score:      u64,   // RTT-only; controller owns load/capacity labels
 }
 
 /// Probe all candidates concurrently, up to RELAY_MAX_CONCURRENT_PROBES in parallel.
@@ -42,7 +41,7 @@ pub struct RelayProbeResult {
 ///   3. Send ProbeRequest { connector_id, request_id: random_u64() }
 ///   4. Receive ProbeResponse; validate request_id matches → failure if mismatch
 ///   5. Measure RTT = wall_clock_from_dial_start_to_probe_response_received
-///   6. Compute score
+///   6. Compute RTT-only score
 /// Unreachable / timeout / mismatch → silently dropped from results
 pub async fn probe_relays(
     candidates: &[LabelledRelayInfo],
@@ -62,7 +61,6 @@ pub struct RankedEntry {
     pub spiffe_id:  String,
     pub score:      u64,
     pub rtt_ms:     u64,
-    pub fill_ratio: f64,
 }
 
 pub struct RelayRanking {
@@ -102,8 +100,7 @@ impl RelayRanking {
       "relay_addr": "relay1.example.com:9093",
       "spiffe_id": "spiffe://zecurity.in/relay/<uuid>",
       "score": 12,
-      "rtt_ms": 8,
-      "fill_ratio": 0.08
+      "rtt_ms": 8
     }
   ]
 }
@@ -137,7 +134,7 @@ cd connector && cargo build
 
 ## Implementation Checklist
 
-- [x] **M3-D1** `connector/src/relay_probe.rs` — `probe_relays()` ships: parallel QUIC mTLS via `JoinSet`+`Semaphore`, `request_id` generate (nanos nonce) + echo validate, peer SPIFFE check reuses `ExactRelaySpiffeVerifier` via `RelayClient::connect`, RTT measured from before-dial to response-received, score = `rtt_ms + ceil(fill_ratio × 50)`. **Wire format correction (vs original plan):** JSON `HandshakeMsg::Probe` (not bincode/prost) — matches relay's `serde_json` `encode_message`.
+- [x] **M3-D1** `connector/src/relay_probe.rs` — `probe_relays()` ships: parallel QUIC mTLS via `JoinSet`+`Semaphore`, `request_id` generate (nanos nonce) + echo validate, peer SPIFFE check reuses `ExactRelaySpiffeVerifier` via `RelayClient::connect`, RTT measured from before-dial to response-received, score is RTT-only because relay load is controller-owned. **Wire format correction (vs original plan):** JSON `HandshakeMsg::Probe` (not bincode/prost) — matches relay's `serde_json` `encode_message`.
 - [x] **M3-D2** `connector/src/relay_ranking.rs` — `RelayRanking { list_version, probed_at_unix, entries }`; `save()` write-tmp + fsync + rename; `load()` → `None` on missing or corrupt; `valid_entries()` filters by `relay_id` present in current list; `is_fresh()` (< 1h, also rejects future timestamps from clock skew); `version_matches()`. Unix seconds instead of `DateTime<Utc>` — no `chrono` dep.
 - [x] **M3-D3** `connector/src/config.rs` — six `RELAY_*` env knobs added with the phase doc's defaults.
 - [x] **Tests:** 8 unit tests in `relay_probe` (score zero-capacity/half/full/partial-ratio rounding, ordering, nonce non-zero, wire-shape pin both directions) + 12 unit tests in `relay_ranking` (roundtrip, missing→None, corrupt→None, tmp-cleanup, overwrite atomicity, `valid_entries` filter, `is_fresh` boundaries incl. clock-skew rejection, `version_matches`). _Real-QUIC `request_id` mismatch + wrong-SPIFFE rejection: full integration coverage lands in Phase 3 scenario4 (needs a real relay)._
