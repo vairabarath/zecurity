@@ -25,7 +25,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -547,7 +547,6 @@ fn persist_ranking(state_dir: &std::path::Path, list_version: u64, results: &[Re
             spiffe_id: r.spiffe_id.clone(),
             score: r.score,
             rtt_ms: r.rtt_ms,
-            fill_ratio: r.fill_ratio,
         })
         .collect();
 
@@ -777,7 +776,6 @@ mod tests {
                 relay_addr: format!("r{i}.example.com:9093"),
                 spiffe_id: format!("spiffe://zecurity.in/relay/r{i}"),
                 rtt_ms: (10 - i) * 10,
-                fill_ratio: 0.0,
                 score: (10 - i) * 10,
             })
             .collect();

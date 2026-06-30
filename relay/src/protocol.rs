@@ -21,8 +21,6 @@ pub enum HandshakeMsg {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProbeResponse {
-    pub connection_count: u32,
-    pub capacity: u32,
     pub request_id: u64,
 }
 

@@ -19,7 +19,7 @@ The controller remains the source of truth for relay eligibility. It labels acti
 
 ## Decision
 
-The controller pushes a versioned `LabelledRelayList` to connectors over the existing connector control stream. A connector immediately registers with a random Tier 1 relay, then probes Tier 1 + Tier 2 relays in the background and migrates only when another relay is meaningfully better.
+The controller pushes a versioned `LabelledRelayList` to connectors over the existing connector control stream. A connector immediately registers with a random Tier 1 relay, then probes Tier 1 + Tier 2 relays in the background for RTT/reachability and migrates only when another eligible relay is meaningfully better.
 
 This replaces two rejected approaches:
 
@@ -85,7 +85,7 @@ uint32 max_connections  = N+1;  // RELAY_MAX_CONNECTIONS
 
 The relay must add runtime instrumentation for this: increment when a client lookup bridge starts, decrement when that bridge ends, and report the current count in heartbeat and probe responses.
 
-Relay probing uses a lightweight request/response after QUIC mTLS:
+Relay probing uses a lightweight request/response after QUIC mTLS. Probes do not expose relay load; load is reported only to the controller via heartbeat and represented to connectors only as `RelayCapacityLabel`.
 
 ```protobuf
 message ProbeRequest  {
@@ -93,9 +93,7 @@ message ProbeRequest  {
   uint64 request_id   = 2; // random nonce generated per probe; echoed by relay
 }
 message ProbeResponse {
-  uint32 connection_count = 1;
-  uint32 capacity         = 2;
-  uint64 request_id       = 3; // must match ProbeRequest.request_id
+  uint64 request_id = 1; // must match ProbeRequest.request_id
 }
 ```
 
@@ -153,7 +151,7 @@ After registration:
 
 1. Probe all Tier 1 + Tier 2 relays, including the current relay. Run at most `RELAY_MAX_CONCURRENT_PROBES` (default 5) probes in parallel; queue the rest.
 2. Measure RTT from dial start to `ProbeResponse`, including handshake time.
-3. Score each relay as `score = rtt_ms + ceil(fill_ratio * 50)`.
+3. Score each relay as `score = rtt_ms`. Capacity is already reflected by the controller-assigned High/Medium label.
 4. **Exhausted active relay:** if the current relay is absent from the current `LabelledRelayList` (it crossed the exhausted threshold), skip the improvement threshold and migrate to the best valid relay immediately.
 5. **Normal migration:** migrate only if `current_score - best_score > max(current_score * 0.15, 10ms)`. Both relative (15%) and absolute (10ms) conditions must hold.
 6. Otherwise keep the current relay and re-probe after `RELAY_REPROBE_INTERVAL_SECS` (default 300s).
@@ -194,8 +192,7 @@ After each probe cycle, the connector atomically writes the top 5 ranked relays 
       "relay_addr": "relay1.example.com:9093",
       "spiffe_id": "spiffe://zecurity.in/relay/<uuid>",
       "score": 12,
-      "rtt_ms": 8,
-      "fill_ratio": 0.08
+      "rtt_ms": 8
     }
   ]
 }
@@ -246,7 +243,7 @@ If the active relay drops unexpectedly:
 
 - Add `RELAY_MAX_CONNECTIONS`.
 - Track active bridged client streams separately from registered connectors.
-- Handle probe request/response without registering the connector.
+- Handle probe request/response without registering the connector or returning load data.
 - Close probe streams on rate-limit, concurrent-limit, malformed, or unauthorized probes.
 
 ### Controller
@@ -263,6 +260,7 @@ If the active relay drops unexpectedly:
 - Validate persisted rankings against the current `LabelledRelayList` before reconnecting, except for temporary fast reconnect before the first list arrives.
 - Implement random Tier 1 startup, Tier 2 fallback, background scoring, thresholded migration, exhausted-active forced migration, and make-before-break drain.
 - Validate probe responses: check `request_id` matches and QUIC peer SPIFFE matches `LabelledRelayInfo.spiffe_id` before accepting result.
+- Use RTT-only probe scoring; do not calculate or consume relay `connection_count` in the connector.
 - Validate persisted rankings against current `LabelledRelayList` before failover — skip absent/exhausted entries.
 - Implement exponential backoff on disconnected retry using `RELAY_RECONNECT_*` config.
 - Replace static `RELAY_ADDR` / `RELAY_SPIFFE_ID` configuration with control-stream relay selection; add all config vars from the configurable values table.
@@ -277,6 +275,7 @@ If the active relay drops unexpectedly:
 - Unit: startup ranking validation skips absent/exhausted relays.
 - Unit: random Tier 1 selection distributes boot load.
 - Unit: migration threshold requires both relative and absolute improvement.
+- Unit: connector probe score is RTT-only and ignores relay load.
 - Unit: active relay becomes exhausted (absent from list) → immediate migration regardless of score delta.
 - Unit: make-before-break does not switch new streams until new registration succeeds.
 - Unit: probe response with mismatched `request_id` is discarded.

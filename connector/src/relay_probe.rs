@@ -1,8 +1,9 @@
 // Sprint 11 ADR-016 Phase 1 — relay probe.
 //
 // Dials each labelled relay over QUIC mTLS, exchanges a single Probe
-// handshake message, measures RTT, scores the relay. No registration
-// happens; the connection is dropped immediately after the response.
+// handshake message, measures RTT, scores the relay by RTT only. No
+// registration happens; the connection is dropped immediately after the
+// response. Relay load is controller-owned and is not used by the connector.
 //
 // Wire format mirrors the existing register path in relay_client.rs:
 // JSON-encoded `HandshakeMsg::Probe` with a 4-byte big-endian length
@@ -38,8 +39,6 @@ enum ProbeMsg<'a> {
 
 #[derive(Debug, Deserialize)]
 struct ProbeResponse {
-    connection_count: u32,
-    capacity: u32,
     request_id: u64,
 }
 
@@ -49,7 +48,6 @@ pub struct RelayProbeResult {
     pub relay_addr: String,
     pub spiffe_id: String,
     pub rtt_ms: u64,
-    pub fill_ratio: f64,
     pub score: u64,
 }
 
@@ -178,15 +176,13 @@ async fn probe_one(
     }
 
     let rtt_ms = t0.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-    let fill_ratio = compute_fill_ratio(response.connection_count, response.capacity);
-    let score = compute_score(rtt_ms, fill_ratio);
+    let score = compute_score(rtt_ms);
 
     Some(RelayProbeResult {
         relay_id: candidate.relay_id.clone(),
         relay_addr: candidate.relay_addr.clone(),
         spiffe_id: candidate.spiffe_id.clone(),
         rtt_ms,
-        fill_ratio,
         score,
     })
 }
@@ -219,16 +215,8 @@ fn new_request_id() -> u64 {
         .max(1)
 }
 
-fn compute_fill_ratio(connection_count: u32, capacity: u32) -> f64 {
-    if capacity == 0 {
-        0.0
-    } else {
-        f64::from(connection_count) / f64::from(capacity)
-    }
-}
-
-fn compute_score(rtt_ms: u64, fill_ratio: f64) -> u64 {
-    rtt_ms.saturating_add((fill_ratio * 50.0).ceil() as u64)
+fn compute_score(rtt_ms: u64) -> u64 {
+    rtt_ms
 }
 
 #[cfg(test)]
@@ -236,41 +224,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn score_zero_capacity_is_rtt_only() {
-        assert_eq!(compute_fill_ratio(0, 0), 0.0);
-        assert_eq!(compute_fill_ratio(5, 0), 0.0);
-        assert_eq!(compute_score(42, 0.0), 42);
+    fn score_is_rtt_only() {
+        assert_eq!(compute_score(0), 0);
+        assert_eq!(compute_score(42), 42);
     }
 
     #[test]
-    fn score_half_full_adds_twenty_five() {
-        assert_eq!(compute_fill_ratio(50, 100), 0.5);
-        assert_eq!(compute_score(100, 0.5), 125);
-    }
-
-    #[test]
-    fn score_full_adds_fifty() {
-        assert_eq!(compute_fill_ratio(100, 100), 1.0);
-        assert_eq!(compute_score(10, 1.0), 60);
-    }
-
-    #[test]
-    fn score_partial_ratio_rounds_up() {
-        // 1/3 capacity = 0.333..., * 50 = 16.66..., ceil = 17
-        assert_eq!(compute_score(0, 1.0 / 3.0), 17);
-    }
-
-    #[test]
-    fn score_orders_ascending_by_combined_metric() {
+    fn score_orders_ascending_by_rtt() {
         let mut entries = vec![
-            ("a", compute_score(50, 0.0)),  // 50
-            ("b", compute_score(20, 0.8)),  // 20 + 40 = 60
-            ("c", compute_score(30, 0.2)),  // 30 + 10 = 40
+            ("a", compute_score(50)),
+            ("b", compute_score(20)),
+            ("c", compute_score(30)),
         ];
         entries.sort_by_key(|(_, s)| *s);
-        assert_eq!(entries[0].0, "c");
-        assert_eq!(entries[1].0, "a");
-        assert_eq!(entries[2].0, "b");
+        assert_eq!(entries[0].0, "b");
+        assert_eq!(entries[1].0, "c");
+        assert_eq!(entries[2].0, "a");
     }
 
     #[test]
@@ -283,10 +252,8 @@ mod tests {
     #[test]
     fn probe_response_deserializes_relay_json() {
         // Exact byte layout the relay produces (from relay/src/protocol.rs).
-        let json = br#"{"connection_count":7,"capacity":100,"request_id":42}"#;
+        let json = br#"{"request_id":42}"#;
         let resp: ProbeResponse = serde_json::from_slice(json).unwrap();
-        assert_eq!(resp.connection_count, 7);
-        assert_eq!(resp.capacity, 100);
         assert_eq!(resp.request_id, 42);
     }
 

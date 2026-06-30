@@ -31,7 +31,6 @@ pub struct RankedEntry {
     pub spiffe_id: String,
     pub score: u64,
     pub rtt_ms: u64,
-    pub fill_ratio: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,7 +120,6 @@ mod tests {
             spiffe_id: format!("spiffe://zecurity.in/relay/{relay_id}"),
             score,
             rtt_ms: score,
-            fill_ratio: 0.0,
         }
     }
 

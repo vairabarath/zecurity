@@ -31,7 +31,6 @@ pub struct SessionLimits {
     probe_permits: Arc<Semaphore>,
     probe_timeout: Duration,
     max_probe_rate: u32,
-    max_connections: usize,
     probe_rate_tracker: Arc<Mutex<HashMap<String, ProbeRateWindow>>>,
 }
 
@@ -44,7 +43,6 @@ impl SessionLimits {
             probe_permits: Arc::new(Semaphore::new(limits.max_concurrent_probes)),
             probe_timeout: limits.probe_timeout,
             max_probe_rate: limits.max_probe_rate,
-            max_connections: limits.max_connections,
             probe_rate_tracker: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -110,13 +108,7 @@ pub async fn handle_connection(
                 window.count += 1;
             }
 
-            let connection_count = ACTIVE_STREAMS.load(Ordering::Relaxed);
-            let capacity = limits.max_connections as u32;
-            let response = ProbeResponse {
-                connection_count,
-                capacity,
-                request_id,
-            };
+            let response = ProbeResponse { request_id };
             let encoded = encode_message(&response).context("encode ProbeResponse")?;
             timeout(limits.probe_timeout, send.write_all(&encoded))
                 .await
