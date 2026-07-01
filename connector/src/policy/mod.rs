@@ -3,6 +3,7 @@ use parking_lot::RwLock;
 use crate::client::v1::{AclEntry, AclSnapshot};
 
 /// Local ACL snapshot cache. Updated from Controller heartbeat; enforces default-deny.
+#[derive(Debug)]
 pub struct PolicyCache {
     snapshot: RwLock<Option<AclSnapshot>>,
 }
@@ -54,6 +55,31 @@ impl PolicyCache {
                         .any(|id| id == client_spiffe_id)
             }
         }
+    }
+
+    /// Return the peer Connectors that share a Remote Network with
+    /// `connector_id` (including itself). Each entry is
+    /// `(connector_id, connector_tunnel_addr)` — the tunnel address is
+    /// `host:9092`; callers that need the Shield-facing :9091 port must
+    /// derive it themselves.
+    ///
+    /// Returns an empty Vec when the snapshot is missing or the queried
+    /// connector isn't listed in any Remote Network.
+    pub fn peers_of_connector(&self, connector_id: &str) -> Vec<(String, String)> {
+        let guard = self.snapshot.read();
+        let Some(snapshot) = guard.as_ref() else {
+            return Vec::new();
+        };
+        for rn in &snapshot.remote_networks {
+            if rn.connectors.iter().any(|c| c.connector_id == connector_id) {
+                return rn
+                    .connectors
+                    .iter()
+                    .map(|c| (c.connector_id.clone(), c.connector_tunnel_addr.clone()))
+                    .collect();
+            }
+        }
+        Vec::new()
     }
 
     /// Look up a resource by its network tuple (address + port + protocol).
@@ -174,6 +200,88 @@ mod tests {
         let result = cache.resolve_resource("10.0.0.1", 443, "tcp");
         assert!(result.is_some());
         assert_eq!(result.unwrap().resource_id, "res-1");
+    }
+
+    fn snapshot_with_remote_networks(
+        entries: Vec<AclEntry>,
+        remote_networks: Vec<crate::client::v1::AclRemoteNetwork>,
+    ) -> AclSnapshot {
+        AclSnapshot {
+            version: 1,
+            workspace_id: "ws-test".into(),
+            generated_at: 0,
+            entries,
+            remote_networks,
+            ..Default::default()
+        }
+    }
+
+    fn rn(rn_id: &str, connectors: Vec<(&str, &str)>) -> crate::client::v1::AclRemoteNetwork {
+        crate::client::v1::AclRemoteNetwork {
+            remote_network_id: rn_id.into(),
+            name: rn_id.into(),
+            connectors: connectors
+                .into_iter()
+                .map(|(id, addr)| crate::client::v1::AclConnector {
+                    connector_id: id.into(),
+                    connector_tunnel_addr: addr.into(),
+                    connector_spiffe: format!("spiffe://ws/connector/{id}"),
+                    relay_addr: String::new(),
+                    relay_spiffe_id: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn peers_of_connector_returns_all_peers_in_same_rn() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with_remote_networks(
+            vec![],
+            vec![rn(
+                "rn-a",
+                vec![("conn-1", "10.0.0.5:9092"), ("conn-2", "10.0.0.6:9092")],
+            )],
+        ));
+        let peers = cache.peers_of_connector("conn-1");
+        assert_eq!(peers.len(), 2);
+        assert!(peers
+            .iter()
+            .any(|(id, addr)| id == "conn-1" && addr == "10.0.0.5:9092"));
+        assert!(peers
+            .iter()
+            .any(|(id, addr)| id == "conn-2" && addr == "10.0.0.6:9092"));
+    }
+
+    #[test]
+    fn peers_of_connector_empty_when_snapshot_missing() {
+        let cache = PolicyCache::new();
+        assert!(cache.peers_of_connector("conn-1").is_empty());
+    }
+
+    #[test]
+    fn peers_of_connector_empty_when_self_absent() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with_remote_networks(
+            vec![],
+            vec![rn("rn-a", vec![("conn-99", "10.0.0.99:9092")])],
+        ));
+        assert!(cache.peers_of_connector("conn-1").is_empty());
+    }
+
+    #[test]
+    fn peers_of_connector_filters_to_own_rn_only() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with_remote_networks(
+            vec![],
+            vec![
+                rn("rn-a", vec![("conn-1", "10.0.0.5:9092")]),
+                rn("rn-b", vec![("conn-2", "10.0.0.6:9092")]),
+            ],
+        ));
+        let peers = cache.peers_of_connector("conn-1");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].0, "conn-1");
     }
 
     #[test]

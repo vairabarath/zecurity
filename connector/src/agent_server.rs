@@ -77,6 +77,10 @@ pub struct ShieldRegistry {
     renewal_window_secs: u64,
     /// Tunnel hub — routes RDE tunnel messages between device connections and Shields.
     pub tunnel_hub: crate::agent_tunnel::AgentTunnelHub,
+    /// Shared ACL snapshot cache. Read on every incoming ShieldHealthReport
+    /// so the connector can piggyback the current peer-Connector list back to
+    /// the Shield (see PeerConnectorList in the Shield Control stream).
+    policy_cache: Arc<crate::policy::PolicyCache>,
 }
 
 impl ShieldRegistry {
@@ -85,6 +89,7 @@ impl ShieldRegistry {
         trust_domain: String,
         connector_id: String,
         ack_tx: mpsc::Sender<(String, ResourceAck)>,
+        policy_cache: Arc<crate::policy::PolicyCache>,
     ) -> Self {
         Self {
             maps: Arc::new(Mutex::new(ShieldMaps {
@@ -102,7 +107,34 @@ impl ShieldRegistry {
             connector_id,
             renewal_window_secs: DEFAULT_RENEWAL_WINDOW_SECS,
             tunnel_hub: crate::agent_tunnel::AgentTunnelHub::new(),
+            policy_cache,
         }
+    }
+
+    /// Build the current peer-Connector list for this Connector's Remote
+    /// Network, sorted deterministically by `connector_id`. Returns `None`
+    /// when the ACL snapshot is missing or this Connector isn't in any RN
+    /// (per design — the Shield ignores empty lists, and we prefer not to
+    /// send them at all).
+    ///
+    /// Address derivation: `connector_tunnel_addr` in the ACL snapshot is
+    /// `host:9092` (QUIC data plane). The Shield needs `host:9091` (gRPC).
+    /// The port is swapped by stripping and re-attaching.
+    pub(crate) fn build_peer_connector_list(&self) -> Option<crate::shield_proto::PeerConnectorList> {
+        let mut peers: Vec<crate::shield_proto::PeerConnector> = self
+            .policy_cache
+            .peers_of_connector(&self.connector_id)
+            .into_iter()
+            .map(|(id, tunnel_addr)| crate::shield_proto::PeerConnector {
+                connector_id: id,
+                connector_addr: derive_grpc_addr(&tunnel_addr),
+            })
+            .collect();
+        if peers.is_empty() {
+            return None;
+        }
+        peers.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+        Some(crate::shield_proto::PeerConnectorList { peers })
     }
 
     /// Deliver instructions to a shield via Control stream, or buffer until the shield reconnects.
@@ -428,6 +460,52 @@ fn unix_now() -> i64 {
         .unwrap_or_default()
 }
 
+/// Convert an ACL snapshot's `connector_tunnel_addr` (host:9092 QUIC) into
+/// the Shield-facing gRPC form (host:9091) by stripping the trailing
+/// `:<port>` and appending `:9091`. Non-default port topologies are out of
+/// scope — this function assumes the standard split (`:9092` tunnel /
+/// `:9091` shield gRPC).
+///
+/// Preserves IPv6 bracketed forms (`[::1]:9092` → `[::1]:9091`).
+pub(crate) fn derive_grpc_addr(tunnel_addr: &str) -> String {
+    if let Some(idx) = tunnel_addr.rfind(':') {
+        // Guard against a bare `:9091`-less input we accidentally split at
+        // an IPv6 colon: rely on `rfind` (last colon) so `[::1]:9092` works.
+        format!("{}:9091", &tunnel_addr[..idx])
+    } else {
+        // No port present; append :9091 as a best effort.
+        format!("{tunnel_addr}:9091")
+    }
+}
+
+#[cfg(test)]
+mod peer_addr_tests {
+    use super::derive_grpc_addr;
+
+    #[test]
+    fn ipv4_swaps_port() {
+        assert_eq!(derive_grpc_addr("10.0.0.5:9092"), "10.0.0.5:9091");
+    }
+
+    #[test]
+    fn hostname_swaps_port() {
+        assert_eq!(
+            derive_grpc_addr("connector.example.com:9092"),
+            "connector.example.com:9091"
+        );
+    }
+
+    #[test]
+    fn ipv6_bracketed_swaps_port() {
+        assert_eq!(derive_grpc_addr("[::1]:9092"), "[::1]:9091");
+    }
+
+    #[test]
+    fn no_port_appends_9091() {
+        assert_eq!(derive_grpc_addr("bare-host"), "bare-host:9091");
+    }
+}
+
 #[tonic::async_trait]
 impl ShieldService for ShieldRegistry {
     type ControlStream = ReceiverStream<Result<ShieldControlMessage, Status>>;
@@ -531,6 +609,16 @@ impl ShieldService for ShieldRegistry {
                                                 last_seen_unix: unix_now(),
                                                 lan_ip: hr.lan_ip,
                                             });
+                                        // Piggyback the current peer-Connector list so the
+                                        // Shield can fail over if this Connector goes down.
+                                        // Empty / snapshot-missing skips the push per design.
+                                        if let Some(list) = registry.build_peer_connector_list() {
+                                            let _ = out_tx
+                                                .send(Ok(ShieldControlMessage {
+                                                    body: Some(Body::PeerConnectorList(list)),
+                                                }))
+                                                .await;
+                                        }
                                         if registry.cert_needs_renewal(cert_not_after) {
                                             let _ = out_tx
                                                 .send(Ok(ShieldControlMessage {
@@ -671,11 +759,13 @@ mod tests {
         // never touches the channel, so this is a cheap, network-free registry.
         let channel = Channel::from_static("http://127.0.0.1:1").connect_lazy();
         let (ack_tx, _ack_rx) = mpsc::channel(8);
+        let policy_cache = Arc::new(crate::policy::PolicyCache::new());
         ShieldRegistry::new(
             channel,
             "test.example".to_string(),
             "connector-1".to_string(),
             ack_tx,
+            policy_cache,
         )
     }
 

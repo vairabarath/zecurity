@@ -127,7 +127,8 @@ async fn main() -> anyhow::Result<()> {
         let state = ShieldState::load(&cfg.state_dir)?;
         info!(
             shield_id    = %state.shield_id,
-            connector_id = %state.connector_id,
+            connector_id = %state.connectors[0].connector_id,
+            connectors   = %state.connectors.len(),
             trust_domain = %state.trust_domain,
             interface_addr = %state.interface_addr,
             "shield already enrolled, resuming"

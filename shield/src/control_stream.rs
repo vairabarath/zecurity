@@ -20,7 +20,7 @@ use crate::proto::{
 };
 use crate::resources::SharedResourceState;
 use crate::tunnel::{self, TunnelHub};
-use crate::types::ShieldState;
+use crate::types::{ConnectorRef, ShieldState};
 use crate::{renewal, resources, tls, util};
 
 const BACKOFF_INITIAL_SECS: u64 = 5;
@@ -62,9 +62,18 @@ async fn run_once(
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
 ) -> Result<()> {
-    let mut client = build_client(state, cfg)
+    let (mut client, selected_idx) = build_client(state, cfg)
         .await
         .context("failed to build mTLS client for Control stream")?;
+
+    // If we failed over to a non-head Connector, rotate the list so the new
+    // head is the surviving Connector and persist. Next reconnect prefers it.
+    if selected_idx > 0 {
+        state.connectors.rotate_left(selected_idx);
+        if let Err(e) = state.save(&cfg.state_dir) {
+            warn!(error = %e, "failed to persist state.json after connector head rotation");
+        }
+    }
 
     let hostname = util::read_hostname();
     let public_ip = util::get_public_ip().await.unwrap_or_default();
@@ -86,7 +95,9 @@ async fn run_once(
 
     info!(
         shield_id = %state.shield_id,
-        connector_addr = %state.connector_addr,
+        connector_id = %state.connectors[0].connector_id,
+        connector_addr = %state.connectors[0].connector_addr,
+        peers = %state.connectors.len(),
         "Shield Control stream established"
     );
 
@@ -267,10 +278,69 @@ async fn handle_connector_msg(
             tunnel::handle_tunnel_close(tunnel_hub, &close.connection_id).await;
             None
         }
+        Some(Body::PeerConnectorList(list)) => {
+            apply_peer_connector_list(state, cfg, list.peers);
+            None
+        }
         other => {
             warn!(?other, "ignored unsupported Shield Control message");
             None
         }
+    }
+}
+
+/// Apply an incoming `PeerConnectorList` to the Shield's persistent state.
+///
+///   - Empty `peers` is ignored — the Shield's existing list is safer than a
+///     truncated one.
+///   - Identical content (order-insensitive by connector_id) is a no-op —
+///     no rewrite of state.json.
+///   - New content replaces the list. The current head is preserved when
+///     the new list still contains it; otherwise the new head is index 0.
+fn apply_peer_connector_list(
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    peers: Vec<crate::proto::PeerConnector>,
+) {
+    if peers.is_empty() {
+        return;
+    }
+    let mut new_list: Vec<ConnectorRef> = peers
+        .into_iter()
+        .map(|p| ConnectorRef {
+            connector_id: p.connector_id,
+            connector_addr: p.connector_addr,
+        })
+        .collect();
+
+    // Ignore no-op updates (same connector set + same addresses). Compare
+    // by the sorted-by-id projection so ordering differences in the wire
+    // message don't trigger a spurious write.
+    let mut current_sorted = state.connectors.clone();
+    current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+    let mut new_sorted = new_list.clone();
+    new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
+    if current_sorted == new_sorted {
+        return;
+    }
+
+    // Preserve current head if it survives in the new list. Otherwise the
+    // new list's index-0 becomes head.
+    if let Some(current_head_id) = state.connectors.first().map(|c| c.connector_id.clone()) {
+        if let Some(idx) = new_list
+            .iter()
+            .position(|c| c.connector_id == current_head_id)
+        {
+            new_list.rotate_left(idx);
+        }
+    }
+
+    let peer_count = new_list.len();
+    state.connectors = new_list;
+    if let Err(e) = state.save(&cfg.state_dir) {
+        warn!(error = %e, "failed to persist state.json after peer-list update");
+    } else {
+        info!(peers = peer_count, "peer connector list refreshed");
     }
 }
 
@@ -294,26 +364,55 @@ async fn send_health(
         .context("failed to send shield health report")
 }
 
+/// Build an mTLS client, walking the Shield's peer-Connector list from head
+/// to tail. Returns the first Connector that answers and the index it lived
+/// at in the list (so the caller can rotate it to head + persist). If every
+/// Connector is unreachable, returns the last error the walk observed.
 async fn build_client(
     state: &ShieldState,
     cfg: &ShieldConfig,
-) -> Result<ShieldServiceClient<tonic::transport::Channel>> {
+) -> Result<(ShieldServiceClient<tonic::transport::Channel>, usize)> {
     let state_dir = Path::new(&cfg.state_dir);
     let ca_pem = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
     let cert_pem = tokio::fs::read(state_dir.join("shield.crt")).await?;
     let key_pem = tokio::fs::read(state_dir.join("shield.key")).await?;
 
-    let channel = tls::build_connector_channel(
-        &ca_pem,
-        &cert_pem,
-        &key_pem,
-        &state.connector_id,
-        &state.trust_domain,
-        &state.connector_addr,
-    )
-    .await?;
+    let mut last_err: Option<anyhow::Error> = None;
+    for (idx, conn) in state.connectors.iter().enumerate() {
+        match tls::build_connector_channel(
+            &ca_pem,
+            &cert_pem,
+            &key_pem,
+            &conn.connector_id,
+            &state.trust_domain,
+            &conn.connector_addr,
+        )
+        .await
+        {
+            Ok(channel) => {
+                if idx > 0 {
+                    info!(
+                        connector_id = %conn.connector_id,
+                        connector_addr = %conn.connector_addr,
+                        from_idx = idx,
+                        "Shield failed over to peer Connector",
+                    );
+                }
+                return Ok((ShieldServiceClient::new(channel), idx));
+            }
+            Err(e) => {
+                warn!(
+                    connector_id = %conn.connector_id,
+                    connector_addr = %conn.connector_addr,
+                    error = %e,
+                    "Shield: peer Connector unreachable, trying next",
+                );
+                last_err = Some(e);
+            }
+        }
+    }
 
-    Ok(ShieldServiceClient::new(channel))
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Shield has no peer connectors to dial")))
 }
 
 async fn send_discovery_report(
@@ -363,10 +462,12 @@ async fn send_discovery_report(
 }
 
 /// Best-effort Goodbye RPC on SIGTERM so the connector removes this shield
-/// from its in-memory health map immediately.
+/// from its in-memory health map immediately. Reuses the same peer-list
+/// failover walk — if the head Connector is already gone, goodbye still
+/// reaches a healthy sibling.
 pub async fn goodbye(state: &ShieldState, cfg: &ShieldConfig) {
     match build_client(state, cfg).await {
-        Ok(mut client) => {
+        Ok((mut client, _idx)) => {
             let req = Request::new(crate::proto::GoodbyeRequest {
                 shield_id: state.shield_id.clone(),
             });

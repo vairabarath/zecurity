@@ -97,11 +97,17 @@ async fn main() -> anyhow::Result<()> {
     // Create ack channel shared between ShieldRegistry (producers) and control_stream (consumer).
     let (ack_tx, ack_rx) = mpsc::channel(128);
 
+    // PolicyCache is constructed here (rather than later) so ShieldRegistry
+    // can hold an Arc to it — the Shield-facing handler reads the cache on
+    // every ShieldHealthReport to piggyback the peer-Connector list.
+    let policy_cache = Arc::new(policy::PolicyCache::new());
+
     let shield_registry = agent_server::ShieldRegistry::new(
         controller_channel,
         enrollment_state.trust_domain.clone(),
         enrollment_state.connector_id.clone(),
         ack_tx,
+        policy_cache.clone(),
     );
 
     // Spawn shield-facing gRPC server on :9091.
@@ -128,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("connector running — entering Control stream loop");
 
-    let policy_cache = Arc::new(policy::PolicyCache::new());
+    // `policy_cache` already constructed above and shared with ShieldRegistry.
 
     // Determine LAN IP for QUIC advertise address.
     let lan_ip = net_util::lan_ip()

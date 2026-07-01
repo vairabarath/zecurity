@@ -241,11 +241,16 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         .format(&::time::format_description::well_known::Rfc3339)
         .context("failed to format enrollment timestamp")?;
 
+    // First-enrollment peer list is a single element (the Connector that
+    // enrolled us). Subsequent `PeerConnectorList` piggybacks from the
+    // active Connector will expand this list as siblings come online.
     let state = ShieldState {
         shield_id: response.shield_id,
         trust_domain: claims.trust_domain,
-        connector_id: response.connector_id,
-        connector_addr: response.connector_addr,
+        connectors: vec![crate::types::ConnectorRef {
+            connector_id: response.connector_id,
+            connector_addr: response.connector_addr,
+        }],
         interface_addr: response.interface_addr,
         enrolled_at,
         cert_not_after,
