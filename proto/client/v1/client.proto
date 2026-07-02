@@ -146,4 +146,5 @@ message ACLEntry {
   string route_type                  = 7; // "connector" or "shield"
   string shield_id                   = 8; // set when route_type == "shield"
   string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
+  string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
 }

@@ -8,10 +8,10 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::config;
+use crate::{config, transport};
 use crate::grpc::{
     self,
-    client_v1::{AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
+    client_v1::{AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
 };
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
@@ -718,6 +718,31 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
     Ok(result)
 }
 
+
+fn ordered_connectors_for_entry<'a>(
+    entry: &AclEntry,
+    rn: &'a AclRemoteNetwork,
+) -> Vec<&'a AclConnector>{
+    let mut ordered = Vec::new();
+    let preferred = entry.preferred_connector_id.as_str();
+
+    if !preferred.is_empty(){
+        if let Some(connector) = rn
+        .connectors
+        .iter()
+        .find(|connector| connector.connector_id == preferred)
+        {
+            ordered.push(connector);
+        }
+    }
+    for connector in &rn.connectors{
+        if connector.connector_id != preferred {
+            ordered.push(connector);
+        }
+    }
+    ordered
+}
+
 // Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
 //
 // Three cases at lookup time (enforced in net_stack):
@@ -728,83 +753,116 @@ pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
     device: &DeviceInfo,
-) -> Result<HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>>> {
-    // Build remote_network_id → Option<ClientTransport>.
-    // None means the RN is known but has no active connector.
-    let mut rn_transport: HashMap<String, Option<Arc<ClientTransport>>> = HashMap::new();
+) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
+    // Build a remote_network_id lookup. Each entry picks its preferred connector
+    // lazily so one bad unused connector does not poison every resource in the RN.
+    let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
-        let Some(connector) = rn.connectors.first() else {
-            // Connector offline — insert None so resources fail closed, not bypassed.
-            rn_transport.insert(rn.remote_network_id.clone(), None);
-            continue;
-        };
-
-        let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
-            connector.connector_tunnel_addr.clone()
-        } else {
-            info!(connetor_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),"using default connector address address");
-            crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
-        };
-        let connector_socket: SocketAddr = connector_addr
-            .to_socket_addrs()
-            .with_context(|| format!("resolve connector tunnel address {connector_addr}"))?
-            .next()
-            .with_context(|| {
-                format!("connector tunnel address {connector_addr} resolved to no addresses")
-            })?;
-
-        let direct = Arc::new(TunnelPool::new(
-            &device.certificate_pem,
-            &device.private_key_pem,
-            &device.ca_cert_pem,
-        )?);
-
-        // Relay coords are per-connector (ACLConnector fields 4+5, populated by Gap 1).
-        // Empty relay_addr means this connector has no relay assignment — direct only.
-        let relay = if !connector.relay_addr.is_empty()
-            && !connector.relay_spiffe_id.is_empty()
-            && !connector.connector_id.is_empty()
-            && !connector.connector_spiffe.is_empty()
-        {
-            let pool = Arc::new(RelayPool::new(
-                &device.certificate_pem,
-                &device.private_key_pem,
-                &device.ca_cert_pem,
-                &connector.relay_spiffe_id,
-            )?);
-            Some(RelayContext {
-                pool,
-                relay_addr: connector.relay_addr.clone(),
-                connector_id: connector.connector_id.clone(),
-                connector_spiffe: connector.connector_spiffe.clone(),
-            })
-        } else {
-            None
-        };
-
-        rn_transport.insert(
-            rn.remote_network_id.clone(),
-            Some(Arc::new(ClientTransport::new(
-                direct,
-                connector_socket,
-                relay,
-            ))),
-        );
+        rn_by_id.insert(rn.remote_network_id.as_str(), rn);
     }
 
-    // Fan out: map each resource (Ipv4Addr, port) to its RN's transport slot.
-    // Resources in RNs absent from rn_transport (shouldn't happen) are omitted.
-    let mut out: HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>> = HashMap::new();
+    // Fan out: map each resource (Ipv4Addr, port) to its preferred connector's
+    // transport when present, otherwise the RN fallback transport.
+    // Resources in RNs absent from rn_by_id (shouldn't happen) are omitted.
+    let mut out: HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>> = HashMap::new();
+    let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
         let Ok(ip) = entry.address.parse::<IpAddr>() else {
             continue;
         };
         let IpAddr::V4(v4) = ip else { continue };
-        if let Some(slot) = rn_transport.get(&entry.remote_network_id) {
-            out.insert((v4, entry.port as u16), slot.clone());
+        let Some(rn) = rn_by_id.get(entry.remote_network_id.as_str()) else {
+            continue;
+        };
+
+        let mut transports = Vec::new();
+        for connector in ordered_connectors_for_entry(entry, rn){
+            let cache_key = if connector.connector_id.is_empty(){
+                format!(
+                    "{}:{}", 
+                    rn.remote_network_id, 
+                    connector.connector_id.clone()
+                )
+            }else{
+                connector.connector_id.clone()
+            };
+            let transport = match transport_cache.get(&cache_key) {
+                Some(t) => t.clone(),
+                None => {
+                    let transport = build_transport_for_connector(connector, device)?;
+                    transport_cache.insert(cache_key, transport.clone());
+                    transport
+                }
+            };
+            transports.push(transport);
         }
+        let slot = if transports.is_empty(){
+            None
+        }else{
+            Some(transports)
+        };
+        out.insert((v4, entry.port as u16), slot);
     }
     Ok(out)
+}
+
+
+
+fn build_transport_for_connector(
+    connector: &AclConnector,
+    device: &DeviceInfo,
+) -> Result<Arc<ClientTransport>> {
+    let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
+        connector.connector_tunnel_addr.clone()
+    } else {
+        info!(
+            connetor_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),
+            "using default connector address address"
+        );
+        crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
+    };
+    let connector_socket: SocketAddr = connector_addr
+        .to_socket_addrs()
+        .with_context(|| format!("resolve connector tunnel address {connector_addr}"))?
+        .next()
+        .with_context(|| {
+            format!("connector tunnel address {connector_addr} resolved to no addresses")
+        })?;
+
+    let direct = Arc::new(TunnelPool::new(
+        &device.certificate_pem,
+        &device.private_key_pem,
+        &device.ca_cert_pem,
+    )?);
+
+    // Relay coords are per-connector (ACLConnector fields 4+5).
+    // Empty relay_addr means this connector has no relay assignment — direct only.
+    let relay = if !connector.relay_addr.is_empty()
+        && !connector.relay_spiffe_id.is_empty()
+        && !connector.connector_id.is_empty()
+        && !connector.connector_spiffe.is_empty()
+    {
+        let pool = Arc::new(RelayPool::new(
+            &device.certificate_pem,
+            &device.private_key_pem,
+            &device.ca_cert_pem,
+            &connector.relay_spiffe_id,
+        )?);
+        Some(RelayContext {
+            pool,
+            relay_addr: connector.relay_addr.clone(),
+            connector_id: connector.connector_id.clone(),
+            connector_spiffe: connector.connector_spiffe.clone(),
+        })
+    } else {
+        None
+    };
+
+    Ok(Arc::new(ClientTransport::new(
+        direct,
+        connector_socket,
+        relay,
+    )))
 }
 
 fn now_unix() -> i64 {

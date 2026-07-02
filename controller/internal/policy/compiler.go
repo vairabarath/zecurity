@@ -36,6 +36,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 	}
 	names := make(map[entryKey]string)
 	shieldIDs := make(map[entryKey]string)
+	preferredConnectorIDs := make(map[entryKey]string)
 	routeTypes := make(map[entryKey]string)
 	rnByKey := make(map[entryKey]string)     // entryKey → remote_network_id
 	keyGroups := make(map[entryKey][]string) // groups contributing to each entry
@@ -52,6 +53,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 			}
 			names[key] = rule.Name
 			shieldIDs[key] = rule.ShieldID
+			preferredConnectorIDs[key] = rule.ShieldConnectorID
 			routeTypes[key] = routeType
 			rnByKey[key] = rule.RemoteNetworkID
 		}
@@ -137,15 +139,16 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 			ids = append(ids, id)
 		}
 		entries = append(entries, &clientv1.ACLEntry{
-			ResourceId:       key.resourceID,
-			Name:             names[key],
-			Address:          key.address,
-			Port:             key.port,
-			Protocol:         key.protocol,
-			AllowedSpiffeIds: ids,
-			RouteType:        routeTypes[key],
-			ShieldId:         shieldIDs[key],
-			RemoteNetworkId:  rnByKey[key],
+			ResourceId:           key.resourceID,
+			Name:                 names[key],
+			Address:              key.address,
+			Port:                 key.port,
+			Protocol:             key.protocol,
+			AllowedSpiffeIds:     ids,
+			RouteType:            routeTypes[key],
+			ShieldId:             shieldIDs[key],
+			RemoteNetworkId:      rnByKey[key],
+			PreferredConnectorId: preferredConnectorIDs[key],
 		})
 	}
 

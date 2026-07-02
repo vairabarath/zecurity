@@ -386,7 +386,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case *pb.ConnectorControlMessage_ConnectorHealth:
 			h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
 		case *pb.ConnectorControlMessage_ShieldStatus:
-			h.handleShieldStatus(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
+			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
 			h.handleResourceAcks(ctx, tenantID, msg.Body.(*pb.ConnectorControlMessage_ResourceAcks).ResourceAcks)
 		case *pb.ConnectorControlMessage_ShieldDiscovery:
@@ -621,12 +621,24 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	return nil
 }
 
-func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, connectorID string, batch *pb.ShieldStatusBatch) {
+func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *connectorStreamClient, batch *pb.ShieldStatusBatch) {
+	var anyConnectorChanged bool
 	for _, s := range batch.Shields {
-		if err := h.ShieldSvc.UpdateShieldHealth(
-			ctx, s.ShieldId, connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
-		); err != nil {
+		connectorChanged, err := h.ShieldSvc.UpdateShieldHealth(
+			ctx, s.ShieldId, client.connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
+		)
+		if err != nil {
 			log.Printf("control stream: update shield health %s: %v", s.ShieldId, err)
+			continue
+		}
+		if connectorChanged {
+			anyConnectorChanged = true
+			log.Printf("control stream: shield %s moved to connector %s", s.ShieldId, client.connectorID)
+		}
+	}
+	if anyConnectorChanged && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+			log.Printf("control stream: notify after shield connector move tenant=%s: %v", client.tenantID, err)
 		}
 	}
 }

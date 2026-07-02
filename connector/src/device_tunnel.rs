@@ -281,12 +281,6 @@ where
             shield = %shield_id,
             "access allowed",
         );
-        let response = TunnelResponse {
-            ok: true,
-            error: None,
-            quic_addr: quic_advertise_addr().map(String::from),
-        };
-        send_response(&mut stream, &response).await?;
         emit_access_log(
             control_tx,
             connector_id,
@@ -318,6 +312,12 @@ where
         {
             Ok(relay) => {
                 tracing::info!(shield = %shield_id, resource_id = %acl_entry.resource_id, "tunnel_opened ok");
+                let response = TunnelResponse {
+                    ok: true,
+                    error: None,
+                    quic_addr: quic_advertise_addr().map(String::from),
+                };
+                send_response(&mut stream, &response).await?;
                 relay.relay_stream(stream).await?;
             }
             Err(e) => {

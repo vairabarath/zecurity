@@ -120,7 +120,9 @@ impl ShieldRegistry {
     /// Address derivation: `connector_tunnel_addr` in the ACL snapshot is
     /// `host:9092` (QUIC data plane). The Shield needs `host:9091` (gRPC).
     /// The port is swapped by stripping and re-attaching.
-    pub(crate) fn build_peer_connector_list(&self) -> Option<crate::shield_proto::PeerConnectorList> {
+    pub(crate) fn build_peer_connector_list(
+        &self,
+    ) -> Option<crate::shield_proto::PeerConnectorList> {
         let mut peers: Vec<crate::shield_proto::PeerConnector> = self
             .policy_cache
             .peers_of_connector(&self.connector_id)

@@ -3,7 +3,7 @@ use std::sync::Once;
 
 use rcgen::{CertificateParams, KeyPair, SanType};
 
-use crate::daemon::build_transports_by_resource;
+use crate::daemon::{build_transports_by_resource, select_connector_for_entry};
 use crate::grpc::client_v1::{AclConnector, AclEntry, AclRemoteNetwork};
 use crate::runtime::DeviceInfo;
 
@@ -80,7 +80,7 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
             connector_id: "conn1".to_string(),
             connector_tunnel_addr: "127.0.0.1:9092".to_string(),
             connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
-            relay_addr: String::new(),      // empty → direct-only, no RelayPool
+            relay_addr: String::new(), // empty → direct-only, no RelayPool
             relay_spiffe_id: String::new(),
             ..Default::default()
         }],
@@ -91,8 +91,14 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
-    assert!(map.contains_key(&key), "resource 10.0.0.1:80 missing from transport map");
-    assert!(map[&key].is_some(), "transport slot is None — connector is active");
+    assert!(
+        map.contains_key(&key),
+        "resource 10.0.0.1:80 missing from transport map"
+    );
+    assert!(
+        map[&key].is_some(),
+        "transport slot is None — connector is active"
+    );
 }
 
 // Gap 4 regression: connector with relay_addr+relay_spiffe_id set must build
@@ -194,4 +200,43 @@ async fn two_connectors_different_relay_addrs_build_independently() {
     assert!(map.contains_key(&key_b), "res-b missing from transport map");
     assert!(map[&key_a].is_some(), "res-a: transport slot is None");
     assert!(map[&key_b].is_some(), "res-b: transport slot is None");
+}
+
+// Shield-routed resources should use the connector currently holding the Shield
+// even when that connector is not the first active connector in the RN list.
+#[test]
+fn shield_resource_uses_preferred_connector_id() {
+    let entry = AclEntry {
+        resource_id: "res-shield".to_string(),
+        address: "10.3.0.1".to_string(),
+        port: 8443,
+        remote_network_id: "rn-shield".to_string(),
+        protocol: "tcp".to_string(),
+        route_type: "shield".to_string(),
+        shield_id: "shield-1".to_string(),
+        preferred_connector_id: "conn-holder".to_string(),
+        ..Default::default()
+    };
+
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn-shield".to_string(),
+        connectors: vec![
+            AclConnector {
+                connector_id: "conn-other".to_string(),
+                connector_tunnel_addr: "not-a-valid-socket-address".to_string(),
+                connector_spiffe: "spiffe://test.example/connector/conn-other".to_string(),
+                ..Default::default()
+            },
+            AclConnector {
+                connector_id: "conn-holder".to_string(),
+                connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+                connector_spiffe: "spiffe://test.example/connector/conn-holder".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let connector = select_connector_for_entry(&entry, &rn).expect("connector selected");
+    assert_eq!(connector.connector_id, "conn-holder");
 }

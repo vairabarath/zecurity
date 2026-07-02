@@ -15,7 +15,7 @@ import (
 // Used by connector/control_stream.go and graph resolvers without depending on the concrete type.
 type Service interface {
 	GenerateShieldToken(ctx context.Context, remoteNetworkID, workspaceID, tenantID, shieldID, shieldName string) (tokenString string, installCommand string, err error)
-	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) error
+	UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) (connectorChanged bool, err error)
 	RunDisconnectWatcher(ctx context.Context)
 	TokenHandler() http.Handler
 }

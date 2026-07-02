@@ -12,6 +12,7 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tonic::transport;
 use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
@@ -115,7 +116,7 @@ struct ActiveRelay {
 pub async fn run(
     dev: AsyncDevice,
     allowed_entries: Vec<AclEntry>,
-    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Arc<ClientTransport>>>>,
+    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -228,22 +229,33 @@ pub async fn run(
                 let dest = ip.to_string();
                 tracing::info!(dest = %dest, port, "new TCP connection");
                 match transports.get(&(ip, port)) {
-                    Some(Some(transport)) => {
+
+                    Some(Some(transports)) => {
                         // Managed resource, connector online → tunnel via QUIC.
-                        let pool_c = transport.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = relay_tcp_to_quic(
-                                pool_c,
-                                dest,
-                                port,
-                                tcp_to_quic_rx,
-                                quic_to_tcp_tx,
-                            )
-                            .await
-                            {
-                                tracing::warn!(error = %e, "QUIC relay ended");
-                            }
-                        });
+                        if let Some(transport) = transports.first(){
+                            let pool_c = transport.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = relay_tcp_to_quic(
+                                    pool_c,
+                                    dest,
+                                    port,
+                                    tcp_to_quic_rx,
+                                    quic_to_tcp_tx,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(error = %e, "QUIC relay ended");
+                                }
+                            });    
+                        }else{
+                            tracing::warn!(
+                                dest = %dest, 
+                                port, 
+                                "transport list unexpectedly empty"
+                            );
+                            drop(tcp_to_quic_rx);
+                            drop(quic_to_tcp_tx);
+                        }
                     }
                     Some(None) => {
                         // Managed resource, connector offline → fail closed.
