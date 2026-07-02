@@ -195,6 +195,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
+	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
 
 	if os.Getenv("ENV") == "development" {

@@ -12,7 +12,6 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
-use tonic::transport;
 use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
@@ -229,10 +228,9 @@ pub async fn run(
                 let dest = ip.to_string();
                 tracing::info!(dest = %dest, port, "new TCP connection");
                 match transports.get(&(ip, port)) {
-
                     Some(Some(transports)) => {
                         // Managed resource, connector online → tunnel via QUIC.
-                        if let Some(transport) = transports.first(){
+                        if let Some(transport) = transports.first() {
                             let pool_c = transport.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = relay_tcp_to_quic(
@@ -246,11 +244,11 @@ pub async fn run(
                                 {
                                     tracing::warn!(error = %e, "QUIC relay ended");
                                 }
-                            });    
-                        }else{
+                            });
+                        } else {
                             tracing::warn!(
-                                dest = %dest, 
-                                port, 
+                                dest = %dest,
+                                port,
                                 "transport list unexpectedly empty"
                             );
                             drop(tcp_to_quic_rx);

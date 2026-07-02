@@ -22,6 +22,9 @@ use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
 
 const MAX_HANDSHAKE_SIZE: usize = 4096;
+pub const ERR_SHIELD_NOT_ATTACHED: &str = "SHIELD_NOT_ATTACHED";
+pub const ERR_ACCESS_DENIED: &str = "ACCESS_DENIED";
+pub const ERR_INTERNAL: &str = "INTERNAL";
 
 static QUIC_ADVERTISE_ADDR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -312,6 +315,8 @@ where
         {
             Ok(relay) => {
                 tracing::info!(shield = %shield_id, resource_id = %acl_entry.resource_id, "tunnel_opened ok");
+
+                // Only acknowledge success after the relay session is ready.
                 let response = TunnelResponse {
                     ok: true,
                     error: None,
@@ -321,7 +326,26 @@ where
                 relay.relay_stream(stream).await?;
             }
             Err(e) => {
-                tracing::error!(shield = %shield_id, resource_id = %acl_entry.resource_id, error = %e, "tunnel_opened error");
+                tracing::error!(shield = %shield_id,
+                    resource_id = %acl_entry.resource_id,
+                    error = %e,
+                    "tunnel_opened error"
+                );
+                let response = if e.to_string().contains("not connected") {
+                    TunnelResponse {
+                        ok: false,
+                        error: Some(ERR_SHIELD_NOT_ATTACHED.to_string()),
+                        quic_addr: quic_advertise_addr().map(String::from),
+                    }
+                } else {
+                    TunnelResponse {
+                        ok: false,
+                        error: Some("INTERNAL".to_string()),
+                        quic_addr: quic_advertise_addr().map(String::from),
+                    }
+                };
+
+                let _ = send_response(&mut stream, &response).await;
                 return Err(e);
             }
         }

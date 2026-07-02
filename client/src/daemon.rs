@@ -8,7 +8,8 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::{config, transport};
+use crate::auth;
+use crate::config;
 use crate::grpc::{
     self,
     client_v1::{AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
@@ -61,10 +62,19 @@ pub async fn run() -> Result<()> {
         let state_clone = Arc::clone(&state);
         let conf_clone = conf.clone();
         let ca_pem = stored.device.ca_cert_pem.clone();
-        let access_token = stored.session.access_token.clone();
         let device_id = stored.device.id.clone();
         tokio::spawn(async move {
-            fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, access_token, device_id).await;
+            fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, device_id).await;
+        });
+    }
+
+    // Proactive session-refresh loop. Runs for the daemon's lifetime, sleeps
+    // until each access token nears expiry, then rotates. See run_refresh_scheduler.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_refresh_scheduler(state_clone, conf_clone).await;
         });
     }
 
@@ -628,16 +638,197 @@ async fn fetch_acl_snapshot(
         .ok_or_else(|| anyhow::anyhow!("controller returned empty ACL snapshot"))
 }
 
+/// Fetch the ACL snapshot, transparently refreshing the access token on 401.
+/// This is the entry point every control-plane call site should use — it
+/// keeps the retry logic and token persistence in one place so callers do
+/// not each reinvent it.
+///
+/// Flow:
+///   1. Read current session tokens from in-memory state.
+///   2. Attempt GetACLSnapshot.
+///   3. If tonic::Status::Unauthenticated (server rejected the JWT), call
+///      /auth/refresh to rotate both tokens.
+///   4. Persist the new pair to disk (state_store) AND to in-memory state
+///      atomically so any concurrent reader sees consistent tokens.
+///   5. Retry GetACLSnapshot with the new access token — once.
+///
+/// A second Unauthenticated on the retry means the session is dead. This
+/// is treated as an error the caller must surface — the user must log in
+/// again. We do NOT clear state here; that is a policy decision left to
+/// the caller (background sync should keep trying quietly; an interactive
+/// IPC sync should prompt the user).
+async fn fetch_acl_snapshot_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    let (access_token, refresh_token) = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        (sess.access_token.clone(), sess.refresh_token.clone())
+    };
+
+    match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+        Ok(snap) => Ok(snap),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("ACL fetch returned Unauthenticated; refreshing session");
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            // Persist the rotated pair BEFORE updating in-memory state so a
+            // crash between save and in-memory update leaves the disk as the
+            // source of truth for the next boot.
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id).await
+        }
+    }
+}
+
+/// True when an error surfaced from a gRPC control-plane call is the
+/// controller telling us the access token is expired / revoked. We only
+/// retry with refresh in this case — network errors and 5xx bubble up as
+/// transient failures for the caller to handle.
+fn is_grpc_unauthenticated(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<tonic::Status>()
+        .map(|s| s.code() == tonic::Code::Unauthenticated)
+        .unwrap_or(false)
+}
+
+/// Proactive session-refresh loop. The access token has a 15-minute TTL;
+/// waiting for it to expire would cause a user-visible request failure on
+/// the first call after 15 minutes. Instead we rotate ~60s before the
+/// stamped `expires_at` so every observable call has a valid token in hand.
+///
+/// Runs for the daemon's lifetime as a spawned tokio task. The 401-retry
+/// path in fetch_acl_snapshot_with_refresh is the safety net for cases this
+/// scheduler misses (transient network failure at rotation time, clock
+/// skew, first request after resume-from-suspend).
+///
+/// Lifecycle:
+///   - No session in state (fresh daemon before login, or post-logout):
+///     sleep the recheck interval and poll again.
+///   - Session exists but expires_at is in the past: refresh immediately.
+///   - Session exists and expires_at is in the future: sleep until
+///     `expires_at - REFRESH_LEAD_SECS`, then refresh.
+///
+/// On SessionDead the loop exits — the refresh token is dead server-side
+/// and the user must re-authenticate. The scheduler is not re-spawned
+/// until the daemon restarts; that's fine because SessionDead is
+/// terminal for this workspace's tokens.
+async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
+    const REFRESH_LEAD_SECS: i64 = 60;
+    const NO_SESSION_POLL_SECS: u64 = 60;
+    const TRANSIENT_RETRY_SECS: u64 = 30;
+
+    loop {
+        // Snapshot expiry outside any long-held lock.
+        let expires_at = {
+            let s = state.read().await;
+            s.session.as_ref().map(|sess| sess.expires_at)
+        };
+
+        let expires_at = match expires_at {
+            Some(exp) => exp,
+            None => {
+                // Not logged in yet (or just logged out). Recheck later —
+                // login/logout is an infrequent event, 60s polling is fine.
+                tokio::time::sleep(std::time::Duration::from_secs(NO_SESSION_POLL_SECS)).await;
+                continue;
+            }
+        };
+
+        let sleep_secs = (expires_at - REFRESH_LEAD_SECS - now_unix()).max(0) as u64;
+        if sleep_secs > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
+        }
+
+        // Re-read tokens right before the network call — the session may
+        // have been rotated by a concurrent 401-retry in the meantime.
+        let (access_token, refresh_token) = {
+            let s = state.read().await;
+            match s.session.as_ref() {
+                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
+                None => continue, // logged out between sleep and now
+            }
+        };
+
+        match auth::refresh_access_token(&conf, &access_token, &refresh_token).await {
+            Ok(new_tokens) => {
+                if let Err(e) = state_store::save_rotated_tokens(
+                    &conf.workspace,
+                    new_tokens.access_token.clone(),
+                    new_tokens.refresh_token.clone(),
+                    new_tokens.expires_at,
+                ) {
+                    // Server has already rotated but we could not persist —
+                    // the new tokens are only in memory. In-memory update
+                    // still happens below so the daemon keeps working; a
+                    // crash before the next successful save loses them.
+                    warn!(error = %e, "persist rotated tokens failed");
+                }
+                {
+                    let mut s = state.write().await;
+                    if let Some(sess) = s.session.as_mut() {
+                        sess.access_token = new_tokens.access_token;
+                        sess.refresh_token = new_tokens.refresh_token;
+                        sess.expires_at = new_tokens.expires_at;
+                    }
+                }
+                info!(
+                    next_expiry = new_tokens.expires_at,
+                    "session refreshed proactively"
+                );
+            }
+            Err(auth::RefreshError::SessionDead) => {
+                warn!("refresh session dead — user must sign in again; scheduler exiting");
+                return;
+            }
+            Err(auth::RefreshError::Transient(e)) => {
+                warn!(error = %e, "transient refresh failure; retry in {}s", TRANSIENT_RETRY_SECS);
+                tokio::time::sleep(std::time::Duration::from_secs(TRANSIENT_RETRY_SECS)).await;
+            }
+        }
+    }
+}
+
 /// Fetch and store the ACL snapshot. On failure, keeps the existing snapshot
-/// (never reverts to None on a transient error).
+/// (never reverts to None on a transient error). Access-token expiry is
+/// handled transparently by fetch_acl_snapshot_with_refresh.
 async fn fetch_and_store_acl(
     state: &SharedState,
     conf: &config::ClientConf,
     ca_pem: String,
-    access_token: String,
     device_id: String,
 ) {
-    match fetch_acl_snapshot(conf, &ca_pem, &access_token, &device_id).await {
+    match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await {
         Ok(snapshot) => {
             let version = snapshot.version;
             let synced_at = now_unix();
@@ -684,23 +875,17 @@ async fn refresh_acl_if_needed(
 }
 
 async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
-    let (ca_pem, access_token, device_id) = {
+    let (ca_pem, device_id) = {
         let s = state.read().await;
         let device = s.device.as_ref().ok_or_else(|| {
             anyhow::anyhow!("no device identity — run zecurity-client login first")
         })?;
-        let session = s
-            .session
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no session — run zecurity-client login first"))?;
-        (
-            device.ca_cert_pem.clone(),
-            session.access_token.clone(),
-            device.id.clone(),
-        )
+        // Session presence is checked inside fetch_acl_snapshot_with_refresh —
+        // we only need CA + device id here.
+        (device.ca_cert_pem.clone(), device.id.clone())
     };
 
-    let snapshot = fetch_acl_snapshot(conf, &ca_pem, &access_token, &device_id).await?;
+    let snapshot = fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await?;
     let result = AclSyncResult {
         version: snapshot.version,
         entry_count: snapshot.entries.len(),
@@ -718,24 +903,23 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
     Ok(result)
 }
 
-
 fn ordered_connectors_for_entry<'a>(
     entry: &AclEntry,
     rn: &'a AclRemoteNetwork,
-) -> Vec<&'a AclConnector>{
+) -> Vec<&'a AclConnector> {
     let mut ordered = Vec::new();
     let preferred = entry.preferred_connector_id.as_str();
 
-    if !preferred.is_empty(){
+    if !preferred.is_empty() {
         if let Some(connector) = rn
-        .connectors
-        .iter()
-        .find(|connector| connector.connector_id == preferred)
+            .connectors
+            .iter()
+            .find(|connector| connector.connector_id == preferred)
         {
             ordered.push(connector);
         }
     }
-    for connector in &rn.connectors{
+    for connector in &rn.connectors {
         if connector.connector_id != preferred {
             ordered.push(connector);
         }
@@ -776,14 +960,14 @@ pub(crate) fn build_transports_by_resource(
         };
 
         let mut transports = Vec::new();
-        for connector in ordered_connectors_for_entry(entry, rn){
-            let cache_key = if connector.connector_id.is_empty(){
+        for connector in ordered_connectors_for_entry(entry, rn) {
+            let cache_key = if connector.connector_id.is_empty() {
                 format!(
-                    "{}:{}", 
-                    rn.remote_network_id, 
+                    "{}:{}",
+                    rn.remote_network_id,
                     connector.connector_id.clone()
                 )
-            }else{
+            } else {
                 connector.connector_id.clone()
             };
             let transport = match transport_cache.get(&cache_key) {
@@ -796,17 +980,15 @@ pub(crate) fn build_transports_by_resource(
             };
             transports.push(transport);
         }
-        let slot = if transports.is_empty(){
+        let slot = if transports.is_empty() {
             None
-        }else{
+        } else {
             Some(transports)
         };
         out.insert((v4, entry.port as u16), slot);
     }
     Ok(out)
 }
-
-
 
 fn build_transport_for_connector(
     connector: &AclConnector,
