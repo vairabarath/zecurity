@@ -3,7 +3,7 @@ use std::sync::Once;
 
 use rcgen::{CertificateParams, KeyPair, SanType};
 
-use crate::daemon::{build_transports_by_resource, select_connector_for_entry};
+use crate::daemon::{build_transports_by_resource, ordered_connectors_for_entry};
 use crate::grpc::client_v1::{AclConnector, AclEntry, AclRemoteNetwork};
 use crate::runtime::DeviceInfo;
 
@@ -237,6 +237,9 @@ fn shield_resource_uses_preferred_connector_id() {
         ..Default::default()
     };
 
-    let connector = select_connector_for_entry(&entry, &rn).expect("connector selected");
+    let connector = ordered_connectors_for_entry(&entry, &rn)
+        .into_iter()
+        .next()
+        .expect("connector selected");
     assert_eq!(connector.connector_id, "conn-holder");
 }

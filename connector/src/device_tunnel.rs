@@ -7,8 +7,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -21,7 +22,7 @@ use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
 
-const MAX_HANDSHAKE_SIZE: usize = 4096;
+const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 pub const ERR_SHIELD_NOT_ATTACHED: &str = "SHIELD_NOT_ATTACHED";
 pub const ERR_ACCESS_DENIED: &str = "ACCESS_DENIED";
 pub const ERR_INTERNAL: &str = "INTERNAL";
@@ -156,18 +157,9 @@ where
         ));
     }
 
-    let mut buf = vec![0u8; MAX_HANDSHAKE_SIZE];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Err(anyhow!("client closed connection before sending handshake"));
-    }
-
-    let handshake =
-        String::from_utf8(buf[..n].to_vec()).map_err(|_| anyhow!("handshake not valid UTF-8"))?;
-    let handshake = handshake.trim();
-
-    let req: TunnelRequest =
-        serde_json::from_str(handshake).map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
+    let req: TunnelRequest = read_framed_json(&mut stream)
+        .await
+        .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
 
     tracing::debug!(
         destination = %req.destination,
@@ -548,10 +540,40 @@ async fn send_response<S>(stream: &mut S, response: &TunnelResponse) -> Result<(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let json = serde_json::to_string(response)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.flush().await?;
+    write_framed_json(stream, response).await
+}
+
+async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    if body.len() > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {} bytes", body.len()));
+    }
+
+    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
     Ok(())
+}
+
+async fn read_framed_json<R, T>(reader: &mut R) -> Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {length} bytes"));
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).await?;
+    serde_json::from_slice(&body).map_err(Into::into)
 }
 
 /// Typed access-log fields the connector forwards to the controller. Mirrors

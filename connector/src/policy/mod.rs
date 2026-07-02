@@ -129,6 +129,7 @@ mod tests {
 
     fn entry(resource_id: &str, allowed: Vec<&str>) -> AclEntry {
         AclEntry {
+            preferred_connector_id: "".to_string(),
             remote_network_id: "".to_string(),
             resource_id: resource_id.into(),
             name: resource_id.into(),

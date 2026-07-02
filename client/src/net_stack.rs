@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tun::AsyncDevice;
 
@@ -18,6 +19,7 @@ use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
 
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
+const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
 
 // --- TunDevice: bridges tun::AsyncDevice to smoltcp's Device trait ---
@@ -97,6 +99,39 @@ struct TunnelRequest {
 struct TunnelResponse {
     ok: bool,
     error: Option<String>,
+}
+
+async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    if body.len() > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {} bytes", body.len()));
+    }
+
+    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_framed_json<R, T>(reader: &mut R) -> Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {length} bytes"));
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).await?;
+    serde_json::from_slice(&body).map_err(Into::into)
 }
 
 // --- Per-connection relay state (lives in the smoltcp loop) ---
@@ -230,11 +265,11 @@ pub async fn run(
                 match transports.get(&(ip, port)) {
                     Some(Some(transports)) => {
                         // Managed resource, connector online → tunnel via QUIC.
-                        if let Some(transport) = transports.first() {
-                            let pool_c = transport.clone();
+                        if !transports.is_empty() {
+                            let transports = transports.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = relay_tcp_to_quic(
-                                    pool_c,
+                                    transports,
                                     dest,
                                     port,
                                     tcp_to_quic_rx,
@@ -346,43 +381,80 @@ fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
 /// `tcp_to_quic_rx` carries bytes read from the TCP socket (client → resource).
 /// `quic_to_tcp_tx` carries bytes read from the QUIC stream (resource → client).
 async fn relay_tcp_to_quic(
-    transport: Arc<ClientTransport>,
+    transports: Vec<Arc<ClientTransport>>,
     destination: String,
     port: u16,
     mut tcp_to_quic_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     quic_to_tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
 ) -> Result<()> {
-    let stream = transport.open_authenticated_stream().await?;
-    let (mut recv, mut send) = tokio::io::split(stream);
+    let mut selected_stream = None;
 
-    // Send the tunnel handshake to the connector.
-    let req = TunnelRequest {
-        token: String::new(),
-        destination: destination.clone(),
-        port,
-        protocol: "tcp".to_string(),
-    };
-    send.write_all(&serde_json::to_vec(&req)?).await?;
+    for transport in transports {
+        let candidate = match transport.open_authenticated_stream().await {
+            Ok(stream) => stream,
 
-    // Read the connector's JSON response.
-    let mut resp_buf = vec![0u8; 1024];
-    let n = recv.read(&mut resp_buf).await?;
-    if n == 0 {
-        return Err(anyhow!("connector closed stream before sending response"));
-    }
-    let resp: TunnelResponse = serde_json::from_slice(&resp_buf[..n])
-        .map_err(|e| anyhow!("invalid tunnel response: {}", e))?;
-    if !resp.ok {
-        return Err(anyhow!(
-            "tunnel denied for {}:{}: {}",
-            destination,
+            Err(e) => {
+                tracing::warn!(
+                    destination = %destination,
+                    port,
+                    error = %e,
+                    "failed to connect to connector, trying next"
+                );
+                continue;
+            }
+        };
+
+        let mut stream = candidate;
+
+        // Send the tunnel handshake to the connector.
+        let req = TunnelRequest {
+            token: String::new(),
+            destination: destination.clone(),
             port,
-            resp.error.unwrap_or_default()
-        ));
+            protocol: "tcp".to_string(),
+        };
+        if let Err(e) = write_framed_json(&mut stream, &req).await {
+            tracing::warn!(error = %e, "failed to send TunnelRequest");
+            continue;
+        }
+
+        // Read the connector's framed JSON response.
+        let resp: TunnelResponse = match read_framed_json(&mut stream).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e, 
+                    "failed to read TunnelResponse"
+                );
+                continue;
+            }
+        };
+        if resp.ok {
+            tracing::info!(
+                dest = %destination,
+                port,
+                "tunnel opened"
+            );
+            selected_stream = Some(stream);
+            break;
+        }
+        match resp.error.as_deref() {
+            Some("SHIELD_NOT_ATTACHED") => {
+                tracing::warn!(
+                    dest = %destination,
+                    port,
+                    "shield not attached, trying next connector"
+                );
+                continue;
+            }
+            _ => {
+                return Err(anyhow!("tunnel denied: {}", resp.error.unwrap_or_default()));
+            }
+        }
     }
-
-    tracing::info!(dest = %destination, port, "tunnel open — relaying");
-
+    let stream = selected_stream
+        .ok_or_else(|| anyhow!("no connector accepted tunnel for {}: {}", destination, port))?;
+    let (mut recv, mut send) = tokio::io::split(stream);
     // Bidirectional relay loop.
     let mut quic_buf = vec![0u8; 65536];
     loop {

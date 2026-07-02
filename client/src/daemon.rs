@@ -903,7 +903,7 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
     Ok(result)
 }
 
-fn ordered_connectors_for_entry<'a>(
+pub(crate) fn ordered_connectors_for_entry<'a>(
     entry: &AclEntry,
     rn: &'a AclRemoteNetwork,
 ) -> Vec<&'a AclConnector> {
