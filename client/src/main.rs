@@ -1,4 +1,5 @@
 mod appmeta;
+mod auth;
 mod config;
 mod daemon;
 #[cfg(test)]
