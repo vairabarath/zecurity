@@ -115,7 +115,7 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 			ConnectorId:         row.ConnectorID,
 			ConnectorTunnelAddr: tunnelAddr,
 			ConnectorSpiffe:     spiffe,
-			RelayAddr:           row.RelayAddr,
+			RelayAddr:           resolveConnectorRelayAddr(row.RelayPublicAddr, row.RelayObservedHost),
 			RelaySpiffeId:       relaySpiffe,
 		})
 	}
@@ -185,6 +185,21 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 		RelayAddr:      relayAddr,
 		RelaySpiffeId:  relaySPIFFEID,
 	}, nil
+}
+
+// resolveConnectorRelayAddr builds the per-connector relay address for an
+// ACLConnector. A configured public_addr wins as-is; otherwise the observed IP
+// of a public-scope relay is joined with the default relay port via
+// net.JoinHostPort so IPv6 is bracketed correctly (e.g. "[2001:db8::1]:9093").
+// Returns "" when the connector has no relay coordinates.
+func resolveConnectorRelayAddr(publicAddr, observedHost string) string {
+	if publicAddr != "" {
+		return publicAddr
+	}
+	if observedHost != "" {
+		return net.JoinHostPort(observedHost, defaultRelayPort)
+	}
+	return ""
 }
 
 func routeTypeForResource(status, shieldID string) (string, error) {

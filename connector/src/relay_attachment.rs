@@ -1,11 +1,11 @@
 // Shared state describing the connector's current relay attachment.
 //
-// Sprint 11 Phase 2: dual-slot to support make-before-break migration.
-// `active` is what the heartbeat reports to the controller and what the
-// device tunnel routes through. `pending` is the new relay during the
-// brief Phase-3 window between successful registration on the new relay
-// and the drain expiry on the old one. The controller never observes
-// `pending` — the heartbeat always reports `active` only.
+// A single `active` slot holds the relay the heartbeat reports to the
+// controller. During make-before-break migration, `run_session` flips
+// `active` to the new relay the instant registration on it succeeds, so
+// new client streams route to the new relay immediately. The old relay's
+// connection is drained and aborted independently by the selector — it is
+// not tracked here.
 
 use std::sync::Arc;
 
@@ -21,7 +21,6 @@ pub struct RelayAttachment {
 #[derive(Debug, Default)]
 struct Slot {
     active: Option<RelayAttachment>,
-    pending: Option<RelayAttachment>,
 }
 
 #[derive(Clone)]
@@ -64,18 +63,6 @@ impl RelayAttachmentSlot {
         }
     }
 
-    pub async fn set_pending(&self, attachment: Option<RelayAttachment>) {
-        self.inner.write().await.pending = attachment;
-    }
-
-    /// Phase-3 commit: pending becomes active, pending clears. No-op if
-    /// pending was None.
-    pub async fn promote_pending(&self) {
-        let mut guard = self.inner.write().await;
-        if let Some(p) = guard.pending.take() {
-            guard.active = Some(p);
-        }
-    }
 }
 
 pub fn new_slot() -> RelayAttachmentSlot {

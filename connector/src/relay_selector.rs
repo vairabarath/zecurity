@@ -37,7 +37,7 @@ use crate::proto::{
     ConnectorControlMessage, ConnectorRelayState, LabelledRelayInfo, LabelledRelayList,
     RelayCapacityLabel,
 };
-use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
+use crate::relay_attachment::RelayAttachmentSlot;
 use crate::relay_client;
 use crate::relay_handler::{RelayDrainTracker, RelayHandler};
 use crate::relay_probe::{probe_relays, RelayProbeResult};
@@ -79,9 +79,19 @@ struct ActiveRelay {
 }
 
 enum State {
-    Disconnected,
+    /// `next_backoff` is the delay to use if this bootstrap attempt fails and
+    /// we fall into `Backoff`. It grows across consecutive failed cycles and
+    /// resets to `reconnect_base` after a healthy connection (see `failover`).
+    Disconnected { next_backoff: Duration },
     Connected(ActiveRelay),
     Backoff { delay: Duration },
+}
+
+/// Compute the next exponential-backoff delay: `current * factor`, capped at
+/// `max`, with a 1s floor so a misconfigured zero base can't busy-loop.
+fn next_backoff_delay(current: Duration, factor: f64, max: Duration) -> Duration {
+    let scaled = current.mul_f64(factor.max(1.0));
+    scaled.min(max).max(Duration::from_secs(1))
 }
 
 /// Public entry. Runs forever; spawn from main.
@@ -93,7 +103,9 @@ pub async fn run(
     ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
 ) -> ! {
     info!("Relay selector starting");
-    let mut state = State::Disconnected;
+    let mut state = State::Disconnected {
+        next_backoff: cfg.reconnect_base,
+    };
     let mut current_list = relay_list_rx.borrow_and_update().clone();
 
     loop {
@@ -107,8 +119,16 @@ pub async fn run(
         let list = current_list.clone().expect("checked just above");
 
         state = match state {
-            State::Disconnected => {
-                bootstrap(&cfg, &list, &relay_handler, &attachment_slot, &ctrl_tx).await
+            State::Disconnected { next_backoff } => {
+                bootstrap(
+                    &cfg,
+                    &list,
+                    &relay_handler,
+                    &attachment_slot,
+                    &ctrl_tx,
+                    next_backoff,
+                )
+                .await
             }
             State::Connected(active) => {
                 connected_step(
@@ -128,9 +148,9 @@ pub async fn run(
                     delay_ms: delay.as_millis() as u64,
                 });
                 tokio::time::sleep(delay).await;
-                let next = (delay.as_secs_f64() * cfg.reconnect_backoff_factor) as u64;
-                let _next_delay = Duration::from_secs(next.min(cfg.reconnect_max.as_secs()).max(1));
-                State::Disconnected
+                let next_backoff =
+                    next_backoff_delay(delay, cfg.reconnect_backoff_factor, cfg.reconnect_max);
+                State::Disconnected { next_backoff }
             }
         };
     }
@@ -142,11 +162,12 @@ async fn bootstrap(
     relay_handler: &Arc<RelayHandler>,
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
+    next_backoff: Duration,
 ) -> State {
     if list.relays.is_empty() {
         warn!("LabelledRelayList is empty; entering backoff");
         return State::Backoff {
-            delay: cfg.reconnect_base,
+            delay: next_backoff,
         };
     }
 
@@ -195,7 +216,7 @@ async fn bootstrap(
 
     warn!("All relays in current list failed to connect; entering backoff");
     State::Backoff {
-        delay: cfg.reconnect_base,
+        delay: next_backoff,
     }
 }
 
@@ -334,7 +355,7 @@ async fn reprobe_and_maybe_migrate(
                     relay_handler,
                     attachment_slot,
                     ctrl_tx,
-                    Some(best.score),
+                    Some(info),
                 )
                 .await;
             }
@@ -356,6 +377,40 @@ fn is_meaningful_improvement(current_score: u64, best_score: u64) -> bool {
     delta >= ratio_threshold.max(MIGRATION_IMPROVEMENT_MIN_MS)
 }
 
+/// Order migration targets by preference, de-duplicated and with the relay
+/// we're leaving excluded: the explicit probe winner first, then valid
+/// persisted-ranking entries (best RTT first), then any remaining listed
+/// relays. `valid_entries` preserves rank order, and the ranking file is
+/// persisted score-sorted, so ranking entries arrive best-first.
+fn build_migration_candidates(
+    state_dir: &std::path::Path,
+    list: &LabelledRelayList,
+    old_relay_id: &str,
+    preferred: Option<LabelledRelayInfo>,
+) -> Vec<LabelledRelayInfo> {
+    let in_list = |id: &str| list.relays.iter().find(|r| r.relay_id == id).cloned();
+
+    // Assemble in priority order, then de-dup preserving first occurrence.
+    let mut prioritized: Vec<LabelledRelayInfo> = Vec::new();
+    if let Some(p) = preferred.and_then(|p| in_list(&p.relay_id)) {
+        prioritized.push(p);
+    }
+    if let Some(ranking) = RelayRanking::load(state_dir) {
+        for entry in ranking.valid_entries(list) {
+            if let Some(info) = in_list(&entry.relay_id) {
+                prioritized.push(info);
+            }
+        }
+    }
+    prioritized.extend(list.relays.iter().cloned());
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    prioritized
+        .into_iter()
+        .filter(|info| info.relay_id != old_relay_id && seen.insert(info.relay_id.clone()))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn migrate(
     cfg: &RelaySelectorConfig,
@@ -364,16 +419,15 @@ async fn migrate(
     relay_handler: &Arc<RelayHandler>,
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
-    _best_score_hint: Option<u64>,
+    preferred: Option<LabelledRelayInfo>,
 ) -> State {
-    // Pick a target relay. Prefer the best-scoring candidate from the most
-    // recent probe sweep that's still in the list; otherwise random order.
-    let candidates: Vec<LabelledRelayInfo> = list
-        .relays
-        .iter()
-        .filter(|r| r.relay_id != old.info.relay_id)
-        .cloned()
-        .collect();
+    // Order targets so we migrate to the relay the probe sweep actually chose:
+    //   1. the explicit `preferred` winner (if still listed),
+    //   2. valid persisted-ranking entries, best RTT first,
+    //   3. any remaining listed relays.
+    // Without this, migration would connect to whatever is first in the
+    // controller's list, discarding the probe result entirely.
+    let candidates = build_migration_candidates(&cfg.state_dir, list, &old.info.relay_id, preferred);
 
     for target in candidates {
         let (tx, rx) = oneshot::channel();
@@ -384,6 +438,7 @@ async fn migrate(
             attachment_slot.clone(),
             ctrl_tx.clone(),
             Some(tx),
+           
         );
 
         // Wait for register-OK on the new connection, or for the new session
@@ -394,16 +449,10 @@ async fn migrate(
                     from: old.info.relay_id.clone(),
                     to: target.relay_id.clone(),
                 });
-                // Pending marks the post-drain target. The old relay stays
-                // connected until its active stream count reaches zero or the
-                // drain timeout fires.
-                attachment_slot
-                    .set_pending(Some(RelayAttachment {
-                        relay_id: target.relay_id.clone(),
-                        relay_spiffe_id: target.spiffe_id.clone(),
-                        attached_at: now_unix_seconds(),
-                    }))
-                    .await;
+                // `run_session` already flipped the shared `active` attachment
+                // to the new relay on register-OK, so new client streams route
+                // there immediately. Report the switch to the controller, then
+                // drain the old connection independently below.
                 let _ = ctrl_tx
                     .send(ConnectorControlMessage {
                         body: Some(connector_control_message::Body::RelayState(
@@ -436,7 +485,6 @@ async fn migrate(
                 }
 
                 old.handle.abort();
-                attachment_slot.promote_pending().await;
 
                 emit_event(SelectorEvent::MigrationCompleted);
                 emit_event(SelectorEvent::EnteredConnected {
@@ -900,6 +948,108 @@ mod tests {
         for w in loaded.entries.windows(2) {
             assert!(w[0].score <= w[1].score);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Bug 2: exponential backoff ramp ----
+
+    #[test]
+    fn backoff_delay_ramps_and_caps() {
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(120);
+        let d1 = next_backoff_delay(base, 2.0, max);
+        let d2 = next_backoff_delay(d1, 2.0, max);
+        let d3 = next_backoff_delay(d2, 2.0, max);
+        assert_eq!(d1, Duration::from_secs(10));
+        assert_eq!(d2, Duration::from_secs(20));
+        assert_eq!(d3, Duration::from_secs(40));
+        // Ramp saturates at max and never exceeds it.
+        let mut d = base;
+        for _ in 0..20 {
+            d = next_backoff_delay(d, 2.0, max);
+        }
+        assert_eq!(d, max);
+    }
+
+    #[test]
+    fn backoff_delay_floors_and_clamps_factor() {
+        // Zero base can't busy-loop: floored to 1s.
+        assert_eq!(
+            next_backoff_delay(Duration::ZERO, 2.0, Duration::from_secs(120)),
+            Duration::from_secs(1)
+        );
+        // factor < 1.0 is clamped to 1.0 so the delay never shrinks.
+        assert_eq!(
+            next_backoff_delay(Duration::from_secs(30), 0.5, Duration::from_secs(120)),
+            Duration::from_secs(30)
+        );
+    }
+
+    // ---- Bug 1: migration target ordering ----
+
+    fn temp_state_dir(label: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("zecurity-migtargets-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn migration_prefers_explicit_target_over_list_order() {
+        // list is [a, b, c] (a first). Probe winner is c. No ranking file.
+        let dir = temp_state_dir("preferred");
+        let list = LabelledRelayList {
+            relays: vec![
+                info("a", RelayCapacityLabel::RelayCapacityHigh),
+                info("b", RelayCapacityLabel::RelayCapacityHigh),
+                info("c", RelayCapacityLabel::RelayCapacityHigh),
+            ],
+            version: 1,
+        };
+        let order = build_migration_candidates(&dir, &list, "a", Some(info("c", RelayCapacityLabel::RelayCapacityHigh)));
+        // c (preferred) first, then b from list order; a (old) excluded, c de-duped.
+        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_uses_ranking_best_first_when_no_preferred() {
+        // Persist a ranking [c(10), b(20)]; list is [a, b, c]; no preferred.
+        let dir = temp_state_dir("ranking");
+        let list = LabelledRelayList {
+            relays: vec![
+                info("a", RelayCapacityLabel::RelayCapacityHigh),
+                info("b", RelayCapacityLabel::RelayCapacityHigh),
+                info("c", RelayCapacityLabel::RelayCapacityHigh),
+            ],
+            version: 1,
+        };
+        persist_ranking(
+            &dir,
+            1,
+            &[
+                RelayProbeResult { relay_id: "c".into(), relay_addr: "c:9093".into(), spiffe_id: "s".into(), rtt_ms: 10, score: 10 },
+                RelayProbeResult { relay_id: "b".into(), relay_addr: "b:9093".into(), spiffe_id: "s".into(), rtt_ms: 20, score: 20 },
+            ],
+        );
+        let order = build_migration_candidates(&dir, &list, "a", None);
+        // Ranking best-first: c then b; list adds nothing new; a excluded.
+        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migration_ignores_preferred_absent_from_list_and_excludes_old() {
+        // preferred "z" is not in the list → ignored; falls back to list order.
+        let dir = temp_state_dir("absent");
+        let list = LabelledRelayList {
+            relays: vec![
+                info("a", RelayCapacityLabel::RelayCapacityHigh),
+                info("b", RelayCapacityLabel::RelayCapacityHigh),
+            ],
+            version: 1,
+        };
+        let order = build_migration_candidates(&dir, &list, "a", Some(info("z", RelayCapacityLabel::RelayCapacityHigh)));
+        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
