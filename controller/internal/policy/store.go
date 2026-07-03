@@ -383,8 +383,14 @@ type RemoteNetworkConnectorsRow struct {
 	ConnectorID     string
 	LanAddr         string
 	TrustDomain     string
-	RelayAddr       string // empty if connector has no placement or relay has no public addr
-	RelayID         string // empty if no placement; used to build SPIFFE ID
+	// RelayPublicAddr is the relay's configured public host:port, or empty.
+	// RelayObservedHost is the relay's observed IP (no port) when it is a
+	// public-scope relay without a configured public_addr, or empty. The
+	// compiler joins host+port in Go via net.JoinHostPort so IPv6 is bracketed
+	// correctly — never build the address by SQL string concatenation.
+	RelayPublicAddr   string
+	RelayObservedHost string
+	RelayID           string // empty if no placement; used to build SPIFFE ID
 }
 
 // GetConnectorsForRemoteNetworks returns all active connectors for the given
@@ -402,15 +408,12 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 		        c.id::text,
 		        COALESCE(c.lan_addr, ''),
 		        COALESCE(c.trust_domain, ''),
-		        COALESCE(
-		          CASE
-		            WHEN r.public_addr IS NOT NULL AND r.public_addr != ''
-		              THEN r.public_addr
-		            WHEN r.address_scope = 'public' AND r.observed_ip IS NOT NULL
-		              THEN host(r.observed_ip) || ':9093'
-		            ELSE ''
-		          END, ''
-		        ),
+		        COALESCE(NULLIF(r.public_addr, ''), ''),
+		        CASE
+		          WHEN r.address_scope = 'public' AND r.observed_ip IS NOT NULL
+		            THEN host(r.observed_ip)
+		          ELSE ''
+		        END,
 		        COALESCE(r.id::text, '')
 		   FROM connectors c
 		   LEFT JOIN connector_relay_placement crp ON crp.connector_id = c.id
@@ -428,7 +431,7 @@ func (s *Store) GetConnectorsForRemoteNetworks(ctx context.Context, remoteNetwor
 	var out []*RemoteNetworkConnectorsRow
 	for rows.Next() {
 		r := &RemoteNetworkConnectorsRow{}
-		if err := rows.Scan(&r.RemoteNetworkID, &r.ConnectorID, &r.LanAddr, &r.TrustDomain, &r.RelayAddr, &r.RelayID); err != nil {
+		if err := rows.Scan(&r.RemoteNetworkID, &r.ConnectorID, &r.LanAddr, &r.TrustDomain, &r.RelayPublicAddr, &r.RelayObservedHost, &r.RelayID); err != nil {
 			return nil, fmt.Errorf("scan connector row: %w", err)
 		}
 		out = append(out, r)
