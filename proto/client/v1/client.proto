@@ -26,6 +26,14 @@ service ClientService {
   // GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
   // Validates access_token and device_id; default-deny if either is invalid.
   rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
+
+ // RevokeDevice — mark a client device as revoked. Called by the CLI on
+  // logout; also usable by admin flows in the future. Best-effort from the
+  // CLI's perspective — logout must not block on this RPC. Authenticates
+  // ownership via access_token; the device_id must belong to the token's
+  // user + workspace. Removes the device's SPIFFE from subsequent ACL
+  // compiles and bumps the workspace policy version.
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
 }
 
 // ── GetAuthConfig ──────────────────────────────────────────────────────────
@@ -147,4 +155,15 @@ message ACLEntry {
   string shield_id                   = 8; // set when route_type == "shield"
   string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
   string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
+}
+// ── RevokeDevice ───────────────────────────────────────────────────────────
+
+message RevokeDeviceRequest {
+  string access_token = 1;
+  string device_id    = 2;
+}
+
+message RevokeDeviceResponse {
+  // Intentionally empty in v1. Reserved for future fields (revoked_at,
+  // was_already_revoked, etc.) without breaking the wire format.
 }
