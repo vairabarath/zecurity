@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net"
+	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -297,8 +299,7 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 		       COALESCE(public_addr, ''),
 		       COALESCE(host(observed_ip), ''),
 		       COALESCE(address_scope, ''),
-		       capacity_label,
-		       EXTRACT(EPOCH FROM last_label_changed_at)::bigint
+		       capacity_label
 		  FROM relays
 		 WHERE status = 'active'
 		   AND capacity_label IN ('high', 'medium')
@@ -310,11 +311,8 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 
 	list := &connectorpb.LabelledRelayList{}
 	for rows.Next() {
-		var (
-			id, publicAddr, observedIP, addrScope, label string
-			labelChangedAt                               int64
-		)
-		if err := rows.Scan(&id, &publicAddr, &observedIP, &addrScope, &label, &labelChangedAt); err != nil {
+		var id, publicAddr, observedIP, addrScope, label string
+		if err := rows.Scan(&id, &publicAddr, &observedIP, &addrScope, &label); err != nil {
 			return nil, fmt.Errorf("scan labelled relay row: %w", err)
 		}
 		addr := publicAddr
@@ -341,11 +339,39 @@ func (s *Store) BuildLabelledRelayList(ctx context.Context) (*connectorpb.Labell
 			SpiffeId:  appmeta.RelaySPIFFEID(id),
 			Label:     lbl,
 		})
-		if uint64(labelChangedAt) > list.Version {
-			list.Version = uint64(labelChangedAt)
-		}
 	}
-	return list, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// F11: the connector compares this version by equality to decide whether to
+	// re-probe (relay_ranking.rs version_matches). It must be identical for
+	// identical content and change whenever the eligible set, an address, or a
+	// label changes — regardless of DB row order. A content fingerprint gives
+	// that; the previous wall-clock stamp did not (it changed on every broadcast
+	// and disagreed with the connect-time push, F11).
+	list.Version = relayListVersion(list.Relays)
+	return list, nil
+}
+
+// relayListVersion derives a deterministic, content-addressed version for a
+// LabelledRelayList. Order-independent (relays are sorted by id first) so the
+// same eligible set always yields the same version, and sensitive to any
+// relay id / address / label / membership change.
+//
+// SpiffeId is intentionally omitted from the fingerprint: it is a pure function
+// of RelayId (appmeta.RelaySPIFFEID above), so hashing the id already covers it.
+// If SpiffeId ever becomes independent of RelayId, add it here — otherwise two
+// relays differing only in spiffe_id would collide on the same version.
+func relayListVersion(relays []*connectorpb.LabelledRelayInfo) uint64 {
+	ordered := make([]*connectorpb.LabelledRelayInfo, len(relays))
+	copy(ordered, relays)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].RelayId < ordered[j].RelayId })
+	h := fnv.New64a()
+	for _, r := range ordered {
+		// NUL separators keep field boundaries unambiguous across concatenation.
+		fmt.Fprintf(h, "%s\x00%s\x00%d\x00", r.RelayId, r.RelayAddr, int32(r.Label))
+	}
+	return h.Sum64()
 }
 
 // EvaluateCapacityLabel runs the tier-label hysteresis state machine against

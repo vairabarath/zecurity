@@ -141,16 +141,17 @@ func main() {
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
-	// changes, and eviction. Version is stamped with the broadcast time so
-	// it is strictly monotonic across pool changes — connectors compare
-	// against the version they last saw to decide whether to re-probe.
+	// changes, and eviction. The version is a content fingerprint set by
+	// BuildLabelledRelayList (F11): both this broadcast path and the
+	// connect-time push in control_stream.go agree on it, and it changes iff
+	// the eligible set / an address / a label changes — so a connector
+	// re-probes exactly when the pool actually changed.
 	broadcastRelayList := func(ctx context.Context) {
 		list, err := relayStore.BuildLabelledRelayList(ctx)
 		if err != nil {
 			log.Printf("relay pool broadcast: build list: %v", err)
 			return
 		}
-		list.Version = uint64(time.Now().UTC().Unix())
 		connectorRegistry.BroadcastRelayList(list)
 	}
 	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
