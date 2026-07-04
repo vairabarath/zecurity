@@ -7,10 +7,7 @@ pub async fn run() -> Result<()> {
     if resp.ok {
         println!("Zecurity is down.");
     } else {
-        anyhow::bail!(
-            "{}",
-            resp.error.unwrap_or_else(|| "unknown error".into())
-        );
+        anyhow::bail!("{}", resp.error.unwrap_or_else(|| "unknown error".into()));
     }
     Ok(())
 }

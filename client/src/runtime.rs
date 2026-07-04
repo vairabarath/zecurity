@@ -35,6 +35,8 @@ pub struct RuntimeState {
     pub acl_last_sync_at: Option<i64>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
+    /// Ensures only one task refreshes the session tokens at a time.
+    pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +88,15 @@ pub type SharedState = Arc<RwLock<RuntimeState>>;
 pub fn new_shared() -> SharedState {
     Arc::new(RwLock::new(RuntimeState {
         schema_version: crate::appmeta::SCHEMA_VERSION,
-        ..Default::default()
+        workspace: None,
+        user: None,
+        device: None,
+        session: None,
+        resources: Vec::new(),
+        last_sync_at: None,
+        acl_snapshot: None,
+        acl_last_sync_at: None,
+        tun_handle: None,
+        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     }))
 }

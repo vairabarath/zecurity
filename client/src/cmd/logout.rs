@@ -25,7 +25,9 @@ pub async fn run() -> Result<()> {
     // enroll/get-ACL. Failures logged and swallowed; local logout must proceed.
     if let (Some(token), Some(dev)) = (access_token.as_ref(), device_id.as_ref()) {
         if let Err(e) = revoke_device(&conf, token, dev).await {
-            eprintln!("warning: server-side device revoke failed: {e:#} (local session will still be cleared)");
+            eprintln!(
+                "warning: server-side device revoke failed: {e:#} (local session will still be cleared)"
+            );
         }
     }
 

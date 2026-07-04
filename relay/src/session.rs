@@ -307,7 +307,7 @@ async fn pipe_streams(
     mut connector_recv: RecvStream,
 ) -> Result<()> {
     let client_to_connector = async {
-        tokio::io::copy(&mut client_recv, &mut connector_send)
+        tokio::io::copy(&mut client_recv, &mut connector_send) //the client_recv is mean by the relay receive the clients data and connector_send means the relay is sending the message to the connector
             .await
             .context("pipe Client to Connector")?;
         connector_send

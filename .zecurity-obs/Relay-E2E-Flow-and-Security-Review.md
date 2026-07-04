@@ -221,16 +221,16 @@ Severity: **C**ritical / **H**igh / **M**edium / **L**ow.
 |----|-----|-------|----------|
 | F1 | **C** | Relay provisioning is unauthenticated (token machinery is dead code) | `internal/relay/provision.go:80-148`, `spiffe.go:160-164`, `token.go:53,81` |
 | F2 | **H** | No CRL/revocation check on relay outer mTLS or controller heartbeat mTLS | `relay/src/tls.rs:79-105`, `internal/relay/spiffe.go:239` |
-| F3 | **H** | Client never rebuilds transports on ACL change (stale relay/connector) | `client/src/daemon.rs:464-475,537-541,633-718` |
+| F3 | **M** | Client rebuilds transports on action-triggered ACL changes, but has no standalone background refresh loop | `client/src/daemon.rs:198-241,669-698,1007-1073` |
 | F4 | **H** | Relay eviction is broken — `inactive` violates the status CHECK constraint | `internal/relay/store.go:247-250`, `migrations/019_relays.sql:14` |
 | F5 | **H** | Relay probe rate-limiter keyed on unauthenticated `connector_id` → bypass + unbounded map | `relay/src/session.rs:34,64-109` |
-| F6 | **M** | No timeouts on the client relay leg (open_bi / Lookup / Ack / inner TLS) | `client/src/relay_pool.rs:92-149`, `transport.rs:86-100` |
+| F6 | **M** | Client relay fallback still lacks operation timeouts | `client/src/relay_pool.rs:92-149`, `transport.rs:86-100`, `net_stack.rs:416-423` |
 | F7 | **M** | Unbounded channels/buffers in client net_stack (memory DoS) | `client/src/net_stack.rs:104-121,216-217` |
 | F8 | **M** | Self-asserted SAN allowlist on self-provision path | `internal/relay/provision.go:93-100`, `pki/relay.go:120-155` |
 | F9 | **M** | `max_connections == 0` ⇒ relay permanently labeled `high` | `internal/relay/capacity_label.go:68-72` |
 | F10 | **M** | No relay cert renewal; 30-day cert expires silently | `relay/src/main.rs:42`, `internal/relay/` (no renew RPC) |
 | F11 | **M** | LabelledRelayList version inconsistency (wall-clock vs monotonic) | `main.go:153`, `control_stream.go:353` |
-| F12 | **L** | Inner-connector trust anchor mismatch: relay path trusts only Workspace CA | `client/src/relay_pool.rs:116` vs `tunnel_pool.rs:256-262` |
+| F12 | **L** | Direct connector trust store is broader than necessary | `client/src/tunnel_pool.rs:256-262` |
 | F13 | **L** | No rate limiting on Provision → unbounded row creation + CA signing | `internal/relay/provision.go:84` |
 | F14 | **L** | Deployment: `listen_port` client-controlled; observed-IP wrong behind LB | `internal/relay/heartbeat.go:242-281` |
 | F15 | **L** | Leftover debug `println("=== STDOUT TEST ===")` and `connetor_addr` typo | `control_stream.go:287`, `client/src/daemon.rs:745` |
@@ -282,19 +282,27 @@ verifier. The connector already has a `CrlManager` (`connector/src/crl.rs`) that
 the CRL — reuse that pattern on the relay (fetch from the controller, cache, refresh) and add a
 revocation check to `verifyRelayCertificate`.
 
-### F3 — Client never rebuilds transports on ACL change  **(High)**
+### F3 — Client rebuilds transports on action-triggered ACL changes, but has no standalone background refresh loop  **(Medium)**
 
-**What.** `build_transports_by_resource` runs once at `up` and its result is captured into an
-immutable `Arc<HashMap>` handed to `net_stack::run` (`daemon.rs:464-475,537-541`). The 60s ACL
-refresh updates `state.acl_snapshot` but the running data plane is never rebuilt
-(`daemon.rs:633-718`). So a relay migration/eviction, a connector going online/offline, a changed
-`relay_addr`, or added/removed ACL entries are **not picked up until the user runs `down`+`up`**.
-Combined with F4, a client can keep routing through a relay the controller has (tried to) evict.
+**What.** This finding is partially fixed. The daemon now compares the fetched ACL snapshot version
+with the in-memory version and restarts the running tunnel when the version changes during explicit
+client actions: `sync`, `resources` after TTL refresh, and login/PostLoginState. Restarting performs
+`down` then `up`, rebuilding routes, listeners, and the per-resource connector transport lists from
+the new ACL. The client also receives all connector options for a remote network, orders the
+preferred connector first, and tries the remaining connectors if a connector cannot open the stream
+or returns `SHIELD_NOT_ATTACHED`.
 
-**Fix.** Watch the ACL snapshot version; when it changes, rebuild the transport map and swap it
-into the running net_stack (e.g., behind an `ArcSwap` or a `watch` channel the data plane reads),
-tearing down transports for RNs/relays no longer present. Reuse the existing per-connector relay
-coordinates already threaded through `ACLConnector`.
+**Remaining gap.** There is no standalone background ACL refresh loop that restarts the tunnel
+without any IPC/user action. If the client stays up and no `sync`, `resources`, login, or `up`
+action occurs, it can keep the previous transport map until the next action-triggered refresh.
+For the current design this is acceptable, because failover is handled by trying the connector and
+relay options already present in the snapshot; the practical availability risk is now bounded by
+the missing relay/handshake timeouts covered in F6.
+
+**Fix.** If fully autonomous convergence is required later, add a background ACL refresh task that
+calls the existing `sync_acl_now` + `restart_tunnel_if_running` path when the snapshot version
+changes. A lower-disruption long-term alternative is to push updates into `net_stack` through a
+watch channel or `ArcSwap` and swap transport maps without a full TUN restart.
 
 ### F4 — Relay eviction is broken (status CHECK violation)  **(High)**
 
@@ -325,17 +333,20 @@ map without bound → memory-exhaustion DoS on the relay.
 reject any Probe whose body `connector_id != identity.entity_id`. Periodically prune stale windows
 (or use a bounded LRU / a fixed-size sliding window keyed by the finite set of real connectors).
 
-### F6 — No timeouts on the client relay leg  **(Medium)**
+### F6 — Client relay fallback still lacks operation timeouts  **(Medium)**
 
-**What.** The relay branch of `open_authenticated_stream` has no timeout on `open_bi`, the Lookup
-write, the Ack read, or the inner TLS handshake (`relay_pool.rs:92-149`); only the *direct* leg is
-bounded (2s, `transport.rs:72`). A stalled or malicious relay hangs the relay attempt
-indefinitely, wedging that connection attempt. `net_stack::relay_tcp_to_quic` also reads
-`TunnelResponse` into a fixed 1024-byte buffer in a single `read` with no timeout
-(`net_stack.rs:358-364`).
+**What.** The old partial-read bug on `TunnelResponse` has been fixed: the client now uses a
+4-byte length-prefixed framed JSON read. The remaining issue is timeout coverage. The relay branch
+of `open_authenticated_stream` still has no timeout on relay connect/cache lookup, `open_bi`, the
+Lookup write, the Ack read, or the inner TLS handshake (`relay_pool.rs:92-149`); only the *direct*
+leg is bounded (2s, `transport.rs:72`). `net_stack::relay_tcp_to_quic` also writes `TunnelRequest`
+and reads framed `TunnelResponse` without a timeout (`net_stack.rs:416-423`). A stalled or
+malicious relay/connector can therefore hang that connection attempt and delay failover to the next
+connector transport.
 
-**Fix.** Wrap the whole relay attempt (and each I/O step) in a timeout comparable to the direct
-path; length-prefix and bound the `TunnelResponse` read with a timeout and a size cap.
+**Fix.** Wrap the whole relay fallback attempt in an overall timeout, and add per-step timeouts for
+relay connect/open, Lookup write/Ack read, inner TLS, and TunnelRequest/TunnelResponse. On timeout,
+log and continue to the next connector transport.
 
 ### F7 — Unbounded channels/buffers in client net_stack  **(Medium)**
 
@@ -385,14 +396,26 @@ updates.
 
 **Fix.** Use one monotonic version source (the store-derived label-change epoch) in both paths.
 
-### F12 — Inner-connector trust anchor mismatch  **(Low)**
+### F12 — Direct connector trust store is broader than necessary  **(Low)**
 
-**What.** The relay-path inner handshake trusts only the Workspace CA (`relay_pool.rs:116`) while
-the direct path trusts Workspace CA + Intermediate CA (`tunnel_pool.rs:256-262`). If a connector
-leaf chains through the Intermediate, the relay-path handshake fails `UnknownIssuer`. Fail-closed,
-so not a security hole, but an availability inconsistency.
+**What.** Connector certificates are signed by the tenant Workspace CA, while relay certificates are
+signed by the Platform Intermediate CA. The relay paths already reflect this split: relay outer TLS
+trusts the Platform Intermediate CA, and relay inner connector TLS trusts only the Workspace CA
+(`relay_pool.rs:59-61,116-119`). The direct connector path currently trusts both Workspace CA and
+Intermediate CA (`tunnel_pool.rs:256-262`), which is broader than needed.
 
-**Fix.** Use the same root set for both inner-handshake paths.
+This is not an `UnknownIssuer` availability bug in the relay path; that earlier interpretation
+assumed connector certificates chain directly through the Intermediate. The remaining concern is
+defense in depth: direct connector TLS should reject other workspace-issued connector chains before
+the SPIFFE verifier has to enforce workspace isolation.
+
+**Fix.** Keep the trust anchors path-specific:
+- Direct connector TLS: Workspace CA only.
+- Relay outer TLS: Platform Intermediate CA only.
+- Relay inner connector TLS: Workspace CA only.
+
+Concretely, remove `ca_bundle.intermediate_ca` from the direct connector `RootCertStore` in
+`TunnelPool::new()`. Keep the existing SPIFFE checks.
 
 ### F13 / F14 / F15 — Lower-priority hardening & cleanup
 

@@ -284,7 +284,6 @@ func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
 func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) error {
 	ctx := stream.Context()
 
-	println("=== STDOUT TEST FROM CONTROLLER ===")
 	log.Printf("=== CONTROLLER: Control() handler invoked for connector ===")
 
 	trustDomain := TrustDomainFromContext(ctx)

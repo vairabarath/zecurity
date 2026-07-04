@@ -33,6 +33,7 @@ struct AclSyncResult {
     version: u64,
     entry_count: usize,
     synced_at: i64,
+    changed: bool,
 }
 
 pub async fn run() -> Result<()> {
@@ -195,15 +196,37 @@ async fn handle_request(
         }
 
         IpcRequest::Sync => match sync_acl_now(state, conf).await {
-            Ok(result) => IpcResponse {
-                ok: true,
-                kind: "Sync".into(),
-                acl_snapshot_version: Some(result.version),
-                acl_last_sync_at: Some(result.synced_at),
-                acl_entry_count: Some(result.entry_count),
-                synced_resources: Some(result.entry_count),
-                ..Default::default()
-            },
+            Ok(result) => {
+                if result.changed {
+                    info!(
+                        version = result.version,
+                        "ACL changed, restarting VPN or tunnel"
+                    );
+
+                    if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                        return IpcResponse {
+                            ok: false,
+                            kind: "Sync".into(),
+                            error: Some(e.to_string()),
+                            ..Default::default()
+                        };
+                    }
+                } else {
+                    info!(
+                        version = result.version,
+                        "ACL unchanged, skipping VPN or tunnel restart"
+                    );
+                }
+                IpcResponse {
+                    ok: true,
+                    kind: "Sync".into(),
+                    acl_snapshot_version: Some(result.version),
+                    acl_last_sync_at: Some(result.synced_at),
+                    acl_entry_count: Some(result.entry_count),
+                    synced_resources: Some(result.entry_count),
+                    ..Default::default()
+                }
+            }
             Err(e) => IpcResponse {
                 ok: false,
                 kind: "Sync".into(),
@@ -213,13 +236,26 @@ async fn handle_request(
         },
 
         IpcRequest::Resources => {
-            if let Err(e) = refresh_acl_if_needed(state, conf).await {
-                return IpcResponse {
-                    ok: false,
-                    kind: "Resources".into(),
-                    error: Some(e.to_string()),
-                    ..Default::default()
-                };
+            match refresh_acl_if_needed(state, conf).await {
+                Ok(Some(result)) if result.changed => {
+                    if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                        return IpcResponse {
+                            ok: false,
+                            kind: "Resources".into(),
+                            error: Some(e.to_string()),
+                            ..Default::default()
+                        };
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    return IpcResponse {
+                        ok: false,
+                        kind: "Resources".into(),
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    };
+                }
             }
 
             let s = state.read().await;
@@ -355,13 +391,59 @@ async fn handle_request(
                     info!("PostLoginState: durable state saved, runtime updated");
                     drop(s);
 
-                    if let Err(e) = sync_acl_now(state, conf).await {
-                        return IpcResponse {
-                            ok: false,
-                            kind: "PostLoginState".into(),
-                            error: Some(format!("login state saved, but ACL sync failed: {}", e)),
-                            ..Default::default()
-                        };
+                    let result = match sync_acl_now(state, conf).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return IpcResponse {
+                                ok: false,
+                                kind: "PostLoginState".into(),
+                                error: Some(format!(
+                                    "login state saved, but ACL sync failde: {}",
+                                    e
+                                )),
+                                ..Default::default()
+                            };
+                        }
+                    };
+                    info!(
+                        version = result.version,
+                        entries = result.entry_count,
+                        "ACL syncronized after login"
+                    );
+
+                    let running = tun_slot.lock().await.is_some();
+                    if !running {
+                        // Automatically connect after login.
+                        let up = handle_up(state, conf, tun_slot).await;
+
+                        if !up.ok {
+                            return IpcResponse {
+                                ok: false,
+                                kind: "PostLoginState".into(),
+                                error: Some(
+                                    up.error.unwrap_or_else(|| {
+                                        "automatic vpn startup failed".to_string()
+                                    }),
+                                ),
+                                ..Default::default()
+                            };
+                        }
+                    } else {
+                        if result.changed {
+                            if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                                return IpcResponse {
+                                    ok: false,
+                                    kind: "Sync".into(),
+                                    error: Some(e.to_string()),
+                                    ..Default::default()
+                                };
+                            }
+                        } else {
+                            info!(
+                                version = result.version,
+                                "acl unchanged after login, tunnel restart not required"
+                            );
+                        }
                     }
 
                     IpcResponse {
@@ -584,6 +666,38 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     }
 }
 
+async fn restart_tunnel_if_running(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<()> {
+    let running = tun_slot.lock().await.is_some();
+
+    if !running {
+        return Ok(());
+    }
+
+    info!("ACL changed, restarting VPN");
+
+    let down = handle_down(state, tun_slot).await;
+    if !down.ok {
+        anyhow::bail!(
+            "{}",
+            down.error.unwrap_or_else(|| "failed to stop VPN".into())
+        );
+    }
+
+    let up = handle_up(state, conf, tun_slot).await;
+    if !up.ok {
+        anyhow::bail!(
+            "{}",
+            up.error.unwrap_or_else(|| "failed to start VPN".into())
+        );
+    }
+
+    Ok(())
+}
+
 fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState) {
     s.workspace = Some(WorkspaceInfo::from(stored));
     s.user = Some(UserInfo::from(stored));
@@ -663,6 +777,10 @@ async fn fetch_acl_snapshot_with_refresh(
     state: &SharedState,
     device_id: &str,
 ) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
     let (access_token, refresh_token) = {
         let s = state.read().await;
         let sess = s.session.as_ref().ok_or_else(|| {
@@ -678,6 +796,36 @@ async fn fetch_acl_snapshot_with_refresh(
                 return Err(err);
             }
             info!("ACL fetch returned Unauthenticated; refreshing session");
+            // Serialize token refreshes across the daemon.
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+                Ok(snapshot) => {
+                    info!("ACL fetch succeeded after another task refreshed the session");
+                    return Ok(snapshot);
+                }
+
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired.
+                    // Continue to refresh below.
+                }
+
+                Err(err) => {
+                    return Err(err);
+                }
+            }
+
             let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
                 .await
                 .map_err(|e| match e {
@@ -739,10 +887,9 @@ fn is_grpc_unauthenticated(err: &anyhow::Error) -> bool {
 ///   - Session exists and expires_at is in the future: sleep until
 ///     `expires_at - REFRESH_LEAD_SECS`, then refresh.
 ///
-/// On SessionDead the loop exits — the refresh token is dead server-side
-/// and the user must re-authenticate. The scheduler is not re-spawned
-/// until the daemon restarts; that's fine because SessionDead is
-/// terminal for this workspace's tokens.
+/// On SessionDead the loop does not exit. It sleeps and keeps polling so a
+/// later PostLoginState can install a fresh session without requiring a daemon
+/// restart.
 async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
     const REFRESH_LEAD_SECS: i64 = 60;
     const NO_SESSION_POLL_SECS: u64 = 60;
@@ -779,7 +926,20 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
                 None => continue, // logged out between sleep and now
             }
         };
+        let refresh_lock = {
+            let s = state.read().await;
+            s.refresh_lock.clone()
+        };
 
+        let _guard = refresh_lock.lock().await;
+        let (access_token, refresh_token) = {
+            let s = state.read().await;
+
+            match s.session.as_ref() {
+                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
+                None => continue,
+            }
+        };
         match auth::refresh_access_token(&conf, &access_token, &refresh_token).await {
             Ok(new_tokens) => {
                 if let Err(e) = state_store::save_rotated_tokens(
@@ -808,8 +968,9 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
                 );
             }
             Err(auth::RefreshError::SessionDead) => {
-                warn!("refresh session dead — user must sign in again; scheduler exiting");
-                return;
+                warn!("refresh session dead — user must sign in again; scheduler polling");
+                tokio::time::sleep(std::time::Duration::from_secs(NO_SESSION_POLL_SECS)).await;
+                continue;
             }
             Err(auth::RefreshError::Transient(e)) => {
                 warn!(error = %e, "transient refresh failure; retry in {}s", TRANSIENT_RETRY_SECS);
@@ -884,12 +1045,21 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
         // we only need CA + device id here.
         (device.ca_cert_pem.clone(), device.id.clone())
     };
-
+    let old_version = {
+        let s = state.read().await;
+        s.acl_snapshot.as_ref().map(|a| a.version)
+    };
     let snapshot = fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await?;
+
+    let changed = match old_version {
+        Some(v) => v != snapshot.version,
+        None => true,
+    };
     let result = AclSyncResult {
         version: snapshot.version,
         entry_count: snapshot.entries.len(),
         synced_at: now_unix(),
+        changed,
     };
 
     let mut s = state.write().await;
@@ -965,7 +1135,7 @@ pub(crate) fn build_transports_by_resource(
                 format!(
                     "{}:{}",
                     rn.remote_network_id,
-                    connector.connector_id.clone()
+                    connector.connector_tunnel_addr.clone()
                 )
             } else {
                 connector.connector_id.clone()
@@ -998,8 +1168,8 @@ fn build_transport_for_connector(
         connector.connector_tunnel_addr.clone()
     } else {
         info!(
-            connetor_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),
-            "using default connector address address"
+            connector_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),
+            "using default connector address"
         );
         crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string()
     };

@@ -40,6 +40,11 @@ Two related improvements to client-to-connector tunnel reliability:
    a preferred connector. The client places that connector first in the
    transport list, falling back to other connectors automatically.
 
+5. **ACL-change tunnel refresh** — when the client fetches a newer ACL
+   snapshot version, it restarts the running tunnel so route/listener state is
+   rebuilt from the new ACL. If the snapshot version is unchanged, no restart
+   occurs.
+
 ---
 
 ## Dependency Graph
@@ -88,6 +93,7 @@ Phase E — Shield: peer connector failover (M3) [independent]
 - [x] **M1-C4** `client/src/net_stack.rs` — `relay_tcp_to_quic` accepts `Vec<Arc<ClientTransport>>`; iterates in order, continues to next on connection failure
 - [x] **M1-C5** `client/src/net_stack.rs` — add `write_framed_json` / `read_framed_json`: 4-byte big-endian length prefix + JSON body; max 16 KB
 - [x] **M1-C6** `client/src/net_stack.rs` — use `write_framed_json` for tunnel handshake send
+- [x] **M1-C7** `client/src/daemon.rs` — restart running tunnel after manual sync or resource-triggered refresh when ACL snapshot version changes
 - [x] **Build gate:** `cd client && cargo build`
 
 ### Phase D — M3: Connector Framed Tunnel Handshake
@@ -135,6 +141,7 @@ Phase E — Shield: peer connector failover (M3) [independent]
 - [x] `MAX_TUNNEL_HANDSHAKE_SIZE` is 16 KB on both sides (was 4 KB connector-side).
 - [x] Shield receives `PeerConnectorList` after every health report; fails over to sibling connector on primary disconnect.
 - [x] `derive_grpc_addr` correctly converts `:9092` tunnel addr to `:9091` gRPC addr for IPv4, hostname, and IPv6.
+- [x] Client restarts a running tunnel only when the fetched ACL snapshot version changes; unchanged snapshots do not disrupt active tunnel state.
 
 ---
 

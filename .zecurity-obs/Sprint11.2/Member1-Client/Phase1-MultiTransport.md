@@ -95,4 +95,33 @@ async fn relay_tcp_to_quic(
 - [x] **M1-C5** `net_stack.rs` — `write_framed_json` / `read_framed_json` helpers (16 KB max)
 - [x] **M1-C6** `net_stack.rs` — tunnel handshake send uses `write_framed_json`
 - [x] **M1-C7** `daemon_tests.rs` — updated tests for new transport list return type
+- [x] **M1-C8** `daemon.rs` — restart running tunnel after ACL sync/refresh only when snapshot version changes
 - [x] **Build gate:** `cd client && cargo build` passes
+
+## Post-Phase Fixes
+
+### Fix: Restart Tunnel on ACL Version Change
+
+**Issue:** The client could fetch a newer ACL snapshot while the tunnel was
+already up, but the running TUN routes and smoltcp listeners stayed on the old
+snapshot until the user manually cycled the tunnel.
+
+**Root Cause:** ACL sync updated `RuntimeState.acl_snapshot`, but no caller
+checked whether the snapshot version changed and restarted the tunnel.
+
+**Fix Applied:**
+
+- `client/src/daemon.rs` — `AclSyncResult` now carries `changed`.
+- `client/src/daemon.rs` — `sync_acl_now()` compares the previous in-memory
+  ACL snapshot version with the newly fetched version.
+- `client/src/daemon.rs` — `zecurity-client sync` restarts the tunnel when
+  `changed == true`.
+- `client/src/daemon.rs` — `zecurity-client resources` restarts the tunnel
+  when its TTL refresh fetches a changed ACL.
+- Unchanged ACL versions skip restart to avoid disrupting active tunnel state.
+
+**Build Check:**
+
+```bash
+cargo build --manifest-path client/Cargo.toml
+```

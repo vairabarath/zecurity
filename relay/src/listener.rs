@@ -21,6 +21,8 @@ pub async fn run_listener(
     let endpoint = Endpoint::server(server_config, bind_addr).context("create Relay endpoint")?;
     let connection_permits = Arc::new(Semaphore::new(limits.max_connections));
     let session_limits = session::SessionLimits::new(&limits);
+
+
     info!(
         addr = %bind_addr,
         max_connections = limits.max_connections,
@@ -28,6 +30,8 @@ pub async fn run_listener(
         max_bidi_streams = limits.max_bidi_streams,
         "Relay QUIC listener started"
     );
+
+    
 
     while let Some(incoming) = endpoint.accept().await {
         let permit = match connection_permits.clone().try_acquire_owned() {
