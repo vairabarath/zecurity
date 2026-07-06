@@ -45,3 +45,62 @@ discussion — the "Options" and "Open Questions" are the point; the
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.
+
+---
+
+## Implementation Order
+
+> **Correction to a common assumption:** the two P0s do **not** require the provider *dashboard
+> (UI)*. They require the provider **identity/authorization tier** ([[PENDING-07a-Provider-Identity-and-Authorization]])
+> — a small backend slice (`provider_users` allowlist + `RequireProvider` + a `/provider` route
+> group + per-action audit), drivable by CLI. The dashboard *UI* ([[PENDING-07b-Provider-Console-Packaging]])
+> is a Beta concern. So the true first buildable step is **07a**, then the P0s land correctly on
+> top of it.
+
+### Phase 0 — Provider foundation + P0 security *(Alpha: internal, CLI-driven)*
+1. **07a (alpha slice)** — provider identity tier: `provider_users` allowlist via corp SSO,
+   `RequireProvider`, `/provider` API route group, one authz chokepoint, per-action audit.
+   *The boundary everything provider-side sits on.*
+2. **PENDING-01** — authenticated relay provisioning (verify + burn the token; re-home
+   `POST /api/relays` under `/provider`). *Lands correctly on 07a.*
+3. **PENDING-02** — CRL/OCSP enforcement in the relay + controller heartbeat verifiers (backend,
+   independent); expose the relay-revoke trigger under `/provider`.
+
+> ⚠️ Security escape hatch: 01's token-*verify* can be hotfixed on its own to stop anonymous CA
+> signing **before** 07a is ready — but re-homing token *issuance* under 07a is required to make
+> it authorization-correct.
+
+### Phase 1 — Relay correctness + signal *(P1)*
+4. **PENDING-03** — decouple transport from ACL. Start with the cheap client-rebuild-on-ACL-change
+   fix (review finding F3); do full `TransportSnapshot` only if automatic relay failover is
+   prioritized.
+5. **PENDING-10** — observability (relay capacity, migration/probe health, cert-expiry runway,
+   failover convergence). *Feeds the provider fleet views in Phase 2.*
+
+### Phase 2 — Provider dashboard (Beta) + enterprise identity *(P1)*
+6. **PENDING-07b / 07-Beta** — the React provider console (relay fleet + tenant lifecycle, basic
+   provider RBAC). *Now there's data + a tier worth rendering.*
+7. **PENDING-04** — multiple IdPs / enterprise SSO. *Unblocks 05 and 06.*
+
+### Phase 3 — Identity depth + zero-trust *(P2)*
+8. **PENDING-05** — SCIM directory sync *(needs 04)*.
+9. **PENDING-06** — MFA / step-up *(needs 04; relates to 09)*.
+10. **PENDING-13** — client device lifecycle + cert renewal. *Provides 02's client-device revoke trigger.*
+11. **PENDING-09** — continuous / re-evaluated authorization.
+12. **PENDING-08** — device posture *(best alongside 09)*.
+
+### Phase 4 — Maturity / GA *(P2)*
+13. **PENDING-11 (full)** — audit + SIEM export (beyond the provider-action audit slice from Phase 0).
+14. **PENDING-12** — controller HA / multi-region.
+15. **PENDING-14** — DNS / FQDN-based resource access.
+16. **07-GA** — partner/reseller multi-tenancy, billing/quotas, break-glass impersonation, SoD roles.
+
+### Dependency summary
+- **07a** → unblocks *correct* 01, 02's relay-revoke trigger, 07b, and the entire provider plane.
+- **04** → unblocks 05, 06.
+- **13** → supplies 02's client-device revoke trigger.
+- **09 ↔ 08, 06** → the zero-trust posture cluster.
+- **10** → feeds the 07 dashboard fleet views and 03 failover visibility.
+- **07** (vision) is a reference/north-star, not a build step; it decomposes into 07a (Phase 0)
+  and 07b (Phase 2).
+
