@@ -488,21 +488,36 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
 	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
-	_, err := h.Pool.Exec(ctx,
-		`UPDATE connectors
-		    SET version           = $1,
-		        hostname          = $2,
-		        public_ip         = $3,
-		        lan_addr          = NULLIF($4, ''),
-		        last_heartbeat_at = NOW(),
-		        updated_at        = NOW()
-		  WHERE id = $5`,
-		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID,
-	)
+	var connectorChanged bool
+	err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+		     SELECT status, COALESCE(lan_addr, '') AS lan_addr
+		       FROM connectors
+		      WHERE id = $5
+		   ),
+		   updated AS (
+		     UPDATE connectors
+		        SET status            = 'active',
+		            version           = $1,
+		            hostname          = $2,
+		            public_ip         = $3,
+		            lan_addr          = NULLIF($4, ''),
+		            last_heartbeat_at = NOW(),
+		            updated_at        = NOW()
+		      WHERE id = $5
+		      RETURNING id
+		   )
+		   SELECT current.status IS DISTINCT FROM 'active'
+		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), '')
+		     FROM current, updated`,
+		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
+	} else if connectorChanged && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+			log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+		}
 	}
-
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
 	// connector claims to be attached; empty means detached. The UPSERT returns
 	// true iff the relay actually changed, so we only invalidate the policy

@@ -333,7 +333,7 @@ func main() {
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
+	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
 	go shieldSvc.RunDisconnectWatcher(ctx)
 	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	go func() {
