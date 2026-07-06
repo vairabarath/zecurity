@@ -1715,3 +1715,17 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Implement authenticated single-use Relay provisioning and stale/offline
   heartbeat health transitions.
+
+## 2026-07-06 — Codex (Client fwmark stale-rule cleanup)
+
+**What was done:**
+- Updated client TUN policy cleanup to remove both the current `fwmark 0x5a lookup 105 priority 49` rule and the stale older `fwmark 0x5a lookup main priority 49` rule.
+- Left `configure_allowed_flows()` adding only the current table 105 rule.
+- Updated the stale daemon comment that referenced a non-existent SO_MARK NIC bypass path.
+- Documented the fix and manual verification in Sprint 9 client TUN notes and path overview.
+
+**Verification:**
+- `cd client && cargo build` passed. Existing warnings remain in daemon/config/runtime/error code.
+
+**What's next:**
+- Verify on a Linux host with CAP_NET_ADMIN: after `zecurity-client down` then `zecurity-client up`, `ip rule show | grep 'fwmark 0x5a'` should show only `lookup 105` and no `lookup main`.

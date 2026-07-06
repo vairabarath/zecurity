@@ -1102,7 +1102,7 @@ pub(crate) fn ordered_connectors_for_entry<'a>(
 // Three cases at lookup time (enforced in net_stack):
 //   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
 //   Some(None)    — managed resource, connector offline → fail closed
-//   None (absent) — unmanaged traffic, not in ACL       → bypass via SO_MARK NIC
+//   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
 pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],

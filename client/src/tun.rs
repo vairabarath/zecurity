@@ -213,6 +213,20 @@ fn cleanup_policy_routes() {
         .stderr(Stdio::null())
         .status();
     let _ = Command::new("ip")
+        .args([
+            "rule",
+            "del",
+            "fwmark",
+            ZECURITY_MARK,
+            "lookup",
+            "main",
+            "priority",
+            ZECURITY_RULE_PRIORITY,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("ip")
         .args(["route", "flush", "table", ZECURITY_ROUTE_TABLE])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

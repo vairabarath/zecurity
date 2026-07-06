@@ -487,3 +487,28 @@ IpcRequest::Up => handle_up(state, conf, tun_slot).await
 ```
 
 `refresh_acl_if_needed()` refreshes when the snapshot is missing or older than 60 seconds. If refresh fails and a cached snapshot exists, the daemon logs a warning and uses the cache; if no snapshot exists, the request fails closed. `PostLoginState` now calls `sync_acl_now()` before returning success, and `zecurity-client login` checks the daemon response. Status also prints the last successful ACL sync age. The client package version was bumped to `1.0.12` for release.
+
+### Fix: stale fwmark rule using lookup main
+**File:** `client/src/tun.rs`, `client/src/daemon.rs`
+**Issue:** Older client builds created `ip rule add fwmark 0x5a lookup main priority 49`. Newer builds correctly add `ip rule add fwmark 0x5a lookup 105 priority 49`, but cleanup only removed the table 105 rule. After upgrade, both priority-49 rules could coexist and marked protected traffic could hit `lookup main` before table 105.
+
+**Root Cause:** `cleanup_policy_routes()` deleted only the current Zecurity rule and did not remove the stale pre-table-105 bypass rule. A stale daemon comment still described unmanaged traffic as bypassing via `SO_MARK`, but the current client has no SO_MARK NIC implementation.
+
+**Fix Applied:**
+```rust
+// current rule cleanup
+ip rule del fwmark 0x5a lookup 105 priority 49
+
+// stale-rule cleanup
+ip rule del fwmark 0x5a lookup main priority 49
+```
+
+`configure_allowed_flows()` still calls `cleanup_policy_routes()` before adding the current rule, and still adds only `fwmark 0x5a lookup 105 priority 49`. The daemon comment now says absent ACL traffic has no tunnel route.
+
+Manual verification:
+```bash
+zecurity-client down
+zecurity-client up
+ip rule show | grep 'fwmark 0x5a'
+```
+Expected: exactly one rule, `from all fwmark 0x5a lookup 105`. No `fwmark 0x5a lookup main` rule should remain.
