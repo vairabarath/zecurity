@@ -413,15 +413,23 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace.
+	// Confirm the device belongs to this user and workspace, and is not revoked.
+	// The access token is user-scoped (not device-scoped), so a revoked device
+	// with a still-valid token would otherwise keep pulling ACL snapshots — a
+	// control-plane leak. Gate on revoked_at here; cert revocation (CRL) handles
+	// the data plane separately.
 	var deviceWorkspaceID string
+	var revokedAt *time.Time
 	err = s.pool.QueryRow(ctx,
-		`SELECT workspace_id FROM client_devices
+		`SELECT workspace_id, revoked_at FROM client_devices
 		 WHERE id = $1 AND user_id = $2`,
 		req.GetDeviceId(), claims.UserID,
-	).Scan(&deviceWorkspaceID)
+	).Scan(&deviceWorkspaceID, &revokedAt)
 	if err != nil || deviceWorkspaceID != claims.TenantID {
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
+	}
+	if revokedAt != nil {
+		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
 	}
 
 	workspaceID := claims.TenantID

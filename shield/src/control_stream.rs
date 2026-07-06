@@ -303,6 +303,7 @@ fn apply_peer_connector_list(
     peers: Vec<crate::proto::PeerConnector>,
 ) {
     if peers.is_empty() {
+        warn!("ignored empty PeerConnectorList");
         return;
     }
     let mut new_list: Vec<ConnectorRef> = peers
@@ -313,14 +314,12 @@ fn apply_peer_connector_list(
         })
         .collect();
 
-    // Ignore no-op updates (same connector set + same addresses). Compare
-    // by the sorted-by-id projection so ordering differences in the wire
-    // message don't trigger a spurious write.
     let mut current_sorted = state.connectors.clone();
     current_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
     let mut new_sorted = new_list.clone();
     new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
     if current_sorted == new_sorted {
+        info!(peers = new_list.len(), "PeerConnectorList unchanged, no update");
         return;
     }
 

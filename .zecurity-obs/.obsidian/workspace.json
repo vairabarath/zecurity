@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Decisions/ADR-015-Transport-Control-Plane.md",
+                "file": "Relay-E2E-Flow-and-Security-Review.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "ADR-015-Transport-Control-Plane"
+              "title": "Relay-E2E-Flow-and-Security-Review"
             }
           }
         ]
@@ -185,12 +185,12 @@
   },
   "active": "1bd27bd99f8f8cf3",
   "lastOpenFiles": [
+    "Decisions/ADR-015-Transport-Control-Plane.md",
     "Decisions/ADR-018-Migration-Strategy.md",
     "Decisions/ADR-017-Transport-Propagation.md",
     "Decisions/ADR-016-Placement-Engine.md",
     "Decisions/ADR-014-Relay-Stabilization.md",
     "Decisions/ADR-013-SnapshotCache-Epoch-CAS.md",
-    "Decisions/ADR-015-Transport-Control-Plane.md",
     "Planning/Relay-Roadmap.md.tmp.8334.5adb15e1a54e",
     "Decisions/ADR-015-Transport-Control-Plane.md.tmp.8334.f7c1065b9ca5",
     "Decisions/ADR-011-SnapshotCache-Epoch-CAS.md",
