@@ -11,6 +11,7 @@ use crate::relay_pool::RelayPool;
 use crate::tunnel_pool::{AuthenticatedStream, TunnelOpenError, TunnelPool};
 
 pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub const RELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[async_trait]
 pub trait DirectOpener: Send + Sync + 'static {
@@ -84,20 +85,24 @@ impl ClientTransport {
         };
 
         match &self.relay {
-            Some(r) => {
-                match r.pool.open(r).await {
-                    Ok(stream) => {
-                        warn!(
-                            direct_err = %direct_err,
-                            relay_addr = %r.relay_addr,
-                            "direct path failed; used relay fallback"
-                        );
-                        Ok(stream)
-                    }
-                    Err(relay_err) => Err(anyhow::Error::new(relay_err)
-                        .context(format!("direct attempt: {direct_err}"))),
+            Some(r) => match timeout(RELAY_TIMEOUT, r.pool.open(r)).await {
+                Ok(Ok(stream)) => {
+                    warn!(
+                        direct_err = %direct_err,
+                        relay_addr = %r.relay_addr,
+                        "direct path failed; used relay fallback"
+                    );
+                    Ok(stream)
                 }
-            }
+                Ok(Err(relay_err)) => {
+                    Err(anyhow::Error::new(relay_err)
+                        .context(format!("direct attempt: {direct_err}")))
+                }
+                Err(_) => Err(
+                    anyhow!("relay stream establishment exceeded {:?}", RELAY_TIMEOUT)
+                        .context(format!("direct attempt: {direct_err}")),
+                ),
+            },
             None => Err(direct_err),
         }
     }

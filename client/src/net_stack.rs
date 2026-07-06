@@ -13,11 +13,13 @@ use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
 
+const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
 const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
@@ -413,22 +415,29 @@ async fn relay_tcp_to_quic(
             port,
             protocol: "tcp".to_string(),
         };
-        if let Err(e) = write_framed_json(&mut stream, &req).await {
-            tracing::warn!(error = %e, "failed to send TunnelRequest");
-            continue;
-        }
 
-        // Read the connector's framed JSON response.
-        let resp: TunnelResponse = match read_framed_json(&mut stream).await {
-            Ok(resp) => resp,
-            Err(e) => {
+        // Send handshake + read response, bounded so a stalled peer can't wedge us.
+        let handshake = timeout(TUNNEL_HANDSHAKE_TIMEOUT, async {
+            write_framed_json(&mut stream, &req).await?;
+            read_framed_json::<_, TunnelResponse>(&mut stream).await
+        })
+        .await;
+
+        let resp: TunnelResponse = match handshake {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "tunnel handshake failed");
+                continue;
+            }
+            Err(_) => {
                 tracing::warn!(
-                    error = %e, 
-                    "failed to read TunnelResponse"
+                    dest = %destination, port,
+                    "tunnel handshake timed out after {:?}", TUNNEL_HANDSHAKE_TIMEOUT
                 );
                 continue;
             }
         };
+
         if resp.ok {
             tracing::info!(
                 dest = %destination,
