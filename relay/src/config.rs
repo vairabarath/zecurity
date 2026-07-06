@@ -60,7 +60,8 @@ impl RelayConfig {
             env::var("CONTROLLER_HTTP_ADDR").unwrap_or_else(|_| derive_http_addr(&controller_addr));
         let ca_fingerprint = required_env("RELAY_CA_FINGERPRINT")?.to_ascii_lowercase();
         if ca_fingerprint.len() != 64
-            || !ca_fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit()) // between 0-9, a-f, A-F
+            || !ca_fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        // between 0-9, a-f, A-F
         {
             bail!("RELAY_CA_FINGERPRINT must be a 64-character SHA-256 hex digest");
         }
@@ -71,7 +72,7 @@ impl RelayConfig {
             controller_http_addr,
             bind_addr: env::var("RELAY_BIND")
                 .unwrap_or_else(|_| DEFAULT_RELAY_BIND.to_owned()) // assign the default value
-                .parse()// socket address object
+                .parse() // socket address object
                 .context("RELAY_BIND must be a socket address")?,
             ca_fingerprint,
             state_dir: env::var("RELAY_STATE_DIR").unwrap_or_else(|_| DEFAULT_STATE_DIR.to_owned()), // pki
@@ -103,10 +104,7 @@ impl RelayConfig {
                     "RELAY_MESSAGE_TIMEOUT_SECS",
                     DEFAULT_MESSAGE_TIMEOUT_SECS,
                 )?),
-                max_probe_rate: positive_env_u32(
-                    "RELAY_MAX_PROBE_RATE",
-                    DEFAULT_MAX_PROBE_RATE,
-                )?,
+                max_probe_rate: positive_env_u32("RELAY_MAX_PROBE_RATE", DEFAULT_MAX_PROBE_RATE)?,
                 max_concurrent_probes: positive_env_usize(
                     "RELAY_MAX_CONCURRENT_PROBES",
                     DEFAULT_MAX_CONCURRENT_PROBES,

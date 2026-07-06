@@ -65,19 +65,15 @@ pub async fn handle_connection(
             connector_id,
             request_id,
         } => {
-            if identity.role != "connector" {
-                bail!("Probe requires connector identity");
-            }
-            if connector_id.is_empty() {
-                bail!("Probe connector_id must be non-empty");
-            }
+            validate_probe(&identity, &connector_id)?;
+            let authenticated_connector_id = identity.entity_id.clone();
 
             // Concurrent probe cap
             let _permit = match limits.probe_permits.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
                     warn!(
-                        connector_id = %connector_id,
+                        connector_id = %authenticated_connector_id,
                         rejection_reason = "probe_concurrency_limit",
                         "Relay Probe rejected: concurrent limit reached"
                     );
@@ -89,17 +85,23 @@ pub async fn handle_connection(
             {
                 let mut tracker = limits.probe_rate_tracker.lock().await;
                 let now = Instant::now();
-                let window = tracker.entry(connector_id.clone()).or_insert(ProbeRateWindow {
-                    count: 0,
-                    window_start: now,
+                tracker.retain(|_, window| {
+                    now.duration_since(window.window_start) < Duration::from_secs(60)
                 });
+                let window =
+                    tracker
+                        .entry(authenticated_connector_id.clone())
+                        .or_insert(ProbeRateWindow {
+                            count: 0,
+                            window_start: now,
+                        });
                 if now.duration_since(window.window_start) >= Duration::from_secs(60) {
                     window.count = 0;
                     window.window_start = now;
                 }
                 if window.count >= limits.max_probe_rate {
                     warn!(
-                        connector_id = %connector_id,
+                        connector_id = %authenticated_connector_id,
                         rejection_reason = "probe_rate_limit",
                         "Relay Probe rejected: rate limit exceeded"
                     );
@@ -341,6 +343,19 @@ fn validate_register(identity: &ParsedSpiffe, connector_id: &str, spiffe_id: &st
     Ok(())
 }
 
+fn validate_probe(identity: &ParsedSpiffe, connector_id: &str) -> Result<()> {
+    if identity.role != "connector" {
+        bail!("Probe requires Connector identity");
+    }
+    if connector_id.is_empty() {
+        bail!("Probe connector_id must be non-empty");
+    }
+    if identity.entity_id != connector_id {
+        bail!("Probe connector_id does not match authenticated certificate");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +390,22 @@ mod tests {
         let mut identity = connector_identity();
         identity.role = "client".to_owned();
         assert!(validate_register(&identity, CONNECTOR_ID, &identity.uri).is_err());
+    }
+    #[test]
+    fn probe_must_match_authenticated_certificate() {
+        let identity = connector_identity();
+
+        validate_probe(&identity, CONNECTOR_ID).unwrap();
+
+        assert!(validate_probe(&identity, "9b2d5cae-5820-4702-adf4-231680852b11").is_err());
+    }
+
+    #[test]
+    fn client_cannot_probe_as_connector() {
+        let mut identity = connector_identity();
+        identity.role = "client".to_owned();
+
+        assert!(validate_probe(&identity, CONNECTOR_ID).is_err());
     }
 
     #[test]

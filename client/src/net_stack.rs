@@ -23,11 +23,14 @@ const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
 const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
+const TUN_TX_QUEUE_CAP: usize = 1024;
+const FLOW_QUEUE_CAP: usize = 64;
+const FLOW_WRITE_BUF_CAP: usize = 1024 * 1024;
 
 // --- TunDevice: bridges tun::AsyncDevice to smoltcp's Device trait ---
 
 struct TunRxToken(Vec<u8>);
-struct TunTxToken(mpsc::UnboundedSender<Vec<u8>>);
+struct TunTxToken(mpsc::Sender<Vec<u8>>);
 
 impl RxToken for TunRxToken {
     fn consume<R, F>(mut self, f: F) -> R
@@ -45,14 +48,14 @@ impl TxToken for TunTxToken {
     {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
-        let _ = self.0.send(buf);
+        let _ = self.0.try_send(buf);
         result
     }
 }
 
 struct TunDevice {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for TunDevice {
@@ -140,9 +143,9 @@ where
 
 struct ActiveRelay {
     // smoltcp loop → relay task: client payload going to the resource
-    tcp_to_quic_tx: mpsc::UnboundedSender<Vec<u8>>,
+    tcp_to_quic_tx: mpsc::Sender<Vec<u8>>,
     // relay task → smoltcp loop: resource payload coming back to the client
-    quic_to_tcp_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    quic_to_tcp_rx: mpsc::Receiver<Vec<u8>>,
     // overflow buffer when the smoltcp send window is temporarily full
     write_buf: VecDeque<u8>,
 }
@@ -154,8 +157,8 @@ pub async fn run(
     allowed_entries: Vec<AclEntry>,
     transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
 ) -> Result<()> {
-    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
+    let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
 
     let (mut tun_read, mut tun_write) = tokio::io::split(dev);
 
@@ -167,7 +170,7 @@ pub async fn run(
             match tun_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let _ = rx_sync_tx.send(buf[..n].to_vec());
+                    let _ = rx_sync_tx.try_send(buf[..n].to_vec());
                 }
             }
         }
@@ -250,8 +253,8 @@ pub async fn run(
 
                 // Channel pair that bridges the synchronous smoltcp poll loop
                 // and the async QUIC relay task.
-                let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-                let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+                let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
 
                 active_relays.insert(
                     handle,
@@ -322,7 +325,11 @@ pub async fn run(
                 match socket.recv_slice(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        let _ = relay.tcp_to_quic_tx.send(buf[..n].to_vec());
+                        if relay.tcp_to_quic_tx.try_send(buf[..n].to_vec()).is_err() {
+                            tracing::warn!("flow queue full; closing TCP flow");
+                            socket.close();
+                            break;
+                        }
                     }
                 }
             }
@@ -333,6 +340,12 @@ pub async fn run(
                 let chunk: Vec<u8> = relay.write_buf.drain(..).collect();
                 match socket.send_slice(&chunk) {
                     Ok(n) if n < chunk.len() => {
+                        let pending = chunk.len() - n;
+                        if relay.write_buf.len() + pending > FLOW_WRITE_BUF_CAP {
+                            tracing::warn!("write buffer cap exceeded; closing TCP flow");
+                            socket.close();
+                            break;
+                        }
                         relay.write_buf.extend(&chunk[n..]);
                         break;
                     }
@@ -344,6 +357,12 @@ pub async fn run(
                     match relay.quic_to_tcp_rx.try_recv() {
                         Ok(data) => match socket.send_slice(&data) {
                             Ok(n) if n < data.len() => {
+                                let pending = data.len() - n;
+                                if relay.write_buf.len() + pending > FLOW_WRITE_BUF_CAP {
+                                    tracing::warn!("write buffer cap exceeded; closing TCP flow");
+                                    socket.close();
+                                    break;
+                                }
                                 relay.write_buf.extend(&data[n..]);
                                 break;
                             }
@@ -386,8 +405,8 @@ async fn relay_tcp_to_quic(
     transports: Vec<Arc<ClientTransport>>,
     destination: String,
     port: u16,
-    mut tcp_to_quic_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    quic_to_tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
+    mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
+    quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
     let mut selected_stream = None;
 
@@ -481,7 +500,7 @@ async fn relay_tcp_to_quic(
             result = recv.read(&mut quic_buf) => {
                 match result {
                     Ok(n) if n > 0 => {
-                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).is_err() { break; }
+                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() { break; }
                     }
                     _ => break, // QUIC stream finished or error
                 }
