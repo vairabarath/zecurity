@@ -318,16 +318,58 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	// unblocks when ctx is cancelled (handler returns) or the Send fails.
 	go client.runWriter(ctx)
 
-	_, _ = h.Pool.Exec(ctx,
-		`UPDATE connectors SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1`,
+	var becameActive bool
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+			     SELECT status
+			       FROM connectors
+			      WHERE id = $1
+			   ),
+			   updated AS (
+			     UPDATE connectors
+			        SET status = 'active',
+			            last_heartbeat_at = NOW(),
+			            updated_at = NOW()
+			      WHERE id = $1
+			      RETURNING id
+			   )
+			   SELECT current.status IS DISTINCT FROM 'active'
+			     FROM current, updated`,
 		connectorID,
-	)
+	).Scan(&becameActive); err != nil {
+		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
+	} else if becameActive && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+			log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+		}
+	}
 	defer func() {
 		// Use background context — stream context is already cancelled at this point.
-		_, _ = h.Pool.Exec(context.Background(),
-			`UPDATE connectors SET status = 'disconnected', updated_at = NOW() WHERE id = $1`,
+		bg := context.Background()
+		var becameDisconnected bool
+		if err := h.Pool.QueryRow(bg,
+			`WITH current AS (
+				     SELECT status
+				       FROM connectors
+				      WHERE id = $1
+				   ),
+				   updated AS (
+				     UPDATE connectors
+				        SET status = 'disconnected',
+				            updated_at = NOW()
+				      WHERE id = $1
+				      RETURNING id
+				   )
+				   SELECT current.status IS DISTINCT FROM 'disconnected'
+				     FROM current, updated`,
 			connectorID,
-		)
+		).Scan(&becameDisconnected); err != nil {
+			log.Printf("control stream: mark connector %s disconnected: %v", connectorID, err)
+		} else if becameDisconnected && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+			}
+		}
 		log.Printf("control stream: connector %s disconnected", connectorID)
 	}()
 
