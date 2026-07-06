@@ -18,9 +18,10 @@ func TestComputeCandidateLabel(t *testing.T) {
 		max     uint32
 		want    string
 	}{
-		// max == 0 → unknown capacity, treat as available.
-		{"unknown_capacity_high", CapacityLabelHigh, 1000, 0, CapacityLabelHigh},
-		{"unknown_capacity_low", CapacityLabelLow, 1000, 0, CapacityLabelHigh},
+		// max == 0 → unreported ceiling; the relay is INELIGIBLE (Low is
+		// dropped from the LabelledRelayList) regardless of current label.
+		{"unknown_capacity_from_high_ineligible", CapacityLabelHigh, 1000, 0, CapacityLabelLow},
+		{"unknown_capacity_from_low_ineligible", CapacityLabelLow, 1000, 0, CapacityLabelLow},
 
 		// From High — dead-band keeps it in High until fill >= 0.50.
 		{"high_stays_at_0", CapacityLabelHigh, 0, 100, CapacityLabelHigh},

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"net"
 	"sort"
 	"time"
@@ -397,11 +398,11 @@ func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdD
 	defer tx.Rollback(ctx)
 
 	var (
-		current          string
-		pending          *string
-		pendingSince     *time.Time
-		connectionCount  uint32
-		maxConnections   uint32
+		current         string
+		pending         *string
+		pendingSince    *time.Time
+		connectionCount uint32
+		maxConnections  uint32
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT capacity_label,
@@ -418,6 +419,9 @@ func (s *Store) EvaluateCapacityLabel(ctx context.Context, relayID string, holdD
 			return CapacityLabelTransition{}, ErrRelayNotFound
 		}
 		return CapacityLabelTransition{}, fmt.Errorf("read capacity-label state: %w", err)
+	}
+	if maxConnections == 0 {
+		log.Printf("relay %s reports max_connections=0 (RELAY_MAX_CONNECTIONS unset); marking ineligible", relayID)
 	}
 
 	candidate := computeCandidateLabel(current, connectionCount, maxConnections)

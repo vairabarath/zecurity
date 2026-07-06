@@ -63,11 +63,13 @@ func decideHysteresis(current string, pending *string, pendingSince *time.Time, 
 // the hold-down window has elapsed (see EvaluateCapacityLabel).
 //
 // max == 0 means the relay has not reported its configured ceiling
-// (RELAY_MAX_CONNECTIONS unset). Treat the relay as fully available so it
-// remains eligible until real capacity data arrives.
+// (RELAY_MAX_CONNECTIONS unset). Without a ceiling we cannot reason about
+// capacity, so treat the relay as INELIGIBLE — Low is dropped from the
+// LabelledRelayList (BuildLabelledRelayList selects only high/medium).
+// Relays must report a ceiling to be eligible.
 func computeCandidateLabel(current string, count, max uint32) string {
 	if max == 0 {
-		return CapacityLabelHigh
+		return CapacityLabelLow
 	}
 	fill := float64(count) / float64(max)
 
