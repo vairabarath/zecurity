@@ -29,7 +29,7 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
         info!(state_dir = %cfg.state_dir, "Relay certificate material already exists");
         return Ok(paths);
     }
-    // if paths.exists = ture then the remaining is not executed
+    // if paths.exists = true then the remaining is not executed
 
     let ca_pem = fetch_ca_cert(&cfg.controller_http_addr).await?;
     verify_ca_fingerprint(&ca_pem, &cfg.ca_fingerprint)?;
