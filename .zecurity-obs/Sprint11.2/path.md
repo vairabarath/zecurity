@@ -59,6 +59,7 @@ Phase C — Client: multiple transports + failover + framed handshake (M1)
 Phase D — Connector: framed tunnel handshake (M3)
 
 Phase E — Shield: peer connector failover (M3) [independent]
+Phase F — Client: background ACL sync scheduler (M1) [depends on C]
 ```
 
 ---
@@ -121,6 +122,24 @@ Phase E — Shield: peer connector failover (M3) [independent]
 - [x] **M3-E9** `shield/src/enrollment.rs` + `shield/src/main.rs` — wire peer list through startup
 - [x] **Build gate:** `cd connector && cargo build` and `cd shield && cargo build`
 
+### Phase F — M1: Background ACL Sync Scheduler
+
+> Fixes review finding F3 (action-triggered-only ACL sync). See [[Sprint11.2/Member1-Client/Phase2-Background-ACL-Sync]].
+>
+> **Finding:** `ACL_REFRESH_TTL_SECS` was only a staleness gate on IPC actions
+> (`up`/`sync`/`resources`) — no timer existed. An idle client with a long-lived
+> tunnel never re-synced: revocations stayed usable, new resources never appeared,
+> and connector-offline ACL recompiles never reached the client.
+>
+> **Fix:** daemon-lifetime `run_acl_sync_scheduler` task — every 60s calls
+> `sync_acl_now` and restarts the tunnel on version change (same path as the
+> `sync` IPC handler); skips ticks when logged out; keeps cached snapshot on
+> transient failure.
+
+- [x] **M1-F1** `client/src/daemon.rs` — `run_acl_sync_scheduler`: 60s interval, identity gate, `sync_acl_now` + `restart_tunnel_if_running` on version change
+- [x] **M1-F2** `client/src/daemon.rs` — spawn wired in `run()` after `tun_slot` creation
+- [x] **Build gate:** `cd client && cargo build`
+
 ---
 
 ## Final Build Gates
@@ -142,6 +161,7 @@ Phase E — Shield: peer connector failover (M3) [independent]
 - [x] Shield receives `PeerConnectorList` after every health report; fails over to sibling connector on primary disconnect.
 - [x] `derive_grpc_addr` correctly converts `:9092` tunnel addr to `:9091` gRPC addr for IPv4, hostname, and IPv6.
 - [x] Client restarts a running tunnel only when the fetched ACL snapshot version changes; unchanged snapshots do not disrupt active tunnel state.
+- [x] Idle client converges on policy changes within one 60s interval without any user/IPC action (background ACL sync scheduler).
 
 ---
 
@@ -152,3 +172,4 @@ Phase E — Shield: peer connector failover (M3) [independent]
 | `5c8f65c` | 2026-07-01 | feat(shield): add peer connector failover |
 | `f88600c` | 2026-07-02 | client: support multiple transports per resource |
 | `8f9235f` | 2026-07-02 | feat: add multi-connector failover and framed tunnel handshake |
+| `4168cf3` | 2026-07-07 | feat(client): add background ACL sync scheduler |
