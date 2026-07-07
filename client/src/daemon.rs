@@ -107,6 +107,17 @@ pub async fn run() -> Result<()> {
 
     let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
+    // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
+    // and restarts the tunnel when the version changes — the timer counterpart
+    // to the action-triggered sync in handle_request. See run_acl_sync_scheduler.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
+        tokio::spawn(async move {
+            run_acl_sync_scheduler(state_clone, conf_clone, tun_slot_clone).await;
+        });
+    }
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
@@ -917,6 +928,7 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
         }
 
+        
         // Re-read tokens right before the network call — the session may
         // have been rotated by a concurrent 401-retry in the meantime.
         let (access_token, refresh_token) = {
@@ -979,6 +991,57 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
         }
     }
 }
+
+/// Background ACL sync loop. The action-triggered paths (up / sync / resources)
+/// only converge when the user does something; this task guarantees an idle
+/// daemon with a long-lived tunnel still picks up policy changes within one
+/// ACL_REFRESH_TTL_SECS interval.
+///
+/// Skips ticks when no session/device exists (pre-login or post-logout).
+/// On version change it reuses the exact same path as the 
+/// sync_acl_now + restart_tunnel_if_running. Transient fetch failures keep the
+/// cached snapshot (fail-open on staleness, consistent with refresh_acl_if_needed).
+async fn run_acl_sync_scheduler(
+    state: SharedState,
+    conf: config::ClientConf,
+    tun_slot: TunSlot,
+) {
+    let mut ticker =
+        tokio::time::interval(std::time::Duration::from_secs(ACL_REFRESH_TTL_SECS as u64));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // First tick completes immediately — consume it so we don
+    // right after the startup fetch_and_store_acl.
+    ticker.tick().await;
+
+    loop {
+        ticker.tick().await;
+
+        let has_identity = {
+            let s = state.read().await;
+            s.device.is_some() && s.session.is_some()
+        };
+        if !has_identity {
+            continue;
+        }
+
+        match sync_acl_now(&state, &conf).await {
+            Ok(result) if result.changed => {
+                info!(
+                    version = result.version,
+                    "background ACL sync: version changed, restarting tunnel"
+                );
+                if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
+                    warn!(error = %e, "background ACL sync: tunnel restart failed");
+                }
+            }
+            Ok(_) => {} // unchanged — quiet, this fires every 60s
+            Err(e) => {
+                warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+            }
+        }
+    }
+}
+
 
 /// Fetch and store the ACL snapshot. On failure, keeps the existing snapshot
 /// (never reverts to None on a transient error). Access-token expiry is
