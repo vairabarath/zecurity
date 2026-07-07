@@ -60,7 +60,10 @@ pub struct ConnectorConfig {
     /// HTTP address of the controller for the /ca.crt endpoint.
     /// The gRPC port (controller_addr) and HTTP port are different.
     /// If unset, derived from controller_addr host + port 8080.
-    /// Example: "controller.example.com:8080"
+    /// Example: "controller.example.com:8080" (assumes http://) or
+    /// "https://controller.example.com" (explicit scheme — required when the
+    /// controller is only reachable over HTTPS, e.g. a remote/WAN deployment).
+    /// Do not include a trailing slash.
     #[serde(default)]
     pub controller_http_addr: Option<String>,
 

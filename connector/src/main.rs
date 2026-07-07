@@ -158,7 +158,8 @@ async fn main() -> anyhow::Result<()> {
     });
     let crl_url = format!(
         "{}/ca.crl?workspace_id={}",
-        http_base, enrollment_state.workspace_id
+        http_base.trim_end_matches('/'),
+        enrollment_state.workspace_id
     );
 
     let crl_manager = crl::CrlManager::new();

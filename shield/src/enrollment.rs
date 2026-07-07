@@ -295,12 +295,28 @@ fn parse_jwt_payload(token: &str) -> Result<JwtClaims> {
         .context("failed to deserialize JWT claims from payload")
 }
 
+/// Builds the /ca.crt URL from a configured HTTP address.
+///
+/// Bare "host:port" assumes http:// (co-located/dev); a full URL with an explicit
+/// "http://" / "https://" scheme is used verbatim (https:// is required when the
+/// controller is only reachable over its public HTTPS endpoint).
+fn ca_cert_url(http_addr: &str) -> String {
+    if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        format!("{}/ca.crt", http_addr.trim_end_matches('/'))
+    } else {
+        format!("http://{}/ca.crt", http_addr)
+    }
+}
+
 /// Fetch the CA certificate from the controller's HTTP endpoint.
 ///
-/// Plain HTTP is intentional here — we have no TLS material yet.
-/// Security comes from the fingerprint check in verify_ca_fingerprint().
+/// Transport carries no trust here — the CA arrives unauthenticated regardless of
+/// scheme. Security comes from the fingerprint check in verify_ca_fingerprint().
+/// The scheme (http:// vs https://) only decides reachability: bare "host:port"
+/// assumes http:// (co-located/dev); a full https:// URL is required when the
+/// controller is only reachable over its public HTTPS endpoint.
 async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
-    let url = format!("http://{}/ca.crt", http_addr);
+    let url = ca_cert_url(http_addr);
     let resp = Client::new()
         .get(&url)
         .send()
@@ -407,3 +423,7 @@ fn cleanup_config_after_enrollment(shield_id: &str, _state_dir: &str) {
         info!("removed ENROLLMENT_TOKEN from /etc/zecurity/shield.conf");
     }
 }
+
+#[cfg(test)]
+#[path = "enrollment_tests.rs"]
+mod tests;

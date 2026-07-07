@@ -311,13 +311,27 @@ fn parse_jwt_payload(token: &str) -> Result<JwtClaims> {
     Ok(claims)
 }
 
+/// Builds the /ca.crt URL from a configured HTTP address.
+///
+/// `http_addr` may be a bare "host:port" (assumed http://, for co-located/dev use —
+/// e.g. the relay-style "127.0.0.1:8080" pattern) or a full URL with an explicit
+/// "http://" / "https://" scheme (required when the controller is on a different
+/// network and only reachable via its public HTTPS endpoint).
+fn ca_cert_url(http_addr: &str) -> String {
+    if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        format!("{}/ca.crt", http_addr.trim_end_matches('/'))
+    } else {
+        format!("http://{}/ca.crt", http_addr)
+    }
+}
+
 /// Step 3: Fetch the CA certificate from the controller's HTTP endpoint.
 async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
     let client = Client::builder()
         .build()
         .context("failed to build HTTP client")?;
 
-    let url = format!("http://{}/ca.crt", http_addr);
+    let url = ca_cert_url(http_addr);
     let resp = client
         .get(&url)
         .send()
@@ -423,3 +437,7 @@ fn controller_host(grpc_addr: &str) -> String {
         .map(|(host, _)| host.to_string())
         .unwrap_or_else(|| grpc_addr.to_string())
 }
+
+#[cfg(test)]
+#[path = "enrollment_tests.rs"]
+mod tests;

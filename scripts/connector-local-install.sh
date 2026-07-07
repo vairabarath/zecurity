@@ -12,7 +12,8 @@
 #
 # Required environment variables:
 #   CONTROLLER_ADDR       — gRPC address of the controller, e.g. "localhost:9090"
-#   CONTROLLER_HTTP_ADDR  — HTTP address for /ca.crt fetch, e.g. "localhost:8080"
+#   CONTROLLER_HTTP_ADDR  — bare host:port (http assumed, e.g. "localhost:8080") or a
+#                           full URL with scheme (e.g. "https://controller.example.com")
 #   ENROLLMENT_TOKEN      — single-use JWT from the admin UI
 #
 # Usage:
@@ -42,7 +43,8 @@ Installs the ZECURITY connector locally.
 
 Required env vars:
   CONTROLLER_ADDR       gRPC host:port for heartbeat (e.g. localhost:9090)
-  CONTROLLER_HTTP_ADDR  HTTP host:port for /ca.crt   (e.g. localhost:8080)
+  CONTROLLER_HTTP_ADDR  host:port (http assumed) or full URL with scheme for /ca.crt
+                        (e.g. localhost:8080 or https://controller.example.com)
   ENROLLMENT_TOKEN      Single-use JWT from admin UI
 EOF
 }
@@ -80,8 +82,12 @@ install -d -m 0755 "$CONFIG_DIR"
 install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_DIR"
 
 # ── Fetch intermediate CA certificate ───────────────────────────────────────
-log "fetching /ca.crt from http://${CONTROLLER_HTTP_ADDR}"
-if ! curl -fsSL --max-time 10 "http://${CONTROLLER_HTTP_ADDR}/ca.crt" -o "${CONFIG_DIR}/ca.crt"; then
+case "${CONTROLLER_HTTP_ADDR}" in
+    http://*|https://*) CA_URL="${CONTROLLER_HTTP_ADDR%/}/ca.crt" ;;
+    *)                  CA_URL="http://${CONTROLLER_HTTP_ADDR}/ca.crt" ;;
+esac
+log "fetching /ca.crt from ${CA_URL}"
+if ! curl -fsSL --max-time 10 "${CA_URL}" -o "${CONFIG_DIR}/ca.crt"; then
     err "failed to fetch /ca.crt from controller"
 fi
 chmod 0644 "${CONFIG_DIR}/ca.crt"
