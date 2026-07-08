@@ -241,11 +241,16 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         .format(&::time::format_description::well_known::Rfc3339)
         .context("failed to format enrollment timestamp")?;
 
+    // First-enrollment peer list is a single element (the Connector that
+    // enrolled us). Subsequent `PeerConnectorList` piggybacks from the
+    // active Connector will expand this list as siblings come online.
     let state = ShieldState {
         shield_id: response.shield_id,
         trust_domain: claims.trust_domain,
-        connector_id: response.connector_id,
-        connector_addr: response.connector_addr,
+        connectors: vec![crate::types::ConnectorRef {
+            connector_id: response.connector_id,
+            connector_addr: response.connector_addr,
+        }],
         interface_addr: response.interface_addr,
         enrolled_at,
         cert_not_after,
@@ -262,17 +267,6 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // ever exposed. Best-effort — log a warning if we can't write.
     cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
 
-    // ── Step 12: Network setup ────────────────────────────────────────────────
-    //
-    // Create the local `zecurity0` TUN interface and install the base nftables
-    // table. This is intentionally best-effort for Sprint 4:
-    //   - enrollment already succeeded at this point
-    //   - certs/state are safely on disk
-    //   - if Linux networking setup fails, the operator can still inspect logs,
-    //     fix host permissions, and restart the service without re-enrolling
-    // if let Err(e) = crate::network::setup(&state.interface_addr, &state.connector_addr).await {
-    //     warn!(error = %e, "network setup failed (non-fatal for now)");
-    // }.
 
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)
@@ -301,12 +295,28 @@ fn parse_jwt_payload(token: &str) -> Result<JwtClaims> {
         .context("failed to deserialize JWT claims from payload")
 }
 
+/// Builds the /ca.crt URL from a configured HTTP address.
+///
+/// Bare "host:port" assumes http:// (co-located/dev); a full URL with an explicit
+/// "http://" / "https://" scheme is used verbatim (https:// is required when the
+/// controller is only reachable over its public HTTPS endpoint).
+fn ca_cert_url(http_addr: &str) -> String {
+    if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        format!("{}/ca.crt", http_addr.trim_end_matches('/'))
+    } else {
+        format!("http://{}/ca.crt", http_addr)
+    }
+}
+
 /// Fetch the CA certificate from the controller's HTTP endpoint.
 ///
-/// Plain HTTP is intentional here — we have no TLS material yet.
-/// Security comes from the fingerprint check in verify_ca_fingerprint().
+/// Transport carries no trust here — the CA arrives unauthenticated regardless of
+/// scheme. Security comes from the fingerprint check in verify_ca_fingerprint().
+/// The scheme (http:// vs https://) only decides reachability: bare "host:port"
+/// assumes http:// (co-located/dev); a full https:// URL is required when the
+/// controller is only reachable over its public HTTPS endpoint.
 async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
-    let url = format!("http://{}/ca.crt", http_addr);
+    let url = ca_cert_url(http_addr);
     let resp = Client::new()
         .get(&url)
         .send()
@@ -413,3 +423,7 @@ fn cleanup_config_after_enrollment(shield_id: &str, _state_dir: &str) {
         info!("removed ENROLLMENT_TOKEN from /etc/zecurity/shield.conf");
     }
 }
+
+#[cfg(test)]
+#[path = "enrollment_tests.rs"]
+mod tests;

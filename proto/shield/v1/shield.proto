@@ -119,7 +119,24 @@ message ShieldControlMessage {
     ResourceSnapshot resource_snapshot = 12;
     // Shield → Connector
     ResourceStateReport resource_state = 13;
+    // Connector → Shield — peer-Connector list piggybacked after every
+    // ShieldHealthReport. Lets the Shield fail over to a sibling Connector
+    // on the same Remote Network when this one goes down. See ADR (TODO).
+    PeerConnectorList peer_connector_list = 14;
   }
+}
+
+// PeerConnectorList tells the Shield which Connectors on its own Remote
+// Network are currently available. The Connector emits this every time it
+// sees a ShieldHealthReport, reading its own ACL snapshot. Empty `peers` is
+// ignored by the Shield (its current list is kept as-is).
+message PeerConnectorList {
+  repeated PeerConnector peers = 1;
+}
+
+message PeerConnector {
+  string connector_id   = 1;
+  string connector_addr = 2; // host:9091 gRPC address for the Shield to dial
 }
 
 message TunnelOpen {

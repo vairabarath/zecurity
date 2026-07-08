@@ -3,12 +3,14 @@ package connector
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
@@ -24,6 +26,27 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
+
+// RelayPlacementStore is the subset of relay.Store used by the connector
+// control-stream handlers. Defined as an interface for testability.
+type RelayPlacementStore interface {
+	UpsertPlacement(ctx context.Context, connectorID, relayID string, attachedAt time.Time, source string) (bool, error)
+	DeletePlacement(ctx context.Context, connectorID string) (bool, error)
+	BumpLastConfirmed(ctx context.Context, connectorID string) error
+}
+
+// LabelledRelayListSource builds the ADR-016 LabelledRelayList that the
+// controller pushes to connector control streams. Implemented by *relay.Store
+// (BuildLabelledRelayList). Defined as an interface so tests can stub it.
+type LabelledRelayListSource interface {
+	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
+}
+
+// PolicyChangeNotifier is the subset of policy.Notifier used by the
+// relay-placement handlers. Defined as an interface for testability.
+type PolicyChangeNotifier interface {
+	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+}
 
 // ConnectorRegistry tracks active bidirectional Control streams.
 // The resolver calls PushResourceInstruction to deliver instructions in real time.
@@ -234,12 +257,32 @@ func (r *ConnectorRegistry) PushScanCommand(connectorID string, msg *pb.Connecto
 	return c.send(msg)
 }
 
+// BroadcastRelayList fans the ADR-016 LabelledRelayList out to every currently
+// connected connector. A wedged connector whose send queue is full is logged
+// and skipped — the next broadcast (or the C4 push at reconnect) will catch
+// it up. The pool change that triggered this broadcast is the source of
+// truth in the relay store; if delivery to a connector is lost it will sync
+// when its stream re-opens.
+func (r *ConnectorRegistry) BroadcastRelayList(list *pb.LabelledRelayList) {
+	msg := &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+	}
+	r.mu.RLock()
+	clients := make([]*connectorStreamClient, 0, len(r.clients))
+	for _, c := range r.clients {
+		clients = append(clients, c)
+	}
+	r.mu.RUnlock()
+	for _, c := range clients {
+		if err := c.send(msg); err != nil {
+			log.Printf("control stream: broadcast labelled relay list to connector %s: %v", c.connectorID, err)
+		}
+	}
+}
+
 // Control implements ConnectorService.Control — the persistent bidirectional stream.
 func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) error {
 	ctx := stream.Context()
-
-	println("=== STDOUT TEST FROM CONTROLLER ===")
-	log.Printf("=== CONTROLLER: Control() handler invoked for connector ===")
 
 	trustDomain := TrustDomainFromContext(ctx)
 	role := SPIFFERoleFromContext(ctx)
@@ -275,16 +318,58 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	// unblocks when ctx is cancelled (handler returns) or the Send fails.
 	go client.runWriter(ctx)
 
-	_, _ = h.Pool.Exec(ctx,
-		`UPDATE connectors SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1`,
+	var becameActive bool
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+			     SELECT status
+			       FROM connectors
+			      WHERE id = $1
+			   ),
+			   updated AS (
+			     UPDATE connectors
+			        SET status = 'active',
+			            last_heartbeat_at = NOW(),
+			            updated_at = NOW()
+			      WHERE id = $1
+			      RETURNING id
+			   )
+			   SELECT current.status IS DISTINCT FROM 'active'
+			     FROM current, updated`,
 		connectorID,
-	)
+	).Scan(&becameActive); err != nil {
+		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
+	} else if becameActive && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+			log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+		}
+	}
 	defer func() {
 		// Use background context — stream context is already cancelled at this point.
-		_, _ = h.Pool.Exec(context.Background(),
-			`UPDATE connectors SET status = 'disconnected', updated_at = NOW() WHERE id = $1`,
+		bg := context.Background()
+		var becameDisconnected bool
+		if err := h.Pool.QueryRow(bg,
+			`WITH current AS (
+				     SELECT status
+				       FROM connectors
+				      WHERE id = $1
+				   ),
+				   updated AS (
+				     UPDATE connectors
+				        SET status = 'disconnected',
+				            updated_at = NOW()
+				      WHERE id = $1
+				      RETURNING id
+				   )
+				   SELECT current.status IS DISTINCT FROM 'disconnected'
+				     FROM current, updated`,
 			connectorID,
-		)
+		).Scan(&becameDisconnected); err != nil {
+			log.Printf("control stream: mark connector %s disconnected: %v", connectorID, err)
+		} else if becameDisconnected && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+			}
+		}
 		log.Printf("control stream: connector %s disconnected", connectorID)
 	}()
 
@@ -299,6 +384,18 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		},
 	}); err != nil {
 		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
+	}
+
+	// ADR-016 C4: push the current eligible relay pool so the connector can
+	// pick a Tier 1 relay at startup without waiting for the next pool change.
+	if h.RelayListSrc != nil {
+		if list, err := h.RelayListSrc.BuildLabelledRelayList(ctx); err != nil {
+			log.Printf("control stream: build labelled relay list for connector %s: %v", connectorID, err)
+		} else if err := client.send(&pb.ConnectorControlMessage{
+			Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
+		}); err != nil {
+			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
+		}
 	}
 
 	// Deliver any instructions that queued while the connector was offline.
@@ -328,7 +425,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case *pb.ConnectorControlMessage_ConnectorHealth:
 			h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
 		case *pb.ConnectorControlMessage_ShieldStatus:
-			h.handleShieldStatus(ctx, connectorID, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
+			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
 			h.handleResourceAcks(ctx, tenantID, msg.Body.(*pb.ConnectorControlMessage_ResourceAcks).ResourceAcks)
 		case *pb.ConnectorControlMessage_ShieldDiscovery:
@@ -346,6 +443,8 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			h.handleConnectorLog(ctx, tenantID, connectorID, entry)
 		case *pb.ConnectorControlMessage_ResourceState:
 			h.handleResourceState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ResourceState).ResourceState)
+		case *pb.ConnectorControlMessage_RelayState:
+			h.handleConnectorRelayState(ctx, client, msg.Body.(*pb.ConnectorControlMessage_RelayState).RelayState)
 		default:
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
@@ -429,22 +528,115 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
 	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
-	_, err := h.Pool.Exec(ctx,
-		`UPDATE connectors
-		    SET version           = $1,
-		        hostname          = $2,
-		        public_ip         = $3,
-		        lan_addr          = NULLIF($4, ''),
-		        last_heartbeat_at = NOW(),
-		        updated_at        = NOW()
-		  WHERE id = $5`,
-		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID,
-	)
+	var connectorChanged bool
+	err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+		     SELECT status, COALESCE(lan_addr, '') AS lan_addr
+		       FROM connectors
+		      WHERE id = $5
+		   ),
+		   updated AS (
+		     UPDATE connectors
+		        SET status            = 'active',
+		            version           = $1,
+		            hostname          = $2,
+		            public_ip         = $3,
+		            lan_addr          = NULLIF($4, ''),
+		            last_heartbeat_at = NOW(),
+		            updated_at        = NOW()
+		      WHERE id = $5
+		      RETURNING id
+		   )
+		   SELECT current.status IS DISTINCT FROM 'active'
+		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), '')
+		     FROM current, updated`,
+		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
+	} else if connectorChanged && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+			log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+		}
 	}
+	// Process relay attachment from heartbeat. Non-empty relay_id means the
+	// connector claims to be attached; empty means detached. The UPSERT returns
+	// true iff the relay actually changed, so we only invalidate the policy
+	// cache on a real placement transition — not on every heartbeat.
+	if h.RelayStore != nil {
+		if r.RelayId != "" {
+			attachedAt := time.Unix(r.RelayAttachedAtUnix, 0).UTC()
+			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
+			if err != nil {
+				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay placement connector=%s: %v", connectorID, err)
+				}
+			}
+		} else {
+			// Empty relay_id — connector is not attached. Delete any stale placement.
+			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+			if err != nil {
+				log.Printf("control stream: delete relay placement from heartbeat connector=%s: %v", connectorID, err)
+			} else if changed && h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+					log.Printf("control stream: notify policy change after relay detach connector=%s: %v", connectorID, err)
+				}
+			}
+		}
+	}
+
 	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
 		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	}
+}
+
+func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {
+	connectorID := client.connectorID
+
+	// Cross-check: the connector_id in the message body must match the
+	// authenticated SPIFFE identity from the mTLS cert.
+	if r.ConnectorId != "" && r.ConnectorId != connectorID {
+		log.Printf("control stream: relay state connector_id mismatch: body=%s cert=%s — ignoring", r.ConnectorId, connectorID)
+		return
+	}
+
+	log.Printf("control stream: relay state connector=%s relay=%s reason=%s", connectorID, r.RelayId, r.Reason)
+
+	if h.RelayStore == nil {
+		return
+	}
+
+	switch r.Reason {
+	case "connected", "switched":
+		if r.RelayId == "" {
+			log.Printf("control stream: relay state connector=%s reason=%s with empty relay_id — ignoring", connectorID, r.Reason)
+			return
+		}
+		attachedAt := time.Unix(r.ObservedAtUnix, 0).UTC()
+		changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "event")
+		if err != nil {
+			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay event connector=%s: %v", connectorID, err)
+			}
+		}
+	case "disconnected":
+		changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
+		if err != nil {
+			log.Printf("control stream: delete relay placement from event connector=%s: %v", connectorID, err)
+			return
+		}
+		if changed && h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after relay detach event connector=%s: %v", connectorID, err)
+			}
+		}
+	default:
+		log.Printf("control stream: relay state unknown reason=%s connector=%s — ignoring", r.Reason, connectorID)
 	}
 }
 
@@ -456,14 +648,18 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	// GetOrCompile uses the cache's epoch CAS so a compile raced by a policy
 	// change is not cached as stale (ADR-013). The version gate below is
 	// unchanged: it still skips the push when the connector is already current.
+	pn, ok := h.PolicyNotifier.(*policy.Notifier)
+	if !ok || pn == nil {
+		return nil
+	}
 	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PolicyNotifier, h.Pool, client.tenantID)
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, pn, client.tenantID)
 	})
 	if err != nil {
 		return fmt.Errorf("compile ACL snapshot: %w", err)
 	}
 
-	if connectorVersion == snap.Version {
+	if connectorVersion != 0 && connectorVersion == snap.Version {
 		log.Printf("control stream: connector ACL already current connector=%s version=%d entries=%d", client.connectorID, snap.Version, len(snap.Entries))
 		return nil
 	}
@@ -479,12 +675,24 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	return nil
 }
 
-func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, connectorID string, batch *pb.ShieldStatusBatch) {
+func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *connectorStreamClient, batch *pb.ShieldStatusBatch) {
+	var anyConnectorChanged bool
 	for _, s := range batch.Shields {
-		if err := h.ShieldSvc.UpdateShieldHealth(
-			ctx, s.ShieldId, connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
-		); err != nil {
+		connectorChanged, err := h.ShieldSvc.UpdateShieldHealth(
+			ctx, s.ShieldId, client.connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
+		)
+		if err != nil {
 			log.Printf("control stream: update shield health %s: %v", s.ShieldId, err)
+			continue
+		}
+		if connectorChanged {
+			anyConnectorChanged = true
+			log.Printf("control stream: shield %s moved to connector %s", s.ShieldId, client.connectorID)
+		}
+	}
+	if anyConnectorChanged && h.PolicyNotifier != nil {
+		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+			log.Printf("control stream: notify after shield connector move tenant=%s: %v", client.tenantID, err)
 		}
 	}
 }
@@ -543,6 +751,11 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		if role == appmeta.SPIFFERoleConnector {
 			if err := verifyConnectorCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
+			}
+		}
+		if role == appmeta.SPIFFERoleRelay {
+			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
+				return status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
 			}
 		}
 
@@ -636,10 +849,54 @@ func (h *EnrollmentHandler) handleScanReport(ctx context.Context, connectorID st
 }
 
 func (h *EnrollmentHandler) handleConnectorLog(ctx context.Context, tenantID, connectorID string, entry *pb.ConnectorLog) {
+	// Resolve the client SPIFFE ID to device + user when present. A miss is not
+	// fatal — leave both columns NULL so legacy logs and pre-ACL-match denies
+	// still land in the table.
+	var deviceID, userID *string
+	if entry.ClientSpiffeId != "" {
+		var d, u string
+		err := h.Pool.QueryRow(ctx,
+			`SELECT id::text, user_id::text
+			   FROM client_devices
+			  WHERE spiffe_id = $1
+			  LIMIT 1`,
+			entry.ClientSpiffeId,
+		).Scan(&d, &u)
+		switch {
+		case err == nil:
+			deviceID = &d
+			userID = &u
+		case errors.Is(err, pgx.ErrNoRows):
+			// unknown SPIFFE — leave both nil, keep the log
+		default:
+			log.Printf("control stream: resolve client spiffe %s: %v", entry.ClientSpiffeId, err)
+		}
+	}
+
+	// occurred_at: use what the connector sent if non-zero; else fall through
+	// to NOW() via the SQL coalesce so legacy emitters still get a timestamp.
+	var occurredAt *time.Time
+	if entry.OccurredAtUnix > 0 {
+		t := time.Unix(entry.OccurredAtUnix, 0).UTC()
+		occurredAt = &t
+	}
+
 	_, err := h.Pool.Exec(ctx,
-		`INSERT INTO connector_logs (workspace_id, connector_id, message)
-		 VALUES ($1, $2, $3)`,
+		`INSERT INTO connector_logs
+		     (workspace_id, connector_id, message,
+		      resource_id, client_spiffe_id, client_device_id, user_id,
+		      route_type, destination, port, protocol, action, error,
+		      occurred_at)
+		 VALUES ($1, $2, $3,
+		         NULLIF($4, '')::uuid, NULLIF($5, ''), $6::uuid, $7::uuid,
+		         NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, 0)::int, NULLIF($11, ''),
+		         NULLIF($12, ''), NULLIF($13, ''),
+		         COALESCE($14, NOW()))`,
 		tenantID, connectorID, entry.Message,
+		entry.ResourceId, entry.ClientSpiffeId, deviceID, userID,
+		entry.RouteType, entry.Destination, int(entry.Port), entry.Protocol,
+		entry.Action, entry.Error,
+		occurredAt,
 	)
 	if err != nil {
 		log.Printf("control stream: insert connector log connector=%s: %v", connectorID, err)

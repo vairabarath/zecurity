@@ -98,8 +98,8 @@ func TestRootCAIntegration(t *testing.T) {
 		t.Fatalf("unexpected common name: %s", cert.Subject.CommonName)
 	}
 
-	if cert.MaxPathLen != 1 {
-		t.Fatalf("expected MaxPathLen=1, got %d", cert.MaxPathLen)
+	if cert.MaxPathLen != 2 {
+		t.Fatalf("expected MaxPathLen=2, got %d", cert.MaxPathLen)
 	}
 
 	if cert.Issuer.String() != cert.Subject.String() {

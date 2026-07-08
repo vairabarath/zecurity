@@ -4,10 +4,12 @@
 // either direct or via Shield relay.
 
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -20,7 +22,10 @@ use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
 
-const MAX_HANDSHAKE_SIZE: usize = 4096;
+const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
+pub const ERR_SHIELD_NOT_ATTACHED: &str = "SHIELD_NOT_ATTACHED";
+pub const ERR_ACCESS_DENIED: &str = "ACCESS_DENIED";
+pub const ERR_INTERNAL: &str = "INTERNAL";
 
 static QUIC_ADVERTISE_ADDR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -152,18 +157,9 @@ where
         ));
     }
 
-    let mut buf = vec![0u8; MAX_HANDSHAKE_SIZE];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Err(anyhow!("client closed connection before sending handshake"));
-    }
-
-    let handshake =
-        String::from_utf8(buf[..n].to_vec()).map_err(|_| anyhow!("handshake not valid UTF-8"))?;
-    let handshake = handshake.trim();
-
-    let req: TunnelRequest =
-        serde_json::from_str(handshake).map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
+    let req: TunnelRequest = read_framed_json(&mut stream)
+        .await
+        .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
 
     tracing::debug!(
         destination = %req.destination,
@@ -206,10 +202,20 @@ where
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
-                client_spiffe_id, req.destination, req.port, req.protocol,
-            ),
+            AccessLogFields {
+                resource_id: "",
+                client_spiffe_id: &client_spiffe_id,
+                route_type: "",
+                destination: &req.destination,
+                port: req.port,
+                protocol: &req.protocol,
+                action: "deny",
+                error: "no_acl_match",
+                legacy_message: format!(
+                    "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
+                    client_spiffe_id, req.destination, req.port, req.protocol,
+                ),
+            },
         )
         .await;
         return Err(anyhow!("access denied"));
@@ -234,14 +240,24 @@ where
             emit_access_log(
                 control_tx,
                 connector_id,
-                &format!(
-                    "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
-                    client_spiffe_id,
-                    acl_entry.resource_id,
-                    req.destination,
-                    req.port,
-                    req.protocol,
-                ),
+                AccessLogFields {
+                    resource_id:      &acl_entry.resource_id,
+                    client_spiffe_id: &client_spiffe_id,
+                    route_type:       "shield",
+                    destination:      &req.destination,
+                    port:             req.port,
+                    protocol:         &req.protocol,
+                    action:           "error",
+                    error:            "missing_shield_id",
+                    legacy_message: format!(
+                        "deny spiffe_id={} resource={} dest={}:{} proto={} reason=missing_shield_id",
+                        client_spiffe_id,
+                        acl_entry.resource_id,
+                        req.destination,
+                        req.port,
+                        req.protocol,
+                    ),
+                },
             )
             .await;
             return Err(anyhow!(
@@ -260,24 +276,28 @@ where
             shield = %shield_id,
             "access allowed",
         );
-        let response = TunnelResponse {
-            ok: true,
-            error: None,
-            quic_addr: quic_advertise_addr().map(String::from),
-        };
-        send_response(&mut stream, &response).await?;
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
-                client_spiffe_id,
-                acl_entry.resource_id,
-                req.destination,
-                req.port,
-                req.protocol,
-                shield_id,
-            ),
+            AccessLogFields {
+                resource_id: &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type: "shield",
+                destination: &req.destination,
+                port: req.port,
+                protocol: &req.protocol,
+                action: "allow",
+                error: "",
+                legacy_message: format!(
+                    "allow spiffe_id={} resource={} dest={}:{} proto={} route=shield shield={}",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                    shield_id,
+                ),
+            },
         )
         .await;
 
@@ -287,24 +307,97 @@ where
         {
             Ok(relay) => {
                 tracing::info!(shield = %shield_id, resource_id = %acl_entry.resource_id, "tunnel_opened ok");
+
+                // Only acknowledge success after the relay session is ready.
+                let response = TunnelResponse {
+                    ok: true,
+                    error: None,
+                    quic_addr: quic_advertise_addr().map(String::from),
+                };
+                send_response(&mut stream, &response).await?;
                 relay.relay_stream(stream).await?;
             }
             Err(e) => {
-                tracing::error!(shield = %shield_id, resource_id = %acl_entry.resource_id, error = %e, "tunnel_opened error");
+                tracing::error!(shield = %shield_id,
+                    resource_id = %acl_entry.resource_id,
+                    error = %e,
+                    "tunnel_opened error"
+                );
+                let response = if e.to_string().contains("not connected") {
+                    TunnelResponse {
+                        ok: false,
+                        error: Some(ERR_SHIELD_NOT_ATTACHED.to_string()),
+                        quic_addr: quic_advertise_addr().map(String::from),
+                    }
+                } else {
+                    TunnelResponse {
+                        ok: false,
+                        error: Some("INTERNAL".to_string()),
+                        quic_addr: quic_advertise_addr().map(String::from),
+                    }
+                };
+
+                let _ = send_response(&mut stream, &response).await;
                 return Err(e);
             }
         }
         return Ok(());
     }
 
-    // direct route
+    // Connector route — direct TCP/UDP bridge from the connector to the
+    // resource. `"direct"` is kept as a temporary legacy alias for older
+    // ACL snapshots; new compilations emit `"connector"`.
+    if acl_entry.route_type != "connector" && acl_entry.route_type != "direct" {
+        tracing::error!(
+            spiffe_id = %client_spiffe_id,
+            resource_id = %acl_entry.resource_id,
+            route_type = %acl_entry.route_type,
+            "access denied — unknown route_type",
+        );
+        let response = TunnelResponse {
+            ok: false,
+            error: Some(format!("unknown route_type {:?}", acl_entry.route_type)),
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+        send_response(&mut stream, &response).await?;
+        emit_access_log(
+            control_tx,
+            connector_id,
+            AccessLogFields {
+                resource_id:      &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type:       &acl_entry.route_type,
+                destination:      &req.destination,
+                port:             req.port,
+                protocol:         &req.protocol,
+                action:           "error",
+                error:            "unknown_route_type",
+                legacy_message: format!(
+                    "deny spiffe_id={} resource={} dest={}:{} proto={} reason=unknown_route_type={}",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                    acl_entry.route_type,
+                ),
+            },
+        )
+        .await;
+        return Err(anyhow!(
+            "unknown route_type {:?} for resource {}",
+            acl_entry.route_type,
+            acl_entry.resource_id
+        ));
+    }
+
     tracing::info!(
         spiffe_id = %client_spiffe_id,
         resource_id = %acl_entry.resource_id,
         dest = %req.destination,
         port = req.port,
         proto = %req.protocol,
-        route = "direct",
+        route = "connector",
         "access allowed",
     );
 
@@ -318,10 +411,24 @@ where
         emit_access_log(
             control_tx,
             connector_id,
-            &format!(
-                "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-            ),
+            AccessLogFields {
+                resource_id: &acl_entry.resource_id,
+                client_spiffe_id: &client_spiffe_id,
+                route_type: "connector",
+                destination: &req.destination,
+                port: req.port,
+                protocol: &req.protocol,
+                action: "allow",
+                error: "",
+                legacy_message: format!(
+                    "allow spiffe_id={} resource={} dest={}:{} proto={} route=connector",
+                    client_spiffe_id,
+                    acl_entry.resource_id,
+                    req.destination,
+                    req.port,
+                    req.protocol,
+                ),
+            },
         )
         .await;
 
@@ -330,14 +437,34 @@ where
     }
 
     let target = format!("{}:{}", req.destination, req.port);
-    let resource_conn_result = TcpStream::connect(&target).await;
-    let mut resource_conn = match resource_conn_result {
+    let mut resource_conn = match TcpStream::connect(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
             c
         }
         Err(e) => {
             tracing::error!(resource_id = %acl_entry.resource_id, dest = %target, error = %e, "tunnel_opened error");
+            // Resource unreachable from the connector — audit as an `error`
+            // action rather than a `deny` (which is reserved for policy denial).
+            emit_access_log(
+                control_tx,
+                connector_id,
+                AccessLogFields {
+                    resource_id:      &acl_entry.resource_id,
+                    client_spiffe_id: &client_spiffe_id,
+                    route_type:       "connector",
+                    destination:      &req.destination,
+                    port:             req.port,
+                    protocol:         &req.protocol,
+                    action:           "error",
+                    error:            &format!("connect_failed: {}", e),
+                    legacy_message: format!(
+                        "error spiffe_id={} resource={} dest={}:{} proto={} reason=connect_failed: {}",
+                        client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol, e,
+                    ),
+                },
+            )
+            .await;
             return Err(anyhow!("failed to connect to {}: {}", target, e));
         }
     };
@@ -351,10 +478,20 @@ where
     emit_access_log(
         control_tx,
         connector_id,
-        &format!(
-            "allow spiffe_id={} resource={} dest={}:{} proto={} route=direct",
-            client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
-        ),
+        AccessLogFields {
+            resource_id: &acl_entry.resource_id,
+            client_spiffe_id: &client_spiffe_id,
+            route_type: "connector",
+            destination: &req.destination,
+            port: req.port,
+            protocol: &req.protocol,
+            action: "allow",
+            error: "",
+            legacy_message: format!(
+                "allow spiffe_id={} resource={} dest={}:{} proto={} route=connector",
+                client_spiffe_id, acl_entry.resource_id, req.destination, req.port, req.protocol,
+            ),
+        },
     )
     .await;
 
@@ -403,21 +540,79 @@ async fn send_response<S>(stream: &mut S, response: &TunnelResponse) -> Result<(
 where
     S: tokio::io::AsyncWrite + Unpin,
 {
-    let json = serde_json::to_string(response)?;
-    stream.write_all(json.as_bytes()).await?;
-    stream.flush().await?;
+    write_framed_json(stream, response).await
+}
+
+async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    if body.len() > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {} bytes", body.len()));
+    }
+
+    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
     Ok(())
 }
 
-async fn emit_access_log(
+async fn read_framed_json<R, T>(reader: &mut R) -> Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {length} bytes"));
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).await?;
+    serde_json::from_slice(&body).map_err(Into::into)
+}
+
+/// Typed access-log fields the connector forwards to the controller. Mirrors
+/// the structured columns in connector_logs added by migration 021.
+struct AccessLogFields<'a> {
+    resource_id: &'a str,
+    client_spiffe_id: &'a str,
+    route_type: &'a str,
+    destination: &'a str,
+    port: u16,
+    protocol: &'a str,
+    action: &'a str, // "allow" | "deny" | "error"
+    error: &'a str,
+    legacy_message: String,
+}
+
+async fn emit_access_log<'a>(
     control_tx: &mpsc::Sender<ControlMessage>,
-    connector_id: &str,
-    message: &str,
+    _connector_id: &str,
+    fields: AccessLogFields<'a>,
 ) {
+    let occurred_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
     let log_msg = ControlMessage {
         body: Some(crate::proto::connector_control_message::Body::ConnectorLog(
             crate::proto::ConnectorLog {
-                message: format!("[device_tunnel] {}", message),
+                message: format!("[device_tunnel] {}", fields.legacy_message),
+                resource_id: fields.resource_id.to_string(),
+                client_spiffe_id: fields.client_spiffe_id.to_string(),
+                route_type: fields.route_type.to_string(),
+                destination: fields.destination.to_string(),
+                port: fields.port as u32,
+                protocol: fields.protocol.to_string(),
+                action: fields.action.to_string(),
+                error: fields.error.to_string(),
+                occurred_at_unix: occurred_at,
                 ..Default::default()
             },
         )),

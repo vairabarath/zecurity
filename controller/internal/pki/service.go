@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -43,6 +44,15 @@ type Service interface {
 	// a short-lived client certificate carrying the client SPIFFE ID as URI SAN.
 	// Called by: client.Service.EnrollDevice (Sprint 7).
 	SignClientCert(ctx context.Context, tenantID, deviceID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ClientCertResult, error)
+
+	// SignRelayCert signs an operator-supplied Relay CSR with the Platform
+	// Intermediate CA. The Relay host keeps the private key — the controller
+	// only sees and validates the CSR.
+	//
+	// dnsNames / ipAddresses are the operator-confirmed SAN allowlist: any
+	// DNS/IP SAN in the CSR not on these lists is rejected. Pass nil for
+	// either to forbid that SAN type.
+	SignRelayCert(ctx context.Context, relayID string, csr *x509.CertificateRequest, dnsNames []string, ipAddresses []net.IP, certTTL time.Duration) (*RelayCertResult, error)
 
 	// GenerateControllerServerTLS creates an in-memory server certificate/keypair
 	// for the controller gRPC endpoint. The certificate is signed by the
@@ -107,6 +117,17 @@ type ControllerServerTLSResult struct {
 	NotAfter       time.Time
 }
 
+// RelayCertResult is what the operator gets back from SignRelayCert.
+// IntermediateCAPEM lets the relay populate RELAY_CLIENT_CA (the trust
+// bundle it presents to inbound mTLS peers).
+type RelayCertResult struct {
+	CertificatePEM    string
+	IntermediateCAPEM string
+	Serial            string
+	NotBefore         time.Time
+	NotAfter          time.Time
+}
+
 // serviceImpl is the concrete PKI service used inside the controller.
 // It keeps the intermediate CA loaded in memory so workspace CAs can be
 // signed without repeated DB reads and decrypt operations.
@@ -150,6 +171,15 @@ func Init(ctx context.Context, pool *pgxpool.Pool) (Service, error) {
 		} else if !recovered {
 			return nil, fmt.Errorf("init intermediate CA: %w", err)
 		}
+	}
+
+	rootCert, rootKey, err := svc.loadRootCA(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pki audit: load root: %w", err)
+	}
+	rootKey.D.SetInt64(0) // audit needs only the certificate
+	if err := auditCAConstraints(rootCert, svc.intermediateKey.cert); err != nil {
+		return nil, err // fail closed — controller refuses to start
 	}
 
 	return svc, nil

@@ -97,7 +97,7 @@ impl AgentTunnelHub {
     /// Returns a `RelaySession` ready for bidirectional data relay.
     ///
     /// **M4 API contract** — do not change the signature without coordinating with M4:
-    /// ```rust
+    /// ```ignore
     /// let relay = agent_tunnel::open_relay_session(
     ///     &hub, shield_id, destination, port, protocol
     /// ).await?;

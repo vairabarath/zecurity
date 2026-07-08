@@ -33,7 +33,10 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-PrivateDevices=true
+# Do NOT set PrivateDevices=true — the shield creates the zecurity0 TUN
+# interface, which requires /dev/net/tun. PrivateDevices=true strips /dev
+# down to null/zero/full/random/urandom/tty/pts and breaks TUN creation.
+# The other hardening flags below keep the security posture tight.
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

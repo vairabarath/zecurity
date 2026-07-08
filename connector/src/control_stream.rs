@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::interval;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
@@ -20,9 +20,10 @@ use crate::enrollment::EnrollmentState;
 use crate::proto::connector_control_message::Body as CBody;
 use crate::proto::{
     connector_service_client::ConnectorServiceClient, ConnectorControlMessage,
-    ConnectorHealthReport, ResourceAckBatch, ScanReport as ProtoScanReport,
+    ConnectorHealthReport, LabelledRelayList, ResourceAckBatch, ScanReport as ProtoScanReport,
     ScanResult as ProtoScanResult,
 };
+use crate::relay_attachment::RelayAttachmentSlot;
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
 use crate::tls::cert_store::CertStore;
@@ -41,6 +42,8 @@ pub async fn run_control_stream(
     mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
     mut log_rx: mpsc::Receiver<crate::ControlMessage>,
     policy_cache: Arc<PolicyCache>,
+    relay_attachment_slot: RelayAttachmentSlot,
+    relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -76,6 +79,8 @@ pub async fn run_control_stream(
             &version,
             &public_ip,
             &policy_cache,
+            &relay_attachment_slot,
+            &relay_list_tx,
         )
         .await
         {
@@ -108,6 +113,17 @@ async fn send_msg(
         .map_err(|_| anyhow::anyhow!("outbound channel closed"))
 }
 
+/// Read the active relay attachment and return (relay_id, relay_spiffe_id, attached_at_unix).
+/// Fields are empty/zero when no relay is attached. Phase-2 migrations expose
+/// only the active relay here — `pending` is invisible to the controller until
+/// it promotes to active.
+fn relay_attachment_fields(slot: &RelayAttachmentSlot) -> (String, String, i64) {
+    match slot.try_active() {
+        Some(a) => (a.relay_id, a.relay_spiffe_id, a.attached_at),
+        None => (String::new(), String::new(), 0),
+    }
+}
+
 async fn run_once(
     cfg: &ConnectorConfig,
     state: &mut EnrollmentState,
@@ -119,9 +135,12 @@ async fn run_once(
     version: &str,
     public_ip: &str,
     policy_cache: &Arc<PolicyCache>,
+    relay_attachment_slot: &RelayAttachmentSlot,
+    relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
-    let cert_store =
-        CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for control stream")?;
+    let cert_store = CertStore::load_async(&cfg.state_dir)
+        .await
+        .context("failed to load cert store for control stream")?;
 
     info!("starting mTLS SPIFFE preflight check");
     verify_controller_spiffe_preflight(cfg, &cert_store)
@@ -150,18 +169,25 @@ async fn run_once(
     );
 
     // Send initial ConnectorHealthReport on connect.
-    out_tx
-        .send(ConnectorControlMessage {
-            body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
-                version: version.to_string(),
-                hostname: hostname.to_string(),
-                public_ip: public_ip.to_string(),
-                lan_addr: lan_addr.to_string(),
-                acl_version: policy_cache.version(),
-            })),
-        })
-        .await
-        .context("failed to send initial health report")?;
+    {
+        let (relay_id, relay_spiffe_id, relay_attached_at_unix) =
+            relay_attachment_fields(relay_attachment_slot);
+        out_tx
+            .send(ConnectorControlMessage {
+                body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
+                    version: version.to_string(),
+                    hostname: hostname.to_string(),
+                    public_ip: public_ip.to_string(),
+                    lan_addr: lan_addr.to_string(),
+                    acl_version: policy_cache.version(),
+                    relay_id,
+                    relay_spiffe_id,
+                    relay_attached_at_unix,
+                })),
+            })
+            .await
+            .context("failed to send initial health report")?;
+    }
 
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     // Consume the immediate first tick so we don't double-send health on connect.
@@ -180,7 +206,7 @@ async fn run_once(
                         return Ok(());
                     }
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache).await {
+                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, relay_list_tx).await {
                             return action;
                         }
                     }
@@ -206,13 +232,20 @@ async fn run_once(
                     send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ResourceAcks(ResourceAckBatch { acks })), }).await?;
                 }
 
-                send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
-                    version: version.to_string(),
-                    hostname: hostname.to_string(),
-                    public_ip: public_ip.to_string(),
-                    lan_addr: lan_addr.to_string(),
-                    acl_version: policy_cache.version(),
-                })), }).await?;
+                {
+                    let (relay_id, relay_spiffe_id, relay_attached_at_unix) =
+                        relay_attachment_fields(relay_attachment_slot);
+                    send_msg(&out_tx, ConnectorControlMessage { body: Some(CBody::ConnectorHealth(ConnectorHealthReport {
+                        version: version.to_string(),
+                        hostname: hostname.to_string(),
+                        public_ip: public_ip.to_string(),
+                        lan_addr: lan_addr.to_string(),
+                        acl_version: policy_cache.version(),
+                        relay_id,
+                        relay_spiffe_id,
+                        relay_attached_at_unix,
+                    })), }).await?;
+                }
 
                 let status = shield_registry.get_shield_status_batch();
                 if !status.shields.is_empty() {
@@ -241,6 +274,7 @@ async fn run_once(
 }
 
 /// Returns Some(Err) on fatal error, Some(Ok(())) to reconnect (e.g. after renewal), None to continue.
+#[allow(clippy::too_many_arguments)]
 async fn handle_controller_msg(
     msg: ConnectorControlMessage,
     shield_registry: &ShieldRegistry,
@@ -248,6 +282,7 @@ async fn handle_controller_msg(
     cfg: &ConnectorConfig,
     out_tx: &mpsc::Sender<ConnectorControlMessage>,
     policy_cache: &Arc<PolicyCache>,
+    relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(CBody::ResourceInstructions(batch)) => {
@@ -333,6 +368,23 @@ async fn handle_controller_msg(
             let workspace_id = snap.workspace_id.clone();
             policy_cache.update(snap);
             info!(version, %workspace_id, "ACL snapshot stored");
+            None
+        }
+        Some(CBody::RelayList(list)) => {
+            // Sprint 11 ADR-016: forward to the relay selector via the watch
+            // channel. The selector owns version-skip decisions; we just
+            // hand off the latest payload. A send error means the selector
+            // task has dropped its receiver — non-fatal for the control stream.
+            let version = list.version;
+            let relay_count = list.relays.len();
+            if relay_list_tx.send(Some(list)).is_err() {
+                warn!(
+                    version,
+                    "no relay selector listening; dropping LabelledRelayList push"
+                );
+            } else {
+                info!(version, relay_count, "received LabelledRelayList push");
+            }
             None
         }
         _ => None,

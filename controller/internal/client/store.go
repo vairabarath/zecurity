@@ -211,3 +211,25 @@ func updateClientDeviceCert(
 	}
 	return nil
 }
+
+// revokeClientDevice marks a client device as revoked. The ownership fields
+// (user_id, workspace_id) are included in the WHERE clause as defense-in-depth
+// alongside the handler-side check — even a handler bug or a spoofed device_id
+// cannot revoke a row that doesn't belong to the caller. Idempotent on already-
+// revoked rows: the AND revoked_at IS NULL clause makes repeated calls a no-op
+// and preserves the original revocation timestamp for audit.
+func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID, workspaceID string) error {
+	_, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET revoked_at = NOW()
+		  WHERE id           = $1
+		    AND user_id      = $2
+		    AND workspace_id = $3
+		    AND revoked_at IS NULL`,
+		deviceID, userID, workspaceID,
+	)
+	if err != nil {
+		return fmt.Errorf("revoke client_device: %w", err)
+	}
+	return nil
+}

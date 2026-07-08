@@ -31,6 +31,7 @@ import (
 	"github.com/vektah/gqlparser/v2/parser"
 	clientpb "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
+	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/graph/resolvers"
@@ -47,6 +48,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc"
@@ -114,6 +116,12 @@ func main() {
 	}
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
+	relayStore := relay.NewStore(db.Pool)
+	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
+		WithHeartbeatCache(
+			valkeycompat.NewAdapter(connectorValkey),
+			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
+		)
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)
@@ -129,6 +137,24 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
+	relaySvc.WithPolicyNotifier(policyNotifier)
+
+	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
+	// connected connectors. Triggered on capacity-tier promotion, address
+	// changes, and eviction. The version is a content fingerprint set by
+	// BuildLabelledRelayList (F11): both this broadcast path and the
+	// connect-time push in control_stream.go agree on it, and it changes iff
+	// the eligible set / an address / a label changes — so a connector
+	// re-probes exactly when the pool actually changed.
+	broadcastRelayList := func(ctx context.Context) {
+		list, err := relayStore.BuildLabelledRelayList(ctx)
+		if err != nil {
+			log.Printf("relay pool broadcast: build list: %v", err)
+			return
+		}
+		connectorRegistry.BroadcastRelayList(list)
+	}
+	relaySvc.WithRelayPoolBroadcaster(broadcastRelayList)
 
 	gqlSrv := handler.NewDefaultServer(
 		graph.NewExecutableSchema(graph.Config{
@@ -170,6 +196,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
+	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
 
 	if os.Getenv("ENV") == "development" {
@@ -221,6 +248,20 @@ func main() {
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
+	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
+	// Platform-level (no WorkspaceGuard); admin-only.
+	relayAdminHandler := &relay.AdminHandler{
+		Store:     relayStore,
+		Redis:     valkeycompat.NewAdapter(connectorValkey),
+		JWTSecret: mustEnv("JWT_SECRET"),
+	}
+	relayCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
+		middleware.RequireRole("admin")(
+			http.HandlerFunc(relayAdminHandler.Create),
+		),
+	)
+	mux.Handle("POST /api/relays", relayCreateRoute)
+
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
@@ -259,9 +300,12 @@ func main() {
 		PolicyStore:    policyStore,
 		PolicyCache:    policyCache,
 		PolicyNotifier: policyNotifier,
+		RelayStore:     relayStore,
+		RelayListSrc:   relayStore,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
+	relaypb.RegisterRelayServiceServer(grpcServer, relaySvc)
 
 	// Proactive ACL propagation: after a policy change bumps the version and
 	// invalidates the cache, push the fresh snapshot to all connected connectors
@@ -289,8 +333,9 @@ func main() {
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg)
+	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
 	go shieldSvc.RunDisconnectWatcher(ctx)
+	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

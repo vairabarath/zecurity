@@ -63,6 +63,9 @@ func (r *mutationResolver) RevokeDevice(ctx context.Context, deviceID string) (b
 		}
 		return false, fmt.Errorf("revoke device: %w", err)
 	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return false, fmt.Errorf("revoke device: refresh policy: %w", err)
+	}
 
 	return true, nil
 }

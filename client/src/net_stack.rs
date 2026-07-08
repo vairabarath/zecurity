@@ -1,29 +1,36 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tun::AsyncDevice;
 
-use crate::grpc::client_v1::AclSnapshot;
-use crate::tunnel_pool::TunnelPool;
+use crate::grpc::client_v1::AclEntry;
+use crate::transport::ClientTransport;
 
+const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
+const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
+const TUN_TX_QUEUE_CAP: usize = 1024;
+const FLOW_QUEUE_CAP: usize = 64;
+const FLOW_WRITE_BUF_CAP: usize = 1024 * 1024;
 
 // --- TunDevice: bridges tun::AsyncDevice to smoltcp's Device trait ---
 
 struct TunRxToken(Vec<u8>);
-struct TunTxToken(mpsc::UnboundedSender<Vec<u8>>);
+struct TunTxToken(mpsc::Sender<Vec<u8>>);
 
 impl RxToken for TunRxToken {
     fn consume<R, F>(mut self, f: F) -> R
@@ -41,21 +48,30 @@ impl TxToken for TunTxToken {
     {
         let mut buf = vec![0u8; len];
         let result = f(&mut buf);
-        let _ = self.0.send(buf);
+        let _ = self.0.try_send(buf);
         result
     }
 }
 
 struct TunDevice {
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    tx: mpsc::Sender<Vec<u8>>,
 }
 
 impl Device for TunDevice {
-    type RxToken<'a> = TunRxToken where Self: 'a;
-    type TxToken<'a> = TunTxToken where Self: 'a;
+    type RxToken<'a>
+        = TunRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TunTxToken
+    where
+        Self: 'a;
 
-    fn receive(&mut self, _timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        _timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         match self.rx.try_recv() {
             Ok(pkt) => Some((TunRxToken(pkt), TunTxToken(self.tx.clone()))),
             Err(_) => None,
@@ -90,15 +106,46 @@ struct TunnelResponse {
     error: Option<String>,
 }
 
+async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let body = serde_json::to_vec(value)?;
+    if body.len() > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {} bytes", body.len()));
+    }
+
+    writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_framed_json<R, T>(reader: &mut R) -> Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut length = [0u8; 4];
+    reader.read_exact(&mut length).await?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > MAX_TUNNEL_HANDSHAKE_SIZE {
+        return Err(anyhow!("tunnel handshake too large: {length} bytes"));
+    }
+
+    let mut body = vec![0u8; length];
+    reader.read_exact(&mut body).await?;
+    serde_json::from_slice(&body).map_err(Into::into)
+}
+
 // --- Per-connection relay state (lives in the smoltcp loop) ---
 
 struct ActiveRelay {
-    dest_ip: Ipv4Addr,
-    dest_port: u16,
     // smoltcp loop → relay task: client payload going to the resource
-    tcp_to_quic_tx: mpsc::UnboundedSender<Vec<u8>>,
+    tcp_to_quic_tx: mpsc::Sender<Vec<u8>>,
     // relay task → smoltcp loop: resource payload coming back to the client
-    quic_to_tcp_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    quic_to_tcp_rx: mpsc::Receiver<Vec<u8>>,
     // overflow buffer when the smoltcp send window is temporarily full
     write_buf: VecDeque<u8>,
 }
@@ -107,12 +154,11 @@ struct ActiveRelay {
 
 pub async fn run(
     dev: AsyncDevice,
-    acl: Arc<AclSnapshot>,
-    pool: Arc<TunnelPool>,
-    connector_addr: SocketAddr,
+    allowed_entries: Vec<AclEntry>,
+    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
 ) -> Result<()> {
-    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-    let (tx_async_tx, mut tx_async_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
+    let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
 
     let (mut tun_read, mut tun_write) = tokio::io::split(dev);
 
@@ -123,7 +169,9 @@ pub async fn run(
         loop {
             match tun_read.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
-                Ok(n) => { let _ = rx_sync_tx.send(buf[..n].to_vec()); }
+                Ok(n) => {
+                    let _ = rx_sync_tx.try_send(buf[..n].to_vec());
+                }
             }
         }
     });
@@ -131,24 +179,31 @@ pub async fn run(
     // smoltcp → TUN: write IP packets that smoltcp emits back to the kernel.
     tokio::spawn(async move {
         while let Some(pkt) = tx_async_rx.recv().await {
-            if tun_write.write_all(&pkt).await.is_err() { break; }
+            if tun_write.write_all(&pkt).await.is_err() {
+                break;
+            }
         }
     });
 
-    let mut tun_dev = TunDevice { rx: rx_sync_rx, tx: tx_async_tx };
+    let mut tun_dev = TunDevice {
+        rx: rx_sync_rx,
+        tx: tx_async_tx,
+    };
 
     let mut config = Config::new(HardwareAddress::Ip);
     config.random_seed = rand::random();
     let mut iface = Interface::new(config, &mut tun_dev, smoltcp_now());
 
-    // Collect TCP resources from the ACL snapshot.
-    let resource_entries: Vec<(Ipv4Addr, u16)> = acl
-        .entries
+    // Collect TCP resources from the allowed (SPIFFE-filtered) entries.
+    let resource_entries: Vec<(Ipv4Addr, u16)> = allowed_entries
         .iter()
         .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
         .filter_map(|e| {
             let ip = e.address.parse::<IpAddr>().ok()?;
-            match ip { IpAddr::V4(v4) => Some((v4, e.port as u16)), _ => None }
+            match ip {
+                IpAddr::V4(v4) => Some((v4, e.port as u16)),
+                _ => None,
+            }
         })
         .collect();
 
@@ -176,7 +231,6 @@ pub async fn run(
 
     tracing::info!(
         resources = resource_entries.len(),
-        connector = %connector_addr,
         "net_stack: smoltcp loop started"
     );
 
@@ -199,28 +253,62 @@ pub async fn run(
 
                 // Channel pair that bridges the synchronous smoltcp poll loop
                 // and the async QUIC relay task.
-                let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-                let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+                let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+                let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
 
-                active_relays.insert(handle, ActiveRelay {
-                    dest_ip: ip,
-                    dest_port: port,
-                    tcp_to_quic_tx,
-                    quic_to_tcp_rx,
-                    write_buf: VecDeque::new(),
-                });
+                active_relays.insert(
+                    handle,
+                    ActiveRelay {
+                        tcp_to_quic_tx,
+                        quic_to_tcp_rx,
+                        write_buf: VecDeque::new(),
+                    },
+                );
 
-                let pool_c = pool.clone();
                 let dest = ip.to_string();
-                tracing::info!(dest = %dest, port, "new TCP connection — spawning QUIC relay");
-                tokio::spawn(async move {
-                    if let Err(e) = relay_tcp_to_quic(
-                        pool_c, connector_addr, dest, port,
-                        tcp_to_quic_rx, quic_to_tcp_tx,
-                    ).await {
-                        tracing::warn!(error = %e, "QUIC relay ended");
+                tracing::info!(dest = %dest, port, "new TCP connection");
+                match transports.get(&(ip, port)) {
+                    Some(Some(transports)) => {
+                        // Managed resource, connector online → tunnel via QUIC.
+                        if !transports.is_empty() {
+                            let transports = transports.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = relay_tcp_to_quic(
+                                    transports,
+                                    dest,
+                                    port,
+                                    tcp_to_quic_rx,
+                                    quic_to_tcp_tx,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(error = %e, "QUIC relay ended");
+                                }
+                            });
+                        } else {
+                            tracing::warn!(
+                                dest = %dest,
+                                port,
+                                "transport list unexpectedly empty"
+                            );
+                            drop(tcp_to_quic_rx);
+                            drop(quic_to_tcp_tx);
+                        }
                     }
-                });
+                    Some(None) => {
+                        // Managed resource, connector offline → fail closed.
+                        // Dropping the channels causes smoltcp to RST the connection.
+                        tracing::warn!(dest = %dest, port, "connector offline — failing closed for managed resource");
+                    }
+                    None => {
+                        // The listener set is already built from allowed ACL entries.
+                        // Missing transport here means malformed snapshot/RN data, so
+                        // fail closed instead of bypassing a managed destination.
+                        tracing::warn!(dest = %dest, port, "no transport for managed resource — failing closed");
+                        drop(tcp_to_quic_rx);
+                        drop(quic_to_tcp_tx);
+                    }
+                }
             }
         }
 
@@ -236,7 +324,13 @@ pub async fn run(
                 let mut buf = vec![0u8; 4096];
                 match socket.recv_slice(&mut buf) {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => { let _ = relay.tcp_to_quic_tx.send(buf[..n].to_vec()); }
+                    Ok(n) => {
+                        if relay.tcp_to_quic_tx.try_send(buf[..n].to_vec()).is_err() {
+                            tracing::warn!("flow queue full; closing TCP flow");
+                            socket.close();
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -246,6 +340,12 @@ pub async fn run(
                 let chunk: Vec<u8> = relay.write_buf.drain(..).collect();
                 match socket.send_slice(&chunk) {
                     Ok(n) if n < chunk.len() => {
+                        let pending = chunk.len() - n;
+                        if relay.write_buf.len() + pending > FLOW_WRITE_BUF_CAP {
+                            tracing::warn!("write buffer cap exceeded; closing TCP flow");
+                            socket.close();
+                            break;
+                        }
                         relay.write_buf.extend(&chunk[n..]);
                         break;
                     }
@@ -255,15 +355,19 @@ pub async fn run(
             if relay.write_buf.is_empty() {
                 while socket.can_send() {
                     match relay.quic_to_tcp_rx.try_recv() {
-                        Ok(data) => {
-                            match socket.send_slice(&data) {
-                                Ok(n) if n < data.len() => {
-                                    relay.write_buf.extend(&data[n..]);
+                        Ok(data) => match socket.send_slice(&data) {
+                            Ok(n) if n < data.len() => {
+                                let pending = data.len() - n;
+                                if relay.write_buf.len() + pending > FLOW_WRITE_BUF_CAP {
+                                    tracing::warn!("write buffer cap exceeded; closing TCP flow");
+                                    socket.close();
                                     break;
                                 }
-                                _ => {}
+                                relay.write_buf.extend(&data[n..]);
+                                break;
                             }
-                        }
+                            _ => {}
+                        },
                         Err(_) => break,
                     }
                 }
@@ -298,42 +402,87 @@ fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
 /// `tcp_to_quic_rx` carries bytes read from the TCP socket (client → resource).
 /// `quic_to_tcp_tx` carries bytes read from the QUIC stream (resource → client).
 async fn relay_tcp_to_quic(
-    pool: Arc<TunnelPool>,
-    connector_addr: SocketAddr,
+    transports: Vec<Arc<ClientTransport>>,
     destination: String,
     port: u16,
-    mut tcp_to_quic_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    quic_to_tcp_tx: mpsc::UnboundedSender<Vec<u8>>,
+    mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
+    quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
 ) -> Result<()> {
-    let (mut send, mut recv) = pool.open_stream(connector_addr).await?;
+    let mut selected_stream = None;
 
-    // Send the tunnel handshake to the connector.
-    let req = TunnelRequest {
-        token: String::new(),
-        destination: destination.clone(),
-        port,
-        protocol: "tcp".to_string(),
-    };
-    send.write_all(&serde_json::to_vec(&req)?).await?;
+    for transport in transports {
+        let candidate = match transport.open_authenticated_stream().await {
+            Ok(stream) => stream,
 
-    // Read the connector's JSON response.
-    let mut resp_buf = vec![0u8; 1024];
-    let n = recv.read(&mut resp_buf).await?.unwrap_or(0);
-    if n == 0 {
-        return Err(anyhow!("connector closed stream before sending response"));
+            Err(e) => {
+                tracing::warn!(
+                    destination = %destination,
+                    port,
+                    error = %e,
+                    "failed to connect to connector, trying next"
+                );
+                continue;
+            }
+        };
+
+        let mut stream = candidate;
+
+        // Send the tunnel handshake to the connector.
+        let req = TunnelRequest {
+            token: String::new(),
+            destination: destination.clone(),
+            port,
+            protocol: "tcp".to_string(),
+        };
+
+        // Send handshake + read response, bounded so a stalled peer can't wedge us.
+        let handshake = timeout(TUNNEL_HANDSHAKE_TIMEOUT, async {
+            write_framed_json(&mut stream, &req).await?;
+            read_framed_json::<_, TunnelResponse>(&mut stream).await
+        })
+        .await;
+
+        let resp: TunnelResponse = match handshake {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "tunnel handshake failed");
+                continue;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    dest = %destination, port,
+                    "tunnel handshake timed out after {:?}", TUNNEL_HANDSHAKE_TIMEOUT
+                );
+                continue;
+            }
+        };
+
+        if resp.ok {
+            tracing::info!(
+                dest = %destination,
+                port,
+                "tunnel opened"
+            );
+            selected_stream = Some(stream);
+            break;
+        }
+        match resp.error.as_deref() {
+            Some("SHIELD_NOT_ATTACHED") => {
+                tracing::warn!(
+                    dest = %destination,
+                    port,
+                    "shield not attached, trying next connector"
+                );
+                continue;
+            }
+            _ => {
+                return Err(anyhow!("tunnel denied: {}", resp.error.unwrap_or_default()));
+            }
+        }
     }
-    let resp: TunnelResponse = serde_json::from_slice(&resp_buf[..n])
-        .map_err(|e| anyhow!("invalid tunnel response: {}", e))?;
-    if !resp.ok {
-        return Err(anyhow!(
-            "tunnel denied for {}:{}: {}",
-            destination, port,
-            resp.error.unwrap_or_default()
-        ));
-    }
-
-    tracing::info!(dest = %destination, port, "tunnel open — relaying");
-
+    let stream = selected_stream
+        .ok_or_else(|| anyhow!("no connector accepted tunnel for {}: {}", destination, port))?;
+    let (mut recv, mut send) = tokio::io::split(stream);
     // Bidirectional relay loop.
     let mut quic_buf = vec![0u8; 65536];
     loop {
@@ -350,8 +499,8 @@ async fn relay_tcp_to_quic(
             // Resource → client: bytes from the QUIC recv stream go to the TCP socket.
             result = recv.read(&mut quic_buf) => {
                 match result {
-                    Ok(Some(n)) if n > 0 => {
-                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).is_err() { break; }
+                    Ok(n) if n > 0 => {
+                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() { break; }
                     }
                     _ => break, // QUIC stream finished or error
                 }
@@ -359,7 +508,7 @@ async fn relay_tcp_to_quic(
         }
     }
 
-    let _ = send.finish();
+    let _ = send.shutdown().await;
     Ok(())
 }
 
