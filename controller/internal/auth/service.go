@@ -28,6 +28,12 @@ type Service interface {
 	// Reads httpOnly refresh cookie, issues new JWT.
 	RefreshHandler() http.Handler
 
+	// LogoutHandler handles POST /auth/logout. Invalidates the caller's
+	// refresh token in Redis so subsequent /auth/refresh calls fail. For
+	// browser callers it also clears the refresh_token cookie so the
+	// browser doesn't keep re-presenting a dead token.
+	LogoutHandler() http.Handler
+
 	// ── Sprint 7: ClientService primitives ──────────────────────────────────
 	// These power the Rust CLI's TokenExchange / EnrollDevice gRPC handlers,
 	// which run their own PKCE flow against a localhost redirect URI rather

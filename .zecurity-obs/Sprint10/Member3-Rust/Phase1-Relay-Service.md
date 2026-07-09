@@ -10,7 +10,7 @@ status: planned
 
 ## What You're Building
 
-Standalone Rust binary. Accepts QUIC connections from connectors and clients, validates SPIFFE identities, maintains a connector registry, and bridges two QUIC streams without decrypting traffic.
+A standalone Rust binary that accepts QUIC connections from connectors and clients. It validates SPIFFE identities, maintains a state table of registered connectors, and bridges two QUIC streams together without decrypting traffic.
 
 ## Files to Create
 
@@ -21,7 +21,7 @@ Standalone Rust binary. Accepts QUIC connections from connectors and clients, va
 | `relay/src/listener.rs` | QUIC accept loop |
 | `relay/src/state.rs` | `RelayState` — connector registry |
 | `relay/src/session.rs` | Per-connection handler |
-| `relay/src/spiffe.rs` | SPIFFE validation (per M2 Phase 2 spec) |
+| `relay/src/spiffe.rs` | SPIFFE validation (see M2 Phase 2 spec) |
 
 ## Do NOT Touch
 
@@ -33,7 +33,7 @@ Standalone Rust binary. Accepts QUIC connections from connectors and clients, va
 
 ## Step 1 — Add to Workspace
 
-In root `Cargo.toml`, add `"relay"` to the `members` list.
+In the root `Cargo.toml`, add `"relay"` to the `members` list.
 
 ---
 
@@ -67,18 +67,21 @@ dashmap = "6"
 
 ## Step 3 — `relay/src/main.rs`
 
-Reads from env:
+Entry point. Reads from environment:
 - `RELAY_BIND` — bind address, default `0.0.0.0:9093`
-- `RELAY_TLS_CERT` — path to PEM cert
-- `RELAY_TLS_KEY` — path to PEM key
+- `RELAY_TLS_CERT` — path to PEM cert file
+- `RELAY_TLS_KEY` — path to PEM key file
 
-Load TLS, build QUIC endpoint with ALPN `ztna-relay-v1`, create `Arc<RelayState>`, call `listener::start()`.
+Load TLS config using `rustls_pemfile`, build QUIC endpoint with ALPN `ztna-relay-v1`, create shared `Arc<RelayState>`, call `listener::start()`.
 
 ---
 
 ## Step 4 — `relay/src/state.rs`
 
 ```rust
+use dashmap::DashMap;
+use std::sync::Arc;
+
 #[derive(Clone)]
 pub struct RelayState {
     pub connectors: Arc<DashMap<String, ConnectorEntry>>,
@@ -91,10 +94,10 @@ pub struct ConnectorEntry {
 }
 
 impl RelayState {
-    pub fn new() -> Self
-    pub fn insert_connector(&self, connector_id: String, entry: ConnectorEntry)
-    pub fn remove_connector(&self, connector_id: &str)
-    pub fn lookup_connector(&self, connector_id: &str) -> Option<ConnectorEntry>
+    pub fn new() -> Self { ... }
+    pub fn insert_connector(&self, connector_id: String, entry: ConnectorEntry) { ... }
+    pub fn remove_connector(&self, connector_id: &str) { ... }
+    pub fn lookup_connector(&self, connector_id: &str) -> Option<ConnectorEntry> { ... }
 }
 ```
 
@@ -102,7 +105,7 @@ impl RelayState {
 
 ## Step 5 — `relay/src/session.rs`
 
-Wire protocol: 4-byte big-endian length prefix + JSON body.
+Wire protocol (length-prefixed JSON, 4-byte big-endian length):
 
 ```rust
 #[derive(Deserialize)]
@@ -113,23 +116,34 @@ enum HandshakeMsg {
 }
 ```
 
-`handle_connection(conn, state)`:
+`handle_connection(conn: quinn::Connection, state: Arc<RelayState>)`:
 1. Accept bi-directional stream
-2. Read length-prefixed JSON → deserialize `HandshakeMsg`
-3. Validate SPIFFE from peer cert
-4. `Register` → store in `RelayState`, block on `conn.closed()`, remove on disconnect
-5. `Lookup` → validate client SPIFFE + workspace match → `conn.open_bi()` on stored connector → `pipe_streams()` both pairs
+2. Read 4-byte length, read JSON, deserialize `HandshakeMsg`
+3. Validate SPIFFE from peer cert (see `spiffe.rs`)
+4. Match on variant:
+   - `Register` → validate connector SPIFFE → store in `RelayState` → keep connection alive (block on `conn.closed()`) → on disconnect remove from state
+   - `Lookup` → validate client SPIFFE → check trust domain matches connector → call `conn.open_bi()` on stored connector connection → send 4-byte ACK to client → `pipe_streams()` both pairs bidirectionally
 
 `pipe_streams(send_a, recv_a, send_b, recv_b)`:
-- Two tasks: `recv_a → send_b` and `recv_b → send_a`
-- Read chunks up to 16 KB, write to other side
+- Spawn two tasks: `recv_a → send_b` and `recv_b → send_a`
+- Each reads chunks up to 16 KB and writes to the other side
 - Either task finishing closes both
 
 ---
 
 ## Step 6 — `relay/src/spiffe.rs`
 
-Implement per M2 Phase 2 spec. Extract URI SAN from DER cert using `x509-parser` crate (add to Cargo.toml).
+Implement per the M2 Phase 2 spec:
+
+```rust
+pub fn extract_spiffe_uri(cert: &[u8]) -> Option<String>
+pub fn parse_trust_domain(spiffe_uri: &str) -> Option<&str>
+pub fn validate_connector_spiffe(spiffe_uri: &str) -> bool  // must be /connector/<uuid>
+pub fn validate_client_spiffe(spiffe_uri: &str) -> bool    // must be /client_device/<uuid>
+pub fn same_workspace(connector_spiffe: &str, client_spiffe: &str) -> bool
+```
+
+Extract URI SAN from DER cert using `x509-parser` or manual ASN.1 (SubjectAltName OID 2.5.29.17, GeneralName type uniformResourceIdentifier = 6).
 
 ---
 
@@ -139,8 +153,10 @@ Implement per M2 Phase 2 spec. Extract URI SAN from DER cert using `x509-parser`
 cd relay && cargo build
 ```
 
+Must pass. Warnings OK, errors not.
+
 ---
 
 ## Post-Phase Fixes
 
-*(Empty)*
+*(Empty — add fixes here as discovered)*

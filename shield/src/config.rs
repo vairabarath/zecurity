@@ -49,7 +49,10 @@ pub struct ShieldConfig {
     /// HTTP address of the controller for the /ca.crt bootstrap endpoint.
     /// The shield fetches the CA cert over HTTP before it has any TLS material,
     /// then verifies the CA fingerprint against the enrollment token's embedded hash.
-    /// Example: "controller.example.com:8080"
+    /// Example: "controller.example.com:8080" (assumes http://) or
+    /// "https://controller.example.com" (explicit scheme — required when the
+    /// controller is only reachable over HTTPS, e.g. a remote/WAN deployment).
+    /// Do not include a trailing slash.
     pub controller_http_addr: String,
 
     /// Single-use enrollment JWT from the admin UI "Add Shield" flow.

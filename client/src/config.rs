@@ -88,10 +88,18 @@ pub fn load() -> Result<ClientConf> {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
             let c: ClientConf = toml::from_str(&raw)?;
-            if !c.workspace.is_empty()          { merged.workspace           = c.workspace; }
-            if !c.controller_address.is_empty() { merged.controller_address  = c.controller_address; }
-            if !c.connector_address.is_empty()  { merged.connector_address   = c.connector_address; }
-            if !c.http_base_url.is_empty()      { merged.http_base_url       = c.http_base_url; }
+            if !c.workspace.is_empty() {
+                merged.workspace = c.workspace;
+            }
+            if !c.controller_address.is_empty() {
+                merged.controller_address = c.controller_address;
+            }
+            if !c.connector_address.is_empty() {
+                merged.connector_address = c.connector_address;
+            }
+            if !c.http_base_url.is_empty() {
+                merged.http_base_url = c.http_base_url;
+            }
             found = true;
         }
     }

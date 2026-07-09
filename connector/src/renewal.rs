@@ -35,8 +35,9 @@ pub async fn renew_cert(state: &EnrollmentState, cfg: &ConnectorConfig) -> Resul
     info!("starting certificate renewal");
 
     // 1. Read existing private key from disk
-    let cert_store =
-        CertStore::load_async(&cfg.state_dir).await.context("failed to load cert store for renewal")?;
+    let cert_store = CertStore::load_async(&cfg.state_dir)
+        .await
+        .context("failed to load cert store for renewal")?;
 
     // 2. Extract public key in DER format
     let key_pem_str =

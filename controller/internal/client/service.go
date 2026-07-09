@@ -413,7 +413,58 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace.
+	// Confirm the device belongs to this user and workspace, and is not revoked.
+	// The access token is user-scoped (not device-scoped), so a revoked device
+	// with a still-valid token would otherwise keep pulling ACL snapshots — a
+	// control-plane leak. Gate on revoked_at here; cert revocation (CRL) handles
+	// the data plane separately.
+	var deviceWorkspaceID string
+	var revokedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT workspace_id, revoked_at FROM client_devices
+		 WHERE id = $1 AND user_id = $2`,
+		req.GetDeviceId(), claims.UserID,
+	).Scan(&deviceWorkspaceID, &revokedAt)
+	if err != nil || deviceWorkspaceID != claims.TenantID {
+		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
+	}
+	if revokedAt != nil {
+		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	}
+
+	workspaceID := claims.TenantID
+
+	// Serve from cache, or compile under the epoch CAS so a compile raced by a
+	// policy change is not cached as stale (ADR-013).
+	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
+		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, workspaceID)
+	})
+	if err != nil {
+		// Default-deny: do not serve a partial or stale snapshot.
+		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)
+	}
+
+	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
+}
+
+// RevokeDevice marks a client device as revoked. The device's SPIFFE will be
+// removed from subsequent ACL compiles and the workspace policy version is
+// bumped so connectors and clients see the change. This is the server side of
+// the CLI's logout flow, and is best-effort from the CLI's perspective — but
+// on the server side it is fully authoritative: on success, the row is
+// revoked and cannot be un-revoked without a fresh enrollment.
+func (s *Service) RevokeDevice(ctx context.Context, req *clientv1.RevokeDeviceRequest) (*clientv1.RevokeDeviceResponse, error) {
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token and device_id are required")
+	}
+
+	claims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
+	}
+
+	// Confirm the device belongs to this user and workspace — same shape as
+	// GetACLSnapshot. Prevents alice from revoking bob's device.
 	var deviceWorkspaceID string
 	err = s.pool.QueryRow(ctx,
 		`SELECT workspace_id FROM client_devices
@@ -424,19 +475,20 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
 	}
 
-	workspaceID := claims.TenantID
-
-	// Serve from cache, or compile under the epoch CAS so a compile raced by a
-	// policy change is not cached as stale (ADR-013).
-	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, s.pool, workspaceID)
-	})
-	if err != nil {
-		// Default-deny: do not serve a partial or stale snapshot.
-		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)
+	// Soft revoke: set revoked_at = NOW(). Idempotent — repeated calls on an
+	// already-revoked device are a no-op success.
+	if err := revokeClientDevice(ctx, s.pool, req.GetDeviceId(), claims.UserID, claims.TenantID); err != nil {
+		return nil, status.Errorf(codes.Internal, "revoke device: %v", err)
 	}
 
-	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
+	// Bump the workspace policy version so the SPIFFE is dropped from
+	// AllowedSpiffeIds on the next ACL compile, and connectors receive the
+	// updated snapshot via the push hook.
+	if err := s.policyNotifier.NotifyPolicyChange(ctx, claims.TenantID); err != nil {
+		return nil, status.Errorf(codes.Internal, "refresh policy after device revocation: %v", err)
+	}
+
+	return &clientv1.RevokeDeviceResponse{}, nil
 }
 
 // Compile-time interface check.

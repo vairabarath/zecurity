@@ -32,10 +32,9 @@ type ACLPusher struct {
 	store    *policy.Store
 	cache    *policy.SnapshotCache
 	notifier *policy.Notifier
-	pool     *pgxpool.Pool
 
 	// compile is policy.CompileACLSnapshot in production; overridable in tests.
-	compile func(context.Context, *policy.Store, *policy.Notifier, *pgxpool.Pool, string) (*clientv1.ACLSnapshot, error)
+	compile func(context.Context, *policy.Store, *policy.Notifier, string) (*clientv1.ACLSnapshot, error)
 
 	mu       sync.Mutex
 	inflight map[string]*wsPushState // workspaceID -> coalescing latch state
@@ -56,7 +55,6 @@ func NewACLPusher(reg *ConnectorRegistry, store *policy.Store, cache *policy.Sna
 		store:    store,
 		cache:    cache,
 		notifier: notifier,
-		pool:     pool,
 		compile:  policy.CompileACLSnapshot,
 		inflight: make(map[string]*wsPushState),
 	}
@@ -120,7 +118,7 @@ func (p *ACLPusher) pushOnce(workspaceID string) {
 	// epoch CAS, so a snapshot built from a now-superseded view is dropped rather
 	// than poisoning the freshly-invalidated slot (ADR-013).
 	snap, err := p.cache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
-		return p.compile(ctx, p.store, p.notifier, p.pool, workspaceID)
+		return p.compile(ctx, p.store, p.notifier, workspaceID)
 	})
 	if err != nil {
 		log.Printf("acl push: compile workspace %s: %v", workspaceID, err)

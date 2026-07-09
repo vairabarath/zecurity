@@ -32,6 +32,9 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 	if err != nil {
 		return nil, fmt.Errorf("createResource: %w", err)
 	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("createResource: notify policy change: %w", err)
+	}
 
 	return toResourceGQL(row), nil
 }
@@ -51,6 +54,9 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("updateResource: notify policy change: %w", err)
 	}
 
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
@@ -74,6 +80,9 @@ func (r *mutationResolver) ProtectResource(ctx context.Context, id string) (*gra
 	if err != nil {
 		return nil, fmt.Errorf("protectResource: %w", err)
 	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("protectResource: notify policy change: %w", err)
+	}
 
 	r.ConnectorRegistry.PushInstruction(row)
 	connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
@@ -95,6 +104,8 @@ func (r *mutationResolver) UnprotectResource(ctx context.Context, id string) (*g
 	if row.Status == "protecting" {
 		r.ConnectorRegistry.PushInstruction(row)
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	} else if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("unprotectResource: notify policy change: %w", err)
 	}
 	return toResourceGQL(row), nil
 }
@@ -120,6 +131,9 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		}
 		r.ConnectorRegistry.PushInstruction(delRow)
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("deleteResource: notify policy change: %w", err)
+		}
 		return true, nil
 	default: // pending, unprotected — no rule possible, delete now
 		if err := resource.DeleteRow(ctx, r.ResourceCfg.DB, tc.TenantID, id); err != nil {
@@ -180,6 +194,9 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	// so it drops the rule for the resource we just removed.
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return false, fmt.Errorf("forceDeleteResource: notify policy change: %w", err)
 	}
 
 	// The row left the ACL compiler's output — invalidate the workspace snapshot.

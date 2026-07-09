@@ -181,7 +181,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
     })
 }
 
-async fn fetch_controller_ca(conf: &ClientConf) -> Result<String> {
+pub async fn fetch_controller_ca(conf: &ClientConf) -> Result<String> {
     let url = format!("{}/ca.crt", conf.http_base());
     let response = reqwest::get(&url)
         .await

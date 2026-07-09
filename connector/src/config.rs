@@ -37,6 +37,15 @@ pub const CONFIG_FILE_PATH: &str = "/etc/zecurity/connector.conf";
 const DEFAULT_STATE_DIR: &str = "/var/lib/zecurity-connector";
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 86400; // 24 hours
+const DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_RELAY_MAX_TUNNEL_STREAMS: u32 = 256;
+const DEFAULT_RELAY_IDLE_TIMEOUT_SECS: u64 = 60;
+const DEFAULT_RELAY_REPROBE_INTERVAL_SECS: u64 = 300;
+const DEFAULT_RELAY_MAX_CONCURRENT_PROBES: usize = 5;
+const DEFAULT_RELAY_RECONNECT_BASE_SECS: u64 = 5;
+const DEFAULT_RELAY_RECONNECT_MAX_SECS: u64 = 120;
+const DEFAULT_RELAY_RECONNECT_BACKOFF_FACTOR: f64 = 2.0;
+const DEFAULT_RELAY_DRAIN_TIMEOUT_SECS: u64 = 120;
 
 /// Connector configuration.
 ///
@@ -51,7 +60,10 @@ pub struct ConnectorConfig {
     /// HTTP address of the controller for the /ca.crt endpoint.
     /// The gRPC port (controller_addr) and HTTP port are different.
     /// If unset, derived from controller_addr host + port 8080.
-    /// Example: "controller.example.com:8080"
+    /// Example: "controller.example.com:8080" (assumes http://) or
+    /// "https://controller.example.com" (explicit scheme — required when the
+    /// controller is only reachable over HTTPS, e.g. a remote/WAN deployment).
+    /// Do not include a trailing slash.
     #[serde(default)]
     pub controller_http_addr: Option<String>,
 
@@ -65,6 +77,45 @@ pub struct ConnectorConfig {
     /// Stored in state.json and read on subsequent startups.
     #[serde(default)]
     pub connector_id: Option<String>,
+
+    /// Deadline for Client-to-Connector inner mTLS through Relay.
+    #[serde(default = "default_relay_inner_handshake_timeout_secs")]
+    pub relay_inner_handshake_timeout_secs: u64,
+
+    /// Maximum concurrent Relay tunnel streams, including inner mTLS handshakes.
+    #[serde(default = "default_relay_max_tunnel_streams")]
+    pub relay_max_tunnel_streams: u32,
+
+    /// Outer Connector-to-Relay QUIC idle timeout.
+    #[serde(default = "default_relay_idle_timeout_secs")]
+    pub relay_idle_timeout_secs: u64,
+
+    /// Sprint 11 ADR-016 — interval between background re-probes of the
+    /// labelled-relay list. Phase 2 consumes; Phase 1 lands the knob.
+    #[serde(default = "default_relay_reprobe_interval_secs")]
+    pub relay_reprobe_interval_secs: u64,
+
+    /// Maximum parallel relay probes during a single probe sweep.
+    #[serde(default = "default_relay_max_concurrent_probes")]
+    pub relay_max_concurrent_probes: usize,
+
+    /// Initial backoff after a relay disconnect before the connector
+    /// re-attempts attachment. Phase 3 consumes.
+    #[serde(default = "default_relay_reconnect_base_secs")]
+    pub relay_reconnect_base_secs: u64,
+
+    /// Backoff ceiling for relay reconnect attempts.
+    #[serde(default = "default_relay_reconnect_max_secs")]
+    pub relay_reconnect_max_secs: u64,
+
+    /// Multiplicative factor applied to the relay reconnect backoff each retry.
+    #[serde(default = "default_relay_reconnect_backoff_factor")]
+    pub relay_reconnect_backoff_factor: f64,
+
+    /// Grace period to drain active streams before tearing down an old relay
+    /// session during a rotation.
+    #[serde(default = "default_relay_drain_timeout_secs")]
+    pub relay_drain_timeout_secs: u64,
 
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]
@@ -100,6 +151,42 @@ fn default_log_level() -> String {
 
 fn default_update_check_interval_secs() -> u64 {
     DEFAULT_UPDATE_CHECK_INTERVAL_SECS
+}
+
+fn default_relay_inner_handshake_timeout_secs() -> u64 {
+    DEFAULT_RELAY_INNER_HANDSHAKE_TIMEOUT_SECS
+}
+
+fn default_relay_max_tunnel_streams() -> u32 {
+    DEFAULT_RELAY_MAX_TUNNEL_STREAMS
+}
+
+fn default_relay_idle_timeout_secs() -> u64 {
+    DEFAULT_RELAY_IDLE_TIMEOUT_SECS
+}
+
+fn default_relay_reprobe_interval_secs() -> u64 {
+    DEFAULT_RELAY_REPROBE_INTERVAL_SECS
+}
+
+fn default_relay_max_concurrent_probes() -> usize {
+    DEFAULT_RELAY_MAX_CONCURRENT_PROBES
+}
+
+fn default_relay_reconnect_base_secs() -> u64 {
+    DEFAULT_RELAY_RECONNECT_BASE_SECS
+}
+
+fn default_relay_reconnect_max_secs() -> u64 {
+    DEFAULT_RELAY_RECONNECT_MAX_SECS
+}
+
+fn default_relay_reconnect_backoff_factor() -> f64 {
+    DEFAULT_RELAY_RECONNECT_BACKOFF_FACTOR
+}
+
+fn default_relay_drain_timeout_secs() -> u64 {
+    DEFAULT_RELAY_DRAIN_TIMEOUT_SECS
 }
 
 fn default_state_dir() -> String {

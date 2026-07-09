@@ -12,7 +12,8 @@
 #
 # Required environment variables:
 #   CONTROLLER_ADDR       — controller gRPC address, e.g. "controller.example.com:9090"
-#   CONTROLLER_HTTP_ADDR  — controller HTTP address, e.g. "controller.example.com:8080"
+#   CONTROLLER_HTTP_ADDR  — bare host:port (http assumed, e.g. "controller.example.com:8080") or
+#                           a full URL with scheme (e.g. "https://controller.example.com")
 #   ENROLLMENT_TOKEN      — single-use JWT from the admin UI
 
 set -euo pipefail
@@ -48,7 +49,8 @@ Flags:
 
 Required env vars:
   CONTROLLER_ADDR       gRPC host:port for enrollment (e.g. host:9090)
-  CONTROLLER_HTTP_ADDR  HTTP host:port for /ca.crt   (e.g. host:8080)
+  CONTROLLER_HTTP_ADDR  host:port (http assumed) or full URL with scheme for /ca.crt
+                        (e.g. host:8080 or https://controller.example.com)
   ENROLLMENT_TOKEN      Single-use JWT from admin UI
 
 Optional env vars:
@@ -200,8 +202,12 @@ create_directories() {
 }
 
 fetch_ca_cert() {
-    log "fetching /ca.crt from http://${CONTROLLER_HTTP_ADDR}"
-    if ! curl -fsSL --max-time 30 "http://${CONTROLLER_HTTP_ADDR}/ca.crt" -o "${CONFIG_DIR}/ca.crt"; then
+    case "${CONTROLLER_HTTP_ADDR}" in
+        http://*|https://*) CA_URL="${CONTROLLER_HTTP_ADDR%/}/ca.crt" ;;
+        *)                  CA_URL="http://${CONTROLLER_HTTP_ADDR}/ca.crt" ;;
+    esac
+    log "fetching /ca.crt from ${CA_URL}"
+    if ! curl -fsSL --max-time 30 "${CA_URL}" -o "${CONFIG_DIR}/ca.crt"; then
         err "failed to fetch /ca.crt from controller"
     fi
     chmod 0644 "${CONFIG_DIR}/ca.crt"

@@ -26,6 +26,14 @@ service ClientService {
   // GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
   // Validates access_token and device_id; default-deny if either is invalid.
   rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
+
+ // RevokeDevice — mark a client device as revoked. Called by the CLI on
+  // logout; also usable by admin flows in the future. Best-effort from the
+  // CLI's perspective — logout must not block on this RPC. Authenticates
+  // ownership via access_token; the device_id must belong to the token's
+  // user + workspace. Removes the device's SPIFFE from subsequent ACL
+  // compiles and bumps the workspace policy version.
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
 }
 
 // ── GetAuthConfig ──────────────────────────────────────────────────────────
@@ -102,12 +110,38 @@ message GetACLSnapshotResponse {
   ACLSnapshot snapshot = 1;
 }
 
+// ACLConnector holds the tunnel endpoint for one Connector instance.
+message ACLConnector {
+  string connector_id          = 1;
+  string connector_tunnel_addr = 2; // host:9092 QUIC
+  string connector_spiffe      = 3;
+  // Transitional — Track A (ADR-014). Track B (ADR-015) moves relay routing
+  // to TransportSnapshot; reserve fields 4 and 5 at that point, never reuse.
+  string relay_addr            = 4; // relay QUIC address for this connector; empty = no relay
+  string relay_spiffe_id       = 5; // SPIFFE URI of the relay this connector is registered with
+}
+
+// ACLRemoteNetwork groups the connectors serving a single remote network.
+// Connectors is empty when no active connector currently exists for this
+// remote network. The client must treat resources in this network as
+// temporarily unavailable.
+message ACLRemoteNetwork {
+  string remote_network_id         = 1;
+  string name                      = 2;
+  repeated ACLConnector connectors = 3;
+}
+
 message ACLSnapshot {
-  uint64 version                 = 1;
-  string workspace_id            = 2;
-  int64  generated_at            = 3;
-  repeated ACLEntry entries      = 4;
-  string connector_tunnel_addr   = 5; // QUIC tunnel address of the active connector, e.g. "192.168.1.x:9092"
+  uint64 version                            = 1;
+  string workspace_id                       = 2;
+  int64  generated_at                       = 3;
+  repeated ACLEntry entries                 = 4;
+  reserved 5;                               // was: connector_tunnel_addr
+  string relay_addr                         = 6; // relay QUIC public address, e.g. "relay.example.com:9093"
+  reserved 7;                               // was: connector_id
+  reserved 8;                               // was: connector_spiffe
+  string relay_spiffe_id                    = 9; // SPIFFE URI of the relay. Required whenever relay_addr is set.
+  repeated ACLRemoteNetwork remote_networks = 10;
 }
 
 message ACLEntry {
@@ -117,6 +151,19 @@ message ACLEntry {
   string protocol                    = 4;
   repeated string allowed_spiffe_ids = 5;
   string name                        = 6;
-  string route_type                  = 7; // "direct" or "shield"
+  string route_type                  = 7; // "connector" or "shield"
   string shield_id                   = 8; // set when route_type == "shield"
+  string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
+  string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
+}
+// ── RevokeDevice ───────────────────────────────────────────────────────────
+
+message RevokeDeviceRequest {
+  string access_token = 1;
+  string device_id    = 2;
+}
+
+message RevokeDeviceResponse {
+  // Intentionally empty in v1. Reserved for future fields (revoked_at,
+  // was_already_revoked, etc.) without breaking the wire format.
 }

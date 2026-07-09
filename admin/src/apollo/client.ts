@@ -6,6 +6,8 @@ import {
 } from '@apollo/client/core'
 import { authLink } from './links/auth'
 import { errorLink } from './links/error'
+import { retryLink } from './links/retry'
+import { timeoutLink } from './links/timeout'
 
 const httpLink = new HttpLink({
   uri: '/graphql',
@@ -16,11 +18,13 @@ const httpLink = new HttpLink({
 })
 
 // Link chain order matters:
-//   errorLink first  → catches errors from all downstream links
-//   authLink second  → attaches token to requests
-//   httpLink last    → sends the actual HTTP request
+//   errorLink first   → catches errors from all downstream links (incl. 401 refresh-retry)
+//   retryLink second  → retries queries on transient network errors (never mutations)
+//   timeoutLink third → bounds request latency to ~25s per attempt
+//   authLink fourth   → attaches Bearer token to requests
+//   httpLink last     → sends the actual HTTP request
 export const apolloClient = new ApolloClient({
-  link: ApolloLink.from([errorLink, authLink, httpLink]),
+  link: ApolloLink.from([errorLink, retryLink, timeoutLink, authLink, httpLink]),
   cache: new InMemoryCache(),
   defaultOptions: {
     watchQuery: {

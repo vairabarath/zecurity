@@ -12,64 +12,20 @@
 //   6. Run bidirectional Control stream to controller (control_stream.rs)
 //      — blocks with inner reconnect loop until process shutdown
 
-pub mod agent_server;
-pub mod agent_tunnel;
-mod appmeta;
-mod config;
-mod control_stream;
-mod controller_client;
-pub mod crl;
-mod crypto;
-pub mod device_tunnel;
-pub mod discovery;
-mod enrollment;
-pub mod net_util;
-pub mod policy;
-pub mod quic_listener;
-mod renewal;
-pub mod tls;
-mod updater;
-mod util;
-mod watchdog;
-
-/// Generated gRPC client stubs from connector.proto.
-pub mod shield {
-    pub mod v1 {
-        tonic::include_proto!("shield.v1");
-    }
-}
-
-/// Generated client.v1 message types — used for ACLSnapshot referenced in connector.proto.
-pub mod client {
-    pub mod v1 {
-        tonic::include_proto!("client.v1");
-    }
-}
-/// Alias so existing agent_server.rs code can use `crate::shield_proto::*`.
-pub use shield::v1 as shield_proto;
-
-/// Type alias used by quic_listener.rs and device_tunnel.rs.
-/// Maps the spec name to the real ShieldRegistry type.
-pub type AgentRegistry = agent_server::ShieldRegistry;
-
-/// Type alias used by device_tunnel.rs for the control stream message type.
-pub type ControlMessage = proto::ConnectorControlMessage;
-
-/// Generated connector gRPC stubs.
-pub mod connector {
-    pub mod v1 {
-        tonic::include_proto!("connector.v1");
-    }
-}
-/// Alias so connector modules can use `proto::*`.
-pub use connector::v1 as proto;
+// All modules live in lib.rs so tests/ can link against them. Main pulls
+// them in via the library crate's namespace.
+use zecurity_connector::{
+    agent_server, appmeta, config, control_stream, controller_client, crl, device_tunnel,
+    enrollment, net_util, policy, proto, quic_listener, relay_attachment, relay_handler,
+    relay_selector, tls, updater, util, watchdog, ControlMessage,
+};
 
 use std::net::SocketAddr;
 use std::path::Path;
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use config::ConnectorConfig;
 use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
@@ -141,11 +97,17 @@ async fn main() -> anyhow::Result<()> {
     // Create ack channel shared between ShieldRegistry (producers) and control_stream (consumer).
     let (ack_tx, ack_rx) = mpsc::channel(128);
 
+    // PolicyCache is constructed here (rather than later) so ShieldRegistry
+    // can hold an Arc to it — the Shield-facing handler reads the cache on
+    // every ShieldHealthReport to piggyback the peer-Connector list.
+    let policy_cache = Arc::new(policy::PolicyCache::new());
+
     let shield_registry = agent_server::ShieldRegistry::new(
         controller_channel,
         enrollment_state.trust_domain.clone(),
         enrollment_state.connector_id.clone(),
         ack_tx,
+        policy_cache.clone(),
     );
 
     // Spawn shield-facing gRPC server on :9091.
@@ -172,7 +134,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("connector running — entering Control stream loop");
 
-    let policy_cache = Arc::new(policy::PolicyCache::new());
+    // `policy_cache` already constructed above and shared with ShieldRegistry.
 
     // Determine LAN IP for QUIC advertise address.
     let lan_ip = net_util::lan_ip()
@@ -196,7 +158,8 @@ async fn main() -> anyhow::Result<()> {
     });
     let crl_url = format!(
         "{}/ca.crl?workspace_id={}",
-        http_base, enrollment_state.workspace_id
+        http_base.trim_end_matches('/'),
+        enrollment_state.workspace_id
     );
 
     let crl_manager = crl::CrlManager::new();
@@ -207,6 +170,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
+
+    // Shared relay-attachment state. Written by relay_client on register
+    // success / session end; read by control_stream when building each
+    // ConnectorHealthReport.
+    let relay_attachment_slot = relay_attachment::new_slot();
 
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
@@ -253,6 +221,60 @@ async fn main() -> anyhow::Result<()> {
 
     info!("device tunnel listeners spawned on :9092 (TLS+QUIC)");
 
+    // Sprint 11 ADR-016: relay selector + watch channel for LabelledRelayList.
+    // The controller pushes labelled relays into the channel via the
+    // control stream; the selector subscribes, probes them, and runs the
+    // make-before-break attachment lifecycle.
+    let (relay_list_tx, relay_list_rx) = tokio::sync::watch::channel(None);
+
+    let relay_handler = Arc::new(
+        relay_handler::RelayHandler::new(
+            &cert_store,
+            acl.clone(),
+            tunnel_hub.clone(),
+            crl_manager.clone(),
+            connector_id.clone(),
+            ctrl_tx.clone(),
+            cfg.relay_inner_handshake_timeout_secs,
+            cfg.relay_max_tunnel_streams as usize,
+        )
+        .context("build Connector Relay stream handler")?,
+    );
+    let connector_spiffe_id =
+        appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
+    let ca_bundle = cert_store.workspace_ca_pem.clone();
+    let selector_cfg = relay_selector::RelaySelectorConfig {
+        state_dir: std::path::PathBuf::from(&cfg.state_dir),
+        connector_id: connector_id.clone(),
+        connector_spiffe_id,
+        cert_pem: cert_store.cert_pem.clone(),
+        key_pem: cert_store.key_pem.clone(),
+        workspace_ca_pem: ca_bundle.clone(),
+        intermediate_ca_pem: ca_bundle,
+        max_incoming_bidi_streams: cfg.relay_max_tunnel_streams,
+        idle_timeout: std::time::Duration::from_secs(cfg.relay_idle_timeout_secs),
+        reprobe_interval: std::time::Duration::from_secs(cfg.relay_reprobe_interval_secs),
+        max_concurrent_probes: cfg.relay_max_concurrent_probes,
+        probe_timeout: std::time::Duration::from_millis(3000),
+        reconnect_base: std::time::Duration::from_secs(cfg.relay_reconnect_base_secs),
+        reconnect_max: std::time::Duration::from_secs(cfg.relay_reconnect_max_secs),
+        reconnect_backoff_factor: cfg.relay_reconnect_backoff_factor,
+        drain_timeout: std::time::Duration::from_secs(cfg.relay_drain_timeout_secs),
+    };
+    let selector_attachment_slot = relay_attachment_slot.clone();
+    let selector_ctrl_tx = ctrl_tx.clone();
+    tokio::spawn(async move {
+        relay_selector::run(
+            selector_cfg,
+            relay_handler,
+            selector_attachment_slot,
+            relay_list_rx,
+            selector_ctrl_tx,
+        )
+        .await
+    });
+    info!("Relay selector spawned (ADR-016)");
+
     watchdog::notify_ready();
     watchdog::spawn_watchdog();
 
@@ -264,6 +286,8 @@ async fn main() -> anyhow::Result<()> {
         ack_rx,
         ctrl_rx,
         policy_cache,
+        relay_attachment_slot,
+        relay_list_tx,
     )
     .await
 }

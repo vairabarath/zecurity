@@ -1,9 +1,14 @@
 import { create } from 'zustand'
 import type { MeQuery } from '@/generated/graphql'
 
-// Access token is stored in sessionStorage so it survives page refreshes
-// within the same tab but is cleared when the tab is closed.
-// localStorage is avoided due to XSS risk (any JS on the page can read it).
+// Access token is stored in sessionStorage (JS-readable, per-tab, cleared on tab close).
+// Security posture: sessionStorage does NOT reduce XSS read risk versus localStorage —
+// any active XSS can read both via JS. The actual XSS mitigations are:
+//   1. Short TTL (15 min) — limits the window a stolen token is valid.
+//   2. httpOnly refresh cookie — the long-lived credential is XSS-proof.
+//   3. sessionStorage is per-tab (not shared across tabs) and cleared on close,
+//      which limits persistence but does not prevent in-page exfiltration.
+// See CodeStudy/04-Connector-Enrollment-Flow.md F6 for full threat model.
 const SESSION_KEY = 'ztna_access_token'
 
 interface AuthState {

@@ -261,6 +261,36 @@ pub fn load_workspace_state(workspace_slug: &str) -> Result<StoredWorkspaceState
     Ok(state)
 }
 
+/// Replace the session tokens on disk after a successful /auth/refresh. The
+/// controller rotates the refresh token on every call — the old value is
+/// dead server-side the moment the response leaves the wire, so the caller
+/// must invoke this before the next refresh attempt or the whole session
+/// will be lost.
+///
+/// Load → mutate → save. Non-session fields (device cert, workspace, user,
+/// resources) are preserved verbatim. The underlying write uses the same
+/// atomic tmp-file + rename path as save_workspace_state, so a crash mid-
+/// write leaves the old file intact.
+///
+/// Known failure window: if the process crashes AFTER the server rotated
+/// the refresh token but BEFORE this save returns, the client keeps the
+/// old (now dead) refresh token on disk. On next daemon start the old
+/// token gets rejected and the user re-authenticates. Acceptable — the
+/// alternative (two-phase commit) is disproportionate for a 15-min bug.
+pub fn save_rotated_tokens(
+    workspace_slug: &str,
+    new_access: String,
+    new_refresh: String,
+    expires_at: i64,
+) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.session.access_token = new_access;
+    state.session.refresh_token = new_refresh;
+    state.session.expires_at = expires_at;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
 pub fn clear_workspace_state(workspace_slug: &str) -> Result<bool> {
     let state = state_path(workspace_slug);
     let key = key_path(workspace_slug);

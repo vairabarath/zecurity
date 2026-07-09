@@ -409,3 +409,9 @@ See full details in [[Sprint9/Member4-Rust-Client/Phase1-Client-TUN]] → Post-P
 **Issue:** The Sprint 9 relay path uses Shield-local sockets opened from `TunnelOpen`, but the per-resource nftables chain still allowed `iifname "zecurity0"` as if protected traffic entered through the Shield TUN.
 **Root Cause:** The old packet-routing assumption survived after the protected dataplane moved to Connector → Shield Control-stream relay.
 **Fix:** Per-resource rules now allow loopback interface traffic and localhost source traffic (`127.0.0.0/8`) before dropping the protected port. Shield `zecurity0` setup remains untouched for now, but it is no longer part of the per-resource allow path.
+
+### Fix: Stale client fwmark rule using lookup main (M4 Client)
+**File:** `client/src/tun.rs`, `client/src/daemon.rs`
+**Issue:** Older clients left `ip rule add fwmark 0x5a lookup main priority 49`, which could coexist with the current `lookup 105` rule and bypass table 105 routing.
+**Root Cause:** `cleanup_policy_routes()` deleted only the current table 105 rule; stale comments still referenced a non-existent SO_MARK NIC bypass path.
+**Fix:** Cleanup now deletes both `fwmark 0x5a lookup 105 priority 49` and stale `fwmark 0x5a lookup main priority 49`. `configure_allowed_flows()` still adds only the table 105 rule. Manual verification: after `zecurity-client down` and `zecurity-client up`, `ip rule show | grep 'fwmark 0x5a'` should show exactly one rule: `from all fwmark 0x5a lookup 105`.
