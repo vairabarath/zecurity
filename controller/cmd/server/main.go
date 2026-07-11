@@ -48,6 +48,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
@@ -59,7 +60,6 @@ func main() {
 	loadOptionalEnv()
 
 	ctx := context.Background()
-
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
@@ -117,6 +117,8 @@ func main() {
 
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	relayStore := relay.NewStore(db.Pool)
+	providerStore := provider.NewStore(db.Pool)
+	seedProviderUsers(ctx, providerStore)
 	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
@@ -737,5 +739,27 @@ func loadOptionalEnv() {
 		}
 
 		log.Fatalf("load %s: %v", path, err)
+	}
+}
+
+// seedProviderUsers upserts each email in PROVIDER_BOOTSTRAP_EMAILS as an active
+// super-admin. This is the ONLY way the first provider user comes into existence
+// — there is no self-registration. Idempotent: safe to run on every startup.
+func seedProviderUsers(ctx context.Context, store *provider.Store) {
+	raw := strings.TrimSpace(os.Getenv("PROVIDER_BOOTSTRAP_EMAILS"))
+	if raw == "" {
+		log.Printf("PROVIDER_BOOTSTRAP_EMAILS unset — no provider super-admins seeded")
+		return
+	}
+	for _, e := range strings.Split(raw, ",") {
+		email := strings.TrimSpace(e)
+		if email == "" {
+			continue
+		}
+		if err := store.UpsertSuperAdmin(ctx, email); err != nil {
+			log.Printf("seed provider super-admin %q: %v", email, err)
+			continue
+		}
+		log.Printf("seeded provider super-admin: %s", email)
 	}
 }
