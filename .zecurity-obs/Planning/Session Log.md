@@ -10,6 +10,28 @@ tags:
 
 ---
 
+## 2026-07-11 — Claude Code (Opus 4.8) — Sprint 12 Planning (Provider Tier + Relay Provisioning)
+
+**Member:** M2 (bairava)
+**Branch:** feat/pending-07a-provider-authz
+
+**What was done:**
+- Created `Sprint12/` planning docs: `path.md` + `Member1-Go/` (2 phases) + `Member2-Go-Relay/` (3 phases).
+- Sprint 12 completes two Phase-0 pending items together: PENDING-07a (provider identity/authz tier, alpha slice) and PENDING-01 (authenticated relay provisioning).
+- Detailed engineering plan saved at `~/Documents/PLAN-PENDING-01-and-07a-Provider-Tier-and-Relay-Provisioning.md` (source of truth for phase contents).
+
+**Key decisions:**
+- Split **by feature**, labels **M1 + M2**: M1-Go owns the provider tier (07a); M2-Go+Rust owns relay provisioning enforcement + `/provider` re-home + the Rust client (01).
+- The two ship together — 07a makes token issuance a provider action behind `RequireProvider`; 01 makes the token verified+burned at `Provision`. Neither half alone is sufficient.
+- Separate `provider_users` + `provider_audit_logs` (tenant `audit_logs.tenant_id` is NOT NULL); audience-scoped provider session (`aud=provider`) reusing Google OIDC; single `Authz.decide` chokepoint with actor+target signatures; env-seed bootstrap; flat model (partner scoping deferred).
+- `main.go` flagged as the shared conflict zone — M1 lands provider wiring + `/provider` route group first, M2 rebases.
+
+**What's next:**
+- Execute Sprint 12: start with the two Day-1-independent phases in parallel (M1 Phase 1 provider data model/authz, M2 Phase 1 Provision token enforcement), then M1 Phase 2 → M2 Phase 2/3.
+- On completion, promote PENDING-01 and PENDING-07a to the next free `ADR-0NN` in `Decisions/`.
+
+---
+
 ## 2026-05-14 — Codex (GPT-5) — Connector Lint Diagnostics
 
 **What was done:**
