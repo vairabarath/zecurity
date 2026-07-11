@@ -155,8 +155,8 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		handler grpc.UnaryHandler,
 	) (any, error) {
 		// Skip bootstrap RPCs because the caller has no certificate yet.
-		// Connector and Shield authenticate with JWTs. Relay Provision currently
-		// uses server-authenticated TLS only; token authentication is deferred.
+		// Connector, Shield, and Relay bootstrap RPCs authenticate with enrollment
+		// tokens in their handlers because callers do not have certificates yet.
 		if info.FullMethod == pb.ConnectorService_Enroll_FullMethodName ||
 			info.FullMethod == shieldpb.ShieldService_Enroll_FullMethodName ||
 			info.FullMethod == relaypb.RelayService_Provision_FullMethodName {

@@ -123,7 +123,7 @@ func main() {
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
 			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
-		)
+		).WithProvisioningAuth(mustEnv("JWT_SECRET"))
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)

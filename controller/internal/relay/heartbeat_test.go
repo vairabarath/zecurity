@@ -70,10 +70,6 @@ func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, ti
 	return s.err
 }
 
-func (s *fakeHeartbeatStore) InsertProvisionedRelay(context.Context, string, string, []string, []string, string, time.Time, string, string) error {
-	return s.err
-}
-
 func (s *fakeHeartbeatStore) ListWorkspacesForRelay(_ context.Context, _ string) ([]string, error) {
 	if s.err != nil {
 		return nil, s.err

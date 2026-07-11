@@ -21,11 +21,12 @@ import (
 type Service struct {
 	relaypb.UnimplementedRelayServiceServer
 
-	pki      pki.Service
-	store    heartbeatStore
-	redis    valkeycompat.Cmdable
-	certTTL  time.Duration
-	notifier policyChangeNotifier
+	pki       pki.Service
+	store     heartbeatStore
+	redis     valkeycompat.Cmdable
+	jwtSecret string
+	certTTL   time.Duration
+	notifier  policyChangeNotifier
 
 	heartbeatDBWriteInterval time.Duration
 	labelHoldDown            time.Duration
@@ -72,15 +73,19 @@ func (s *Service) WithHeartbeatCache(redis valkeycompat.Cmdable, dbWriteInterval
 	return s
 }
 
+func (s *Service) WithProvisioningAuth(jwtSecret string) *Service {
+	s.jwtSecret = jwtSecret
+	return s
+}
+
 func (s *Service) WithPolicyNotifier(n policyChangeNotifier) *Service {
 	s.notifier = n
 	return s
 }
 
-// Provision validates and signs a Relay-generated CSR.
-//
-// Provisioning currently uses server-authenticated TLS. ProvisioningToken is
-// reserved for a future authenticated operator flow and is ignored.
+// Provision validates a single-use provisioning token and signs a
+// Relay-generated CSR. The relay has no client certificate yet, so the
+// provisioning token is its bootstrap credential.
 func (s *Service) Provision(ctx context.Context, req *relaypb.ProvisionRequest) (*relaypb.ProvisionResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
@@ -102,41 +107,80 @@ func (s *Service) Provision(ctx context.Context, req *relaypb.ProvisionRequest) 
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "parse Relay CSR: %v", err)
 	}
+	if req.ProvisioningToken == "" {
+		return nil, status.Error(
+			codes.Unauthenticated,
+			"provisioning token required",
+		)
+	}
+
+	if s.jwtSecret == "" || s.redis == nil || s.store == nil {
+		return nil, status.Error(
+			codes.FailedPrecondition,
+			"relay provisioning authentication is not configured",
+		)
+	}
+
+	claims, err := VerifyProvisioningToken(
+		s.jwtSecret,
+		req.ProvisioningToken,
+	)
+	if err != nil {
+		return nil, status.Error(
+			codes.PermissionDenied,
+			"invalid provisioning token",
+		)
+	}
+	if claims.RelayID != relayID {
+		return nil, status.Error(
+			codes.PermissionDenied,
+			"token relay mismatch",
+		)
+	}
+
+	burnedRelayID, ok, err := BurnProvisioningJTI(
+		ctx,
+		s.redis,
+		claims.ID,
+	)
+
+	if err != nil {
+		return nil, status.Error(
+			codes.Internal,
+			"burn provisioning token",
+		)
+	}
+	if !ok {
+		return nil, status.Error(
+			codes.PermissionDenied,
+			"provisioning token already used or unknown",
+		)
+	}
+	if burnedRelayID != relayID {
+		return nil, status.Error(
+			codes.PermissionDenied,
+			"token relay mismatch",
+		)
+	}
 
 	cert, err := s.pki.SignRelayCert(ctx, relayID, csr, dnsSANs, ipSANs, s.certTTL)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign Relay certificate: %v", err)
 	}
 
-	// Canonicalize IP SANs to []string for DB persistence. make() guarantees
-	// a non-nil slice even when ipSANs is empty, so pgx sends '{}' rather
-	// than NULL (ip_allowlist is NOT NULL).
-	ipStrs := make([]string, len(ipSANs))
-	for i, ip := range ipSANs {
-		ipStrs[i] = ip.String()
-	}
-	if s.store != nil {
-		if err := s.store.MarkProvisioned(ctx, relayID, cert.Serial, cert.NotAfter, req.Version, req.Hostname); err != nil {
-			if !errors.Is(err, ErrRelayNotFound) {
-				return nil, status.Errorf(codes.Internal, "record Relay provisioning: %v", err)
-			}
-			// Self-provisioning path: no pre-existing row from POST /api/relays.
-			// Insert one now with the SANs the relay asked us to sign.
-			if err := s.store.InsertProvisionedRelay(
-				ctx,
-				relayID,
-				req.Hostname,
-				dnsSANs,
-				ipStrs,
-				cert.Serial,
-				cert.NotAfter,
-				req.Version,
-				req.Hostname,
-			); err != nil {
-				return nil, status.Errorf(codes.Internal, "create Relay row: %v", err)
-			}
+	if err := s.store.MarkProvisioned(ctx, relayID, cert.Serial, cert.NotAfter, req.Version, req.Hostname); err != nil {
+		if errors.Is(err, ErrRelayNotFound) {
+			return nil, status.Error(
+				codes.FailedPrecondition,
+				"relay not registered",
+			)
 		}
+		return nil, status.Error(
+			codes.Internal,
+			"record Relay provisioning",
+		)
 	}
+
 	return &relaypb.ProvisionResponse{
 		CertificatePem:    []byte(cert.CertificatePEM),
 		IntermediateCaPem: []byte(cert.IntermediateCAPEM),
