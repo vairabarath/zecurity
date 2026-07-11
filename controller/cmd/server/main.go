@@ -197,16 +197,24 @@ func main() {
 
 	mux := http.NewServeMux()
 	pInit, pCallback, err := auth.ProviderRoutes(
-              authSvc,
-              providerStore,
-              mustEnv("PROVIDER_GOOGLE_REDIRECT_URI"),
-              15*time.Minute,
-      )
-      if err != nil {
-              log.Fatalf("provider auth routes: %v", err)
-      }
-      mux.Handle("/provider/auth/initiate", pInit)
-      mux.Handle("/provider/auth/callback", pCallback)
+		authSvc,
+		providerStore,
+		mustEnv("PROVIDER_GOOGLE_REDIRECT_URI"),
+		15*time.Minute,
+	)
+	if err != nil {
+		log.Fatalf("provider auth routes: %v", err)
+	}
+	mux.Handle("/provider/auth/initiate", pInit)
+	mux.Handle("/provider/auth/callback", pCallback)
+	// Provider plane (PENDING-07a): routes behind RequireProvider — provider JWT
+	// (aud=provider) + active provider_users allowlist. NEVER WorkspaceGuard;
+	// provider identity has no tenant. M2 hangs POST /provider/relays here.
+	providerAuthz := provider.NewAuthz()
+	providerHandlers := provider.NewHandlers(providerStore, providerAuthz)
+	requireProvider := middleware.RequireProvider(mustEnv("JWT_SECRET"), providerStore)
+	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
+	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
