@@ -34,6 +34,12 @@ the JWT, sessions are workspace-bound, and auth is a single Google OIDC.
 
 Is "provider" a distinct identity + authorization domain, and how is it modeled and authenticated?
 
+## Architectural Invariant
+
+Provider identities and tenant identities are separate security domains. Provider authorization
+must never depend on tenant membership, and tenant authorization must never grant access to
+provider-owned infrastructure.
+
 ## Options
 
 ### Option A — Separate identity tier (recommended)
