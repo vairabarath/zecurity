@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -12,6 +13,8 @@ use crate::tunnel_pool::{AuthenticatedStream, TunnelOpenError, TunnelPool};
 
 pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RELAY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DIRECT_RETRY_INITIAL_COOLDOWN: Duration = Duration::from_secs(30);
+pub const DIRECT_RETRY_MAX_COOLDOWN: Duration = Duration::from_secs(2 * 60 * 60);
 
 #[async_trait]
 pub trait DirectOpener: Send + Sync + 'static {
@@ -49,6 +52,8 @@ pub struct ClientTransport {
     direct: Arc<dyn DirectOpener>,
     direct_addr: SocketAddr,
     relay: Option<RelayContext>,
+    direct_failure_count: AtomicU32,
+    direct_unhealthy_until: AtomicI64
 }
 
 impl ClientTransport {
@@ -61,8 +66,43 @@ impl ClientTransport {
             direct,
             direct_addr,
             relay,
+            direct_failure_count: AtomicU32::new(0),
+            direct_unhealthy_until: AtomicI64::new(0),
         }
     }
+    fn now_unix() -> i64 {
+      std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map(|d| d.as_secs() as i64)
+          .unwrap_or(0)
+  }
+
+  fn direct_is_in_cooldown(&self) -> bool {
+      Self::now_unix() < self.direct_unhealthy_until.load(Ordering::Relaxed)
+  }
+
+  fn mark_direct_success(&self) {
+      self.direct_failure_count.store(0, Ordering::Relaxed);
+      self.direct_unhealthy_until.store(0, Ordering::Relaxed);
+  }
+
+  fn mark_direct_failure(&self) {
+      let failures = self
+          .direct_failure_count
+          .fetch_add(1, Ordering::Relaxed)
+          .saturating_add(1);
+
+      let shift = failures.saturating_sub(1).min(16);
+      let multiplier = 1u64 << shift;
+      let cooldown_secs = DIRECT_RETRY_INITIAL_COOLDOWN
+          .as_secs()
+          .saturating_mul(multiplier)
+          .min(DIRECT_RETRY_MAX_COOLDOWN.as_secs());
+
+      let until = Self::now_unix().saturating_add(cooldown_secs as i64);
+      self.direct_unhealthy_until.store(until, Ordering::Relaxed);
+  }
+
 
     /// Open a byte-zero authenticated stream to the connector, preferring the
     /// direct LAN path and falling back to the relay only when the direct
@@ -70,42 +110,53 @@ impl ClientTransport {
     /// authentication failures surface verbatim and never trigger relay
     /// retry — the relay path would just fail the same way.
     pub async fn open_authenticated_stream(&self) -> Result<AuthenticatedStream> {
-        let attempt = timeout(DIRECT_TIMEOUT, self.direct.open(self.direct_addr)).await;
+      let direct_err: anyhow::Error = if self.direct_is_in_cooldown() {
+          anyhow!("direct path is in cooldown")
+      } else {
+          let attempt = timeout(DIRECT_TIMEOUT, self.direct.open(self.direct_addr)).await;
 
-        let direct_err: anyhow::Error = match attempt {
-            Ok(Ok(stream)) => return Ok(stream),
-            Ok(Err(err)) => match err {
-                TunnelOpenError::Authenticate(_) => {
-                    // Identity/auth failures surface verbatim — no relay retry.
-                    return Err(anyhow::Error::new(err));
-                }
-                TunnelOpenError::Connect(_) => anyhow::Error::new(err),
-            },
-            Err(_) => anyhow!("direct stream establishment exceeded {:?}", DIRECT_TIMEOUT),
-        };
+          match attempt {
+              Ok(Ok(stream)) => {
+                  self.mark_direct_success();
+                  return Ok(stream);
+              }
+              Ok(Err(err)) => match err {
+                  TunnelOpenError::Authenticate(_) => {
+                      // Identity/auth failures surface verbatim — no relay retry.
+                      return Err(anyhow::Error::new(err));
+                  }
+                  TunnelOpenError::Connect(_) => {
+                      self.mark_direct_failure();
+                      anyhow::Error::new(err)
+                  }
+              },
+              Err(_) => {
+                  self.mark_direct_failure();
+                  anyhow!("direct stream establishment exceeded {:?}", DIRECT_TIMEOUT)
+              }
+          }
+      };
 
-        match &self.relay {
-            Some(r) => match timeout(RELAY_TIMEOUT, r.pool.open(r)).await {
-                Ok(Ok(stream)) => {
-                    warn!(
-                        direct_err = %direct_err,
-                        relay_addr = %r.relay_addr,
-                        "direct path failed; used relay fallback"
-                    );
-                    Ok(stream)
-                }
-                Ok(Err(relay_err)) => {
-                    Err(anyhow::Error::new(relay_err)
-                        .context(format!("direct attempt: {direct_err}")))
-                }
-                Err(_) => Err(
-                    anyhow!("relay stream establishment exceeded {:?}", RELAY_TIMEOUT)
-                        .context(format!("direct attempt: {direct_err}")),
-                ),
-            },
-            None => Err(direct_err),
-        }
-    }
+      match &self.relay {
+          Some(r) => match timeout(RELAY_TIMEOUT, r.pool.open(r)).await {
+              Ok(Ok(stream)) => {
+                  warn!(
+                      direct_err = %direct_err,
+                      relay_addr = %r.relay_addr,
+                      "direct path failed; used relay fallback"
+                  );
+                  Ok(stream)
+              }
+              Ok(Err(relay_err)) => Err(anyhow::Error::new(relay_err)
+                  .context(format!("direct attempt: {direct_err}"))),
+              Err(_) => Err(
+                  anyhow!("relay stream establishment exceeded {:?}", RELAY_TIMEOUT)
+                      .context(format!("direct attempt: {direct_err}")),
+              ),
+          },
+          None => Err(direct_err),
+      }
+  }
 }
 
 #[cfg(test)]

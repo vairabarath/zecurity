@@ -22,13 +22,11 @@ impl std::fmt::Debug for TunHandle {
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
-    pub schema_version: u32,
+    // pub schema_version: u32,
     pub workspace: Option<WorkspaceInfo>,
     pub user: Option<UserInfo>,
     pub device: Option<DeviceInfo>,
     pub session: Option<SessionInfo>,
-    pub resources: Vec<Resource>,
-    pub last_sync_at: Option<i64>,
     /// ACL snapshot fetched from the Controller. None = default-deny.
     pub acl_snapshot: Option<AclSnapshot>,
     /// Unix timestamp of the last successful ACL snapshot fetch.
@@ -46,7 +44,7 @@ pub struct WorkspaceInfo {
     pub slug: String,
     pub trust_domain: String,
 }
-
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UserInfo {
     pub id: String,
@@ -73,27 +71,17 @@ pub struct SessionInfo {
     pub expires_at: i64, // Unix timestamp
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Resource {
-    pub id: String,
-    pub name: String,
-    pub host: String,
-    pub port: u16,
-    pub protocol: String,
-}
 
 /// Shared handle used across async tasks.
 pub type SharedState = Arc<RwLock<RuntimeState>>;
 
 pub fn new_shared() -> SharedState {
     Arc::new(RwLock::new(RuntimeState {
-        schema_version: crate::appmeta::SCHEMA_VERSION,
+        // schema_version: crate::appmeta::SCHEMA_VERSION,
         workspace: None,
         user: None,
         device: None,
         session: None,
-        resources: Vec::new(),
-        last_sync_at: None,
         acl_snapshot: None,
         acl_last_sync_at: None,
         tun_handle: None,

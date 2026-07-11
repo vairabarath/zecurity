@@ -19,7 +19,7 @@ use std::{
 use crate::{
     appmeta,
     login::LoginResult,
-    runtime::{DeviceInfo, Resource, SessionInfo, UserInfo, WorkspaceInfo},
+    runtime::{DeviceInfo, SessionInfo, UserInfo, WorkspaceInfo},
 };
 
 const ENC_PREFIX: &str = "enc1:";
@@ -204,19 +204,6 @@ impl From<&StoredWorkspaceState> for SessionInfo {
         }
     }
 }
-
-impl From<&StoredResource> for Resource {
-    fn from(resource: &StoredResource) -> Self {
-        Self {
-            id: resource.id.clone(),
-            name: resource.name.clone(),
-            host: resource.host.clone(),
-            port: resource.port,
-            protocol: resource.protocol.clone(),
-        }
-    }
-}
-
 pub fn state_dir() -> PathBuf {
     dirs::data_local_dir()
         .or_else(dirs::data_dir)

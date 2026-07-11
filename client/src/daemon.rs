@@ -792,7 +792,7 @@ async fn fetch_acl_snapshot_with_refresh(
         let s = state.read().await;
         s.refresh_lock.clone()
     };
-    let (access_token, refresh_token) = {
+    let (access_token, _refresh_token) = {
         let s = state.read().await;
         let sess = s.session.as_ref().ok_or_else(|| {
             anyhow::anyhow!("no session in state — run zecurity-client login first")
@@ -931,13 +931,6 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
         
         // Re-read tokens right before the network call — the session may
         // have been rotated by a concurrent 401-retry in the meantime.
-        let (access_token, refresh_token) = {
-            let s = state.read().await;
-            match s.session.as_ref() {
-                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
-                None => continue, // logged out between sleep and now
-            }
-        };
         let refresh_lock = {
             let s = state.read().await;
             s.refresh_lock.clone()
