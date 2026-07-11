@@ -196,6 +196,17 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	pInit, pCallback, err := auth.ProviderRoutes(
+              authSvc,
+              providerStore,
+              mustEnv("PROVIDER_GOOGLE_REDIRECT_URI"),
+              15*time.Minute,
+      )
+      if err != nil {
+              log.Fatalf("provider auth routes: %v", err)
+      }
+      mux.Handle("/provider/auth/initiate", pInit)
+      mux.Handle("/provider/auth/callback", pCallback)
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
