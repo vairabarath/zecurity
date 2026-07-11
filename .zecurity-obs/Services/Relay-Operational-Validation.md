@@ -35,6 +35,11 @@ relay discovery enabled relay_addr=relay.local:9093 relay_spiffe_id=spiffe://zec
 
 ### Step 2 — Relay provisions cert and registers
 
+The provisioning token is a single-use bootstrap credential with a default
+24-hour lifetime. It is required only while the Relay has no stored certificate
+material. The Controller burns it on the first accepted provisioning request;
+reprovisioning requires a newly issued token.
+
 ```bash
 # Issue provisioning token (admin auth required)
 curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
@@ -45,6 +50,19 @@ curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
 # Start relay; it consumes the token and provisions
 RELAY_ID=<from-response> RELAY_PROVISIONING_TOKEN=$(cat /tmp/relay.token) ./relay
 ```
+
+Alternatively, supply a protected token file:
+
+```bash
+install -m 0640 -o root -g zecurity /tmp/relay.token /etc/zecurity/relay-provisioning.token
+RELAY_ID=<from-response> \
+RELAY_PROVISIONING_TOKEN_FILE=/etc/zecurity/relay-provisioning.token \
+./relay
+```
+
+The token file is not deleted automatically. Remove it after successful
+provisioning. A Relay restart uses the stored certificate material and does not
+require the consumed token.
 
 **Expect** in Relay logs:
 ```

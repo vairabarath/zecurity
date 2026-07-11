@@ -30,30 +30,40 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
         return Ok(paths);
     }
     // if paths.exists = true then the remaining is not executed
-
+    let provisioning_token = require_provisioning_token(cfg.provisioning_token.as_deref())?;
     let ca_pem = fetch_ca_cert(&cfg.controller_http_addr).await?;
     verify_ca_fingerprint(&ca_pem, &cfg.ca_fingerprint)?;
     info!("verified controller Intermediate CA fingerprint");
 
     let material = generate_relay_csr(&cfg.relay_id, &cfg.dns_sans, &cfg.ip_sans)?; /*RelayCsr {
-                                                                                        private_key_pem,
-                                                                                        csr_der,
-                                                                                    } */
+                                                                                                    private_key_pem,
+                                                                                                    csr_der,
+                                                                                                } */
 
-    let response = send_provision_request(cfg, &ca_pem, material.csr_der).await?;
+    let response =
+        send_provision_request(cfg, provisioning_token, &ca_pem, material.csr_der).await?;
     validate_response(&cfg.relay_id, &cfg.ca_fingerprint, &response)?;
     paths.store(
         material.private_key_pem.as_bytes(),
         &response.certificate_pem,
         &response.intermediate_ca_pem,
     )?;
-
     info!(
         certificate = %paths.certificate_path.display(),
         intermediate_ca = %paths.intermediate_ca_path.display(),
         "stored Relay certificate material"
     );
     Ok(paths)
+}
+
+fn require_provisioning_token(token: Option<&str>) -> Result<&str> {
+    token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context(
+            "no provisioning token: set RELAY_PROVISIONING_TOKEN or \
+             RELAY_PROVISIONING_TOKEN_FILE",
+        )
 }
 
 impl ProvisionedRelay {
@@ -136,6 +146,7 @@ fn verify_ca_fingerprint(ca_pem: &str, expected: &str) -> Result<()> {
 
 async fn send_provision_request(
     cfg: &RelayConfig,
+    provisioning_token: &str,
     ca_pem: &str,
     csr_der: Vec<u8>,
 ) -> Result<ProvisionResponse> {
@@ -154,7 +165,7 @@ async fn send_provision_request(
         .with_context(|| format!("failed to connect to {grpc_addr}"))?;
 
     let request = ProvisionRequest {
-        provisioning_token: String::new(),
+        provisioning_token: provisioning_token.to_owned(),
         relay_id: cfg.relay_id.clone(),
         csr_der,
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -273,6 +284,16 @@ mod tests {
             "controller.example.com"
         );
         assert_eq!(controller_host("127.0.0.1:9090").unwrap(), "127.0.0.1");
+    }
+
+    #[test]
+    fn requires_non_empty_provisioning_token() {
+        assert_eq!(
+            require_provisioning_token(Some("  relay-token  ")).unwrap(),
+            "relay-token"
+        );
+        assert!(require_provisioning_token(None).is_err());
+        assert!(require_provisioning_token(Some("  ")).is_err());
     }
 
     #[test]
