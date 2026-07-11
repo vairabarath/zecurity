@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
 import { CheckCircle2, Copy, Monitor, Terminal } from 'lucide-react'
@@ -81,18 +81,13 @@ export default function ClientInstall() {
   const devices       = devicesData?.myDevices ?? []
   const isAdmin       = meData?.me?.role === 'ADMIN'
 
-  const controllerAddr = useMemo(() => {
-    if (typeof window === 'undefined') return 'controller.example.com:9090'
-    const hostname = window.location.hostname
-    // nip.io hostnames (e.g. 192-168-1-223.nip.io) require external DNS.
-    // Convert back to raw IP so the install command works on LAN machines
-    // without internet-dependent DNS, and matches the cert's IP SAN.
-    const nipMatch = hostname.match(/^(\d+-\d+-\d+-\d+)\.nip\.io$/)
-    if (nipMatch) return `${nipMatch[1].replace(/-/g, '.')}:9090`
-    return `${hostname}:9090`
-  }, [])
+  const CLIENT_CONTROLLER_ADDR = import.meta.env.VITE_CLIENT_CONTROLLER_ADDR ?? 'controller.zecurity.in:9090'
+  const CLIENT_HTTP_BASE_URL = import.meta.env.VITE_CLIENT_HTTP_BASE_URL ?? 'https://controller.zecurity.in'
 
-  const installCmd = `curl -fsSL ${INSTALL_SCRIPT_URL} | sudo CONTROLLER_ADDR=${controllerAddr} bash`
+  const installCmd =
+    `curl -fsSL ${INSTALL_SCRIPT_URL} | sudo ` +
+    `CONTROLLER_ADDR=${CLIENT_CONTROLLER_ADDR} ` +
+    `CONTROLLER_HTTP_ADDR=${CLIENT_HTTP_BASE_URL} bash`
   const setupCmd   = `zecurity-client setup --workspace ${workspaceSlug}`
   const loginCmd   = `zecurity-client login`
   const upCmd      = `zecurity-client up`

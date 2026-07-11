@@ -174,8 +174,14 @@ if [[ -n "${CONTROLLER_ADDR:-}" || -n "${CONTROLLER_HTTP_ADDR:-}" ]]; then
     log "writing system config: $CONFIG_FILE"
     {
         echo "# ZECURITY client system config — written by client-install.sh"
-        [[ -n "${CONTROLLER_ADDR:-}" ]]      && echo "controller_address = \"${CONTROLLER_ADDR}\""
-        [[ -n "${CONTROLLER_HTTP_ADDR:-}" ]] && echo "http_base_url = \"http://${CONTROLLER_HTTP_ADDR}\""
+        [[ -n "${CONTROLLER_ADDR:-}" ]] && echo "controller_address = \"${CONTROLLER_ADDR}\""
+        if [[ -n "${CONTROLLER_HTTP_ADDR:-}" ]]; then
+            case "${CONTROLLER_HTTP_ADDR}" in
+                http://*|https://*) HTTP_BASE_URL="${CONTROLLER_HTTP_ADDR%/}" ;;
+                *)                  HTTP_BASE_URL="http://${CONTROLLER_HTTP_ADDR}" ;;
+            esac
+            echo "http_base_url = \"${HTTP_BASE_URL}\""
+        fi
         echo "workspace = \"\""
     } > "$CONFIG_FILE"
     chmod 0644 "$CONFIG_FILE"
