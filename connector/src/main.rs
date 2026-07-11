@@ -14,22 +14,21 @@
 
 // All modules live in lib.rs so tests/ can link against them. Main pulls
 // them in via the library crate's namespace.
-use zecurity_connector::{
-    agent_server, appmeta, config, control_stream, controller_client, crl, device_tunnel,
-    enrollment, net_util, policy, proto, quic_listener, relay_attachment, relay_handler,
-    relay_selector, tls, updater, util, watchdog, ControlMessage,
-};
 
 use std::net::SocketAddr;
 use std::path::Path;
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
-use config::ConnectorConfig;
+use anyhow::Context;
 use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
 use tracing::{error, info};
+use zecurity_connector::{
+    agent_server, appmeta, config::ConnectorConfig, control_stream, controller_client, crl,
+    device_tunnel, enrollment, net_util, policy, quic_listener, relay_attachment, relay_handler,
+    relay_selector, tls, updater, watchdog, ControlMessage,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

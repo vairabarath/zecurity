@@ -94,7 +94,6 @@ impl Device for TunDevice {
 
 #[derive(Serialize)]
 struct TunnelRequest {
-    token: String,
     destination: String,
     port: u16,
     protocol: String,
@@ -429,7 +428,6 @@ async fn relay_tcp_to_quic(
 
         // Send the tunnel handshake to the connector.
         let req = TunnelRequest {
-            token: String::new(),
             destination: destination.clone(),
             port,
             protocol: "tcp".to_string(),

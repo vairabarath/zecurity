@@ -39,7 +39,6 @@ pub fn quic_advertise_addr() -> Option<&'static str> {
 
 #[derive(Deserialize)]
 struct TunnelRequest {
-    token: String,
     destination: String,
     port: u16,
     #[serde(default = "default_tcp")]
