@@ -114,6 +114,7 @@ its own fast, topology-scoped channel with **no ACL recompile**.
 | `Decisions/ADR-017-Transport-Propagation.md` | Propagation pipeline: Notifier, triggers, compiler SQL, RPC shape, convergence SLA. **Has an implementation checklist — follow it.** |
 | `Decisions/ADR-018-Migration-Strategy.md` | Phased rollout + exact proto reserved statements. **We do Phases 1 & 3 only; Phase 4 is deferred.** |
 | `pending/PENDING-03-Decouple-Transport-From-ACL.md` | The decision record (Option A chosen). Reconciled at sprint end (§7). |
+| [[Sprint13/Acceptance-Test-Plan]] | **The verification gate.** Concrete, checkable test cases per phase + the critical invariant. The sprint is not done until this checklist is green. |
 
 ---
 
@@ -183,6 +184,9 @@ cd client && cargo build && cargo test
 
 ## 7. Acceptance criteria
 
+> Full checkable test matrix in [[Sprint13/Acceptance-Test-Plan]]. The gate below is the headline.
+
+- [ ] **AT-CORE (the invariant that proves the sprint):** a relay address/placement change pushes a new `TransportSnapshot` to affected connectors **without** recompiling or bumping the ACL snapshot version — and, in reverse, a policy change never bumps `transport_version`.
 - [ ] `TransportSnapshot` is compiled per workspace and served both proactively (connector stream, field 16) and by poll (`GetTransportSnapshot`).
 - [ ] A relay metadata/placement change pushes a new `TransportSnapshot` to **only the affected connectors** — and does **not** recompile or re-push the ACL snapshot.
 - [ ] The client routes a connector's relay from the Transport Cache; with an empty cache it falls back to `ACLConnector` 4+5 with no regression.
