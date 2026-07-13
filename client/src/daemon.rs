@@ -28,6 +28,18 @@ use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
 const ACL_REFRESH_TTL_SECS: i64 = 60;
+// Early-resync backoff after a relay transport failure. The connector may still
+// be re-homing, so the controller's ACL may not carry the new relay yet — retry
+// with exponential backoff until the version changes, then fall back to the
+// steady poll tick. Bounded so a permanently-dead relay can't spin forever.
+// ~2+4+8+16+16 = 46s span, which covers the connector re-home floor (~5–15s).
+const RELAY_RESYNC_BASE_SECS: u64 = 2;
+const RELAY_RESYNC_MAX_SECS: u64 = 16;
+const RELAY_RESYNC_MAX_ATTEMPTS: u32 = 5;
+// Minimum gap between early-resync bursts. Without it, a permanently-dead relay
+// plus an app that keeps retrying connections would re-arm the signal
+// continuously and spin the burst back-to-back. The 60s tick is the backstop.
+const RELAY_RESYNC_COOLDOWN_SECS: u64 = 30;
 
 struct AclSyncResult {
     version: u64,
@@ -637,8 +649,9 @@ async fn handle_up(
         }
     };
 
+    let relay_resync = { state.read().await.relay_resync.clone() };
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, allowed_entries, transports).await {
+        if let Err(e) = net_stack::run(dev, allowed_entries, transports, relay_resync).await {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -999,38 +1012,108 @@ async fn run_acl_sync_scheduler(
     conf: config::ClientConf,
     tun_slot: TunSlot,
 ) {
+    // Shared with net_stack (via handle_up): the data plane fires this when a
+    // managed-resource relay transport fails, so we re-sync early rather than
+    // waiting out the 60s tick.
+    let resync = { state.read().await.relay_resync.clone() };
+
     let mut ticker =
         tokio::time::interval(std::time::Duration::from_secs(ACL_REFRESH_TTL_SECS as u64));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // First tick completes immediately — consume it so we don
+    // First tick completes immediately — consume it so we don't double-fetch
     // right after the startup fetch_and_store_acl.
     ticker.tick().await;
 
+    // End time of the last early-resync burst; enforces RELAY_RESYNC_COOLDOWN so
+    // a permanently-dead relay can't spin bursts back-to-back. None = never run.
+    let mut last_burst_end: Option<tokio::time::Instant> = None;
+
     loop {
-        ticker.tick().await;
-
-        let has_identity = {
-            let s = state.read().await;
-            s.device.is_some() && s.session.is_some()
-        };
-        if !has_identity {
-            continue;
-        }
-
-        match sync_acl_now(&state, &conf).await {
-            Ok(result) if result.changed => {
-                info!(
-                    version = result.version,
-                    "background ACL sync: version changed, restarting tunnel"
-                );
-                if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
-                    warn!(error = %e, "background ACL sync: tunnel restart failed");
+        tokio::select! {
+            _ = ticker.tick() => {
+                sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
+            }
+            _ = resync.notified() => {
+                // A relay transport just failed. Consume this wake; if we ran a
+                // burst too recently, skip — the 60s tick remains the backstop.
+                if let Some(end) = last_burst_end {
+                    if end.elapsed() < std::time::Duration::from_secs(RELAY_RESYNC_COOLDOWN_SECS) {
+                        continue;
+                    }
                 }
+                // The connector may still be re-homing to a new relay, so the
+                // controller's ACL may not carry it yet — retry with backoff until
+                // the version changes (then restart), or attempts run out (fall
+                // back to the steady tick). Notify coalesces bursts into one wake.
+                info!("relay failure signalled — early ACL resync");
+                let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
+                for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
+                    let has_identity = {
+                        let s = state.read().await;
+                        s.device.is_some() && s.session.is_some()
+                    };
+                    if !has_identity {
+                        break;
+                    }
+                    match sync_acl_now(&state, &conf).await {
+                        Ok(result) if result.changed => {
+                            info!(
+                                version = result.version,
+                                "early ACL resync: version changed, restarting tunnel"
+                            );
+                            if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
+                                warn!(error = %e, "early ACL resync: tunnel restart failed");
+                            }
+                            break;
+                        }
+                        Ok(_) => {
+                            // Controller hasn't seen the connector re-home yet.
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2)
+                                .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "early ACL resync failed — keeping cached snapshot");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2)
+                                .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
+                        }
+                    }
+                }
+                last_burst_end = Some(tokio::time::Instant::now());
             }
-            Ok(_) => {} // unchanged — quiet, this fires every 60s
-            Err(e) => {
-                warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+        }
+    }
+}
+
+/// One steady-cadence ACL sync: fetch, and if the snapshot version changed,
+/// restart the tunnel to rebuild transports. No-op when not logged in or when
+/// the version is unchanged.
+async fn sync_and_restart_if_changed(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) {
+    let has_identity = {
+        let s = state.read().await;
+        s.device.is_some() && s.session.is_some()
+    };
+    if !has_identity {
+        return;
+    }
+    match sync_acl_now(state, conf).await {
+        Ok(result) if result.changed => {
+            info!(
+                version = result.version,
+                "background ACL sync: version changed, restarting tunnel"
+            );
+            if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                warn!(error = %e, "background ACL sync: tunnel restart failed");
             }
+        }
+        Ok(_) => {} // unchanged — quiet, this fires every 60s
+        Err(e) => {
+            warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
         }
     }
 }
