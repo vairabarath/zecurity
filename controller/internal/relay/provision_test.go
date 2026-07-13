@@ -179,7 +179,7 @@ func (f *fakeProvisionStore) RecordHeartbeat(context.Context, string, string, ti
 	return nil
 }
 
-func (f *fakeProvisionStore) ListWorkspacesForRelay(context.Context, string) ([]string, error) {
+func (f *fakeProvisionStore) ListConnectorsForRelay(context.Context, string) (map[string][]string, error) {
 	return nil, nil
 }
 

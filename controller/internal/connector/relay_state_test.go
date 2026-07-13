@@ -41,22 +41,25 @@ func (f *fakeRelayStore) BumpLastConfirmed(_ context.Context, connectorID string
 	return f.bumpErr
 }
 
-// fakePolicyNotifier records calls to NotifyPolicyChange.
-type fakePolicyNotifier struct {
-	lastWorkspaceID string
+// fakeTransportNotifier records calls to NotifyTopologyChange. Relay-placement
+// changes drive the transport plane (Track B), not the policy plane.
+type fakeTransportNotifier struct {
+	lastWorkspaceID  string
+	lastConnectorIDs []string
 }
 
-func (f *fakePolicyNotifier) NotifyPolicyChange(_ context.Context, workspaceID string) error {
+func (f *fakeTransportNotifier) NotifyTopologyChange(_ context.Context, workspaceID string, connectorIDs []string) error {
 	f.lastWorkspaceID = workspaceID
+	f.lastConnectorIDs = connectorIDs
 	return nil
 }
 
 func TestHandleConnectorRelayState_Connected(t *testing.T) {
 	store := &fakeRelayStore{upsertChanged: true}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -81,16 +84,16 @@ func TestHandleConnectorRelayState_Connected(t *testing.T) {
 		t.Fatalf("expected source 'event', got %q", store.upsertSource)
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
-		t.Fatalf("expected policy notification for ws-123, got %q", notifier.lastWorkspaceID)
+		t.Fatalf("expected topology notification for ws-123, got %q", notifier.lastWorkspaceID)
 	}
 }
 
 func TestHandleConnectorRelayState_Connected_NoChange(t *testing.T) {
 	store := &fakeRelayStore{upsertChanged: false}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -104,16 +107,16 @@ func TestHandleConnectorRelayState_Connected_NoChange(t *testing.T) {
 	})
 
 	if notifier.lastWorkspaceID != "" {
-		t.Fatalf("policy notification triggered on no-op upsert")
+		t.Fatalf("topology notification triggered on no-op upsert")
 	}
 }
 
 func TestHandleConnectorRelayState_Connected_EmptyRelayID(t *testing.T) {
 	store := &fakeRelayStore{}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -132,10 +135,10 @@ func TestHandleConnectorRelayState_Connected_EmptyRelayID(t *testing.T) {
 
 func TestHandleConnectorRelayState_Disconnected(t *testing.T) {
 	store := &fakeRelayStore{deleteChanged: true}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -152,16 +155,16 @@ func TestHandleConnectorRelayState_Disconnected(t *testing.T) {
 		t.Fatalf("expected delete for conn-abc, got %q", store.deleteConnectorID)
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
-		t.Fatalf("expected policy notification for ws-123, got %q", notifier.lastWorkspaceID)
+		t.Fatalf("expected topology notification for ws-123, got %q", notifier.lastWorkspaceID)
 	}
 }
 
 func TestHandleConnectorRelayState_Disconnected_NoChange(t *testing.T) {
 	store := &fakeRelayStore{deleteChanged: false}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -174,16 +177,16 @@ func TestHandleConnectorRelayState_Disconnected_NoChange(t *testing.T) {
 	})
 
 	if notifier.lastWorkspaceID != "" {
-		t.Fatal("policy notification triggered on no-op delete")
+		t.Fatal("topology notification triggered on no-op delete")
 	}
 }
 
 func TestHandleConnectorRelayState_ConnectorIDMismatch(t *testing.T) {
 	store := &fakeRelayStore{}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -203,10 +206,10 @@ func TestHandleConnectorRelayState_ConnectorIDMismatch(t *testing.T) {
 
 func TestHandleConnectorRelayState_UnknownReason(t *testing.T) {
 	store := &fakeRelayStore{}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -239,10 +242,10 @@ func TestHandleConnectorRelayState_NoRelayStore(t *testing.T) {
 
 func TestHandleConnectorRelayState_Switched(t *testing.T) {
 	store := &fakeRelayStore{upsertChanged: true}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",
@@ -259,16 +262,16 @@ func TestHandleConnectorRelayState_Switched(t *testing.T) {
 		t.Fatalf("expected upsert for switched relay-new, got %q", store.upsertRelayID)
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
-		t.Fatal("expected policy notification on switch")
+		t.Fatal("expected topology notification on switch")
 	}
 }
 
 func TestHandleConnectorRelayState_EmptyConnectorIDInBody(t *testing.T) {
 	store := &fakeRelayStore{upsertChanged: true}
-	notifier := &fakePolicyNotifier{}
+	notifier := &fakeTransportNotifier{}
 	handler := &EnrollmentHandler{
-		RelayStore:     store,
-		PolicyNotifier: notifier,
+		RelayStore:        store,
+		TransportNotifier: notifier,
 	}
 	client := &connectorStreamClient{
 		connectorID: "conn-abc",

@@ -140,15 +140,16 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
-	relaySvc.WithPolicyNotifier(policyNotifier)
 
-	// ADR-015 Track B: transport (connectivity) plane, independent of the ACL
-	// (authorization) plane. Phase A serves it; Phase B rewires relay triggers
-	// to transportNotifier.NotifyTopologyChange.
+	// ADR-015/017 Track B: transport (connectivity) plane, independent of the
+	// ACL (authorization) plane. Relay metadata/eviction and connector relay
+	// placement changes drive transportNotifier.NotifyTopologyChange — never
+	// the policy notifier — so they never recompile or bump the ACL.
 	transportStore := transport.NewStore(db.Pool)
 	transportCache := transport.NewSnapshotCache()
 	transportNotifier := transport.NewNotifier(transportCache)
 	transportCompiler := transport.NewCompiler(transportStore, transportCache, transportNotifier)
+	relaySvc.WithTransportNotifier(transportNotifier)
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
@@ -329,9 +330,10 @@ func main() {
 		PolicyStore:    policyStore,
 		PolicyCache:    policyCache,
 		PolicyNotifier: policyNotifier,
-		RelayStore:     relayStore,
-		RelayListSrc:   relayStore,
-		TransportSrc:   transportCompiler,
+		RelayStore:        relayStore,
+		RelayListSrc:      relayStore,
+		TransportSrc:      transportCompiler,
+		TransportNotifier: transportNotifier,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
@@ -343,6 +345,12 @@ func main() {
 	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
 	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
+
+	// Proactive transport propagation (ADR-017): after a topology change bumps
+	// the transport version, push the fresh snapshot to only the affected
+	// connectors. Never touches the ACL plane.
+	transportPusher := connector.NewTransportPusher(connectorRegistry, transportCompiler)
+	transportNotifier.RegisterPushHook(transportPusher.PushToConnectors)
 
 	clientSvc := clientsvc.NewService(
 		db.Pool,
@@ -366,7 +374,7 @@ func main() {
 
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
 	go shieldSvc.RunDisconnectWatcher(ctx)
-	go relay.RunExpiryLoop(ctx, relayStore, policyNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	go relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()

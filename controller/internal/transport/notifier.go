@@ -22,10 +22,12 @@ type Notifier struct {
 	versions map[string]*atomic.Uint64
 
 	// pushHook, if set, runs after each NotifyTopologyChange (post version-bump,
-	// post cache-invalidate) to drive proactive transport propagation. Registered
-	// once at startup before serving; must be non-blocking (it runs on the
-	// mutation path and must schedule its own async work).
-	pushHook func(workspaceID string)
+	// post cache-invalidate) to drive proactive, topology-scoped transport
+	// propagation — it receives the affected connector IDs so the pusher targets
+	// only those streams, not the whole workspace. Registered once at startup
+	// before serving; must be non-blocking (it runs on the mutation path and must
+	// schedule its own async work).
+	pushHook func(workspaceID string, affectedConnectorIDs []string)
 }
 
 // NewNotifier creates a Notifier backed by the given cache.
@@ -36,11 +38,13 @@ func NewNotifier(cache *SnapshotCache) *Notifier {
 	}
 }
 
-// NotifyTopologyChange increments the transport version for workspaceID and
-// invalidates its cached snapshot, so connectors receive the latest topology on
-// their next stream push and clients get a fresh compile on the next
-// GetTransportSnapshot. It never touches the ACL plane.
-func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string) error {
+// NotifyTopologyChange increments the workspace transport version and
+// invalidates its cached snapshot, then fires the push hook targeting only
+// affectedConnectorIDs (the connectors touched by this topology event — e.g.
+// those placed on the changed/evicted relay, or the single connector that
+// re-homed). Clients pick up the new version on their next GetTransportSnapshot.
+// It never touches the ACL plane — that is the Track B decoupling invariant.
+func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string, affectedConnectorIDs []string) error {
 	if workspaceID == "" {
 		return fmt.Errorf("notify topology change: workspaceID is required")
 	}
@@ -56,14 +60,14 @@ func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string) e
 	n.cache.Invalidate(workspaceID)
 
 	if n.pushHook != nil {
-		n.pushHook(workspaceID)
+		n.pushHook(workspaceID, affectedConnectorIDs)
 	}
 	return nil
 }
 
 // RegisterPushHook installs the proactive-push callback fired after every
 // NotifyTopologyChange. Call once during startup wiring, before serving.
-func (n *Notifier) RegisterPushHook(fn func(workspaceID string)) {
+func (n *Notifier) RegisterPushHook(fn func(workspaceID string, affectedConnectorIDs []string)) {
 	n.pushHook = fn
 }
 

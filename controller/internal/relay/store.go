@@ -235,6 +235,34 @@ func (s *Store) ListWorkspacesForRelay(ctx context.Context, relayID string) ([]s
 	return ids, rows.Err()
 }
 
+// ListConnectorsForRelay returns the connectors currently placed on a relay,
+// grouped by workspace (tenant) ID. Used by the transport-plane triggers
+// (ADR-017): a relay online/metadata/eviction event affects only the connectors
+// on that relay, so the caller notifies exactly those via NotifyTopologyChange
+// rather than recompiling the whole workspace ACL.
+func (s *Store) ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT c.tenant_id::text, c.id::text
+		   FROM connector_relay_placement crp
+		   JOIN connectors c ON c.id = crp.connector_id
+		  WHERE crp.relay_id = $1`,
+		relayID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list connectors for relay: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][]string)
+	for rows.Next() {
+		var wsID, connID string
+		if err := rows.Scan(&wsID, &connID); err != nil {
+			return nil, fmt.Errorf("scan relay connector row: %w", err)
+		}
+		out[wsID] = append(out[wsID], connID)
+	}
+	return out, rows.Err()
+}
+
 // EvictExpiredRelays marks active relays whose last heartbeat is older than
 // before as inactive. Returns the IDs of relays that were evicted so the
 // caller can notify affected workspaces.

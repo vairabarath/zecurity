@@ -30,16 +30,16 @@ type fakeHeartbeatStore struct {
 	publicAddr      string
 	connectionCount uint32
 	maxConnections  uint32
-	err             error
-	workspaceIDs    []string // returned by ListWorkspacesForRelay
+	err               error
+	connectorsByWorkspace map[string][]string // returned (as ws→connIDs) by ListConnectorsForRelay
 }
 
 type fakeNotifier struct {
-	called []string // workspace IDs NotifyPolicyChange was called with
+	called []string // workspace IDs NotifyTopologyChange was called with
 	err    error
 }
 
-func (n *fakeNotifier) NotifyPolicyChange(_ context.Context, workspaceID string) error {
+func (n *fakeNotifier) NotifyTopologyChange(_ context.Context, workspaceID string, _ []string) error {
 	n.called = append(n.called, workspaceID)
 	return n.err
 }
@@ -70,11 +70,11 @@ func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, ti
 	return s.err
 }
 
-func (s *fakeHeartbeatStore) ListWorkspacesForRelay(_ context.Context, _ string) ([]string, error) {
+func (s *fakeHeartbeatStore) ListConnectorsForRelay(_ context.Context, _ string) (map[string][]string, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	return s.workspaceIDs, nil
+	return s.connectorsByWorkspace, nil
 }
 
 func TestHeartbeatRecordsAuthenticatedRelay(t *testing.T) {
@@ -173,12 +173,12 @@ func relayHeartbeatContext(t *testing.T, role, contextRelayID, certificateRelayI
 
 // TestHeartbeat_NotifiesWorkspacesOnMetadataChange — Gap 2 regression.
 // Without Redis the cache layer always sets metadataChanged=true, so the
-// heartbeat handler must call NotifyPolicyChange for every workspace that
-// has connectors assigned to this relay.
+// heartbeat handler must call NotifyTopologyChange for every workspace that
+// has connectors assigned to this relay (transport plane — not the ACL).
 func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
-	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-alpha", "ws-beta"}}
+	store := &fakeHeartbeatStore{connectorsByWorkspace: map[string][]string{"ws-alpha": {"c1"}, "ws-beta": {"c2"}}}
 	notifier := &fakeNotifier{}
-	service := NewService(nil, store, time.Hour).WithPolicyNotifier(notifier)
+	service := NewService(nil, store, time.Hour).WithTransportNotifier(notifier)
 	notAfter := time.Now().UTC().Add(time.Hour)
 	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)
 
@@ -187,7 +187,7 @@ func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
 	}
 
 	if len(notifier.called) != 2 {
-		t.Fatalf("expected 2 NotifyPolicyChange calls, got %d: %v", len(notifier.called), notifier.called)
+		t.Fatalf("expected 2 NotifyTopologyChange calls, got %d: %v", len(notifier.called), notifier.called)
 	}
 	notified := make(map[string]bool, len(notifier.called))
 	for _, id := range notifier.called {
@@ -201,9 +201,9 @@ func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
 }
 
 // TestHeartbeat_NoNotifierDoesNotPanic — Gap 2 regression.
-// Heartbeat must succeed when no notifier is wired (nil guard in notifyRelayWorkspaces).
+// Heartbeat must succeed when no notifier is wired (nil guard in notifyRelayTopology).
 func TestHeartbeat_NoNotifierDoesNotPanic(t *testing.T) {
-	store := &fakeHeartbeatStore{workspaceIDs: []string{"ws-orphan"}}
+	store := &fakeHeartbeatStore{connectorsByWorkspace: map[string][]string{"ws-orphan": {"c1"}}}
 	service := NewService(nil, store, time.Hour) // no notifier
 	notAfter := time.Now().UTC().Add(time.Hour)
 	ctx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, notAfter)

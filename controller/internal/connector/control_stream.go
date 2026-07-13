@@ -49,6 +49,14 @@ type TransportSnapshotSource interface {
 	GetOrCompile(ctx context.Context, workspaceID string) (*clientv1.TransportSnapshot, error)
 }
 
+// TransportChangeNotifier fires a transport-plane topology change (ADR-017)
+// when a connector's relay placement changes. Implemented by *transport.Notifier
+// (NotifyTopologyChange). A relay-placement change is connectivity, not
+// authorization, so it must NOT go through the policy notifier (Track B invariant).
+type TransportChangeNotifier interface {
+	NotifyTopologyChange(ctx context.Context, workspaceID string, connectorIDs []string) error
+}
+
 // PolicyChangeNotifier is the subset of policy.Notifier used by the
 // relay-placement handlers. Defined as an interface for testability.
 type PolicyChangeNotifier interface {
@@ -588,9 +596,11 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 			changed, err := h.RelayStore.UpsertPlacement(ctx, connectorID, r.RelayId, attachedAt, "heartbeat")
 			if err != nil {
 				log.Printf("control stream: upsert relay placement from heartbeat connector=%s relay=%s: %v", connectorID, r.RelayId, err)
-			} else if changed && h.PolicyNotifier != nil {
-				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-					log.Printf("control stream: notify policy change after relay placement connector=%s: %v", connectorID, err)
+			} else if changed && h.TransportNotifier != nil {
+				// Relay placement changed → transport-plane topology change for
+				// this connector only. Never the ACL (Track B invariant).
+				if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after relay placement connector=%s: %v", connectorID, err)
 				}
 			}
 		} else {
@@ -598,9 +608,9 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 			changed, err := h.RelayStore.DeletePlacement(ctx, connectorID)
 			if err != nil {
 				log.Printf("control stream: delete relay placement from heartbeat connector=%s: %v", connectorID, err)
-			} else if changed && h.PolicyNotifier != nil {
-				if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-					log.Printf("control stream: notify policy change after relay detach connector=%s: %v", connectorID, err)
+			} else if changed && h.TransportNotifier != nil {
+				if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after relay detach connector=%s: %v", connectorID, err)
 				}
 			}
 		}
@@ -639,9 +649,9 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			log.Printf("control stream: upsert relay placement from event connector=%s relay=%s: %v", connectorID, r.RelayId, err)
 			return
 		}
-		if changed && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-				log.Printf("control stream: notify policy change after relay event connector=%s: %v", connectorID, err)
+		if changed && h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after relay event connector=%s: %v", connectorID, err)
 			}
 		}
 	case "disconnected":
@@ -650,9 +660,9 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 			log.Printf("control stream: delete relay placement from event connector=%s: %v", connectorID, err)
 			return
 		}
-		if changed && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-				log.Printf("control stream: notify policy change after relay detach event connector=%s: %v", connectorID, err)
+		if changed && h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after relay detach event connector=%s: %v", connectorID, err)
 			}
 		}
 	default:

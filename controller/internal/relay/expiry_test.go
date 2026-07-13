@@ -9,11 +9,11 @@ import (
 
 // fakeExpiryStore is a hand-rolled fake satisfying the expiryStore interface.
 type fakeExpiryStore struct {
-	evictedIDs     []string            // returned by EvictExpiredRelays
-	workspacesByID map[string][]string // relayID → []workspaceID for ListWorkspacesForRelay
-	evictErr       error
-	listErr        error
-	capturedBefore time.Time // threshold passed to EvictExpiredRelays
+	evictedIDs        []string                       // returned by EvictExpiredRelays
+	connectorsByRelay map[string]map[string][]string // relayID → (workspaceID → connectorIDs)
+	evictErr          error
+	listErr           error
+	capturedBefore    time.Time // threshold passed to EvictExpiredRelays
 }
 
 func (s *fakeExpiryStore) EvictExpiredRelays(_ context.Context, before time.Time) ([]string, error) {
@@ -21,22 +21,23 @@ func (s *fakeExpiryStore) EvictExpiredRelays(_ context.Context, before time.Time
 	return s.evictedIDs, s.evictErr
 }
 
-func (s *fakeExpiryStore) ListWorkspacesForRelay(_ context.Context, relayID string) ([]string, error) {
+func (s *fakeExpiryStore) ListConnectorsForRelay(_ context.Context, relayID string) (map[string][]string, error) {
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
-	return s.workspacesByID[relayID], nil
+	return s.connectorsByRelay[relayID], nil
 }
 
-// TestRunEviction_EvictsAndNotifiesWorkspaces — Gap 3 regression.
+// TestRunEviction_EvictsAndNotifiesWorkspaces — Gap 3 regression (Track B).
 // When relays are evicted, every workspace that had connectors on those relays
-// must receive a NotifyPolicyChange call so stale relay coords are recompiled out.
+// must receive a NotifyTopologyChange call so the transport snapshot drops the
+// dead relay — without recompiling the ACL.
 func TestRunEviction_EvictsAndNotifiesWorkspaces(t *testing.T) {
 	store := &fakeExpiryStore{
 		evictedIDs: []string{"relay-one", "relay-two"},
-		workspacesByID: map[string][]string{
-			"relay-one": {"ws-a", "ws-b"},
-			"relay-two": {"ws-c"},
+		connectorsByRelay: map[string]map[string][]string{
+			"relay-one": {"ws-a": {"c1"}, "ws-b": {"c2"}},
+			"relay-two": {"ws-c": {"c3"}},
 		},
 	}
 	notifier := &fakeNotifier{}
@@ -45,7 +46,7 @@ func TestRunEviction_EvictsAndNotifiesWorkspaces(t *testing.T) {
 
 	wantNotified := map[string]bool{"ws-a": true, "ws-b": true, "ws-c": true}
 	if len(notifier.called) != 3 {
-		t.Fatalf("expected 3 NotifyPolicyChange calls, got %d: %v", len(notifier.called), notifier.called)
+		t.Fatalf("expected 3 NotifyTopologyChange calls, got %d: %v", len(notifier.called), notifier.called)
 	}
 	for _, id := range notifier.called {
 		if !wantNotified[id] {

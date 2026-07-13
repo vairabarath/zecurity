@@ -26,7 +26,7 @@ type Service struct {
 	redis     valkeycompat.Cmdable
 	jwtSecret string
 	certTTL   time.Duration
-	notifier  policyChangeNotifier
+	notifier  topologyChangeNotifier
 
 	heartbeatDBWriteInterval time.Duration
 	labelHoldDown            time.Duration
@@ -78,7 +78,11 @@ func (s *Service) WithProvisioningAuth(jwtSecret string) *Service {
 	return s
 }
 
-func (s *Service) WithPolicyNotifier(n policyChangeNotifier) *Service {
+// WithTransportNotifier wires the transport-plane notifier used to propagate
+// relay topology changes (ADR-017). Relay metadata/eviction events call
+// NotifyTopologyChange, never NotifyPolicyChange — a relay change must not
+// recompile or bump the ACL snapshot (the Track B decoupling invariant).
+func (s *Service) WithTransportNotifier(n topologyChangeNotifier) *Service {
 	s.notifier = n
 	return s
 }

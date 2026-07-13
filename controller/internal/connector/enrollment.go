@@ -28,12 +28,13 @@ type EnrollmentHandler struct {
 	ShieldSvc  shield.Service
 	Registry   *ConnectorRegistry // tracks active Control streams
 
-	PolicyStore    *policy.Store
-	PolicyCache    *policy.SnapshotCache
-	PolicyNotifier PolicyChangeNotifier
-	RelayStore     RelayPlacementStore
-	RelayListSrc   LabelledRelayListSource // ADR-016: source of LabelledRelayList for control-stream push
-	TransportSrc   TransportSnapshotSource // ADR-015 Track B: source of TransportSnapshot for control-stream push
+	PolicyStore       *policy.Store
+	PolicyCache       *policy.SnapshotCache
+	PolicyNotifier    PolicyChangeNotifier
+	RelayStore        RelayPlacementStore
+	RelayListSrc      LabelledRelayListSource // ADR-016: source of LabelledRelayList for control-stream push
+	TransportSrc      TransportSnapshotSource // ADR-015 Track B: source of TransportSnapshot for control-stream push
+	TransportNotifier TransportChangeNotifier // ADR-017 Track B: topology-change notifier for relay-placement changes
 
 	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
 }

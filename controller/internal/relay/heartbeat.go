@@ -33,12 +33,15 @@ const (
 type heartbeatStore interface {
 	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
-	ListWorkspacesForRelay(ctx context.Context, relayID string) ([]string, error)
+	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
 
-type policyChangeNotifier interface {
-	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+// topologyChangeNotifier is the transport-plane notifier (ADR-017). A relay
+// metadata/eviction event is a topology change, NOT a policy change: it updates
+// connectivity for the connectors on that relay without recompiling the ACL.
+type topologyChangeNotifier interface {
+	NotifyTopologyChange(ctx context.Context, workspaceID string, connectorIDs []string) error
 }
 
 type relayAddressObservation struct {
@@ -138,7 +141,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 			relayID, transition.PreviousLabel, transition.NewLabel)
 	}
 	if metadataChanged || transition.Promoted {
-		s.notifyRelayWorkspaces(ctx, relayID)
+		s.notifyRelayTopology(ctx, relayID)
 		// ADR-016 C5: pool change → push fresh LabelledRelayList to all
 		// connected connectors. metadataChanged catches address/SPIFFE shifts
 		// and first-time eligibility; Promoted catches tier transitions.
@@ -152,18 +155,22 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	}, nil
 }
 
-func (s *Service) notifyRelayWorkspaces(ctx context.Context, relayID string) {
+// notifyRelayTopology fires a transport-plane topology change for every
+// workspace with connectors on this relay, targeting only those connectors. It
+// deliberately does NOT recompile the ACL — a relay metadata change is
+// connectivity, not authorization (the Track B decoupling invariant).
+func (s *Service) notifyRelayTopology(ctx context.Context, relayID string) {
 	if s.notifier == nil {
 		return
 	}
-	workspaceIDs, err := s.store.ListWorkspacesForRelay(ctx, relayID)
+	byWorkspace, err := s.store.ListConnectorsForRelay(ctx, relayID)
 	if err != nil {
-		log.Printf("relay heartbeat: list workspaces for relay %s: %v", relayID, err)
+		log.Printf("relay heartbeat: list connectors for relay %s: %v", relayID, err)
 		return
 	}
-	for _, wsID := range workspaceIDs {
-		if err := s.notifier.NotifyPolicyChange(ctx, wsID); err != nil {
-			log.Printf("relay heartbeat: notify workspace %s: %v", wsID, err)
+	for wsID, connectorIDs := range byWorkspace {
+		if err := s.notifier.NotifyTopologyChange(ctx, wsID, connectorIDs); err != nil {
+			log.Printf("relay heartbeat: notify topology workspace %s: %v", wsID, err)
 		}
 	}
 }
