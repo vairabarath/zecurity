@@ -17,8 +17,9 @@ tags:
 # Sprint 12 — Provider Identity Tier + Authenticated Relay Provisioning
 
 > **Read this before writing a single line of code.**
-> Source of truth for scope: `.zecurity-obs/pending/PENDING-07a-Provider-Identity-and-Authorization.md`
-> and `.zecurity-obs/pending/PENDING-01-Authenticated-Relay-Provisioning.md`.
+> Source of truth for scope: `.zecurity-obs/Decisions/ADR-021-Provider-Identity-and-Authorization.md`
+> and `.zecurity-obs/Decisions/ADR-020-Authenticated-Relay-Provisioning.md`
+> (accepted 2026-07-13; formerly PENDING-07a / PENDING-01).
 > Detailed engineering plan: `~/Documents/PLAN-PENDING-01-and-07a-Provider-Tier-and-Relay-Provisioning.md`.
 
 ## Sprint Goal

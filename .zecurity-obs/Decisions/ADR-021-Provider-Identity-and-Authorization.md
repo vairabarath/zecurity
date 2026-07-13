@@ -1,22 +1,35 @@
 ---
 type: adr
-status: pending
-id: PENDING-07a
+status: accepted
+id: ADR-021
+former_id: PENDING-07a
 domain: operator
 priority: P1
 created: 2026-07-03
+decided: 2026-07-13
 related:
   - PENDING-07-Provider-Dashboard-Vision
   - PENDING-07b-Provider-Console-Packaging
-  - PENDING-01-Authenticated-Relay-Provisioning
+  - ADR-020-Authenticated-Relay-Provisioning
   - PENDING-04-Multiple-IdPs-Enterprise-SSO
-tags: [pending, adr, operator, provider, identity, authz, rbac]
+tags: [adr, operator, provider, identity, authz, rbac]
 ---
 
-# Pending ADR 07a — Provider Identity & Authorization Tier
+# ADR-021 — Provider Identity & Authorization Tier
 
-> **Status: PENDING — for team discussion.** Backend half of [[PENDING-07-Provider-Dashboard-Vision]].
-> This is the load-bearing decision and the real prerequisite to doing PENDING-01/02 *correctly*.
+> **Status: ACCEPTED (2026-07-13).** Promoted from `PENDING-07a`. Backend half of
+> [[PENDING-07-Provider-Dashboard-Vision]].
+>
+> **Decision: Option A** — a separate `provider_users` identity tier (not the
+> tenant `users` table), authenticated via the existing Google OIDC exchange but
+> issued an **audience-scoped provider JWT (`aud=provider`)**, gated by a new
+> `RequireProvider` middleware that never touches `WorkspaceGuard`. All provider
+> operations live behind a `/provider` route group and funnel through one
+> `Authz.decide(actor, action, target)` chokepoint; alpha roles are
+> `super-admin` / `relay-ops`; super-admin #0 is seeded from
+> `PROVIDER_BOOTSTRAP_EMAILS`. Enterprise SSO/MFA and the React console are
+> deferred (PENDING-04/06, PENDING-07b). **Implemented in Sprint 12**
+> (see [[Sprint12/path]]).
 
 ## Context / Current State
 

@@ -26,14 +26,14 @@ discussion — the "Options" and "Open Questions" are the point; the
 
 | # | Title | Domain | Priority | Related |
 |---|-------|--------|----------|---------|
-| [PENDING-01](PENDING-01-Authenticated-Relay-Provisioning.md) | Authenticated Relay Provisioning | security/relay | **P0** | ADR-014, Sprint 10.3 |
+| PENDING-01 ✅ → [ADR-020](../Decisions/ADR-020-Authenticated-Relay-Provisioning.md) | Authenticated Relay Provisioning *(accepted, Sprint 12)* | security/relay | **P0** | ADR-014, Sprint 10.3 |
 | [PENDING-02](PENDING-02-Certificate-Revocation-Enforcement.md) | Certificate Revocation (CRL/OCSP) Enforcement | security | **P0** | ADR-014 |
 | [PENDING-03](PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) | relay | P1 | ADR-015/016/017/018 |
 | [PENDING-04](PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO | identity | P1 | ADR-005/006 |
 | [PENDING-05](PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) | identity | P2 | — |
 | [PENDING-06](PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication | identity | P2 | PENDING-04 |
 | [PENDING-07](PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** (functionality + phased roadmap) | operator | P1 | 07a, 07b |
-| [PENDING-07a](PENDING-07a-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(the load-bearing decision)* | operator | P1 | 01, 04 |
+| PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
 | [PENDING-07b](PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging (separate app vs shared; alpha = CLI) | operator | P1 | 07a |
 | [PENDING-08](PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks | zero-trust | P2 | — |
 | [PENDING-09](PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization | zero-trust | P2 | ADR-001 |
@@ -51,7 +51,7 @@ P2 = differentiation / maturity.
 ## Implementation Order
 
 > **Correction to a common assumption:** the two P0s do **not** require the provider *dashboard
-> (UI)*. They require the provider **identity/authorization tier** ([[PENDING-07a-Provider-Identity-and-Authorization]])
+> (UI)*. They require the provider **identity/authorization tier** ([[ADR-021-Provider-Identity-and-Authorization]])
 > — a small backend slice (`provider_users` allowlist + `RequireProvider` + a `/provider` route
 > group + per-action audit), drivable by CLI. The dashboard *UI* ([[PENDING-07b-Provider-Console-Packaging]])
 > is a Beta concern. So the true first buildable step is **07a**, then the P0s land correctly on

@@ -1,19 +1,31 @@
 ---
 type: adr
-status: pending
-id: PENDING-01
+status: accepted
+id: ADR-020
+former_id: PENDING-01
 domain: security/relay
 priority: P0
 created: 2026-07-03
+decided: 2026-07-13
 related:
   - ADR-014-Relay-Stabilization
+  - ADR-021-Provider-Identity-and-Authorization
   - Relay-E2E-Flow-and-Security-Review (F1)
-tags: [pending, adr, relay, security, pki]
+tags: [adr, relay, security, pki]
 ---
 
-# Pending ADR 01 — Authenticated Relay Provisioning
+# ADR-020 — Authenticated Relay Provisioning
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: ACCEPTED (2026-07-13).** Promoted from `PENDING-01`.
+>
+> **Decision: Option A** — wire the existing single-use provisioning token.
+> `Provision` now requires `provisioning_token`, verifies it, asserts
+> `claims.RelayID == req.RelayId`, and burns the JTI atomically **before**
+> `SignRelayCert`; the anonymous self-insert fallback is removed (unregistered
+> relay → `FailedPrecondition`). Relay-token *issuance* is re-homed under the
+> provider tier ([[ADR-021-Provider-Identity-and-Authorization]]), closing the
+> "any tenant admin can mint tokens" gap. **Implemented in Sprint 12**
+> (see [[Sprint12/path]]).
 
 ## Context / Current State
 
