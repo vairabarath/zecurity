@@ -3,7 +3,7 @@
 
 
 -- A relay is platform-level (not workspace-scoped). The operator pre-registers
--- a relay via POST /api/relays, which records the dns/ip allowlist and stores
+-- a relay via POST /provider/relays, which records the dns/ip allowlist and stores
 -- the JTI of the issued provisioning token. The Provision gRPC RPC burns the
 -- JTI on success and flips status pending → active.
 

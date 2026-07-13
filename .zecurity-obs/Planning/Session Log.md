@@ -1751,3 +1751,34 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Verify on a Linux host with CAP_NET_ADMIN: after `zecurity-client down` then `zecurity-client up`, `ip rule show | grep 'fwmark 0x5a'` should show only `lookup 105` and no `lookup main`.
+
+## 2026-07-13 — Sprint 12 (Provider Identity Tier + Authenticated Relay Provisioning)
+
+**What was done:**
+- **M1 (provider tier):** `provider_users` + `provider_audit_logs` migrations (025/026);
+  `internal/provider` store + single `Authz.decide(actor, action, target)` chokepoint with typed
+  `CanX` wrappers; audience-scoped provider JWT (`aud=provider`) reusing the Google OIDC exchange;
+  `RequireProvider` middleware (allowlist + `disabled_at`, never calls `WorkspaceGuard`); `/provider`
+  route group with `/provider/me` + `/provider/users`; super-admin #0 seeded from
+  `PROVIDER_BOOTSTRAP_EMAILS`.
+- **M2 (relay provisioning):** `Provision` RPC now requires the single-use token — verify → assert
+  `claims.RelayID == req.RelayId` → burn JTI atomically before `SignRelayCert`; anonymous
+  self-insert fallback removed (unregistered relay → `FailedPrecondition`). Relay creation re-homed
+  from tenant `POST /api/relays` to `POST /provider/relays` behind `RequireProvider`, running
+  `CanIssueProvisioningToken` + writing a `relay.create` audit row; `DELETE /provider/relays/{id}`
+  soft-delete seam added for PENDING-02 (cert NOT revoked). Rust relay client sends the real
+  `provisioning_token` (env/file), fails fast when absent.
+- **Docs:** promoted `PENDING-01` → `ADR-020-Authenticated-Relay-Provisioning` and `PENDING-07a` →
+  `ADR-021-Provider-Identity-and-Authorization` (both Option A, `status: accepted`); repointed
+  back-references; fixed a stale `POST /api/relays` comment in migration `019_relays.sql`.
+
+**Verification:**
+- `cd controller && go build ./...` passed.
+- `go test ./internal/relay/... ./internal/provider/... ./internal/middleware/...` passed.
+- No `/api/relays` references remain in `controller/`.
+
+**What's next:**
+- Runtime e2e provisioning check (the one remaining unchecked acceptance box): relay boots with
+  `RELAY_PROVISIONING_TOKEN` and provisions end-to-end against `POST /provider/relays`.
+- PENDING-02 (CRL/OCSP enforcement) can now hang its relay-revoke trigger off the `DELETE
+  /provider/relays/{id}` seam.
