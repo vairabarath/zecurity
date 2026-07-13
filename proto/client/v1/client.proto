@@ -27,6 +27,13 @@ service ClientService {
   // Validates access_token and device_id; default-deny if either is invalid.
   rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
 
+  // GetTransportSnapshot — returns the workspace transport (connectivity)
+  // snapshot: per-connector relay coordinates keyed by remote_network_id
+  // (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+  // changes propagate without an authorization recompile. Validates
+  // access_token and device_id; default-deny if either is invalid.
+  rpc GetTransportSnapshot(GetTransportSnapshotRequest) returns (GetTransportSnapshotResponse);
+
  // RevokeDevice — mark a client device as revoked. Called by the CLI on
   // logout; also usable by admin flows in the future. Best-effort from the
   // CLI's perspective — logout must not block on this RPC. Authenticates
@@ -156,6 +163,46 @@ message ACLEntry {
   string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
   string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
 }
+
+// ── Transport plane (ADR-015 Track B) ───────────────────────────────────────
+// The transport snapshot carries connectivity (which connector + relay) for a
+// workspace, independent of authorization (the ACL snapshot). Relay coords live
+// here so a relay change propagates without recompiling/bumping the ACL. Lives
+// in client.v1 (not connector.v1) to mirror ACLSnapshot and avoid an import
+// cycle — connector.proto references it as client.v1.TransportSnapshot.
+// Correlated with the ACL by the shared join key remote_network_id.
+
+message GetTransportSnapshotRequest {
+  string access_token  = 1;
+  string device_id     = 2;
+  uint64 known_version = 3; // client's cached version; 0 = always return the snapshot
+}
+
+message GetTransportSnapshotResponse {
+  TransportSnapshot snapshot   = 1; // omitted when up_to_date
+  bool              up_to_date = 2; // true when known_version == current version
+}
+
+// TransportConnector mirrors ACLConnector's tunnel/relay coordinates.
+message TransportConnector {
+  string connector_id          = 1;
+  string connector_tunnel_addr = 2; // host:9092 QUIC
+  string connector_spiffe      = 3;
+  string relay_addr            = 4; // relay QUIC address for this connector; empty = no relay
+  string relay_spiffe_id       = 5; // SPIFFE URI of the relay this connector is registered with
+}
+
+// TransportRemoteNetwork groups the connectors serving one remote network.
+message TransportRemoteNetwork {
+  string remote_network_id               = 1; // shared join key with ACLEntry.remote_network_id
+  repeated TransportConnector connectors = 2;
+}
+
+message TransportSnapshot {
+  repeated TransportRemoteNetwork remote_networks = 1;
+  uint64 version                                  = 2; // monotonic; independent of ACLSnapshot.version
+}
+
 // ── RevokeDevice ───────────────────────────────────────────────────────────
 
 message RevokeDeviceRequest {

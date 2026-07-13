@@ -52,6 +52,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/transport"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -140,6 +141,14 @@ func main() {
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
 	relaySvc.WithPolicyNotifier(policyNotifier)
+
+	// ADR-015 Track B: transport (connectivity) plane, independent of the ACL
+	// (authorization) plane. Phase A serves it; Phase B rewires relay triggers
+	// to transportNotifier.NotifyTopologyChange.
+	transportStore := transport.NewStore(db.Pool)
+	transportCache := transport.NewSnapshotCache()
+	transportNotifier := transport.NewNotifier(transportCache)
+	transportCompiler := transport.NewCompiler(transportStore, transportCache, transportNotifier)
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
@@ -322,6 +331,7 @@ func main() {
 		PolicyNotifier: policyNotifier,
 		RelayStore:     relayStore,
 		RelayListSrc:   relayStore,
+		TransportSrc:   transportCompiler,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
 	shieldpb.RegisterShieldServiceServer(grpcServer, shieldSvc)
@@ -345,6 +355,7 @@ func main() {
 		policyStore,
 		policyCache,
 		policyNotifier,
+		transportCompiler,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 

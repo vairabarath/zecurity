@@ -42,6 +42,13 @@ type LabelledRelayListSource interface {
 	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
 }
 
+// TransportSnapshotSource builds the ADR-015 Track B TransportSnapshot that the
+// controller pushes to connector control streams on open. Implemented by
+// *transport.Compiler (GetOrCompile). Defined as an interface so tests can stub it.
+type TransportSnapshotSource interface {
+	GetOrCompile(ctx context.Context, workspaceID string) (*clientv1.TransportSnapshot, error)
+}
+
 // PolicyChangeNotifier is the subset of policy.Notifier used by the
 // relay-placement handlers. Defined as an interface for testability.
 type PolicyChangeNotifier interface {
@@ -395,6 +402,19 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			Body: &pb.ConnectorControlMessage_RelayList{RelayList: list},
 		}); err != nil {
 			log.Printf("control stream: send labelled relay list to connector %s: %v", connectorID, err)
+		}
+	}
+
+	// ADR-015 Track B: push the current transport (connectivity) snapshot so the
+	// connector's workspace topology is available immediately, independent of the
+	// ACL snapshot. Workspace-scoped by the connector's tenant.
+	if h.TransportSrc != nil {
+		if snap, err := h.TransportSrc.GetOrCompile(ctx, tenantID); err != nil {
+			log.Printf("control stream: build transport snapshot for connector %s: %v", connectorID, err)
+		} else if err := client.send(&pb.ConnectorControlMessage{
+			Body: &pb.ConnectorControlMessage_TransportSnapshot{TransportSnapshot: snap},
+		}); err != nil {
+			log.Printf("control stream: send transport snapshot to connector %s: %v", connectorID, err)
 		}
 	}
 

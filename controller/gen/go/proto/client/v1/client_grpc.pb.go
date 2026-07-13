@@ -19,12 +19,13 @@ import (
 const _ = grpc.SupportPackageIsVersion8
 
 const (
-	ClientService_GetAuthConfig_FullMethodName  = "/client.v1.ClientService/GetAuthConfig"
-	ClientService_InitiateAuth_FullMethodName   = "/client.v1.ClientService/InitiateAuth"
-	ClientService_TokenExchange_FullMethodName  = "/client.v1.ClientService/TokenExchange"
-	ClientService_EnrollDevice_FullMethodName   = "/client.v1.ClientService/EnrollDevice"
-	ClientService_GetACLSnapshot_FullMethodName = "/client.v1.ClientService/GetACLSnapshot"
-	ClientService_RevokeDevice_FullMethodName   = "/client.v1.ClientService/RevokeDevice"
+	ClientService_GetAuthConfig_FullMethodName        = "/client.v1.ClientService/GetAuthConfig"
+	ClientService_InitiateAuth_FullMethodName         = "/client.v1.ClientService/InitiateAuth"
+	ClientService_TokenExchange_FullMethodName        = "/client.v1.ClientService/TokenExchange"
+	ClientService_EnrollDevice_FullMethodName         = "/client.v1.ClientService/EnrollDevice"
+	ClientService_GetACLSnapshot_FullMethodName       = "/client.v1.ClientService/GetACLSnapshot"
+	ClientService_GetTransportSnapshot_FullMethodName = "/client.v1.ClientService/GetTransportSnapshot"
+	ClientService_RevokeDevice_FullMethodName         = "/client.v1.ClientService/RevokeDevice"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -48,6 +49,12 @@ type ClientServiceClient interface {
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(ctx context.Context, in *GetACLSnapshotRequest, opts ...grpc.CallOption) (*GetACLSnapshotResponse, error)
+	// GetTransportSnapshot — returns the workspace transport (connectivity)
+	// snapshot: per-connector relay coordinates keyed by remote_network_id
+	// (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+	// changes propagate without an authorization recompile. Validates
+	// access_token and device_id; default-deny if either is invalid.
+	GetTransportSnapshot(ctx context.Context, in *GetTransportSnapshotRequest, opts ...grpc.CallOption) (*GetTransportSnapshotResponse, error)
 	// RevokeDevice — mark a client device as revoked. Called by the CLI on
 	// logout; also usable by admin flows in the future. Best-effort from the
 	// CLI's perspective — logout must not block on this RPC. Authenticates
@@ -115,6 +122,16 @@ func (c *clientServiceClient) GetACLSnapshot(ctx context.Context, in *GetACLSnap
 	return out, nil
 }
 
+func (c *clientServiceClient) GetTransportSnapshot(ctx context.Context, in *GetTransportSnapshotRequest, opts ...grpc.CallOption) (*GetTransportSnapshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTransportSnapshotResponse)
+	err := c.cc.Invoke(ctx, ClientService_GetTransportSnapshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clientServiceClient) RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RevokeDeviceResponse)
@@ -146,6 +163,12 @@ type ClientServiceServer interface {
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error)
+	// GetTransportSnapshot — returns the workspace transport (connectivity)
+	// snapshot: per-connector relay coordinates keyed by remote_network_id
+	// (ADR-015/017, Track B). Independent of the ACL snapshot's version, so relay
+	// changes propagate without an authorization recompile. Validates
+	// access_token and device_id; default-deny if either is invalid.
+	GetTransportSnapshot(context.Context, *GetTransportSnapshotRequest) (*GetTransportSnapshotResponse, error)
 	// RevokeDevice — mark a client device as revoked. Called by the CLI on
 	// logout; also usable by admin flows in the future. Best-effort from the
 	// CLI's perspective — logout must not block on this RPC. Authenticates
@@ -174,6 +197,9 @@ func (UnimplementedClientServiceServer) EnrollDevice(context.Context, *EnrollDev
 }
 func (UnimplementedClientServiceServer) GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetACLSnapshot not implemented")
+}
+func (UnimplementedClientServiceServer) GetTransportSnapshot(context.Context, *GetTransportSnapshotRequest) (*GetTransportSnapshotResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetTransportSnapshot not implemented")
 }
 func (UnimplementedClientServiceServer) RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevokeDevice not implemented")
@@ -281,6 +307,24 @@ func _ClientService_GetACLSnapshot_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_GetTransportSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTransportSnapshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).GetTransportSnapshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_GetTransportSnapshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).GetTransportSnapshot(ctx, req.(*GetTransportSnapshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ClientService_RevokeDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RevokeDeviceRequest)
 	if err := dec(in); err != nil {
@@ -325,6 +369,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetACLSnapshot",
 			Handler:    _ClientService_GetACLSnapshot_Handler,
+		},
+		{
+			MethodName: "GetTransportSnapshot",
+			Handler:    _ClientService_GetTransportSnapshot_Handler,
 		},
 		{
 			MethodName: "RevokeDevice",

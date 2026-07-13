@@ -30,6 +30,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
 const (
@@ -53,6 +54,7 @@ type Service struct {
 	policyStore              *policy.Store
 	policyCache              *policy.SnapshotCache
 	policyNotifier           *policy.Notifier
+	transportCompiler        *transport.Compiler
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -65,6 +67,7 @@ func NewService(
 	policyStore *policy.Store,
 	policyCache *policy.SnapshotCache,
 	policyNotifier *policy.Notifier,
+	transportCompiler *transport.Compiler,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -77,6 +80,7 @@ func NewService(
 		policyStore:              policyStore,
 		policyCache:              policyCache,
 		policyNotifier:           policyNotifier,
+		transportCompiler:        transportCompiler,
 	}
 }
 
@@ -445,6 +449,55 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 	}
 
 	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
+}
+
+// GetTransportSnapshot returns the workspace transport (connectivity) snapshot
+// for the calling device — per-connector relay coordinates keyed by
+// remote_network_id (ADR-015 Track B). Independent of the ACL: relay changes
+// bump only transport_version, so this can return a new snapshot without any
+// ACL recompile. Same device ownership + revocation gate as GetACLSnapshot.
+// When the client's known_version matches the current version, the snapshot is
+// omitted and up_to_date is set.
+func (s *Service) GetTransportSnapshot(ctx context.Context, req *clientv1.GetTransportSnapshotRequest) (*clientv1.GetTransportSnapshotResponse, error) {
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token and device_id are required")
+	}
+
+	claims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
+	}
+
+	// Confirm the device belongs to this user and workspace, and is not revoked
+	// — identical gate to GetACLSnapshot so a revoked device cannot pull
+	// transport topology either.
+	var deviceWorkspaceID string
+	var revokedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT workspace_id, revoked_at FROM client_devices
+		 WHERE id = $1 AND user_id = $2`,
+		req.GetDeviceId(), claims.UserID,
+	).Scan(&deviceWorkspaceID, &revokedAt)
+	if err != nil || deviceWorkspaceID != claims.TenantID {
+		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
+	}
+	if revokedAt != nil {
+		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	}
+
+	workspaceID := claims.TenantID
+
+	snap, err := s.transportCompiler.GetOrCompile(ctx, workspaceID)
+	if err != nil {
+		// Default-deny: do not serve a partial or stale snapshot.
+		return nil, status.Errorf(codes.Internal, "compile transport snapshot: %v", err)
+	}
+
+	// Skip the payload when the client already has the current version.
+	if req.GetKnownVersion() != 0 && req.GetKnownVersion() == snap.Version {
+		return &clientv1.GetTransportSnapshotResponse{UpToDate: true}, nil
+	}
+	return &clientv1.GetTransportSnapshotResponse{Snapshot: snap}, nil
 }
 
 // RevokeDevice marks a client device as revoked. The device's SPIFFE will be
