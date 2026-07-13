@@ -8,7 +8,7 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 8 is the active sprint.** Building Policy Engine: groups, resource access rules, ACL snapshot compilation, Connector ACL push, and Client `GetACLSnapshot` support. Sprint 8.5 is the M4 client daemon bridge; Sprint 9 is the RDE data plane.
+**Sprint 13 is the active sprint.** Decoupling transport from the ACL (Track B / PENDING-03 Option A): a first-class `TransportSnapshot` plane so relay routing propagates independently of authorization. **Solo sprint — M3 (Yogesh).** Executes the already-approved design in `Decisions/ADR-015`, `ADR-017`, `ADR-018` (Phases 1 & 3 only; the breaking ADR-018 Phase 4 removal is deferred). Sprint 12 (provider identity tier + authenticated relay provisioning, now `ADR-020`/`ADR-021`) just completed.
 
 ---
 
@@ -17,7 +17,7 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint8/path.md` — dependency map and progress checkboxes
+2. Read `.zecurity-obs/Sprint13/path.md` — dependency map and progress checkboxes (Sprint 13 is solo M3; other members: ask what they're picking up)
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
@@ -31,8 +31,8 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint8/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint8/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint13/path.md` | Dependency map + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint13/Member{N}-*/Phase*.md` | Detailed spec per phase |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
