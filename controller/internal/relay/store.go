@@ -122,6 +122,25 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 	return nil
 }
 
+// MarkDeleted soft-deletes a relay (status='deleted') so it stops being served
+// to connectors — BuildLabelledRelayList and RecordHeartbeat both reject
+// 'deleted'. It does NOT revoke the relay certificate: CRL revocation is the
+// PENDING-02 seam. Returns ErrRelayNotFound if no matching non-deleted row.
+func (s *Store) MarkDeleted(ctx context.Context, id string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relays SET status = 'deleted', updated_at = NOW()
+                WHERE id = $1 AND status <> 'deleted'`,
+		id,
+	)
+	if err != nil {
+		return fmt.Errorf("mark relay deleted: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrRelayNotFound
+	}
+	return nil
+}
+
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
 // runtime and certificate metadata.
 // UpsertPlacement inserts or updates a connector_relay_placement row.

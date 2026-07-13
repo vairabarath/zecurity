@@ -269,20 +269,19 @@ func main() {
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
-	// REST endpoint: POST /api/relays — creates a relay registration + provisioning token.
-	// Platform-level (no WorkspaceGuard); admin-only.
+	// REST endpoint: POST /provider/relays — creates a relay registration +
+	// provisioning token. Provider-plane action (PENDING-07a): guarded by
+	// RequireProvider (aud=provider + active allowlist), NOT the tenant model.
+	// The handler runs the Authz chokepoint and writes a provider_audit_logs row.
 	relayAdminHandler := &relay.AdminHandler{
-		Store:     relayStore,
-		Redis:     valkeycompat.NewAdapter(connectorValkey),
-		JWTSecret: mustEnv("JWT_SECRET"),
+		Store:         relayStore,
+		Redis:         valkeycompat.NewAdapter(connectorValkey),
+		JWTSecret:     mustEnv("JWT_SECRET"),
+		Authz:         providerAuthz,
+		ProviderStore: providerStore,
 	}
-	relayCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
-		middleware.RequireRole("admin")(
-			http.HandlerFunc(relayAdminHandler.Create),
-		),
-	)
-	mux.Handle("POST /api/relays", relayCreateRoute)
-
+	mux.Handle("POST /provider/relays", requireProvider(http.HandlerFunc(relayAdminHandler.Create)))
+	mux.Handle("DELETE /provider/relays/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.Delete)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
 		log.Fatalf("grpc listen: %v", err)
