@@ -37,6 +37,11 @@ pub struct RuntimeState {
     pub tun_handle: Option<Arc<TunHandle>>,
     /// Ensures only one task refreshes the session tokens at a time.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Signalled by the data plane (net_stack) when a managed-resource relay
+    /// transport fails, so the ACL sync scheduler re-syncs early instead of
+    /// waiting for the next poll tick. Coalescing: a burst of failures collapses
+    /// into a single wake.
+    pub relay_resync: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,5 +103,6 @@ pub fn new_shared() -> SharedState {
         acl_last_sync_at: None,
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        relay_resync: Arc::new(tokio::sync::Notify::new()),
     }))
 }

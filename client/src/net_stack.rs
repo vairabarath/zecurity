@@ -12,7 +12,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 use tun::AsyncDevice;
 
@@ -156,6 +156,7 @@ pub async fn run(
     dev: AsyncDevice,
     allowed_entries: Vec<AclEntry>,
     transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
+    relay_resync: Arc<Notify>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
     let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -272,13 +273,19 @@ pub async fn run(
                         // Managed resource, connector online → tunnel via QUIC.
                         if !transports.is_empty() {
                             let transports = transports.clone();
+                            let resync = relay_resync.clone();
                             tokio::spawn(async move {
+                                // relay_tcp_to_quic fires `resync` itself at the
+                                // transport-failure points (open failure and
+                                // mid-session drop). A normal close does not, so we
+                                // don't resync on every finished connection.
                                 if let Err(e) = relay_tcp_to_quic(
                                     transports,
                                     dest,
                                     port,
                                     tcp_to_quic_rx,
                                     quic_to_tcp_tx,
+                                    resync,
                                 )
                                 .await
                                 {
@@ -407,6 +414,7 @@ async fn relay_tcp_to_quic(
     port: u16,
     mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
     quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
+    resync: Arc<Notify>,
 ) -> Result<()> {
     let mut selected_stream = None;
 
@@ -480,35 +488,62 @@ async fn relay_tcp_to_quic(
             }
         }
     }
-    let stream = selected_stream
-        .ok_or_else(|| anyhow!("no connector accepted tunnel for {}: {}", destination, port))?;
+    let stream = match selected_stream {
+        Some(stream) => stream,
+        None => {
+            // No transport accepted the tunnel — the relay/connector is
+            // unreachable (relay down, or connector re-homed to a relay the ACL
+            // hasn't propagated yet). Wake the ACL sync scheduler to re-home.
+            resync.notify_one();
+            return Err(anyhow!(
+                "no connector accepted tunnel for {}: {}",
+                destination,
+                port
+            ));
+        }
+    };
     let (mut recv, mut send) = tokio::io::split(stream);
-    // Bidirectional relay loop.
+    // Bidirectional relay loop. `relay_failed` distinguishes a mid-session
+    // transport error (relay/connector dropped — worth an early resync) from a
+    // normal close (client or resource closed the stream — no resync).
     let mut quic_buf = vec![0u8; 65536];
+    let mut relay_failed = false;
     loop {
         tokio::select! {
             // Client → resource: bytes from the TCP socket go to the QUIC send stream.
             data = tcp_to_quic_rx.recv() => {
                 match data {
                     Some(buf) => {
-                        if send.write_all(&buf).await.is_err() { break; }
+                        if send.write_all(&buf).await.is_err() {
+                            relay_failed = true; // QUIC send failed mid-session
+                            break;
+                        }
                     }
-                    None => break, // TCP socket closed
+                    None => break, // TCP socket closed (normal client-side close)
                 }
             }
             // Resource → client: bytes from the QUIC recv stream go to the TCP socket.
             result = recv.read(&mut quic_buf) => {
                 match result {
                     Ok(n) if n > 0 => {
-                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() { break; }
+                        if quic_to_tcp_tx.send(quic_buf[..n].to_vec()).await.is_err() {
+                            break; // client-side channel closed (socket gone) — normal
+                        }
                     }
-                    _ => break, // QUIC stream finished or error
+                    Ok(_) => break, // n == 0: QUIC stream finished (normal EOF)
+                    Err(_) => {
+                        relay_failed = true; // mid-session QUIC read error
+                        break;
+                    }
                 }
             }
         }
     }
 
     let _ = send.shutdown().await;
+    if relay_failed {
+        resync.notify_one();
+    }
     Ok(())
 }
 
