@@ -1,6 +1,6 @@
 ---
 type: planning
-status: planned
+status: complete
 sprint: 12
 tags:
   - sprint12
@@ -108,54 +108,54 @@ M2 Phase 3 — Relay client sends token                (needs M2 P1 server-side)
 > See [[Sprint12/Member1-Go/Phase1-Provider-Data-Model-Authz]].
 > Depends on nothing — Day 1.
 
-- [ ] **M1-A1** `controller/migrations/025_provider_users.sql` — `provider_users` (email UNIQUE, role, disabled_at).
-- [ ] **M1-A2** `controller/migrations/026_provider_audit_logs.sql` — append-only provider audit with `details JSONB`.
-- [ ] **M1-A3** `controller/internal/provider/store.go` — `ProviderStore`: GetByEmail / List / Create / Disable / InsertAudit.
-- [ ] **M1-A4** `controller/internal/provider/authz.go` — `Authz` chokepoint; typed `CanX(actor, target)` → `decide(actor, action, target)`.
-- [ ] **M1-A5** `controller/cmd/server/main.go` — bootstrap seed from `PROVIDER_BOOTSTRAP_EMAILS` (idempotent upsert as `super-admin`).
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-A1** `controller/migrations/025_provider_users.sql` — `provider_users` (email UNIQUE, role, disabled_at).
+- [x] **M1-A2** `controller/migrations/026_provider_audit_logs.sql` — append-only provider audit with `details JSONB`.
+- [x] **M1-A3** `controller/internal/provider/store.go` — `ProviderStore`: GetByEmail / List / Create / Disable / InsertAudit.
+- [x] **M1-A4** `controller/internal/provider/authz.go` — `Authz` chokepoint; typed `CanX(actor, target)` → `decide(actor, action, target)`.
+- [x] **M1-A5** `controller/cmd/server/main.go` — bootstrap seed from `PROVIDER_BOOTSTRAP_EMAILS` (idempotent upsert as `super-admin`).
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase B — M1: Provider Session + RequireProvider + /provider route group
 
 > See [[Sprint12/Member1-Go/Phase2-Provider-Session-Middleware]].
 > Depends on Phase A.
 
-- [ ] **M1-B1** `controller/internal/auth/*` — issue provider JWT with `aud=provider` (reuse Google exchange); `/provider/auth/callback` gated by allowlist.
-- [ ] **M1-B2** `controller/internal/middleware/provider.go` — `RequireProvider`: enforce `aud=provider`, allowlist + `disabled_at` check, inject provider ctx, **never** call `WorkspaceGuard`.
-- [ ] **M1-B3** `controller/cmd/server/main.go` — `/provider` route group skeleton behind `AuthMiddleware(provider) → RequireProvider`.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-B1** `controller/internal/auth/*` — issue provider JWT with `aud=provider` (reuse Google exchange); `/provider/auth/callback` gated by allowlist.
+- [x] **M1-B2** `controller/internal/middleware/provider.go` — `RequireProvider`: enforce `aud=provider`, allowlist + `disabled_at` check, inject provider ctx, **never** call `WorkspaceGuard`.
+- [x] **M1-B3** `controller/cmd/server/main.go` — `/provider` route group skeleton behind `AuthMiddleware(provider) → RequireProvider`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase C — M2: Provision Token Enforcement
 
 > See [[Sprint12/Member2-Go-Relay/Phase1-Provision-Token-Enforcement]].
 > Depends on nothing — Day 1.
 
-- [ ] **M2-C1** `controller/internal/relay/provision.go` — add JWT-secret field + `WithProvisioningAuth`.
-- [ ] **M2-C2** `provision.go` — verify token → assert `claims.RelayID == relayID` → `BurnProvisioningJTI` **before** `SignRelayCert`.
-- [ ] **M2-C3** `provision.go` — drop self-provision fallback (lines ~123-138); return `FailedPrecondition` on `ErrRelayNotFound`.
-- [ ] **M2-C4** `controller/cmd/server/main.go` — wire `WithProvisioningAuth(JWT_SECRET)` at relay-service construction.
-- [ ] **M2-C5** `provision_test.go` — valid / missing / wrong-relay / replay / unregistered cases.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-C1** `controller/internal/relay/provision.go` — add JWT-secret field + `WithProvisioningAuth`.
+- [x] **M2-C2** `provision.go` — verify token → assert `claims.RelayID == relayID` → `BurnProvisioningJTI` **before** `SignRelayCert`.
+- [x] **M2-C3** `provision.go` — drop self-provision fallback (lines ~123-138); return `FailedPrecondition` on `ErrRelayNotFound`.
+- [x] **M2-C4** `controller/cmd/server/main.go` — wire `WithProvisioningAuth(JWT_SECRET)` at relay-service construction.
+- [x] **M2-C5** `provision_test.go` — valid / missing / wrong-relay / replay / unregistered cases.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase D — M2: Re-home Relay Management under /provider
 
 > See [[Sprint12/Member2-Go-Relay/Phase2-Rehome-Relay-Under-Provider]].
 > Depends on Phase B (M1 `RequireProvider` + `Authz`).
 
-- [ ] **M2-D1** `controller/cmd/server/main.go` — remove `POST /api/relays`; add `POST /provider/relays` behind `RequireProvider`.
-- [ ] **M2-D2** `controller/internal/relay/admin_handler.go` — call `Authz.CanIssueProvisioningToken(actor, target)`; write `provider_audit_logs` (`relay.create`).
-- [ ] **M2-D3** (optional) stub `DELETE /provider/relays/{id}` guarded by `CanDeleteRelay` + audit — seam for PENDING-02 (not wired to CRL).
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-D1** `controller/cmd/server/main.go` — remove `POST /api/relays`; add `POST /provider/relays` behind `RequireProvider`.
+- [x] **M2-D2** `controller/internal/relay/admin_handler.go` — call `Authz.CanIssueProvisioningToken(actor, target)`; write `provider_audit_logs` (`relay.create`).
+- [x] **M2-D3** (optional) stub `DELETE /provider/relays/{id}` guarded by `CanDeleteRelay` + audit — seam for PENDING-02 (not wired to CRL).
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase E — M2: Relay Client Token Delivery
 
 > See [[Sprint12/Member2-Go-Relay/Phase3-Relay-Client-Token]].
 > Depends on Phase C (server accepts the token).
 
-- [ ] **M2-E1** `relay/src/provision.rs` — send the real `provisioning_token` (not `String::new()`).
-- [ ] **M2-E2** relay config — `RELAY_PROVISIONING_TOKEN` env / file source; document delivery in the relay README.
-- [ ] **M2-E3** fail fast with a clear operator error when the token is missing.
-- [ ] **Build gate:** `cd relay && cargo build`
+- [x] **M2-E1** `relay/src/provision.rs` — send the real `provisioning_token` (not `String::new()`).
+- [x] **M2-E2** relay config — `RELAY_PROVISIONING_TOKEN` env / file source; document delivery in the relay README.
+- [x] **M2-E3** fail fast with a clear operator error when the token is missing.
+- [x] **Build gate:** `cd relay && cargo build`
 
 ## Final Build Gates
 
@@ -167,14 +167,14 @@ cd relay && cargo build
 
 ## Acceptance Criteria
 
-- [ ] `Provision` requires a valid single-use token; the JTI is burned atomically before signing.
-- [ ] A replayed token is rejected (`PermissionDenied`).
-- [ ] A token whose `relay_id` ≠ request `relay_id` is rejected.
-- [ ] The self-provision fallback is gone; an unregistered relay is rejected (`FailedPrecondition`).
-- [ ] `POST /api/relays` no longer exists; relay creation is `POST /provider/relays` behind `RequireProvider`.
-- [ ] A tenant JWT is rejected by `RequireProvider`; a provider JWT is rejected by tenant `AuthMiddleware`.
-- [ ] Every provider action writes a `provider_audit_logs` row (actor + target + details).
-- [ ] Super-admin #0 is seeded from `PROVIDER_BOOTSTRAP_EMAILS` on startup.
+- [x] `Provision` requires a valid single-use token; the JTI is burned atomically before signing.
+- [x] A replayed token is rejected (`PermissionDenied`).
+- [x] A token whose `relay_id` ≠ request `relay_id` is rejected.
+- [x] The self-provision fallback is gone; an unregistered relay is rejected (`FailedPrecondition`).
+- [x] `POST /api/relays` no longer exists; relay creation is `POST /provider/relays` behind `RequireProvider`.
+- [x] A tenant JWT is rejected by `RequireProvider`; a provider JWT is rejected by tenant `AuthMiddleware`.
+- [x] Every provider action writes a `provider_audit_logs` row (actor + target + details).
+- [x] Super-admin #0 is seeded from `PROVIDER_BOOTSTRAP_EMAILS` on startup.
 - [ ] The relay client sends its provisioning token and provisions end-to-end.
 
 ## Deferred
