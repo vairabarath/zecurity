@@ -18,6 +18,21 @@ import (
 // the client's next poll observes the new version and recompiles. The
 // affectedConnectorIDs argument is retained for a future push channel and for
 // observability, but is not acted on today.
+//
+// LIMITATION — single-controller (finding #3): versions and the SnapshotCache
+// are process-local and in-memory, exactly like policy.Notifier / policy
+// SnapshotCache. Consequences with more than one controller replica, or across
+// a restart:
+//   - Restart resets versions to 0. A client's known_version (say N) then no
+//     longer matches, so its next poll gets a full snapshot once (harmless — a
+//     redundant fetch, never a stale route).
+//   - Multiple replicas keep independent version counters, so a client that
+//     hops between replicas may re-fetch on each hop (churn, still correct).
+// This is a system-wide single-controller assumption shared with the ACL plane,
+// not specific to transport. Making it multi-replica-safe (persist the version
+// epoch, or distribute invalidations via Valkey) is Controller-HA scope
+// (PENDING-12) and must cover both notifiers together. Safe as-is for a single
+// controller.
 type Notifier struct {
 	cache    *SnapshotCache
 	mu       sync.Mutex
