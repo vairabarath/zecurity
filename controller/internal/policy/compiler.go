@@ -101,7 +101,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 		}
 		tunnelAddr := ""
 		if host != "" {
-			tunnelAddr = host + ":9092"
+			// JoinHostPort brackets IPv6 correctly (e.g. "[2001:db8::1]:9092").
+			tunnelAddr = net.JoinHostPort(host, "9092")
 		}
 		spiffe := ""
 		if row.ConnectorID != "" && row.TrustDomain != "" {
