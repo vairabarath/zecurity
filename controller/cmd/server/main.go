@@ -183,6 +183,7 @@ func main() {
 				InvitationEmailer: inviteEmailer,
 				PolicyStore:       policyStore,
 				PolicyNotifier:    policyNotifier,
+				TransportNotifier: transportNotifier,
 			},
 			Directives: graph.DirectiveRoot{
 				HasRole: resolvers.HasRole,

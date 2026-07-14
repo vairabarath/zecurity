@@ -130,6 +130,23 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 		return false, fmt.Errorf("revoke connector: %w", err)
 	}
 
+	// Drop the revoked connector from BOTH planes immediately: the ACL
+	// (availability) and the transport (connectivity) snapshots. Without this,
+	// the connector lingers in the cached snapshots until they happen to be
+	// invalidated. The guarded heartbeat UPDATE (control_stream) prevents the
+	// connector from resurrecting itself and closes its live stream on the next
+	// heartbeat.
+	if r.PolicyNotifier != nil {
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("revoke connector: notify policy change: %w", err)
+		}
+	}
+	if r.TransportNotifier != nil {
+		if err := r.TransportNotifier.NotifyTopologyChange(ctx, tc.TenantID, []string{id}); err != nil {
+			return false, fmt.Errorf("revoke connector: notify topology change: %w", err)
+		}
+	}
+
 	return true, nil
 }
 

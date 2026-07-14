@@ -452,7 +452,10 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case nil:
 			log.Printf("control stream: connector %s body is NIL", connectorID)
 		case *pb.ConnectorControlMessage_ConnectorHealth:
-			h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth)
+			if !h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth) {
+				// Connector was revoked/deleted — tear down the control stream.
+				return status.Error(codes.PermissionDenied, "connector revoked")
+			}
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
@@ -554,7 +557,12 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 	return rows.Err()
 }
 
-func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) {
+// handleConnectorHealth processes a heartbeat. It returns false when the
+// connector is revoked/deleted — the caller must then close the control stream.
+// The UPDATE is guarded (status NOT IN revoked/deleted) so a revoked connector's
+// heartbeat can never resurrect it to 'active'; that guard makes `updated` empty,
+// so the query returns no rows (ErrNoRows) — our signal to tear the stream down.
+func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) bool {
 	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
 	var connectorChanged bool
@@ -574,12 +582,19 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		            last_heartbeat_at = NOW(),
 		            updated_at        = NOW()
 		      WHERE id = $5
+		        AND status NOT IN ('revoked', 'deleted')
 		      RETURNING id
 		   )
 		   SELECT current.status IS DISTINCT FROM 'active'
 		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), '')
 		     FROM current, updated`,
 		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Guarded UPDATE matched nothing → connector revoked/deleted while its
+		// stream was open. Stop serving it and signal the caller to close.
+		log.Printf("control stream: connector %s revoked/deleted — closing control stream", connectorID)
+		return false
+	}
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
 	} else if connectorChanged {
@@ -630,6 +645,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
 		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
 	}
+	return true
 }
 
 func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {
