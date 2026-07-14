@@ -332,7 +332,6 @@ func main() {
 		PolicyNotifier: policyNotifier,
 		RelayStore:        relayStore,
 		RelayListSrc:      relayStore,
-		TransportSrc:      transportCompiler,
 		TransportNotifier: transportNotifier,
 	}
 	pb.RegisterConnectorServiceServer(grpcServer, connectorSvc)
@@ -346,11 +345,11 @@ func main() {
 	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
 
-	// Proactive transport propagation (ADR-017): after a topology change bumps
-	// the transport version, push the fresh snapshot to only the affected
-	// connectors. Never touches the ACL plane.
-	transportPusher := connector.NewTransportPusher(connectorRegistry, transportCompiler)
-	transportNotifier.RegisterPushHook(transportPusher.PushToConnectors)
+	// Transport plane has no proactive push: the client is the sole consumer and
+	// polls GetTransportSnapshot (plus an immediate re-poll on relay failure,
+	// Phase C). A topology change just bumps the transport version + invalidates
+	// the cache; the client's next poll picks it up. Connectors do not consume
+	// the transport snapshot, so nothing is pushed to them.
 
 	clientSvc := clientsvc.NewService(
 		db.Pool,

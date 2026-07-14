@@ -42,13 +42,6 @@ type LabelledRelayListSource interface {
 	BuildLabelledRelayList(ctx context.Context) (*pb.LabelledRelayList, error)
 }
 
-// TransportSnapshotSource builds the ADR-015 Track B TransportSnapshot that the
-// controller pushes to connector control streams on open. Implemented by
-// *transport.Compiler (GetOrCompile). Defined as an interface so tests can stub it.
-type TransportSnapshotSource interface {
-	GetOrCompile(ctx context.Context, workspaceID string) (*clientv1.TransportSnapshot, error)
-}
-
 // TransportChangeNotifier fires a transport-plane topology change (ADR-017)
 // when a connector's relay placement changes. Implemented by *transport.Notifier
 // (NotifyTopologyChange). A relay-placement change is connectivity, not
@@ -413,18 +406,9 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		}
 	}
 
-	// ADR-015 Track B: push the current transport (connectivity) snapshot so the
-	// connector's workspace topology is available immediately, independent of the
-	// ACL snapshot. Workspace-scoped by the connector's tenant.
-	if h.TransportSrc != nil {
-		if snap, err := h.TransportSrc.GetOrCompile(ctx, tenantID); err != nil {
-			log.Printf("control stream: build transport snapshot for connector %s: %v", connectorID, err)
-		} else if err := client.send(&pb.ConnectorControlMessage{
-			Body: &pb.ConnectorControlMessage_TransportSnapshot{TransportSnapshot: snap},
-		}); err != nil {
-			log.Printf("control stream: send transport snapshot to connector %s: %v", connectorID, err)
-		}
-	}
+	// Note: the TransportSnapshot is NOT pushed here. The client is its sole
+	// consumer and fetches it via GetTransportSnapshot (poll + relay-failure
+	// re-poll, Phase C); connectors do not consume it.
 
 	// Deliver any instructions that queued while the connector was offline.
 	log.Printf("control stream: pushing pending instructions for connector %s", connectorID)

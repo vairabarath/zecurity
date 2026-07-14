@@ -12,22 +12,16 @@ import (
 // counterpart to policy.Notifier, deliberately independent so a transport
 // change never bumps the ACL version and vice versa (the Track B invariant).
 //
-// Phase A wiring: the version is served by CompileTransportSnapshot and the
-// GetTransportSnapshot handler. Phase B (ADR-017) rewires the relay
-// heartbeat/expiry/registration triggers to call NotifyTopologyChange and
-// refines the push hook to target only the affected connectors.
+// There is no proactive push: the client is the sole consumer of the transport
+// snapshot and fetches it via GetTransportSnapshot (poll + relay-failure
+// re-poll). A topology change just bumps the version and invalidates the cache;
+// the client's next poll observes the new version and recompiles. The
+// affectedConnectorIDs argument is retained for a future push channel and for
+// observability, but is not acted on today.
 type Notifier struct {
 	cache    *SnapshotCache
 	mu       sync.Mutex
 	versions map[string]*atomic.Uint64
-
-	// pushHook, if set, runs after each NotifyTopologyChange (post version-bump,
-	// post cache-invalidate) to drive proactive, topology-scoped transport
-	// propagation — it receives the affected connector IDs so the pusher targets
-	// only those streams, not the whole workspace. Registered once at startup
-	// before serving; must be non-blocking (it runs on the mutation path and must
-	// schedule its own async work).
-	pushHook func(workspaceID string, affectedConnectorIDs []string)
 }
 
 // NewNotifier creates a Notifier backed by the given cache.
@@ -58,17 +52,7 @@ func (n *Notifier) NotifyTopologyChange(_ context.Context, workspaceID string, a
 
 	v.Add(1)
 	n.cache.Invalidate(workspaceID)
-
-	if n.pushHook != nil {
-		n.pushHook(workspaceID, affectedConnectorIDs)
-	}
 	return nil
-}
-
-// RegisterPushHook installs the proactive-push callback fired after every
-// NotifyTopologyChange. Call once during startup wiring, before serving.
-func (n *Notifier) RegisterPushHook(fn func(workspaceID string, affectedConnectorIDs []string)) {
-	n.pushHook = fn
 }
 
 // Version returns the current transport version for workspaceID (0 if never
