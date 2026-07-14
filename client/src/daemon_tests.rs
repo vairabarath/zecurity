@@ -1,10 +1,13 @@
 use std::net::Ipv4Addr;
+use std::collections::HashMap;
 use std::sync::Once;
 
 use rcgen::{CertificateParams, KeyPair, SanType};
 
-use crate::daemon::{build_transports_by_resource, ordered_connectors_for_entry};
-use crate::grpc::client_v1::{AclConnector, AclEntry, AclRemoteNetwork};
+use crate::daemon::{build_transports_by_resource, ordered_connectors_for_entry, resolve_entry_coords};
+use crate::grpc::client_v1::{
+    AclConnector, AclEntry, AclRemoteNetwork, TransportConnector, TransportRemoteNetwork,
+};
 use crate::runtime::DeviceInfo;
 
 fn install_crypto_provider() {
@@ -54,7 +57,7 @@ fn test_device_info() -> DeviceInfo {
 fn build_transports_empty_inputs_returns_empty_map() {
     install_crypto_provider();
     let device = test_device_info();
-    let result = build_transports_by_resource(&[], &[], &device);
+    let result = build_transports_by_resource(&[], &[], None, &device);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }
@@ -87,7 +90,7 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
@@ -129,7 +132,7 @@ async fn connector_with_relay_addr_builds_transport_with_relay() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.2".parse::<Ipv4Addr>().unwrap(), 443u16);
@@ -190,7 +193,7 @@ async fn two_connectors_different_relay_addrs_build_independently() {
         },
     ];
 
-    let result = build_transports_by_resource(&entries, &remote_networks, &device);
+    let result = build_transports_by_resource(&entries, &remote_networks, None, &device);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
 
@@ -242,4 +245,98 @@ fn shield_resource_uses_preferred_connector_id() {
         .next()
         .expect("connector selected");
     assert_eq!(connector.connector_id, "conn-holder");
+}
+
+// ── Track B routing decision (resolve_entry_coords) ─────────────────────────
+// Pure: no certs/network. Verifies transport-plane preference, ACL fallback,
+// and preferred-connector ordering.
+
+fn tp_entry(rn: &str, preferred: &str) -> AclEntry {
+    AclEntry {
+        remote_network_id: rn.to_string(),
+        preferred_connector_id: preferred.to_string(),
+        ..Default::default()
+    }
+}
+
+fn tp_acl_conn(id: &str, relay_addr: &str) -> AclConnector {
+    AclConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://td/connector/{id}"),
+        relay_addr: relay_addr.to_string(),
+        relay_spiffe_id: "spiffe://zecurity.in/relay/r".to_string(),
+    }
+}
+
+fn tp_transport_conn(id: &str, relay_addr: &str) -> TransportConnector {
+    TransportConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://td/connector/{id}"),
+        relay_addr: relay_addr.to_string(),
+        relay_spiffe_id: "spiffe://zecurity.in/relay/r".to_string(),
+    }
+}
+
+#[test]
+fn resolve_prefers_transport_plane_when_rn_present() {
+    let e = tp_entry("rn1", "");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")],
+    };
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![tp_transport_conn("c1", "relay-new:9093")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    assert_eq!(coords.len(), 1);
+    assert_eq!(coords[0].relay_addr, "relay-new:9093");
+}
+
+#[test]
+fn resolve_falls_back_to_acl_when_transport_lacks_rn() {
+    let e = tp_entry("rn1", "");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    assert_eq!(coords.len(), 1);
+    assert_eq!(coords[0].relay_addr, "relay-old:9093");
+}
+
+#[test]
+fn resolve_empty_when_neither_plane_has_rn() {
+    let e = tp_entry("rn-missing", "");
+    let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    assert!(resolve_entry_coords(&e, &rn_by_id, &trn_by_id).is_empty());
+}
+
+#[test]
+fn resolve_honors_preferred_connector_in_transport() {
+    let e = tp_entry("rn1", "c2");
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![
+            tp_transport_conn("c1", "r1:9093"),
+            tp_transport_conn("c2", "r2:9093"),
+        ],
+    };
+    let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    assert_eq!(coords.len(), 2);
+    assert_eq!(coords[0].connector_id, "c2");
 }

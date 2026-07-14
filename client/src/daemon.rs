@@ -12,7 +12,10 @@ use crate::auth;
 use crate::config;
 use crate::grpc::{
     self,
-    client_v1::{AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest},
+    client_v1::{
+        AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest,
+        GetTransportSnapshotRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
+    },
 };
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
@@ -78,6 +81,16 @@ pub async fn run() -> Result<()> {
         let device_id = stored.device.id.clone();
         tokio::spawn(async move {
             fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, device_id).await;
+        });
+
+        // Fetch the transport snapshot too, so relay routing is available before
+        // the first background tick (ADR-015 Track B).
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            if let Err(e) = fetch_and_store_transport(&state_clone, &conf_clone).await {
+                warn!(error = %e, "startup transport snapshot fetch failed");
+            }
         });
     }
 
@@ -514,10 +527,15 @@ async fn handle_up(
         };
     }
 
-    // Require an ACL snapshot with at least one entry.
-    let (acl, device) = {
+    // Require an ACL snapshot with at least one entry. The transport snapshot is
+    // optional — routing falls back to the ACL relay fields when it's absent.
+    let (acl, transport, device) = {
         let s = state.read().await;
-        (s.acl_snapshot.clone(), s.device.clone())
+        (
+            s.acl_snapshot.clone(),
+            s.transport_snapshot.clone(),
+            s.device.clone(),
+        )
     };
 
     let acl = match acl {
@@ -577,7 +595,7 @@ async fn handle_up(
     }
 
     let transports =
-        match build_transports_by_resource(&allowed_entries, &acl.remote_networks, &device) {
+        match build_transports_by_resource(&allowed_entries, &acl.remote_networks, transport.as_ref(), &device) {
             Ok(t) => Arc::new(t),
             Err(e) => {
                 return IpcResponse {
@@ -1041,11 +1059,14 @@ async fn run_acl_sync_scheduler(
                         continue;
                     }
                 }
-                // The connector may still be re-homing to a new relay, so the
-                // controller's ACL may not carry it yet — retry with backoff until
-                // the version changes (then restart), or attempts run out (fall
-                // back to the steady tick). Notify coalesces bursts into one wake.
-                info!("relay failure signalled — early ACL resync");
+                // A relay just failed on the data plane. The relay change lives in
+                // the TRANSPORT snapshot (Track B), so re-poll transport — not ACL.
+                // The connector may still be re-homing, so the controller may not
+                // carry the new relay yet — retry with backoff until the transport
+                // version changes (then restart to rebuild transports), or attempts
+                // run out (the 60s tick remains the backstop). Notify coalesces
+                // bursts into one wake.
+                info!("relay failure signalled — early transport resync");
                 let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
                 for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
                     let has_identity = {
@@ -1055,25 +1076,22 @@ async fn run_acl_sync_scheduler(
                     if !has_identity {
                         break;
                     }
-                    match sync_acl_now(&state, &conf).await {
-                        Ok(result) if result.changed => {
-                            info!(
-                                version = result.version,
-                                "early ACL resync: version changed, restarting tunnel"
-                            );
+                    match fetch_and_store_transport(&state, &conf).await {
+                        Ok(true) => {
+                            info!("early transport resync: version changed, restarting tunnel");
                             if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
-                                warn!(error = %e, "early ACL resync: tunnel restart failed");
+                                warn!(error = %e, "early transport resync: tunnel restart failed");
                             }
                             break;
                         }
-                        Ok(_) => {
+                        Ok(false) => {
                             // Controller hasn't seen the connector re-home yet.
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2)
                                 .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
                         }
                         Err(e) => {
-                            warn!(error = %e, "early ACL resync failed — keeping cached snapshot");
+                            warn!(error = %e, "early transport resync failed — keeping cached snapshot");
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2)
                                 .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
@@ -1086,9 +1104,9 @@ async fn run_acl_sync_scheduler(
     }
 }
 
-/// One steady-cadence ACL sync: fetch, and if the snapshot version changed,
-/// restart the tunnel to rebuild transports. No-op when not logged in or when
-/// the version is unchanged.
+/// One steady-cadence sync of BOTH planes: refresh the ACL and the transport
+/// snapshot; if either version changed, restart the tunnel to rebuild
+/// transports (which read both planes). No-op when not logged in.
 async fn sync_and_restart_if_changed(
     state: &SharedState,
     conf: &config::ClientConf,
@@ -1101,23 +1119,29 @@ async fn sync_and_restart_if_changed(
     if !has_identity {
         return;
     }
-    match sync_acl_now(state, conf).await {
-        Ok(result) if result.changed => {
-            info!(
-                version = result.version,
-                "background ACL sync: version changed, restarting tunnel"
-            );
-            if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
-                warn!(error = %e, "background ACL sync: tunnel restart failed");
-            }
-        }
-        Ok(_) => {} // unchanged — quiet, this fires every 60s
+
+    let acl_changed = match sync_acl_now(state, conf).await {
+        Ok(result) => result.changed,
         Err(e) => {
             warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+            false
+        }
+    };
+    let transport_changed = match fetch_and_store_transport(state, conf).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            warn!(error = %e, "background transport sync failed — keeping cached snapshot");
+            false
+        }
+    };
+
+    if acl_changed || transport_changed {
+        info!(acl_changed, transport_changed, "background sync: version changed, restarting tunnel");
+        if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+            warn!(error = %e, "background sync: tunnel restart failed");
         }
     }
 }
-
 
 /// Fetch and store the ACL snapshot. On failure, keeps the existing snapshot
 /// (never reverts to None on a transient error). Access-token expiry is
@@ -1139,6 +1163,150 @@ async fn fetch_and_store_acl(
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
+        }
+    }
+}
+
+// ── Transport plane (ADR-015 Track B) ───────────────────────────────────────
+
+/// Raw GetTransportSnapshot RPC. Returns Ok(None) when the controller reports
+/// up_to_date (client's known_version matches — keep the cached snapshot).
+async fn fetch_transport_snapshot(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    known_version: u64,
+) -> Result<Option<TransportSnapshot>> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .get_transport_snapshot(GetTransportSnapshotRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            known_version,
+        })
+        .await?
+        .into_inner();
+    if resp.up_to_date {
+        return Ok(None);
+    }
+    resp.snapshot
+        .ok_or_else(|| anyhow::anyhow!("controller returned empty transport snapshot"))
+        .map(Some)
+}
+
+/// Fetch the transport snapshot, transparently refreshing the access token on
+/// Unauthenticated — mirrors fetch_acl_snapshot_with_refresh. Ok(None) means
+/// up_to_date (keep cached).
+async fn fetch_transport_snapshot_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    known_version: u64,
+) -> Result<Option<TransportSnapshot>> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
+    let access_token = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        sess.access_token.clone()
+    };
+
+    match fetch_transport_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
+        Ok(snap) => Ok(snap),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("transport fetch returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            // Another task may have refreshed while we waited for the lock.
+            match fetch_transport_snapshot(conf, ca_pem, &access_token, device_id, known_version)
+                .await
+            {
+                Ok(snap) => return Ok(snap),
+                Err(err) if is_grpc_unauthenticated(&err) => {}
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            fetch_transport_snapshot(conf, ca_pem, &new_tokens.access_token, device_id, known_version)
+                .await
+        }
+    }
+}
+
+/// Fetch and store the transport snapshot. Uses known_version so an unchanged
+/// snapshot returns up_to_date (no re-store). On failure keeps the cached
+/// snapshot. Returns true when the stored version changed.
+async fn fetch_and_store_transport(state: &SharedState, conf: &config::ClientConf) -> Result<bool> {
+    let (ca_pem, device_id, known_version) = {
+        let s = state.read().await;
+        let device = s
+            .device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no device identity"))?;
+        let known = s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0);
+        (device.ca_cert_pem.clone(), device.id.clone(), known)
+    };
+
+    match fetch_transport_snapshot_with_refresh(conf, &ca_pem, state, &device_id, known_version)
+        .await?
+    {
+        None => {
+            // up_to_date — refresh the sync timestamp, keep the cached snapshot.
+            let mut s = state.write().await;
+            s.transport_last_sync_at = Some(now_unix());
+            Ok(false)
+        }
+        Some(snapshot) => {
+            let version = snapshot.version;
+            let changed = known_version != version;
+            let mut s = state.write().await;
+            s.transport_snapshot = Some(snapshot);
+            s.transport_last_sync_at = Some(now_unix());
+            info!(version, "transport snapshot stored");
+            Ok(changed)
         }
     }
 }
@@ -1242,21 +1410,114 @@ pub(crate) fn ordered_connectors_for_entry<'a>(
 //   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
 //   Some(None)    — managed resource, connector offline → fail closed
 //   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
+// ConnCoords is a connector's connectivity (tunnel + relay) coordinates,
+// sourced from either the transport snapshot (Track B, preferred) or the ACL's
+// transitional relay fields (fallback). ACLConnector and TransportConnector
+// carry identical fields.
+pub(crate) struct ConnCoords {
+    pub(crate) connector_id: String,
+    pub(crate) connector_tunnel_addr: String,
+    pub(crate) connector_spiffe: String,
+    pub(crate) relay_addr: String,
+    pub(crate) relay_spiffe_id: String,
+}
+
+fn coords_from_acl(c: &AclConnector) -> ConnCoords {
+    ConnCoords {
+        connector_id: c.connector_id.clone(),
+        connector_tunnel_addr: c.connector_tunnel_addr.clone(),
+        connector_spiffe: c.connector_spiffe.clone(),
+        relay_addr: c.relay_addr.clone(),
+        relay_spiffe_id: c.relay_spiffe_id.clone(),
+    }
+}
+
+fn coords_from_transport(c: &TransportConnector) -> ConnCoords {
+    ConnCoords {
+        connector_id: c.connector_id.clone(),
+        connector_tunnel_addr: c.connector_tunnel_addr.clone(),
+        connector_spiffe: c.connector_spiffe.clone(),
+        relay_addr: c.relay_addr.clone(),
+        relay_spiffe_id: c.relay_spiffe_id.clone(),
+    }
+}
+
+// ordered_transport_connectors_for_entry mirrors ordered_connectors_for_entry
+// for the transport plane: the ACL entry's preferred connector first.
+fn ordered_transport_connectors_for_entry<'a>(
+    entry: &AclEntry,
+    rn: &'a TransportRemoteNetwork,
+) -> Vec<&'a TransportConnector> {
+    let mut ordered = Vec::new();
+    let preferred = entry.preferred_connector_id.as_str();
+    if !preferred.is_empty() {
+        if let Some(c) = rn.connectors.iter().find(|c| c.connector_id == preferred) {
+            ordered.push(c);
+        }
+    }
+    for c in &rn.connectors {
+        if c.connector_id != preferred {
+            ordered.push(c);
+        }
+    }
+    ordered
+}
+
+// resolve_entry_coords picks a connector's connectivity coordinates for an ACL
+// entry: from the transport plane when that entry's remote_network_id is present
+// there (Track B, preferred), otherwise falling back per-RN to the ACL's
+// transitional relay fields. Returns empty when neither plane has the RN. Pure
+// (no cert/network work) so the routing decision is unit-testable.
+pub(crate) fn resolve_entry_coords(
+    entry: &AclEntry,
+    rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
+    trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
+) -> Vec<ConnCoords> {
+    match trn_by_id.get(entry.remote_network_id.as_str()) {
+        Some(trn) => ordered_transport_connectors_for_entry(entry, trn)
+            .into_iter()
+            .map(coords_from_transport)
+            .collect(),
+        None => match rn_by_id.get(entry.remote_network_id.as_str()) {
+            Some(rn) => ordered_connectors_for_entry(entry, rn)
+                .into_iter()
+                .map(coords_from_acl)
+                .collect(),
+            None => Vec::new(),
+        },
+    }
+}
+
+// Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
+//
+// Authorization comes from the ACL (which entries exist, their remote_network).
+// Connectivity (tunnel + relay coords) comes from the transport snapshot keyed
+// by remote_network_id when present; otherwise it falls back per-RN to the ACL's
+// transitional relay fields (ACLConnector 4+5) so rollout is non-breaking.
+//
+// Three cases at lookup time (enforced in net_stack):
+//   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
+//   Some(None)    — managed resource, connector offline → fail closed
+//   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
 pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
+    transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
-    // Build a remote_network_id lookup. Each entry picks its preferred connector
-    // lazily so one bad unused connector does not poison every resource in the RN.
     let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
         rn_by_id.insert(rn.remote_network_id.as_str(), rn);
     }
+    // Transport plane, keyed by remote_network_id. Empty/absent for an RN →
+    // fall back to the ACL relay fields for that RN.
+    let mut trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    if let Some(t) = transport {
+        for trn in &t.remote_networks {
+            trn_by_id.insert(trn.remote_network_id.as_str(), trn);
+        }
+    }
 
-    // Fan out: map each resource (Ipv4Addr, port) to its preferred connector's
-    // transport when present, otherwise the RN fallback transport.
-    // Resources in RNs absent from rn_by_id (shouldn't happen) are omitted.
     let mut out: HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>> = HashMap::new();
     let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
@@ -1264,27 +1525,22 @@ pub(crate) fn build_transports_by_resource(
             continue;
         };
         let IpAddr::V4(v4) = ip else { continue };
-        let Some(rn) = rn_by_id.get(entry.remote_network_id.as_str()) else {
-            continue;
-        };
+
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
 
         let mut transports = Vec::new();
-        for connector in ordered_connectors_for_entry(entry, rn) {
-            let cache_key = if connector.connector_id.is_empty() {
-                format!(
-                    "{}:{}",
-                    rn.remote_network_id,
-                    connector.connector_tunnel_addr.clone()
-                )
+        for c in &coords {
+            let cache_key = if c.connector_id.is_empty() {
+                format!("{}:{}", entry.remote_network_id, c.connector_tunnel_addr)
             } else {
-                connector.connector_id.clone()
+                c.connector_id.clone()
             };
             let transport = match transport_cache.get(&cache_key) {
                 Some(t) => t.clone(),
                 None => {
-                    let transport = build_transport_for_connector(connector, device)?;
-                    transport_cache.insert(cache_key, transport.clone());
-                    transport
+                    let t = build_transport_from_coords(c, device)?;
+                    transport_cache.insert(cache_key, t.clone());
+                    t
                 }
             };
             transports.push(transport);
@@ -1299,12 +1555,9 @@ pub(crate) fn build_transports_by_resource(
     Ok(out)
 }
 
-fn build_transport_for_connector(
-    connector: &AclConnector,
-    device: &DeviceInfo,
-) -> Result<Arc<ClientTransport>> {
-    let connector_addr = if !connector.connector_tunnel_addr.is_empty() {
-        connector.connector_tunnel_addr.clone()
+fn build_transport_from_coords(c: &ConnCoords, device: &DeviceInfo) -> Result<Arc<ClientTransport>> {
+    let connector_addr = if !c.connector_tunnel_addr.is_empty() {
+        c.connector_tunnel_addr.clone()
     } else {
         info!(
             connector_addr = crate::appmeta::DEFAULT_CONNECTOR_ADDRESS.to_string(),
@@ -1326,24 +1579,23 @@ fn build_transport_for_connector(
         &device.ca_cert_pem,
     )?);
 
-    // Relay coords are per-connector (ACLConnector fields 4+5).
-    // Empty relay_addr means this connector has no relay assignment — direct only.
-    let relay = if !connector.relay_addr.is_empty()
-        && !connector.relay_spiffe_id.is_empty()
-        && !connector.connector_id.is_empty()
-        && !connector.connector_spiffe.is_empty()
+    // Empty relay coords → this connector has no relay assignment (direct only).
+    let relay = if !c.relay_addr.is_empty()
+        && !c.relay_spiffe_id.is_empty()
+        && !c.connector_id.is_empty()
+        && !c.connector_spiffe.is_empty()
     {
         let pool = Arc::new(RelayPool::new(
             &device.certificate_pem,
             &device.private_key_pem,
             &device.ca_cert_pem,
-            &connector.relay_spiffe_id,
+            &c.relay_spiffe_id,
         )?);
         Some(RelayContext {
             pool,
-            relay_addr: connector.relay_addr.clone(),
-            connector_id: connector.connector_id.clone(),
-            connector_spiffe: connector.connector_spiffe.clone(),
+            relay_addr: c.relay_addr.clone(),
+            connector_id: c.connector_id.clone(),
+            connector_spiffe: c.connector_spiffe.clone(),
         })
     } else {
         None

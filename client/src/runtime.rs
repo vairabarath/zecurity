@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::grpc::client_v1::AclSnapshot;
+use crate::grpc::client_v1::{AclSnapshot, TransportSnapshot};
 
 /// Live TUN session handle — present while `zecurity up` is active.
 pub struct TunHandle {
@@ -31,6 +31,12 @@ pub struct RuntimeState {
     pub acl_snapshot: Option<AclSnapshot>,
     /// Unix timestamp of the last successful ACL snapshot fetch.
     pub acl_last_sync_at: Option<i64>,
+    /// Transport (connectivity) snapshot — per-connector relay coords keyed by
+    /// remote_network_id (ADR-015 Track B). Independent of the ACL. None = fall
+    /// back to the ACL's transitional relay fields (ACLConnector 4+5).
+    pub transport_snapshot: Option<TransportSnapshot>,
+    /// Unix timestamp of the last successful transport snapshot fetch.
+    pub transport_last_sync_at: Option<i64>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
     /// Ensures only one task refreshes the session tokens at a time.
@@ -89,6 +95,8 @@ pub fn new_shared() -> SharedState {
         session: None,
         acl_snapshot: None,
         acl_last_sync_at: None,
+        transport_snapshot: None,
+        transport_last_sync_at: None,
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         relay_resync: Arc::new(tokio::sync::Notify::new()),
