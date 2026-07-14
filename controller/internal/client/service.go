@@ -458,6 +458,15 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 // ACL recompile. Same device ownership + revocation gate as GetACLSnapshot.
 // When the client's known_version matches the current version, the snapshot is
 // omitted and up_to_date is set.
+//
+// DISCLOSURE (finding #7): the snapshot is workspace-wide — every authenticated
+// device in the workspace receives the full connector/relay topology, and the
+// client filters to its authorized resources locally. This is intentional and
+// consistent with GetACLSnapshot, which already returns the whole workspace ACL
+// (the same connector/relay metadata) to every device. It is connectivity
+// metadata only — it grants no access; authorization is always the ACL's
+// allowed_spiffe_ids. Per-device least-disclosure filtering, if ever required,
+// must be applied to BOTH planes together (ACL + transport), not transport alone.
 func (s *Service) GetTransportSnapshot(ctx context.Context, req *clientv1.GetTransportSnapshotRequest) (*clientv1.GetTransportSnapshotResponse, error) {
 	if req.GetAccessToken() == "" || req.GetDeviceId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "access_token and device_id are required")
