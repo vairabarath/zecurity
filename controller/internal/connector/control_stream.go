@@ -346,9 +346,18 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		connectorID,
 	).Scan(&becameActive); err != nil {
 		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
-	} else if becameActive && h.PolicyNotifier != nil {
-		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
-			log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+	} else if becameActive {
+		if h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+			}
+		}
+		// The connector now appears in the transport snapshot (with its tunnel
+		// address), so refresh the transport plane too — not just the ACL.
+		if h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after connector active connector=%s: %v", connectorID, err)
+			}
 		}
 	}
 	defer func() {
@@ -373,9 +382,17 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			connectorID,
 		).Scan(&becameDisconnected); err != nil {
 			log.Printf("control stream: mark connector %s disconnected: %v", connectorID, err)
-		} else if becameDisconnected && h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
-				log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+		} else if becameDisconnected {
+			if h.PolicyNotifier != nil {
+				if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
+					log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
+				}
+			}
+			// The connector drops out of the transport snapshot too.
+			if h.TransportNotifier != nil {
+				if err := h.TransportNotifier.NotifyTopologyChange(bg, tenantID, []string{connectorID}); err != nil {
+					log.Printf("control stream: notify topology after connector disconnect connector=%s: %v", connectorID, err)
+				}
 			}
 		}
 		log.Printf("control stream: connector %s disconnected", connectorID)
@@ -565,9 +582,19 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
 	if err != nil {
 		log.Printf("control stream: update connector health %s: %v", connectorID, err)
-	} else if connectorChanged && h.PolicyNotifier != nil {
-		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-			log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+	} else if connectorChanged {
+		if h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector health connector=%s: %v", connectorID, err)
+			}
+		}
+		// connectorChanged fires on a status or lan_addr change; lan_addr is the
+		// connector's tunnel address, which lives in the transport snapshot too —
+		// so refresh the transport plane as well (Q3: avoid a stale tunnel addr).
+		if h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, client.tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after connector health connector=%s: %v", connectorID, err)
+			}
 		}
 	}
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
