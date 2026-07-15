@@ -101,7 +101,13 @@ func (s *Store) LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
 // MarkProvisioned burns the jti, flips status to active, and records cert
 // metadata. The Provision RPC calls this after pki.SignRelayCert succeeds.
 func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error {
-	tag, err := s.pool.Exec(ctx,
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mark provisioned: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
 		`UPDATE relays
 		    SET enrollment_token_jti = NULL,
 		        status               = 'active',
@@ -110,7 +116,8 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 		        version              = NULLIF($4, ''),
 		        hostname             = NULLIF($5, ''),
 		        updated_at           = NOW()
-		  WHERE id = $1`,
+		  WHERE id = $1
+		    AND status NOT IN ('revoked', 'deleted')`,
 		id, certSerial, certNotAfter, version, hostname,
 	)
 	if err != nil {
@@ -119,7 +126,82 @@ func (s *Store) MarkProvisioned(ctx context.Context, id, certSerial string, cert
 	if tag.RowsAffected() == 0 {
 		return ErrRelayNotFound
 	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (serial) DO NOTHING`,
+		id, certSerial, certNotAfter,
+	); err != nil {
+		return fmt.Errorf("record provisioned relay cert: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mark provisioned: %w", err)
+	}
 	return nil
+}
+
+// RevokedSerial is one revoked, still-unexpired relay certificate serial.
+// Consumed by the relay CRL generator (Phase 3) and the controller checker (Phase 4).
+type RevokedSerial struct {
+	Serial    string
+	RevokedAt time.Time
+}
+
+// RecordIssuedCert appends one issued relay certificate to the history table.
+// Called inside MarkProvisioned (and future renewal) so every serial a relay has
+// held is tracked. serial is the canonical SerialNumber.Text(16) form.
+func (s *Store) RecordIssuedCert(ctx context.Context, relayID, serial string, notAfter time.Time) error {
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (serial) DO NOTHING`,
+		relayID, serial, notAfter,
+	)
+	if err != nil {
+		return fmt.Errorf("record issued relay cert: %w", err)
+	}
+	return nil
+}
+
+// RevokeAllForRelay marks every not-yet-revoked certificate of a relay revoked.
+// Returns how many serials were revoked. Idempotent: a second call revokes 0.
+func (s *Store) RevokeAllForRelay(ctx context.Context, relayID, reason string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = NULLIF($2, '')
+		  WHERE relay_id = $1 AND revoked_at IS NULL`,
+		relayID, reason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke relay certs: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// ListRevokedRelaySerials returns every revoked, still-unexpired relay serial.
+// Expired serials are omitted — a CRL need not carry an already-invalid cert.
+func (s *Store) ListRevokedRelaySerials(ctx context.Context) ([]RevokedSerial, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT serial, revoked_at
+		   FROM relay_certificates
+		  WHERE revoked_at IS NOT NULL AND not_after > NOW()
+		  ORDER BY revoked_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list revoked relay serials: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RevokedSerial
+	for rows.Next() {
+		var r RevokedSerial
+		if err := rows.Scan(&r.Serial, &r.RevokedAt); err != nil {
+			return nil, fmt.Errorf("scan revoked relay serial: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // MarkDeleted soft-deletes a relay (status='deleted') so it stops being served
@@ -139,6 +221,54 @@ func (s *Store) MarkDeleted(ctx context.Context, id string) error {
 		return ErrRelayNotFound
 	}
 	return nil
+}
+
+// RevokeRelay atomically revokes every unexpired certificate of a relay and marks
+// the relay 'revoked' (a terminal, heartbeat-safe status). Returns the number of
+// certificate serials revoked. FOR UPDATE serializes against MarkProvisioned so a
+// concurrent provision cannot undo the revoke. Rows are never deleted — the CRL
+// needs the serial until not_after. Returns ErrRelayNotFound if the relay is gone.
+func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin revoke relay: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
+	).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrRelayNotFound
+		}
+		return 0, fmt.Errorf("lock relay for revoke: %w", err)
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = NULLIF($2, '')
+		  WHERE relay_id = $1 AND revoked_at IS NULL`,
+		relayID, reason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke relay certs: %w", err)
+	}
+
+	// Don't downgrade an already-deleted relay; 'deleted' is the more terminal state.
+	if status != "deleted" {
+		if _, err := tx.Exec(ctx,
+			`UPDATE relays SET status = 'revoked', updated_at = NOW() WHERE id = $1`,
+			relayID,
+		); err != nil {
+			return 0, fmt.Errorf("mark relay revoked: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit revoke relay: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 // RecordHeartbeat marks an authenticated Relay healthy and refreshes its
@@ -486,7 +616,7 @@ func (s *Store) RecordHeartbeat(ctx context.Context, id, certSerial string, cert
 		        last_heartbeat_at = NOW(),
 		        updated_at        = NOW()
 		  WHERE id = $1
-		    AND status <> 'deleted'`,
+		    AND status NOT IN ('deleted', 'revoked')`,
 		id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections,
 	)
 	if err != nil {

@@ -125,6 +125,23 @@ func main() {
 			valkeycompat.NewAdapter(connectorValkey),
 			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
 		).WithProvisioningAuth(mustEnv("JWT_SECRET"))
+	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
+		rs, err := relayStore.ListRevokedRelaySerials(ctx)
+		if err != nil {
+			return nil, err
+		}
+		serials := make([]string, len(rs))
+		for i, r := range rs {
+			serials[i] = r.Serial
+		}
+		return serials, nil
+	})
+	if err := relayRevChecker.Refresh(ctx); err != nil {
+		log.Printf("relay revocation checker: initial load failed (relays denied u succeeds): %v", err)
+	}
+	relayRevChecker.SpawnRefresh(ctx, 60*time.Second, func(err error) {
+		log.Printf("relay revocation checker: refresh failed: %v", err)
+	})
 	connectorRegistry := connector.NewConnectorRegistry()
 
 	inviteStore := invitation.NewStore(db.Pool)
@@ -241,6 +258,7 @@ func main() {
 
 	mux.HandleFunc("/ca.crt", connector.CAEndpointHandler(db.Pool))
 	mux.HandleFunc("/ca.crl", connector.CRLEndpointHandler(db.Pool, pkiService))
+	mux.HandleFunc("/relay.crl", relay.RelayCRLHandler(pkiService, relayStore))
 
 	// REST endpoints: invitations
 	inviteCreateRoute := middleware.AuthMiddleware(mustEnv("JWT_SECRET"))(
@@ -290,7 +308,25 @@ func main() {
 		Authz:         providerAuthz,
 		ProviderStore: providerStore,
 	}
+	// Post-commit convergence when a relay is revoked/deleted: rebuild+broadcast the
+	// relay list (connectors migrate) AND invalidate the transport snapshot for each
+	// affected workspace (Sprint-13 clients re-poll) — mirrors the expiry path.
+	_ = relayRevChecker.Refresh(ctx)
+	relayAdminHandler.OnRelayRevoked = func(ctx context.Context, relayID string) {
+		broadcastRelayList(ctx)
+		conns, err := relayStore.ListConnectorsForRelay(ctx, relayID)
+		if err != nil {
+			log.Printf("relay revoke fan-out: list connectors for %s: %v", relayID, err)
+			return
+		}
+		for wsID, connectorIDs := range conns {
+			if err := transportNotifier.NotifyTopologyChange(ctx, wsID, connectorIDs); err != nil {
+				log.Printf("relay revoke fan-out: transport notify ws=%s: %v", wsID, err)
+			}
+		}
+	}
 	mux.Handle("POST /provider/relays", requireProvider(http.HandlerFunc(relayAdminHandler.Create)))
+	mux.Handle("POST /provider/relays/{id}/revoke", requireProvider(http.HandlerFunc(relayAdminHandler.Revoke)))
 	mux.Handle("DELETE /provider/relays/{id}", requireProvider(http.HandlerFunc(relayAdminHandler.Delete)))
 	grpcListener, err := net.Listen("tcp", ":"+connectorCfg.GRPCPort)
 	if err != nil {
@@ -315,8 +351,8 @@ func main() {
 			ClientAuth:   tls.RequestClientCert,
 			MinVersion:   tls.VersionTLS13,
 		})),
-		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore)),
-		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore)),
+		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
+		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
 	)
 
 	connectorSvc := &connector.EnrollmentHandler{
@@ -327,9 +363,9 @@ func main() {
 		ShieldSvc:  shieldSvc,
 		Registry:   connectorRegistry,
 
-		PolicyStore:    policyStore,
-		PolicyCache:    policyCache,
-		PolicyNotifier: policyNotifier,
+		PolicyStore:       policyStore,
+		PolicyCache:       policyCache,
+		PolicyNotifier:    policyNotifier,
 		RelayStore:        relayStore,
 		RelayListSrc:      relayStore,
 		TransportNotifier: transportNotifier,

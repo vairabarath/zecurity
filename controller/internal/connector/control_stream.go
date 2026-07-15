@@ -765,7 +765,7 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 
 // StreamSPIFFEInterceptor wraps the stream SPIFFE identity injection for Control RPCs.
 // The gRPC server must register this as a StreamInterceptor alongside the UnaryInterceptor.
-func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.StreamServerInterceptor {
+func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore, revChecker *RelayRevocationChecker) grpc.StreamServerInterceptor {
 	return func(
 		srv any,
 		ss grpc.ServerStream,
@@ -797,6 +797,14 @@ func StreamSPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStor
 		if role == appmeta.SPIFFERoleRelay {
 			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+			// PENDING-02: reject a revoked relay. Fail closed if revocation state
+			// is unavailable.
+			if revChecker == nil || !revChecker.Ready() {
+				return status.Error(codes.Unavailable, "relay revocation state unavailable")
+			}
+			if revChecker.IsRevoked(leaf.SerialNumber.Text(16)) {
+				return status.Error(codes.PermissionDenied, "relay certificate revoked")
 			}
 		}
 

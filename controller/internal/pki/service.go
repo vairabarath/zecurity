@@ -64,6 +64,12 @@ type Service interface {
 	// by the workspace CA for tenantID. It includes all client_devices rows with a
 	// non-null revoked_at. Returns the raw DER bytes ready to be served at /ca.crl.
 	GenerateClientCRL(ctx context.Context, tenantID string) ([]byte, error)
+	// GenerateRelayCRL produces a DER-encoded CRL signed by the platform
+	// Intermediate CA for the given revoked relay serials. Relay leaf certs chain
+	// to the Intermediate CA (not a workspace CA), so relay revocation needs this
+	// separate CRL. Serials are canonical hex (SerialNumber.Text(16)). Pure: the
+	// caller supplies the serials, so the PKI service needs no relay-store handle.
+	GenerateRelayCRL(ctx context.Context, revoked []RevokedEntry) ([]byte, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.

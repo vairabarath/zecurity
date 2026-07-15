@@ -20,6 +20,7 @@ const (
 	ActionRelayDelete        = "relay.delete"
 	ActionProviderUserManage = "provider_user.manage"
 	ActionAuditView          = "audit.view"
+	ActionRelayRevoke        = "relay.revoke"
 )
 
 // ErrForbidden is returned by decide() when the actor may not perform the
@@ -57,6 +58,10 @@ func (a *Authz) CanIssueProvisioningToken(actor Actor, target Target) error {
 
 func (a *Authz) CanDeleteRelay(actor Actor, target Target) error {
 	return decide(actor, ActionRelayDelete, target)
+}
+
+func (a *Authz) CanRevokeRelay(actor Actor, target Target) error {
+	return decide(actor, ActionRelayRevoke, target)
 }
 
 func (a *Authz) CanManageProviderUser(actor Actor, target Target) error {

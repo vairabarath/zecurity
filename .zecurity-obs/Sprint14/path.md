@@ -45,18 +45,18 @@ relay cert: verified chain + SPIFFE only,       relay cert: also checked for rev
 
 ## Key Design Decisions
 
-| Decision | Detail |
-|----------|--------|
-| Scope = Track 1 only | Relay *certificate* revocation. Relay-checks-its-*peers* (workspace CRLs at the relay) is a **separate future ADR**. |
-| Two-CA reality | Relay certs are signed by the **Intermediate CA** → **one platform CRL** (`/relay.crl`). Workspace CRLs (`/ca.crl`) are **untouched** this sprint. |
-| Controller = DB check | The controller is the CRL's source of truth; it enforces via a DB-backed in-memory checker, **not** by parsing its own CRL. |
-| Off-controller = signed CRL | Connector + client pull `/relay.crl` (Intermediate-CA-signed) and verify it. |
-| Renewal-safe model | New `relay_certificates` history table; revoke marks **every unexpired serial** for the relay (relays don't renew today, but this future-proofs it). `relays.cert_serial` stays as the "current" pointer. |
-| Hardened CRL manager | Verify **signature + issuer + thisUpdate + nextUpdate**; **deny once past `nextUpdate`**; keep-last-good on transient fetch failure; **cold-boot fail-closed**. Fixes the pre-existing unverified-CRL bug in `connector/src/crl.rs`. |
-| Refresh interval | **60s + jitter** (down from today's 300s). |
-| Revoke API | `POST /provider/relays/{id}/revoke` (revoke without delete); `DELETE /provider/relays/{id}` = **revoke-then-remove**. **Never physically delete** the relay row or its `relay_certificates` rows — the CRL needs them until expiry. |
-| Atomic revoke | revoke serials → mark relay non-active → `provider_audit_logs` (`relay.revoke`) → `broadcastRelayList`, in one flow. |
-| No proto changes | Controller enforces at the existing SPIFFE interceptor; verifiers pull a new HTTP endpoint. Cleanly additive. |
+| Decision                    | Detail                                                                                                                                                                                                                               |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Scope = Track 1 only        | Relay *certificate* revocation. Relay-checks-its-*peers* (workspace CRLs at the relay) is a **separate future ADR**.                                                                                                                 |
+| Two-CA reality              | Relay certs are signed by the **Intermediate CA** → **one platform CRL** (`/relay.crl`). Workspace CRLs (`/ca.crl`) are **untouched** this sprint.                                                                                   |
+| Controller = DB check       | The controller is the CRL's source of truth; it enforces via a DB-backed in-memory checker, **not** by parsing its own CRL.                                                                                                          |
+| Off-controller = signed CRL | Connector + client pull `/relay.crl` (Intermediate-CA-signed) and verify it.                                                                                                                                                         |
+| Renewal-safe model          | New `relay_certificates` history table; revoke marks **every unexpired serial** for the relay (relays don't renew today, but this future-proofs it). `relays.cert_serial` stays as the "current" pointer.                            |
+| Hardened CRL manager        | Verify **signature + issuer + thisUpdate + nextUpdate**; **deny once past `nextUpdate`**; keep-last-good on transient fetch failure; **cold-boot fail-closed**. Fixes the pre-existing unverified-CRL bug in `connector/src/crl.rs`. |
+| Refresh interval            | **60s + jitter** (down from today's 300s).                                                                                                                                                                                           |
+| Revoke API                  | `POST /provider/relays/{id}/revoke` (revoke without delete); `DELETE /provider/relays/{id}` = **revoke-then-remove**. **Never physically delete** the relay row or its `relay_certificates` rows — the CRL needs them until expiry.  |
+| Atomic revoke               | revoke serials → mark relay non-active → `provider_audit_logs` (`relay.revoke`) → `broadcastRelayList`, in one flow.                                                                                                                 |
+| No proto changes            | Controller enforces at the existing SPIFFE interceptor; verifiers pull a new HTTP endpoint. Cleanly additive.                                                                                                                        |
 
 ## Team Assignments
 

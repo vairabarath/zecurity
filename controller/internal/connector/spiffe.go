@@ -147,7 +147,7 @@ func parseSPIFFEID(cert *x509.Certificate) (trustDomain, role, id string, err er
 //   - spiffeRoleKey{}     — "connector", "agent", or "controller"
 //   - spiffeEntityIDKey{} — the entity-specific ID (e.g. connector UUID)
 //   - trustDomainKey{}    — the trust domain from the SPIFFE URI
-func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore) grpc.UnaryServerInterceptor {
+func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore, revChecker *RelayRevocationChecker) grpc.UnaryServerInterceptor {
 	return func(
 		ctx context.Context,
 		req any,
@@ -210,6 +210,14 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 		if role == appmeta.SPIFFERoleRelay {
 			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return nil, status.Errorf(codes.Unauthenticated, "relay certificate verification failed: %v", err)
+			}
+			// PENDING-02: reject a revoked relay. Fail closed if revocation state
+			// is unavailable — an unknown relay is not trusted.
+			if revChecker == nil || !revChecker.Ready() {
+				return nil, status.Error(codes.Unavailable, "relay revocation state unavailable")
+			}
+			if revChecker.IsRevoked(leaf.SerialNumber.Text(16)) {
+				return nil, status.Error(codes.PermissionDenied, "relay certificate revoked")
 			}
 		}
 
