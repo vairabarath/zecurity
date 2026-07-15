@@ -18,6 +18,19 @@ use tun::AsyncDevice;
 
 use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
+use crate::tunnel_pool::TunnelOpenError;
+
+/// True when a stream-open error was an authentication/identity failure
+/// (revoked or mismatched cert/SPIFFE) rather than a network/transport failure.
+/// Auth failures fail closed — re-polling the transport plane can't fix a bad
+/// credential — so they must NOT trigger an accelerated transport resync
+/// (finding #8). Recovers the typed error from the anyhow chain.
+fn is_auth_failure(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|c| c.downcast_ref::<TunnelOpenError>())
+        .map(|e| matches!(e, TunnelOpenError::Authenticate(_)))
+        .unwrap_or(false)
+}
 
 const TUNNEL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_TCP_PAYLOAD: usize = 64 * 1024;
@@ -416,18 +429,34 @@ async fn relay_tcp_to_quic(
     resync: Arc<Notify>,
 ) -> Result<()> {
     let mut selected_stream = None;
+    // Whether any failure was a network/transport failure (relay/connector
+    // unreachable). Only these warrant an early transport resync; auth failures
+    // and connector denials fail closed (finding #8).
+    let mut saw_transport_failure = false;
 
     for transport in transports {
         let candidate = match transport.open_authenticated_stream().await {
             Ok(stream) => stream,
 
             Err(e) => {
-                tracing::warn!(
-                    destination = %destination,
-                    port,
-                    error = %e,
-                    "failed to connect to connector, trying next"
-                );
+                if is_auth_failure(&e) {
+                    // Revoked/mismatched cert or SPIFFE — re-polling transport
+                    // won't help. Fail closed; do not signal a resync.
+                    tracing::warn!(
+                        destination = %destination,
+                        port,
+                        error = %e,
+                        "connector rejected authentication — failing closed (no transport resync)"
+                    );
+                } else {
+                    tracing::warn!(
+                        destination = %destination,
+                        port,
+                        error = %e,
+                        "failed to reach connector (transport), trying next"
+                    );
+                    saw_transport_failure = true;
+                }
                 continue;
             }
         };
@@ -452,6 +481,7 @@ async fn relay_tcp_to_quic(
             Ok(Ok(resp)) => resp,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "tunnel handshake failed");
+                saw_transport_failure = true;
                 continue;
             }
             Err(_) => {
@@ -459,6 +489,7 @@ async fn relay_tcp_to_quic(
                     dest = %destination, port,
                     "tunnel handshake timed out after {:?}", TUNNEL_HANDSHAKE_TIMEOUT
                 );
+                saw_transport_failure = true;
                 continue;
             }
         };
@@ -489,10 +520,19 @@ async fn relay_tcp_to_quic(
     let stream = match selected_stream {
         Some(stream) => stream,
         None => {
-            // No transport accepted the tunnel — the relay/connector is
-            // unreachable (relay down, or connector re-homed to a relay the ACL
-            // hasn't propagated yet). Wake the ACL sync scheduler to re-home.
-            resync.notify_one();
+            // No transport accepted the tunnel. Signal a transport resync ONLY
+            // if the failures were network/transport (relay down, or connector
+            // re-homed to a relay the transport plane hasn't propagated yet).
+            // If every failure was an auth rejection or a connector denial,
+            // re-polling won't help — fail closed without signalling (finding #8).
+            if saw_transport_failure {
+                resync.notify_one();
+            } else {
+                tracing::warn!(
+                    dest = %destination, port,
+                    "no connector accepted tunnel (auth/denial only) — failing closed, no resync"
+                );
+            }
             return Err(anyhow!(
                 "no connector accepted tunnel for {}: {}",
                 destination,

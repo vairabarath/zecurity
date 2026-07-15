@@ -10,6 +10,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
 // Resolver holds shared dependencies for all resolvers.
@@ -26,4 +27,5 @@ type Resolver struct {
 	InvitationEmailer *invitation.Emailer
 	PolicyStore       *policy.Store
 	PolicyNotifier    *policy.Notifier
+	TransportNotifier *transport.Notifier
 }

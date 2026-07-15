@@ -1045,6 +1045,10 @@ async fn run_acl_sync_scheduler(
     // End time of the last early-resync burst; enforces RELAY_RESYNC_COOLDOWN so
     // a permanently-dead relay can't spin bursts back-to-back. None = never run.
     let mut last_burst_end: Option<tokio::time::Instant> = None;
+    // Single-flight guard: at most one transport-recovery task runs at a time.
+    // The recovery loop runs off this select! thread so the 60s ACL tick keeps
+    // firing during a relay recovery (revocation polling must not stall).
+    let recovery_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     loop {
         tokio::select! {
@@ -1052,53 +1056,73 @@ async fn run_acl_sync_scheduler(
                 sync_and_restart_if_changed(&state, &conf, &tun_slot).await;
             }
             _ = resync.notified() => {
-                // A relay transport just failed. Consume this wake; if we ran a
-                // burst too recently, skip — the 60s tick remains the backstop.
+                // A relay transport just failed. The relay change lives in the
+                // TRANSPORT snapshot (Track B), so re-poll transport — not ACL.
+                // Consume this wake; skip if a burst ran too recently (the 60s
+                // tick remains the backstop).
                 if let Some(end) = last_burst_end {
                     if end.elapsed() < std::time::Duration::from_secs(RELAY_RESYNC_COOLDOWN_SECS) {
                         continue;
                     }
                 }
-                // A relay just failed on the data plane. The relay change lives in
-                // the TRANSPORT snapshot (Track B), so re-poll transport — not ACL.
-                // The connector may still be re-homing, so the controller may not
-                // carry the new relay yet — retry with backoff until the transport
-                // version changes (then restart to rebuild transports), or attempts
-                // run out (the 60s tick remains the backstop). Notify coalesces
-                // bursts into one wake.
-                info!("relay failure signalled — early transport resync");
-                let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
-                for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
-                    let has_identity = {
-                        let s = state.read().await;
-                        s.device.is_some() && s.session.is_some()
-                    };
-                    if !has_identity {
-                        break;
-                    }
-                    match fetch_and_store_transport(&state, &conf).await {
-                        Ok(true) => {
-                            info!("early transport resync: version changed, restarting tunnel");
-                            if let Err(e) = restart_tunnel_if_running(&state, &conf, &tun_slot).await {
-                                warn!(error = %e, "early transport resync: tunnel restart failed");
-                            }
-                            break;
-                        }
-                        Ok(false) => {
-                            // Controller hasn't seen the connector re-home yet.
-                            tokio::time::sleep(backoff).await;
-                            backoff = (backoff * 2)
-                                .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "early transport resync failed — keeping cached snapshot");
-                            tokio::time::sleep(backoff).await;
-                            backoff = (backoff * 2)
-                                .min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
-                        }
-                    }
+                // Single-flight: if a recovery is already running, drop this wake
+                // (it re-fires on the next failed connection).
+                if recovery_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    continue;
                 }
                 last_burst_end = Some(tokio::time::Instant::now());
+
+                // Run the retry-until-changed loop as a SEPARATE task so this
+                // select! keeps servicing the ACL tick during relay recovery.
+                info!("relay failure signalled — early transport resync (background)");
+                let state = state.clone();
+                let conf = conf.clone();
+                let tun_slot = tun_slot.clone();
+                let flag = recovery_running.clone();
+                tokio::spawn(async move {
+                    run_transport_recovery(&state, &conf, &tun_slot).await;
+                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                });
+            }
+        }
+    }
+}
+
+/// Early transport re-poll after a relay failure, run as its own task so it
+/// never blocks the ACL sync tick (revocations keep polling). Retries with
+/// backoff until the transport version changes (then restarts the tunnel to
+/// adopt the new relay) or attempts are exhausted — the 60s tick is the backstop.
+async fn run_transport_recovery(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) {
+    let mut backoff = std::time::Duration::from_secs(RELAY_RESYNC_BASE_SECS);
+    for _ in 0..RELAY_RESYNC_MAX_ATTEMPTS {
+        let has_identity = {
+            let s = state.read().await;
+            s.device.is_some() && s.session.is_some()
+        };
+        if !has_identity {
+            break;
+        }
+        match fetch_and_store_transport(state, conf).await {
+            Ok(true) => {
+                info!("early transport resync: version changed, restarting tunnel");
+                if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
+                    warn!(error = %e, "early transport resync: tunnel restart failed");
+                }
+                break;
+            }
+            Ok(false) => {
+                // Controller hasn't seen the connector re-home yet.
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
+            }
+            Err(e) => {
+                warn!(error = %e, "early transport resync failed — keeping cached snapshot");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_secs(RELAY_RESYNC_MAX_SECS));
             }
         }
     }

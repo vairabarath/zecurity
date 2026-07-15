@@ -94,14 +94,15 @@ message ConnectorControlMessage {
     // ConnectorHealthReport so a lost message self-heals within one
     // heartbeat interval.
     ConnectorRelayState relay_state = 15;
-    // Controller → Connector — transport (connectivity) plane: per-connector
-    // relay coordinates keyed by remote_network_id (ADR-015 Track B). Pushed
-    // independently of the ACL snapshot so relay changes don't recompile
-    // authorization. Defined in client.v1 alongside ACLSnapshot.
-    client.v1.TransportSnapshot transport_snapshot = 16;
+    // Field 16 was TransportSnapshot (ADR-015 Track B) — removed; the transport
+    // snapshot is client-only (GetTransportSnapshot), connectors never consumed
+    // it. See message-level `reserved 16` below.
     // Controller → Connector — eligible relay pool with capacity labels (ADR-016).
     LabelledRelayList relay_list = 17;
   }
+  // Reserve the retired TransportSnapshot field number so it is never reused.
+  // (reserved must be at message scope, not inside the oneof.)
+  reserved 16;
 }
 
 message ConnectorLog {

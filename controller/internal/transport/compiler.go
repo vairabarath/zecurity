@@ -38,7 +38,8 @@ func CompileTransportSnapshot(ctx context.Context, store *Store, notifier *Notif
 		}
 		tunnelAddr := ""
 		if host != "" {
-			tunnelAddr = host + ":" + connectorTunnelPort
+			// JoinHostPort brackets IPv6 correctly (e.g. "[2001:db8::1]:9092").
+			tunnelAddr = net.JoinHostPort(host, connectorTunnelPort)
 		}
 		spiffe := ""
 		if row.ConnectorID != "" && row.TrustDomain != "" {
