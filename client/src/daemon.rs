@@ -1363,34 +1363,72 @@ async fn fetch_transport_snapshot_with_refresh(
     }
 }
 
+/// Abstracts the transport-snapshot fetch (given the client's known_version)
+/// so the store/serialization logic in fetch_and_store_transport_with can be
+/// unit-tested without a live controller. Ok(None) means up_to_date.
+#[async_trait::async_trait]
+trait TransportFetcher {
+    async fn fetch(&self, known_version: u64) -> Result<Option<TransportSnapshot>>;
+}
+
+/// Real fetcher: reads the device identity from state and calls the gRPC RPC.
+struct GrpcTransportFetcher<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+}
+
+#[async_trait::async_trait]
+impl TransportFetcher for GrpcTransportFetcher<'_> {
+    async fn fetch(&self, known_version: u64) -> Result<Option<TransportSnapshot>> {
+        let (ca_pem, device_id) = {
+            let s = self.state.read().await;
+            let device = s
+                .device
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("no device identity"))?;
+            (device.ca_cert_pem.clone(), device.id.clone())
+        };
+        fetch_transport_snapshot_with_refresh(
+            self.conf,
+            &ca_pem,
+            self.state,
+            &device_id,
+            known_version,
+        )
+        .await
+    }
+}
+
 /// Fetch and store the transport snapshot. Uses known_version so an unchanged
 /// snapshot returns up_to_date (no re-store). On failure keeps the cached
 /// snapshot. Returns true when the stored version changed.
 async fn fetch_and_store_transport(state: &SharedState, conf: &config::ClientConf) -> Result<bool> {
-    // Serialize the entire known-version → fetch → store sequence. Without this,
-    // the 60s scheduler tick and the spawned relay-recovery task can both be
-    // inside this function at once; because the state lock is dropped during the
-    // network fetch, an older response can land last and move transport_snapshot
-    // backwards (stale relay coords). Holding the guard for the whole operation
-    // makes a second caller read a fresh known_version only after the first has
-    // stored, so versions progress monotonically. Locking only the store would
-    // not help — the stale known_version read has already happened by then.
+    fetch_and_store_transport_with(state, &GrpcTransportFetcher { state, conf }).await
+}
+
+/// Inner: holds transport_sync_lock across the whole known-version → fetch →
+/// store sequence. Split out so tests can inject a fetcher and exercise both the
+/// up_to_date path and the serialization guarantee.
+///
+/// Serialization matters: the 60s scheduler tick and the spawned relay-recovery
+/// task can both call this at once; because the state lock is dropped during the
+/// network fetch, without the sync lock an older response could land last and
+/// move transport_snapshot backwards (stale relay coords). Holding the guard for
+/// the whole operation makes a second caller read a fresh known_version only
+/// after the first has stored, so versions progress monotonically.
+async fn fetch_and_store_transport_with(
+    state: &SharedState,
+    fetcher: &impl TransportFetcher,
+) -> Result<bool> {
     let sync_lock = { state.read().await.transport_sync_lock.clone() };
     let _sync_guard = sync_lock.lock().await;
 
-    let (ca_pem, device_id, known_version) = {
+    let known_version = {
         let s = state.read().await;
-        let device = s
-            .device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no device identity"))?;
-        let known = s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0);
-        (device.ca_cert_pem.clone(), device.id.clone(), known)
+        s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0)
     };
 
-    match fetch_transport_snapshot_with_refresh(conf, &ca_pem, state, &device_id, known_version)
-        .await?
-    {
+    match fetcher.fetch(known_version).await? {
         None => {
             // up_to_date — refresh the sync timestamp, keep the cached snapshot.
             let mut s = state.write().await;
@@ -1440,28 +1478,51 @@ async fn refresh_acl_if_needed(
     }
 }
 
+/// Abstracts the ACL-snapshot fetch (given the client's known_version) so the
+/// version-comparison / up_to_date logic in sync_acl_now_with can be unit-tested
+/// without a live controller. Ok(None) means up_to_date.
+#[async_trait::async_trait]
+trait AclFetcher {
+    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>>;
+}
+
+/// Real fetcher: reads the device identity from state and calls the gRPC RPC.
+struct GrpcAclFetcher<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+}
+
+#[async_trait::async_trait]
+impl AclFetcher for GrpcAclFetcher<'_> {
+    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+        let (ca_pem, device_id) = {
+            let s = self.state.read().await;
+            let device = s.device.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("no device identity — run zecurity-client login first")
+            })?;
+            (device.ca_cert_pem.clone(), device.id.clone())
+        };
+        fetch_acl_snapshot_with_refresh(self.conf, &ca_pem, self.state, &device_id, known_version)
+            .await
+    }
+}
+
 async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
-    let (ca_pem, device_id) = {
-        let s = state.read().await;
-        let device = s.device.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("no device identity — run zecurity-client login first")
-        })?;
-        // Session presence is checked inside fetch_acl_snapshot_with_refresh —
-        // we only need CA + device id here.
-        (device.ca_cert_pem.clone(), device.id.clone())
-    };
+    sync_acl_now_with(state, &GrpcAclFetcher { state, conf }).await
+}
+
+/// Inner: reads the cached version, fetches, and applies the result. Split out so
+/// tests can drive the up_to_date (keep cached, changed=false) and changed paths
+/// without a controller.
+async fn sync_acl_now_with(
+    state: &SharedState,
+    fetcher: &impl AclFetcher,
+) -> Result<AclSyncResult> {
     let old_version = {
         let s = state.read().await;
         s.acl_snapshot.as_ref().map(|a| a.version)
     };
-    let snapshot = fetch_acl_snapshot_with_refresh(
-        conf,
-        &ca_pem,
-        state,
-        &device_id,
-        old_version.unwrap_or(0),
-    )
-    .await?;
+    let snapshot = fetcher.fetch(old_version.unwrap_or(0)).await?;
 
     match snapshot {
         // up_to_date — the controller confirms our cached version is current.
@@ -1786,5 +1847,153 @@ mod recovery_tests {
             finished + std::time::Duration::from_secs(10),
             std::time::Duration::from_secs(10),
         ));
+    }
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    use crate::grpc::client_v1::AclSnapshot;
+
+    // --- Transport: up_to_date keeps the cached snapshot and reports unchanged ---
+    struct UpToDateTransport;
+    #[async_trait::async_trait]
+    impl TransportFetcher for UpToDateTransport {
+        async fn fetch(&self, _known: u64) -> Result<Option<TransportSnapshot>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_up_to_date_keeps_cached_and_reports_unchanged() {
+        let state = crate::runtime::new_shared();
+        state.write().await.transport_snapshot = Some(TransportSnapshot {
+            version: 5,
+            ..Default::default()
+        });
+
+        let changed = fetch_and_store_transport_with(&state, &UpToDateTransport)
+            .await
+            .unwrap();
+
+        assert!(!changed, "up_to_date must report unchanged");
+        let s = state.read().await;
+        assert_eq!(
+            s.transport_snapshot.as_ref().unwrap().version,
+            5,
+            "cached snapshot must be kept"
+        );
+        assert!(s.transport_last_sync_at.is_some(), "sync timestamp refreshed");
+    }
+
+    // --- Transport: concurrent fetches are serialized (Fix 1 regression guard) ---
+    // Each fetch returns `known_version + 1` and yields at its await point. WITHOUT
+    // the sync lock, both concurrent calls would read the same known_version (0) and
+    // the newer result would be lost. WITH the lock, the second call reads the
+    // first's stored version, so versions advance monotonically (0 -> 1 -> 2).
+    struct MonotonicTransport {
+        seen: Arc<Mutex<Vec<u64>>>,
+    }
+    #[async_trait::async_trait]
+    impl TransportFetcher for MonotonicTransport {
+        async fn fetch(&self, known: u64) -> Result<Option<TransportSnapshot>> {
+            self.seen.lock().await.push(known);
+            // Force scheduling points so an unserialized impl would interleave.
+            tokio::task::yield_now().await;
+            tokio::task::yield_now().await;
+            Ok(Some(TransportSnapshot {
+                version: known + 1,
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_sync_serializes_concurrent_fetches() {
+        let state = crate::runtime::new_shared();
+        let seen = Arc::new(Mutex::new(Vec::<u64>::new()));
+        let fetcher = MonotonicTransport { seen: seen.clone() };
+
+        let (r1, r2) = tokio::join!(
+            fetch_and_store_transport_with(&state, &fetcher),
+            fetch_and_store_transport_with(&state, &fetcher),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        let mut seen = seen.lock().await.clone();
+        seen.sort_unstable();
+        assert_eq!(
+            seen,
+            vec![0, 1],
+            "each fetch must observe the prior fetch's stored version (serialized)"
+        );
+        assert_eq!(
+            state.read().await.transport_snapshot.as_ref().unwrap().version,
+            2,
+            "final stored version must be the newest — no stale overwrite"
+        );
+    }
+
+    // --- ACL: up_to_date keeps the cached snapshot and reports unchanged ---
+    struct UpToDateAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for UpToDateAcl {
+        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn acl_up_to_date_keeps_cached_and_reports_unchanged() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot {
+            version: 7,
+            entries: vec![AclEntry::default(), AclEntry::default(), AclEntry::default()],
+            ..Default::default()
+        });
+
+        let result = sync_acl_now_with(&state, &UpToDateAcl).await.unwrap();
+
+        assert!(!result.changed, "up_to_date must report unchanged");
+        assert_eq!(result.version, 7, "result reflects the cached version");
+        assert_eq!(result.entry_count, 3, "result reflects the cached entry count");
+        assert_eq!(
+            state.read().await.acl_snapshot.as_ref().unwrap().version,
+            7,
+            "cached ACL snapshot must be kept"
+        );
+    }
+
+    // --- ACL: a newer version is stored and reported changed ---
+    struct NewAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for NewAcl {
+        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
+            Ok(Some(AclSnapshot {
+                version: 8,
+                entries: vec![AclEntry::default()],
+                ..Default::default()
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn acl_new_version_is_stored_and_reported_changed() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot {
+            version: 7,
+            ..Default::default()
+        });
+
+        let result = sync_acl_now_with(&state, &NewAcl).await.unwrap();
+
+        assert!(result.changed, "a new version must report changed");
+        assert_eq!(result.version, 8);
+        assert_eq!(
+            state.read().await.acl_snapshot.as_ref().unwrap().version,
+            8,
+            "new ACL snapshot must be stored"
+        );
     }
 }
