@@ -4,7 +4,7 @@ member: M2
 sprint: 12
 phase: 3
 title: Relay Client Provisioning-Token Delivery
-status: planned
+status: done
 depends_on:
   - Sprint12/Member2-Go-Relay/Phase1-Provision-Token-Enforcement
 tags:
@@ -83,10 +83,10 @@ cd relay && cargo build
 
 ## Implementation Checklist
 
-- [ ] **M2-E1** `relay/src/provision.rs` — send real `provisioning_token`
-- [ ] **M2-E2** relay config — `RELAY_PROVISIONING_TOKEN` (env/file) + README note
-- [ ] **M2-E3** fail fast with a clear error when the token is missing
-- [ ] **Build gate:** `cd relay && cargo build`
+- [x] **M2-E1** `relay/src/provision.rs` — send real `provisioning_token`
+- [x] **M2-E2** relay config — `RELAY_PROVISIONING_TOKEN` (env/file) + README note
+- [x] **M2-E3** fail fast with a clear error when the token is missing
+- [x] **Build gate:** `cd relay && cargo build`
 
 ## Post-Phase Fixes
 

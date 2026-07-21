@@ -4,7 +4,7 @@ member: M1
 sprint: 12
 phase: 1
 title: Provider Data Model + Authorization Core
-status: planned
+status: done
 depends_on: []
 tags:
   - go
@@ -163,12 +163,12 @@ cd controller && go test ./internal/provider/...
 
 ## Implementation Checklist
 
-- [ ] **M1-A1** `controller/migrations/025_provider_users.sql`
-- [ ] **M1-A2** `controller/migrations/026_provider_audit_logs.sql`
-- [ ] **M1-A3** `controller/internal/provider/store.go`
-- [ ] **M1-A4** `controller/internal/provider/authz.go`
-- [ ] **M1-A5** `controller/cmd/server/main.go` — `PROVIDER_BOOTSTRAP_EMAILS` seed
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-A1** `controller/migrations/025_provider_users.sql`
+- [x] **M1-A2** `controller/migrations/026_provider_audit_logs.sql`
+- [x] **M1-A3** `controller/internal/provider/store.go`
+- [x] **M1-A4** `controller/internal/provider/authz.go`
+- [x] **M1-A5** `controller/cmd/server/main.go` — `PROVIDER_BOOTSTRAP_EMAILS` seed
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 

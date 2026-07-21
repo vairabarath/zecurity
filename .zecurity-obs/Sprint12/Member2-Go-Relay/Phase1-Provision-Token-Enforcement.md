@@ -4,7 +4,7 @@ member: M2
 sprint: 12
 phase: 1
 title: Provision Token Enforcement + Drop Self-Provision Fallback
-status: planned
+status: done
 depends_on: []
 tags:
   - go
@@ -98,12 +98,12 @@ cd controller && go test ./internal/relay/...
 
 ## Implementation Checklist
 
-- [ ] **M2-C1** `provision.go` — JWT-secret field + `WithProvisioningAuth`
-- [ ] **M2-C2** `provision.go` — verify → assert relay_id → `BurnProvisioningJTI` before sign
-- [ ] **M2-C3** `provision.go` — drop self-provision fallback; `FailedPrecondition` on not-found
-- [ ] **M2-C4** `main.go` — wire `WithProvisioningAuth(JWT_SECRET)`
-- [ ] **M2-C5** `provision_test.go` — enforcement cases
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-C1** `provision.go` — JWT-secret field + `WithProvisioningAuth`
+- [x] **M2-C2** `provision.go` — verify → assert relay_id → `BurnProvisioningJTI` before sign
+- [x] **M2-C3** `provision.go` — drop self-provision fallback; `FailedPrecondition` on not-found
+- [x] **M2-C4** `main.go` — wire `WithProvisioningAuth(JWT_SECRET)`
+- [x] **M2-C5** `provision_test.go` — enforcement cases
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 
