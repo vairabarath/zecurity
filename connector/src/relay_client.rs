@@ -16,6 +16,7 @@ use tracing::{info, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::crl::CrlManager;
 use crate::proto::connector_control_message;
 use crate::proto::{ConnectorControlMessage, ConnectorRelayState};
 use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
@@ -45,6 +46,7 @@ struct RelayAck {
 pub struct RelayClient {
     _endpoint: Endpoint,
     connection: Connection,
+    peer_serial: Vec<u8>,
 }
 
 impl RelayClient {
@@ -59,6 +61,7 @@ impl RelayClient {
         key_pem: &[u8],
         workspace_ca_bundle_pem: &[u8],
         intermediate_ca_bundle_pem: &[u8],
+        relay_crl_manager: CrlManager,
         max_incoming_bidi_streams: u32,
         idle_timeout: Duration,
     ) -> Result<Self> {
@@ -71,6 +74,7 @@ impl RelayClient {
             key_pem,
             workspace_ca_bundle_pem,
             intermediate_ca_bundle_pem,
+            relay_crl_manager,
         )?;
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
             .context("build Relay QUIC TLS config")?;
@@ -97,10 +101,12 @@ impl RelayClient {
             .context("start Relay QUIC connection")?
             .await
             .with_context(|| format!("connect to Relay at {relay_addr}"))?;
+        let peer_serial = peer_certificate_serial(&connection)?;
 
         Ok(Self {
             _endpoint: endpoint,
             connection,
+            peer_serial,
         })
     }
 
@@ -136,6 +142,10 @@ impl RelayClient {
     pub fn connection(&self) -> Connection {
         self.connection.clone()
     }
+
+    pub fn peer_serial(&self) -> &[u8] {
+        &self.peer_serial
+    }
 }
 
 /// Run one Connector→Relay registration cycle: connect, register, emit the
@@ -158,6 +168,7 @@ pub async fn run_session(
     key_pem: &[u8],
     workspace_ca_bundle_pem: &[u8],
     intermediate_ca_bundle_pem: &[u8],
+    relay_crl_manager: CrlManager,
     relay_handler: Arc<RelayHandler>,
     max_incoming_bidi_streams: u32,
     idle_timeout: Duration,
@@ -182,6 +193,7 @@ pub async fn run_session(
             key_pem,
             workspace_ca_bundle_pem,
             intermediate_ca_bundle_pem,
+            relay_crl_manager.clone(),
             max_incoming_bidi_streams,
             idle_timeout,
         )
@@ -217,10 +229,12 @@ pub async fn run_session(
             let _ = tx.send(());
         }
 
-        relay_handler
-            .clone()
-            .run(client.connection(), drain_tracker)
-            .await
+        let connection = client.connection();
+        let serial = client.peer_serial().to_vec();
+        tokio::select! {
+            result = relay_handler.clone().run(connection.clone(), drain_tracker) => result,
+            result = monitor_relay_revocation(connection, relay_crl_manager, serial) => result,
+        }
     }
     .await;
 
@@ -265,17 +279,37 @@ async fn resolve_relay_addr(relay_addr: &str) -> Result<SocketAddr> {
 struct ExactRelaySpiffeVerifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
     expected_spiffe_id: String,
+    crl_manager: CrlManager,
 }
 
 impl ExactRelaySpiffeVerifier {
-    fn new(roots: RootCertStore, expected_spiffe_id: String) -> Result<Arc<Self>> {
+    fn new(
+        roots: RootCertStore,
+        expected_spiffe_id: String,
+        crl_manager: CrlManager,
+    ) -> Result<Arc<Self>> {
         let inner = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
             .build()
             .context("build Relay certificate chain verifier")?;
         Ok(Arc::new(Self {
             inner,
             expected_spiffe_id,
+            crl_manager,
         }))
+    }
+
+    fn verify_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
+        if !self.crl_manager.has_valid_cache() {
+            return Err(RustlsError::General(
+                "relay revocation state unavailable".into(),
+            ));
+        }
+        let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
+            .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
+        if self.crl_manager.is_revoked(cert.raw_serial()) {
+            return Err(RustlsError::General("relay certificate revoked".into()));
+        }
+        Ok(())
     }
 
     fn verify_exact_spiffe(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
@@ -325,6 +359,7 @@ impl ServerCertVerifier for ExactRelaySpiffeVerifier {
         ) {
             Ok(verified) => {
                 self.verify_exact_spiffe(end_entity)?;
+                self.verify_revocation(end_entity)?;
                 Ok(verified)
             }
             Err(RustlsError::InvalidCertificate(CertificateError::NotValidForName))
@@ -332,6 +367,7 @@ impl ServerCertVerifier for ExactRelaySpiffeVerifier {
                 ..
             })) => {
                 self.verify_exact_spiffe(end_entity)?;
+                self.verify_revocation(end_entity)?;
                 Ok(ServerCertVerified::assertion())
             }
             Err(error) => Err(error),
@@ -367,6 +403,7 @@ fn build_relay_tls_config(
     key_pem: &[u8],
     workspace_ca_bundle_pem: &[u8],
     intermediate_ca_bundle_pem: &[u8],
+    relay_crl_manager: CrlManager,
 ) -> Result<rustls::ClientConfig> {
     validate_relay_spiffe_id(relay_spiffe_id)?;
 
@@ -400,7 +437,8 @@ fn build_relay_tls_config(
         )
         .context("add Platform Intermediate CA trust anchor")?;
 
-    let verifier = ExactRelaySpiffeVerifier::new(roots, relay_spiffe_id.to_owned())?;
+    let verifier =
+        ExactRelaySpiffeVerifier::new(roots, relay_spiffe_id.to_owned(), relay_crl_manager)?;
     let mut tls_config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
@@ -408,6 +446,45 @@ fn build_relay_tls_config(
         .context("build Relay mTLS client config; certificate and key may not match")?;
     tls_config.alpn_protocols = vec![RELAY_ALPN.to_vec()];
     Ok(tls_config)
+}
+
+fn peer_certificate_serial(connection: &Connection) -> Result<Vec<u8>> {
+    let identity = connection
+        .peer_identity()
+        .context("Relay supplied no peer certificate")?;
+    let chain = identity
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| anyhow::anyhow!("unexpected Relay peer identity type"))?;
+    let leaf = chain
+        .first()
+        .context("Relay supplied an empty certificate chain")?;
+    let (_, cert) = X509Certificate::from_der(leaf.as_ref())
+        .map_err(|_| anyhow::anyhow!("parse Relay peer certificate"))?;
+    Ok(cert.raw_serial().to_vec())
+}
+
+async fn monitor_relay_revocation(
+    connection: Connection,
+    manager: CrlManager,
+    serial: Vec<u8>,
+) -> Result<()> {
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(reason) = relay_rejection_reason(&manager, &serial) {
+            connection.close(0u32.into(), reason);
+            bail!("{}", String::from_utf8_lossy(reason));
+        }
+    }
+}
+
+fn relay_rejection_reason(manager: &CrlManager, serial: &[u8]) -> Option<&'static [u8]> {
+    if !manager.has_valid_cache() {
+        Some(b"relay revocation state unavailable")
+    } else if manager.is_revoked(serial) {
+        Some(b"relay certificate revoked")
+    } else {
+        None
+    }
 }
 
 pub fn validate_relay_spiffe_id(spiffe_id: &str) -> Result<()> {
@@ -471,8 +548,17 @@ pub(crate) async fn read_message<T: for<'de> Deserialize<'de>>(recv: &mut RecvSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{CertificateParams, KeyPair, SanType, SerialNumber};
+    use std::sync::Once;
 
     const RELAY_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    fn install_crypto_provider() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
 
     #[test]
     fn accepts_canonical_relay_spiffe_id() {
@@ -500,5 +586,64 @@ mod tests {
         .unwrap();
         assert_eq!(encoded["type"], "register");
         assert_eq!(encoded["connector_id"], "connector-id");
+    }
+
+    fn relay_cert() -> CertificateDer<'static> {
+        install_crypto_provider();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        params.serial_number = Some(SerialNumber::from(42u64));
+        params.subject_alt_names.push(SanType::URI(
+            format!("spiffe://zecurity.in/relay/{RELAY_ID}")
+                .try_into()
+                .unwrap(),
+        ));
+        params.self_signed(&key).unwrap().der().clone()
+    }
+
+    #[test]
+    fn relay_verifier_fails_closed_without_crl() {
+        let cert = relay_cert();
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.clone()).unwrap();
+        let verifier = ExactRelaySpiffeVerifier::new(
+            roots,
+            format!("spiffe://zecurity.in/relay/{RELAY_ID}"),
+            CrlManager::new(),
+        )
+        .unwrap();
+        assert!(verifier.verify_revocation(&cert).is_err());
+    }
+
+    #[test]
+    fn relay_verifier_rejects_revoked_serial() {
+        let cert = relay_cert();
+        let manager = CrlManager::new();
+        manager.install_test_cache(vec![vec![42]]);
+        let mut roots = RootCertStore::empty();
+        roots.add(cert.clone()).unwrap();
+        let verifier = ExactRelaySpiffeVerifier::new(
+            roots,
+            format!("spiffe://zecurity.in/relay/{RELAY_ID}"),
+            manager,
+        )
+        .unwrap();
+        assert!(verifier.verify_revocation(&cert).is_err());
+    }
+
+    #[test]
+    fn live_relay_monitor_fails_closed_without_crl() {
+        let manager = CrlManager::new();
+        assert_eq!(
+            relay_rejection_reason(&manager, &[42]),
+            Some(b"relay revocation state unavailable".as_slice())
+        );
+    }
+
+    #[test]
+    fn live_relay_monitor_accepts_non_revoked_serial() {
+        let manager = CrlManager::new();
+        manager.install_test_cache(Vec::new());
+        assert_eq!(relay_rejection_reason(&manager, &[42]), None);
     }
 }

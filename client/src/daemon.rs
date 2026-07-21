@@ -594,18 +594,46 @@ async fn handle_up(
         };
     }
 
-    let transports =
-        match build_transports_by_resource(&allowed_entries, &acl.remote_networks, transport.as_ref(), &device) {
-            Ok(t) => Arc::new(t),
-            Err(e) => {
-                return IpcResponse {
-                    ok: false,
-                    kind: "Up".into(),
-                    error: Some(format!("failed to build client transport: {}", e)),
-                    ..Default::default()
-                }
+    let relay_crl = {
+        let mut runtime = state.write().await;
+        runtime
+            .relay_crl
+            .get_or_insert_with(crate::crl::CrlManager::new)
+            .clone()
+    };
+    let relay_crl_url = format!("{}/relay.crl", conf.http_base());
+    if !relay_crl.has_valid_cache() {
+        if let Err(error) = relay_crl
+            .refresh(&relay_crl_url, device.ca_cert_pem.as_bytes())
+            .await
+        {
+            warn!(%error, "initial Relay CRL fetch failed; relay routing is fail-closed");
+        }
+    }
+    relay_crl.clone().spawn_refresh(
+        relay_crl_url,
+        device.ca_cert_pem.as_bytes().to_vec(),
+        60,
+        15,
+    );
+
+    let transports = match build_transports_by_resource_with_crl(
+        &allowed_entries,
+        &acl.remote_networks,
+        transport.as_ref(),
+        &device,
+        relay_crl,
+    ) {
+        Ok(t) => Arc::new(t),
+        Err(e) => {
+            return IpcResponse {
+                ok: false,
+                kind: "Up".into(),
+                error: Some(format!("failed to build client transport: {}", e)),
+                ..Default::default()
             }
-        };
+        }
+    };
 
     // Create TUN device.
     let mut mgr = match TunManager::create().await {
@@ -959,7 +987,6 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
             tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
         }
 
-        
         // Re-read tokens right before the network call — the session may
         // have been rotated by a concurrent 401-retry in the meantime.
         let refresh_lock = {
@@ -1022,14 +1049,10 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
 /// ACL_REFRESH_TTL_SECS interval.
 ///
 /// Skips ticks when no session/device exists (pre-login or post-logout).
-/// On version change it reuses the exact same path as the 
+/// On version change it reuses the exact same path as the
 /// sync_acl_now + restart_tunnel_if_running. Transient fetch failures keep the
 /// cached snapshot (fail-open on staleness, consistent with refresh_acl_if_needed).
-async fn run_acl_sync_scheduler(
-    state: SharedState,
-    conf: config::ClientConf,
-    tun_slot: TunSlot,
-) {
+async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tun_slot: TunSlot) {
     // Shared with net_stack (via handle_up): the data plane fires this when a
     // managed-resource relay transport fails, so we re-sync early rather than
     // waiting out the 60s tick.
@@ -1160,7 +1183,10 @@ async fn sync_and_restart_if_changed(
     };
 
     if acl_changed || transport_changed {
-        info!(acl_changed, transport_changed, "background sync: version changed, restarting tunnel");
+        info!(
+            acl_changed,
+            transport_changed, "background sync: version changed, restarting tunnel"
+        );
         if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
             warn!(error = %e, "background sync: tunnel restart failed");
         }
@@ -1294,8 +1320,14 @@ async fn fetch_transport_snapshot_with_refresh(
                 }
             }
 
-            fetch_transport_snapshot(conf, ca_pem, &new_tokens.access_token, device_id, known_version)
-                .await
+            fetch_transport_snapshot(
+                conf,
+                ca_pem,
+                &new_tokens.access_token,
+                device_id,
+                known_version,
+            )
+            .await
         }
     }
 }
@@ -1310,7 +1342,11 @@ async fn fetch_and_store_transport(state: &SharedState, conf: &config::ClientCon
             .device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no device identity"))?;
-        let known = s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0);
+        let known = s
+            .transport_snapshot
+            .as_ref()
+            .map(|t| t.version)
+            .unwrap_or(0);
         (device.ca_cert_pem.clone(), device.id.clone(), known)
     };
 
@@ -1523,11 +1559,28 @@ pub(crate) fn resolve_entry_coords(
 //   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
 //   Some(None)    — managed resource, connector offline → fail closed
 //   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
+#[cfg(test)]
 pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
+) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
+    build_transports_by_resource_with_crl(
+        entries,
+        remote_networks,
+        transport,
+        device,
+        crate::crl::CrlManager::new(),
+    )
+}
+
+fn build_transports_by_resource_with_crl(
+    entries: &[AclEntry],
+    remote_networks: &[AclRemoteNetwork],
+    transport: Option<&TransportSnapshot>,
+    device: &DeviceInfo,
+    relay_crl: crate::crl::CrlManager,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
     let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
@@ -1562,7 +1615,7 @@ pub(crate) fn build_transports_by_resource(
             let transport = match transport_cache.get(&cache_key) {
                 Some(t) => t.clone(),
                 None => {
-                    let t = build_transport_from_coords(c, device)?;
+                    let t = build_transport_from_coords(c, device, relay_crl.clone())?;
                     transport_cache.insert(cache_key, t.clone());
                     t
                 }
@@ -1579,7 +1632,11 @@ pub(crate) fn build_transports_by_resource(
     Ok(out)
 }
 
-fn build_transport_from_coords(c: &ConnCoords, device: &DeviceInfo) -> Result<Arc<ClientTransport>> {
+fn build_transport_from_coords(
+    c: &ConnCoords,
+    device: &DeviceInfo,
+    relay_crl: crate::crl::CrlManager,
+) -> Result<Arc<ClientTransport>> {
     let connector_addr = if !c.connector_tunnel_addr.is_empty() {
         c.connector_tunnel_addr.clone()
     } else {
@@ -1614,6 +1671,7 @@ fn build_transport_from_coords(c: &ConnCoords, device: &DeviceInfo) -> Result<Ar
             &device.private_key_pem,
             &device.ca_cert_pem,
             &c.relay_spiffe_id,
+            relay_crl,
         )?);
         Some(RelayContext {
             pool,

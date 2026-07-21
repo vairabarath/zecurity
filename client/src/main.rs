@@ -1,6 +1,7 @@
 mod appmeta;
 mod auth;
 mod config;
+mod crl;
 mod daemon;
 #[cfg(test)]
 mod daemon_tests;

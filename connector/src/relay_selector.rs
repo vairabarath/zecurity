@@ -57,6 +57,7 @@ pub struct RelaySelectorConfig {
     pub key_pem: Vec<u8>,
     pub workspace_ca_pem: Vec<u8>,
     pub intermediate_ca_pem: Vec<u8>,
+    pub relay_crl_manager: crate::crl::CrlManager,
     pub max_incoming_bidi_streams: u32,
     pub idle_timeout: Duration,
     pub reprobe_interval: Duration,
@@ -82,9 +83,13 @@ enum State {
     /// `next_backoff` is the delay to use if this bootstrap attempt fails and
     /// we fall into `Backoff`. It grows across consecutive failed cycles and
     /// resets to `reconnect_base` after a healthy connection (see `failover`).
-    Disconnected { next_backoff: Duration },
+    Disconnected {
+        next_backoff: Duration,
+    },
     Connected(ActiveRelay),
-    Backoff { delay: Duration },
+    Backoff {
+        delay: Duration,
+    },
 }
 
 /// Compute the next exponential-backoff delay: `current * factor`, capped at
@@ -311,6 +316,7 @@ async fn reprobe_and_maybe_migrate(
         &cfg.key_pem,
         &cfg.workspace_ca_pem,
         &cfg.intermediate_ca_pem,
+        cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
     )
@@ -427,7 +433,8 @@ async fn migrate(
     //   3. any remaining listed relays.
     // Without this, migration would connect to whatever is first in the
     // controller's list, discarding the probe result entirely.
-    let candidates = build_migration_candidates(&cfg.state_dir, list, &old.info.relay_id, preferred);
+    let candidates =
+        build_migration_candidates(&cfg.state_dir, list, &old.info.relay_id, preferred);
 
     for target in candidates {
         let (tx, rx) = oneshot::channel();
@@ -438,7 +445,6 @@ async fn migrate(
             attachment_slot.clone(),
             ctrl_tx.clone(),
             Some(tx),
-           
         );
 
         // Wait for register-OK on the new connection, or for the new session
@@ -569,6 +575,7 @@ async fn failover(
         &cfg.key_pem,
         &cfg.workspace_ca_pem,
         &cfg.intermediate_ca_pem,
+        cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
     )
@@ -667,6 +674,7 @@ fn spawn_session(
     let key_pem = cfg_owned.key_pem.clone();
     let workspace_ca_pem = cfg_owned.workspace_ca_pem.clone();
     let intermediate_ca_pem = cfg_owned.intermediate_ca_pem.clone();
+    let relay_crl_manager = cfg_owned.relay_crl_manager.clone();
     let max_streams = cfg_owned.max_incoming_bidi_streams;
     let idle_timeout = cfg_owned.idle_timeout;
     let drain_tracker = RelayDrainTracker::new();
@@ -681,6 +689,7 @@ fn spawn_session(
             &key_pem,
             &workspace_ca_pem,
             &intermediate_ca_pem,
+            relay_crl_manager,
             relay_handler,
             max_streams,
             idle_timeout,
@@ -988,7 +997,10 @@ mod tests {
     // ---- Bug 1: migration target ordering ----
 
     fn temp_state_dir(label: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("zecurity-migtargets-{label}-{}", uuid::Uuid::new_v4()));
+        let p = std::env::temp_dir().join(format!(
+            "zecurity-migtargets-{label}-{}",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -1005,9 +1017,20 @@ mod tests {
             ],
             version: 1,
         };
-        let order = build_migration_candidates(&dir, &list, "a", Some(info("c", RelayCapacityLabel::RelayCapacityHigh)));
+        let order = build_migration_candidates(
+            &dir,
+            &list,
+            "a",
+            Some(info("c", RelayCapacityLabel::RelayCapacityHigh)),
+        );
         // c (preferred) first, then b from list order; a (old) excluded, c de-duped.
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1027,13 +1050,31 @@ mod tests {
             &dir,
             1,
             &[
-                RelayProbeResult { relay_id: "c".into(), relay_addr: "c:9093".into(), spiffe_id: "s".into(), rtt_ms: 10, score: 10 },
-                RelayProbeResult { relay_id: "b".into(), relay_addr: "b:9093".into(), spiffe_id: "s".into(), rtt_ms: 20, score: 20 },
+                RelayProbeResult {
+                    relay_id: "c".into(),
+                    relay_addr: "c:9093".into(),
+                    spiffe_id: "s".into(),
+                    rtt_ms: 10,
+                    score: 10,
+                },
+                RelayProbeResult {
+                    relay_id: "b".into(),
+                    relay_addr: "b:9093".into(),
+                    spiffe_id: "s".into(),
+                    rtt_ms: 20,
+                    score: 20,
+                },
             ],
         );
         let order = build_migration_candidates(&dir, &list, "a", None);
         // Ranking best-first: c then b; list adds nothing new; a excluded.
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c", "b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1048,8 +1089,19 @@ mod tests {
             ],
             version: 1,
         };
-        let order = build_migration_candidates(&dir, &list, "a", Some(info("z", RelayCapacityLabel::RelayCapacityHigh)));
-        assert_eq!(order.iter().map(|r| r.relay_id.as_str()).collect::<Vec<_>>(), vec!["b"]);
+        let order = build_migration_candidates(
+            &dir,
+            &list,
+            "a",
+            Some(info("z", RelayCapacityLabel::RelayCapacityHigh)),
+        );
+        assert_eq!(
+            order
+                .iter()
+                .map(|r| r.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

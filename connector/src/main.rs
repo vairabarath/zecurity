@@ -162,10 +162,28 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let crl_manager = crl::CrlManager::new();
-    if let Err(e) = crl_manager.refresh(&crl_url).await {
-        tracing::warn!("initial CRL fetch failed (using empty cache): {e}");
+    let workspace_ca_bundle = cert_store.workspace_ca_pem.clone();
+    if let Err(e) = crl_manager.refresh(&crl_url, &workspace_ca_bundle).await {
+        tracing::warn!("initial CRL fetch failed; revocation state is unavailable: {e}");
     }
-    crl_manager.clone().spawn_refresh(crl_url, 300);
+    crl_manager
+        .clone()
+        .spawn_refresh(crl_url, workspace_ca_bundle, 60, 15);
+
+    let relay_crl_url = format!("{}/relay.crl", http_base.trim_end_matches('/'));
+    let relay_crl_manager = crl::CrlManager::new();
+    if let Err(e) = relay_crl_manager
+        .refresh(&relay_crl_url, &cert_store.workspace_ca_pem)
+        .await
+    {
+        tracing::warn!("initial Relay CRL fetch failed; relay dialing is fail-closed: {e}");
+    }
+    relay_crl_manager.clone().spawn_refresh(
+        relay_crl_url,
+        cert_store.workspace_ca_pem.clone(),
+        60,
+        15,
+    );
 
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);
@@ -250,6 +268,7 @@ async fn main() -> anyhow::Result<()> {
         key_pem: cert_store.key_pem.clone(),
         workspace_ca_pem: ca_bundle.clone(),
         intermediate_ca_pem: ca_bundle,
+        relay_crl_manager,
         max_incoming_bidi_streams: cfg.relay_max_tunnel_streams,
         idle_timeout: std::time::Duration::from_secs(cfg.relay_idle_timeout_secs),
         reprobe_interval: std::time::Duration::from_secs(cfg.relay_reprobe_interval_secs),

@@ -37,6 +37,7 @@ async fn wrong_request_id_is_discarded() {
         &certs.connector_key_pem,
         &certs.workspace_ca_pem,
         &certs.workspace_ca_pem,
+        certs.valid_relay_crl_manager(),
         4,
         Duration::from_secs(3),
     )
@@ -80,6 +81,7 @@ async fn wrong_spiffe_is_unreachable() {
         &certs.connector_key_pem,
         &certs.workspace_ca_pem,
         &certs.workspace_ca_pem,
+        certs.valid_relay_crl_manager(),
         4,
         Duration::from_secs(3),
     )
@@ -111,6 +113,7 @@ async fn no_response_is_dropped() {
         &certs.connector_key_pem,
         &certs.workspace_ca_pem,
         &certs.workspace_ca_pem,
+        certs.valid_relay_crl_manager(),
         4,
         Duration::from_secs(2),
     )
@@ -148,6 +151,7 @@ async fn correct_probe_succeeds_baseline() {
         &certs.connector_key_pem,
         &certs.workspace_ca_pem,
         &certs.workspace_ca_pem,
+        certs.valid_relay_crl_manager(),
         4,
         Duration::from_secs(5),
     )

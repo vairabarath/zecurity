@@ -1,6 +1,6 @@
 ---
 type: planning
-status: planned
+status: active
 sprint: 14
 tags:
   - sprint14
@@ -127,15 +127,16 @@ M2-B Connector + client consume /relay.crl        (needs M1-C endpoint + M2-A ma
 
 ### Phase E — M2: Hardened CRL Manager
 > See [[Sprint14/Member2-Rust/Phase1-Hardened-CRL-Manager]]. Depends on nothing — Day 1.
-- [ ] **M2-E1** hardened CRL manager: verify **signature + issuer + thisUpdate + nextUpdate**; **deny past nextUpdate**; keep-last-good on transient failure; cold-boot fail-closed.
-- [ ] **M2-E2** refactor `connector/src/crl.rs` onto it (fixes the existing unverified-CRL bug); 60s + jitter refresh.
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M2-E1** hardened CRL manager: verify **signature + issuer + thisUpdate + nextUpdate**; **deny past nextUpdate**; keep-last-good on transient failure; cold-boot fail-closed.
+- [x] **M2-E2** refactor `connector/src/crl.rs` onto it (fixes the existing unverified-CRL bug); 60s + jitter refresh.
+- [x] **Build gate:** `cd connector && cargo build`
 
 ### Phase F — M2: Connector + Client Consume /relay.crl
 > See [[Sprint14/Member2-Rust/Phase2-Connector-Client-Relay-CRL]]. Depends on Phase C (endpoint) + Phase E (manager).
-- [ ] **M2-F1** `connector/src/relay_client.rs` — reject a revoked relay cert (relay-CRL check via the hardened manager) when dialing the relay.
-- [ ] **M2-F2** `client/src/relay_pool.rs` — same on the client side.
-- [ ] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
+- [x] **M2-F1** `connector/src/relay_client.rs` — reject a revoked relay cert (relay-CRL check via the hardened manager) when dialing the relay.
+- [x] **M2-F2** `client/src/relay_pool.rs` — same on the client side, including live cached-connection eviction.
+- [x] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
+- [ ] **M2-F3 E2E gate:** Controller revoke + stale `LabelledRelayList` connector/client rejection.
 
 ## Final Build Gates
 ```bash
@@ -150,7 +151,7 @@ cd relay && cargo build
 - [ ] `POST /provider/relays/{id}/revoke` (provider-auth) revokes + removes-from-pool + audits (`relay.revoke`) + broadcasts, **atomically**; relay row **preserved**.
 - [ ] `DELETE /provider/relays/{id}` = revoke-then-remove; **no path physically deletes** a relay or its cert-history rows.
 - [ ] `GenerateRelayCRL` emits an **Intermediate-CA-signed** CRL of exactly the revoked unexpired relay serials; verifies against the Intermediate CA; `GET /relay.crl` returns parseable `application/pkix-crl`.
-- [ ] Hardened CRL manager verifies **signature + issuer + thisUpdate + nextUpdate**, **denies once past nextUpdate**, keeps last-good on transient failure, and is **fail-closed on cold-boot**.
+- [x] Hardened CRL manager verifies **signature + issuer + thisUpdate + nextUpdate**, **denies once past nextUpdate**, keeps last-good on transient failure, and is **fail-closed on cold-boot**.
 - [ ] Controller rejects a revoked relay at **Heartbeat + authenticated relay RPCs** via a cache (no per-RPC DB query); **fails closed** when state is unavailable. (Provision is skipped by the SPIFFE interceptor — `connector/spiffe.go:162` — so it is **not** covered by the verifier.)
 - [ ] Re-provisioning of a revoked relay is denied by a **Provision-time DB status guard** (`MarkProvisioned` guarded; revoke serializes against Provision) — a revoke cannot be silently undone.
 - [ ] Connector **and** client reject a revoked relay cert — including from a cached `LabelledRelayList`.
@@ -158,7 +159,7 @@ cd relay && cargo build
 - [ ] A revoked relay is removed from `LabelledRelayList` and a broadcast fires immediately.
 - [ ] The revoke transaction is **atomic** (revocation rows + relay status + audit in one DB tx); cache refresh + broadcast happen **after commit**.
 - [ ] Relay serials use one **canonical normalized form** (`SerialNumber.Text(16)`) across DB, CRL, and checker; invalid serials rejected.
-- [ ] Refresh interval is **60s + jitter**.
+- [x] Refresh interval is **60s + jitter**.
 
 ## Deferred (out of scope this sprint)
 - **Relay peer revocation** (relay rejecting revoked connectors/clients via workspace CRLs) → **separate ADR**.

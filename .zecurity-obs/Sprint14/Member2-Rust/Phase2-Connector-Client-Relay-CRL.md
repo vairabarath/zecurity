@@ -4,7 +4,7 @@ member: M2
 sprint: 14
 phase: 2
 title: Connector + Client Consume /relay.crl
-status: planned
+status: in-progress
 depends_on:
   - Sprint14/Member1-Go/Phase3-Relay-CRL-Generation-Endpoint
   - Sprint14/Member2-Rust/Phase1-Hardened-CRL-Manager
@@ -58,9 +58,12 @@ cd connector && cargo build && cd ../client && cargo build
 ```
 
 ## Implementation Checklist
-- [ ] **M2-F1** `connector/src/relay_client.rs` — relay-CRL check via the hardened manager; fail-closed.
-- [ ] **M2-F2** `client/src/relay_pool.rs` — same.
-- [ ] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
+- [x] **M2-F1** `connector/src/relay_client.rs` — relay-CRL check via the hardened manager; fail-closed.
+- [x] **M2-F2** `client/src/relay_pool.rs` — same, including active cached-connection eviction.
+- [x] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
+- [ ] **M2-F3 E2E gate:** revoke a Relay through the Controller and prove a connector/client holding
+  a cached `LabelledRelayList` closes/refuses it. Requires completed M1 Phase C endpoint and a test
+  environment that permits local QUIC sockets.
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **Full connector wiring, not just the verifier (must-fix).** The connector's dial path is
@@ -74,4 +77,34 @@ cd connector && cargo build && cd ../client && cargo build
   lifetime + revalidate before reuse). Handshake rejection alone is insufficient.
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: Thread Relay CRL through every Connector dial path
+**Issue:** Relay selection, probing, migration, and persistent sessions all construct relay TLS
+connections. Updating only the verifier constructor would leave alternate dial paths unchecked.
+
+**Fix Applied:** `CrlManager` is carried through `RelaySelectorConfig`, probe calls, session spawning,
+`RelayClient::connect`, and `ExactRelaySpiffeVerifier`. Every relay handshake now fails closed when
+CRL state is unavailable and rejects listed serials.
+
+### Fix: Evict live relay connections after revocation
+**Issue:** Handshake-only verification leaves already-established QUIC connections usable after a
+new CRL revokes their certificate.
+
+**Fix Applied:** Connector sessions monitor the authenticated relay serial and close within one
+second of revocation or CRL expiry. Client cached connections now have the same active monitor;
+the existing 60-second cache lifetime remains defense in depth.
+
+### Fix: Preserve one Client CRL refresh lifecycle across tunnel restarts
+**Issue:** ACL/transport changes restart the tunnel. Creating a new manager and refresh task inside
+every `handle_up` would leak duplicate 60-second polling loops.
+
+**Fix Applied:** The client stores the Relay CRL manager in `RuntimeState`, reuses it across tunnel
+restarts, and makes background refresh startup idempotent.
+
+### Fix: Update probe integration tests for fail-closed CRL enforcement
+**Issue:** `probe_relays` gained the required Relay CRL manager argument, leaving four existing
+integration tests uncompilable.
+
+**Fix Applied:** The shared test PKI now generates and installs a verified, unexpired empty CRL;
+all four probe tests pass it through the production API. They compile successfully; runtime socket
+execution remains environment-gated.

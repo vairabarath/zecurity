@@ -4,7 +4,7 @@ member: M2
 sprint: 14
 phase: 1
 title: Hardened CRL Manager
-status: planned
+status: done
 depends_on: []
 tags: [rust, crl, pki, security, revocation, pending-02]
 ---
@@ -66,9 +66,9 @@ cd connector && cargo build
 ```
 
 ## Implementation Checklist
-- [ ] **M2-E1** hardened manager: verify signature + issuer + thisUpdate + nextUpdate; deny past nextUpdate; keep-last-good; expose `has_valid_cache()`.
-- [ ] **M2-E2** refactor `connector/src/crl.rs` onto it; 60s + jitter in `main.rs`.
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M2-E1** hardened manager: verify signature + issuer + thisUpdate + nextUpdate; deny past nextUpdate; keep-last-good; expose `has_valid_cache()`.
+- [x] **M2-E2** refactor `connector/src/crl.rs` onto it; 60s + jitter in `main.rs`.
+- [x] **Build gate:** `cd connector && cargo build`
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **Client has no CRL module + version skew (must-fix).** `connector/src/crl.rs` exists only in the
@@ -79,4 +79,11 @@ cd connector && cargo build
   assume a drop-in shared module.
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: Verified DER installation seam for integration tests
+**Issue:** Relay probe integration tests needed a valid, signed CRL cache after the hardened manager
+made cold-boot state fail closed, but the only public loading path required an HTTP server.
+
+**Fix Applied:** `connector/src/crl.rs` now exposes `install_verified_der()`, which runs the same
+signature, issuer, AKI/SKI, and validity checks as HTTP refresh before atomically replacing the
+cache. Invalid DER still preserves the last-good cache.

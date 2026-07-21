@@ -143,6 +143,20 @@ pub async fn handle_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    if !crl_manager.has_valid_cache() {
+        let response = TunnelResponse {
+            ok: false,
+            error: Some("certificate revocation state unavailable".to_string()),
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+
+        send_response(&mut stream, &response).await?;
+
+        return Err(anyhow!(
+            "certificate revocation state unavailable for spiffe_id={}",
+            client_spiffe_id
+        ));
+    }
     if crl_manager.is_revoked(&cert_serial) {
         let response = TunnelResponse {
             ok: false,

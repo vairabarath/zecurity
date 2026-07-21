@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use quinn::Connection;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::tunnel_pool::{
     classify_quinn, parse_ca_bundle, parse_cert_chain, parse_private_key_der, root_store_from_cert,
@@ -32,12 +34,20 @@ struct RelayAck {
 }
 
 pub struct RelayPool {
-    connections: Arc<Mutex<HashMap<String, Connection>>>,
+    connections: Arc<Mutex<HashMap<String, CachedRelay>>>,
     endpoint: quinn::Endpoint,
     client_cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
     client_private_key: rustls::pki_types::PrivateKeyDer<'static>,
     workspace_ca: rustls::pki_types::CertificateDer<'static>,
+    relay_crl: crate::crl::CrlManager,
 }
+
+struct CachedRelay {
+    connection: Connection,
+    established_at: Instant,
+}
+
+const MAX_RELAY_CONNECTION_AGE: Duration = Duration::from_secs(60);
 
 impl RelayPool {
     pub fn new(
@@ -45,6 +55,7 @@ impl RelayPool {
         key_pem: &str,
         ca_bundle_pem: &str,
         relay_spiffe_id: &str,
+        relay_crl: crate::crl::CrlManager,
     ) -> Result<Self> {
         let mut client_cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
         let client_private_key = parse_private_key_der(key_pem, "device")?;
@@ -58,7 +69,8 @@ impl RelayPool {
 
         let relay_roots =
             root_store_from_cert(&ca_bundle.intermediate_ca, "platform intermediate CA")?;
-        let verifier = ExactSpiffeVerifier::new(relay_roots, relay_spiffe_id)?;
+        let verifier =
+            ExactSpiffeVerifier::new_relay(relay_roots, relay_spiffe_id, relay_crl.clone())?;
 
         let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
@@ -81,6 +93,7 @@ impl RelayPool {
             client_cert_chain,
             client_private_key,
             workspace_ca: ca_bundle.workspace_ca,
+            relay_crl,
         })
     }
 
@@ -150,13 +163,26 @@ impl RelayPool {
     }
 
     async fn get_or_connect(&self, relay_addr: &str) -> Result<Connection, TunnelOpenError> {
+        if !self.relay_crl.has_valid_cache() {
+            self.close_cached(relay_addr, b"relay revocation state unavailable")
+                .await;
+            return Err(TunnelOpenError::Authenticate(anyhow!(
+                "relay revocation state unavailable"
+            )));
+        }
         {
             let mut conns = self.connections.lock().await;
             if let Some(conn) = conns.get(relay_addr) {
-                if conn.close_reason().is_none() {
-                    return Ok(conn.clone());
+                if conn.connection.close_reason().is_none()
+                    && conn.established_at.elapsed() < MAX_RELAY_CONNECTION_AGE
+                {
+                    return Ok(conn.connection.clone());
                 }
-                conns.remove(relay_addr);
+                if let Some(stale) = conns.remove(relay_addr) {
+                    stale
+                        .connection
+                        .close(0u32.into(), b"relay CRL revalidation");
+                }
             }
         }
 
@@ -173,17 +199,83 @@ impl RelayPool {
             })?
             .await
             .map_err(|e| classify_quinn(&e))?;
+        let peer_serial =
+            peer_certificate_serial(&new_conn).map_err(TunnelOpenError::Authenticate)?;
+        spawn_relay_revocation_monitor(new_conn.clone(), self.relay_crl.clone(), peer_serial);
 
         let mut conns = self.connections.lock().await;
         if let Some(existing) = conns.get(relay_addr) {
-            if existing.close_reason().is_none() {
+            if existing.connection.close_reason().is_none()
+                && existing.established_at.elapsed() < MAX_RELAY_CONNECTION_AGE
+            {
                 new_conn.close(0u32.into(), b"raced");
-                return Ok(existing.clone());
+                return Ok(existing.connection.clone());
             }
         }
-        conns.insert(relay_addr.to_string(), new_conn.clone());
+        conns.insert(
+            relay_addr.to_string(),
+            CachedRelay {
+                connection: new_conn.clone(),
+                established_at: Instant::now(),
+            },
+        );
         Ok(new_conn)
     }
+
+    async fn close_cached(&self, relay_addr: &str, reason: &'static [u8]) {
+        if let Some(connection) = self.connections.lock().await.remove(relay_addr) {
+            connection.connection.close(0u32.into(), reason);
+        }
+    }
+}
+
+fn peer_certificate_serial(connection: &Connection) -> Result<Vec<u8>> {
+    let identity = connection
+        .peer_identity()
+        .context("Relay supplied no peer certificate")?;
+    let chain = identity
+        .downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
+        .map_err(|_| anyhow!("unexpected Relay peer identity type"))?;
+    let leaf = chain
+        .first()
+        .context("Relay supplied an empty certificate chain")?;
+    let (_, cert) = X509Certificate::from_der(leaf.as_ref())
+        .map_err(|_| anyhow!("parse Relay peer certificate"))?;
+    Ok(cert.raw_serial().to_vec())
+}
+
+fn relay_rejection_reason(
+    manager: &crate::crl::CrlManager,
+    serial: &[u8],
+) -> Option<&'static [u8]> {
+    if !manager.has_valid_cache() {
+        Some(b"relay revocation state unavailable")
+    } else if manager.is_revoked(serial) {
+        Some(b"relay certificate revoked")
+    } else {
+        None
+    }
+}
+
+fn spawn_relay_revocation_monitor(
+    connection: Connection,
+    manager: crate::crl::CrlManager,
+    serial: Vec<u8>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Some(reason) = relay_rejection_reason(&manager, &serial) {
+                        connection.close(0u32.into(), reason);
+                        break;
+                    }
+                }
+                _ = connection.closed() => break,
+            }
+        }
+    });
 }
 
 async fn resolve_relay_addr(relay_addr: &str) -> Result<SocketAddr> {
@@ -299,5 +391,31 @@ mod tests {
         frame.extend_from_slice(body);
         let mut reader = BufReader::new(frame.as_slice());
         assert!(read_ack_frame(&mut reader).await.is_err());
+    }
+
+    #[test]
+    fn relay_connection_fails_closed_without_crl() {
+        let manager = crate::crl::CrlManager::new();
+        assert_eq!(
+            relay_rejection_reason(&manager, &[42]),
+            Some(b"relay revocation state unavailable".as_slice())
+        );
+    }
+
+    #[test]
+    fn relay_connection_rejects_revoked_serial() {
+        let manager = crate::crl::CrlManager::new();
+        manager.install_test_cache(vec![vec![42]]);
+        assert_eq!(
+            relay_rejection_reason(&manager, &[42]),
+            Some(b"relay certificate revoked".as_slice())
+        );
+    }
+
+    #[test]
+    fn relay_connection_accepts_non_revoked_serial_with_valid_crl() {
+        let manager = crate::crl::CrlManager::new();
+        manager.install_test_cache(Vec::new());
+        assert_eq!(relay_rejection_reason(&manager, &[42]), None);
     }
 }
