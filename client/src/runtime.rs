@@ -41,6 +41,17 @@ pub struct RuntimeState {
     pub tun_handle: Option<Arc<TunHandle>>,
     /// Ensures only one task refreshes the session tokens at a time.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes the transport fetch/read/store operation so a concurrent
+    /// scheduler tick and relay-recovery task cannot overwrite a newer transport
+    /// snapshot with an older response. Held across the whole known-version →
+    /// fetch → store sequence, not just the store.
+    pub transport_sync_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes tunnel down→up restarts. Multiple triggers (relay recovery, the
+    /// 60s ACL tick, IPC sync/resources, post-login) can each call
+    /// restart_tunnel_if_running concurrently; without this, two down/up sequences
+    /// interleave and corrupt the live TUN session (tunnel left down, orphaned
+    /// handle, or duplicate sessions). Held across the whole restart.
+    pub tunnel_restart_lock: Arc<tokio::sync::Mutex<()>>,
     /// Signalled by the data plane (net_stack) when a managed-resource relay
     /// transport fails, so the ACL sync scheduler re-syncs early instead of
     /// waiting for the next poll tick. Coalescing: a burst of failures collapses
@@ -99,6 +110,8 @@ pub fn new_shared() -> SharedState {
         transport_last_sync_at: None,
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+        transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restart_lock: Arc::new(tokio::sync::Mutex::new(())),
         relay_resync: Arc::new(tokio::sync::Notify::new()),
     }))
 }

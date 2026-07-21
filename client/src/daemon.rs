@@ -713,13 +713,21 @@ async fn restart_tunnel_if_running(
     conf: &config::ClientConf,
     tun_slot: &TunSlot,
 ) -> Result<()> {
-    let running = tun_slot.lock().await.is_some();
+    // Serialize the whole down→up sequence. Relay recovery, the 60s ACL tick,
+    // IPC sync/resources, and post-login can each call this concurrently; without
+    // the lock two restarts interleave and corrupt the live TUN session.
+    let restart_lock = { state.read().await.tunnel_restart_lock.clone() };
+    let _restart_guard = restart_lock.lock().await;
 
-    if !running {
+    // Re-check AFTER acquiring the lock: while this task waited, another restart
+    // may have already completed the transition we intended, so there is nothing
+    // to do. (This guard drops immediately so handle_down/handle_up can take
+    // tun_slot themselves.)
+    if tun_slot.lock().await.is_none() {
         return Ok(());
     }
 
-    info!("ACL changed, restarting VPN");
+    info!("snapshot changed, restarting VPN");
 
     let down = handle_down(state, tun_slot).await;
     if !down.ok {
@@ -776,22 +784,30 @@ fn sd_spawn_watchdog() {
     });
 }
 
+/// Raw GetACLSnapshot RPC. Returns Ok(None) when the controller reports
+/// up_to_date (client's known_version matches — keep the cached snapshot).
 async fn fetch_acl_snapshot(
     conf: &config::ClientConf,
     ca_pem: &str,
     access_token: &str,
     device_id: &str,
-) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    known_version: u64,
+) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
     let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
     let resp = client
         .get_acl_snapshot(GetAclSnapshotRequest {
             access_token: access_token.to_string(),
             device_id: device_id.to_string(),
+            known_version,
         })
         .await?
         .into_inner();
+    if resp.up_to_date {
+        return Ok(None);
+    }
     resp.snapshot
         .ok_or_else(|| anyhow::anyhow!("controller returned empty ACL snapshot"))
+        .map(Some)
 }
 
 /// Fetch the ACL snapshot, transparently refreshing the access token on 401.
@@ -818,7 +834,8 @@ async fn fetch_acl_snapshot_with_refresh(
     ca_pem: &str,
     state: &SharedState,
     device_id: &str,
-) -> Result<crate::grpc::client_v1::AclSnapshot> {
+    known_version: u64,
+) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
     let refresh_lock = {
         let s = state.read().await;
         s.refresh_lock.clone()
@@ -831,7 +848,7 @@ async fn fetch_acl_snapshot_with_refresh(
         (sess.access_token.clone(), sess.refresh_token.clone())
     };
 
-    match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+    match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
         Ok(snap) => Ok(snap),
         Err(err) => {
             if !is_grpc_unauthenticated(&err) {
@@ -852,7 +869,7 @@ async fn fetch_acl_snapshot_with_refresh(
                 (sess.access_token.clone(), sess.refresh_token.clone())
             };
 
-            match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id).await {
+            match fetch_acl_snapshot(conf, ca_pem, &access_token, device_id, known_version).await {
                 Ok(snapshot) => {
                     info!("ACL fetch succeeded after another task refreshed the session");
                     return Ok(snapshot);
@@ -897,7 +914,8 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id).await
+            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id, known_version)
+                .await
         }
     }
 }
@@ -1016,6 +1034,39 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
     }
 }
 
+/// Single-flight + cooldown state for the transport-recovery task, shared
+/// between the scheduler's select! loop and the spawned recovery task.
+#[derive(Debug, Default)]
+struct TransportRecoveryState {
+    /// True while a recovery task is in flight.
+    running: bool,
+    /// When the last recovery completed. The cooldown is measured from here (not
+    /// from when recovery started) so a long recovery can't immediately re-burst.
+    last_finished_at: Option<tokio::time::Instant>,
+}
+
+/// Decide whether a new transport-recovery burst may start, and reserve the slot
+/// if so. Pure so it is unit-testable without spawning tasks or mocking time:
+/// returns false when a recovery is already running or the cooldown since the
+/// last completion has not elapsed; otherwise marks `running` and returns true.
+fn may_start_transport_recovery(
+    recovery: &mut TransportRecoveryState,
+    now: tokio::time::Instant,
+    cooldown: std::time::Duration,
+) -> bool {
+    if recovery.running {
+        return false;
+    }
+    if recovery
+        .last_finished_at
+        .is_some_and(|finished| now.duration_since(finished) < cooldown)
+    {
+        return false;
+    }
+    recovery.running = true;
+    true
+}
+
 /// Background ACL sync loop. The action-triggered paths (up / sync / resources)
 /// only converge when the user does something; this task guarantees an idle
 /// daemon with a long-lived tunnel still picks up policy changes within one
@@ -1042,13 +1093,13 @@ async fn run_acl_sync_scheduler(
     // right after the startup fetch_and_store_acl.
     ticker.tick().await;
 
-    // End time of the last early-resync burst; enforces RELAY_RESYNC_COOLDOWN so
-    // a permanently-dead relay can't spin bursts back-to-back. None = never run.
-    let mut last_burst_end: Option<tokio::time::Instant> = None;
-    // Single-flight guard: at most one transport-recovery task runs at a time.
-    // The recovery loop runs off this select! thread so the 60s ACL tick keeps
-    // firing during a relay recovery (revocation polling must not stall).
-    let recovery_running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Single-flight + cooldown state for transport recovery. The recovery task
+    // runs off this select! thread so the 60s ACL tick keeps firing during a
+    // relay recovery (revocation polling must not stall). The cooldown is
+    // measured from completion (see TransportRecoveryState) so a permanently-dead
+    // relay can't spin bursts back-to-back.
+    let recovery_state =
+        std::sync::Arc::new(tokio::sync::Mutex::new(TransportRecoveryState::default()));
 
     loop {
         tokio::select! {
@@ -1058,19 +1109,20 @@ async fn run_acl_sync_scheduler(
             _ = resync.notified() => {
                 // A relay transport just failed. The relay change lives in the
                 // TRANSPORT snapshot (Track B), so re-poll transport — not ACL.
-                // Consume this wake; skip if a burst ran too recently (the 60s
-                // tick remains the backstop).
-                if let Some(end) = last_burst_end {
-                    if end.elapsed() < std::time::Duration::from_secs(RELAY_RESYNC_COOLDOWN_SECS) {
-                        continue;
-                    }
-                }
-                // Single-flight: if a recovery is already running, drop this wake
-                // (it re-fires on the next failed connection).
-                if recovery_running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // Single check-and-set under one lock: skip if a recovery is
+                // already running, or if the cooldown since the last completion
+                // hasn't elapsed (the 60s tick remains the backstop).
+                let should_start = {
+                    let mut recovery = recovery_state.lock().await;
+                    may_start_transport_recovery(
+                        &mut recovery,
+                        tokio::time::Instant::now(),
+                        std::time::Duration::from_secs(RELAY_RESYNC_COOLDOWN_SECS),
+                    )
+                };
+                if !should_start {
                     continue;
                 }
-                last_burst_end = Some(tokio::time::Instant::now());
 
                 // Run the retry-until-changed loop as a SEPARATE task so this
                 // select! keeps servicing the ACL tick during relay recovery.
@@ -1078,10 +1130,14 @@ async fn run_acl_sync_scheduler(
                 let state = state.clone();
                 let conf = conf.clone();
                 let tun_slot = tun_slot.clone();
-                let flag = recovery_running.clone();
+                let recovery_state = recovery_state.clone();
                 tokio::spawn(async move {
                     run_transport_recovery(&state, &conf, &tun_slot).await;
-                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                    // Mark complete and stamp the finish time so the cooldown is
+                    // measured from completion, not from when recovery started.
+                    let mut recovery = recovery_state.lock().await;
+                    recovery.running = false;
+                    recovery.last_finished_at = Some(tokio::time::Instant::now());
                 });
             }
         }
@@ -1176,14 +1232,21 @@ async fn fetch_and_store_acl(
     ca_pem: String,
     device_id: String,
 ) {
-    match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await {
-        Ok(snapshot) => {
+    // known_version = 0: startup has no cached snapshot, so always request the
+    // full ACL (the controller never reports up_to_date for known_version == 0).
+    match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id, 0).await {
+        Ok(Some(snapshot)) => {
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(synced_at);
             info!(version, "ACL snapshot stored");
+        }
+        Ok(None) => {
+            // Contract violation: up_to_date for known_version == 0. Keep whatever
+            // we have rather than acting on an empty response.
+            warn!("ACL fetch reported up_to_date for known_version=0 — unexpected; keeping cached snapshot");
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
@@ -1304,6 +1367,17 @@ async fn fetch_transport_snapshot_with_refresh(
 /// snapshot returns up_to_date (no re-store). On failure keeps the cached
 /// snapshot. Returns true when the stored version changed.
 async fn fetch_and_store_transport(state: &SharedState, conf: &config::ClientConf) -> Result<bool> {
+    // Serialize the entire known-version → fetch → store sequence. Without this,
+    // the 60s scheduler tick and the spawned relay-recovery task can both be
+    // inside this function at once; because the state lock is dropped during the
+    // network fetch, an older response can land last and move transport_snapshot
+    // backwards (stale relay coords). Holding the guard for the whole operation
+    // makes a second caller read a fresh known_version only after the first has
+    // stored, so versions progress monotonically. Locking only the store would
+    // not help — the stale known_version read has already happened by then.
+    let sync_lock = { state.read().await.transport_sync_lock.clone() };
+    let _sync_guard = sync_lock.lock().await;
+
     let (ca_pem, device_id, known_version) = {
         let s = state.read().await;
         let device = s
@@ -1380,28 +1454,58 @@ async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<
         let s = state.read().await;
         s.acl_snapshot.as_ref().map(|a| a.version)
     };
-    let snapshot = fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id).await?;
+    let snapshot = fetch_acl_snapshot_with_refresh(
+        conf,
+        &ca_pem,
+        state,
+        &device_id,
+        old_version.unwrap_or(0),
+    )
+    .await?;
 
-    let changed = match old_version {
-        Some(v) => v != snapshot.version,
-        None => true,
-    };
-    let result = AclSyncResult {
-        version: snapshot.version,
-        entry_count: snapshot.entries.len(),
-        synced_at: now_unix(),
-        changed,
-    };
+    match snapshot {
+        // up_to_date — the controller confirms our cached version is current.
+        // This branch is only reachable when we sent a non-zero known_version,
+        // which requires a cached snapshot, so acl_snapshot is guaranteed Some.
+        None => {
+            let synced_at = now_unix();
+            let mut s = state.write().await;
+            s.acl_last_sync_at = Some(synced_at);
+            let cached = s.acl_snapshot.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("controller reported ACL up_to_date but no cached snapshot")
+            })?;
+            let result = AclSyncResult {
+                version: cached.version,
+                entry_count: cached.entries.len(),
+                synced_at,
+                changed: false,
+            };
+            info!(version = result.version, "ACL up_to_date — kept cached snapshot");
+            Ok(result)
+        }
+        Some(snapshot) => {
+            let changed = match old_version {
+                Some(v) => v != snapshot.version,
+                None => true,
+            };
+            let result = AclSyncResult {
+                version: snapshot.version,
+                entry_count: snapshot.entries.len(),
+                synced_at: now_unix(),
+                changed,
+            };
 
-    let mut s = state.write().await;
-    s.acl_snapshot = Some(snapshot);
-    s.acl_last_sync_at = Some(result.synced_at);
-    info!(
-        version = result.version,
-        entries = result.entry_count,
-        "ACL snapshot synced"
-    );
-    Ok(result)
+            let mut s = state.write().await;
+            s.acl_snapshot = Some(snapshot);
+            s.acl_last_sync_at = Some(result.synced_at);
+            info!(
+                version = result.version,
+                entries = result.entry_count,
+                "ACL snapshot synced"
+            );
+            Ok(result)
+        }
+    }
 }
 
 pub(crate) fn ordered_connectors_for_entry<'a>(
@@ -1637,4 +1741,50 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_is_single_flight() {
+        let now = tokio::time::Instant::now();
+        let mut state = TransportRecoveryState::default();
+
+        // First call reserves the slot.
+        assert!(may_start_transport_recovery(
+            &mut state,
+            now,
+            std::time::Duration::from_secs(10),
+        ));
+        // Second call while running is refused.
+        assert!(!may_start_transport_recovery(
+            &mut state,
+            now,
+            std::time::Duration::from_secs(10),
+        ));
+    }
+
+    #[test]
+    fn cooldown_is_measured_after_recovery_finishes() {
+        let finished = tokio::time::Instant::now();
+        let mut state = TransportRecoveryState {
+            running: false,
+            last_finished_at: Some(finished),
+        };
+
+        // 9s after completion: still inside the 10s cooldown → refused.
+        assert!(!may_start_transport_recovery(
+            &mut state,
+            finished + std::time::Duration::from_secs(9),
+            std::time::Duration::from_secs(10),
+        ));
+        // 10s after completion: cooldown elapsed → allowed.
+        assert!(may_start_transport_recovery(
+            &mut state,
+            finished + std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+        ));
+    }
 }
