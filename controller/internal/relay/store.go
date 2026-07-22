@@ -228,7 +228,8 @@ func (s *Store) MarkDeleted(ctx context.Context, id string) error {
 // certificate serials revoked. FOR UPDATE serializes against MarkProvisioned so a
 // concurrent provision cannot undo the revoke. Rows are never deleted — the CRL
 // needs the serial until not_after. Returns ErrRelayNotFound if the relay is gone.
-func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string) (int, error) {
+func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string,
+	inTx func(ctx context.Context, tx pgx.Tx, revoked int) error) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin revoke relay: %w", err)
@@ -254,6 +255,7 @@ func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string) (int, e
 	if err != nil {
 		return 0, fmt.Errorf("revoke relay certs: %w", err)
 	}
+	revoked := int(tag.RowsAffected())
 
 	// Don't downgrade an already-deleted relay; 'deleted' is the more terminal state.
 	if status != "deleted" {
@@ -264,7 +266,14 @@ func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string) (int, e
 			return 0, fmt.Errorf("mark relay revoked: %w", err)
 		}
 	}
-
+	// In-tx hook (audit row, and for Delete the 'deleted' status flip). A hook error
+	// returns here → the deferred tx.Rollback reverts the whole revoke, so revocation
+	// rows + status + audit commit atomically or not at all.
+	if inTx != nil {
+		if err := inTx(ctx, tx, revoked); err != nil {
+			return 0, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit revoke relay: %w", err)
 	}

@@ -116,10 +116,14 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 	var discardedID string
 	err := r.TenantDB.QueryRow(ctx,
 		`UPDATE connectors
-		    SET status = 'revoked', updated_at = NOW()
+		    SET status            = 'revoked',
+		        revoked_at        = NOW(),
+		        revocation_reason = 'revoked via admin API',
+		        updated_at        = NOW()
 		  WHERE id = $1
 		    AND tenant_id = $2
 		    AND status IN ('active', 'disconnected')
+		    AND revoked_at IS NULL
 		 RETURNING id`,
 		id, tc.TenantID,
 	).Scan(&discardedID)

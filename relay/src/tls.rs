@@ -6,6 +6,8 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::RootCertStore;
 use rustls_pemfile::{certs, private_key};
+use x509_parser::certificate::X509Certificate;
+use x509_parser::prelude::FromDer;
 
 use crate::spiffe::{extract_spiffe_uri, parse_spiffe, validate_relay_spiffe, ParsedSpiffe};
 
@@ -73,7 +75,50 @@ pub fn build_server_config(
     server_config.transport_config(Arc::new(transport));
     Ok(server_config)
 }
+pub struct PeerRevocation {
+    pub workspace_id: String, // tenant id from the Workspace CA (chain[1])
+    pub leaf_serial: Vec<u8>, // raw DER serial of the peer leaf
+    pub workspace_ca_der: Vec<u8>,
+}
 
+/// Pull the revocation inputs from an already-authenticated peer connection.
+pub fn peer_revocation(connection: &Connection) -> Result<PeerRevocation> {
+    let chain = connection
+        .peer_identity()
+        .context("peer did not present a certificate")?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .map_err(|_| anyhow::anyhow!("unexpected QUIC peer identity type"))?;
+    if chain.len() < 2 {
+        bail!("peer must present leaf certificate plus Workspace CA");
+    }
+    let (_, leaf) = X509Certificate::from_der(chain[0].as_ref())
+        .map_err(|e| anyhow::anyhow!("parse peer leaf: {e:?}"))?;
+    let leaf_serial = leaf.raw_serial().to_vec();
+    let workspace_ca_der = chain[1].as_ref().to_vec();
+
+    let (_, ca) = X509Certificate::from_der(&workspace_ca_der)
+        .map_err(|e| anyhow::anyhow!("parse Workspace CA: {e:?}"))?;
+    let workspace_id = tenant_id_from_ca(&ca).context("Workspace CA has no tenant URI SAN")?;
+
+    Ok(PeerRevocation {
+        workspace_id,
+        leaf_serial,
+        workspace_ca_der,
+    })
+}
+
+fn tenant_id_from_ca(ca: &X509Certificate<'_>) -> Option<String> {
+    let san = ca.subject_alternative_name().ok()??;
+    for name in &san.value.general_names {
+        if let x509_parser::extensions::GeneralName::URI(uri) = name {
+            if let Some(id) = uri.strip_prefix("tenant:") {
+                // controller sets `tenant:<id>`
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
 /// Extract the authenticated Connector or Client identity after a QUIC
 /// handshake. The TLS verifier has already validated the certificate chain.
 pub fn authenticated_peer_identity(connection: &Connection) -> Result<ParsedSpiffe> {
@@ -147,9 +192,9 @@ mod tests {
     fn install_crypto_provider() {
         static INSTALL: Once = Once::new();
         INSTALL.call_once(|| {
-            rustls::crypto::ring::default_provider()
-                .install_default()
-                .unwrap();
+            // Tolerate an already-installed provider: other test modules (e.g. crl)
+            // may have installed the process-wide default first.
+            let _ = rustls::crypto::ring::default_provider().install_default();
         });
     }
 

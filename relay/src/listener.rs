@@ -8,6 +8,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::config::RuntimeLimits;
+use crate::crl::RevocationStatus;
 use crate::session;
 use crate::state::RelayState;
 use crate::tls;
@@ -17,6 +18,7 @@ pub async fn run_listener(
     server_config: quinn::ServerConfig,
     state: Arc<RelayState>,
     limits: RuntimeLimits,
+    crl: crate::crl::WorkspaceCrlManager,
 ) -> Result<()> {
     let endpoint = Endpoint::server(server_config, bind_addr).context("create Relay endpoint")?;
     let connection_permits = Arc::new(Semaphore::new(limits.max_connections));
@@ -44,6 +46,7 @@ pub async fn run_listener(
             }
         };
         let state = state.clone();
+        let crl = crl.clone();
         let session_limits = session_limits.clone();
         let handshake_timeout = limits.handshake_timeout;
         tokio::spawn(async move {
@@ -84,7 +87,30 @@ pub async fn run_listener(
                 trust_domain = %identity.trust_domain,
                 "accepted authenticated Relay peer"
             );
-
+            // Track-2: reject a revoked connector/client on the outer mTLS. Fail closed.
+            match tls::peer_revocation(&connection) {
+                Ok(pr) => match crl
+                    .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
+                    .await
+                {
+                    RevocationStatus::NotRevoked => {}
+                    RevocationStatus::Revoked => {
+                        warn!(spiffe_id = %identity.uri, "rejecting revoked peer certificate");
+                        connection.close(0u32.into(), b"peer certificate revoked");
+                        return;
+                    }
+                    RevocationStatus::Unavailable => {
+                        warn!(spiffe_id = %identity.uri, "workspace CRL unavailable — failing closed");
+                        connection.close(0u32.into(), b"revocation state unavailable");
+                        return;
+                    }
+                },
+                Err(error) => {
+                    warn!(error = %error, "cannot derive peer revocation context — failing closed");
+                    connection.close(0u32.into(), b"revocation context error");
+                    return;
+                }
+            }
             if let Err(error) =
                 session::handle_connection(connection, identity, state, session_limits).await
             {

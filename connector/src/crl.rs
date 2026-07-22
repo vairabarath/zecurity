@@ -16,13 +16,20 @@ struct ValidCrl {
     revoked: HashSet<Vec<u8>>,
     next_update: i64,
 }
-
+/// Result of a revocation lookup. `Unavailable` is a distinct state so callers
+/// cannot mistake "no valid CRL" for "not revoked" (fail-closed by construction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevocationStatus {
+    Revoked,
+    NotRevoked,
+    Unavailable,
+}
 /// Caches revoked certificate serials fetched from the controller's /ca.crl endpoint.
 ///
 /// The controller serves `GET /ca.crl?workspace_id=<uuid>` → DER-encoded CRL signed
 /// by the workspace CA. Connector fetches on startup then refreshes every 5 minutes.
 ///
-/// M4 calls `is_revoked(serial_bytes)` inside `device_tunnel::handle_stream` after
+/// M4 calls `check(serial_bytes)` inside `device_tunnel::handle_stream` after
 /// extracting the peer cert serial from the TLS handshake.
 #[derive(Clone, Debug, Default)]
 pub struct CrlManager {
@@ -34,14 +41,21 @@ impl CrlManager {
         Self::default()
     }
 
-    /// Returns true if `serial` (raw big-endian bytes from the peer cert) is revoked.
-    pub fn is_revoked(&self, serial: &[u8]) -> bool {
+    /// Fail-closed revocation lookup. Callers MUST deny on anything but
+    /// `NotRevoked`, so an absent/expired cache can never read as "allow".
+    pub fn check(&self, serial: &[u8]) -> RevocationStatus {
         let now = ASN1Time::now().timestamp();
-        self.cache
-            .read()
-            .as_ref()
-            .filter(|cache| now < cache.next_update)
-            .is_some_and(|cache| cache.revoked.contains(serial))
+        let guard = self.cache.read();
+        match guard.as_ref() {
+            Some(cache) if now < cache.next_update => {
+                if cache.revoked.contains(serial) {
+                    RevocationStatus::Revoked
+                } else {
+                    RevocationStatus::NotRevoked
+                }
+            }
+            _ => RevocationStatus::Unavailable,
+        }
     }
 
     /// Fetch the DER CRL from `url`, parse it, and replace the cached revoked set.
@@ -279,7 +293,10 @@ mod tests {
         });
 
         assert!(!manager.has_valid_cache());
-        assert!(!manager.is_revoked(REVOKED_SERIAL_BYTES));
+        assert_eq!(
+            manager.check(REVOKED_SERIAL_BYTES),
+            RevocationStatus::Unavailable
+        );
     }
 
     #[test]
@@ -298,7 +315,10 @@ mod tests {
             .unwrap();
 
         assert!(manager.has_valid_cache());
-        assert!(manager.is_revoked(REVOKED_SERIAL_BYTES));
+        assert_eq!(
+            manager.check(REVOKED_SERIAL_BYTES),
+            RevocationStatus::Revoked
+        );
     }
 
     #[test]
@@ -375,7 +395,10 @@ mod tests {
             .is_err());
 
         assert!(manager.has_valid_cache());
-        assert!(manager.is_revoked(REVOKED_SERIAL_BYTES));
+        assert_eq!(
+            manager.check(REVOKED_SERIAL_BYTES),
+            RevocationStatus::Revoked
+        );
     }
 
     #[test]

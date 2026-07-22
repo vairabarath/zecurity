@@ -16,6 +16,16 @@ struct ValidCrl {
     next_update: i64,
 }
 
+
+
+/// Result of a revocation lookup. `Unavailable` is a distinct state so callers
+/// cannot mistake "no valid CRL" for "not revoked" (fail-closed by construction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevocationStatus {
+    Revoked,
+    NotRevoked,
+    Unavailable,
+}
 #[derive(Clone, Debug, Default)]
 pub struct CrlManager {
     cache: Arc<RwLock<Option<ValidCrl>>>,
@@ -35,13 +45,21 @@ impl CrlManager {
             .is_some_and(|cache| now < cache.next_update)
     }
 
-    pub fn is_revoked(&self, serial: &[u8]) -> bool {
+     /// Fail-closed revocation lookup. Callers MUST deny on anything but
+    /// `NotRevoked`, so an absent/expired cache can never read as "allow".
+    pub fn check(&self, serial: &[u8]) -> RevocationStatus {
         let now = ASN1Time::now().timestamp();
-        self.cache
-            .read()
-            .as_ref()
-            .filter(|cache| now < cache.next_update)
-            .is_some_and(|cache| cache.revoked.contains(serial))
+        let guard = self.cache.read();
+        match guard.as_ref() {
+            Some(cache) if now < cache.next_update => {
+                if cache.revoked.contains(serial) {
+                    RevocationStatus::Revoked
+                } else {
+                    RevocationStatus::NotRevoked
+                }
+            }
+            _ => RevocationStatus::Unavailable,
+        }
     }
 
     pub async fn refresh(&self, url: &str, issuer_ca_pem: &[u8]) -> anyhow::Result<()> {

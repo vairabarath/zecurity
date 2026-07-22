@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
@@ -162,35 +164,32 @@ func (h *AdminHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	// Revoke-then-remove: kill the certs first (so they land on the CRL), then mark
-	// the relay deleted. The relay row + relay_certificates are preserved for the CRL.
-	revoked, err := h.Store.RevokeRelay(ctx, relayID, "relay deleted")
+	// Revoke-then-remove, atomically: revoke the certs (so they land on the CRL),
+	// flip the relay to 'deleted', and write the audit — all in one tx. The relay
+	// row + relay_certificates are preserved for the CRL.
+	_, err := h.Store.RevokeRelay(ctx, relayID, "relay deleted", func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE relays SET status = 'deleted', updated_at = NOW() WHERE id = $1`, relayID); err != nil {
+			return fmt.Errorf("mark relay deleted: %w", err)
+		}
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayDelete,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        map[string]any{"note": "revoke-then-remove", "serials_revoked": revoked},
+			IPAddress:      r.RemoteAddr,
+		})
+	})
 	if err != nil {
 		if errors.Is(err, ErrRelayNotFound) {
 			http.Error(w, "relay not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, "failed to revoke relay: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := h.Store.MarkDeleted(ctx, relayID); err != nil && !errors.Is(err, ErrRelayNotFound) {
 		http.Error(w, "failed to delete relay: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	// Append-only audit. Best-effort: the revoke+delete already committed.
-	if err := h.ProviderStore.InsertAudit(ctx, provider.AuditEntry{
-		ProviderUserID: &actor.UserID,
-		ProviderEmail:  actor.Email,
-		Action:         provider.ActionRelayDelete,
-		TargetType:     "relay",
-		TargetID:       relayID,
-		Details:        map[string]any{"note": "revoke-then-remove", "serials_revoked": revoked},
-		IPAddress:      r.RemoteAddr,
-	}); err != nil {
-		log.Printf("provider audit (relay.delete) failed for relay %s: %v", relayID, err)
-	}
-
 	// Convergence fan-out (broadcast + transport invalidation), post-commit.
 	if h.OnRelayRevoked != nil {
 		h.OnRelayRevoked(ctx, relayID)
@@ -228,7 +227,17 @@ func (h *AdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	reason := r.URL.Query().Get("reason")
-	revoked, err := h.Store.RevokeRelay(ctx, relayID, reason)
+	_, err := h.Store.RevokeRelay(ctx, relayID, reason, func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayRevoke,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        map[string]any{"serials_revoked": revoked, "reason": reason},
+			IPAddress:      r.RemoteAddr,
+		})
+	})
 	if err != nil {
 		if errors.Is(err, ErrRelayNotFound) {
 			http.Error(w, "relay not found", http.StatusNotFound)
@@ -236,19 +245,6 @@ func (h *AdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "failed to revoke relay: "+err.Error(), http.StatusInternalServerError)
 		return
-	}
-
-	// Append-only audit. Best-effort: the revoke already committed.
-	if err := h.ProviderStore.InsertAudit(ctx, provider.AuditEntry{
-		ProviderUserID: &actor.UserID,
-		ProviderEmail:  actor.Email,
-		Action:         provider.ActionRelayRevoke,
-		TargetType:     "relay",
-		TargetID:       relayID,
-		Details:        map[string]any{"serials_revoked": revoked, "reason": reason},
-		IPAddress:      r.RemoteAddr,
-	}); err != nil {
-		log.Printf("provider audit (relay.revoke) failed for relay %s: %v", relayID, err)
 	}
 
 	// Convergence fan-out (broadcast + transport invalidation), post-commit.
