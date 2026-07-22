@@ -112,20 +112,59 @@ struct TunnelRequest {
     protocol: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct TunnelResponse {
     ok: bool,
     error: Option<String>,
 }
 
-async fn write_framed_json<W, T>(writer: &mut W, value: &T) -> Result<()>
+/// Error from the framed-JSON handshake helpers, split so the caller can tell a
+/// genuine transport failure (network I/O) from a protocol failure (bad or
+/// oversized payload). Only the former warrants an early transport resync.
+#[derive(Debug, thiserror::Error)]
+enum FramedJsonError {
+    #[error("transport I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("JSON encoding failed: {0}")]
+    Encode(serde_json::Error),
+
+    #[error("JSON decoding failed: {0}")]
+    Decode(serde_json::Error),
+
+    #[error("frame too large: {0} bytes")]
+    FrameTooLarge(usize),
+}
+
+impl FramedJsonError {
+    /// True only for genuine transport I/O failures. Protocol failures — malformed
+    /// JSON (`Decode`), oversized frames (`FrameTooLarge`), encode errors — are NOT
+    /// transport failures: the path reached the peer fine, so re-polling the
+    /// transport plane cannot help.
+    ///
+    /// Deliberately broad (`Io(_)`, not an `ErrorKind` allowlist): every `Io` here
+    /// originates from the QUIC stream read/write, because the JSON/size failures
+    /// are separate variants. Verified against quinn 0.11.9 — a lost connection
+    /// maps to `ConnectionReset`/`NotConnected` and a clean close to `UnexpectedEof`,
+    /// all `Io`. Broad also survives future quinn error-mapping changes, and an
+    /// unnecessary resync is cheap whereas a missed one strands the client on a
+    /// dead relay until the next 60s tick.
+    fn is_transport_failure(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+}
+
+async fn write_framed_json<W, T>(
+    writer: &mut W,
+    value: &T,
+) -> std::result::Result<(), FramedJsonError>
 where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let body = serde_json::to_vec(value)?;
+    let body = serde_json::to_vec(value).map_err(FramedJsonError::Encode)?;
     if body.len() > MAX_TUNNEL_HANDSHAKE_SIZE {
-        return Err(anyhow!("tunnel handshake too large: {} bytes", body.len()));
+        return Err(FramedJsonError::FrameTooLarge(body.len()));
     }
 
     writer.write_all(&(body.len() as u32).to_be_bytes()).await?;
@@ -134,7 +173,7 @@ where
     Ok(())
 }
 
-async fn read_framed_json<R, T>(reader: &mut R) -> Result<T>
+async fn read_framed_json<R, T>(reader: &mut R) -> std::result::Result<T, FramedJsonError>
 where
     R: AsyncRead + Unpin,
     T: DeserializeOwned,
@@ -143,12 +182,12 @@ where
     reader.read_exact(&mut length).await?;
     let length = u32::from_be_bytes(length) as usize;
     if length > MAX_TUNNEL_HANDSHAKE_SIZE {
-        return Err(anyhow!("tunnel handshake too large: {length} bytes"));
+        return Err(FramedJsonError::FrameTooLarge(length));
     }
 
     let mut body = vec![0u8; length];
     reader.read_exact(&mut body).await?;
-    serde_json::from_slice(&body).map_err(Into::into)
+    serde_json::from_slice(&body).map_err(FramedJsonError::Decode)
 }
 
 // --- Per-connection relay state (lives in the smoltcp loop) ---
@@ -479,9 +518,16 @@ async fn relay_tcp_to_quic(
 
         let resp: TunnelResponse = match handshake {
             Ok(Ok(resp)) => resp,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "tunnel handshake failed");
-                saw_transport_failure = true;
+            Ok(Err(error)) => {
+                // Only a transport I/O failure warrants a resync; a malformed or
+                // oversized reply means the path is fine but the peer is confused.
+                let transport_failure = error.is_transport_failure();
+                tracing::warn!(
+                    error = %error,
+                    transport_failure,
+                    "tunnel handshake failed"
+                );
+                saw_transport_failure |= transport_failure;
                 continue;
             }
             Err(_) => {
@@ -489,6 +535,7 @@ async fn relay_tcp_to_quic(
                     dest = %destination, port,
                     "tunnel handshake timed out after {:?}", TUNNEL_HANDSHAKE_TIMEOUT
                 );
+                // Timeout means the selected relay/connector path is unusable.
                 saw_transport_failure = true;
                 continue;
             }
@@ -592,4 +639,71 @@ fn smoltcp_now() -> SmolInstant {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{duplex, AsyncWriteExt};
+
+    // A malformed JSON body is a protocol failure, not a transport failure:
+    // we received a well-framed reply, it just didn't parse. No resync.
+    #[tokio::test]
+    async fn malformed_handshake_json_is_not_transport_failure() {
+        let (mut writer, mut reader) = duplex(64);
+
+        let body = b"{invalid-json";
+        writer
+            .write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        writer.write_all(body).await.unwrap();
+        drop(writer);
+
+        let error = read_framed_json::<_, TunnelResponse>(&mut reader)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FramedJsonError::Decode(_)));
+        assert!(!error.is_transport_failure());
+    }
+
+    // A dropped connection surfaces as an I/O error (UnexpectedEof here): the
+    // path is dead, so this IS a transport failure and should resync.
+    #[tokio::test]
+    async fn disconnected_handshake_is_transport_failure() {
+        let (writer, mut reader) = duplex(64);
+        drop(writer);
+
+        let error = read_framed_json::<_, TunnelResponse>(&mut reader)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FramedJsonError::Io(_)));
+        assert!(error.is_transport_failure());
+    }
+
+    // An oversized frame length is rejected before reading the body — a protocol
+    // failure, not transport. No resync.
+    #[tokio::test]
+    async fn oversized_handshake_is_not_transport_failure() {
+        let (mut writer, mut reader) = duplex(64);
+        let size = MAX_TUNNEL_HANDSHAKE_SIZE + 1;
+
+        writer
+            .write_all(&(size as u32).to_be_bytes())
+            .await
+            .unwrap();
+        drop(writer);
+
+        let error = read_framed_json::<_, TunnelResponse>(&mut reader)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FramedJsonError::FrameTooLarge(value) if value == size
+        ));
+        assert!(!error.is_transport_failure());
+    }
 }

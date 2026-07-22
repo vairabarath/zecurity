@@ -448,6 +448,13 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Errorf(codes.Internal, "compile acl snapshot: %v", err)
 	}
 
+	// Skip the payload when the client already has the current version — mirrors
+	// GetTransportSnapshot. Compared against the compiled snapshot's version (not
+	// the notifier directly) so a compile raced by a policy change can never report
+	// up_to_date for a version the client isn't actually holding.
+	if req.GetKnownVersion() != 0 && req.GetKnownVersion() == snap.Version {
+		return &clientv1.GetACLSnapshotResponse{UpToDate: true}, nil
+	}
 	return &clientv1.GetACLSnapshotResponse{Snapshot: snap}, nil
 }
 

@@ -109,12 +109,14 @@ message EnrollDeviceResponse {
 // ── GetACLSnapshot ─────────────────────────────────────────────────────────
 
 message GetACLSnapshotRequest {
-  string access_token = 1;
-  string device_id    = 2;
+  string access_token  = 1;
+  string device_id     = 2;
+  uint64 known_version = 3; // client's cached version; 0 = always return the snapshot
 }
 
 message GetACLSnapshotResponse {
-  ACLSnapshot snapshot = 1;
+  ACLSnapshot snapshot   = 1; // omitted when up_to_date
+  bool        up_to_date = 2; // true when known_version == current version
 }
 
 // ACLConnector holds the tunnel endpoint for one Connector instance.
