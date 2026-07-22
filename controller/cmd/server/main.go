@@ -312,8 +312,11 @@ func main() {
 	// Post-commit convergence when a relay is revoked/deleted: rebuild+broadcast the
 	// relay list (connectors migrate) AND invalidate the transport snapshot for each
 	// affected workspace (Sprint-13 clients re-poll) — mirrors the expiry path.
-	_ = relayRevChecker.Refresh(ctx)
+
 	relayAdminHandler.OnRelayRevoked = func(ctx context.Context, relayID string) {
+		if err := relayRevChecker.Refresh(ctx); err != nil {
+			log.Printf("relay revoke fan-out: refresh revocation checker for %s: %v", relayID, err)
+		}
 		broadcastRelayList(ctx)
 		conns, err := relayStore.ListConnectorsForRelay(ctx, relayID)
 		if err != nil {

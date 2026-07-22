@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -141,9 +142,24 @@ func (s *Store) UpsertSuperAdmin(ctx context.Context, email string) error {
 	return nil
 }
 
-// InsertAudit appends one provider action to provider_audit_logs. Append-only:
-// this is the only write path, and there is deliberately no update/delete.
+// dbExec is the subset of pgx used to write an audit row. Both *pgxpool.Pool and
+// pgx.Tx satisfy it, so an audit can be written standalone or folded into a
+// caller's transaction.
+type dbExec interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// InsertAudit appends one provider action to provider_audit_logs on the pool.
+// Append-only: this is the only write path; there is deliberately no update/delete.
 func (s *Store) InsertAudit(ctx context.Context, e AuditEntry) error {
+	return s.InsertAuditTx(ctx, s.pool, e)
+}
+
+// InsertAuditTx appends one provider action using the supplied executor. Pass a
+// pgx.Tx to make the audit row commit atomically with the caller's transaction
+// (a failed audit then rolls the whole operation back); pass the pool for a
+// standalone write.
+func (s *Store) InsertAuditTx(ctx context.Context, db dbExec, e AuditEntry) error {
 	var details []byte
 	if e.Details != nil {
 		b, err := json.Marshal(e.Details)
@@ -152,7 +168,7 @@ func (s *Store) InsertAudit(ctx context.Context, e AuditEntry) error {
 		}
 		details = b
 	}
-	_, err := s.pool.Exec(ctx,
+	_, err := db.Exec(ctx,
 		`INSERT INTO provider_audit_logs
                    (provider_user_id, provider_email, action, target_type, target_id, details, ip_address)
                VALUES ($1, $2, $3, $4, $5, $6, $7)`,

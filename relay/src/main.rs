@@ -1,5 +1,6 @@
 mod appmeta;
 mod config;
+mod crl;
 mod csr;
 mod heartbeat;
 mod listener;
@@ -66,6 +67,7 @@ async fn main() -> Result<()> {
         intermediate_ca.clone(),
         state.clone(),
     ));
-
-    listener::run_listener(cfg.bind_addr, server_config, state, cfg.runtime_limits).await
+    let crl = crl::WorkspaceCrlManager::new(cfg.controller_http_addr.clone());
+    crl.clone().spawn_refresh(60, 15);
+    listener::run_listener(cfg.bind_addr, server_config, state, cfg.runtime_limits, crl).await
 }

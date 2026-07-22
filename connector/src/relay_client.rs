@@ -16,7 +16,7 @@ use tracing::{info, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::crl::CrlManager;
+use crate::crl::{CrlManager, RevocationStatus};
 use crate::proto::connector_control_message;
 use crate::proto::{ConnectorControlMessage, ConnectorRelayState};
 use crate::relay_attachment::{RelayAttachment, RelayAttachmentSlot};
@@ -298,18 +298,18 @@ impl ExactRelaySpiffeVerifier {
         }))
     }
 
-    fn verify_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
-        if !self.crl_manager.has_valid_cache() {
-            return Err(RustlsError::General(
-                "relay revocation state unavailable".into(),
-            ));
-        }
+        fn verify_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
         let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
             .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
-        if self.crl_manager.is_revoked(cert.raw_serial()) {
-            return Err(RustlsError::General("relay certificate revoked".into()));
+        match self.crl_manager.check(cert.raw_serial()) {
+            RevocationStatus::NotRevoked => Ok(()),
+            RevocationStatus::Revoked => {
+                Err(RustlsError::General("relay certificate revoked".into()))
+            }
+            RevocationStatus::Unavailable => {
+                Err(RustlsError::General("relay revocation state unavailable".into()))
+            }
         }
-        Ok(())
     }
 
     fn verify_exact_spiffe(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
@@ -478,12 +478,10 @@ async fn monitor_relay_revocation(
 }
 
 fn relay_rejection_reason(manager: &CrlManager, serial: &[u8]) -> Option<&'static [u8]> {
-    if !manager.has_valid_cache() {
-        Some(b"relay revocation state unavailable")
-    } else if manager.is_revoked(serial) {
-        Some(b"relay certificate revoked")
-    } else {
-        None
+    match manager.check(serial) {
+        RevocationStatus::NotRevoked => None,
+        RevocationStatus::Revoked => Some(b"relay certificate revoked"),
+        RevocationStatus::Unavailable => Some(b"relay revocation state unavailable"),
     }
 }
 

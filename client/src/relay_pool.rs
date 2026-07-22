@@ -248,12 +248,10 @@ fn relay_rejection_reason(
     manager: &crate::crl::CrlManager,
     serial: &[u8],
 ) -> Option<&'static [u8]> {
-    if !manager.has_valid_cache() {
-        Some(b"relay revocation state unavailable")
-    } else if manager.is_revoked(serial) {
-        Some(b"relay certificate revoked")
-    } else {
-        None
+    match manager.check(serial) {
+        crate::crl::RevocationStatus::NotRevoked => None,
+        crate::crl::RevocationStatus::Revoked => Some(b"relay certificate revoked"),
+        crate::crl::RevocationStatus::Unavailable => Some(b"relay revocation state unavailable"),
     }
 }
 

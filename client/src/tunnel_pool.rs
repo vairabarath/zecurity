@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::crl::RevocationStatus;
+
 pub trait AuthenticatedIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AuthenticatedIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 pub type AuthenticatedStream = Box<dyn AuthenticatedIo>;
@@ -108,19 +110,19 @@ impl ExactSpiffeVerifier {
         Err(Error::InvalidCertificate(CertificateError::NotValidForName))
     }
 
-    fn verify_relay_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
+     fn verify_relay_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
         let Some(manager) = &self.relay_crl else {
             return Ok(());
         };
-        if !manager.has_valid_cache() {
-            return Err(Error::General("relay revocation state unavailable".into()));
-        }
         let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
             .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
-        if manager.is_revoked(cert.raw_serial()) {
-            return Err(Error::General("relay certificate revoked".into()));
+        match manager.check(cert.raw_serial()) {
+            RevocationStatus::NotRevoked => Ok(()),
+            RevocationStatus::Revoked => Err(Error::General("relay certificate revoked".into())),
+            RevocationStatus::Unavailable => {
+                Err(Error::General("relay revocation state unavailable".into()))
+            }
         }
-        Ok(())
     }
 }
 

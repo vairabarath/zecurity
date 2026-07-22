@@ -580,6 +580,40 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 		return nil, fmt.Errorf("iterate revoked devices: %w", err)
 	}
 
+	// PENDING-02: also publish revoked CONNECTOR serials on the same workspace
+	// CRL (connectors are Workspace-CA-signed, so they belong here). Serials are
+	// stored as SerialNumber.Text(16), matching the base-16 parse below.
+	connRows, err := s.pool.Query(ctx,
+		`SELECT cert_serial, revoked_at
+		   FROM connectors
+		  WHERE tenant_id = $1
+		    AND revoked_at IS NOT NULL
+		    AND cert_serial IS NOT NULL`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query revoked connectors: %w", err)
+	}
+	defer connRows.Close()
+	for connRows.Next() {
+		var serialHex string
+		var revokedAt time.Time
+		if err := connRows.Scan(&serialHex, &revokedAt); err != nil {
+			return nil, fmt.Errorf("scan revoked connector: %w", err)
+		}
+		n := new(big.Int)
+		if _, ok := n.SetString(serialHex, 16); !ok {
+			return nil, fmt.Errorf("invalid connector cert_serial %q", serialHex)
+		}
+		revoked = append(revoked, x509.RevocationListEntry{
+			SerialNumber:   n,
+			RevocationTime: revokedAt.UTC(),
+		})
+	}
+	if err := connRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate revoked connectors: %w", err)
+	}
+
 	crlSerial, err := newSerialNumber()
 	if err != nil {
 		return nil, fmt.Errorf("generate CRL serial: %w", err)
