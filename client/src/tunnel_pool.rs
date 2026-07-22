@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::crl::RevocationStatus;
+
 pub trait AuthenticatedIo: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AuthenticatedIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 pub type AuthenticatedStream = Box<dyn AuthenticatedIo>;
@@ -69,6 +71,7 @@ pub struct ParsedCaBundle {
 pub struct ExactSpiffeVerifier {
     inner: Arc<rustls::client::WebPkiServerVerifier>,
     expected_spiffe_id: String,
+    relay_crl: Option<crate::crl::CrlManager>,
 }
 
 impl ExactSpiffeVerifier {
@@ -82,6 +85,20 @@ impl ExactSpiffeVerifier {
         Ok(Arc::new(Self {
             inner,
             expected_spiffe_id: expected_spiffe_id.into(),
+            relay_crl: None,
+        }))
+    }
+
+    pub fn new_relay(
+        roots: rustls::RootCertStore,
+        expected_spiffe_id: impl Into<String>,
+        relay_crl: crate::crl::CrlManager,
+    ) -> Result<Arc<Self>> {
+        let verifier = Self::new(roots, expected_spiffe_id)?;
+        Ok(Arc::new(Self {
+            inner: verifier.inner.clone(),
+            expected_spiffe_id: verifier.expected_spiffe_id.clone(),
+            relay_crl: Some(relay_crl),
         }))
     }
 
@@ -91,6 +108,21 @@ impl ExactSpiffeVerifier {
             return Ok(());
         }
         Err(Error::InvalidCertificate(CertificateError::NotValidForName))
+    }
+
+     fn verify_relay_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), Error> {
+        let Some(manager) = &self.relay_crl else {
+            return Ok(());
+        };
+        let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
+            .map_err(|_| Error::InvalidCertificate(CertificateError::BadEncoding))?;
+        match manager.check(cert.raw_serial()) {
+            RevocationStatus::NotRevoked => Ok(()),
+            RevocationStatus::Revoked => Err(Error::General("relay certificate revoked".into())),
+            RevocationStatus::Unavailable => {
+                Err(Error::General("relay revocation state unavailable".into()))
+            }
+        }
     }
 }
 
@@ -112,11 +144,13 @@ impl ServerCertVerifier for ExactSpiffeVerifier {
         ) {
             Ok(verified) => {
                 self.verify_exact_spiffe(end_entity)?;
+                self.verify_relay_revocation(end_entity)?;
                 Ok(verified)
             }
             Err(Error::InvalidCertificate(CertificateError::NotValidForName))
             | Err(Error::InvalidCertificate(CertificateError::NotValidForNameContext { .. })) => {
                 self.verify_exact_spiffe(end_entity)?;
+                self.verify_relay_revocation(end_entity)?;
                 Ok(ServerCertVerified::assertion())
             }
             Err(error) => Err(error),
@@ -463,5 +497,33 @@ mod tests {
         let (cert, _pem) = issue_cert("spiffe://workspace.zecurity.in/client/123");
         let trust_domain = extract_client_trust_domain(cert.as_ref()).unwrap();
         assert_eq!(trust_domain, "workspace.zecurity.in");
+    }
+
+    #[test]
+    fn relay_verifier_fails_closed_without_crl() {
+        let (cert, _pem) = issue_cert("spiffe://zecurity.in/relay/test");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.clone()).unwrap();
+        let verifier = ExactSpiffeVerifier::new_relay(
+            roots,
+            "spiffe://zecurity.in/relay/test",
+            crate::crl::CrlManager::new(),
+        )
+        .unwrap();
+        assert!(verifier.verify_relay_revocation(&cert).is_err());
+    }
+
+    #[test]
+    fn relay_verifier_rejects_revoked_serial() {
+        let (cert, _pem) = issue_cert("spiffe://zecurity.in/relay/test");
+        let (_, parsed) = X509Certificate::from_der(cert.as_ref()).unwrap();
+        let manager = crate::crl::CrlManager::new();
+        manager.install_test_cache(vec![parsed.raw_serial().to_vec()]);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert.clone()).unwrap();
+        let verifier =
+            ExactSpiffeVerifier::new_relay(roots, "spiffe://zecurity.in/relay/test", manager)
+                .unwrap();
+        assert!(verifier.verify_relay_revocation(&cert).is_err());
     }
 }

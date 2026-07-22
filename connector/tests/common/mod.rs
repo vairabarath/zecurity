@@ -23,13 +23,14 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use quinn::Endpoint;
 use rcgen::{
-    BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair, SanType,
-    PKCS_ECDSA_P384_SHA384,
+    BasicConstraints, CertificateParams, CertificateRevocationListParams, DistinguishedName,
+    DnType, IsCa, Issuer, KeyIdMethod, KeyPair, SanType, SerialNumber, PKCS_ECDSA_P384_SHA384,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use zecurity_connector::crl::CrlManager;
 use zecurity_connector::proto::{LabelledRelayInfo, LabelledRelayList, RelayCapacityLabel};
 
 const RELAY_ALPN: &[u8] = b"ztna-relay-v1";
@@ -47,6 +48,7 @@ pub struct TestCerts {
     pub connector_id: String,
     pub connector_spiffe_id: String,
     pub relays: Vec<TestRelayCert>,
+    ca_params: CertificateParams,
     ca_key_pem: String,
     ca_cert_der: CertificateDer<'static>,
 }
@@ -93,7 +95,7 @@ pub fn make_test_certs(num_relays: usize) -> TestCerts {
 
     // `Issuer::new` consumes both params and key. We don't need ca_params
     // after this point; ca_key's PEM is already captured above.
-    let issuer: Issuer<'static, KeyPair> = Issuer::new(ca_params, ca_key);
+    let issuer: Issuer<'static, KeyPair> = Issuer::new(ca_params.clone(), ca_key);
 
     // ---- connector leaf ----
     let connector_id = Uuid::new_v4().to_string();
@@ -150,8 +152,35 @@ pub fn make_test_certs(num_relays: usize) -> TestCerts {
         connector_id,
         connector_spiffe_id,
         relays,
+        ca_params,
         ca_key_pem: ca_key_pem_str,
         ca_cert_der: CertificateDer::from(ca_der_bytes),
+    }
+}
+
+impl TestCerts {
+    /// Build a verified, unexpired empty Relay CRL cache for integration tests
+    /// whose focus is probe/selector behavior rather than revocation itself.
+    pub fn valid_relay_crl_manager(&self) -> CrlManager {
+        let key = KeyPair::from_pem(&self.ca_key_pem).expect("parse test CA key");
+        let issuer = Issuer::new(self.ca_params.clone(), key);
+        let now = time::OffsetDateTime::now_utc();
+        let crl = CertificateRevocationListParams {
+            this_update: now - time::Duration::minutes(1),
+            next_update: now + time::Duration::hours(1),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: Vec::new(),
+            key_identifier_method: KeyIdMethod::Sha256,
+        }
+        .signed_by(&issuer)
+        .expect("sign test Relay CRL");
+
+        let manager = CrlManager::new();
+        manager
+            .install_verified_der(crl.der().as_ref(), &self.workspace_ca_pem)
+            .expect("install test Relay CRL");
+        manager
     }
 }
 

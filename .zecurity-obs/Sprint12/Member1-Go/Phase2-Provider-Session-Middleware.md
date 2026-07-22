@@ -4,7 +4,7 @@ member: M1
 sprint: 12
 phase: 2
 title: Provider Session + RequireProvider Middleware + /provider Route Group
-status: planned
+status: done
 depends_on:
   - Sprint12/Member1-Go/Phase1-Provider-Data-Model-Authz
 tags:
@@ -115,10 +115,10 @@ cd controller && go test ./internal/middleware/... ./internal/auth/...
 
 ## Implementation Checklist
 
-- [ ] **M1-B1** provider JWT issuance (`aud=provider`) + `/provider/auth/callback` gated by allowlist
-- [ ] **M1-B2** `controller/internal/middleware/provider.go` — `RequireProvider`
-- [ ] **M1-B3** `controller/cmd/server/main.go` — `/provider` route group skeleton + `GET /provider/me`
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-B1** provider JWT issuance (`aud=provider`) + `/provider/auth/callback` gated by allowlist
+- [x] **M1-B2** `controller/internal/middleware/provider.go` — `RequireProvider`
+- [x] **M1-B3** `controller/cmd/server/main.go` — `/provider` route group skeleton + `GET /provider/me`
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 

@@ -1782,3 +1782,63 @@ serves on `127.0.0.1:9102`.
   `RELAY_PROVISIONING_TOKEN` and provisions end-to-end against `POST /provider/relays`.
 - PENDING-02 (CRL/OCSP enforcement) can now hang its relay-revoke trigger off the `DELETE
   /provider/relays/{id}` seam.
+
+## 2026-07-13 — Codex (Sprint 12 completion tracking)
+
+**What was done:**
+- Verified and marked M1 Phase 1 complete: provider data model, audit store, authorization chokepoint, and bootstrap seeding.
+- Verified and marked M1 Phase 2 complete after the protected provider route group, `/provider/me`, and isolation tests landed.
+- Marked M2 Phase 1 complete: single-use Relay provisioning-token enforcement, replay protection, and removal of anonymous self-provisioning.
+- Marked M2 Phase 3 complete: Relay token delivery, environment/file configuration, fail-fast validation, installer support, documentation, and tests.
+- Left M2 Phase 2 unmodified because it is assigned to another member.
+
+**Verification:**
+- Controller Relay tests and build passed for M2 Phase 1.
+- Relay tests (36 passed), build, formatting, and installer shell syntax passed for M2 Phase 3.
+
+**What's next:**
+- The assigned member completes M2 Phase 2 by moving Relay creation to `POST /provider/relays`, enforcing provider authorization, and recording provider audit entries.
+
+## 2026-07-15 — Codex (Sprint 14 M2 Phase 1)
+
+**What was done:**
+- Implemented the hardened Connector CRL manager with signature, issuer, AKI/SKI, `thisUpdate`, and `nextUpdate` verification.
+- Added fail-closed cold-boot and expired-cache behavior, keep-last-good refresh semantics, trailing-data rejection, and a 60-second refresh interval with jitter.
+- Updated the existing workspace `/ca.crl` consumer to deny device tunnels when revocation state is unavailable.
+- Added 12 CRL unit tests covering valid CRLs, wrong issuer/signature/AKI, invalid validity windows, expired cache state, and keep-last-good behavior.
+- Marked Sprint 14 M2 Phase 1 complete in its phase file and dependency path.
+
+**Verification:**
+- `cargo test --manifest-path connector/Cargo.toml --lib crl`: 12 passed.
+- `cargo build --manifest-path connector/Cargo.toml`: passed.
+- Focused Rust formatting and `git diff --check`: passed.
+
+**What's next:**
+- Integrate the latest origin branch containing M1's `/relay.crl` endpoint, then implement Sprint 14 M2 Phase 2 for Connector and Client relay-certificate enforcement and live-connection eviction.
+
+## 2026-07-21 — Codex (Sprint 14 M2 enforcement verification)
+
+**What was done:**
+- Audited the local Sprint 14 M2 implementation against both phase specifications and live relay
+  dial paths.
+- Added verified-DER CRL installation for realistic integration fixtures and repaired all four
+  `probe_relays` test call sites.
+- Added active client relay-connection monitoring so CRL revocation or expiry closes established
+  QUIC connections, matching the existing connector session monitor.
+- Persisted the client's Relay CRL manager across tunnel restarts and made its refresh loop
+  idempotent to prevent duplicate polling tasks.
+- Marked M2-F1, M2-F2, their build gate, and the 60s+jitter acceptance item complete. Kept the
+  Controller-backed stale-list E2E gate open.
+
+**Verification:**
+- Connector library tests: 82 passed.
+- Connector build: passed.
+- Client CRL, RelayPool, and verifier tests: 14 passed.
+- Client build: passed.
+- Full connector/client network suites compile, but local QUIC bind tests cannot execute in the
+  restricted sandbox (`Operation not permitted`).
+- Strict Clippy remains blocked by pre-existing repository-wide warnings; new CRL warnings fixed.
+
+**What's next:**
+- Complete M1 Phase C `/relay.crl`, then run the M2-F3 revocation E2E on a socket-capable host and
+  mark Phase F `done` only after it passes.

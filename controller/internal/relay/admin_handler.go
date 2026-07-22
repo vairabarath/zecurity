@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
@@ -25,6 +27,10 @@ type AdminHandler struct {
 	JWTSecret     string
 	Authz         *provider.Authz
 	ProviderStore *provider.Store
+	// OnRelayRevoked, if set, runs post-commit after a relay is revoked or deleted:
+	// it rebuilds+broadcasts the relay list and invalidates the transport snapshot
+	// for affected workspaces so connectors AND clients converge. Wired in main.go.
+	OnRelayRevoked func(ctx context.Context, relayID string)
 }
 
 type createRelayRequest struct {
@@ -158,7 +164,25 @@ func (h *AdminHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	if err := h.Store.MarkDeleted(ctx, relayID); err != nil {
+	// Revoke-then-remove, atomically: revoke the certs (so they land on the CRL),
+	// flip the relay to 'deleted', and write the audit — all in one tx. The relay
+	// row + relay_certificates are preserved for the CRL.
+	_, err := h.Store.RevokeRelay(ctx, relayID, "relay deleted", func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		if _, err := tx.Exec(ctx,
+			`UPDATE relays SET status = 'deleted', updated_at = NOW() WHERE id = $1`, relayID); err != nil {
+			return fmt.Errorf("mark relay deleted: %w", err)
+		}
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayDelete,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        map[string]any{"note": "revoke-then-remove", "serials_revoked": revoked},
+			IPAddress:      r.RemoteAddr,
+		})
+	})
+	if err != nil {
 		if errors.Is(err, ErrRelayNotFound) {
 			http.Error(w, "relay not found", http.StatusNotFound)
 			return
@@ -166,18 +190,66 @@ func (h *AdminHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to delete relay: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Convergence fan-out (broadcast + transport invalidation), post-commit.
+	if h.OnRelayRevoked != nil {
+		h.OnRelayRevoked(ctx, relayID)
+	}
 
-	// Append-only audit. Best-effort: the delete already committed.
-	if err := h.ProviderStore.InsertAudit(ctx, provider.AuditEntry{
-		ProviderUserID: &actor.UserID,
-		ProviderEmail:  actor.Email,
-		Action:         provider.ActionRelayDelete,
-		TargetType:     "relay",
-		TargetID:       relayID,
-		Details:        map[string]any{"note": "soft-delete; certificate NOT revoked (PENDING-02)"},
-		IPAddress:      r.RemoteAddr,
-	}); err != nil {
-		log.Printf("provider audit (relay.delete) failed for relay %s: %v", relayID, err)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Revoke revokes a relay's certificate(s) WITHOUT removing the relay. It marks the
+// relay 'revoked' (terminal), adds every unexpired serial to the CRL, and runs the
+// convergence fan-out post-commit.
+//
+// POST /provider/relays/{id}/revoke
+func (h *AdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	actor, ok := provider.ActorFromContext(r.Context())
+	if !ok {
+		http.Error(w, "no provider actor in context", http.StatusInternalServerError)
+		return
+	}
+	relayID := r.PathValue("id")
+	if relayID == "" {
+		http.Error(w, "relay id required", http.StatusBadRequest)
+		return
+	}
+	if err := h.Authz.CanRevokeRelay(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	reason := r.URL.Query().Get("reason")
+	_, err := h.Store.RevokeRelay(ctx, relayID, reason, func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
+			ProviderUserID: &actor.UserID,
+			ProviderEmail:  actor.Email,
+			Action:         provider.ActionRelayRevoke,
+			TargetType:     "relay",
+			TargetID:       relayID,
+			Details:        map[string]any{"serials_revoked": revoked, "reason": reason},
+			IPAddress:      r.RemoteAddr,
+		})
+	})
+	if err != nil {
+		if errors.Is(err, ErrRelayNotFound) {
+			http.Error(w, "relay not found", http.StatusNotFound)
+			return
+		}
+		http.Error(w, "failed to revoke relay: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Convergence fan-out (broadcast + transport invalidation), post-commit.
+	if h.OnRelayRevoked != nil {
+		h.OnRelayRevoked(ctx, relayID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

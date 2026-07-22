@@ -34,7 +34,8 @@ libc               = "0.2"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 aes-gcm     = "0.10"
-x509-parser = "0.16"
+x509-parser = { version = "0.18", features = ["verify"] }
+parking_lot = "0.12"
 
 # Phase 5 — add now so they compile clean:
 tun         = { version = "0.6", features = ["async"] }

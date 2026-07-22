@@ -37,6 +37,8 @@ pub struct RuntimeState {
     pub transport_snapshot: Option<TransportSnapshot>,
     /// Unix timestamp of the last successful transport snapshot fetch.
     pub transport_last_sync_at: Option<i64>,
+    /// Verified platform Relay CRL cache shared across tunnel restarts.
+    pub relay_crl: Option<crate::crl::CrlManager>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
     /// Ensures only one task refreshes the session tokens at a time.
@@ -93,7 +95,6 @@ pub struct SessionInfo {
     pub expires_at: i64, // Unix timestamp
 }
 
-
 /// Shared handle used across async tasks.
 pub type SharedState = Arc<RwLock<RuntimeState>>;
 
@@ -108,6 +109,7 @@ pub fn new_shared() -> SharedState {
         acl_last_sync_at: None,
         transport_snapshot: None,
         transport_last_sync_at: None,
+        relay_crl: None,
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),

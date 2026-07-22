@@ -2,7 +2,10 @@ use super::ca_cert_url;
 
 #[test]
 fn bare_host_port_defaults_to_http() {
-    assert_eq!(ca_cert_url("127.0.0.1:8080"), "http://127.0.0.1:8080/ca.crt");
+    assert_eq!(
+        ca_cert_url("127.0.0.1:8080"),
+        "http://127.0.0.1:8080/ca.crt"
+    );
     assert_eq!(
         ca_cert_url("controller.example.com:8080"),
         "http://controller.example.com:8080/ca.crt"

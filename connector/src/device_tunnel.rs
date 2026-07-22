@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use x509_parser::prelude::*;
 
 use crate::agent_tunnel::AgentTunnelHub;
-use crate::crl::CrlManager;
+use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
@@ -143,19 +143,33 @@ pub async fn handle_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    if crl_manager.is_revoked(&cert_serial) {
-        let response = TunnelResponse {
-            ok: false,
-            error: Some("certificate revoked".to_string()),
-            quic_addr: quic_advertise_addr().map(String::from),
-        };
-        send_response(&mut stream, &response).await?;
-        return Err(anyhow!(
-            "certificate revoked for spiffe_id={}",
-            client_spiffe_id
-        ));
+    match crl_manager.check(&cert_serial) {
+        RevocationStatus::NotRevoked => {}
+        RevocationStatus::Unavailable => {
+            let response = TunnelResponse {
+                ok: false,
+                error: Some("certificate revocation state unavailable".to_string()),
+                quic_addr: quic_advertise_addr().map(String::from),
+            };
+            send_response(&mut stream, &response).await?;
+            return Err(anyhow!(
+                "certificate revocation state unavailable for spiffe_id={}",
+                client_spiffe_id
+            ));
+        }
+        RevocationStatus::Revoked => {
+            let response = TunnelResponse {
+                ok: false,
+                error: Some("certificate revoked".to_string()),
+                quic_addr: quic_advertise_addr().map(String::from),
+            };
+            send_response(&mut stream, &response).await?;
+            return Err(anyhow!(
+                "certificate revoked for spiffe_id={}",
+                client_spiffe_id
+            ));
+        }
     }
-
     let req: TunnelRequest = read_framed_json(&mut stream)
         .await
         .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
