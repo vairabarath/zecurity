@@ -86,6 +86,9 @@ func TestHandleConnectorRelayState_Connected(t *testing.T) {
 	if notifier.lastWorkspaceID != "ws-123" {
 		t.Fatalf("expected topology notification for ws-123, got %q", notifier.lastWorkspaceID)
 	}
+	if len(notifier.lastConnectorIDs) != 1 || notifier.lastConnectorIDs[0] != "conn-abc" {
+		t.Fatalf("expected topology notification only for conn-abc, got %v", notifier.lastConnectorIDs)
+	}
 }
 
 func TestHandleConnectorRelayState_Connected_NoChange(t *testing.T) {
@@ -156,6 +159,9 @@ func TestHandleConnectorRelayState_Disconnected(t *testing.T) {
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
 		t.Fatalf("expected topology notification for ws-123, got %q", notifier.lastWorkspaceID)
+	}
+	if len(notifier.lastConnectorIDs) != 1 || notifier.lastConnectorIDs[0] != "conn-abc" {
+		t.Fatalf("expected topology notification only for conn-abc, got %v", notifier.lastConnectorIDs)
 	}
 }
 
@@ -263,6 +269,9 @@ func TestHandleConnectorRelayState_Switched(t *testing.T) {
 	}
 	if notifier.lastWorkspaceID != "ws-123" {
 		t.Fatal("expected topology notification on switch")
+	}
+	if len(notifier.lastConnectorIDs) != 1 || notifier.lastConnectorIDs[0] != "conn-abc" {
+		t.Fatalf("expected topology notification only for conn-abc, got %v", notifier.lastConnectorIDs)
 	}
 }
 

@@ -4,7 +4,7 @@ member: M3
 sprint: 13
 phase: 2
 title: Transport Propagation — TransportNotifier + trigger rewiring
-status: planned
+status: done
 depends_on:
   - Sprint13/Member3-Go-Rust/Phase1-Transport-Proto-and-Compiler
 tags: [go, transport, propagation, notifier, relay, acl-decoupling, pending-03]
@@ -78,12 +78,33 @@ address (or evict it) and confirm (a) the affected connector receives a new `Tra
 
 ## Implementation checklist
 
-- [ ] **B1** `TransportNotifier` (connector-scoped versions, workspace cache invalidation)
-- [ ] **B2** `transport_push.go` topology-scoped push
-- [ ] **B3** rewire heartbeat/expiry/registration triggers to `NotifyTopologyChange`
-- [ ] **B4** (optional) `transport_version` convergence observable
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **B1 (architecture-corrected)** `TransportNotifier` with workspace-scoped versions/cache invalidation and an affected-connector advisory parameter
+- [x] **B2 (architecture-corrected)** client polling plus failure-triggered re-poll replaces connector proactive push
+- [x] **B3** rewire heartbeat/expiry/placement triggers to `NotifyTopologyChange`; transport-only placement changes do not notify policy
+- [x] **B4** (optional) `transport_version` convergence observable
+- [x] **Build gate:** `cd controller && go build ./...`
+- [x] **Tests:** AT-CORE/AT-CORE-R notifier isolation, monotonic versions, and exact heartbeat/expiry/placement connector scoping
+
+> B4 remains an optional observability follow-up; it does not block the implemented propagation phase.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: Client-poll propagation replaces connector-scoped push
+
+**Issue:** The original design proposed pushing client routing topology through connector streams
+and maintaining connector-scoped transport versions. That path had no consumer at the connector.
+
+**Fix applied:** Commit `90803e4` removed `transport_push.go` and its push hook. Topology events now
+invalidate the workspace transport cache and bump an independent workspace transport version; the
+client polls that snapshot and performs an early re-poll after relay failure. The
+`affectedConnectorIDs` argument is retained for topology context but is not a delivery target.
+
+**Related behavior:** Relay heartbeat/expiry and connector placement changes call
+`NotifyTopologyChange`. Policy and transport versions remain separate. The version state is
+process-local and therefore assumes a single controller instance, as documented by the later
+single-controller clarification (`ef7f72c`).
+
+**Verification:** Executable tests now prove AT-CORE/AT-CORE-R version and cache isolation at the
+notifier boundary, exercise the real relay-heartbeat → transport-notifier path, and verify exact
+workspace/connector scoping for relay heartbeat, relay expiry, and connector placement changes.
+The runtime client failover/convergence E2E remains a sprint-level acceptance gate.

@@ -184,9 +184,9 @@ tags:
 
 #### F5 — TUN Mode (Depends on: F4 done + Sprint 8 Connector `:9092` listener live)
 
-- [ ] **M4-F16** `client/src/tun_mode.rs` — reads cert + key from `RuntimeState` (in memory), builds `rustls::ClientConfig`, creates TUN interface, IP packet forwarding loop to Connector `:9092`
-- [ ] Wire `TunTunnel::run()` into `connect.rs` replacing `tunnel_placeholder()`
-- [ ] Systemd unit: add `AmbientCapabilities=CAP_NET_ADMIN` for TUN device access
+- [x] **M4-F16** `client/src/tun_mode.rs` — reads cert + key from `RuntimeState` (in memory), builds `rustls::ClientConfig`, creates TUN interface, IP packet forwarding loop to Connector `:9092`
+- [x] Wire `TunTunnel::run()` into `connect.rs` replacing `tunnel_placeholder()`
+- [x] Systemd unit: add `AmbientCapabilities=CAP_NET_ADMIN` for TUN device access
 
 > Build check: `cd client && cargo build` passes.
 
@@ -218,26 +218,26 @@ M3-B  M3-C           M1-E          M4-F1
 
 ## Final Verification Checklist
 
-- [ ] `buf generate` — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd client && cargo build` — clean (warnings OK)
-- [ ] `cd admin && npm run build` — clean
-- [ ] `zecurity-client setup --workspace myworkspace` writes `/etc/zecurity/client.conf` (workspace only)
-- [ ] Session/cert metadata is persisted to client state; private key is encrypted at rest and plaintext exists only in process memory
-- [ ] `zecurity-client login` opens browser, completes OAuth, saves encrypted state, prints "Logged in as user@example.com", exits
-- [ ] `zecurity-client status` prints workspace from config + "Logged in as user@example.com, cert expires in ..."
-- [ ] `zecurity-client status` with no config prints "Not configured"
-- [ ] `zecurity-client logout` deletes saved state + AES key file
-- [ ] `zecurity-client invite --email user@example.com` runs login to authenticate via OAuth, then calls HTTP API
-- [ ] Admin UI: ADMIN login → /dashboard; MEMBER login → /client-install
-- [ ] `/invite/:token` page shows workspace + inviter info + Google sign-in button
-- [ ] After invite acceptance: user added to workspace as MEMBER, redirect to /client-install
-- [ ] ADMIN user sees "Install Client" button in sidebar/header
-- [ ] `GET /api/invitations/:token` returns 404 for expired/unknown tokens
-- [ ] `POST /api/invitations` returns 403 for non-admin JWT
-- [ ] `zecurity-client login` (TUN mode, requires Sprint 8 Connector) creates `tun0` (100.64.0.2/24), routes packets through Connector `:9092`
-- [ ] mTLS to Connector uses cert + key from RuntimeState — no disk file involved
-- [ ] Connector rejects revoked cert → client logs error, clears RuntimeState, retries login
+- [x] `buf generate` — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd client && cargo build` — clean (warnings OK)
+- [x] `cd admin && npm run build` — clean
+- [x] `zecurity-client setup --workspace myworkspace` writes `/etc/zecurity/client.conf` (workspace only)
+- [x] Session/cert metadata is persisted to client state; private key is encrypted at rest and plaintext exists only in process memory
+- [x] `zecurity-client login` opens browser, completes OAuth, saves encrypted state, prints "Logged in as user@example.com", exits
+- [x] `zecurity-client status` prints workspace from config + "Logged in as user@example.com, cert expires in ..."
+- [x] `zecurity-client status` with no config prints "Not configured"
+- [x] `zecurity-client logout` deletes saved state + AES key file
+- [x] `zecurity-client invite --email user@example.com` runs login to authenticate via OAuth, then calls HTTP API
+- [x] Admin UI: ADMIN login → /dashboard; MEMBER login → /client-install
+- [x] `/invite/:token` page shows workspace + inviter info + Google sign-in button
+- [x] After invite acceptance: user added to workspace as MEMBER, redirect to /client-install
+- [x] ADMIN user sees "Install Client" button in sidebar/header
+- [x] `GET /api/invitations/:token` returns 404 for expired/unknown tokens
+- [x] `POST /api/invitations` returns 403 for non-admin JWT
+- [x] `zecurity-client login` (TUN mode, requires Sprint 8 Connector) creates `tun0` (100.64.0.2/24), routes packets through Connector `:9092`
+- [x] mTLS to Connector uses cert + key from RuntimeState — no disk file involved
+- [x] Connector rejects revoked cert → client logs error, clears RuntimeState, retries login
 
 ---
 

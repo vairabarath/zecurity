@@ -39,25 +39,25 @@ tags:
 
 ### 1. Create `proto/shield/v1/shield.proto`
 
-- [ ] Create directory `proto/shield/v1/`
-- [ ] Write proto with package `shield.v1`
-- [ ] `option go_package = "github.com/vairabarath/zecurity/gen/go/proto/shield/v1;shieldv1";`
-- [ ] `service ShieldService` with 4 RPCs: `Enroll`, `Heartbeat`, `RenewCert`, `Goodbye`
-- [ ] All messages defined: `EnrollRequest`, `EnrollResponse`, `HeartbeatRequest`, `HeartbeatResponse`, `RenewCertRequest`, `RenewCertResponse`, `GoodbyeRequest`, `GoodbyeResponse`
-- [ ] `EnrollResponse` includes: `certificate_pem`, `workspace_ca_pem`, `intermediate_ca_pem`, `shield_id`, `interface_addr`, `connector_addr`, `connector_id`
-- [ ] `HeartbeatResponse` includes: `ok`, `latest_version`, `re_enroll`
+- [x] Create directory `proto/shield/v1/`
+- [x] Write proto with package `shield.v1`
+- [x] `option go_package = "github.com/vairabarath/zecurity/gen/go/proto/shield/v1;shieldv1";`
+- [x] `service ShieldService` with 4 RPCs: `Enroll`, `Heartbeat`, `RenewCert`, `Goodbye`
+- [x] All messages defined: `EnrollRequest`, `EnrollResponse`, `HeartbeatRequest`, `HeartbeatResponse`, `RenewCertRequest`, `RenewCertResponse`, `GoodbyeRequest`, `GoodbyeResponse`
+- [x] `EnrollResponse` includes: `certificate_pem`, `workspace_ca_pem`, `intermediate_ca_pem`, `shield_id`, `interface_addr`, `connector_addr`, `connector_id`
+- [x] `HeartbeatResponse` includes: `ok`, `latest_version`, `re_enroll`
 
 > See sprint4-shield-plan.md for full proto content.
 
 ### 2. Modify `proto/connector/v1/connector.proto`
 
-- [ ] Add `Goodbye` RPC to `ConnectorService`:
+- [x] Add `Goodbye` RPC to `ConnectorService`:
   ```protobuf
   rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
   ```
-- [ ] Add `GoodbyeRequest` message: `{ string connector_id = 1; }`
-- [ ] Add `GoodbyeResponse` message: `{ bool ok = 1; }`
-- [ ] Add `ShieldHealth` message:
+- [x] Add `GoodbyeRequest` message: `{ string connector_id = 1; }`
+- [x] Add `GoodbyeResponse` message: `{ bool ok = 1; }`
+- [x] Add `ShieldHealth` message:
   ```protobuf
   message ShieldHealth {
     string shield_id         = 1;
@@ -66,12 +66,12 @@ tags:
     int64  last_heartbeat_at = 4;
   }
   ```
-- [ ] Add `shields` field to `HeartbeatRequest`: `repeated ShieldHealth shields = 5;`
-- [ ] **Do NOT remove or renumber existing fields.** Proto field numbers are permanent.
+- [x] Add `shields` field to `HeartbeatRequest`: `repeated ShieldHealth shields = 5;`
+- [x] **Do NOT remove or renumber existing fields.** Proto field numbers are permanent.
 
 ### 3. Modify `controller/internal/appmeta/identity.go`
 
-- [ ] Add Shield constants block (after existing connector constants):
+- [x] Add Shield constants block (after existing connector constants):
   ```go
   const (
       SPIFFERoleShield    = "shield"
@@ -80,13 +80,13 @@ tags:
       ShieldInterfaceCIDR = "100.64.0.0/10"
   )
   ```
-- [ ] Add `ShieldSPIFFEID()` function:
+- [x] Add `ShieldSPIFFEID()` function:
   ```go
   func ShieldSPIFFEID(trustDomain, shieldID string) string {
       return "spiffe://" + trustDomain + "/" + SPIFFERoleShield + "/" + shieldID
   }
   ```
-- [ ] **Do NOT remove existing constants.** Connectors still use them.
+- [x] **Do NOT remove existing constants.** Connectors still use them.
 
 ### 4. Run buf generate (team step — anyone can do this after commit)
 
@@ -97,11 +97,11 @@ buf generate
 # Verify: controller/gen/go/proto/connector/v1/ updated with Goodbye + ShieldHealth
 ```
 
-- [ ] Buf generate runs cleanly (no errors)
-- [ ] `controller/gen/go/proto/shield/v1/shield.pb.go` exists
-- [ ] `controller/gen/go/proto/shield/v1/shield_grpc.pb.go` exists
-- [ ] Connector stubs updated with `GoodbyeRequest`, `ShieldHealth`
-- [ ] `cd controller && go build ./...` passes (stubs compile, no import errors)
+- [x] Buf generate runs cleanly (no errors)
+- [x] `controller/gen/go/proto/shield/v1/shield.pb.go` exists
+- [x] `controller/gen/go/proto/shield/v1/shield_grpc.pb.go` exists
+- [x] Connector stubs updated with `GoodbyeRequest`, `ShieldHealth`
+- [x] `cd controller && go build ./...` passes (stubs compile, no import errors)
 
 ---
 

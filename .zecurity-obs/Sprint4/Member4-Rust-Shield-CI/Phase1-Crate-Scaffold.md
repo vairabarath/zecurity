@@ -44,8 +44,8 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
 
 ### Cargo.toml
 
-- [ ] `[package]`: `name = "zecurity-shield"`, `version = "0.1.0"`, `edition = "2021"`
-- [ ] `[dependencies]`:
+- [x] `[package]`: `name = "zecurity-shield"`, `version = "0.1.0"`, `edition = "2021"`
+- [x] `[dependencies]`:
   - `tokio = { version = "1", features = ["full"] }`
   - `tonic = { version = "0.14", features = ["tls"] }` — match connector's tonic version
   - `prost = "0.14"` — match connector's prost version
@@ -67,13 +67,13 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
   - `tokio-retry = "0.3"` — enrollment retry backoff
   - `rtnetlink = "0.14"` — zecurity0 TUN interface creation
   - `nftables = "0.4"` — nftables rules (check crate name on crates.io)
-- [ ] `[build-dependencies]`: `tonic-build = "0.14"`
+- [x] `[build-dependencies]`: `tonic-build = "0.14"`
 
 > **Version alignment:** Check `connector/Cargo.toml` for exact versions of tonic, prost, rustls, tokio. Use the same versions to avoid dependency conflicts in a future workspace.
 
 ### build.rs
 
-- [ ] Single call:
+- [x] Single call:
   ```rust
   fn main() -> Result<(), Box<dyn std::error::Error>> {
       tonic_build::compile_protos("../proto/shield/v1/shield.proto")?;
@@ -83,7 +83,7 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
 
 ### Cross.toml
 
-- [ ] Mirror `connector/Cross.toml`:
+- [x] Mirror `connector/Cross.toml`:
   ```toml
   [build.pre-build]
   cmd = ["apt-get", "install", "-y", "protobuf-compiler"]
@@ -91,11 +91,11 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
 
 ### Dockerfile
 
-- [ ] Mirror `connector/Dockerfile`. Change binary name from `zecurity-connector` to `zecurity-shield`.
+- [x] Mirror `connector/Dockerfile`. Change binary name from `zecurity-connector` to `zecurity-shield`.
 
 ### src/main.rs (stub)
 
-- [ ] Minimal stub to verify compilation:
+- [x] Minimal stub to verify compilation:
   ```rust
   fn main() {
       println!("zecurity-shield stub");

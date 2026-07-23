@@ -176,7 +176,7 @@ cd relay && cargo build
 - [x] A tenant JWT is rejected by `RequireProvider`; a provider JWT is rejected by tenant `AuthMiddleware`.
 - [x] Every provider action writes a `provider_audit_logs` row (actor + target + details).
 - [x] Super-admin #0 is seeded from `PROVIDER_BOOTSTRAP_EMAILS` on startup.
-- [ ] The relay client sends its provisioning token and provisions end-to-end.
+- [x] The relay client sends its provisioning token and provisions end-to-end.
 
 ## Deferred
 

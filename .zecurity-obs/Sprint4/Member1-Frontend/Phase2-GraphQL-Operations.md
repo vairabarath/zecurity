@@ -43,7 +43,7 @@ Write the GraphQL operation files (mutations + queries) and run codegen to gener
 
 ### mutations.graphql — Add:
 
-- [ ] `GenerateShieldToken` mutation:
+- [x] `GenerateShieldToken` mutation:
 ```graphql
 mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
   generateShieldToken(remoteNetworkId: $remoteNetworkId, shieldName: $shieldName) {
@@ -53,14 +53,14 @@ mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
 }
 ```
 
-- [ ] `RevokeShield` mutation:
+- [x] `RevokeShield` mutation:
 ```graphql
 mutation RevokeShield($id: ID!) {
   revokeShield(id: $id)
 }
 ```
 
-- [ ] `DeleteShield` mutation:
+- [x] `DeleteShield` mutation:
 ```graphql
 mutation DeleteShield($id: ID!) {
   deleteShield(id: $id)
@@ -69,7 +69,7 @@ mutation DeleteShield($id: ID!) {
 
 ### queries.graphql — Add:
 
-- [ ] `GetShields` query:
+- [x] `GetShields` query:
 ```graphql
 query GetShields($remoteNetworkId: ID!) {
   shields(remoteNetworkId: $remoteNetworkId) {
@@ -90,8 +90,8 @@ query GetShields($remoteNetworkId: ID!) {
 
 ### Codegen
 
-- [ ] Run `cd admin && npm run codegen`
-- [ ] Verify generated hooks exist:
+- [x] Run `cd admin && npm run codegen`
+- [x] Verify generated hooks exist:
   - `useGenerateShieldTokenMutation`
   - `useRevokeShieldMutation`
   - `useDeleteShieldMutation`

@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"encoding/hex"
 	"sync"
 	"time"
 )
@@ -55,6 +56,9 @@ func (c *RelayRevocationChecker) Ready() bool {
 
 // IsRevoked reports whether serialHex (canonical SerialNumber.Text(16)) is revoked.
 func (c *RelayRevocationChecker) IsRevoked(serialHex string) bool {
+	if _, err := hex.DecodeString(serialHex); err != nil {
+		return true // reject malformed serials (fail-closed)
+	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	_, ok := c.revoked[serialHex]

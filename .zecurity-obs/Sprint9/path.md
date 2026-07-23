@@ -191,28 +191,28 @@ QUIC/UDP on the same port (`:9092`) is advertised in every `TunnelResponse` so c
 
 Run these once all phases are complete:
 
-- [ ] `buf generate` (from repo root) — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd connector && cargo build` — clean (warnings OK)
-- [ ] `cargo build --manifest-path shield/Cargo.toml` — clean
-- [ ] `cd admin && npm run build` — clean
+- [x] `buf generate` (from repo root) — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd connector && cargo build` — clean (warnings OK)
+- [x] `cargo build --manifest-path shield/Cargo.toml` — clean
+- [x] `cd admin && npm run build` — clean
 **TCP gate (Sprint 9 completion criteria — must all pass):**
-- [ ] `zecurity up` creates `zecurity0` TUN interface with configurable host address (default `100.64.0.1/32`)
-- [ ] Routes for ACL snapshot resource IPs appear in routing table on client machine
-- [ ] App connects to resource IP directly → traffic intercepted by TUN → flows through Connector → reaches resource (no `zecurity connect` needed)
-- [ ] Protected resource (behind Shield nftables): traffic relays via Shield tunnel relay — still reachable through TUN transparent proxy
-- [ ] Unprotected resource: traffic routes via `copy_bidirectional` on Connector — reachable through TUN transparent proxy
-- [ ] Multiple simultaneous connections to different resources work (QUIC stream multiplexing — not multiple QUIC connections)
-- [ ] Device cert is revoked → Connector rejects with "certificate revoked"
-- [ ] Client SPIFFE ID not in ACL snapshot → Connector denies access
-- [ ] `zecurity down` removes `zecurity0` and all routes cleanly
-- [ ] QUIC `quic_addr` present in every `TunnelResponse` (even rejections)
-- [ ] Systemd watchdog: `WATCHDOG=1` notifications appear in `journalctl` for connector service
-- [ ] Daemon exit (SIGTERM) cleans up TUN and routes — no dangling `zecurity0` after daemon stops
+- [x] `zecurity up` creates `zecurity0` TUN interface with configurable host address (default `100.64.0.1/32`)
+- [x] Routes for ACL snapshot resource IPs appear in routing table on client machine
+- [x] App connects to resource IP directly → traffic intercepted by TUN → flows through Connector → reaches resource (no `zecurity connect` needed)
+- [x] Protected resource (behind Shield nftables): traffic relays via Shield tunnel relay — still reachable through TUN transparent proxy
+- [x] Unprotected resource: traffic routes via `copy_bidirectional` on Connector — reachable through TUN transparent proxy
+- [x] Multiple simultaneous connections to different resources work (QUIC stream multiplexing — not multiple QUIC connections)
+- [x] Device cert is revoked → Connector rejects with "certificate revoked"
+- [x] Client SPIFFE ID not in ACL snapshot → Connector denies access
+- [x] `zecurity down` removes `zecurity0` and all routes cleanly
+- [x] QUIC `quic_addr` present in every `TunnelResponse` (even rejections)
+- [x] Systemd watchdog: `WATCHDOG=1` notifications appear in `journalctl` for connector service
+- [x] Daemon exit (SIGTERM) cleans up TUN and routes — no dangling `zecurity0` after daemon stops
 
 **UDP stretch goal (Sprint 9 if time allows, else Sprint 10):**
-- [ ] App sends UDP to resource IP → intercepted by TUN → relayed via `relay_udp()` with 4-byte length prefix
-- [ ] UDP session idle timeout (30s) cleans up stale sessions
+- [x] App sends UDP to resource IP → intercepted by TUN → relayed via `relay_udp()` with 4-byte length prefix
+- [x] UDP session idle timeout (30s) cleans up stale sessions
 
 ---
 

@@ -4,7 +4,7 @@ member: M1
 sprint: 14
 phase: 1
 title: Relay Cert-History + Revocation Data Model
-status: planned
+status: done
 depends_on: []
 tags: [go, relay, pki, revocation, data-model, pending-02]
 ---
@@ -79,10 +79,10 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-A1** migration `027_relay_certificates.sql` (no cascade-delete).
-- [ ] **M1-A2** `RecordIssuedCert` / `RevokeAllForRelay` / `ListRevokedRelaySerials`.
-- [ ] **M1-A3** `MarkProvisioned` records the issued cert in the same transaction; `BuildLabelledRelayList` excludes revoked.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-A1** migration `027_relay_certificates.sql` (no cascade-delete).
+- [x] **M1-A2** `RecordIssuedCert` / `RevokeAllForRelay` / `ListRevokedRelaySerials`.
+- [x] **M1-A3** `MarkProvisioned` records the issued cert in the same transaction; `BuildLabelledRelayList` excludes revoked.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **Serial normalization (must-fix).** Existing issuance/heartbeat storage uses

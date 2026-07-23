@@ -40,13 +40,13 @@ Add NetworkHealth indicator to the RemoteNetworks page and Shield count summary.
 
 ### RemoteNetworks.tsx
 
-- [ ] Add `networkHealth` and `shields` fields to `GetRemoteNetworks` query (or create a new query variant)
-- [ ] Run codegen to pick up `NetworkHealth` enum and `shields` field on `RemoteNetwork`
-- [ ] Add NetworkHealth indicator next to each network name:
+- [x] Add `networkHealth` and `shields` fields to `GetRemoteNetworks` query (or create a new query variant)
+- [x] Run codegen to pick up `NetworkHealth` enum and `shields` field on `RemoteNetwork`
+- [x] Add NetworkHealth indicator next to each network name:
   - `ONLINE` → green dot or "🟢 Online" label (≥1 connector ACTIVE)
   - `DEGRADED` → amber dot or "🟡 Degraded" (connectors exist but none ACTIVE)
   - `OFFLINE` → red dot or "🔴 Offline" (no connectors)
-- [ ] Add Shield count to each network card:
+- [x] Add Shield count to each network card:
   ```
   "2 / 3 connectors active · 4 shields active"
   ```
@@ -55,9 +55,9 @@ Add NetworkHealth indicator to the RemoteNetworks page and Shield count summary.
 
 ### Sidebar.tsx
 
-- [ ] Confirm "Shields" nav link is under "Connectors" (done in Phase 1)
-- [ ] If network context is available, link to `/remote-networks/:id/shields`
-- [ ] If no network selected, disable or show unlinked
+- [x] Confirm "Shields" nav link is under "Connectors" (done in Phase 1)
+- [x] If network context is available, link to `/remote-networks/:id/shields`
+- [x] If no network selected, disable or show unlinked
 
 ---
 

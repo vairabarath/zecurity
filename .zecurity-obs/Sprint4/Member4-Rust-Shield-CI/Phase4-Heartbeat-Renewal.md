@@ -43,8 +43,8 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
 
 ### heartbeat.rs (historical — now `shield/src/control_stream.rs`)
 
-- [ ] `pub async fn run(state: ShieldState, cfg: ShieldConfig) -> anyhow::Result<()>`
-- [ ] Build mTLS config:
+- [x] `pub async fn run(state: ShieldState, cfg: ShieldConfig) -> anyhow::Result<()>`
+- [x] Build mTLS config:
   - Client cert: `shield.crt`
   - Client key: `shield.key`
   - Trust root: `workspace_ca.crt`
@@ -55,9 +55,9 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
         appmeta::SPIFFE_ROLE_CONNECTOR,
         state.connector_id);
     ```
-- [ ] Connect to `state.connector_addr` (e.g. `192.168.1.10:9091`)
-- [ ] Create `ShieldServiceClient::new(channel)`
-- [ ] Loop every `cfg.shield_heartbeat_interval_secs`:
+- [x] Connect to `state.connector_addr` (e.g. `192.168.1.10:9091`)
+- [x] Create `ShieldServiceClient::new(channel)`
+- [x] Loop every `cfg.shield_heartbeat_interval_secs`:
   ```rust
   let req = HeartbeatRequest {
       shield_id: state.shield_id.clone(),    // logging on Connector side
@@ -66,38 +66,38 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
       public_ip: util::get_public_ip().unwrap_or_default(),
   };
   ```
-- [ ] On `Ok(resp)`:
+- [x] On `Ok(resp)`:
   - Reset `consecutive_failures = 0`
   - If `resp.re_enroll` → call `renewal::renew_cert(&mut state, &cfg).await`
-- [ ] On `Err(e)`:
+- [x] On `Err(e)`:
   - `consecutive_failures += 1`
   - `backoff = min(5 * 2^(failures-1), 60)` seconds
   - `warn!("heartbeat to connector failed attempt={}", failures)`
   - `tokio::time::sleep(Duration::from_secs(backoff)).await`
-- [ ] `pub async fn goodbye(state: &ShieldState, cfg: &ShieldConfig)` — best-effort Goodbye call on SIGTERM
+- [x] `pub async fn goodbye(state: &ShieldState, cfg: &ShieldConfig)` — best-effort Goodbye call on SIGTERM
 
 ### renewal.rs
 
-- [ ] `pub async fn renew_cert(state: &mut ShieldState, cfg: &ShieldConfig) -> anyhow::Result<()>`
-- [ ] Step 1: Read `shield.key` from disk
-- [ ] Step 2: Build CSR with same SPIFFE SAN (proof of key possession, same keypair):
+- [x] `pub async fn renew_cert(state: &mut ShieldState, cfg: &ShieldConfig) -> anyhow::Result<()>`
+- [x] Step 1: Read `shield.key` from disk
+- [x] Step 2: Build CSR with same SPIFFE SAN (proof of key possession, same keypair):
   - `crypto::build_csr(key, cn, spiffe_uri)`
   - Uses existing private key — does NOT generate a new keypair
-- [ ] Step 3: Call `RenewCert` on Connector :9091 (uses same mTLS channel):
+- [x] Step 3: Call `RenewCert` on Connector :9091 (uses same mTLS channel):
   ```rust
   let req = RenewCertRequest {
       shield_id: state.shield_id.clone(),
       csr_der:   csr,
   };
   ```
-- [ ] Step 4: Receive `RenewCertResponse`
+- [x] Step 4: Receive `RenewCertResponse`
   - Save `shield.crt` (new cert, same key)
   - Save `workspace_ca.crt` (updated chain)
-- [ ] Step 5: Parse new `cert_not_after` from new cert PEM
-- [ ] Step 6: Update `state.cert_not_after` + save `state.json`
-- [ ] Step 7: Rebuild mTLS channel in heartbeat loop with new cert
+- [x] Step 5: Parse new `cert_not_after` from new cert PEM
+- [x] Step 6: Update `state.cert_not_after` + save `state.json`
+- [x] Step 7: Rebuild mTLS channel in heartbeat loop with new cert
   - Return updated state to heartbeat.rs (now `control_stream.rs`) which rebuilds channel
-- [ ] Log `info!("cert renewed shield_id={} new_expiry={}", ...)`
+- [x] Log `info!("cert renewed shield_id={} new_expiry={}", ...)`
 
 ---
 

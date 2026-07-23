@@ -1862,6 +1862,43 @@ fn now_unix() -> i64 {
 mod recovery_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn tunnel_restart_lock_serializes_lifecycle_transitions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let state = crate::runtime::new_shared();
+        let restart_lock = state.read().await.tunnel_restart_lock.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum_active = Arc::new(AtomicUsize::new(0));
+
+        let run_transition = |restart_lock: Arc<tokio::sync::Mutex<()>>,
+                              active: Arc<AtomicUsize>,
+                              maximum_active: Arc<AtomicUsize>| async move {
+            let _guard = restart_lock.lock().await;
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum_active.fetch_max(current, Ordering::SeqCst);
+
+            tokio::task::yield_now().await;
+
+            active.fetch_sub(1, Ordering::SeqCst);
+        };
+
+        let first = run_transition(
+            restart_lock.clone(),
+            active.clone(),
+            maximum_active.clone(),
+        );
+        let second = run_transition(restart_lock, active, maximum_active.clone());
+
+        tokio::join!(first, second);
+
+        assert_eq!(
+            maximum_active.load(Ordering::SeqCst),
+            1,
+            "tunnel lifecycle transitions must never overlap"
+        );
+    }
+
     #[test]
     fn recovery_is_single_flight() {
         let now = tokio::time::Instant::now();

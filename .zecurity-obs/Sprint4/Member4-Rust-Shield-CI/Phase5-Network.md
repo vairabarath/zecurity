@@ -49,7 +49,7 @@ Implement `network::setup()` which creates the `zecurity0` TUN interface and bas
   1. Create TUN interface named `"zecurity0"` (`RTM_NEWLINK`, kind `"tun"`, mode tun)
   2. Assign `interface_addr` (parse CIDR, add address via `RTM_NEWADDR`)
   3. Bring interface UP (`RTM_NEWLINK` with `IFF_UP`)
-- [ ] Shell equivalent (for reference):
+- [x] Shell equivalent (for reference):
   ```bash
   ip tuntap add dev zecurity0 mode tun
   ip addr add 100.64.0.1/32 dev zecurity0

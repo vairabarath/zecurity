@@ -47,9 +47,9 @@ func NewConfig(db *pgxpool.Pool) Config {
 }
 ```
 
-- [ ] File created
-- [ ] `Config` struct with `DB *pgxpool.Pool`
-- [ ] `NewConfig()` constructor
+- [x] File created
+- [x] `Config` struct with `DB *pgxpool.Pool`
+- [x] `NewConfig()` constructor
 
 ### 2. Create `controller/internal/resource/store.go`
 
@@ -132,16 +132,16 @@ Implement these functions:
 //   WHERE r.tenant_id=$1 AND r.deleted_at IS NULL
 ```
 
-- [ ] All functions implemented
-- [ ] `AutoMatchShield` returns descriptive error when no shield found
-- [ ] `RecordAck` updates `last_verified_at` from Shield-reported timestamp
-- [ ] `applied_at` set only when status transitions to `protected`
+- [x] All functions implemented
+- [x] `AutoMatchShield` returns descriptive error when no shield found
+- [x] `RecordAck` updates `last_verified_at` from Shield-reported timestamp
+- [x] `applied_at` set only when status transitions to `protected`
 
 ### 3. Wire into Resolver struct
 
 In `controller/graph/resolvers/resolver.go`:
-- [ ] Add `ResourceCfg resource.Config` to `Resolver` struct
-- [ ] Wire in `cmd/server/main.go`: `ResourceCfg: resource.NewConfig(pool)`
+- [x] Add `ResourceCfg resource.Config` to `Resolver` struct
+- [x] Wire in `cmd/server/main.go`: `ResourceCfg: resource.NewConfig(pool)`
 
 ---
 

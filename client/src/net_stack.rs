@@ -135,22 +135,26 @@ enum FramedJsonError {
     #[error("frame too large: {0} bytes")]
     FrameTooLarge(usize),
 }
-
 impl FramedJsonError {
-    /// True only for genuine transport I/O failures. Protocol failures — malformed
-    /// JSON (`Decode`), oversized frames (`FrameTooLarge`), encode errors — are NOT
-    /// transport failures: the path reached the peer fine, so re-polling the
-    /// transport plane cannot help.
+    /// True only for connectivity failures that may be repaired by fetching
+    /// updated transport coordinates.
     ///
-    /// Deliberately broad (`Io(_)`, not an `ErrorKind` allowlist): every `Io` here
-    /// originates from the QUIC stream read/write, because the JSON/size failures
-    /// are separate variants. Verified against quinn 0.11.9 — a lost connection
-    /// maps to `ConnectionReset`/`NotConnected` and a clean close to `UnexpectedEof`,
-    /// all `Io`. Broad also survives future quinn error-mapping changes, and an
-    /// unnecessary resync is cheap whereas a missed one strands the client on a
-    /// dead relay until the next 60s tick.
+    /// Protocol errors, malformed responses, oversized frames, encoding
+    /// failures, and unrelated local I/O errors must not trigger recovery.
     fn is_transport_failure(&self) -> bool {
-        matches!(self, Self::Io(_))
+        matches!(
+            self,
+            Self::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::NotConnected
+                )
+        )
     }
 }
 
@@ -645,6 +649,62 @@ fn smoltcp_now() -> SmolInstant {
 mod tests {
     use super::*;
     use tokio::io::{duplex, AsyncWriteExt};
+
+    #[test]
+    fn connectivity_io_kinds_are_transport_failures() {
+        let kinds = [
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotConnected,
+        ];
+
+        for kind in kinds {
+            let error = FramedJsonError::Io(std::io::Error::from(kind));
+            assert!(
+                error.is_transport_failure(),
+                "{kind:?} must trigger transport recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_io_kinds_are_not_transport_failures() {
+        let kinds = [
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::InvalidInput,
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::WouldBlock,
+        ];
+
+        for kind in kinds {
+            let error = FramedJsonError::Io(std::io::Error::from(kind));
+            assert!(
+                !error.is_transport_failure(),
+                "{kind:?} must not trigger transport recovery"
+            );
+        }
+    }
+
+    #[test]
+    fn certificate_or_spiffe_failure_is_recognized_as_authentication() {
+        let error = anyhow::Error::new(TunnelOpenError::Authenticate(anyhow!(
+            "SPIFFE identity mismatch"
+        )))
+        .context("open authenticated stream");
+
+        assert!(is_auth_failure(&error));
+    }
+
+    #[test]
+    fn connection_failure_is_not_misclassified_as_authentication() {
+        let error = anyhow::Error::new(TunnelOpenError::Connect(anyhow!("connection reset")))
+            .context("open authenticated stream");
+
+        assert!(!is_auth_failure(&error));
+    }
 
     // A malformed JSON body is a protocol failure, not a transport failure:
     // we received a well-framed reply, it just didn't parse. No resync.

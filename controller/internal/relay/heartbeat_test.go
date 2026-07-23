@@ -12,35 +12,50 @@ import (
 
 	relaypb "github.com/yourorg/ztna/controller/gen/go/proto/relay/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
+	"github.com/yourorg/ztna/controller/internal/transport"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
 type fakeHeartbeatStore struct {
-	id              string
-	certSerial      string
-	certNotAfter    time.Time
-	version         string
-	hostname        string
-	observedIP      string
-	observedPort    int
-	addressScope    string
-	publicAddr      string
-	connectionCount uint32
-	maxConnections  uint32
-	err               error
+	id                    string
+	certSerial            string
+	certNotAfter          time.Time
+	version               string
+	hostname              string
+	observedIP            string
+	observedPort          int
+	addressScope          string
+	publicAddr            string
+	connectionCount       uint32
+	maxConnections        uint32
+	err                   error
 	connectorsByWorkspace map[string][]string // returned (as ws→connIDs) by ListConnectorsForRelay
 }
 
 type fakeNotifier struct {
-	called []string // workspace IDs NotifyTopologyChange was called with
-	err    error
+	called       []string
+	connectorIDs map[string][]string
+	err          error
 }
 
-func (n *fakeNotifier) NotifyTopologyChange(_ context.Context, workspaceID string, _ []string) error {
+func (n *fakeNotifier) NotifyTopologyChange(
+	_ context.Context,
+	workspaceID string,
+	connectorIDs []string,
+) error {
 	n.called = append(n.called, workspaceID)
+
+	if n.connectorIDs == nil {
+		n.connectorIDs = make(map[string][]string)
+	}
+
+	// Copy the slice so the test does not retain caller-owned memory.
+	n.connectorIDs[workspaceID] = append([]string(nil), connectorIDs...)
+
 	return n.err
 }
 
@@ -197,6 +212,73 @@ func TestHeartbeat_NotifiesWorkspacesOnMetadataChange(t *testing.T) {
 		if !notified[wantID] {
 			t.Fatalf("workspace %q was not notified; got calls: %v", wantID, notifier.called)
 		}
+	}
+	expectedConnectors := map[string][]string{
+		"ws-alpha": {"c1"},
+		"ws-beta":  {"c2"},
+	}
+
+	for workspaceID, expected := range expectedConnectors {
+		actual := notifier.connectorIDs[workspaceID]
+
+		if len(actual) != len(expected) {
+			t.Fatalf(
+				"workspace %q connector count = %d, want %d: %v",
+				workspaceID,
+				len(actual),
+				len(expected),
+				actual,
+			)
+		}
+
+		for index := range expected {
+			if actual[index] != expected[index] {
+				t.Fatalf(
+					"workspace %q connectors = %v, want %v",
+					workspaceID,
+					actual,
+					expected,
+				)
+			}
+		}
+	}
+}
+
+// TestHeartbeat_MetadataChangeBumpsTransportNotPolicy proves AT-CORE at the
+// relay event boundary: the real transport notifier observes the topology
+// event while the independent ACL notifier remains unchanged.
+func TestHeartbeat_MetadataChangeBumpsTransportNotPolicy(t *testing.T) {
+	const workspaceID = "ws-isolation"
+
+	store := &fakeHeartbeatStore{
+		connectorsByWorkspace: map[string][]string{
+			workspaceID: {"conn-abc"},
+		},
+	}
+	transportNotifier := transport.NewNotifier(transport.NewSnapshotCache())
+	policyNotifier := policy.NewNotifier(policy.NewSnapshotCache())
+	service := NewService(nil, store, time.Hour).WithTransportNotifier(transportNotifier)
+	notAfter := time.Now().UTC().Add(time.Hour)
+	ctx := relayHeartbeatContext(
+		t,
+		appmeta.SPIFFERoleRelay,
+		testRelayID,
+		testRelayID,
+		notAfter,
+	)
+
+	if _, err := service.Heartbeat(ctx, &relaypb.HeartbeatRequest{
+		Version:  "1.0.0",
+		Hostname: "relay-a",
+	}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+
+	if got := transportNotifier.Version(workspaceID); got != 1 {
+		t.Fatalf("transport version = %d, want 1", got)
+	}
+	if got := policyNotifier.Version(workspaceID); got != 0 {
+		t.Fatalf("policy version changed after relay metadata event: got %d, want 0", got)
 	}
 }
 

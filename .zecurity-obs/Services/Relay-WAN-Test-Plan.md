@@ -160,23 +160,23 @@ uses `<CTLR_HOST>` for that name (may be an IP if you accept IP SANs).
    **Expect:** the intermediate CA subject prints. This URL must be reachable **from the
    VPS relay process and from the laptop**.
 
-> ⚠️ **Security note.** You are exposing the controller to the internet. Provisioning is
-> currently unauthenticated (finding **F1**) and there is no CRL check on relay-facing
-> mTLS (**F2**). For a *test* this is acceptable; do **not** treat this exposure as a
-> production posture. Restrict inbound 9090/8080 to known source IPs if you can.
+> ⚠️ **Security note.** You are exposing the controller to the internet. Relay provisioning now
+> requires a provider-issued, single-use token, and relay certificate revocation is enforced by
+> CRL; this does not make unrestricted public exposure appropriate. Restrict inbound 9090/8080 to
+> known source IPs and protect the provider token throughout the test.
 
 ### Phase 2 — Relay on the VPS
 
-1. **(Optional) Admin pre-register** the relay row and mint the (currently unenforced)
-   provisioning token — mirrors production and gives you a stable `RELAY_ID`:
+1. **Provider pre-registers the relay (required)** and mints the enforced single-use
+   provisioning token:
    ```bash
-   curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
-        -X POST https://<CTLR_HOST>:8080/api/relays \
+   curl -sS -H "Authorization: Bearer $PROVIDER_TOKEN" \
+        -X POST https://<CTLR_HOST>:8080/provider/relays \
         -d '{"name":"relay-vps","dns_allowlist":["<CTLR_HOST>"],"ip_allowlist":["<VPS_IP>"]}' | jq .
    # → note the returned relay id (RELAY_ID) and provisioning_token
    ```
-   (If you skip this, the relay self-provisions — F1 — and picks its own UUID. Fine for
-   a test.)
+   Do not skip this step: current provisioning rejects an unregistered relay ID and requires the
+   returned token on first boot.
 2. **Pin the CA fingerprint** (out-of-band trust anchor):
    ```bash
    RELAY_CA_FINGERPRINT=$(curl -fsS http://<CTLR_HOST>:8080/ca.crt \
