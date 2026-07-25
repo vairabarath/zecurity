@@ -7,6 +7,10 @@ edition = "2021"
 name = "zecurity-client"
 path = "src/main.rs"
 
+
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
 serde      = { version = "1", features = ["derive"] }
