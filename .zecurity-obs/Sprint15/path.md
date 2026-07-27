@@ -113,7 +113,7 @@ nothing re-checks a live tunnel.                  satisfaction. Connector diffs 
 
 | Member | Role | Area |
 |--------|------|------|
-| **M1** | Go (Controller) | Migration `029_device_posture.sql`, report ingestion + validation, profile evaluation engine, GraphQL admin (Device Profile CRUD, bindings, audit/enforce), ACL compiler hook, policy-version bump + cache invalidation on evaluation change |
+| **M1** | Go (Controller) | Migration `030_device_posture.sql`, report ingestion + validation, profile evaluation engine, GraphQL admin (Device Profile CRUD, bindings, audit/enforce), ACL compiler hook, policy-version bump + cache invalidation on evaluation change |
 | **M2** | Rust (Client) | Linux posture collectors, `DevicePostureReport` proto + `ReportDevicePosture` RPC, daemon collection scheduler (startup + 5-min interval, per-collector timeouts, partial-failure tolerant) |
 | **M3** | Rust (Connector) | Active-session registry keyed by `(spiffe_id, resource_id)`, ACL-snapshot diff-and-cancel teardown (TCP + QUIC + relay child task), posture-aware tunnel auth path, structured logging (+ metrics only if a framework is explicitly added) for report accept/reject and session termination |
 | **M4** | Frontend (Admin UI) | Device Profile administration screens (create/edit profile, requirements editor, resource-binding picker, audit/enforce toggle, per-device posture visibility) — GraphQL alone is not usable admin surface |
@@ -122,7 +122,7 @@ nothing re-checks a live tunnel.                  satisfaction. Connector diffs 
 
 | File | Who | Rule |
 |------|-----|------|
-| `controller/migrations/029_device_posture.sql` | **M1 only** | next free number is 029 |
+| `controller/migrations/030_device_posture.sql` | **M1 only** | 029 was taken by connector revocation before implementation |
 | `controller/internal/posture/*` (new package) | **M1 only** | validation, store, evaluation engine — **no gRPC method lives here** |
 | `controller/internal/client/service.go` / new `controller/internal/client/posture.go` | **M1 only** | `(*Service).ReportDevicePosture` must live here — `client.Service` is the only type that satisfies the generated gRPC interface; a method in `internal/posture` cannot |
 | `controller/internal/policy/compiler.go` | **M1 only** | posture filter + `CompiledACL{Snapshot, ValidUntil}` return contract |
@@ -147,7 +147,7 @@ No Go/Rust file overlaps beyond the shared proto file, which is sequenced (M2 la
 M2-A Proto: ReportDevicePostureRequest/Response  (Day 1, independent — land first;
      + DevicePostureReport/PostureCheck messages   buf generate = Go stubs, cargo build = Rust stubs)
    ↓                                              ↓
-M2-B Linux collectors + normalization        M1-A Migration 029 + posture store (Day 1, independent)
+M2-B Linux collectors + normalization        M1-A Migration 030 + posture store (Day 1, independent)
    ↓                                              ↓
 M2-C Daemon scheduler (startup+5min,         M1-B Report ingestion (access_token+device_id auth,
      handles not-logged-in, per-collector         batch-safe) + validation (needs M2-A message shape)
@@ -199,7 +199,7 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase C — M1: Migration + Posture Store
 > See [[Sprint15/Member1-Go/Phase1-Migration-and-Posture-Store]]. Depends on nothing — Day 1.
-- [ ] **M1-C1** `controller/migrations/029_device_posture.sql` — correct device/workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, and profile/evaluation revision columns. Phase C owns schema only; Phase F0 exclusively owns cleanup execution.
+- [ ] **M1-C1** `controller/migrations/030_device_posture.sql` — correct device/workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, and profile/evaluation revision columns. Phase C owns schema only; Phase F0 exclusively owns cleanup execution.
 - [ ] **M1-C2** `controller/internal/posture/store.go` — insert report/observations, workspace-scoped profile CRUD, atomic requirement+revision changes, last-requirement guard, revision-bearing evaluation upsert/read, and batch `EvaluationsForDevices`.
 - [ ] **Build gate:** `cd controller && go build ./...`
 
@@ -262,7 +262,7 @@ buf generate   # from repo root, after M2-A lands — regenerates Go stubs only;
 
 ## Acceptance Criteria
 - [ ] Linux collectors return normalized `PASS/FAIL/UNSUPPORTED/UNKNOWN/ERROR` against registered check IDs; one failed or **panicking** collector doesn't block report submission (isolated task + `JoinError` handling, not just a timeout).
-- [ ] `029_device_posture.sql` references `client_devices(id)` and `workspaces(id)`, enforces tenant-scoped and `(report_id, check_id)` uniqueness, indexes `received_at`, preserves nullable evaluation provenance with `ON DELETE SET NULL`, and includes `device_profiles.revision` plus `device_profile_evaluations.profile_revision`; Phase F0 alone owns retention execution.
+- [ ] `030_device_posture.sql` references `client_devices(id)` and `workspaces(id)`, enforces tenant-scoped and `(report_id, check_id)` uniqueness, indexes `received_at`, preserves nullable evaluation provenance with `ON DELETE SET NULL`, and includes `device_profiles.revision` plus `device_profile_evaluations.profile_revision`; Phase F0 alone owns retention execution.
 - [ ] `(*client.Service).ReportDevicePosture` lives in `controller/internal/client/posture.go` — **not** `internal/posture`, since the generated gRPC interface can only be satisfied by a method on `client.Service`. Authenticates via `{access_token, device_id}` exactly like `GetACLSnapshot`.
 - [ ] Ingestion enforces the documented concrete age, count, string, and detail limits; validates device ownership; treats same-device replay of one collection-cycle `report_id` idempotently; rejects cross-device/workspace reuse and duplicate check IDs; ignores unknown checks individually; and rejects a report when no recognized valid checks remain.
 - [ ] Evaluation: AND within a profile, OR across **enforce-mode** profiles bound to a resource (audit-mode profiles never affect authorization, pass or fail); a profile cannot be switched to enforce, bound to a resource while enforced, **or have its last requirement removed while enforced** — all three paths guarded, preventing the vacuous-truth trap of an empty profile silently granting everyone; re-evaluates on report/profile/requirement/binding change.
@@ -285,6 +285,17 @@ buf generate   # from repo root, after M2-A lands — regenerates Go stubs only;
 - [ ] Admin UI provides usable Device Profile administration **and is actually reachable** — routes wired into `App.tsx`, sidebar/nav entry present, permission-based visibility applied, component tests written. A page file with no route is not a completed phase.
 - [ ] `linux.os.version` is documented as visibility-only in v1 — not described as enforced anywhere, since the requirement schema has no operator/expected-value comparison this sprint.
 - [ ] `cargo test` passes for both `client` and `connector`, not just `cargo build`.
+
+## Post-Sprint Fixes
+
+### Fix: Posture migration renumbered to 030
+
+**Issue:** Sprint 15 originally reserved migration 029 for posture, but
+`029_connector_revocation.sql` landed before M1 implementation began.
+
+**Fix:** The posture schema and all Sprint 15 references now use
+`controller/migrations/030_device_posture.sql`. See the M1 Phase 1 Post-Phase Fixes
+section for details.
 
 ## Deferred (out of scope this sprint)
 - Windows/macOS collectors (same interface, later).

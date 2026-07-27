@@ -22,12 +22,13 @@ when profiles, requirements, or bindings change without a new client report.
 
 | File | Change |
 |------|--------|
-| `controller/migrations/029_device_posture.sql` | **new** — reports, observations, profiles, requirements, resource bindings, latest evaluations |
+| `controller/migrations/030_device_posture.sql` | **new** — reports, observations, profiles, requirements, resource bindings, latest evaluations |
 | `controller/internal/posture/store.go` | **new** — insert/read methods |
 
-## controller/migrations/029_device_posture.sql
+## controller/migrations/030_device_posture.sql
 
-Next free number is **029** (latest on disk: `028_relay_revoked_status.sql`). Suggested schema:
+The planned number was **029**, but `029_connector_revocation.sql` landed first. The
+posture migration therefore uses the next free number, **030**. Suggested schema:
 
 **Device records live in `client_devices` (`controller/migrations/011_client.sql`), not
 a `devices` table — no such table exists in this codebase.** Every table below carries
@@ -210,9 +211,19 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-C1** migration `029_device_posture.sql` — real workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, plus `device_profiles.revision` and `device_profile_evaluations.profile_revision`.
+- [ ] **M1-C1** migration `030_device_posture.sql` — real workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, plus `device_profiles.revision` and `device_profile_evaluations.profile_revision`.
 - [ ] **M1-C2** `internal/posture/store.go` — report/observation insert, workspace-scoped profile CRUD, atomic requirement+revision mutations (including the last-requirement guard), revision-bearing evaluation upsert/read, batch `EvaluationsForDevices`.
 - [ ] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: Posture migration number collision
+
+**Issue:** The original phase plan assigned `029_device_posture.sql`, but
+`029_connector_revocation.sql` reached the branch before posture implementation.
+
+**Root Cause:** The phase plan was written while migration 028 was the latest file.
+
+**Fix Applied:** The posture schema is implemented as
+`controller/migrations/030_device_posture.sql`, preserving deterministic migration order
+without renaming the already-landed connector revocation migration.
