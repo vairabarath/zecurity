@@ -10,11 +10,25 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) (bool, error) {
-	var connectorChanged bool
+func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID, status, version, lanIP string, lastHeartbeatAt int64) (bool, bool, error) {
+	var connectorChanged, lanIPChanged bool
+	// One atomic statement:
+	//   current — snapshot the shield's OLD connector_id + lan_ip (pre-update).
+	//   updated — apply the heartbeat; report whether connector_id / lan_ip changed.
+	//   synced  — when the LAN IP actually moved, re-point this shield's resources
+	//             so resources.host keeps matching shields.lan_ip (the invariant
+	//             AutoMatchShield / protect_resource / the shield's validate_host
+	//             all rely on). Guard `r.host = current.lan_ip` moves only rows that
+	//             were tracking the OLD IP — preserves 127.0.0.1 / custom hosts.
+	// `synced` is a data-modifying CTE, so Postgres runs it to completion even
+	// though the final SELECT doesn't read it — which is why it MUST be gated on
+	// `(SELECT lan_ip_changed FROM updated)`: when the shield row wasn't updated
+	// (e.g. the connector isn't active / tenant-network mismatch → `updated`
+	// returns 0 rows → NULL), the guard is false and resources are left untouched,
+	// so we never move resources.host to an IP the shield row didn't actually adopt.
 	err := s.db.QueryRow(ctx,
 		`WITH current AS (
-		     SELECT connector_id
+		     SELECT connector_id, lan_ip
 		       FROM shields
 		      WHERE id = $4
 		   ),
@@ -32,18 +46,29 @@ func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID,
 		        AND c.tenant_id = sh.tenant_id
 		        AND c.remote_network_id = sh.remote_network_id
 		        AND c.status = 'active'
-		      RETURNING (SELECT current.connector_id FROM current) IS DISTINCT FROM $5 AS connector_changed
+		      RETURNING
+		        (SELECT current.connector_id FROM current) IS DISTINCT FROM $5             AS connector_changed,
+		        (SELECT current.lan_ip FROM current)       IS DISTINCT FROM NULLIF($6, '') AS lan_ip_changed
+		   ),
+		   synced AS (
+		     UPDATE resources r
+		        SET host = NULLIF($6, '')
+		       FROM current
+		      WHERE r.shield_id = $4
+		        AND NULLIF($6, '') IS NOT NULL
+		        AND r.host = current.lan_ip
+		        AND (SELECT lan_ip_changed FROM updated)
 		   )
-		   SELECT connector_changed FROM updated`,
+		   SELECT connector_changed, lan_ip_changed FROM updated`,
 		lastHeartbeatAt, status, version, shieldID, connectorID, lanIP,
-	).Scan(&connectorChanged)
+	).Scan(&connectorChanged, &lanIPChanged)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return false, false, nil
 	}
 	if err != nil {
-		return false, err
+		return false, false, err
 	}
-	return connectorChanged, nil
+	return connectorChanged, lanIPChanged, nil
 }
 
 func (s *service) RunDisconnectWatcher(ctx context.Context) {
