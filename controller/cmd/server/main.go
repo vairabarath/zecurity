@@ -48,6 +48,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
@@ -167,6 +168,8 @@ func main() {
 	transportNotifier := transport.NewNotifier(transportCache)
 	transportCompiler := transport.NewCompiler(transportStore, transportCache, transportNotifier)
 	relaySvc.WithTransportNotifier(transportNotifier)
+	postureStore := posture.NewStore(db.Pool)
+	postureEvaluator := posture.NewEvaluator(postureStore, policyNotifier)
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
@@ -403,6 +406,8 @@ func main() {
 		policyCache,
 		policyNotifier,
 		transportCompiler,
+		postureStore,
+		postureEvaluator,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 

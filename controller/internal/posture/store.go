@@ -1015,6 +1015,55 @@ func (s *Store) EvaluationsForDevices(
 	return evaluations, nil
 }
 
+func (s *Store) ReportByClientID(
+	ctx context.Context,
+	reportID string,
+) (*Report, error) {
+	report := &Report{}
+
+	err := s.pool.QueryRow(
+		ctx,
+		`
+		SELECT
+			id,
+			report_id,
+			device_id,
+			workspace_id,
+			client_version,
+			os_info,
+			reported_at,
+			received_at,
+			created_at
+		FROM device_posture_reports
+		WHERE report_id = $1
+		`,
+		reportID,
+	).Scan(
+		&report.ID,
+		&report.ReportID,
+		&report.DeviceID,
+		&report.WorkspaceID,
+		&report.ClientVersion,
+		&report.OSInfo,
+		&report.ReportedAt,
+		&report.ReceivedAt,
+		&report.CreatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load posture report by client id: %w",
+			err,
+		)
+	}
+
+	return report, nil
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"

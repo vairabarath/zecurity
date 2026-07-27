@@ -199,15 +199,15 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase C — M1: Migration + Posture Store
 > See [[Sprint15/Member1-Go/Phase1-Migration-and-Posture-Store]]. Depends on nothing — Day 1.
-- [ ] **M1-C1** `controller/migrations/030_device_posture.sql` — correct device/workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, and profile/evaluation revision columns. Phase C owns schema only; Phase F0 exclusively owns cleanup execution.
-- [ ] **M1-C2** `controller/internal/posture/store.go` — insert report/observations, workspace-scoped profile CRUD, atomic requirement+revision changes, last-requirement guard, revision-bearing evaluation upsert/read, and batch `EvaluationsForDevices`.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-C1** `controller/migrations/030_device_posture.sql` — correct device/workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, and profile/evaluation revision columns. Phase C owns schema only; Phase F0 exclusively owns cleanup execution.
+- [x] **M1-C2** `controller/internal/posture/store.go` — insert report/observations, workspace-scoped profile CRUD, atomic requirement+revision changes, last-requirement guard, revision-bearing evaluation upsert/read, and batch `EvaluationsForDevices`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase D — M1: Report Ingestion + Evaluation Engine
 > See [[Sprint15/Member1-Go/Phase2-Ingestion-and-Evaluation]]. Depends on Phase C + M2-A (message shape).
-- [ ] **M1-D1** `(*client.Service).ReportDevicePosture` in `controller/internal/client/posture.go` — device ownership auth; canonical UUID; ≤32 checks; ≤256-byte detail; ≤64-byte client/OS fields; timestamp between now−10m and now+5m; unknown/oversized checks filtered individually; zero valid recognized checks rejected; same-device duplicate report acknowledged idempotently and cross-device duplicate rejected.
-- [ ] **M1-D2** Evaluation engine — AND within profiles, enforce-only OR across profiles, fail-closed states/freshness, and revision-bearing results. Requirement changes commit a new revision and notify before re-evaluation so preceding-revision results cannot authorize.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-D1** `(*client.Service).ReportDevicePosture` in `controller/internal/client/posture.go` — device ownership auth; canonical UUID; ≤32 checks; ≤256-byte detail; ≤64-byte client/OS fields; timestamp between now−10m and now+5m; unknown/oversized checks filtered individually; zero valid recognized checks rejected; same-device duplicate report acknowledged idempotently and cross-device duplicate rejected.
+- [x] **M1-D2** Evaluation engine — AND within profiles, enforce-only OR across profiles, fail-closed states/freshness, and revision-bearing results. Requirement changes commit a new revision and notify before re-evaluation so preceding-revision results cannot authorize.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase E — M1: GraphQL Admin + ACL Compiler Hook
 > See [[Sprint15/Member1-Go/Phase3-GraphQL-Admin-and-ACL-Hook]]. Depends on Phase D.
@@ -296,6 +296,16 @@ buf generate   # from repo root, after M2-A lands — regenerates Go stubs only;
 **Fix:** The posture schema and all Sprint 15 references now use
 `controller/migrations/030_device_posture.sql`. See the M1 Phase 1 Post-Phase Fixes
 section for details.
+
+### Fix: Report replay preserves evaluation convergence
+
+**Issue:** An inserted report whose first evaluation attempt failed could be acknowledged
+on retry without another evaluation attempt; ownership-query infrastructure errors could
+also be masked as permission failures.
+
+**Fix:** The report handler now re-evaluates valid same-device replays and handles
+not-found, database-error, workspace-mismatch, and revoked-device outcomes separately.
+See the M1 Phase 2 Post-Phase Fixes section for details.
 
 ## Deferred (out of scope this sprint)
 - Windows/macOS collectors (same interface, later).

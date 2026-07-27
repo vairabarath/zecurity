@@ -26,6 +26,7 @@ const (
 	ClientService_GetACLSnapshot_FullMethodName       = "/client.v1.ClientService/GetACLSnapshot"
 	ClientService_GetTransportSnapshot_FullMethodName = "/client.v1.ClientService/GetTransportSnapshot"
 	ClientService_RevokeDevice_FullMethodName         = "/client.v1.ClientService/RevokeDevice"
+	ClientService_ReportDevicePosture_FullMethodName  = "/client.v1.ClientService/ReportDevicePosture"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -62,6 +63,7 @@ type ClientServiceClient interface {
 	// user + workspace. Removes the device's SPIFFE from subsequent ACL
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error)
+	ReportDevicePosture(ctx context.Context, in *ReportDevicePostureRequest, opts ...grpc.CallOption) (*ReportDevicePostureResponse, error)
 }
 
 type clientServiceClient struct {
@@ -142,6 +144,16 @@ func (c *clientServiceClient) RevokeDevice(ctx context.Context, in *RevokeDevice
 	return out, nil
 }
 
+func (c *clientServiceClient) ReportDevicePosture(ctx context.Context, in *ReportDevicePostureRequest, opts ...grpc.CallOption) (*ReportDevicePostureResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReportDevicePostureResponse)
+	err := c.cc.Invoke(ctx, ClientService_ReportDevicePosture_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ClientServiceServer is the server API for ClientService service.
 // All implementations must embed UnimplementedClientServiceServer
 // for forward compatibility
@@ -176,6 +188,7 @@ type ClientServiceServer interface {
 	// user + workspace. Removes the device's SPIFFE from subsequent ACL
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error)
+	ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error)
 	mustEmbedUnimplementedClientServiceServer()
 }
 
@@ -203,6 +216,9 @@ func (UnimplementedClientServiceServer) GetTransportSnapshot(context.Context, *G
 }
 func (UnimplementedClientServiceServer) RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RevokeDevice not implemented")
+}
+func (UnimplementedClientServiceServer) ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReportDevicePosture not implemented")
 }
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 
@@ -343,6 +359,24 @@ func _ClientService_RevokeDevice_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_ReportDevicePosture_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReportDevicePostureRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).ReportDevicePosture(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_ReportDevicePosture_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).ReportDevicePosture(ctx, req.(*ReportDevicePostureRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -377,6 +411,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RevokeDevice",
 			Handler:    _ClientService_RevokeDevice_Handler,
+		},
+		{
+			MethodName: "ReportDevicePosture",
+			Handler:    _ClientService_ReportDevicePosture_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

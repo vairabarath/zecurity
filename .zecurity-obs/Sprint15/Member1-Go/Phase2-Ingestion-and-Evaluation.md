@@ -4,7 +4,7 @@ member: M1
 sprint: 15
 phase: 2
 title: Report Ingestion + Evaluation Engine
-status: planned
+status: done
 depends_on: [Phase1-Migration-and-Posture-Store]
 tags: [go, posture, evaluation, pending-08]
 ---
@@ -148,9 +148,29 @@ cd controller && go build ./... && go test ./internal/posture/...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-D1** `(*client.Service).ReportDevicePosture` in `controller/internal/client/posture.go` — ownership auth, concrete size/time/count validation, per-check forward compatibility, and device-scoped idempotent duplicate handling.
-- [ ] **M1-D2** Evaluation engine in `internal/posture/evaluate.go` — AND-within, enforce-only OR, revision-bearing results, fail-closed revision mismatch, and `received_at` inputs for cache expiry.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-D1** `(*client.Service).ReportDevicePosture` in `controller/internal/client/posture.go` — ownership auth, concrete size/time/count validation, per-check forward compatibility, and device-scoped idempotent duplicate handling.
+- [x] **M1-D2** Evaluation engine in `internal/posture/evaluate.go` — AND-within, enforce-only OR, revision-bearing results, fail-closed revision mismatch, and `received_at` inputs for cache expiry.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: Idempotent retry re-runs evaluation
+
+**Issue:** A report could be committed successfully and then return an evaluation error.
+The original replay path acknowledged the existing report without retrying evaluation,
+leaving it persisted but unevaluated.
+
+**Root Cause:** The idempotent fast path returned before `EvaluateDevice`.
+
+**Fix Applied (`controller/internal/client/posture.go`):** Same-device replays and
+insert-race duplicates now pass through `evaluateAndAcceptPosture`; cross-device reuse
+still fails closed.
+
+### Fix: Preserve internal database errors
+
+**Issue:** A database failure during device ownership lookup could be misreported as
+`PermissionDenied` because the zero-value workspace ID was compared before checking the
+query error.
+
+**Fix Applied (`controller/internal/client/posture.go`):** The handler now handles
+`pgx.ErrNoRows`, other database errors, workspace mismatch, and revocation in that order.

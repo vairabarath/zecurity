@@ -4,7 +4,7 @@ member: M1
 sprint: 15
 phase: 1
 title: Migration + Posture Store
-status: planned
+status: done
 depends_on: []
 tags: [go, posture, data-model, pending-08]
 ---
@@ -211,9 +211,9 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-C1** migration `030_device_posture.sql` — real workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, plus `device_profiles.revision` and `device_profile_evaluations.profile_revision`.
-- [ ] **M1-C2** `internal/posture/store.go` — report/observation insert, workspace-scoped profile CRUD, atomic requirement+revision mutations (including the last-requirement guard), revision-bearing evaluation upsert/read, batch `EvaluationsForDevices`.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-C1** migration `030_device_posture.sql` — real workspace FKs, report/observation uniqueness, retention index, nullable evaluation report FK, plus `device_profiles.revision` and `device_profile_evaluations.profile_revision`.
+- [x] **M1-C2** `internal/posture/store.go` — report/observation insert, workspace-scoped profile CRUD, atomic requirement+revision mutations (including the last-requirement guard), revision-bearing evaluation upsert/read, batch `EvaluationsForDevices`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 

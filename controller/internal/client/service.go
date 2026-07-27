@@ -30,6 +30,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -55,6 +56,8 @@ type Service struct {
 	policyCache              *policy.SnapshotCache
 	policyNotifier           *policy.Notifier
 	transportCompiler        *transport.Compiler
+	postureStore             *posture.Store
+	postureEvaluator         *posture.Evaluator
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -68,6 +71,8 @@ func NewService(
 	policyCache *policy.SnapshotCache,
 	policyNotifier *policy.Notifier,
 	transportCompiler *transport.Compiler,
+	postureStore *posture.Store,
+	postureEvaluator *posture.Evaluator,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -81,6 +86,8 @@ func NewService(
 		policyCache:              policyCache,
 		policyNotifier:           policyNotifier,
 		transportCompiler:        transportCompiler,
+		postureStore:             postureStore,
+		postureEvaluator:         postureEvaluator,
 	}
 }
 
