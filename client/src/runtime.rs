@@ -59,6 +59,10 @@ pub struct RuntimeState {
     /// waiting for the next poll tick. Coalescing: a burst of failures collapses
     /// into a single wake.
     pub relay_resync: Arc<tokio::sync::Notify>,
+     /// Signalled by PostLoginState right after a successful login, so the
+    /// posture scheduler collects and submits immediately instead of waiting
+    /// for the next 5-minute tick.
+    pub posture_resync: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -115,5 +119,6 @@ pub fn new_shared() -> SharedState {
         transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         tunnel_restart_lock: Arc::new(tokio::sync::Mutex::new(())),
         relay_resync: Arc::new(tokio::sync::Notify::new()),
+         posture_resync: Arc::new(tokio::sync::Notify::new()),
     }))
 }
