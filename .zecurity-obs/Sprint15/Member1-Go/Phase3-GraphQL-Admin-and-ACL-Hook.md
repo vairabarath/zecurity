@@ -4,7 +4,7 @@ member: M1
 sprint: 15
 phase: 3
 title: GraphQL Admin + ACL Compiler Hook
-status: planned
+status: in-progress
 depends_on: [Phase2-Ingestion-and-Evaluation]
 tags: [go, posture, graphql, acl, pending-08]
 ---
@@ -299,4 +299,12 @@ cd controller && go build ./... && go test ./internal/...
 - [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Progress: Initial GraphQL foundation
+
+The first Phase 3 slice now defines and generates the Device Profile audit/enforce
+schema, exposes the server-driven posture-check registry, lists and creates profiles
+within the authenticated workspace, updates profile mode with the empty-enforce guard,
+wires `PostureStore` into the resolver root, and notifies policy changes after both
+implemented mutations. Requirements, bindings, visibility, and the ACL compiler/cache
+work remain unchecked above.

@@ -39,13 +39,6 @@ var (
 	ErrInvalidReportedTime = errors.New("reported_at is outside the accepted time window")
 )
 
-var recognizedChecks = map[string]struct{}{
-	CheckOSVersion:  {},
-	CheckLUKS:       {},
-	CheckFirewall:   {},
-	CheckSecureBoot: {},
-}
-
 var recognizedStatuses = map[string]struct{}{
 	StatusPass:        {},
 	StatusFail:        {},
@@ -53,6 +46,48 @@ var recognizedStatuses = map[string]struct{}{
 	StatusUnknown:     {},
 	StatusError:       {},
 }
+
+type CheckDescriptor struct {
+	ID                         string
+	Label                      string
+	Platform                   string
+	AllowUnsupportedMeaningful bool
+}
+
+var supportedCheckDescriptors = []CheckDescriptor{
+	{
+		ID:                         CheckOSVersion,
+		Label:                      "OS version",
+		Platform:                   "linux",
+		AllowUnsupportedMeaningful: true,
+	},
+	{
+		ID:                         CheckLUKS,
+		Label:                      "Disk encryption (LUKS)",
+		Platform:                   "linux",
+		AllowUnsupportedMeaningful: true,
+	},
+	{
+		ID:                         CheckFirewall,
+		Label:                      "Firewall active",
+		Platform:                   "linux",
+		AllowUnsupportedMeaningful: true,
+	},
+	{
+		ID:                         CheckSecureBoot,
+		Label:                      "Secure Boot enabled",
+		Platform:                   "linux",
+		AllowUnsupportedMeaningful: true,
+	},
+}
+
+var recognizedChecks = func() map[string]struct{} {
+	checks := make(map[string]struct{}, len(supportedCheckDescriptors))
+	for _, descriptor := range supportedCheckDescriptors {
+		checks[descriptor.ID] = struct{}{}
+	}
+	return checks
+}()
 
 type CheckInput struct {
 	CheckID string
@@ -190,4 +225,18 @@ func ValidateReport(now time.Time, input ReportInput) (Report, error) {
 func IsRecognizedCheck(checkID string) bool {
 	_, ok := recognizedChecks[checkID]
 	return ok
+}
+
+func SupportedChecks() []string {
+	checks := make([]string, len(supportedCheckDescriptors))
+	for i, descriptor := range supportedCheckDescriptors {
+		checks[i] = descriptor.ID
+	}
+	return checks
+}
+
+func SupportedCheckDescriptors() []CheckDescriptor {
+	descriptors := make([]CheckDescriptor, len(supportedCheckDescriptors))
+	copy(descriptors, supportedCheckDescriptors)
+	return descriptors
 }

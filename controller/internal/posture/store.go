@@ -20,6 +20,7 @@ var (
 	ErrDuplicateBinding     = errors.New("duplicate posture resource binding")
 	ErrWorkspaceMismatch    = errors.New("workspace mismatch")
 	ErrLastRequirement      = errors.New("cannot remove the last requirement from an enforced profile")
+	ErrEmptyEnforceProfile  = errors.New("enforced profile must have at least one requirement")
 	ErrInvalidMode          = errors.New("invalid device profile mode")
 )
 
@@ -420,7 +421,45 @@ func (s *Store) UpdateProfileMode(
 		return nil, ErrInvalidMode
 	}
 
-	err := s.pool.QueryRow(
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin update profile mode: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var lockedProfileID uuid.UUID
+	err = tx.QueryRow(
+		ctx,
+		`SELECT id
+		   FROM device_profiles
+		  WHERE workspace_id = $1
+		    AND id = $2
+		  FOR UPDATE`,
+		workspaceID,
+		profileID,
+	).Scan(&lockedProfileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock device profile: %w", err)
+	}
+
+	var requirementCount int
+	if err := tx.QueryRow(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM device_profile_requirements
+		  WHERE profile_id = $1`,
+		lockedProfileID,
+	).Scan(&requirementCount); err != nil {
+		return nil, fmt.Errorf("count device profile requirements: %w", err)
+	}
+	if mode == ModeEnforce && requirementCount == 0 {
+		return nil, ErrEmptyEnforceProfile
+	}
+
+	err = tx.QueryRow(
 		ctx,
 		`UPDATE device_profiles
 		SET mode = $3,
@@ -453,6 +492,9 @@ func (s *Store) UpdateProfileMode(
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update device profile: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit update profile mode: %w", err)
 	}
 	return profile, nil
 }

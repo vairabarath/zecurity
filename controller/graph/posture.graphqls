@@ -1,0 +1,33 @@
+enum DeviceProfileMode {
+  AUDIT
+  ENFORCE
+}
+
+type PostureCheckDescriptor {
+  id: String!
+  label: String!
+  platform: String!
+  allowUnsupportedMeaningful: Boolean!
+}
+
+type DeviceProfile {
+  id: ID!
+  name: String!
+  mode: DeviceProfileMode!
+}
+
+extend type Query {
+  supportedPostureChecks: [PostureCheckDescriptor!]! @hasRole(roles: [ADMIN])
+  deviceProfiles: [DeviceProfile!]! @hasRole(roles: [ADMIN])
+}
+
+extend type Mutation {
+  createDeviceProfile(
+    name: String!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  updateDeviceProfileMode(
+    id: ID!
+    mode: DeviceProfileMode!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+}

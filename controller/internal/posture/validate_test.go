@@ -140,3 +140,24 @@ func TestValidateReportRejectsDuplicateCheckIDs(t *testing.T) {
 		t.Fatalf("error = %v, want %v", err, ErrDuplicateCheck)
 	}
 }
+
+func TestSupportedCheckDescriptorsMatchValidationRegistry(t *testing.T) {
+	descriptors := SupportedCheckDescriptors()
+	if len(descriptors) != len(SupportedChecks()) {
+		t.Fatalf("descriptor count = %d, check count = %d", len(descriptors), len(SupportedChecks()))
+	}
+
+	for _, descriptor := range descriptors {
+		if !IsRecognizedCheck(descriptor.ID) {
+			t.Errorf("descriptor %q is not recognized by report validation", descriptor.ID)
+		}
+		if descriptor.Label == "" || descriptor.Platform == "" {
+			t.Errorf("descriptor %q has incomplete display metadata", descriptor.ID)
+		}
+	}
+
+	descriptors[0].Label = "mutated"
+	if SupportedCheckDescriptors()[0].Label == "mutated" {
+		t.Fatal("SupportedCheckDescriptors returned mutable registry storage")
+	}
+}

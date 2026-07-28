@@ -202,6 +202,7 @@ func main() {
 				InvitationStore:   inviteStore,
 				InvitationEmailer: inviteEmailer,
 				PolicyStore:       policyStore,
+				PostureStore:      postureStore,
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
 			},

@@ -85,6 +85,12 @@ type ComplexityRoot struct {
 		ConnectorID func(childComplexity int) int
 	}
 
+	DeviceProfile struct {
+		ID   func(childComplexity int) int
+		Mode func(childComplexity int) int
+		Name func(childComplexity int) int
+	}
+
 	DiscoveredService struct {
 		BoundIP     func(childComplexity int) int
 		FirstSeen   func(childComplexity int) int
@@ -116,6 +122,7 @@ type ComplexityRoot struct {
 	Mutation struct {
 		AddGroupMember            func(childComplexity int, groupID string, userID string) int
 		AssignResourceToGroup     func(childComplexity int, resourceID string, groupID string) int
+		CreateDeviceProfile       func(childComplexity int, name string) int
 		CreateGroup               func(childComplexity int, name string, description *string) int
 		CreateInvitation          func(childComplexity int, email string) int
 		CreateRemoteNetwork       func(childComplexity int, name string, location NetworkLocation) int
@@ -138,8 +145,16 @@ type ComplexityRoot struct {
 		TriggerScan               func(childComplexity int, connectorID string, targets []string, ports []int) int
 		UnassignResourceFromGroup func(childComplexity int, resourceID string, groupID string) int
 		UnprotectResource         func(childComplexity int, id string) int
+		UpdateDeviceProfileMode   func(childComplexity int, id string, mode DeviceProfileMode) int
 		UpdateGroup               func(childComplexity int, id string, name *string, description *string) int
 		UpdateResource            func(childComplexity int, id string, input UpdateResourceInput) int
+	}
+
+	PostureCheckDescriptor struct {
+		AllowUnsupportedMeaningful func(childComplexity int) int
+		ID                         func(childComplexity int) int
+		Label                      func(childComplexity int) int
+		Platform                   func(childComplexity int) int
 	}
 
 	Query struct {
@@ -148,6 +163,7 @@ type ComplexityRoot struct {
 		Connector               func(childComplexity int, id string) int
 		ConnectorLogs           func(childComplexity int, limit *int) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
+		DeviceProfiles          func(childComplexity int) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
 		GetScanResults          func(childComplexity int, requestID string) int
 		Group                   func(childComplexity int, id string) int
@@ -162,6 +178,7 @@ type ComplexityRoot struct {
 		Resources               func(childComplexity int, remoteNetworkID string) int
 		Shield                  func(childComplexity int, id string) int
 		Shields                 func(childComplexity int, remoteNetworkID string) int
+		SupportedPostureChecks  func(childComplexity int) int
 		Users                   func(childComplexity int) int
 		Workspace               func(childComplexity int) int
 	}
@@ -283,6 +300,8 @@ type MutationResolver interface {
 	RemoveGroupMember(ctx context.Context, groupID string, userID string) (*Group, error)
 	AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
 	UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
+	CreateDeviceProfile(ctx context.Context, name string) (*DeviceProfile, error)
+	UpdateDeviceProfileMode(ctx context.Context, id string, mode DeviceProfileMode) (*DeviceProfile, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -306,6 +325,8 @@ type QueryResolver interface {
 	Groups(ctx context.Context) ([]*Group, error)
 	Group(ctx context.Context, id string) (*Group, error)
 	ConnectorLogs(ctx context.Context, limit *int) ([]*ConnectorLog, error)
+	SupportedPostureChecks(ctx context.Context) ([]*PostureCheckDescriptor, error)
+	DeviceProfiles(ctx context.Context) ([]*DeviceProfile, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -510,6 +531,25 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.ConnectorToken.ConnectorID(childComplexity), true
 
+	case "DeviceProfile.id":
+		if e.ComplexityRoot.DeviceProfile.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfile.ID(childComplexity), true
+	case "DeviceProfile.mode":
+		if e.ComplexityRoot.DeviceProfile.Mode == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfile.Mode(childComplexity), true
+	case "DeviceProfile.name":
+		if e.ComplexityRoot.DeviceProfile.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfile.Name(childComplexity), true
+
 	case "DiscoveredService.boundIp":
 		if e.ComplexityRoot.DiscoveredService.BoundIP == nil {
 			break
@@ -649,6 +689,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.AssignResourceToGroup(childComplexity, args["resourceId"].(string), args["groupId"].(string)), true
+	case "Mutation.createDeviceProfile":
+		if e.ComplexityRoot.Mutation.CreateDeviceProfile == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_createDeviceProfile_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.CreateDeviceProfile(childComplexity, args["name"].(string)), true
 	case "Mutation.createGroup":
 		if e.ComplexityRoot.Mutation.CreateGroup == nil {
 			break
@@ -891,6 +942,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UnprotectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.updateDeviceProfileMode":
+		if e.ComplexityRoot.Mutation.UpdateDeviceProfileMode == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateDeviceProfileMode_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateDeviceProfileMode(childComplexity, args["id"].(string), args["mode"].(DeviceProfileMode)), true
 	case "Mutation.updateGroup":
 		if e.ComplexityRoot.Mutation.UpdateGroup == nil {
 			break
@@ -913,6 +975,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateResource(childComplexity, args["id"].(string), args["input"].(UpdateResourceInput)), true
+
+	case "PostureCheckDescriptor.allowUnsupportedMeaningful":
+		if e.ComplexityRoot.PostureCheckDescriptor.AllowUnsupportedMeaningful == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PostureCheckDescriptor.AllowUnsupportedMeaningful(childComplexity), true
+	case "PostureCheckDescriptor.id":
+		if e.ComplexityRoot.PostureCheckDescriptor.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PostureCheckDescriptor.ID(childComplexity), true
+	case "PostureCheckDescriptor.label":
+		if e.ComplexityRoot.PostureCheckDescriptor.Label == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PostureCheckDescriptor.Label(childComplexity), true
+	case "PostureCheckDescriptor.platform":
+		if e.ComplexityRoot.PostureCheckDescriptor.Platform == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PostureCheckDescriptor.Platform(childComplexity), true
 
 	case "Query.allResources":
 		if e.ComplexityRoot.Query.AllResources == nil {
@@ -959,6 +1046,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Connectors(childComplexity, args["remoteNetworkId"].(string)), true
+	case "Query.deviceProfiles":
+		if e.ComplexityRoot.Query.DeviceProfiles == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.DeviceProfiles(childComplexity), true
 	case "Query.getDiscoveredServices":
 		if e.ComplexityRoot.Query.GetDiscoveredServices == nil {
 			break
@@ -1094,6 +1187,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Shields(childComplexity, args["remoteNetworkId"].(string)), true
+	case "Query.supportedPostureChecks":
+		if e.ComplexityRoot.Query.SupportedPostureChecks == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.SupportedPostureChecks(childComplexity), true
 	case "Query.users":
 		if e.ComplexityRoot.Query.Users == nil {
 			break
@@ -1555,7 +1654,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls" "posture.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1575,6 +1674,7 @@ var sources = []*ast.Source{
 	{Name: "client.graphqls", Input: sourceData("client.graphqls"), BuiltIn: false},
 	{Name: "policy.graphqls", Input: sourceData("policy.graphqls"), BuiltIn: false},
 	{Name: "log.graphqls", Input: sourceData("log.graphqls"), BuiltIn: false},
+	{Name: "posture.graphqls", Input: sourceData("posture.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -1670,6 +1770,18 @@ func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, fiel
 	return nil, fmt.Errorf("no field named %q was found under type ConnectorToken", field.Name)
 }
 
+func (ec *executionContext) childFields_DeviceProfile(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_DeviceProfile_id(ctx, field)
+	case "name":
+		return ec.fieldContext_DeviceProfile_name(ctx, field)
+	case "mode":
+		return ec.fieldContext_DeviceProfile_mode(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type DeviceProfile", field.Name)
+}
+
 func (ec *executionContext) childFields_DiscoveredService(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 	switch field.Name {
 	case "shieldId":
@@ -1724,6 +1836,20 @@ func (ec *executionContext) childFields_Invitation(ctx context.Context, field gr
 		return ec.fieldContext_Invitation_createdAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Invitation", field.Name)
+}
+
+func (ec *executionContext) childFields_PostureCheckDescriptor(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_PostureCheckDescriptor_id(ctx, field)
+	case "label":
+		return ec.fieldContext_PostureCheckDescriptor_label(ctx, field)
+	case "platform":
+		return ec.fieldContext_PostureCheckDescriptor_platform(ctx, field)
+	case "allowUnsupportedMeaningful":
+		return ec.fieldContext_PostureCheckDescriptor_allowUnsupportedMeaningful(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type PostureCheckDescriptor", field.Name)
 }
 
 func (ec *executionContext) childFields_RemoteNetwork(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2075,6 +2201,20 @@ func (ec *executionContext) field_Mutation_assignResourceToGroup_args(ctx contex
 		return nil, err
 	}
 	args["groupId"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_createDeviceProfile_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "name",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["name"] = arg0
 	return args, nil
 }
 
@@ -2471,6 +2611,28 @@ func (ec *executionContext) field_Mutation_unprotectResource_args(ctx context.Co
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateDeviceProfileMode_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "mode",
+		func(ctx context.Context, v any) (DeviceProfileMode, error) {
+			return ec.unmarshalNDeviceProfileMode2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileMode(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["mode"] = arg1
 	return args, nil
 }
 
@@ -3451,6 +3613,75 @@ func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, fie
 }
 func (ec *executionContext) fieldContext_ConnectorToken_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _DeviceProfile_id(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfile_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfile_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _DeviceProfile_name(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfile_name(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfile_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DeviceProfile_mode(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfile_mode(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Mode, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v DeviceProfileMode) graphql.Marshaler {
+			return ec.marshalNDeviceProfileMode2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileMode(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfile_mode(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type DeviceProfileMode does not have child fields"))
 }
 
 func (ec *executionContext) _DiscoveredService_shieldId(ctx context.Context, field graphql.CollectedField, obj *DiscoveredService) (ret graphql.Marshaler) {
@@ -5502,6 +5733,222 @@ func (ec *executionContext) fieldContext_Mutation_unassignResourceFromGroup(ctx 
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_createDeviceProfile(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_createDeviceProfile(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().CreateDeviceProfile(ctx, fc.Args["name"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_createDeviceProfile(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_createDeviceProfile_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateDeviceProfileMode(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateDeviceProfileMode(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateDeviceProfileMode(ctx, fc.Args["id"].(string), fc.Args["mode"].(DeviceProfileMode))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateDeviceProfileMode(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateDeviceProfileMode_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _PostureCheckDescriptor_id(ctx context.Context, field graphql.CollectedField, obj *PostureCheckDescriptor) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PostureCheckDescriptor_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PostureCheckDescriptor_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PostureCheckDescriptor", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _PostureCheckDescriptor_label(ctx context.Context, field graphql.CollectedField, obj *PostureCheckDescriptor) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PostureCheckDescriptor_label(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Label, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PostureCheckDescriptor_label(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PostureCheckDescriptor", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _PostureCheckDescriptor_platform(ctx context.Context, field graphql.CollectedField, obj *PostureCheckDescriptor) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PostureCheckDescriptor_platform(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Platform, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PostureCheckDescriptor_platform(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PostureCheckDescriptor", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _PostureCheckDescriptor_allowUnsupportedMeaningful(ctx context.Context, field graphql.CollectedField, obj *PostureCheckDescriptor) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PostureCheckDescriptor_allowUnsupportedMeaningful(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.AllowUnsupportedMeaningful, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PostureCheckDescriptor_allowUnsupportedMeaningful(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PostureCheckDescriptor", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
 func (ec *executionContext) _Query_me(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -6596,6 +7043,106 @@ func (ec *executionContext) fieldContext_Query_connectorLogs(ctx context.Context
 	if fc.Args, err = ec.field_Query_connectorLogs_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_supportedPostureChecks(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_supportedPostureChecks(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().SupportedPostureChecks(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*PostureCheckDescriptor
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*PostureCheckDescriptor
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*PostureCheckDescriptor) graphql.Marshaler {
+			return ec.marshalNPostureCheckDescriptor2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckDescriptorᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_supportedPostureChecks(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_PostureCheckDescriptor(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_deviceProfiles(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_deviceProfiles(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().DeviceProfiles(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*DeviceProfile
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_deviceProfiles(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
 	}
 	return fc, nil
 }
@@ -9585,6 +10132,55 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 	return out
 }
 
+var deviceProfileImplementors = []string{"DeviceProfile"}
+
+func (ec *executionContext) _DeviceProfile(ctx context.Context, sel ast.SelectionSet, obj *DeviceProfile) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, deviceProfileImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("DeviceProfile")
+		case "id":
+			out.Values[i] = ec._DeviceProfile_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "name":
+			out.Values[i] = ec._DeviceProfile_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "mode":
+			out.Values[i] = ec._DeviceProfile_mode(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var discoveredServiceImplementors = []string{"DiscoveredService"}
 
 func (ec *executionContext) _DiscoveredService(ctx context.Context, sel ast.SelectionSet, obj *DiscoveredService) graphql.Marshaler {
@@ -9977,6 +10573,74 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_unassignResourceFromGroup(ctx, field)
 			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createDeviceProfile":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_createDeviceProfile(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateDeviceProfileMode":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateDeviceProfileMode(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var postureCheckDescriptorImplementors = []string{"PostureCheckDescriptor"}
+
+func (ec *executionContext) _PostureCheckDescriptor(ctx context.Context, sel ast.SelectionSet, obj *PostureCheckDescriptor) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, postureCheckDescriptorImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("PostureCheckDescriptor")
+		case "id":
+			out.Values[i] = ec._PostureCheckDescriptor_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "label":
+			out.Values[i] = ec._PostureCheckDescriptor_label(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "platform":
+			out.Values[i] = ec._PostureCheckDescriptor_platform(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "allowUnsupportedMeaningful":
+			out.Values[i] = ec._PostureCheckDescriptor_allowUnsupportedMeaningful(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -10457,6 +11121,50 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_connectorLogs(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "supportedPostureChecks":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_supportedPostureChecks(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "deviceProfiles":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_deviceProfiles(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -11695,6 +12403,46 @@ func (ec *executionContext) unmarshalNCreateResourceInput2githubᚗcomᚋyourorg
 	return res, graphql.ErrorOnPath(ctx, err)
 }
 
+func (ec *executionContext) marshalNDeviceProfile2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx context.Context, sel ast.SelectionSet, v DeviceProfile) graphql.Marshaler {
+	return ec._DeviceProfile(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNDeviceProfile2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileᚄ(ctx context.Context, sel ast.SelectionSet, v []*DeviceProfile) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx context.Context, sel ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._DeviceProfile(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNDeviceProfileMode2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileMode(ctx context.Context, v any) (DeviceProfileMode, error) {
+	var res DeviceProfileMode
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNDeviceProfileMode2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileMode(ctx context.Context, sel ast.SelectionSet, v DeviceProfileMode) graphql.Marshaler {
+	return v
+}
+
 func (ec *executionContext) marshalNDiscoveredService2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDiscoveredServiceᚄ(ctx context.Context, sel ast.SelectionSet, v []*DiscoveredService) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
@@ -11845,6 +12593,32 @@ func (ec *executionContext) unmarshalNNetworkLocation2githubᚗcomᚋyourorgᚋz
 
 func (ec *executionContext) marshalNNetworkLocation2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐNetworkLocation(ctx context.Context, sel ast.SelectionSet, v NetworkLocation) graphql.Marshaler {
 	return v
+}
+
+func (ec *executionContext) marshalNPostureCheckDescriptor2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckDescriptorᚄ(ctx context.Context, sel ast.SelectionSet, v []*PostureCheckDescriptor) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNPostureCheckDescriptor2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckDescriptor(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNPostureCheckDescriptor2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckDescriptor(ctx context.Context, sel ast.SelectionSet, v *PostureCheckDescriptor) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._PostureCheckDescriptor(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalNRemoteNetwork2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v RemoteNetwork) graphql.Marshaler {

@@ -307,6 +307,14 @@ also be masked as permission failures.
 not-found, database-error, workspace-mismatch, and revoked-device outcomes separately.
 See the M1 Phase 2 Post-Phase Fixes section for details.
 
+### Fix: Empty enforce transition is transactionally rejected
+
+**Issue:** A zero-requirement audit profile could be switched to enforce mode and become
+vacuously satisfied.
+
+**Fix:** `UpdateProfileMode` now locks the workspace-scoped profile and rejects the
+transition unless at least one requirement exists. See the M1 Phase 1 Post-Phase Fixes.
+
 ## Deferred (out of scope this sprint)
 - Windows/macOS collectors (same interface, later).
 - MDM/EDR or hardware-attested posture sources (PENDING-08 Options B/C).

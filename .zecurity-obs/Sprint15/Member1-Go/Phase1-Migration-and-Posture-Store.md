@@ -227,3 +227,15 @@ cd controller && go build ./...
 **Fix Applied:** The posture schema is implemented as
 `controller/migrations/030_device_posture.sql`, preserving deterministic migration order
 without renaming the already-landed connector revocation migration.
+
+### Fix: Empty profile could be switched to enforce mode
+
+**Issue:** `UpdateProfileMode` allowed an audit profile with zero requirements to be
+switched to `enforce`, making its empty AND-set vacuously satisfied.
+
+**Root Cause:** The last-requirement removal path was transactionally guarded, but the
+mode-change path updated the profile directly without locking and counting requirements.
+
+**Fix Applied:** `controller/internal/posture/store.go` now locks the workspace-scoped
+profile row, counts its requirements, rejects an empty enforce transition with
+`ErrEmptyEnforceProfile`, and commits the mode update in the same transaction.

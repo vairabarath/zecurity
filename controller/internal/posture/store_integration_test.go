@@ -89,6 +89,13 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
+	emptyProfile, err := store.CreateProfile(ctx, workspaceA, "Empty enforce guard")
+	if err != nil {
+		t.Fatalf("create empty profile: %v", err)
+	}
+	if _, err := store.UpdateProfileMode(ctx, workspaceA, emptyProfile.ID, ModeEnforce); !errors.Is(err, ErrEmptyEnforceProfile) {
+		t.Fatalf("enforce empty profile error = %v, want %v", err, ErrEmptyEnforceProfile)
+	}
 	if err := store.AddRequirement(ctx, workspaceA, profile.ID, Requirement{
 		CheckID: "linux.disk.encryption",
 	}); err != nil {

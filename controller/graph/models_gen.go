@@ -60,6 +60,12 @@ type CreateResourceInput struct {
 	PortTo          int     `json:"portTo"`
 }
 
+type DeviceProfile struct {
+	ID   string            `json:"id"`
+	Name string            `json:"name"`
+	Mode DeviceProfileMode `json:"mode"`
+}
+
 type DiscoveredService struct {
 	ShieldID    string `json:"shieldId"`
 	Protocol    string `json:"protocol"`
@@ -89,6 +95,13 @@ type Invitation struct {
 }
 
 type Mutation struct {
+}
+
+type PostureCheckDescriptor struct {
+	ID                         string `json:"id"`
+	Label                      string `json:"label"`
+	Platform                   string `json:"platform"`
+	AllowUnsupportedMeaningful bool   `json:"allowUnsupportedMeaningful"`
 }
 
 type Query struct {
@@ -230,6 +243,61 @@ func (e *ConnectorStatus) UnmarshalJSON(b []byte) error {
 }
 
 func (e ConnectorStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type DeviceProfileMode string
+
+const (
+	DeviceProfileModeAudit   DeviceProfileMode = "AUDIT"
+	DeviceProfileModeEnforce DeviceProfileMode = "ENFORCE"
+)
+
+var AllDeviceProfileMode = []DeviceProfileMode{
+	DeviceProfileModeAudit,
+	DeviceProfileModeEnforce,
+}
+
+func (e DeviceProfileMode) IsValid() bool {
+	switch e {
+	case DeviceProfileModeAudit, DeviceProfileModeEnforce:
+		return true
+	}
+	return false
+}
+
+func (e DeviceProfileMode) String() string {
+	return string(e)
+}
+
+func (e *DeviceProfileMode) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = DeviceProfileMode(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid DeviceProfileMode", str)
+	}
+	return nil
+}
+
+func (e DeviceProfileMode) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *DeviceProfileMode) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e DeviceProfileMode) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil

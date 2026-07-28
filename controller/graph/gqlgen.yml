@@ -7,6 +7,7 @@ schema:
   - graph/client.graphqls
   - graph/policy.graphqls
   - graph/log.graphqls
+  - graph/posture.graphqls
 
 exec:
   filename: graph/generated.go
