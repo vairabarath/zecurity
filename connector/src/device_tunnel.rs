@@ -18,6 +18,7 @@ use x509_parser::prelude::*;
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
+use crate::session_registry::SessionRegistry;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -62,6 +63,7 @@ pub async fn listen(
     addr: &str,
     store: CertStore,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
@@ -80,6 +82,7 @@ pub async fn listen(
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let acl_clone = acl.clone();
+        let registry_clone = registry.clone();
         let hub_clone = tunnel_hub.clone();
         let crl_clone = crl_manager.clone();
         let conn_id_clone = connector_id.clone();
@@ -117,6 +120,7 @@ pub async fn listen(
                 spiffe_id,
                 cert_serial,
                 acl_clone,
+                registry_clone,
                 hub_clone,
                 crl_clone,
                 &conn_id_clone,
@@ -135,6 +139,7 @@ pub async fn handle_stream<S>(
     client_spiffe_id: String,
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: &str,
@@ -236,6 +241,10 @@ where
 
     let acl_entry = decision.unwrap();
 
+let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
+    let (cancel_token, _session_guard) = registry.register(session_key);
+
+
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
             tracing::error!(
@@ -328,7 +337,16 @@ where
                     quic_addr: quic_advertise_addr().map(String::from),
                 };
                 send_response(&mut stream, &response).await?;
-                relay.relay_stream(stream).await?;
+                 tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!(
+                            spiffe_id = %client_spiffe_id,
+                            resource_id = %acl_entry.resource_id,
+                            "session cancelled — authorization revoked mid-session",
+                        );
+                    }
+                    result = relay.relay_stream(stream) => { result?; }
+                }
             }
             Err(e) => {
                 tracing::error!(shield = %shield_id,
@@ -445,7 +463,16 @@ where
         )
         .await;
 
-        relay_udp(&mut stream, &req.destination, req.port).await?;
+       tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!(
+                    spiffe_id = %client_spiffe_id,
+                    resource_id = %acl_entry.resource_id,
+                    "session cancelled — authorization revoked mid-session",
+                );
+            }
+            result = relay_udp(&mut stream, &req.destination, req.port) => { result?; }
+        }
         return Ok(());
     }
 
@@ -508,7 +535,16 @@ where
     )
     .await;
 
-    tokio::io::copy_bidirectional(&mut stream, &mut resource_conn).await?;
+      tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tracing::info!(
+                spiffe_id = %client_spiffe_id,
+                resource_id = %acl_entry.resource_id,
+                "session cancelled — authorization revoked mid-session",
+            );
+        }
+        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => { result?; }
+    }
     Ok(())
 }
 
