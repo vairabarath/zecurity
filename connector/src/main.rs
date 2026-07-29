@@ -310,6 +310,7 @@ async fn main() -> anyhow::Result<()> {
         ack_rx,
         ctrl_rx,
         policy_cache,
+        session_registry,
         relay_attachment_slot,
         relay_list_tx,
     )

@@ -238,12 +238,18 @@ where
         .await;
         return Err(anyhow!("access denied"));
     }
+   let acl_entry = decision.unwrap();
 
-    let acl_entry = decision.unwrap();
-
-let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
+    let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
     let (cancel_token, _session_guard) = registry.register(session_key);
 
+    // Closes the window where a diff-and-cancel pass may have already scanned
+    // the registry before this session finished registering. Unconditional —
+    // no ACL-version gating, since policy versions are process-local and can
+    // miss a real content change across a controller restart.
+    if !acl.is_allowed(&acl_entry.resource_id, &client_spiffe_id) {
+        cancel_token.cancel();
+    }
 
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
@@ -345,7 +351,7 @@ let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
                             "session cancelled — authorization revoked mid-session",
                         );
                     }
-                    result = relay.relay_stream(stream) => { result?; }
+                    result = relay.with_cancel_token(cancel_token.clone()).relay_stream(stream) => { result?; }
                 }
             }
             Err(e) => {

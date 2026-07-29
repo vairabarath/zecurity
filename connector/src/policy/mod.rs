@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use parking_lot::RwLock;
 
 use crate::client::v1::{AclEntry, AclSnapshot};
@@ -26,6 +28,21 @@ impl PolicyCache {
     /// Replace the stored snapshot atomically.
     pub fn update(&self, snapshot: AclSnapshot) {
         *self.snapshot.write() = Some(snapshot);
+    }
+
+    /// Atomically replaces the stored snapshot and returns the (spiffe_id,
+    /// resource_id) pairs that were allowed under the previous snapshot but
+    /// are not allowed under the new one — exactly the live sessions that
+    /// must be torn down. Empty on the first-ever snapshot (nothing to diff
+    /// against — `replace` returns None). Used by the Sprint 15 ACL-diff
+    /// teardown in control_stream.rs; `update` above is unchanged and still
+    /// used by existing tests/call sites that don't need the diff.
+    pub fn update_and_revoked(&self, snapshot: AclSnapshot) -> HashSet<(String, String)> {
+        let new_set = allow_set(&snapshot);
+        match self.snapshot.write().replace(snapshot) {
+            Some(previous) => allow_set(&previous).difference(&new_set).cloned().collect(),
+            None => HashSet::new(),
+        }
     }
 
     /// Current local ACL snapshot version. Returns 0 when no snapshot is loaded.
@@ -111,6 +128,25 @@ fn find_entry_by_id<'a>(snapshot: &'a AclSnapshot, resource_id: &str) -> Option<
         .entries
         .iter()
         .find(|e| e.resource_id == resource_id)
+}
+
+/// Flattens a snapshot's entries into the set of (spiffe_id, resource_id)
+/// pairs it currently allows. Note: this assumes `resource_id` doesn't repeat
+/// across entries in one snapshot (consistent with `is_allowed`'s
+/// first-match-by-id lookup) — if it ever did, the only failure mode is
+/// under-cancelling an already-open session, since new connections are still
+/// caught by device_tunnel.rs's post-registration recheck either way.
+pub fn allow_set(snapshot: &AclSnapshot) -> HashSet<(String, String)> {
+    snapshot
+        .entries
+        .iter()
+        .flat_map(|entry| {
+            entry
+                .allowed_spiffe_ids
+                .iter()
+                .map(move |spiffe| (spiffe.clone(), entry.resource_id.clone()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

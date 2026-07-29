@@ -9,6 +9,7 @@ use tonic::Request;
 use tracing::{error, info, warn};
 
 use crate::policy::PolicyCache;
+use crate::session_registry::SessionRegistry;
 
 use crate::agent_server::ShieldRegistry;
 use crate::config::ConnectorConfig;
@@ -42,6 +43,7 @@ pub async fn run_control_stream(
     mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
     mut log_rx: mpsc::Receiver<crate::ControlMessage>,
     policy_cache: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     relay_attachment_slot: RelayAttachmentSlot,
     relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
@@ -79,6 +81,7 @@ pub async fn run_control_stream(
             &version,
             &public_ip,
             &policy_cache,
+            &registry,
             &relay_attachment_slot,
             &relay_list_tx,
         )
@@ -135,6 +138,7 @@ async fn run_once(
     version: &str,
     public_ip: &str,
     policy_cache: &Arc<PolicyCache>,
+    registry: &Arc<SessionRegistry>,
     relay_attachment_slot: &RelayAttachmentSlot,
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Result<()> {
@@ -206,7 +210,7 @@ async fn run_once(
                         return Ok(());
                     }
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, relay_list_tx).await {
+                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, registry, relay_list_tx).await {
                             return action;
                         }
                     }
@@ -282,6 +286,7 @@ async fn handle_controller_msg(
     cfg: &ConnectorConfig,
     out_tx: &mpsc::Sender<ConnectorControlMessage>,
     policy_cache: &Arc<PolicyCache>,
+    registry: &Arc<SessionRegistry>,
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
 ) -> Option<Result<()>> {
     match msg.body {
@@ -366,7 +371,13 @@ async fn handle_controller_msg(
         Some(CBody::AclSnapshot(snap)) => {
             let version = snap.version;
             let workspace_id = snap.workspace_id.clone();
-            policy_cache.update(snap);
+            let revoked = policy_cache.update_and_revoked(snap);
+            for key in &revoked {
+                registry.cancel_all(key);
+            }
+            if !revoked.is_empty() {
+                info!(count = revoked.len(), "ACL diff: revoked sessions torn down");
+            }
             info!(version, %workspace_id, "ACL snapshot stored");
             None
         }

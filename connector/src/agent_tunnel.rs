@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -155,6 +156,7 @@ impl AgentTunnelHub {
             connection_id,
             event_rx,
             shield_tx,
+            cancel_token: CancellationToken::new(),
         })
     }
 }
@@ -167,9 +169,26 @@ pub struct RelaySession {
     connection_id: String,
     event_rx: mpsc::Receiver<RelayEvent>,
     shield_tx: mpsc::Sender<ShieldControlMessage>,
+    cancel_token: CancellationToken, // defaults to a token that's never cancelled
 }
 
 impl RelaySession {
+    // -------------------------------------------------------------------
+    // Sprint 15 Phase 2: optional external cancellation, added as a builder
+    // method (not a relay_stream/open_relay_session parameter) specifically
+    // to respect the M4 API contract documented on open_relay_session above.
+    // -------------------------------------------------------------------
+
+    /// Attaches an external cancellation token so relay_stream's d2s child
+    /// task can independently notice cancellation, even if the caller's own
+    /// future (wrapping relay_stream in a select!) is dropped without ever
+    /// reaching relay_stream's own cleanup path. Optional — a caller that
+    /// never calls this keeps today's exact behavior.
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.cancel_token = token;
+        self
+    }
+
     /// Bidirectionally relay between `stream` (device) and the Shield.
     ///
     /// - Reads data from `stream` → sends `TunnelData` to Shield (max 16 KB chunks).
@@ -184,23 +203,29 @@ impl RelaySession {
         // Device → Shield in a separate task.
         let shield_tx = self.shield_tx.clone();
         let conn_id_d2s = self.connection_id.clone();
+        let d2s_token = self.cancel_token.clone();
         let d2s = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_CHUNK];
             loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if shield_tx
-                            .send(ShieldControlMessage {
-                                body: Some(Body::TunnelData(TunnelData {
-                                    connection_id: conn_id_d2s.clone(),
-                                    data: buf[..n].to_vec(),
-                                })),
-                            })
-                            .await
-                            .is_err()
-                        {
-                            break;
+                tokio::select! {
+                    _ = d2s_token.cancelled() => break,
+                    result = reader.read(&mut buf) => {
+                        match result {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if shield_tx
+                                    .send(ShieldControlMessage {
+                                        body: Some(Body::TunnelData(TunnelData {
+                                            connection_id: conn_id_d2s.clone(),
+                                            data: buf[..n].to_vec(),
+                                        })),
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
