@@ -19,6 +19,25 @@ impl std::fmt::Debug for TunHandle {
     }
 }
 
+/// Coordination state for `daemon::restart_tunnel_if_running`'s queued-oneshot
+/// batch coordinator. `running` is true while a worker task is draining
+/// `pending` passes; a caller pushes a oneshot sender onto `pending` and
+/// starts a worker only if none is already running.
+#[derive(Default)]
+pub struct TunnelRestartCoordinator {
+    pub running: bool,
+    pub pending: Vec<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+}
+
+impl std::fmt::Debug for TunnelRestartCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelRestartCoordinator")
+            .field("running", &self.running)
+            .field("pending_count", &self.pending.len())
+            .finish()
+    }
+}
+
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
@@ -48,12 +67,11 @@ pub struct RuntimeState {
     /// snapshot with an older response. Held across the whole known-version →
     /// fetch → store sequence, not just the store.
     pub transport_sync_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes tunnel down→up restarts. Multiple triggers (relay recovery, the
-    /// 60s ACL tick, IPC sync/resources, post-login) can each call
-    /// restart_tunnel_if_running concurrently; without this, two down/up sequences
-    /// interleave and corrupt the live TUN session (tunnel left down, orphaned
-    /// handle, or duplicate sessions). Held across the whole restart.
-    pub tunnel_restart_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Coordinates tunnel down→up restarts so concurrent triggers (relay
+    /// recovery, the 60s ACL tick, IPC sync/resources, post-login) share
+    /// restart passes instead of each running its own full down/up cycle.
+    /// See `daemon::restart_tunnel_if_running`.
+    pub tunnel_restart: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
     /// Signalled by the data plane (net_stack) when a managed-resource relay
     /// transport fails, so the ACL sync scheduler re-syncs early instead of
     /// waiting for the next poll tick. Coalescing: a burst of failures collapses
@@ -117,7 +135,7 @@ pub fn new_shared() -> SharedState {
         tun_handle: None,
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
-        tunnel_restart_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restart: Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default())),
         relay_resync: Arc::new(tokio::sync::Notify::new()),
          posture_resync: Arc::new(tokio::sync::Notify::new()),
     }))

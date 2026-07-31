@@ -78,7 +78,8 @@ Implement the Shield enrollment flow: parse JWT → fetch + verify CA fingerprin
 
 - [x] **Step 9**: Update config file — remove `ENROLLMENT_TOKEN`, write `SHIELD_ID=<id>` to `/etc/zecurity/shield.conf`
 
-- [x] **Step 10**: Call `network::setup(interface_addr, connector_addr).await`
+- [ ] **Step 10**: Call `network::setup(interface_addr, connector_addr).await`
+  <!-- NOT IMPLEMENTED: shield/src/network.rs does not exist; enrollment skips this step entirely -->
 
 - [x] **Step 11**: Log `info!("enrollment complete shield_id={}", shield_id)`
 

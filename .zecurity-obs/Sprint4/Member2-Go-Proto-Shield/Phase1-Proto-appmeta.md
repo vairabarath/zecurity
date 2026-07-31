@@ -41,11 +41,15 @@ tags:
 
 - [x] Create directory `proto/shield/v1/`
 - [x] Write proto with package `shield.v1`
-- [x] `option go_package = "github.com/vairabarath/zecurity/gen/go/proto/shield/v1;shieldv1";`
-- [x] `service ShieldService` with 4 RPCs: `Enroll`, `Heartbeat`, `RenewCert`, `Goodbye`
-- [x] All messages defined: `EnrollRequest`, `EnrollResponse`, `HeartbeatRequest`, `HeartbeatResponse`, `RenewCertRequest`, `RenewCertResponse`, `GoodbyeRequest`, `GoodbyeResponse`
+- [ ] `option go_package = "github.com/vairabarath/zecurity/gen/go/proto/shield/v1;shieldv1";`
+  <!-- DIFFERS: actual uses "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1;shieldv1" -->
+- [ ] `service ShieldService` with 4 RPCs: `Enroll`, `Heartbeat`, `RenewCert`, `Goodbye`
+  <!-- PARTIAL: Heartbeat RPC replaced with Control (bidirectional stream); only 3 of 4 specified RPCs exist -->
+- [ ] All messages defined: `EnrollRequest`, `EnrollResponse`, `HeartbeatRequest`, `HeartbeatResponse`, `RenewCertRequest`, `RenewCertResponse`, `GoodbyeRequest`, `GoodbyeResponse`
+  <!-- PARTIAL: HeartbeatRequest/Response do NOT exist; replaced by ShieldControlMessage and nested types -->
 - [x] `EnrollResponse` includes: `certificate_pem`, `workspace_ca_pem`, `intermediate_ca_pem`, `shield_id`, `interface_addr`, `connector_addr`, `connector_id`
-- [x] `HeartbeatResponse` includes: `ok`, `latest_version`, `re_enroll`
+- [ ] `HeartbeatResponse` includes: `ok`, `latest_version`, `re_enroll`
+  <!-- NOT FOUND: no HeartbeatResponse message exists -->
 
 > See sprint4-shield-plan.md for full proto content.
 
@@ -57,7 +61,7 @@ tags:
   ```
 - [x] Add `GoodbyeRequest` message: `{ string connector_id = 1; }`
 - [x] Add `GoodbyeResponse` message: `{ bool ok = 1; }`
-- [x] Add `ShieldHealth` message:
+- [ ] Add `ShieldHealth` message:
   ```protobuf
   message ShieldHealth {
     string shield_id         = 1;
@@ -66,7 +70,9 @@ tags:
     int64  last_heartbeat_at = 4;
   }
   ```
-- [x] Add `shields` field to `HeartbeatRequest`: `repeated ShieldHealth shields = 5;`
+  <!-- NOT FOUND: uses ShieldStatusUpdate with different fields instead -->
+- [ ] Add `shields` field to `HeartbeatRequest`: `repeated ShieldHealth shields = 5;`
+  <!-- NOT FOUND: no HeartbeatRequest exists; ShieldStatusBatch.shields uses ShieldStatusUpdate -->
 - [x] **Do NOT remove or renumber existing fields.** Proto field numbers are permanent.
 
 ### 3. Modify `controller/internal/appmeta/identity.go`
@@ -100,7 +106,8 @@ buf generate
 - [x] Buf generate runs cleanly (no errors)
 - [x] `controller/gen/go/proto/shield/v1/shield.pb.go` exists
 - [x] `controller/gen/go/proto/shield/v1/shield_grpc.pb.go` exists
-- [x] Connector stubs updated with `GoodbyeRequest`, `ShieldHealth`
+- [ ] Connector stubs updated with `GoodbyeRequest`, `ShieldHealth`
+  <!-- GoodbyeRequest ✅, ShieldHealth NOT FOUND (uses ShieldStatusUpdate) -->
 - [x] `cd controller && go build ./...` passes (stubs compile, no import errors)
 
 ---

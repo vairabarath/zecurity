@@ -64,7 +64,8 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
 
 - [x] `ShieldConfig` struct with `#[derive(Deserialize)]`
 - [x] Required fields: `controller_addr: String`, `controller_http_addr: String`, `enrollment_token: Option<String>`
-- [x] Optional with defaults: `auto_update_enabled: bool` (false), `log_level: String` ("info"), `shield_heartbeat_interval_secs: u64` (30)
+- [x] Optional with defaults: `auto_update_enabled: bool` (false), `log_level: String` ("info")
+- [ ] `shield_heartbeat_interval_secs: u64` (30) — NOT FOUND: uses hardcoded `HEALTH_INTERVAL_SECS = 15` instead
 - [x] State dir: `state_dir: String` (default: `/var/lib/zecurity-shield`)
 - [x] `pub fn load() -> anyhow::Result<ShieldConfig>` using figment env + TOML
 - [x] Config file: `/etc/zecurity/shield.conf` (TOML format)
@@ -89,7 +90,7 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
   - `save_private_key(key: &str, path: &Path) -> anyhow::Result<()>` (mode 0600)
   - `build_csr(key, cn, spiffe_uri) -> anyhow::Result<Vec<u8>>` (DER-encoded PKCS#10)
   - `parse_cert_not_after(pem: &[u8]) -> anyhow::Result<DateTime<Utc>>`
-  - `pem_to_der(pem: &[u8]) -> anyhow::Result<Vec<u8>>`
+  - ~~`pem_to_der(pem: &[u8]) -> anyhow::Result<Vec<u8>>`~~ — NOT FOUND: replaced by `load_private_key` + `extract_public_key_der`
 
 ### tls.rs
 
@@ -110,12 +111,12 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
 
 - [x] `read_hostname() -> String` — reads `/etc/hostname` or `hostname()` syscall
 - [x] `get_public_ip() -> Option<String>` — HTTP GET to IP echo service (use `reqwest`)
-- [x] `sha256_hex(data: &[u8]) -> String` — for CA fingerprint verification
+- [ ] `sha256_hex(data: &[u8]) -> String` — NOT FOUND in util.rs (implemented in crypto.rs instead)
 
 ### ShieldState struct (in main.rs or a types.rs)
 
-- [x] `#[derive(Serialize, Deserialize, Clone)]`
-- [x] Fields: `shield_id`, `trust_domain`, `connector_id`, `connector_addr`, `interface_addr`, `enrolled_at`, `cert_not_after`
+- [x] `#[derive(Serialize, Clone)]` + custom Deserialize
+- [ ] Fields: `shield_id`, `trust_domain`, `connector_id`, `connector_addr`, `interface_addr`, `enrolled_at`, `cert_not_after` — PARTIAL: `connector_id`/`connector_addr` stored as `connectors: Vec<ConnectorRef>`, not direct fields
 - [x] `fn load(state_dir: &str) -> anyhow::Result<ShieldState>`
 - [x] `fn save(&self, state_dir: &str) -> anyhow::Result<()>`
 

@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "baseBranch": "main",
-  "generatedAt": "2026-07-23T10:44:23+05:30",
+  "generatedAt": "2026-07-23T11:05:00+05:30",
   "changedFiles": [
     ".zecurity-obs/Decisions/ADR-015-Transport-Control-Plane.md",
     ".zecurity-obs/Decisions/ADR-017-Transport-Propagation.md",
@@ -24,6 +24,7 @@
     ".zecurity-obs/pending/README.md",
     "client/src/daemon.rs",
     "client/src/net_stack.rs",
+    "client/src/runtime.rs",
     "controller/internal/connector/relay_state_test.go",
     "controller/internal/relay/expiry_test.go",
     "controller/internal/relay/heartbeat_test.go",

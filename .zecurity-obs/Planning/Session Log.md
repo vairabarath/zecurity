@@ -2083,3 +2083,117 @@ serves on `127.0.0.1:9102`.
 
 **What's next:**
 - Optionally run AT-E1 in a deployed environment to collect operational failover timing evidence.
+
+## 2026-07-23 — Codex (restart-coalescing documentation correction)
+
+**What was done:**
+- Documented the remaining redundant sequential-restart behavior in Sprint 13 Phase 4.
+- Recorded the approved queued-oneshot batch-coordinator design, failure draining, best-effort
+  panic supervision, exact panic-result semantics, and deterministic test requirements.
+- Kept the separate `tun_slot == None` lifecycle ambiguity explicitly out of scope.
+
+**Verification:**
+- Documentation now distinguishes the implemented non-overlap mutex from the not-yet-implemented
+  restart coalescing follow-up and does not claim unconditional panic/shutdown recovery.
+
+**What's next:**
+- Implement the coordinator in Client runtime/daemon code and run its deterministic concurrency
+  tests plus the complete Client suite.
+
+## 2026-07-23 — Codex (restart coordinator race fixes verified)
+
+**What was done:**
+- Moved restart-work panic handling inside each pass so the worker retains and explicitly fails the
+  active batch.
+- Reset coordinator state and drained stragglers before publishing failure or panic results,
+  removing the fresh-request race against stale `running = true`.
+- Reworked batching tests to use pre-populated queues and explicit pending-queue synchronization
+  instead of scheduler timing.
+- Updated Phase 4 documentation to mark the queued-oneshot coordinator implemented.
+
+**Verification:**
+- All seven deterministic coordinator tests pass.
+- The complete Client suite passes 49/49 outside the socket-restricted sandbox.
+- `cargo build` succeeds without warnings.
+
+**What's next:**
+- The separate explicit tunnel-lifecycle-state follow-up remains optional and out of scope.
+
+## 2026-07-27 — Codex (Sprint 15 M1 Phases 1–2)
+
+**What was done:**
+- Completed the device-posture migration and tenant-safe PostgreSQL store, including
+  profile revisions, bindings, raw observations, evaluation provenance, and batch reads.
+- Implemented and wired `ReportDevicePosture`, validation, profile evaluation, generated
+  Go protobuf stubs, replay-safe ingestion, and policy-transition notification.
+- Added Phase 1 store integration coverage, Phase 2 validation/evaluation unit coverage,
+  and an environment-gated end-to-end gRPC ingestion suite.
+- Marked the M1 Phase 1 and Phase 2 implementation/build checkboxes complete and recorded
+  the migration-number and replay/error-classification fixes in the phase documentation.
+
+**Verification:**
+- `go test ./internal/posture/... ./internal/client/...` passes.
+- `go build ./...` and `git diff --check` pass for the Controller.
+- PostgreSQL-backed suites are present but skip until `PKI_TEST_DATABASE_URL` is set.
+
+**What's next:**
+- Run the PostgreSQL suites in a configured environment, then begin M1 Phase 3 GraphQL
+  administration and posture-aware ACL/cache integration.
+
+## 2026-07-28 — Codex (M1 Sprint 15 Phase 3 start)
+
+**What was done:**
+- Added the initial Device Profile GraphQL schema and regenerated gqlgen output.
+- Wired `PostureStore` into the GraphQL resolver root and server construction.
+- Implemented workspace-scoped profile list/create/mode update and the server-driven
+  supported posture-check query.
+- Added policy notifications for implemented profile mutations and transactionally
+  rejected switching a zero-requirement profile to enforce mode.
+- Added focused posture registry and store integration coverage.
+
+**Key decisions:**
+- Kept this session to the initial GraphQL foundation; requirements, bindings, posture
+  visibility, and ACL compiler/cache enforcement remain in Phase 3.
+
+**What's next:**
+- Complete the remaining GraphQL CRUD/binding/visibility API, then implement the
+  posture-aware ACL compiler and cache-expiry/version-bump contract.
+
+## 2026-07-29 — Codex (M1 Sprint 15 Phase 3 GraphQL hardening)
+
+**What was done:**
+- Added posture-specific GraphQL authorization and binding resolver tests.
+- Converted expected posture mutation failures to client-visible safe user errors.
+- Added profile-name normalization, tenant-scoped batch resource loading, and immediate
+  workspace posture re-evaluation after requirement changes.
+- Wired the posture evaluator into the GraphQL resolver root and documented the fixes.
+
+**Verification:**
+- Focused posture, resource, and resolver tests pass; `go build ./...` passes.
+- The broad internal suite has one unrelated existing Valkey/miniredis `CLIENT TRACKING`
+  incompatibility in `internal/auth`; all posture and resolver packages pass.
+
+**What's next:**
+- Run the database-backed posture resolver cases with the configured resource test DSN,
+  then continue device posture visibility and ACL compiler/cache work.
+
+## 2026-07-31 — Codex (M1 Sprint 15 Phase 3 verification)
+
+**What was done:**
+- Audited the Phase 3 GraphQL schema, generated resolvers, dependency wiring,
+  notification paths, ACL compiler, and snapshot cache against the implementation
+  checklist.
+- Marked M1-E1b, M1-E2, and M1-E4 complete in both Phase 3 documentation and the Sprint
+  15 execution path.
+- Documented that posture visibility, posture-aware ACL compilation, and cache expiry
+  remain open.
+
+**Verification:**
+- `go generate ./graph/...`, focused resolver/posture/policy/resource tests,
+  `go build ./...`, and `git diff --check` pass.
+- The full internal test gate remains open because the existing `internal/auth`
+  miniredis test does not support `CLIENT TRACKING`.
+
+**What's next:**
+- Complete M1-E1 posture visibility, then implement M1-E3 compiler gating and M1-E3b
+  cache expiry before closing the Phase 3 build gate.

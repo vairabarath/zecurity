@@ -103,7 +103,8 @@ All new files in `controller/internal/shield/`:
 
 ### Service struct
 
-- [x] `service` struct with: `cfg Config`, `db *pgxpool.Pool`, `pki pki.Service`, `redis *redis.Client`
+- [ ] `service` struct with: `cfg Config`, `db *pgxpool.Pool`, `pki pki.Service`, `redis *redis.Client`
+  <!-- DIFFERS: redis field typed as `valkeycompat.Cmdable`, not `*redis.Client` -->
 - [x] `NewService(cfg Config, db, pki, redis) *service`
 - [x] Implement `shieldpb.ShieldServiceServer` interface
 

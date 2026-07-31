@@ -69,9 +69,11 @@ tags:
 ### shield.graphqls (NEW)
 
 - [x] Create `controller/graph/shield.graphqls`
-- [x] Define `Shield` type with all fields: `id`, `name`, `status`, `remoteNetworkId`, `connectorId`, `lastSeenAt`, `version`, `hostname`, `publicIp`, `interfaceAddr`, `certNotAfter`, `createdAt`
+- [ ] Define `Shield` type with all fields: `id`, `name`, `status`, `remoteNetworkId`, `connectorId`, `lastSeenAt`, `version`, `hostname`, `publicIp`, `interfaceAddr`, `certNotAfter`, `createdAt`
+  <!-- PARTIAL: uses `lanIp` instead of `publicIp` -->
 - [x] Define `ShieldStatus` enum: `PENDING`, `ACTIVE`, `DISCONNECTED`, `REVOKED`
-- [x] Define `ShieldToken` type: `shieldId`, `installCommand`
+- [ ] Define `ShieldToken` type: `shieldId`, `installCommand`
+  <!-- PARTIAL: only `shieldId` present; `installCommand` field missing from schema -->
 - [x] Extend `Mutation` type:
   - `generateShieldToken(remoteNetworkId: ID!, shieldName: String!): ShieldToken!`
   - `revokeShield(id: ID!): Boolean!`

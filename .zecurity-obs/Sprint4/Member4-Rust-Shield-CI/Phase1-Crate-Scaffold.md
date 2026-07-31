@@ -53,7 +53,7 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
   - `tokio-rustls = "0.26"`
   - `rustls = "0.23"`
   - `x509-parser = "0.16"` — parse cert not_after from PEM
-  - `oid-registry = "0.7"`
+  - ~~`oid-registry = "0.7"`~~ (not added — unused)
   - `sha2 = "0.10"` — CA fingerprint verification
   - `hex = "0.4"`
   - `anyhow = "1"`
@@ -83,11 +83,12 @@ Stand up the new `shield/` Rust crate with all project files so subsequent phase
 
 ### Cross.toml
 
-- [x] Mirror `connector/Cross.toml`:
+- [ ] Mirror `connector/Cross.toml`:
   ```toml
   [build.pre-build]
   cmd = ["apt-get", "install", "-y", "protobuf-compiler"]
   ```
+  <!-- NOT IMPLEMENTED: protoc is volume-mounted from runner instead; Cross.toml exists but has no pre-build section -->
 
 ### Dockerfile
 

@@ -62,6 +62,41 @@ Add `tunnel_restart_lock: Arc<tokio::sync::Mutex<()>>` to `RuntimeState`. Acquir
 This makes the down/up pair one lifecycle transition and prevents ACL polling and transport
 recovery from replacing or aborting each other's tunnel.
 
+### Known follow-up: coalesce queued restart requests
+
+The mutex prevents overlapping down/up operations, but it does not deduplicate callers already
+waiting for the lock. After caller A completes `handle_down → handle_up`, `tun_slot` is populated
+again; caller B can then acquire the lock, observe `Some`, and perform a redundant second restart.
+The existing serialization test proves non-overlap only and does not prove coalescing.
+
+The approved follow-up replaces `tunnel_restart_lock` with a mutex-guarded queued-oneshot
+coordinator:
+
+- each caller enqueues a `oneshot::Sender<Result<(), String>>` and awaits its receiver;
+- the first request while idle starts one worker;
+- the worker atomically drains the pending queue into a pass batch before starting the pass;
+- callers queued before that drain receive that pass's real result;
+- callers arriving while the pass runs remain pending for the next pass;
+- a failed pass fails its own batch and all callers queued during the failed pass, then resets
+  `running = false` instead of starting a pass that could misreport success from an empty
+  `tun_slot`;
+- a `catch_unwind` supervisor performs best-effort panic recovery by resetting `running` and
+  failing queued callers. It is not an unconditional process/runtime-shutdown guarantee.
+
+Panic-result semantics must be documented in tests: both callers in the unwinding current batch and
+callers still in the coordinator queue receive `tunnel restart worker panicked` from the
+`catch_unwind` supervisor, which sends explicitly before the worker returns.
+
+Required deterministic tests must not depend on sleeps or scheduler timing. They must cover shared
+batches, mid-pass requests moving to the next pass, failure propagation to the current batch and
+stragglers, idle-to-running handoff after success/failure/panic, cancelled receivers, and panic
+recovery. Pre-populating the queue, extracting an enqueue helper, or using an explicit test barrier
+are acceptable ways to make batching deterministic.
+
+The separate `tun_slot == None` ambiguity remains out of scope for this coalescing change:
+`perform_tunnel_restart` cannot currently distinguish an intentionally stopped tunnel from one
+left absent by a prior failed `handle_up`. That requires explicit tunnel lifecycle state.
+
 ## F3 — Start cooldown when recovery finishes
 
 Replace the scheduler-local start timestamp and atomic flag with shared state:
@@ -209,3 +244,20 @@ not enter transport recovery.
 
 **Verification:** Classification, authentication, recovery single-flight/cooldown, transport
 ordering, and restart-lock regression tests pass. The complete Client suite passes 43/43.
+
+### Fix: queued tunnel-restart coordinator
+
+**Issue:** The current restart mutex serializes lifecycle transitions but queued callers can still
+perform redundant sequential restarts.
+
+**Fix applied:** Replaced the plain lock with the queued-oneshot batch coordinator described in F2.
+Synchronous IPC results are preserved, failures drain both the active batch and queued stragglers,
+and panics are caught per pass while the worker still owns the batch. Coordinator state is reset
+before failure/panic results are published, preventing fresh requests from racing against stale
+`running = true` state.
+
+**Files:** `client/src/runtime.rs`, `client/src/daemon.rs`.
+
+**Verification:** Seven deterministic coordinator tests cover shared batching, mid-pass
+stragglers, failure propagation, fresh-worker startup after failure, cancelled receivers, and panic
+recovery. The complete Client suite passes 49/49 and the Client builds without warnings.

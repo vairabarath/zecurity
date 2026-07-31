@@ -57,7 +57,8 @@ Implement the Shield heartbeat loop (mTLS to Connector :9091) and cert renewal (
     ```
 - [x] Connect to `state.connector_addr` (e.g. `192.168.1.10:9091`)
 - [x] Create `ShieldServiceClient::new(channel)`
-- [x] Loop every `cfg.shield_heartbeat_interval_secs`:
+- [ ] Loop every `cfg.shield_heartbeat_interval_secs`
+  <!-- NOT IMPLEMENTED: uses hardcoded HEALTH_INTERVAL_SECS = 15; config field does not exist -->
   ```rust
   let req = HeartbeatRequest {
       shield_id: state.shield_id.clone(),    // logging on Connector side

@@ -212,6 +212,10 @@ cd client && cargo build && cargo test
 - **ADR-018 Phase 4** — reserve `ACLConnector` 4+5 / `ACLSnapshot` 6+9, delete `GetActiveRelay()` from the compiler, drop the client fallback. Breaking; needs the 4-week fleet compat window after Phase C ships. Schedule as a later coordinated deploy.
 - Convergence metrics dashboard (feeds PENDING-10).
 - Persistent/global transport versioning and coordination for multiple controller replicas.
+- Post-phase hardening completed: the tunnel-restart mutex was replaced with a queued-oneshot batch
+  coordinator so concurrent callers share passes and retain exact synchronous results.
+- Separate lifecycle-state follow-up: distinguish an intentionally stopped tunnel from a tunnel
+  left absent by failed restart startup before treating `tun_slot == None` as success.
 
 ## 9. On completion (the decision-record step)
 

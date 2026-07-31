@@ -81,7 +81,8 @@ address (or evict it) and confirm (a) the affected connector receives a new `Tra
 - [x] **B1 (architecture-corrected)** `TransportNotifier` with workspace-scoped versions/cache invalidation and an affected-connector advisory parameter
 - [x] **B2 (architecture-corrected)** client polling plus failure-triggered re-poll replaces connector proactive push
 - [x] **B3** rewire heartbeat/expiry/placement triggers to `NotifyTopologyChange`; transport-only placement changes do not notify policy
-- [x] **B4** (optional) `transport_version` convergence observable
+- [ ] **B4** (optional) `transport_version` convergence observable
+  <!-- NOT IMPLEMENTED: marked optional; no transport_version piggyback in heartbeat -->
 - [x] **Build gate:** `cd controller && go build ./...`
 - [x] **Tests:** AT-CORE/AT-CORE-R notifier isolation, monotonic versions, and exact heartbeat/expiry/placement connector scoping
 

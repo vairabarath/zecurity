@@ -38,31 +38,32 @@ Implement `network::setup()` which creates the `zecurity0` TUN interface and bas
 
 ### Public API
 
-- [x] `pub async fn setup(interface_addr: &str, connector_addr: &str) -> anyhow::Result<()>`
+- [ ] `pub async fn setup(interface_addr: &str, connector_addr: &str) -> anyhow::Result<()>`
+  <!-- NOT IMPLEMENTED: shield/src/network.rs does not exist; rtnetlink dep unused -->
   - `interface_addr`: e.g. `"100.64.0.1/32"` — assigned by Controller at enrollment
   - `connector_addr`: e.g. `"192.168.1.10:9091"` — used to extract Connector IP for nftables
 
 ### setup_tun_interface()
 
-- [x] `async fn setup_tun_interface(interface_addr: &str) -> anyhow::Result<()>`
-- [x] Use `rtnetlink` crate to:
+- [ ] `async fn setup_tun_interface(interface_addr: &str) -> anyhow::Result<()>`
+- [ ] Use `rtnetlink` crate to:
   1. Create TUN interface named `"zecurity0"` (`RTM_NEWLINK`, kind `"tun"`, mode tun)
   2. Assign `interface_addr` (parse CIDR, add address via `RTM_NEWADDR`)
   3. Bring interface UP (`RTM_NEWLINK` with `IFF_UP`)
-- [x] Shell equivalent (for reference):
+- [ ] Shell equivalent (for reference):
   ```bash
   ip tuntap add dev zecurity0 mode tun
   ip addr add 100.64.0.1/32 dev zecurity0
   ip link set zecurity0 up
   ```
-- [x] If `zecurity0` already exists (Shield restart): log warning, skip creation, proceed
-- [x] On failure: return `Err` (logged in enrollment.rs as `warn!` — non-fatal for now)
+- [ ] If `zecurity0` already exists (Shield restart): log warning, skip creation, proceed
+- [ ] On failure: return `Err` (logged in enrollment.rs as `warn!` — non-fatal for now)
 
 ### setup_nftables()
 
-- [x] `async fn setup_nftables(connector_addr: &str) -> anyhow::Result<()>`
-- [x] Extract connector IP from `connector_addr` (strip `:9091` port)
-- [x] Use the `nftables` crate to build the ruleset document in Rust:
+- [ ] `async fn setup_nftables(connector_addr: &str) -> anyhow::Result<()>`
+- [ ] Extract connector IP from `connector_addr` (strip `:9091` port)
+- [ ] Use the `nftables` crate to build the ruleset document in Rust:
   ```
   table inet zecurity {
     chain input {
@@ -73,8 +74,8 @@ Implement `network::setup()` which creates the `zecurity0` TUN interface and bas
     }
   }
   ```
-- [x] If table already exists (restart): delete and recreate (idempotent)
-- [x] Log `info!("nftables table 'zecurity' created, connector_ip={}", connector_ip)`
+- [ ] If table already exists (restart): delete and recreate (idempotent)
+- [ ] Log `info!("nftables table 'zecurity' created, connector_ip={}", connector_ip)`
 
 ### Current crate note
 

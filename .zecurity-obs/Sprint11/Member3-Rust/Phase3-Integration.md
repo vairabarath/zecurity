@@ -58,10 +58,10 @@ cd connector && cargo test
 
 ## Implementation Checklist
 
-- [x] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window — _planned as `connector/tests/scenario2_warm_restart.rs`. Pending: test relay needs a register-path handler + accept-loop extension._
+- [ ] **TEAM-E3** Connector restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; no traffic loss during 15s ACL sync window — _planned as `connector/tests/scenario2_warm_restart.rs`. **NOT IMPLEMENTED: test file does not exist; needs register-path test relay extension._
 - [x] **TEAM-E5** Probe with wrong `request_id` → discarded; probe to wrong SPIFFE peer → mTLS failure → treated as unreachable. **Ships as `connector/tests/scenario4_probe_security.rs`** — 4 tests green: baseline correct probe succeeds, wrong `request_id` rejected, wrong SPIFFE → `ExactRelaySpiffeVerifier` rejects mTLS, silent relay (no response) dropped. Tests run against a real in-process QUIC mTLS relay built with `rcgen` (workspace CA + leaves with SPIFFE URI SANs).
-- [x] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections — _planned as `connector/examples/load_test.rs`. Pending: needs the register-path relay so the boot path completes._
-- [x] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops — _planned as `connector/tests/scenario3_migration.rs` (control-plane assertions in v1; data-plane stream-drop assertion `#[ignore]`-scaffolded for follow-up). Pending: register-path relay + injectable latency._
+- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no single Tier 1 relay receives > 2× average connections — _planned as `connector/examples/load_test.rs`. **NOT IMPLEMENTED: file does not exist (declared in Cargo.toml but never created)._
+- [ ] **TEAM-E7** Background optimization finds > 15% + 10ms improvement → make-before-break migration → zero active stream drops — _planned as `connector/tests/scenario3_migration.rs`. **NOT IMPLEMENTED: test file does not exist._
 - [~] **Build gate:** `cd connector && cargo build` and `cargo test` pass. **Currently green:** 52 unit tests + 4 scenario4 integration tests + 1 doctest (`ignore`d after lib restructure made it runnable). Will re-verify after scenarios 1/2/3 land.
 
 **Phase 3 status:** **Partially done.**
