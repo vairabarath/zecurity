@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -189,6 +190,50 @@ func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, err
 	}
 	defer rows.Close()
 	return collectRows(rows)
+}
+
+// GetByIDs fetches a tenant-scoped set of resources in one query. Results are
+// returned in input order; a missing or cross-tenant ID fails the whole read.
+func GetByIDs(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	tenantID string,
+	ids []uuid.UUID,
+) ([]*Row, error) {
+	if len(ids) == 0 {
+		return []*Row{}, nil
+	}
+
+	rows, err := db.Query(ctx,
+		`SELECT `+resourceSelectCols+resourceJoins+`
+		  WHERE r.tenant_id = $1
+		    AND r.id = ANY($2)`,
+		tenantID,
+		ids,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get resources by IDs: %w", err)
+	}
+	defer rows.Close()
+
+	loaded, err := collectRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("collect resources by IDs: %w", err)
+	}
+	byID := make(map[string]*Row, len(loaded))
+	for _, row := range loaded {
+		byID[row.ID] = row
+	}
+
+	ordered := make([]*Row, 0, len(ids))
+	for _, id := range ids {
+		row, ok := byID[id.String()]
+		if !ok {
+			return nil, fmt.Errorf("resource %s not found", id)
+		}
+		ordered = append(ordered, row)
+	}
+	return ordered, nil
 }
 
 // GetPendingForShield returns resources in the protecting and deleting state for a shield.

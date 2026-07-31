@@ -42,19 +42,120 @@ func (e *Evaluator) EvaluateDevice(
 	workspaceID uuid.UUID,
 	deviceID uuid.UUID,
 ) ([]ProfileResult, error) {
+	results, policyChanged, err := e.evaluateDevice(ctx, workspaceID, deviceID)
+	if err != nil {
+		return nil, err
+	}
+	if policyChanged && e.notifier != nil {
+		if err := e.notifier.NotifyPolicyChange(ctx, workspaceID.String()); err != nil {
+			return nil, fmt.Errorf("notify posture evaluation transition: %w", err)
+		}
+	}
+	return results, nil
+}
+
+// ReevaluateWorkspace recomputes posture for every device that has submitted a
+// report and emits at most one policy notification for the complete batch.
+func (e *Evaluator) ReevaluateWorkspace(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+) error {
+	deviceIDs, err := e.store.DeviceIDsWithReports(ctx, workspaceID)
+	if err != nil {
+		return fmt.Errorf("list devices for posture re-evaluation: %w", err)
+	}
+	return e.reevaluateDevices(
+		ctx,
+		workspaceID,
+		deviceIDs,
+		func(
+			ctx context.Context,
+			workspaceID uuid.UUID,
+			deviceID uuid.UUID,
+		) (bool, error) {
+			_, changed, err := e.evaluateDevice(
+				ctx,
+				workspaceID,
+				deviceID,
+			)
+			return changed, err
+		},
+	)
+
+}
+
+func (e *Evaluator) reevaluateDevices(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	deviceIDs []uuid.UUID,
+	evaluate func(
+		context.Context,
+		uuid.UUID,
+		uuid.UUID,
+	) (bool, error),
+) error {
+	var reevalErrors []error
+	policyChanged := false
+
+	for _, deviceID := range deviceIDs {
+		changed, err := evaluate(ctx, workspaceID, deviceID)
+		if err != nil {
+			reevalErrors = append(
+				reevalErrors,
+				fmt.Errorf("device %s: %w", deviceID, err),
+			)
+			continue
+		}
+
+		if changed {
+			policyChanged = true
+		}
+	}
+
+	if policyChanged && e.notifier != nil {
+		if err := e.notifier.NotifyPolicyChange(
+			ctx,
+			workspaceID.String(),
+		); err != nil {
+			reevalErrors = append(
+				reevalErrors,
+				fmt.Errorf(
+					"notify posture re-evaluation transition: %w",
+					err,
+				),
+			)
+		}
+	}
+
+	if len(reevalErrors) > 0 {
+		return fmt.Errorf(
+			"workspace posture re-evaluation completed with %d error(s): %w",
+			len(reevalErrors),
+			errors.Join(reevalErrors...),
+		)
+	}
+
+	return nil
+}
+
+func (e *Evaluator) evaluateDevice(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	deviceID uuid.UUID,
+) ([]ProfileResult, bool, error) {
 	report, err := e.store.LatestReport(ctx, workspaceID, deviceID)
 	if err != nil {
-		return nil, fmt.Errorf("load latest report for evaluation: %w", err)
+		return nil, false, fmt.Errorf("load latest report for evaluation: %w", err)
 	}
 
 	observations, err := e.store.ListObservations(ctx, report.ID)
 	if err != nil {
-		return nil, fmt.Errorf("load observations for evaluation: %w", err)
+		return nil, false, fmt.Errorf("load observations for evaluation: %w", err)
 	}
 
 	profiles, err := e.store.ListProfiles(ctx, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("load profiles for evaluation: %w", err)
+		return nil, false, fmt.Errorf("load profiles for evaluation: %w", err)
 	}
 
 	observationByCheck := make(map[string]Observation, len(observations))
@@ -70,7 +171,7 @@ func (e *Evaluator) EvaluateDevice(
 		requirements, err := e.store.ListRequirements(ctx, workspaceID,
 			profile.ID)
 		if err != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"load requirements for profile %s: %w",
 				profile.ID,
 				err,
@@ -92,7 +193,7 @@ func (e *Evaluator) EvaluateDevice(
 			profile.ID,
 		)
 		if previousErr != nil && !errors.Is(previousErr, ErrNotFound) {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"load previous evaluation for profile %s: %w",
 				profile.ID,
 				previousErr,
@@ -110,7 +211,7 @@ func (e *Evaluator) EvaluateDevice(
 			&reason,
 			&report.ID,
 		); err != nil {
-			return nil, fmt.Errorf(
+			return nil, false, fmt.Errorf(
 				"store evaluation for profile %s: %w",
 				profile.ID,
 				err,
@@ -127,13 +228,7 @@ func (e *Evaluator) EvaluateDevice(
 		results = append(results, result)
 	}
 
-	if policyChanged && e.notifier != nil {
-		if err := e.notifier.NotifyPolicyChange(ctx, workspaceID.String()); err != nil {
-			return nil, fmt.Errorf("notify posture evaluation transition: %w", err)
-		}
-	}
-
-	return results, nil
+	return results, policyChanged, nil
 }
 
 func EvaluateProfile(

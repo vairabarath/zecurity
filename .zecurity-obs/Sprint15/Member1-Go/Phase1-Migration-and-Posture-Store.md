@@ -239,3 +239,12 @@ mode-change path updated the profile directly without locking and counting requi
 **Fix Applied:** `controller/internal/posture/store.go` now locks the workspace-scoped
 profile row, counts its requirements, rejects an empty enforce transition with
 `ErrEmptyEnforceProfile`, and commits the mode update in the same transaction.
+
+### Fix: Binding guard and profile-name normalization
+
+**Issue:** A manually corrupted empty enforce profile could be bound to a resource, and
+blank/whitespace-only profile names were accepted.
+
+**Fix Applied:** `CreateResourceBinding` now locks the profile and transactionally
+rejects an empty enforce profile before inserting a binding. `CreateProfile` trims the
+name and returns `ErrInvalidProfileName` before database access when it is blank.

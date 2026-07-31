@@ -291,11 +291,11 @@ cd controller && go build ./... && go test ./internal/...
 
 ## Implementation Checklist
 - [ ] **M1-E1** `controller/graph/posture.graphqls` — Device Profile CRUD + bindings + audit/enforce toggle + posture visibility + `supportedPostureChecks` query; all mutations ADMIN + workspace-scoped; enforce-mode requires ≥1 requirement across mode-switch, bind, **and** requirement-removal.
-- [ ] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — `PostureStore`/evaluator field added and wired; the generated resolvers have nothing to call otherwise.
-- [ ] **M1-E2** `go generate ./graph/...`.
+- [x] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — `PostureStore`/evaluator field added and wired; the generated resolvers have nothing to call otherwise.
+- [x] **M1-E2** `go generate ./graph/...`.
 - [ ] **M1-E3** `CompileACLSnapshot` returns `*CompiledACL{Snapshot, ValidUntil}`; applies enforce-only OR, freshness, profile-revision matching, and batch evaluation queries. Update only the compile closures in ClientService, connector control/heartbeat, and ACLPusher; `GetOrCompile` continues returning a bare protobuf snapshot to their downstream logic. Update direct compiler and cache mocks/tests for the internal result type.
 - [ ] **M1-E3b** `controller/internal/policy/cache.go` — `cacheEntry{snapshot, validUntil}`, injectable clock, and one-time `RegisterExpiryNotifier` callback wired after cache/notifier construction. On expiry, a per-workspace singleflight closure rechecks and claims expiry, releases locks, calls `NotifyPolicyChange` exactly once, recompiles exactly once, and never returns a known-stale snapshot.
-- [ ] **M1-E4** Every posture-relevant mutation (not only evaluation transitions) → policy version bump → ACL cache invalidation → snapshot push, via existing `NotifyPolicyChange`.
+- [x] **M1-E4** Every posture-relevant mutation (not only evaluation transitions) → policy version bump → ACL cache invalidation → snapshot push, via existing `NotifyPolicyChange`.
 - [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
 
 ## Post-Phase Fixes
@@ -308,3 +308,36 @@ within the authenticated workspace, updates profile mode with the empty-enforce 
 wires `PostureStore` into the resolver root, and notifies policy changes after both
 implemented mutations. Requirements, bindings, visibility, and the ACL compiler/cache
 work remain unchecked above.
+
+### Fix: GraphQL posture mutation hardening
+
+**Issue:** Expected posture validation errors were masked by the production error
+presenter, binding fields performed one resource query per binding, and requirement
+changes invalidated policy without immediately rebuilding stored evaluations.
+
+**Fix Applied:** Expected operator mistakes now use `apperr.UserError`, bound resources
+load through one tenant-scoped batch query, and requirement changes notify immediately
+then re-evaluate all devices with reports through `ReevaluateWorkspace`, emitting at
+most one additional transition notification for the batch. The evaluator dependency is
+wired into the GraphQL resolver root. Resolver tests execute the real GraphQL ADMIN
+directive and cover binding notifications, duplicates, tenant isolation, empty-enforce
+rejection, and safe error presentation.
+
+### Progress verification — 2026-07-31
+
+**Verified complete:** Resolver dependency wiring, GraphQL generation, and policy
+notification coverage for profile create/mode change/delete, requirement add/remove,
+resource bind/unbind, and evaluation transitions. Workspace re-evaluation now continues
+after per-device failures, preserves successful results, aggregates errors, and still
+notifies when a successful evaluation changes authorization.
+
+**Still open:** The GraphQL schema does not yet expose per-device posture visibility, so
+M1-E1 remains partial. `CompileACLSnapshot` still returns a plain
+`*clientv1.ACLSnapshot` and does not apply posture gating, revision/freshness checks,
+batch evaluations, or OR-aware `ValidUntil`. `SnapshotCache` still stores bare snapshots
+without expiry metadata, an injectable clock, expiry notification, or singleflight.
+
+**Verification:** `go generate ./graph/...`, focused resolver/posture/policy/resource
+tests, and `go build ./...` passed. The full `go test ./internal/...` gate remains open
+because the pre-existing `internal/auth` miniredis test fails on unsupported
+`CLIENT TRACKING`.

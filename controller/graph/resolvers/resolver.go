@@ -29,5 +29,6 @@ type Resolver struct {
 	PolicyStore       *policy.Store
 	PolicyNotifier    *policy.Notifier
 	PostureStore      *posture.Store
+	PostureEvaluator  *posture.Evaluator
 	TransportNotifier *transport.Notifier
 }

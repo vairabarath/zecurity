@@ -10,10 +10,18 @@ type PostureCheckDescriptor {
   allowUnsupportedMeaningful: Boolean!
 }
 
+type DeviceProfileRequirement {
+  id: ID!
+  checkId: String!
+  allowUnsupported: Boolean!
+}
+
 type DeviceProfile {
   id: ID!
   name: String!
   mode: DeviceProfileMode!
+  requirements: [DeviceProfileRequirement!]! @goField(forceResolver: true)
+  boundResources: [Resource!]! @goField(forceResolver: true)
 }
 
 extend type Query {
@@ -30,4 +38,29 @@ extend type Mutation {
     id: ID!
     mode: DeviceProfileMode!
   ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  addProfileRequirement(
+    profileId: ID!
+    checkId: String!
+    allowUnsupported: Boolean!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  deleteDeviceProfile(
+    id: ID!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  removeProfileRequirement(
+    profileId: ID!
+    checkId: String!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  bindResourceToProfile(
+    profileId: ID!
+    resourceId: ID!
+): DeviceProfile! @hasRole(roles: [ADMIN])
+
+unbindResourceFromProfile(
+    profileId: ID!
+    resourceId: ID!
+): DeviceProfile! @hasRole(roles: [ADMIN])
 }

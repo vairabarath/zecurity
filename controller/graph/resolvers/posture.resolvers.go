@@ -13,9 +13,86 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/posture"
+	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
+
+// Requirements is the resolver for the requirements field.
+func (r *deviceProfileResolver) Requirements(ctx context.Context, obj *graph.DeviceProfile) ([]*graph.DeviceProfileRequirement, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileID, err := uuid.Parse(obj.ID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid profile id: %w", err)
+	}
+
+	requirements, err := r.PostureStore.ListRequirements(
+		ctx,
+		workspaceID,
+		profileID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("requirements: %w", err)
+	}
+
+	result := make([]*graph.DeviceProfileRequirement, len(requirements))
+	for i, requirement := range requirements {
+		result[i] = &graph.DeviceProfileRequirement{
+			ID:               requirement.ID.String(),
+			CheckID:          requirement.CheckID,
+			AllowUnsupported: requirement.AllowUnsupported,
+		}
+	}
+
+	return result, nil
+}
+
+// BoundResources is the resolver for the boundResources field.
+func (r *deviceProfileResolver) BoundResources(ctx context.Context, obj *graph.DeviceProfile) ([]*graph.Resource, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileID, err := uuid.Parse(obj.ID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid profile id: %w", err)
+	}
+
+	bindings, err := r.PostureStore.ListResourceBindings(
+		ctx,
+		workspaceID,
+		profileID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("boundResources: %w", err)
+	}
+
+	resourceIDs := make([]uuid.UUID, len(bindings))
+	for i, binding := range bindings {
+		resourceIDs[i] = binding.ResourceID
+	}
+
+	rows, err := resource.GetByIDs(ctx, r.ResourceCfg.DB, tc.TenantID, resourceIDs)
+	if err != nil {
+		return nil, fmt.Errorf("boundResources: load resources: %w", err)
+	}
+	result := make([]*graph.Resource, len(rows))
+	for i, row := range rows {
+		result[i] = toResourceGQL(row)
+	}
+
+	return result, nil
+}
 
 // CreateDeviceProfile is the resolver for the createDeviceProfile field.
 func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string) (*graph.DeviceProfile, error) {
@@ -28,6 +105,9 @@ func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string)
 
 	profile, err := r.PostureStore.CreateProfile(ctx, workspaceID, name)
 	if err != nil {
+		if errors.Is(err, posture.ErrInvalidProfileName) {
+			return nil, apperr.UserErrorf("createDeviceProfile: name is required")
+		}
 		return nil, fmt.Errorf("createDeviceProfile: %w", err)
 	}
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
@@ -48,7 +128,7 @@ func (r *mutationResolver) UpdateDeviceProfileMode(ctx context.Context, id strin
 
 	profileID, err := uuid.Parse(id)
 	if err != nil {
-		return nil, fmt.Errorf("invalid profile id: %w", err)
+		return nil, apperr.UserErrorf("invalid profile id")
 	}
 
 	profile, err := r.PostureStore.UpdateProfileMode(
@@ -59,15 +139,334 @@ func (r *mutationResolver) UpdateDeviceProfileMode(ctx context.Context, id strin
 	)
 	if err != nil {
 		if errors.Is(err, posture.ErrEmptyEnforceProfile) {
-			return nil, fmt.Errorf("updateDeviceProfileMode: enforce mode requires at least one requirement")
+			return nil, apperr.UserErrorf("updateDeviceProfileMode: enforce mode requires at least one requirement")
 		}
 		if errors.Is(err, posture.ErrNotFound) {
-			return nil, fmt.Errorf("updateDeviceProfileMode: profile not found")
+			return nil, apperr.UserErrorf("updateDeviceProfileMode: profile not found")
 		}
 		return nil, fmt.Errorf("updateDeviceProfileMode: %w", err)
 	}
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("updateDeviceProfileMode notify: %w", err)
+	}
+
+	return postureProfileToGQL(profile), nil
+}
+
+// AddProfileRequirement is the resolver for the addProfileRequirement field.
+func (r *mutationResolver) AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	if !posture.IsRecognizedCheck(checkID) {
+		return nil, apperr.UserErrorf("unknown posture check: %s", checkID)
+	}
+
+	err = r.PostureStore.AddRequirement(
+		ctx,
+		workspaceID,
+		profileUUID,
+		posture.Requirement{
+			CheckID:          checkID,
+			AllowUnsupported: allowUnsupported,
+		},
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, posture.ErrDuplicateRequirement):
+			return nil, apperr.UserErrorf("addProfileRequirement: duplicate requirement")
+		case errors.Is(err, posture.ErrNotFound):
+			return nil, apperr.UserErrorf("addProfileRequirement: profile not found")
+		default:
+			return nil, fmt.Errorf("addProfileRequirement: %w", err)
+		}
+	}
+
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("addProfileRequirement notify: %w", err)
+	}
+	if r.PostureEvaluator == nil {
+		return nil, fmt.Errorf("addProfileRequirement: posture evaluator is not configured")
+	}
+	if err := r.PostureEvaluator.ReevaluateWorkspace(ctx, workspaceID); err != nil {
+		return nil, fmt.Errorf("addProfileRequirement re-evaluate: %w", err)
+	}
+
+	profile, err := r.PostureStore.GetProfile(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("addProfileRequirement: %w", err)
+	}
+
+	return postureProfileToGQL(profile), nil
+}
+
+// DeleteDeviceProfile is the resolver for the deleteDeviceProfile field.
+func (r *mutationResolver) DeleteDeviceProfile(ctx context.Context, id string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return false, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(id)
+	if err != nil {
+		return false, apperr.UserErrorf("invalid profile id")
+	}
+
+	err = r.PostureStore.DeleteProfile(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, posture.ErrNotFound):
+			return false, apperr.UserErrorf("deleteDeviceProfile: profile not found")
+		default:
+			return false, fmt.Errorf("deleteDeviceProfile: %w", err)
+		}
+	}
+
+	if err := r.PolicyNotifier.NotifyPolicyChange(
+		ctx,
+		tc.TenantID,
+	); err != nil {
+		return false, fmt.Errorf(
+			"deleteDeviceProfile notify: %w",
+			err,
+		)
+	}
+
+	return true, nil
+}
+
+// RemoveProfileRequirement is the resolver for the removeProfileRequirement field.
+func (r *mutationResolver) RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	if !posture.IsRecognizedCheck(checkID) {
+		return nil, apperr.UserErrorf("unknown posture check: %s", checkID)
+	}
+
+	err = r.PostureStore.RemoveRequirement(
+		ctx,
+		workspaceID,
+		profileUUID,
+		checkID,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, posture.ErrLastRequirement):
+			return nil, apperr.UserErrorf(
+				"removeProfileRequirement: cannot remove the final requirement from an enforced profile",
+			)
+
+		case errors.Is(err, posture.ErrNotFound):
+			return nil, apperr.UserErrorf(
+				"removeProfileRequirement: requirement or profile not found",
+			)
+
+		default:
+			return nil, fmt.Errorf(
+				"removeProfileRequirement: %w",
+				err,
+			)
+		}
+	}
+
+	if err := r.PolicyNotifier.NotifyPolicyChange(
+		ctx,
+		tc.TenantID,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"removeProfileRequirement notify: %w",
+			err,
+		)
+	}
+	if r.PostureEvaluator == nil {
+		return nil, fmt.Errorf("removeProfileRequirement: posture evaluator is not configured")
+	}
+	if err := r.PostureEvaluator.ReevaluateWorkspace(ctx, workspaceID); err != nil {
+		return nil, fmt.Errorf("removeProfileRequirement re-evaluate: %w", err)
+	}
+
+	profile, err := r.PostureStore.GetProfile(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"removeProfileRequirement: %w",
+			err,
+		)
+	}
+
+	return postureProfileToGQL(profile), nil
+}
+
+// BindResourceToProfile is the resolver for the bindResourceToProfile field.
+func (r *mutationResolver) BindResourceToProfile(ctx context.Context, profileID string, resourceID string) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("parse workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	resourceUUID, err := uuid.Parse(resourceID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid resource id")
+	}
+
+	if _, err := r.PostureStore.CreateResourceBinding(
+		ctx,
+		workspaceID,
+		resourceUUID,
+		profileUUID,
+	); err != nil {
+		switch {
+		case errors.Is(err, posture.ErrDuplicateBinding):
+			return nil, apperr.UserErrorf(
+				"bindResourceToProfile: duplicate resource binding",
+			)
+
+		case errors.Is(err, posture.ErrWorkspaceMismatch):
+			return nil, apperr.UserErrorf(
+				"bindResourceToProfile: profile or resource not found",
+			)
+
+		case errors.Is(err, posture.ErrEmptyEnforceProfile):
+			return nil, apperr.UserErrorf(
+				"bindResourceToProfile: enforced profile requires at least one requirement",
+			)
+
+		case errors.Is(err, posture.ErrNotFound):
+			return nil, apperr.UserErrorf(
+				"bindResourceToProfile: profile or resource not found",
+			)
+
+		default:
+			return nil, fmt.Errorf(
+				"bindResourceToProfile: %w",
+				err,
+			)
+		}
+	}
+
+	if err := r.PolicyNotifier.NotifyPolicyChange(
+		ctx,
+		tc.TenantID,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"bindResourceToProfile notify: %w",
+			err,
+		)
+	}
+
+	profile, err := r.PostureStore.GetProfile(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"bindResourceToProfile: %w",
+			err,
+		)
+	}
+
+	return postureProfileToGQL(profile), nil
+}
+
+// UnbindResourceFromProfile is the resolver for the unbindResourceFromProfile field.
+func (r *mutationResolver) UnbindResourceFromProfile(ctx context.Context, profileID string, resourceID string) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("parse workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	resourceUUID, err := uuid.Parse(resourceID)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid resource id")
+	}
+
+	if err := r.PostureStore.DeleteResourceBinding(
+		ctx,
+		workspaceID,
+		resourceUUID,
+		profileUUID,
+	); err != nil {
+		switch {
+		case errors.Is(err, posture.ErrNotFound):
+			return nil, apperr.UserErrorf(
+				"unbindResourceFromProfile: binding not found",
+			)
+
+		default:
+			return nil, fmt.Errorf(
+				"unbindResourceFromProfile: %w",
+				err,
+			)
+		}
+	}
+
+	if err := r.PolicyNotifier.NotifyPolicyChange(
+		ctx,
+		tc.TenantID,
+	); err != nil {
+		return nil, fmt.Errorf(
+			"unbindResourceFromProfile notify: %w",
+			err,
+		)
+	}
+
+	profile, err := r.PostureStore.GetProfile(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"unbindResourceFromProfile: %w",
+			err,
+		)
 	}
 
 	return postureProfileToGQL(profile), nil
@@ -112,10 +511,7 @@ func (r *queryResolver) DeviceProfiles(ctx context.Context) ([]*graph.DeviceProf
 	return result, nil
 }
 
-func postureProfileToGQL(profile *posture.Profile) *graph.DeviceProfile {
-	return &graph.DeviceProfile{
-		ID:   profile.ID.String(),
-		Name: profile.Name,
-		Mode: graph.DeviceProfileMode(strings.ToUpper(profile.Mode)),
-	}
-}
+// DeviceProfile returns graph.DeviceProfileResolver implementation.
+func (r *Resolver) DeviceProfile() graph.DeviceProfileResolver { return &deviceProfileResolver{r} }
+
+type deviceProfileResolver struct{ *Resolver }

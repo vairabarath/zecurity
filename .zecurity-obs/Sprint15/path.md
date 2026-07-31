@@ -212,11 +212,11 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 ### Phase E — M1: GraphQL Admin + ACL Compiler Hook
 > See [[Sprint15/Member1-Go/Phase3-GraphQL-Admin-and-ACL-Hook]]. Depends on Phase D.
 - [ ] **M1-E1** `controller/graph/posture.graphqls` (new, mirrors `resource.graphqls`) — Device Profile CRUD, requirements, resource bindings, audit/enforce toggle, device posture visibility (failure reason, observation time, report age, collector error — never raw command output), `supportedPostureChecks` query (server-driven check-ID list, not a hardcoded frontend list). All mutations require **ADMIN** role + workspace ownership check. **Reject switching a profile to `enforce` mode, binding an enforce-mode profile to a resource, or removing a requirement that would leave an already-enforced profile with zero requirements** — the empty-profile guard must cover all three paths, not just mode-switch and bind.
-- [ ] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — add `PostureStore`/evaluator field to `resolvers.Resolver` and wire construction; the generated posture resolvers have nothing to call without this.
-- [ ] **M1-E2** `cd controller && go generate ./graph/...`
+- [x] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — add `PostureStore`/evaluator field to `resolvers.Resolver` and wire construction; the generated posture resolvers have nothing to call without this.
+- [x] **M1-E2** `cd controller && go generate ./graph/...`
 - [ ] **M1-E3** `CompileACLSnapshot` returns `CompiledACL{Snapshot, ValidUntil}`, filters on matching profile revisions with a batch query, and computes OR-aware expiry from posture-gated pairs only. Update the compile closures in ClientService, connector control/heartbeat, and ACLPusher plus direct compiler/cache tests; `GetOrCompile` unwraps the result and keeps returning `*clientv1.ACLSnapshot` downstream.
 - [ ] **M1-E3b** `SnapshotCache` stores `cacheEntry`, uses an injectable clock, and exposes one-time `RegisterExpiryNotifier` wiring. A per-workspace singleflight closure rechecks/claims expiry, releases locks, notifies/version-bumps exactly once, compiles exactly once, and fails closed on missing notifier or compile error.
-- [ ] **M1-E4** Every posture-relevant mutation (create/mode-change/requirement/binding/delete) **and** every evaluation transition bumps workspace policy version, invalidates ACL cache, pushes new snapshot (reuse existing `NotifyPolicyChange(workspace_id)` path).
+- [x] **M1-E4** Every posture-relevant mutation (create/mode-change/requirement/binding/delete) **and** every evaluation transition bumps workspace policy version, invalidates ACL cache, pushes new snapshot (reuse existing `NotifyPolicyChange(workspace_id)` path).
 
 ### Phase F0 — M1: Retention Worker
 > See [[Sprint15/Member1-Go/Phase4-Retention-Worker]]. Depends on Phase C's `ON DELETE SET NULL` fix.
@@ -232,10 +232,10 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase F — M3: Active-Session Registry
 > See [[Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry]]. Depends on nothing — Day 1.
-- [ ] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` (neither is a dependency today).
+- [x] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` (neither is a dependency today).
 - [ ] **M3-F1** `connector/src/device_tunnel.rs` — shared `DashMap<(SpiffeId, ResourceId), HashMap<SessionId, CancellationToken>>` (nested per-session map, **not** `Vec` — a bare `Vec`/single-level map keyed only by `(spiffe,resource)` would let one tunnel's cleanup remove a sibling tunnel's still-live token when two sessions share the same pair). Create the token **before** `tokio::spawn`, clone it into the future, register `(spiffe,resource) → {session_id: token}` **after** ACL resolution succeeds inside `handle_stream`, drop-guard removes only its own `session_id`, removing the outer key only when the inner map is empty.
-- [ ] **M3-F2** `connector/src/quic_listener.rs` — identical registration path for QUIC-accepted streams (also calls `handle_stream`).
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M3-F2** `connector/src/quic_listener.rs` — identical registration path for QUIC-accepted streams (also calls `handle_stream`).
+- [x] **Build gate:** `cd connector && cargo build`
 
 ### Phase G — M3: ACL-Diff Teardown
 > See [[Sprint15/Member3-Rust-Connector/Phase2-ACL-Diff-Teardown]]. Depends on Phase F.
@@ -314,6 +314,16 @@ vacuously satisfied.
 
 **Fix:** `UpdateProfileMode` now locks the workspace-scoped profile and rejects the
 transition unless at least one requirement exists. See the M1 Phase 1 Post-Phase Fixes.
+
+### Fix: Posture GraphQL mutations fail safely and re-evaluate
+
+**Issue:** Expected mutation errors were hidden by the production error presenter,
+binding reads were N+1, and requirement changes did not immediately refresh evaluations.
+
+**Fix:** Posture resolvers now expose only explicit safe user errors, batch-load bound
+resources, and run a workspace re-evaluation after requirement changes. Schema-level
+ADMIN, notification, tenant-isolation, and binding regression tests were added. See the
+M1 Phase 3 Post-Phase Fixes section.
 
 ## Deferred (out of scope this sprint)
 - Windows/macOS collectors (same interface, later).

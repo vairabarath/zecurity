@@ -4,7 +4,7 @@ member: M3
 sprint: 15
 phase: 1
 title: Active-Session Registry
-status: planned
+status: in-progress
 depends_on: []
 tags: [rust, connector, session-registry, pending-08, pending-09]
 ---
@@ -113,11 +113,24 @@ cd connector && cargo build
 ```
 
 ## Implementation Checklist
-- [ ] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` as dependencies.
+- [x] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` as dependencies.
 - [ ] **M3-F1** Shared `DashMap<(spiffe_id, resource_id), HashMap<SessionId, CancellationToken>>` (nested, not flat); token + fresh `SessionId` created **before** `tokio::spawn` in `listen()`, registered **after** ACL resolution succeeds inside `handle_stream` — not the (impossible) post-spawn `JoinHandle` design.
-- [ ] **M3-F2** Identical registration path added to `connector/src/quic_listener.rs`'s accept loop.
-- [ ] Drop guard removes only its own `SessionId`; outer key removed only when the inner map is empty (no cross-session cancellation, no leak).
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M3-F2** Identical registration path added to `connector/src/quic_listener.rs`'s accept loop.
+- [x] Drop guard removes only its own `SessionId`; outer key removed only when the inner map is empty (no cross-session cancellation, no leak).
+- [x] **Build gate:** `cd connector && cargo build`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Remaining: create cancellation identity before spawning
+
+**Issue:** The registry shape, shared TCP/QUIC registration path, and cleanup guard are
+implemented, but `SessionRegistry::register()` currently creates the
+`CancellationToken` and `SessionId` from inside `handle_stream`, after the connection
+task has already been spawned.
+
+**Required Fix:** Create a fresh token and session ID before `tokio::spawn` in both
+accept loops, pass them through to `handle_stream`, and register those values only after
+ACL resolution succeeds. Until this is done, M3-F1 and the overall phase remain open.
+
+**Verification:** `cargo test -q` passed all 87 unit tests and all 4 loopback integration
+tests (1 test ignored) on 2026-07-29.

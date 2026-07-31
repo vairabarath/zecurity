@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ var (
 	ErrLastRequirement      = errors.New("cannot remove the last requirement from an enforced profile")
 	ErrEmptyEnforceProfile  = errors.New("enforced profile must have at least one requirement")
 	ErrInvalidMode          = errors.New("invalid device profile mode")
+	ErrInvalidProfileName   = errors.New("device profile name is required")
 )
 
 const (
@@ -287,6 +289,10 @@ func (s *Store) CreateProfile(
 	name string,
 ) (*Profile, error) {
 	profile := &Profile{}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, ErrInvalidProfileName
+	}
 
 	err := s.pool.QueryRow(
 		ctx,
@@ -318,6 +324,37 @@ func (s *Store) CreateProfile(
 	}
 
 	return profile, nil
+}
+
+func (s *Store) DeviceIDsWithReports(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+) ([]uuid.UUID, error) {
+	rows, err := s.pool.Query(
+		ctx,
+		`SELECT DISTINCT device_id
+		   FROM device_posture_reports
+		  WHERE workspace_id = $1
+		  ORDER BY device_id`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list devices with posture reports: %w", err)
+	}
+	defer rows.Close()
+
+	deviceIDs := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var deviceID uuid.UUID
+		if err := rows.Scan(&deviceID); err != nil {
+			return nil, fmt.Errorf("scan device with posture report: %w", err)
+		}
+		deviceIDs = append(deviceIDs, deviceID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate devices with posture reports: %w", err)
+	}
+	return deviceIDs, nil
 }
 
 func (s *Store) GetProfile(
@@ -750,9 +787,67 @@ func (s *Store) CreateResourceBinding(
 	profileID uuid.UUID,
 ) (*ResourceBinding, error) {
 
+	tx, err := s.pool.Begin(ctx)
+
+	if err != nil {
+		return nil, fmt.Errorf("begin create resource binding: %w", err)
+	}
+
+	defer tx.Rollback(ctx)
+
 	binding := &ResourceBinding{}
 
-	err := s.pool.QueryRow(
+	var (
+		profileWorkspaceID uuid.UUID
+		mode               string
+	)
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT workspace_id, mode
+		FROM device_profiles
+		WHERE id = $1
+		FOR UPDATE
+		`,
+		profileID,
+	).Scan(
+		&profileWorkspaceID,
+		&mode,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock device profile: %w", err)
+	}
+
+	if profileWorkspaceID != workspaceID {
+		return nil, ErrWorkspaceMismatch
+	}
+
+	var requirementCount int
+
+	err = tx.QueryRow(
+		ctx,
+		`
+		SELECT COUNT(*)
+		FROM device_profile_requirements
+		WHERE profile_id = $1
+		`,
+		profileID,
+	).Scan(&requirementCount)
+
+	if err != nil {
+		return nil, fmt.Errorf("count profile requirements: %w", err)
+	}
+
+	if mode == ModeEnforce && requirementCount == 0 {
+		return nil, ErrEmptyEnforceProfile
+	}
+
+	err = tx.QueryRow(
 		ctx,
 		`
 		INSERT INTO resource_profile_bindings (
@@ -797,6 +892,9 @@ func (s *Store) CreateResourceBinding(
 		return nil, fmt.Errorf("create resource binding: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit create resource binding: %w", err)
+	}
 	return binding, nil
 }
 

@@ -61,9 +61,17 @@ type CreateResourceInput struct {
 }
 
 type DeviceProfile struct {
-	ID   string            `json:"id"`
-	Name string            `json:"name"`
-	Mode DeviceProfileMode `json:"mode"`
+	ID             string                      `json:"id"`
+	Name           string                      `json:"name"`
+	Mode           DeviceProfileMode           `json:"mode"`
+	Requirements   []*DeviceProfileRequirement `json:"requirements"`
+	BoundResources []*Resource                 `json:"boundResources"`
+}
+
+type DeviceProfileRequirement struct {
+	ID               string `json:"id"`
+	CheckID          string `json:"checkId"`
+	AllowUnsupported bool   `json:"allowUnsupported"`
 }
 
 type DiscoveredService struct {

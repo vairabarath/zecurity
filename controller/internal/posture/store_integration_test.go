@@ -52,6 +52,7 @@ func TestStoreIntegration(t *testing.T) {
 	workspaceB := insertPostureTestWorkspace(t, ctx, pool, "posture-b")
 	deviceA := insertPostureTestDevice(t, ctx, pool, workspaceA, "a")
 	deviceB := insertPostureTestDevice(t, ctx, pool, workspaceB, "b")
+	resourceA := insertPostureTestResource(t, ctx, pool, workspaceB, "a")
 	resourceB := insertPostureTestResource(t, ctx, pool, workspaceB, "b")
 	store := NewStore(pool)
 
@@ -96,6 +97,30 @@ func TestStoreIntegration(t *testing.T) {
 	if _, err := store.UpdateProfileMode(ctx, workspaceA, emptyProfile.ID, ModeEnforce); !errors.Is(err, ErrEmptyEnforceProfile) {
 		t.Fatalf("enforce empty profile error = %v, want %v", err, ErrEmptyEnforceProfile)
 	}
+	// Simulate an invalid profile by bypassing the store.
+	if _, err := pool.Exec(
+		ctx,
+		`
+		UPDATE device_profiles
+		SET mode = $2
+		WHERE workspace_id = $1
+		  AND id = $3
+		`,
+		workspaceA,
+		ModeEnforce,
+		emptyProfile.ID,
+	); err != nil {
+		t.Fatalf("force enforce mode: %v", err)
+	}
+
+	if _, err := store.CreateResourceBinding(
+		ctx,
+		workspaceA,
+		resourceA,
+		emptyProfile.ID,
+	); !errors.Is(err, ErrEmptyEnforceProfile) {
+		t.Fatalf("bind empty enforced profile error = %v, want %v", err, ErrEmptyEnforceProfile)
+	}
 	if err := store.AddRequirement(ctx, workspaceA, profile.ID, Requirement{
 		CheckID: "linux.disk.encryption",
 	}); err != nil {
@@ -108,6 +133,20 @@ func TestStoreIntegration(t *testing.T) {
 	}
 	if profile.Revision != 2 {
 		t.Fatalf("profile revision = %d, want 2", profile.Revision)
+	}
+	notifier := &postureTestNotifier{}
+	if err := NewEvaluator(store, notifier).ReevaluateWorkspace(ctx, workspaceA); err != nil {
+		t.Fatalf("re-evaluate workspace: %v", err)
+	}
+	if notifier.calls != 1 {
+		t.Fatalf("re-evaluation notifications = %d, want 1", notifier.calls)
+	}
+	evaluation, err := store.LatestEvaluation(ctx, workspaceA, deviceA, profile.ID)
+	if err != nil {
+		t.Fatalf("load re-evaluated profile: %v", err)
+	}
+	if !evaluation.Satisfied || evaluation.ProfileRevision != profile.Revision {
+		t.Fatalf("re-evaluated profile = %#v, want satisfied revision %d", evaluation, profile.Revision)
 	}
 	if _, err := store.UpdateProfileMode(ctx, workspaceA, profile.ID, ModeEnforce); err != nil {
 		t.Fatalf("enforce profile: %v", err)
@@ -193,6 +232,15 @@ func TestStoreIntegration(t *testing.T) {
 	); !errors.Is(err, ErrWorkspaceMismatch) {
 		t.Fatalf("cross-workspace evaluation error = %v, want %v", err, ErrWorkspaceMismatch)
 	}
+}
+
+type postureTestNotifier struct {
+	calls int
+}
+
+func (n *postureTestNotifier) NotifyPolicyChange(context.Context, string) error {
+	n.calls++
+	return nil
 }
 
 func postureTestPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {

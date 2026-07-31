@@ -1,11 +1,13 @@
 package posture
 
 import (
+	"context"
+	"errors"
+	"github.com/google/uuid"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func TestEvaluateProfileStatusMatrix(t *testing.T) {
@@ -127,6 +129,203 @@ func TestResourceSatisfiedUsesEnforceOnlyOR(t *testing.T) {
 				t.Fatalf("ResourceSatisfied() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+type recordingNotifier struct {
+	calls int
+	err   error
+}
+
+func (n *recordingNotifier) NotifyPolicyChange(
+	context.Context,
+	string,
+) error {
+	n.calls++
+	return n.err
+}
+func TestReevaluateDevicesContinuesAfterPartialFailure(t *testing.T) {
+	workspaceID := uuid.New()
+
+	deviceA := uuid.New()
+	deviceB := uuid.New()
+	deviceC := uuid.New()
+	deviceD := uuid.New()
+
+	notifier := &recordingNotifier{}
+	evaluator := &Evaluator{
+		notifier: notifier,
+	}
+
+	var evaluated []uuid.UUID
+
+	err := evaluator.reevaluateDevices(
+		context.Background(),
+		workspaceID,
+		[]uuid.UUID{
+			deviceA,
+			deviceB,
+			deviceC,
+			deviceD,
+		},
+		func(
+			_ context.Context,
+			_ uuid.UUID,
+			deviceID uuid.UUID,
+		) (bool, error) {
+			evaluated = append(evaluated, deviceID)
+
+			switch deviceID {
+			case deviceC:
+				return false, errors.New("database unavailable")
+			case deviceD:
+				return true, nil
+			default:
+				return false, nil
+			}
+		},
+	)
+
+	want := []uuid.UUID{
+		deviceA,
+		deviceB,
+		deviceC,
+		deviceD,
+	}
+
+	if !reflect.DeepEqual(evaluated, want) {
+		t.Fatalf("evaluated = %v, want %v", evaluated, want)
+	}
+
+	if err == nil {
+		t.Fatal("expected aggregated partial-failure error")
+	}
+
+	if !strings.Contains(err.Error(), deviceC.String()) {
+		t.Fatalf(
+			"error %q does not contain failed device ID %s",
+			err,
+			deviceC,
+		)
+	}
+
+	if !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf(
+			"error %q does not contain database failure",
+			err,
+		)
+	}
+
+	if notifier.calls != 1 {
+		t.Fatalf(
+			"notification calls = %d, want 1",
+			notifier.calls,
+		)
+	}
+
+}
+
+func TestReevaluateDevicesNoPolicyChangeDoesNotNotify(t *testing.T) {
+	workspaceID := uuid.New()
+
+	deviceA := uuid.New()
+	deviceB := uuid.New()
+	deviceC := uuid.New()
+
+	notifier := &recordingNotifier{}
+	evaluator := &Evaluator{
+		notifier: notifier,
+	}
+
+	err := evaluator.reevaluateDevices(
+		context.Background(),
+		workspaceID,
+		[]uuid.UUID{
+			deviceA,
+			deviceB,
+			deviceC,
+		},
+		func(
+			_ context.Context,
+			_ uuid.UUID,
+			_ uuid.UUID,
+		) (bool, error) {
+			return false, nil
+		},
+	)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if notifier.calls != 0 {
+		t.Fatalf(
+			"notification calls = %d, want 0",
+			notifier.calls,
+		)
+	}
+}
+
+func TestReevaluateDevicesAggregatesNotificationFailure(t *testing.T) {
+	workspaceID := uuid.New()
+
+	deviceA := uuid.New()
+	deviceB := uuid.New()
+
+	notifier := &recordingNotifier{
+		err: errors.New("notification failed"),
+	}
+
+	evaluator := &Evaluator{
+		notifier: notifier,
+	}
+
+	err := evaluator.reevaluateDevices(
+		context.Background(),
+		workspaceID,
+		[]uuid.UUID{
+			deviceA,
+			deviceB,
+		},
+		func(
+			_ context.Context,
+			_ uuid.UUID,
+			deviceID uuid.UUID,
+		) (bool, error) {
+			switch deviceID {
+			case deviceA:
+				return true, nil
+			case deviceB:
+				return false, errors.New("database unavailable")
+			default:
+				return false, nil
+			}
+		},
+	)
+
+	if err == nil {
+		t.Fatal("expected aggregated error")
+	}
+
+	if notifier.calls != 1 {
+		t.Fatalf(
+			"notification calls = %d, want 1",
+			notifier.calls,
+		)
+	}
+
+	if !strings.Contains(err.Error(), "database unavailable") {
+		t.Fatalf(
+			"error %q does not contain device failure",
+			err,
+		)
+	}
+
+	if !strings.Contains(err.Error(), "notification failed") {
+		t.Fatalf(
+			"error %q does not contain notification failure",
+			err,
+		)
 	}
 }
 
