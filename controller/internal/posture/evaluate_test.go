@@ -3,35 +3,37 @@ package posture
 import (
 	"context"
 	"errors"
-	"github.com/google/uuid"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestEvaluateProfileStatusMatrix(t *testing.T) {
 	now := time.Now().UTC()
 
 	tests := []struct {
-		status           string
+		status           ObservationStatus
 		allowUnsupported bool
 		want             bool
 	}{
-		{StatusPass, false, true},
-		{StatusPass, true, true},
-		{StatusFail, false, false},
-		{StatusFail, true, false},
-		{StatusUnsupported, false, false},
-		{StatusUnsupported, true, true},
-		{StatusUnknown, false, false},
-		{StatusUnknown, true, false},
-		{StatusError, false, false},
-		{StatusError, true, false},
+		{ObservationStatusPass, false, true},
+		{ObservationStatusPass, true, true},
+		{ObservationStatusFail, false, false},
+		{ObservationStatusFail, true, false},
+		{ObservationStatusUnsupported, false, false},
+		{ObservationStatusUnsupported, true, true},
+		{ObservationStatusUnknown, false, false},
+		{ObservationStatusUnknown, true, false},
+		{ObservationStatusError, false, false},
+		{ObservationStatusError, true, false},
 	}
 
 	for _, tt := range tests {
-		name := tt.status + "/allow=" + strings.ToLower(string(rune('0'+boolInt(tt.allowUnsupported))))
+		name := fmt.Sprintf("%s/allow=%d", tt.status, boolInt(tt.allowUnsupported))
 		t.Run(name, func(t *testing.T) {
 			result := EvaluateProfile(
 				now,
@@ -72,7 +74,7 @@ func TestEvaluateProfileFailsClosed(t *testing.T) {
 			name:         "stale pass",
 			receivedAt:   now.Add(-MaxReportAge - time.Second),
 			requirements: []Requirement{{CheckID: CheckLUKS}},
-			observations: map[string]Observation{CheckLUKS: {CheckID: CheckLUKS, Status: StatusPass}},
+			observations: map[string]Observation{CheckLUKS: {CheckID: CheckLUKS, Status: ObservationStatusPass}},
 			reason:       "stale",
 		},
 		{
@@ -90,8 +92,8 @@ func TestEvaluateProfileFailsClosed(t *testing.T) {
 				{CheckID: CheckFirewall},
 			},
 			observations: map[string]Observation{
-				CheckLUKS:     {CheckID: CheckLUKS, Status: StatusPass},
-				CheckFirewall: {CheckID: CheckFirewall, Status: StatusFail},
+				CheckLUKS:     {CheckID: CheckLUKS, Status: ObservationStatusPass},
+				CheckFirewall: {CheckID: CheckFirewall, Status: ObservationStatusFail},
 			},
 			reason: CheckFirewall,
 		},

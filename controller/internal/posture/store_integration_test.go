@@ -64,7 +64,7 @@ func TestStoreIntegration(t *testing.T) {
 		ReportedAt:    time.Now().UTC(),
 		Observations: []Observation{{
 			CheckID: "linux.disk.encryption",
-			Status:  "PASS",
+			Status:  ObservationStatusPass,
 		}},
 	}
 	if err := store.InsertReport(ctx, workspaceA, deviceA, report); err != nil {
@@ -145,6 +145,106 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load re-evaluated profile: %v", err)
 	}
+	visibility, err := store.ListDevicePostureVisibility(
+		ctx,
+		workspaceA,
+		profile.ID,
+	)
+	if err != nil {
+		t.Fatalf("list device posture visibility: %v", err)
+	}
+
+	if len(visibility) != 1 {
+		t.Fatalf("visibility len = %d, want 1", len(visibility))
+	}
+
+	visibilityItem := visibility[0]
+
+	if visibilityItem.DeviceID != deviceA {
+		t.Fatalf("device id = %v, want %v", visibilityItem.DeviceID, deviceA)
+	}
+
+	if visibilityItem.ProfileID != profile.ID {
+		t.Fatalf("profile id = %v, want %v", visibilityItem.ProfileID, profile.ID)
+	}
+
+	if !visibilityItem.Satisfied {
+		t.Fatal("expected satisfied=true")
+	}
+
+	if visibilityItem.Stale {
+		t.Fatal("expected stale=false")
+	}
+
+	if visibilityItem.ReportReceivedAt == nil {
+		t.Fatal("expected report received time")
+	}
+
+	if len(visibilityItem.Observations) != 1 {
+		t.Fatalf("observations len = %d, want 1", len(visibilityItem.Observations))
+	}
+
+	if visibilityItem.Observations[0].CheckID != "linux.disk.encryption" {
+		t.Fatalf("unexpected observation: %#v", visibilityItem.Observations[0])
+	}
+
+	if visibilityItem.Observations[0].Status != ObservationStatusPass {
+		t.Fatalf("status = %v, want PASS", visibilityItem.Observations[0].Status)
+	}
+
+	// Add another requirement to bump the profile revision.
+	if err := store.AddRequirement(ctx, workspaceA, profile.ID, Requirement{
+		CheckID: CheckFirewall,
+	}); err != nil {
+		t.Fatalf("add second requirement: %v", err)
+	}
+
+	updatedProfile, err := store.GetProfile(ctx, workspaceA, profile.ID)
+	if err != nil {
+		t.Fatalf("reload updated profile: %v", err)
+	}
+
+	if updatedProfile.Revision != profile.Revision+1 {
+		t.Fatalf(
+			"profile revision = %d, want %d",
+			updatedProfile.Revision,
+			profile.Revision+1,
+		)
+	}
+
+	visibility, err = store.ListDevicePostureVisibility(
+		ctx,
+		workspaceA,
+		profile.ID,
+	)
+	if err != nil {
+		t.Fatalf("list stale visibility: %v", err)
+	}
+
+	if len(visibility) != 1 {
+		t.Fatalf("visibility len = %d, want 1", len(visibility))
+	}
+
+	stale := visibility[0]
+
+	if !stale.Stale {
+		t.Fatal("expected stale=true")
+	}
+
+	if !stale.Satisfied {
+		t.Fatal("expected satisfied to remain true")
+	}
+
+	if stale.FailureReason == nil || *stale.FailureReason != "all required checks passed" {
+		t.Fatalf("failure reason changed unexpectedly: %#v", stale.FailureReason)
+	}
+
+	// Restore the original requirement set so the existing last-requirement
+	// invariant below remains independent from the stale-visibility assertion.
+	if err := store.RemoveRequirement(ctx, workspaceA, profile.ID, CheckFirewall); err != nil {
+		t.Fatalf("remove second requirement: %v", err)
+	}
+
 	if !evaluation.Satisfied || evaluation.ProfileRevision != profile.Revision {
 		t.Fatalf("re-evaluated profile = %#v, want satisfied revision %d", evaluation, profile.Revision)
 	}

@@ -86,6 +86,26 @@ type ComplexityRoot struct {
 		ConnectorID func(childComplexity int) int
 	}
 
+	DevicePostureObservation struct {
+		CheckID        func(childComplexity int) int
+		CollectorError func(childComplexity int) int
+		ObservedAt     func(childComplexity int) int
+		Status         func(childComplexity int) int
+	}
+
+	DevicePostureVisibility struct {
+		DeviceID         func(childComplexity int) int
+		DeviceName       func(childComplexity int) int
+		EvaluatedAt      func(childComplexity int) int
+		FailureReason    func(childComplexity int) int
+		Observations     func(childComplexity int) int
+		ProfileID        func(childComplexity int) int
+		ReportAgeSeconds func(childComplexity int) int
+		ReportReceivedAt func(childComplexity int) int
+		Satisfied        func(childComplexity int) int
+		Stale            func(childComplexity int) int
+	}
+
 	DeviceProfile struct {
 		BoundResources func(childComplexity int) int
 		ID             func(childComplexity int) int
@@ -177,6 +197,7 @@ type ComplexityRoot struct {
 		Connector               func(childComplexity int, id string) int
 		ConnectorLogs           func(childComplexity int, limit *int) int
 		Connectors              func(childComplexity int, remoteNetworkID string) int
+		DevicePostureVisibility func(childComplexity int, profileID string) int
 		DeviceProfiles          func(childComplexity int) int
 		GetDiscoveredServices   func(childComplexity int, shieldID string) int
 		GetScanResults          func(childComplexity int, requestID string) int
@@ -350,6 +371,7 @@ type QueryResolver interface {
 	ConnectorLogs(ctx context.Context, limit *int) ([]*ConnectorLog, error)
 	SupportedPostureChecks(ctx context.Context) ([]*PostureCheckDescriptor, error)
 	DeviceProfiles(ctx context.Context) ([]*DeviceProfile, error)
+	DevicePostureVisibility(ctx context.Context, profileID string) ([]*DevicePostureVisibility, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -553,6 +575,92 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ConnectorToken.ConnectorID(childComplexity), true
+
+	case "DevicePostureObservation.checkId":
+		if e.ComplexityRoot.DevicePostureObservation.CheckID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureObservation.CheckID(childComplexity), true
+	case "DevicePostureObservation.collectorError":
+		if e.ComplexityRoot.DevicePostureObservation.CollectorError == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureObservation.CollectorError(childComplexity), true
+	case "DevicePostureObservation.observedAt":
+		if e.ComplexityRoot.DevicePostureObservation.ObservedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureObservation.ObservedAt(childComplexity), true
+	case "DevicePostureObservation.status":
+		if e.ComplexityRoot.DevicePostureObservation.Status == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureObservation.Status(childComplexity), true
+
+	case "DevicePostureVisibility.deviceId":
+		if e.ComplexityRoot.DevicePostureVisibility.DeviceID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.DeviceID(childComplexity), true
+	case "DevicePostureVisibility.deviceName":
+		if e.ComplexityRoot.DevicePostureVisibility.DeviceName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.DeviceName(childComplexity), true
+	case "DevicePostureVisibility.evaluatedAt":
+		if e.ComplexityRoot.DevicePostureVisibility.EvaluatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.EvaluatedAt(childComplexity), true
+	case "DevicePostureVisibility.failureReason":
+		if e.ComplexityRoot.DevicePostureVisibility.FailureReason == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.FailureReason(childComplexity), true
+	case "DevicePostureVisibility.observations":
+		if e.ComplexityRoot.DevicePostureVisibility.Observations == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.Observations(childComplexity), true
+	case "DevicePostureVisibility.profileId":
+		if e.ComplexityRoot.DevicePostureVisibility.ProfileID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.ProfileID(childComplexity), true
+	case "DevicePostureVisibility.reportAgeSeconds":
+		if e.ComplexityRoot.DevicePostureVisibility.ReportAgeSeconds == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.ReportAgeSeconds(childComplexity), true
+	case "DevicePostureVisibility.reportReceivedAt":
+		if e.ComplexityRoot.DevicePostureVisibility.ReportReceivedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.ReportReceivedAt(childComplexity), true
+	case "DevicePostureVisibility.satisfied":
+		if e.ComplexityRoot.DevicePostureVisibility.Satisfied == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.Satisfied(childComplexity), true
+	case "DevicePostureVisibility.stale":
+		if e.ComplexityRoot.DevicePostureVisibility.Stale == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DevicePostureVisibility.Stale(childComplexity), true
 
 	case "DeviceProfile.boundResources":
 		if e.ComplexityRoot.DeviceProfile.BoundResources == nil {
@@ -1155,6 +1263,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Connectors(childComplexity, args["remoteNetworkId"].(string)), true
+	case "Query.devicePostureVisibility":
+		if e.ComplexityRoot.Query.DevicePostureVisibility == nil {
+			break
+		}
+
+		args, err := ec.field_Query_devicePostureVisibility_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.DevicePostureVisibility(childComplexity, args["profileId"].(string)), true
 	case "Query.deviceProfiles":
 		if e.ComplexityRoot.Query.DeviceProfiles == nil {
 			break
@@ -1877,6 +1996,46 @@ func (ec *executionContext) childFields_ConnectorToken(ctx context.Context, fiel
 		return ec.fieldContext_ConnectorToken_connectorId(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ConnectorToken", field.Name)
+}
+
+func (ec *executionContext) childFields_DevicePostureObservation(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "checkId":
+		return ec.fieldContext_DevicePostureObservation_checkId(ctx, field)
+	case "status":
+		return ec.fieldContext_DevicePostureObservation_status(ctx, field)
+	case "observedAt":
+		return ec.fieldContext_DevicePostureObservation_observedAt(ctx, field)
+	case "collectorError":
+		return ec.fieldContext_DevicePostureObservation_collectorError(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type DevicePostureObservation", field.Name)
+}
+
+func (ec *executionContext) childFields_DevicePostureVisibility(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "deviceId":
+		return ec.fieldContext_DevicePostureVisibility_deviceId(ctx, field)
+	case "deviceName":
+		return ec.fieldContext_DevicePostureVisibility_deviceName(ctx, field)
+	case "profileId":
+		return ec.fieldContext_DevicePostureVisibility_profileId(ctx, field)
+	case "satisfied":
+		return ec.fieldContext_DevicePostureVisibility_satisfied(ctx, field)
+	case "stale":
+		return ec.fieldContext_DevicePostureVisibility_stale(ctx, field)
+	case "failureReason":
+		return ec.fieldContext_DevicePostureVisibility_failureReason(ctx, field)
+	case "evaluatedAt":
+		return ec.fieldContext_DevicePostureVisibility_evaluatedAt(ctx, field)
+	case "reportReceivedAt":
+		return ec.fieldContext_DevicePostureVisibility_reportReceivedAt(ctx, field)
+	case "reportAgeSeconds":
+		return ec.fieldContext_DevicePostureVisibility_reportAgeSeconds(ctx, field)
+	case "observations":
+		return ec.fieldContext_DevicePostureVisibility_observations(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type DevicePostureVisibility", field.Name)
 }
 
 func (ec *executionContext) childFields_DeviceProfile(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2979,6 +3138,20 @@ func (ec *executionContext) field_Query_connectors_args(ctx context.Context, raw
 	return args, nil
 }
 
+func (ec *executionContext) field_Query_devicePostureVisibility_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Query_getDiscoveredServices_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3848,6 +4021,337 @@ func (ec *executionContext) _ConnectorToken_connectorId(ctx context.Context, fie
 }
 func (ec *executionContext) fieldContext_ConnectorToken_connectorId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ConnectorToken", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureObservation_checkId(ctx context.Context, field graphql.CollectedField, obj *DevicePostureObservation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureObservation_checkId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.CheckID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureObservation_checkId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureObservation", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureObservation_status(ctx context.Context, field graphql.CollectedField, obj *DevicePostureObservation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureObservation_status(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v PostureCheckStatus) graphql.Marshaler {
+			return ec.marshalNPostureCheckStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckStatus(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureObservation_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureObservation", field, false, false, errors.New("field of type PostureCheckStatus does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureObservation_observedAt(ctx context.Context, field graphql.CollectedField, obj *DevicePostureObservation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureObservation_observedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ObservedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureObservation_observedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureObservation", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureObservation_collectorError(ctx context.Context, field graphql.CollectedField, obj *DevicePostureObservation) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureObservation_collectorError(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.CollectorError, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureObservation_collectorError(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureObservation", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_deviceId(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_deviceId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DeviceID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_deviceId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_deviceName(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_deviceName(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DeviceName, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_deviceName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_profileId(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_profileId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ProfileID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_profileId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_satisfied(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_satisfied(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Satisfied, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_satisfied(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_stale(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_stale(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Stale, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_stale(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_failureReason(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_failureReason(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.FailureReason, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_failureReason(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_evaluatedAt(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_evaluatedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.EvaluatedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_evaluatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_reportReceivedAt(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_reportReceivedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ReportReceivedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_reportReceivedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_reportAgeSeconds(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_reportAgeSeconds(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ReportAgeSeconds, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *int) graphql.Marshaler {
+			return ec.marshalOInt2ᚖint(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_reportAgeSeconds(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DevicePostureVisibility", field, false, false, errors.New("field of type Int does not have child fields"))
+}
+
+func (ec *executionContext) _DevicePostureVisibility_observations(ctx context.Context, field graphql.CollectedField, obj *DevicePostureVisibility) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DevicePostureVisibility_observations(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Observations, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*DevicePostureObservation) graphql.Marshaler {
+			return ec.marshalNDevicePostureObservation2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureObservationᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DevicePostureVisibility_observations(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "DevicePostureVisibility",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DevicePostureObservation(ctx, field)
+		},
+	}
+	return fc, nil
 }
 
 func (ec *executionContext) _DeviceProfile_id(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
@@ -7825,6 +8329,68 @@ func (ec *executionContext) fieldContext_Query_deviceProfiles(_ context.Context,
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_devicePostureVisibility(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_devicePostureVisibility(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().DevicePostureVisibility(ctx, fc.Args["profileId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*DevicePostureVisibility
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*DevicePostureVisibility
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*DevicePostureVisibility) graphql.Marshaler {
+			return ec.marshalNDevicePostureVisibility2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureVisibilityᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_devicePostureVisibility(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DevicePostureVisibility(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_devicePostureVisibility_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query___type(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -10810,6 +11376,132 @@ func (ec *executionContext) _ConnectorToken(ctx context.Context, sel ast.Selecti
 	return out
 }
 
+var devicePostureObservationImplementors = []string{"DevicePostureObservation"}
+
+func (ec *executionContext) _DevicePostureObservation(ctx context.Context, sel ast.SelectionSet, obj *DevicePostureObservation) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, devicePostureObservationImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("DevicePostureObservation")
+		case "checkId":
+			out.Values[i] = ec._DevicePostureObservation_checkId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "status":
+			out.Values[i] = ec._DevicePostureObservation_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "observedAt":
+			out.Values[i] = ec._DevicePostureObservation_observedAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "collectorError":
+			out.Values[i] = ec._DevicePostureObservation_collectorError(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var devicePostureVisibilityImplementors = []string{"DevicePostureVisibility"}
+
+func (ec *executionContext) _DevicePostureVisibility(ctx context.Context, sel ast.SelectionSet, obj *DevicePostureVisibility) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, devicePostureVisibilityImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("DevicePostureVisibility")
+		case "deviceId":
+			out.Values[i] = ec._DevicePostureVisibility_deviceId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deviceName":
+			out.Values[i] = ec._DevicePostureVisibility_deviceName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "profileId":
+			out.Values[i] = ec._DevicePostureVisibility_profileId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "satisfied":
+			out.Values[i] = ec._DevicePostureVisibility_satisfied(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "stale":
+			out.Values[i] = ec._DevicePostureVisibility_stale(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "failureReason":
+			out.Values[i] = ec._DevicePostureVisibility_failureReason(ctx, field, obj)
+		case "evaluatedAt":
+			out.Values[i] = ec._DevicePostureVisibility_evaluatedAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "reportReceivedAt":
+			out.Values[i] = ec._DevicePostureVisibility_reportReceivedAt(ctx, field, obj)
+		case "reportAgeSeconds":
+			out.Values[i] = ec._DevicePostureVisibility_reportAgeSeconds(ctx, field, obj)
+		case "observations":
+			out.Values[i] = ec._DevicePostureVisibility_observations(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var deviceProfileImplementors = []string{"DeviceProfile"}
 
 func (ec *executionContext) _DeviceProfile(ctx context.Context, sel ast.SelectionSet, obj *DeviceProfile) graphql.Marshaler {
@@ -11999,6 +12691,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_deviceProfiles(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "devicePostureVisibility":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_devicePostureVisibility(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -13237,6 +13951,58 @@ func (ec *executionContext) unmarshalNCreateResourceInput2githubᚗcomᚋyourorg
 	return res, graphql.ErrorOnPath(ctx, err)
 }
 
+func (ec *executionContext) marshalNDevicePostureObservation2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureObservationᚄ(ctx context.Context, sel ast.SelectionSet, v []*DevicePostureObservation) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNDevicePostureObservation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureObservation(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNDevicePostureObservation2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureObservation(ctx context.Context, sel ast.SelectionSet, v *DevicePostureObservation) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._DevicePostureObservation(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNDevicePostureVisibility2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureVisibilityᚄ(ctx context.Context, sel ast.SelectionSet, v []*DevicePostureVisibility) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNDevicePostureVisibility2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureVisibility(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNDevicePostureVisibility2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDevicePostureVisibility(ctx context.Context, sel ast.SelectionSet, v *DevicePostureVisibility) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._DevicePostureVisibility(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNDeviceProfile2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx context.Context, sel ast.SelectionSet, v DeviceProfile) graphql.Marshaler {
 	return ec._DeviceProfile(ctx, sel, &v)
 }
@@ -13479,6 +14245,16 @@ func (ec *executionContext) marshalNPostureCheckDescriptor2ᚖgithubᚗcomᚋyou
 		return graphql.Null
 	}
 	return ec._PostureCheckDescriptor(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalNPostureCheckStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckStatus(ctx context.Context, v any) (PostureCheckStatus, error) {
+	var res PostureCheckStatus
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNPostureCheckStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckStatus(ctx context.Context, sel ast.SelectionSet, v PostureCheckStatus) graphql.Marshaler {
+	return v
 }
 
 func (ec *executionContext) marshalNRemoteNetwork2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v RemoteNetwork) graphql.Marshaler {

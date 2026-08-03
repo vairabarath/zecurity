@@ -60,6 +60,26 @@ type CreateResourceInput struct {
 	PortTo          int     `json:"portTo"`
 }
 
+type DevicePostureObservation struct {
+	CheckID        string             `json:"checkId"`
+	Status         PostureCheckStatus `json:"status"`
+	ObservedAt     string             `json:"observedAt"`
+	CollectorError *string            `json:"collectorError,omitempty"`
+}
+
+type DevicePostureVisibility struct {
+	DeviceID         string                      `json:"deviceId"`
+	DeviceName       string                      `json:"deviceName"`
+	ProfileID        string                      `json:"profileId"`
+	Satisfied        bool                        `json:"satisfied"`
+	Stale            bool                        `json:"stale"`
+	FailureReason    *string                     `json:"failureReason,omitempty"`
+	EvaluatedAt      string                      `json:"evaluatedAt"`
+	ReportReceivedAt *string                     `json:"reportReceivedAt,omitempty"`
+	ReportAgeSeconds *int                        `json:"reportAgeSeconds,omitempty"`
+	Observations     []*DevicePostureObservation `json:"observations"`
+}
+
 type DeviceProfile struct {
 	ID             string                      `json:"id"`
 	Name           string                      `json:"name"`
@@ -426,6 +446,67 @@ func (e *NetworkLocation) UnmarshalJSON(b []byte) error {
 }
 
 func (e NetworkLocation) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type PostureCheckStatus string
+
+const (
+	PostureCheckStatusPass        PostureCheckStatus = "PASS"
+	PostureCheckStatusFail        PostureCheckStatus = "FAIL"
+	PostureCheckStatusUnsupported PostureCheckStatus = "UNSUPPORTED"
+	PostureCheckStatusUnknown     PostureCheckStatus = "UNKNOWN"
+	PostureCheckStatusError       PostureCheckStatus = "ERROR"
+)
+
+var AllPostureCheckStatus = []PostureCheckStatus{
+	PostureCheckStatusPass,
+	PostureCheckStatusFail,
+	PostureCheckStatusUnsupported,
+	PostureCheckStatusUnknown,
+	PostureCheckStatusError,
+}
+
+func (e PostureCheckStatus) IsValid() bool {
+	switch e {
+	case PostureCheckStatusPass, PostureCheckStatusFail, PostureCheckStatusUnsupported, PostureCheckStatusUnknown, PostureCheckStatusError:
+		return true
+	}
+	return false
+}
+
+func (e PostureCheckStatus) String() string {
+	return string(e)
+}
+
+func (e *PostureCheckStatus) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = PostureCheckStatus(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid PostureCheckStatus", str)
+	}
+	return nil
+}
+
+func (e PostureCheckStatus) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *PostureCheckStatus) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e PostureCheckStatus) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil

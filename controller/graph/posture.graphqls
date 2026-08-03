@@ -3,6 +3,14 @@ enum DeviceProfileMode {
   ENFORCE
 }
 
+enum PostureCheckStatus {
+  PASS
+  FAIL
+  UNSUPPORTED
+  UNKNOWN
+  ERROR
+}
+
 type PostureCheckDescriptor {
   id: String!
   label: String!
@@ -24,9 +32,34 @@ type DeviceProfile {
   boundResources: [Resource!]! @goField(forceResolver: true)
 }
 
+type DevicePostureObservation {
+  checkId: String!
+  status: PostureCheckStatus!
+  observedAt: String!
+  collectorError: String
+}
+
+type DevicePostureVisibility {
+  deviceId: ID!
+  deviceName: String!
+  profileId: ID!
+  satisfied: Boolean!
+  stale: Boolean!
+  failureReason: String
+  evaluatedAt: String!
+  reportReceivedAt: String
+  reportAgeSeconds: Int
+  observations: [DevicePostureObservation!]!
+}
+
+
 extend type Query {
   supportedPostureChecks: [PostureCheckDescriptor!]! @hasRole(roles: [ADMIN])
   deviceProfiles: [DeviceProfile!]! @hasRole(roles: [ADMIN])
+
+  devicePostureVisibility(
+    profileId: ID!
+  ): [DevicePostureVisibility!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
@@ -57,10 +90,10 @@ extend type Mutation {
   bindResourceToProfile(
     profileId: ID!
     resourceId: ID!
-): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
 
-unbindResourceFromProfile(
+  unbindResourceFromProfile(
     profileId: ID!
     resourceId: ID!
-): DeviceProfile! @hasRole(roles: [ADMIN])
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
 }

@@ -301,9 +301,9 @@ func requirementSatisfied(
 	observation Observation,
 ) bool {
 	switch observation.Status {
-	case StatusPass:
+	case ObservationStatusPass:
 		return true
-	case StatusUnsupported:
+	case ObservationStatusUnsupported:
 		return requirement.AllowUnsupported
 	default:
 		return false
@@ -314,7 +314,7 @@ func requirementFailureReason(
 	requirement Requirement,
 	observation Observation,
 ) string {
-	if observation.Status == StatusUnsupported && !requirement.AllowUnsupported {
+	if observation.Status == ObservationStatusUnsupported && !requirement.AllowUnsupported {
 		return fmt.Sprintf(
 			"check %s is unsupported",
 			requirement.CheckID,

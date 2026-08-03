@@ -18,7 +18,7 @@ func validReportInput(now time.Time) ReportInput {
 		OSVersion:     "test",
 		Checks: []CheckInput{{
 			CheckID: CheckLUKS,
-			Status:  StatusPass,
+			Status:  ObservationStatusPass,
 			Detail:  "encrypted",
 		}},
 	}
@@ -63,7 +63,7 @@ func TestValidateReportRejectsInvalidReportFields(t *testing.T) {
 			edit: func(in *ReportInput) {
 				in.Checks = make([]CheckInput, MaxChecks+1)
 				for i := range in.Checks {
-					in.Checks[i] = CheckInput{CheckID: CheckLUKS, Status: StatusPass}
+					in.Checks[i] = CheckInput{CheckID: CheckLUKS, Status: ObservationStatusPass}
 				}
 			},
 			want: ErrInvalidReport,
@@ -101,9 +101,9 @@ func TestValidateReportFiltersUnknownAndInvalidChecksIndividually(t *testing.T) 
 	now := time.Now().UTC()
 	input := validReportInput(now)
 	input.Checks = []CheckInput{
-		{CheckID: "linux.future.check", Status: StatusPass},
-		{CheckID: CheckFirewall, Status: StatusPass, Detail: "active"},
-		{CheckID: CheckSecureBoot, Status: StatusPass, Detail: strings.Repeat("x", MaxDetailBytes+1)},
+		{CheckID: "linux.future.check", Status: ObservationStatusPass},
+		{CheckID: CheckFirewall, Status: ObservationStatusPass, Detail: "active"},
+		{CheckID: CheckSecureBoot, Status: ObservationStatusPass, Detail: strings.Repeat("x", MaxDetailBytes+1)},
 		{CheckID: CheckOSVersion, Status: "INVALID"},
 	}
 
@@ -119,7 +119,7 @@ func TestValidateReportFiltersUnknownAndInvalidChecksIndividually(t *testing.T) 
 func TestValidateReportRejectsNoValidRecognizedChecks(t *testing.T) {
 	now := time.Now().UTC()
 	input := validReportInput(now)
-	input.Checks = []CheckInput{{CheckID: "linux.future.check", Status: StatusPass}}
+	input.Checks = []CheckInput{{CheckID: "linux.future.check", Status: ObservationStatusPass}}
 
 	_, err := ValidateReport(now, input)
 	if !errors.Is(err, ErrNoRecognizedChecks) {
@@ -131,8 +131,8 @@ func TestValidateReportRejectsDuplicateCheckIDs(t *testing.T) {
 	now := time.Now().UTC()
 	input := validReportInput(now)
 	input.Checks = []CheckInput{
-		{CheckID: CheckLUKS, Status: StatusPass},
-		{CheckID: CheckLUKS, Status: StatusFail},
+		{CheckID: CheckLUKS, Status: ObservationStatusPass},
+		{CheckID: CheckLUKS, Status: ObservationStatusFail},
 	}
 
 	_, err := ValidateReport(now, input)

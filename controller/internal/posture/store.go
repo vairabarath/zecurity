@@ -52,11 +52,21 @@ type Report struct {
 	Observations  []Observation
 }
 
+type ObservationStatus string
+
+const (
+	ObservationStatusPass        ObservationStatus = "PASS"
+	ObservationStatusFail        ObservationStatus = "FAIL"
+	ObservationStatusUnsupported ObservationStatus = "UNSUPPORTED"
+	ObservationStatusUnknown     ObservationStatus = "UNKNOWN"
+	ObservationStatusError       ObservationStatus = "ERROR"
+)
+
 type Observation struct {
 	ID        uuid.UUID
 	ReportID  uuid.UUID
 	CheckID   string
-	Status    string
+	Status    ObservationStatus
 	Detail    *string
 	CreatedAt time.Time
 }
@@ -95,6 +105,19 @@ type Evaluation struct {
 	EvaluatedAt      time.Time
 	ReportID         *uuid.UUID
 	ReportReceivedAt *time.Time
+}
+
+type DevicePostureVisibility struct {
+	DeviceID           uuid.UUID
+	DeviceName         string
+	ProfileID          uuid.UUID
+	Satisfied          bool
+	FailureReason      *string
+	EvaluatedAt        time.Time
+	ReportReceivedAt   *time.Time
+	Observations       []Observation
+	EvaluationRevision int64
+	Stale              bool
 }
 
 // InsertReport writes the report and all observations atomically.
@@ -187,6 +210,7 @@ func (s *Store) InsertReport(
 
 	return nil
 }
+
 func (s *Store) LatestReport(
 	ctx context.Context,
 	workspaceID uuid.UUID,
@@ -1153,6 +1177,141 @@ func (s *Store) EvaluationsForDevices(
 	}
 
 	return evaluations, nil
+}
+
+func (s *Store) ListDevicePostureVisibility(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+	profileID uuid.UUID,
+) ([]DevicePostureVisibility, error) {
+	profile, err := s.GetProfile(ctx, workspaceID, profileID)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.pool.Query(
+		ctx,
+		`SELECT
+			e.device_id,
+			d.name,
+			e.profile_id,
+			e.satisfied,
+			e.profile_revision,
+			e.reason,
+			e.evaluated_at,
+			e.report_id,
+			r.received_at
+		FROM device_profile_evaluations e
+		JOIN client_devices d
+			ON d.id = e.device_id
+			AND d.workspace_id = e.workspace_id
+		LEFT JOIN device_posture_reports r
+			ON r.id = e.report_id
+			AND r.workspace_id = e.workspace_id
+			AND r.device_id = e.device_id
+		WHERE e.workspace_id = $1
+		  AND e.profile_id = $2
+		ORDER BY d.name`,
+		workspaceID,
+		profileID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list device posture visibility: %w", err)
+	}
+	defer rows.Close()
+
+	visibility := make([]DevicePostureVisibility, 0)
+	reportIDs := make([]uuid.UUID, 0)
+	reportIndex := make(map[uuid.UUID]int)
+	for rows.Next() {
+		item := DevicePostureVisibility{
+			Observations: make([]Observation, 0),
+		}
+		var reportID *uuid.UUID
+
+		if err := rows.Scan(
+			&item.DeviceID,
+			&item.DeviceName,
+			&item.ProfileID,
+			&item.Satisfied,
+			&item.EvaluationRevision,
+			&item.FailureReason,
+			&item.EvaluatedAt,
+			&reportID,
+			&item.ReportReceivedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan device posture visibility: %w", err)
+		}
+
+		item.Stale = item.EvaluationRevision != profile.Revision
+
+		visibility = append(visibility, item)
+		if reportID != nil {
+			reportIDs = append(reportIDs, *reportID)
+			reportIndex[*reportID] = len(visibility) - 1
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate device posture visibility: %w", err)
+	}
+	rows.Close()
+	if len(reportIDs) == 0 {
+		return visibility, nil
+	}
+
+	rows, err = s.pool.Query(
+		ctx,
+		`SELECT
+			o.report_id,
+			o.id,
+			o.check_id,
+			o.status,
+			o.detail,
+			o.created_at
+		FROM device_posture_observations o
+		JOIN device_posture_reports r
+			ON r.id = o.report_id
+		WHERE o.report_id = ANY($1::uuid[])
+		  AND r.workspace_id = $2
+		ORDER BY o.report_id, o.check_id`,
+		reportIDs,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list posture observations: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var reportID uuid.UUID
+		var observation Observation
+
+		if err := rows.Scan(
+			&reportID,
+			&observation.ID,
+			&observation.CheckID,
+			&observation.Status,
+			&observation.Detail,
+			&observation.CreatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan posture observation: %w", err)
+		}
+
+		observation.ReportID = reportID
+		if idx, ok := reportIndex[reportID]; ok {
+			visibility[idx].Observations = append(
+				visibility[idx].Observations,
+				observation,
+			)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate posture observations: %w", err)
+	}
+
+	return visibility, nil
 }
 
 func (s *Store) ReportByClientID(

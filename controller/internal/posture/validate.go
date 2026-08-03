@@ -20,15 +20,10 @@ const (
 )
 
 const (
-	CheckOSVersion    = "linux.os.version"
-	CheckLUKS         = "linux.disk_encryption.luks"
-	CheckFirewall     = "linux.firewall.active"
-	CheckSecureBoot   = "linux.secure_boot.enabled"
-	StatusPass        = "PASS"
-	StatusFail        = "FAIL"
-	StatusUnsupported = "UNSUPPORTED"
-	StatusUnknown     = "UNKNOWN"
-	StatusError       = "ERROR"
+	CheckOSVersion  = "linux.os.version"
+	CheckLUKS       = "linux.disk_encryption.luks"
+	CheckFirewall   = "linux.firewall.active"
+	CheckSecureBoot = "linux.secure_boot.enabled"
 )
 
 var (
@@ -39,12 +34,12 @@ var (
 	ErrInvalidReportedTime = errors.New("reported_at is outside the accepted time window")
 )
 
-var recognizedStatuses = map[string]struct{}{
-	StatusPass:        {},
-	StatusFail:        {},
-	StatusUnsupported: {},
-	StatusUnknown:     {},
-	StatusError:       {},
+var recognizedStatuses = map[ObservationStatus]struct{}{
+	ObservationStatusPass:        {},
+	ObservationStatusFail:        {},
+	ObservationStatusUnsupported: {},
+	ObservationStatusUnknown:     {},
+	ObservationStatusError:       {},
 }
 
 type CheckDescriptor struct {
@@ -91,7 +86,7 @@ var recognizedChecks = func() map[string]struct{} {
 
 type CheckInput struct {
 	CheckID string
-	Status  string
+	Status  ObservationStatus
 	Detail  string
 }
 

@@ -161,19 +161,19 @@ func parseCanonicalUUID(value string) (uuid.UUID, error) {
 	return parsed, nil
 }
 
-func postureStatusString(value clientv1.CheckStatus) string {
+func postureStatusString(value clientv1.CheckStatus) posture.ObservationStatus {
 	switch value {
 	case clientv1.CheckStatus_PASS:
-		return posture.StatusPass
+		return posture.ObservationStatusPass
 	case clientv1.CheckStatus_FAIL:
-		return posture.StatusFail
+		return posture.ObservationStatusFail
 	case clientv1.CheckStatus_UNSUPPORTED:
-		return posture.StatusUnsupported
+		return posture.ObservationStatusUnsupported
 	case clientv1.CheckStatus_UNKNOWN:
-		return posture.StatusUnknown
+		return posture.ObservationStatusUnknown
 	case clientv1.CheckStatus_ERROR:
-		return posture.StatusError
+		return posture.ObservationStatusError
 	default:
-		return fmt.Sprintf("INVALID_%d", value)
+		return posture.ObservationStatusUnknown
 	}
 }

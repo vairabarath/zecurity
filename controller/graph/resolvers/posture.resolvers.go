@@ -511,6 +511,38 @@ func (r *queryResolver) DeviceProfiles(ctx context.Context) ([]*graph.DeviceProf
 	return result, nil
 }
 
+// DevicePostureVisibility is the resolver for the devicePostureVisibility field.
+func (r *queryResolver) DevicePostureVisibility(ctx context.Context, profileID string) ([]*graph.DevicePostureVisibility, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileUUID, err := uuid.Parse(profileID)
+	if err != nil {
+		return nil, apperr.UserErrorf("devicePostureVisibility: invalid profile id")
+	}
+
+	visibility, err := r.PostureStore.ListDevicePostureVisibility(
+		ctx,
+		workspaceID,
+		profileUUID,
+	)
+	if err != nil {
+		if errors.Is(err, posture.ErrNotFound) {
+			return nil, apperr.UserErrorf(
+				"devicePostureVisibility: profile not found",
+			)
+		}
+
+		return nil, fmt.Errorf("devicePostureVisibility: %w", err)
+	}
+
+	return postureVisibilityListToGQL(visibility), nil
+}
+
 // DeviceProfile returns graph.DeviceProfileResolver implementation.
 func (r *Resolver) DeviceProfile() graph.DeviceProfileResolver { return &deviceProfileResolver{r} }
 
