@@ -15,7 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
@@ -77,6 +79,7 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	authSvcIface, err := NewService(Config{
 		Pool:               pool,
 		BootstrapService:   bootstrapSvc,
+		IdpStore:           googleConnStore(),
 		JWTSecret:          "phase-7-auth-jwt-secret-32-bytes!!",
 		JWTIssuer:          "zecurity-controller",
 		GoogleClientID:     "test-google-client-id",
@@ -92,42 +95,21 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 
 	svc := authSvcIface.(*serviceImpl)
 
-	origExchangeHook := exchangeCodeForTokensHook
-	origVerifyHook := verifyGoogleIDTokenHook
-	t.Cleanup(func() {
-		exchangeCodeForTokensHook = origExchangeHook
-		verifyGoogleIDTokenHook = origVerifyHook
-	})
-
-	exchangeCodeForTokensHook = func(_ *serviceImpl, _ context.Context, code, codeVerifier string) (*GoogleTokenResponse, error) {
-		if code != "code-1" && code != "code-2" {
-			return nil, fmt.Errorf("unexpected code: %s", code)
-		}
-		if codeVerifier == "" {
-			return nil, fmt.Errorf("missing code verifier")
-		}
-
-		return &GoogleTokenResponse{
-			IDToken:     "fake-google-id-token",
-			AccessToken: "fake-google-access-token",
-			ExpiresIn:   3600,
-			TokenType:   "Bearer",
-		}, nil
-	}
-	verifyGoogleIDTokenHook = func(_ context.Context, idToken, clientID string) (*GoogleClaims, error) {
-		if idToken != "fake-google-id-token" {
-			return nil, fmt.Errorf("unexpected id token: %s", idToken)
-		}
-		if clientID != "test-google-client-id" {
-			return nil, fmt.Errorf("unexpected client id: %s", clientID)
-		}
-
-		return &GoogleClaims{
+	// Override the adapter-selection seam with a fake provider that returns a
+	// canned AuthenticationContext — no real Google network calls. This mirrors
+	// what the (Chunk A) OIDC/Google adapters produce, so the callback → Bootstrap
+	// → JWT flow is exercised end-to-end against the real DB.
+	origProviderFor := providerForFn
+	t.Cleanup(func() { providerForFn = origProviderFor })
+	providerForFn = func(_ *idp.Connection, _ GoogleCreds) (providers.IdentityProvider, error) {
+		return &fakeProvider{result: &providers.AuthenticationContext{
+			Provider:      "google",
+			Issuer:        "https://accounts.google.com",
+			Subject:       "google-sub-123",
 			Email:         "alice@example.com",
-			EmailVerified: true,
 			Name:          "Alice Example",
-			Sub:           "google-sub-123",
-		}, nil
+			EmailVerified: true,
+		}}, nil
 	}
 
 	firstToken, firstRefreshCookie := runAuthRoundTrip(t, svc, "code-1")
@@ -233,7 +215,7 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 
 	ctx := context.Background()
 
-	initPayload, err := svc.InitiateAuth(ctx, "google", nil)
+	initPayload, err := svc.InitiateAuth(ctx, "google", nil, nil)
 	if err != nil {
 		t.Fatalf("InitiateAuth: %v", err)
 	}

@@ -128,7 +128,7 @@ type ComplexityRoot struct {
 		ForceDeleteResource       func(childComplexity int, id string) int
 		GenerateConnectorToken    func(childComplexity int, remoteNetworkID string, connectorName string) int
 		GenerateShieldToken       func(childComplexity int, remoteNetworkID string, shieldName string) int
-		InitiateAuth              func(childComplexity int, provider string, workspaceName *string) int
+		InitiateAuth              func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
 		PromoteDiscoveredService  func(childComplexity int, shieldID string, protocol string, port int) int
 		ProtectResource           func(childComplexity int, id string) int
 		RemoveGroupMember         func(childComplexity int, groupID string, userID string) int
@@ -257,7 +257,7 @@ type ComplexityRoot struct {
 }
 
 type MutationResolver interface {
-	InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error)
+	InitiateAuth(ctx context.Context, provider string, workspaceName *string, connectionID *string) (*model.AuthInitPayload, error)
 	CreateRemoteNetwork(ctx context.Context, name string, location NetworkLocation) (*RemoteNetwork, error)
 	DeleteRemoteNetwork(ctx context.Context, id string) (bool, error)
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
@@ -791,7 +791,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.InitiateAuth(childComplexity, args["provider"].(string), args["workspaceName"].(*string)), true
+		return e.ComplexityRoot.Mutation.InitiateAuth(childComplexity, args["provider"].(string), args["workspaceName"].(*string), args["connectionId"].(*string)), true
 	case "Mutation.promoteDiscoveredService":
 		if e.ComplexityRoot.Mutation.PromoteDiscoveredService == nil {
 			break
@@ -2297,6 +2297,14 @@ func (ec *executionContext) field_Mutation_initiateAuth_args(ctx context.Context
 		return nil, err
 	}
 	args["workspaceName"] = arg1
+	arg2, err := graphql.ProcessArgField(ctx, rawArgs, "connectionId",
+		func(ctx context.Context, v any) (*string, error) {
+			return ec.unmarshalOID2ᚖstring(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["connectionId"] = arg2
 	return args, nil
 }
 
@@ -3918,7 +3926,7 @@ func (ec *executionContext) _Mutation_initiateAuth(ctx context.Context, field gr
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().InitiateAuth(ctx, fc.Args["provider"].(string), fc.Args["workspaceName"].(*string))
+			return ec.Resolvers.Mutation().InitiateAuth(ctx, fc.Args["provider"].(string), fc.Args["workspaceName"].(*string), fc.Args["connectionId"].(*string))
 		},
 		nil,
 		func(ctx context.Context, selections ast.SelectionSet, v *model.AuthInitPayload) graphql.Marshaler {
@@ -12376,6 +12384,24 @@ func (ec *executionContext) marshalOGroup2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcon
 		return graphql.Null
 	}
 	return ec._Group(ctx, sel, v)
+}
+
+func (ec *executionContext) unmarshalOID2ᚖstring(ctx context.Context, v any) (*string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	res, err := graphql.UnmarshalID(v)
+	return &res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalOID2ᚖstring(ctx context.Context, sel ast.SelectionSet, v *string) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	_ = sel
+	_ = ctx
+	res := graphql.MarshalID(*v)
+	return res
 }
 
 func (ec *executionContext) unmarshalOInt2ᚖint(ctx context.Context, v any) (*int, error) {

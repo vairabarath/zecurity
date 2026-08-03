@@ -42,6 +42,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
@@ -78,9 +79,14 @@ func main() {
 
 	tenantDB := db.NewTenantDB(db.Pool)
 
+	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
+	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	idpStore := idp.NewStore(db.Pool, pkiService)
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
 		BootstrapService:   bootstrapSvc,
+		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
 		JWTIssuer:          appmeta.ControllerIssuer,
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
@@ -244,6 +250,8 @@ func main() {
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
+	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
+	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -395,6 +403,7 @@ func main() {
 		db.Pool,
 		authSvc,
 		pkiService,
+		idpStore,
 		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),

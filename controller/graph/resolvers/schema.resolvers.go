@@ -19,8 +19,8 @@ import (
 )
 
 // InitiateAuth is the resolver for the initiateAuth field.
-func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string) (*model.AuthInitPayload, error) {
-	return r.AuthService.InitiateAuth(ctx, provider, workspaceName)
+func (r *mutationResolver) InitiateAuth(ctx context.Context, provider string, workspaceName *string, connectionID *string) (*model.AuthInitPayload, error) {
+	return r.AuthService.InitiateAuth(ctx, provider, workspaceName, connectionID)
 }
 
 // Me is the resolver for the me field.
