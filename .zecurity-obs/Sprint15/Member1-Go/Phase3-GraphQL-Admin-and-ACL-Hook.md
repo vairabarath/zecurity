@@ -290,7 +290,7 @@ cd controller && go build ./... && go test ./internal/...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-E1** `controller/graph/posture.graphqls` — Device Profile CRUD + bindings + audit/enforce toggle + posture visibility + `supportedPostureChecks` query; all mutations ADMIN + workspace-scoped; enforce-mode requires ≥1 requirement across mode-switch, bind, **and** requirement-removal.
+- [x] **M1-E1** `controller/graph/posture.graphqls` — Device Profile CRUD + bindings + audit/enforce toggle + posture visibility + `supportedPostureChecks` query; all mutations ADMIN + workspace-scoped; enforce-mode requires ≥1 requirement across mode-switch, bind, **and** requirement-removal.
 - [x] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — `PostureStore`/evaluator field added and wired; the generated resolvers have nothing to call otherwise.
 - [x] **M1-E2** `go generate ./graph/...`.
 - [ ] **M1-E3** `CompileACLSnapshot` returns `*CompiledACL{Snapshot, ValidUntil}`; applies enforce-only OR, freshness, profile-revision matching, and batch evaluation queries. Update only the compile closures in ClientService, connector control/heartbeat, and ACLPusher; `GetOrCompile` continues returning a bare protobuf snapshot to their downstream logic. Update direct compiler and cache mocks/tests for the internal result type.
@@ -331,8 +331,19 @@ resource bind/unbind, and evaluation transitions. Workspace re-evaluation now co
 after per-device failures, preserves successful results, aggregates errors, and still
 notifies when a successful evaluation changes authorization.
 
-**Still open:** The GraphQL schema does not yet expose per-device posture visibility, so
-M1-E1 remains partial. `CompileACLSnapshot` still returns a plain
+**Completed after this verification:** The GraphQL schema and generated code now expose
+workspace-scoped per-device posture visibility, including satisfaction, explicit stale
+state, failure reason, evaluation/observation timestamps, report age, and collector
+errors only for normalized `ERROR` observations. Raw collector output is not exposed.
+The resolver enforces ADMIN authorization, derives the workspace exclusively from the
+tenant context, returns a safe profile-not-found error for nonexistent/cross-workspace
+profiles, and batches evaluation/observation loading without an N+1 query. Store,
+mapping, authorization, workspace-isolation, stale-state, and collector-error tests were
+added. The database-backed resolver cases compile and run when
+`RESOURCE_TEST_DATABASE_URL` and `RESOURCE_TEST_SHIELD_ID` are configured. This stable
+schema unblocks M4's Admin UI phase.
+
+**Still open:** `CompileACLSnapshot` still returns a plain
 `*clientv1.ACLSnapshot` and does not apply posture gating, revision/freshness checks,
 batch evaluations, or OR-aware `ValidUntil`. `SnapshotCache` still stores bare snapshots
 without expiry metadata, an injectable clock, expiry notification, or singleflight.
