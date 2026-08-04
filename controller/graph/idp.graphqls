@@ -1,0 +1,73 @@
+# Identity-provider administration (PENDING-04 Phase 6 / ADR-024).
+#
+# Workspace admins manage their own (BYO) OIDC connections here. The client
+# secret is WRITE-ONLY: it is accepted on create/update but is NEVER returned by
+# any query or mutation. Platform (managed) IdPs are not editable through this
+# API — they are provider-managed and shared.
+
+enum IdpProtocol {
+  OIDC
+  SAML
+}
+
+type WorkspaceIdpConnection {
+  id:           ID!
+  protocol:     IdpProtocol!
+  provider:     String!
+  displayName:  String!
+  issuer:       String!
+  clientId:     String
+  discoveryUrl: String
+  scopes:       String!
+  domainHint:   String
+  status:       String!
+  managed:      Boolean!
+  # NOTE: clientSecret is intentionally absent — it is never exposed.
+}
+
+input CreateIdpConnectionInput {
+  provider:     String!   # resolver key: "okta", "entra", "oidc", ...
+  displayName:  String!
+  issuer:       String!   # immutable identity anchor
+  clientId:     String!
+  clientSecret: String!   # write-only; encrypted at rest
+  discoveryUrl: String    # optional; else derived from issuer (.well-known)
+  scopes:       String    # default "openid email profile"
+  domainHint:   String
+}
+
+input UpdateIdpConnectionInput {
+  displayName:  String
+  clientId:     String
+  clientSecret: String    # write-only; omit to keep the existing secret
+  discoveryUrl: String
+  scopes:       String
+  domainHint:   String
+}
+
+# Result of a connection reachability check (OIDC discovery).
+type IdpTestResult {
+  ok:      Boolean!
+  issuer:  String
+  message: String
+}
+
+extend type Query {
+  idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
+  # Whether the workspace still offers the shared platform IdP as a login path.
+  platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
+}
+
+extend type Mutation {
+  createIdpConnection(input: CreateIdpConnectionInput!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
+  updateIdpConnection(id: ID!, input: UpdateIdpConnectionInput!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
+  # status is "active" | "disabled". Disabling revokes the sessions of every user
+  # who authenticates through this connection (their login path is gone).
+  setIdpConnectionStatus(id: ID!, status: String!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
+  deleteIdpConnection(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  testIdpConnection(id: ID!): IdpTestResult! @hasRole(roles: [ADMIN])
+  # Toggle the shared platform IdP as a login path for this workspace. Disabling
+  # is refused if the workspace has no active identity provider of its own and
+  # the actor is not a break-glass admin (no-lockout, ADR-024 §5).
+  setPlatformLoginEnabled(enabled: Boolean!): Boolean! @hasRole(roles: [ADMIN])
+}

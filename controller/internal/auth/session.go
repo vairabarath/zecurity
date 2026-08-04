@@ -19,6 +19,11 @@ type jwtClaims struct {
 	TenantID string `json:"tenant_id"` // coordinate: must match middleware/auth.go
 	Role     string `json:"role"`      // coordinate: must match middleware/auth.go
 	Email    string `json:"email"`
+	// IdentityGeneration is users.identity_generation at mint time (PENDING-04
+	// Phase 5). Refresh re-reads the current generation and rejects a token that
+	// is behind — the mechanism for mass session revocation. Omitted when 0 so
+	// legacy tokens stay compact and are treated as "no generation check".
+	IdentityGeneration int `json:"gen,omitempty"`
 	jwt.RegisteredClaims
 	// Subject (sub) = user_id    — set via RegisteredClaims.Subject
 	// Issuer  (iss) = appmeta.ControllerIssuer — set via RegisteredClaims.Issuer
@@ -29,8 +34,8 @@ type jwtClaims struct {
 // gRPC handlers (e.g. the ClientService TokenExchange RPC). It returns the
 // signed token plus the TTL in seconds so callers can populate expires_in
 // fields without re-parsing the configured TTL.
-func (s *serviceImpl) IssueAccessToken(userID, tenantID, role, email string) (string, int64, error) {
-	token, err := s.issueAccessToken(userID, tenantID, role, email)
+func (s *serviceImpl) IssueAccessToken(userID, tenantID, role, email string, generation int) (string, int64, error) {
+	token, err := s.issueAccessToken(userID, tenantID, role, email, generation)
 	if err != nil {
 		return "", 0, err
 	}
@@ -44,6 +49,13 @@ func (s *serviceImpl) IssueAccessToken(userID, tenantID, role, email string) (st
 // IssueRefreshToken is the public wrapper around issueRefreshToken.
 func (s *serviceImpl) IssueRefreshToken(ctx context.Context, userID string) (string, error) {
 	return s.issueRefreshToken(ctx, userID)
+}
+
+// InvalidateUserSessions deletes the user's server-side refresh session so a
+// generation bump (identity.Revoker) takes effect immediately. Satisfies
+// identity.SessionInvalidator.
+func (s *serviceImpl) InvalidateUserSessions(ctx context.Context, userID string) error {
+	return s.redisClient.DeleteRefreshToken(ctx, userID)
 }
 
 // VerifyAccessToken parses and verifies a Zecurity-issued JWT and returns
@@ -64,7 +76,7 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 // issueAccessToken creates a signed short-lived JWT.
 // exp = JWTAccessTTL (default 15 minutes) from now. Signed with HS256 using JWT_SECRET.
 // Called by: CallbackHandler() in callback.go (Step 8), RefreshHandler() in refresh.go (Step 5).
-func (s *serviceImpl) issueAccessToken(userID, tenantID, role, email string) (string, error) {
+func (s *serviceImpl) issueAccessToken(userID, tenantID, role, email string, generation int) (string, error) {
 	ttl, err := time.ParseDuration(s.cfg.JWTAccessTTL)
 	if err != nil {
 		ttl = 15 * time.Minute
@@ -72,9 +84,10 @@ func (s *serviceImpl) issueAccessToken(userID, tenantID, role, email string) (st
 
 	now := time.Now()
 	claims := jwtClaims{
-		TenantID: tenantID,
-		Role:     role,
-		Email:    email,
+		TenantID:           tenantID,
+		Role:               role,
+		Email:              email,
+		IdentityGeneration: generation,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			Issuer:    s.cfg.JWTIssuer,

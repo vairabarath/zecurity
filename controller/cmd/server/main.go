@@ -42,6 +42,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
@@ -78,9 +80,24 @@ func main() {
 
 	tenantDB := db.NewTenantDB(db.Pool)
 
+	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
+	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	idpStore := idp.NewStore(db.Pool, pkiService)
+
+	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
+	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
+	// invokes on a resolver miss; the audit sink writes identity events to
+	// audit_logs.
+	identitySvc := identity.NewService(
+		db.Pool,
+		identity.NewLinker(bootstrapSvc),
+		identity.NewAuditSink(db.Pool),
+	)
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
+		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
 		JWTIssuer:          appmeta.ControllerIssuer,
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
@@ -92,6 +109,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth init: %v", err)
 	}
+
+	// Session-generation revoker (PENDING-04 Phase 6): admin actions that remove
+	// a login path (disable/delete a connection) bump users.identity_generation
+	// and drop the live refresh session — authSvc satisfies
+	// identity.SessionInvalidator. Break-glass admins may always authenticate via
+	// the platform IdP so a workspace can never lock itself out (ADR-024 §5).
+	identityRevoker := identity.NewRevoker(db.Pool, authSvc, identity.NewAuditSink(db.Pool))
+	breakGlassEmails := parseBreakGlassEmails(os.Getenv("IDP_BREAK_GLASS_EMAILS"))
 
 	connectorCfg := connector.Config{
 		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
@@ -201,6 +226,9 @@ func main() {
 				PolicyStore:       policyStore,
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
+				IdpStore:          idpStore,
+				Revoker:           identityRevoker,
+				BreakGlassEmails:  breakGlassEmails,
 			},
 			Directives: graph.DirectiveRoot{
 				HasRole: resolvers.HasRole,
@@ -244,6 +272,8 @@ func main() {
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
+	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
+	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -395,6 +425,7 @@ func main() {
 		db.Pool,
 		authSvc,
 		pkiService,
+		idpStore,
 		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
@@ -816,6 +847,20 @@ func loadOptionalEnv() {
 
 		log.Fatalf("load %s: %v", path, err)
 	}
+}
+
+// parseBreakGlassEmails parses IDP_BREAK_GLASS_EMAILS (comma-separated) into a
+// lowercased set of workspace admins who may always authenticate via the
+// platform IdP, so a workspace can never lock itself out (ADR-024 §5). Consulted
+// by the no-lockout guard. Empty/unset → no break-glass admins.
+func parseBreakGlassEmails(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range strings.Split(raw, ",") {
+		if email := strings.ToLower(strings.TrimSpace(e)); email != "" {
+			out[email] = true
+		}
+	}
+	return out
 }
 
 // seedProviderUsers upserts each email in PROVIDER_BOOTSTRAP_EMAILS as an active

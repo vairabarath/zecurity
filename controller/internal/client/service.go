@@ -12,7 +12,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -28,6 +27,9 @@ import (
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/transport"
@@ -47,6 +49,7 @@ type Service struct {
 	pool                     *pgxpool.Pool
 	authSvc                  auth.Service
 	pkiSvc                   pki.Service
+	idpStore                 *idp.Store
 	clientGoogleClientID     string
 	clientGoogleClientSecret string
 	controllerHost           string
@@ -62,6 +65,7 @@ func NewService(
 	pool *pgxpool.Pool,
 	authSvc auth.Service,
 	pkiSvc pki.Service,
+	idpStore *idp.Store,
 	clientGoogleClientID, clientGoogleClientSecret,
 	controllerHost, controllerHTTPURL string,
 	policyStore *policy.Store,
@@ -73,6 +77,7 @@ func NewService(
 		pool:                     pool,
 		authSvc:                  authSvc,
 		pkiSvc:                   pkiSvc,
+		idpStore:                 idpStore,
 		clientGoogleClientID:     clientGoogleClientID,
 		clientGoogleClientSecret: clientGoogleClientSecret,
 		controllerHost:           controllerHost,
@@ -88,46 +93,6 @@ func NewService(
 func sha256b64url(b []byte) string {
 	sum := sha256.Sum256(b)
 	return base64.RawURLEncoding.EncodeToString(sum[:])
-}
-
-// exchangeCode performs the Google OAuth code exchange using the CLI OAuth
-// app's credentials. codeVerifier is the controller's own Google PKCE verifier.
-func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*auth.GoogleTokenResponse, error) {
-	body := url.Values{}
-	body.Set("code", code)
-	body.Set("code_verifier", codeVerifier)
-	body.Set("client_id", s.clientGoogleClientID)
-	body.Set("client_secret", s.clientGoogleClientSecret)
-	body.Set("redirect_uri", redirectURI)
-	body.Set("grant_type", "authorization_code")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		googleTokenEndpoint, strings.NewReader(body.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token exchange request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errBody map[string]any
-		json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck
-		return nil, fmt.Errorf("google token exchange failed: status=%d body=%v", resp.StatusCode, errBody)
-	}
-
-	var tokenResp auth.GoogleTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if tokenResp.IDToken == "" {
-		return nil, fmt.Errorf("google did not return id_token")
-	}
-	return &tokenResp, nil
 }
 
 // GetAuthConfig returns the OAuth configuration the CLI needs for informational
@@ -179,14 +144,38 @@ func (s *Service) InitiateAuth(ctx context.Context, req *clientv1.InitiateAuthRe
 		return nil, status.Errorf(codes.Internal, "lookup workspace: %v", err)
 	}
 
-	// Generate the controller's own Google PKCE pair.
-	// The CLI never sees this verifier — it lives only in the session store.
+	// Resolve the workspace's effective identity connection and its adapter.
+	// The Rust client sends no connection selector, so the server picks a single
+	// effective IdP (1 enterprise → it, 0 → bootstrap, >1 → explicit error).
+	conns, err := s.idpStore.ListForWorkspace(ctx, ws.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list identity connections: %v", err)
+	}
+	conn, err := selectEffectiveConnection(conns)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	adapter, err := auth.ProviderFor(conn, auth.GoogleCreds{
+		ClientID:     s.clientGoogleClientID,
+		ClientSecret: s.clientGoogleClientSecret,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "select identity provider: %v", err)
+	}
+
+	// Controller↔IdP PKCE pair (leg a) — never leaves the server. This is
+	// distinct from the CLI↔controller PKCE (leg b, req.CodeChallenge).
 	rawVerifier := make([]byte, 32)
 	if _, err := rand.Read(rawVerifier); err != nil {
-		return nil, status.Errorf(codes.Internal, "generate google pkce verifier: %v", err)
+		return nil, status.Errorf(codes.Internal, "generate idp pkce verifier: %v", err)
 	}
-	googleVerifier := base64.RawURLEncoding.EncodeToString(rawVerifier)
-	googleChallenge := sha256b64url([]byte(googleVerifier))
+	idpVerifier := base64.RawURLEncoding.EncodeToString(rawVerifier)
+	idpChallenge := sha256b64url([]byte(idpVerifier))
+
+	nonce, err := newNonce()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "generate nonce: %v", err)
+	}
 
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -194,29 +183,74 @@ func (s *Service) InitiateAuth(ctx context.Context, req *clientv1.InitiateAuthRe
 	}
 
 	callbackURL := s.controllerHTTPURL + "/api/clients/callback"
-	authURL := fmt.Sprintf(
-		"%s?client_id=%s&redirect_uri=%s&response_type=code"+
-			"&scope=openid%%20email&code_challenge=%s&code_challenge_method=S256&state=%s",
-		googleAuthEndpoint,
-		url.QueryEscape(s.clientGoogleClientID),
-		url.QueryEscape(callbackURL),
-		url.QueryEscape(googleChallenge),
-		url.QueryEscape(sessionID),
-	)
+	authURL, err := adapter.AuthURL(ctx, providers.AuthURLParams{
+		State:         sessionID,
+		Nonce:         nonce,
+		CodeChallenge: idpChallenge,
+		RedirectURI:   callbackURL,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "build auth url: %v", err)
+	}
 
 	putSession(sessionID, &authSession{
-		WorkspaceID:        ws.ID,
-		WorkspaceSlug:      ws.Slug,
-		CliCodeChallenge:   req.GetCodeChallenge(),
-		LocalRedirectURI:   req.GetLocalRedirectUri(),
-		GoogleCodeVerifier: googleVerifier,
-		ExpiresAt:          time.Now().Add(10 * time.Minute),
+		WorkspaceID:      ws.ID,
+		WorkspaceSlug:    ws.Slug,
+		ConnectionID:     conn.ID,
+		CliCodeChallenge: req.GetCodeChallenge(),
+		LocalRedirectURI: req.GetLocalRedirectUri(),
+		IdpCodeVerifier:  idpVerifier,
+		Nonce:            nonce,
+		ExpiresAt:        time.Now().Add(10 * time.Minute),
 	})
 
 	return &clientv1.InitiateAuthResponse{
 		AuthUrl:   authURL,
 		SessionId: sessionID,
 	}, nil
+}
+
+// selectEffectiveConnection picks the single connection the CLI should use, given
+// all active connections resolvable for the workspace. The Rust proto has no
+// connection selector yet (M4 follow-up), so: exactly one active Enterprise IdP
+// → use it; none → the Bootstrap (platform) IdP; more than one Enterprise IdP →
+// explicit error (the CLI can't disambiguate).
+func selectEffectiveConnection(conns []idp.Connection) (*idp.Connection, error) {
+	var enterprise []*idp.Connection
+	var bootstrap *idp.Connection
+	for i := range conns {
+		c := &conns[i]
+		if c.Status != "active" {
+			continue
+		}
+		if c.TenantID == nil {
+			if bootstrap == nil {
+				bootstrap = c
+			}
+		} else {
+			enterprise = append(enterprise, c)
+		}
+	}
+	switch {
+	case len(enterprise) == 1:
+		return enterprise[0], nil
+	case len(enterprise) == 0:
+		if bootstrap != nil {
+			return bootstrap, nil
+		}
+		return nil, fmt.Errorf("no active identity provider configured for this workspace")
+	default:
+		return nil, fmt.Errorf("workspace has multiple identity providers; CLI selection is not yet supported — sign in via the web console")
+	}
+}
+
+// newNonce returns a 256-bit base64url OIDC nonce.
+func newNonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // AuthCallbackHandler handles GET /api/clients/callback — the fixed redirect
@@ -240,14 +274,26 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 		}
 
 		callbackURL := s.controllerHTTPURL + "/api/clients/callback"
-		tokens, err := s.exchangeCode(r.Context(), googleCode, sess.GoogleCodeVerifier, callbackURL)
+
+		// Re-resolve the connection from the session's connection_id (never from
+		// the request) and authenticate via the adapter. Fail closed if the
+		// connection was deleted or disabled during the redirect window.
+		conn, err := s.idpStore.GetByID(r.Context(), sess.ConnectionID)
+		if err != nil || conn.Status != "active" {
+			http.Error(w, "identity connection unavailable", http.StatusUnauthorized)
+			return
+		}
+		adapter, err := auth.ProviderFor(conn, auth.GoogleCreds{
+			ClientID:     s.clientGoogleClientID,
+			ClientSecret: s.clientGoogleClientSecret,
+		})
 		if err != nil {
-			http.Error(w, "google token exchange failed", http.StatusBadRequest)
+			http.Error(w, "identity provider unavailable", http.StatusUnauthorized)
 			return
 		}
 
-		claims, err := auth.VerifyGoogleIDToken(r.Context(), tokens.IDToken, s.clientGoogleClientID)
-		if err != nil || claims.Sub == "" || claims.Email == "" {
+		authCtx, err := adapter.Authenticate(r.Context(), googleCode, sess.IdpCodeVerifier, callbackURL, sess.Nonce)
+		if err != nil || authCtx.Subject == "" || authCtx.Email == "" {
 			http.Error(w, "identity verification failed", http.StatusUnauthorized)
 			return
 		}
@@ -258,7 +304,7 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 			return
 		}
 
-		if !updateSessionCtrlCode(sessionID, claims.Email, claims.Sub, ctrlCode, time.Now().Add(60*time.Second)) {
+		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, ctrlCode, time.Now().Add(60*time.Second)) {
 			http.Error(w, "auth session expired during callback", http.StatusBadRequest)
 			return
 		}
@@ -316,10 +362,24 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		inviteRow = inv
 	}
 
-	user, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, "google", sess.GoogleSub, inviteRow != nil)
+	// Re-resolve the connection from the session's stored id to obtain the issuer
+	// for the identity link, and to fail closed if the connection was deleted or
+	// disabled during the login window.
+	conn, err := s.idpStore.GetByID(ctx, sess.ConnectionID)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity connection unavailable: %v", err)
+	}
+	if conn.Status != "active" {
+		return nil, status.Error(codes.Unauthenticated, "identity connection is not active")
+	}
+
+	user, gen, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, conn.ID, conn.Issuer, inviteRow != nil)
 	if err != nil {
 		if errors.Is(err, errUserNotInvited) {
 			return nil, status.Error(codes.PermissionDenied, "no membership in workspace; ask an admin for an invitation")
+		}
+		if errors.Is(err, identity.ErrUserNotActive) {
+			return nil, status.Error(codes.PermissionDenied, "account is not active")
 		}
 		return nil, status.Errorf(codes.Internal, "upsert user: %v", err)
 	}
@@ -331,7 +391,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email)
+	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
 	}
