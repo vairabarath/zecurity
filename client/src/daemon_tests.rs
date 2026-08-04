@@ -104,6 +104,51 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
     );
 }
 
+// Phase 2 regression: the transport map must carry the resource identity that the
+// client asserts on the tunnel handshake. Every other assertion in this file only
+// checks that the slot *exists* — so an empty or wrong resource_id would be
+// completely invisible without this test.
+#[tokio::test]
+async fn transport_map_carries_resource_id() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res-identity".to_string(),
+        address: "10.0.0.7".to_string(),
+        port: 5432,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
+            relay_addr: String::new(),
+            relay_spiffe_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let map =
+        build_transports_by_resource(&[entry], &[rn], None, &device).expect("build transports");
+    let key = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 5432u16);
+    let target = map[&key]
+        .as_ref()
+        .expect("transport slot is None — connector is active");
+    assert_eq!(
+        target.resource_id, "res-identity",
+        "resource identity must reach the transport map — it is what the connector authorizes on"
+    );
+    assert!(
+        !target.transports.is_empty(),
+        "expected at least one transport for an online connector"
+    );
+}
+
 // Gap 4 regression: connector with relay_addr+relay_spiffe_id set must build
 // a transport without error. Old code read these from removed global params.
 // New code reads connector.relay_addr and connector.relay_spiffe_id directly.

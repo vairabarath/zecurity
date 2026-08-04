@@ -1709,6 +1709,15 @@ pub(crate) fn resolve_entry_coords(
     }
 }
 
+/// A managed resource's identity paired with the transports that can reach it.
+/// Keeping them in one value means `resource_id` and its transports can never
+/// drift apart, and it gives net_stack the identity to assert on the handshake.
+#[derive(Clone)]
+pub(crate) struct ResourceTarget {
+    pub(crate) resource_id: String,
+    pub(crate) transports: Vec<Arc<ClientTransport>>,
+}
+
 // Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
 //
 // Authorization comes from the ACL (which entries exist, their remote_network).
@@ -1717,16 +1726,16 @@ pub(crate) fn resolve_entry_coords(
 // transitional relay fields (ACLConnector 4+5) so rollout is non-breaking.
 //
 // Three cases at lookup time (enforced in net_stack):
-//   Some(Some(t)) — managed resource, connector online  → tunnel via QUIC
-//   Some(None)    — managed resource, connector offline → fail closed
-//   None (absent) — unmanaged traffic, not in ACL       → no tunnel route
+//   Some(Some(target)) — managed resource, connector online  → tunnel via QUIC
+//   Some(None)         — managed resource, connector offline → fail closed
+//   None (absent)      — unmanaged traffic, not in ACL       → no tunnel route
 #[cfg(test)]
 pub(crate) fn build_transports_by_resource(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
-) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
+) -> Result<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>> {
     build_transports_by_resource_with_crl(
         entries,
         remote_networks,
@@ -1742,7 +1751,7 @@ fn build_transports_by_resource_with_crl(
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
     relay_crl: crate::crl::CrlManager,
-) -> Result<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>> {
+) -> Result<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>> {
     let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
         rn_by_id.insert(rn.remote_network_id.as_str(), rn);
@@ -1756,7 +1765,7 @@ fn build_transports_by_resource_with_crl(
         }
     }
 
-    let mut out: HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>> = HashMap::new();
+    let mut out: HashMap<(Ipv4Addr, u16), Option<ResourceTarget>> = HashMap::new();
     let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
         let Ok(ip) = entry.address.parse::<IpAddr>() else {
@@ -1783,10 +1792,15 @@ fn build_transports_by_resource_with_crl(
             };
             transports.push(transport);
         }
+        // Empty transports = managed resource with no reachable connector →
+        // None, which net_stack treats as fail-closed (never passthrough).
         let slot = if transports.is_empty() {
             None
         } else {
-            Some(transports)
+            Some(ResourceTarget {
+                resource_id: entry.resource_id.clone(),
+                transports,
+            })
         };
         out.insert((v4, entry.port as u16), slot);
     }

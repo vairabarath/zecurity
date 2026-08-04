@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
 use tun::AsyncDevice;
 
+use crate::daemon::ResourceTarget;
 use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
 use crate::tunnel_pool::TunnelOpenError;
@@ -107,6 +108,9 @@ impl Device for TunDevice {
 
 #[derive(Serialize)]
 struct TunnelRequest {
+    /// The resource identity this flow is for. The connector authorizes on this
+    /// and dials the address from its own ACL — the client no longer picks the target.
+    resource_id: String,
     destination: String,
     port: u16,
     protocol: String,
@@ -206,7 +210,7 @@ struct ActiveRelay {
 pub async fn run(
     dev: AsyncDevice,
     allowed_entries: Vec<AclEntry>,
-    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
+    transports: Arc<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>>,
     relay_resync: Arc<Notify>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -320,10 +324,11 @@ pub async fn run(
                 let dest = ip.to_string();
                 tracing::info!(dest = %dest, port, "new TCP connection");
                 match transports.get(&(ip, port)) {
-                    Some(Some(transports)) => {
+                    Some(Some(target)) => {
                         // Managed resource, connector online → tunnel via QUIC.
-                        if !transports.is_empty() {
-                            let transports = transports.clone();
+                        if !target.transports.is_empty() {
+                            let transports = target.transports.clone();
+                            let resource_id = target.resource_id.clone();
                             let resync = relay_resync.clone();
                             tokio::spawn(async move {
                                 // relay_tcp_to_quic fires `resync` itself at the
@@ -332,6 +337,7 @@ pub async fn run(
                                 // don't resync on every finished connection.
                                 if let Err(e) = relay_tcp_to_quic(
                                     transports,
+                                    resource_id,
                                     dest,
                                     port,
                                     tcp_to_quic_rx,
@@ -461,6 +467,7 @@ fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
 /// `quic_to_tcp_tx` carries bytes read from the QUIC stream (resource → client).
 async fn relay_tcp_to_quic(
     transports: Vec<Arc<ClientTransport>>,
+    resource_id: String,
     destination: String,
     port: u16,
     mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
@@ -504,6 +511,7 @@ async fn relay_tcp_to_quic(
 
         // Send the tunnel handshake to the connector.
         let req = TunnelRequest {
+            resource_id: resource_id.clone(),
             destination: destination.clone(),
             port,
             protocol: "tcp".to_string(),
