@@ -371,7 +371,7 @@ func main() {
 		PKIService: pkiService,
 		ShieldSvc:  shieldSvc,
 		Registry:   connectorRegistry,
-
+		PostureStore:	   postureStore,
 		PolicyStore:       policyStore,
 		PolicyCache:       policyCache,
 		PolicyNotifier:    policyNotifier,
@@ -387,7 +387,7 @@ func main() {
 	// invalidates the cache, push the fresh snapshot to all connected connectors
 	// in the workspace immediately instead of waiting for the next heartbeat.
 	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
-	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, postureStore, policyCache, policyNotifier)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
 
 	// Transport plane has no proactive push: the client is the sole consumer and

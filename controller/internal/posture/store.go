@@ -993,6 +993,45 @@ func (s *Store) ListResourceBindings(
 	return bindings, nil
 }
 
+// ListResourceBindingsForWorkspace retrieves all resource profile bindings for a
+// workspace in a single batch query to avoid N+1 lookups during ACL compilation.
+func (s *Store) ListResourceBindingsForWorkspace(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+) ([]ResourceBinding, error) {
+	rows, err := s.pool.Query(
+		ctx,
+		`SELECT id, resource_id, profile_id, workspace_id
+           FROM resource_profile_bindings
+          WHERE workspace_id = $1
+          ORDER BY resource_id`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list resource profile bindings for workspace: %w", err)
+	}
+	defer rows.Close()
+
+	bindings := make([]ResourceBinding, 0)
+	for rows.Next() {
+		var binding ResourceBinding
+		if err := rows.Scan(
+			&binding.ID,
+			&binding.ResourceID,
+			&binding.ProfileID,
+			&binding.WorkspaceID,
+		); err != nil {
+			return nil, fmt.Errorf("scan resource profile binding: %w", err)
+		}
+		bindings = append(bindings, binding)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate resource profile bindings: %w", err)
+	}
+
+	return bindings, nil
+}
+
 func (s *Store) LatestEvaluation(
 	ctx context.Context,
 	workspaceID,

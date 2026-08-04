@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 )
@@ -18,7 +19,7 @@ func snap(ws string, version uint64) *clientv1.ACLSnapshot {
 // TestSet_StoresWhenAbsent: an empty cache accepts the first snapshot.
 func TestSet_StoresWhenAbsent(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 1))
+	c.set("ws", snap("ws", 1), time.Time{})
 	got, ok := c.Get("ws")
 	if !ok || got.Version != 1 {
 		t.Fatalf("want version 1 present, got ok=%v snap=%v", ok, got)
@@ -28,8 +29,8 @@ func TestSet_StoresWhenAbsent(t *testing.T) {
 // TestSet_AcceptsNewer: a newer version overwrites an older one.
 func TestSet_AcceptsNewer(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 42))
-	c.set("ws", snap("ws", 43))
+	c.set("ws", snap("ws", 42), time.Time{})
+	c.set("ws", snap("ws", 43), time.Time{})
 	got, _ := c.Get("ws")
 	if got.Version != 43 {
 		t.Fatalf("want version 43, got %d", got.Version)
@@ -42,8 +43,8 @@ func TestSet_AcceptsNewer(t *testing.T) {
 // version guard lands.
 func TestSet_RejectsOlder(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 43)) // newer compile finishes first
-	c.set("ws", snap("ws", 42)) // older compile finishes later — must be rejected
+	c.set("ws", snap("ws", 43), time.Time{}) // newer compile finishes first
+	c.set("ws", snap("ws", 42), time.Time{}) // older compile finishes later — must be rejected
 	got, _ := c.Get("ws")
 	if got.Version != 43 {
 		t.Fatalf("version regressed: want 43 retained, got %d", got.Version)
@@ -59,8 +60,8 @@ func TestSet_EqualVersionOverwrites(t *testing.T) {
 	first.RelayAddr = "relay1.example.com:9093"
 	second := snap("ws", 7)
 	second.RelayAddr = "relay2.example.com:9093"
-	c.set("ws", first)
-	c.set("ws", second)
+	c.set("ws", first, time.Time{})
+	c.set("ws", second, time.Time{})
 	got, _ := c.Get("ws")
 	if got.RelayAddr != "relay2.example.com:9093" {
 		t.Fatalf("equal-version refresh dropped: want relay2.example.com:9093, got %q", got.RelayAddr)
@@ -71,9 +72,9 @@ func TestSet_EqualVersionOverwrites(t *testing.T) {
 // stores unconditionally (no stale high-version entry to compare against).
 func TestSet_StoresAfterInvalidate(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 43))
+	c.set("ws", snap("ws", 43), time.Time{})
 	c.Invalidate("ws")
-	c.set("ws", snap("ws", 44))
+	c.set("ws", snap("ws", 44), time.Time{})
 	got, ok := c.Get("ws")
 	if !ok || got.Version != 44 {
 		t.Fatalf("want version 44 after invalidate, got ok=%v snap=%v", ok, got)
@@ -84,8 +85,8 @@ func TestSet_StoresAfterInvalidate(t *testing.T) {
 // version in one workspace does not affect another.
 func TestSet_PerWorkspaceIndependent(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("a", snap("a", 100))
-	c.set("b", snap("b", 1))
+	c.set("a", snap("a", 100), time.Time{})
+	c.set("b", snap("b", 1), time.Time{})
 	a, _ := c.Get("a")
 	b, _ := c.Get("b")
 	if a.Version != 100 || b.Version != 1 {
@@ -108,7 +109,7 @@ func TestCache_ConcurrentSetGetInvalidate(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 1; i <= iters; i++ {
-				c.set("ws", snap("ws", uint64(i)))
+				c.set("ws", snap("ws", uint64(i)), time.Time{})
 				if g, ok := c.Get("ws"); ok && g.Version > uint64(iters) {
 					t.Errorf("observed impossible version %d", g.Version)
 				}
@@ -143,7 +144,7 @@ func TestEpoch_BumpsOnInvalidate(t *testing.T) {
 func TestSetIfEpoch_AcceptsOnMatch(t *testing.T) {
 	c := NewSnapshotCache()
 	ep := c.Epoch("ws")
-	if !c.SetIfEpoch("ws", snap("ws", 1), ep) {
+	if !c.SetIfEpoch("ws", snap("ws", 1), time.Time{}, ep) {
 		t.Fatal("SetIfEpoch should store when epoch matches")
 	}
 	if got, _ := c.Get("ws"); got == nil || got.Version != 1 {
@@ -157,7 +158,7 @@ func TestSetIfEpoch_RejectsOnAdvance(t *testing.T) {
 	c := NewSnapshotCache()
 	ep := c.Epoch("ws") // captured "before compile"
 	c.Invalidate("ws")  // a change races the compile
-	if c.SetIfEpoch("ws", snap("ws", 1), ep) {
+	if c.SetIfEpoch("ws", snap("ws", 1), time.Time{}, ep) {
 		t.Fatal("SetIfEpoch must reject a snapshot whose epoch was superseded")
 	}
 	if _, ok := c.Get("ws"); ok {
@@ -170,8 +171,8 @@ func TestSetIfEpoch_RejectsOnAdvance(t *testing.T) {
 func TestSetIfEpoch_KeepsVersionGuard(t *testing.T) {
 	c := NewSnapshotCache()
 	ep := c.Epoch("ws")
-	c.SetIfEpoch("ws", snap("ws", 43), ep)
-	c.SetIfEpoch("ws", snap("ws", 42), ep) // same epoch, older version
+	c.SetIfEpoch("ws", snap("ws", 43), time.Time{}, ep)
+	c.SetIfEpoch("ws", snap("ws", 42), time.Time{}, ep) // same epoch, older version
 	if got, _ := c.Get("ws"); got.Version != 43 {
 		t.Fatalf("version regressed to %d, want 43", got.Version)
 	}
@@ -180,11 +181,14 @@ func TestSetIfEpoch_KeepsVersionGuard(t *testing.T) {
 // TestGetOrCompile_HitReturnsCached: a cache hit short-circuits compilation.
 func TestGetOrCompile_HitReturnsCached(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 5))
+	c.set("ws", snap("ws", 5),time.Time{})
 	calls := 0
-	got, err := c.GetOrCompile("ws", func() (*clientv1.ACLSnapshot, error) {
+	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		calls++
-		return snap("ws", 99), nil
+		return &CompiledACL{
+			Snapshot: snap("ws", 99),
+			ValidUntil: time.Time{},
+		}, nil
 	})
 	if err != nil || got.Version != 5 || calls != 0 {
 		t.Fatalf("hit should return cached v5 without compiling; got v%d err=%v calls=%d", got.GetVersion(), err, calls)
@@ -195,9 +199,12 @@ func TestGetOrCompile_HitReturnsCached(t *testing.T) {
 func TestGetOrCompile_MissCompilesAndStores(t *testing.T) {
 	c := NewSnapshotCache()
 	calls := 0
-	got, err := c.GetOrCompile("ws", func() (*clientv1.ACLSnapshot, error) {
+	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		calls++
-		return snap("ws", 7), nil
+		return &CompiledACL{
+			Snapshot: snap("ws", 7),
+			ValidUntil: time.Time{},
+		}, nil
 	})
 	if err != nil || got.Version != 7 || calls != 1 {
 		t.Fatalf("miss should compile once -> v7; got v%d err=%v calls=%d", got.GetVersion(), err, calls)
@@ -213,13 +220,19 @@ func TestGetOrCompile_MissCompilesAndStores(t *testing.T) {
 func TestGetOrCompile_MidCompileInvalidationRecompiles(t *testing.T) {
 	c := NewSnapshotCache()
 	calls := 0
-	got, err := c.GetOrCompile("ws", func() (*clientv1.ACLSnapshot, error) {
+	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		calls++
 		if calls == 1 {
 			c.Invalidate("ws") // a change races compile #1
-			return snap("ws", 1), nil
+			return &CompiledACL{
+				Snapshot: snap("ws", 1),
+				ValidUntil: time.Time{},
+			}, nil
 		}
-		return snap("ws", 2), nil // recompile sees the latest
+		return &CompiledACL{
+				Snapshot: snap("ws", 2),
+				ValidUntil: time.Time{},
+			}, nil // recompile sees the latest
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -239,7 +252,7 @@ func TestGetOrCompile_MidCompileInvalidationRecompiles(t *testing.T) {
 // caches nothing (default-deny).
 func TestGetOrCompile_CompileErrorNotCached(t *testing.T) {
 	c := NewSnapshotCache()
-	_, err := c.GetOrCompile("ws", func() (*clientv1.ACLSnapshot, error) {
+	_, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		return nil, errBoom
 	})
 	if err == nil {
@@ -255,11 +268,16 @@ func TestGetOrCompile_CompileErrorNotCached(t *testing.T) {
 func TestGetOrCompile_BoundedUnderChurn(t *testing.T) {
 	c := NewSnapshotCache()
 	calls := 0
-	got, err := c.GetOrCompile("ws", func() (*clientv1.ACLSnapshot, error) {
-		calls++
-		c.Invalidate("ws") // every compile is immediately superseded
-		return snap("ws", uint64(calls)), nil
-	})
+	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
+	calls++
+	
+	c.Invalidate("ws")
+
+	return &CompiledACL{
+		Snapshot:   snap("ws", 99),
+		ValidUntil: time.Time{},
+	}, nil
+})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -286,8 +304,8 @@ func TestGetOrCompile_CrossPathConvergesToLatest(t *testing.T) {
 	const iters = 400
 	var wg sync.WaitGroup
 
-	compileLatest := func() (*clientv1.ACLSnapshot, error) {
-		return &clientv1.ACLSnapshot{WorkspaceId: ws, Version: n.Version(ws)}, nil
+	compileLatest := func() (*CompiledACL, error) {
+		return &CompiledACL{Snapshot: &clientv1.ACLSnapshot{WorkspaceId: ws, Version: n.Version(ws),}, ValidUntil: time.Time{},}, nil
 	}
 
 	wg.Add(1)
@@ -336,8 +354,11 @@ func TestCache_ConcurrentGetOrCompileAndInvalidate(t *testing.T) {
 			defer wg.Done()
 			ws := "ws-" + string(rune('a'+(w%3)))
 			for i := 1; i <= iters; i++ {
-				_, _ = c.GetOrCompile(ws, func() (*clientv1.ACLSnapshot, error) {
-					return snap(ws, uint64(i)), nil
+				_, _ = c.GetOrCompile(ws, func() (*CompiledACL, error) {
+					return &CompiledACL{
+						Snapshot: snap(ws, uint64(i)),
+						ValidUntil: time.Time{},
+					}, nil
 				})
 				if i%25 == 0 {
 					c.Invalidate(ws)

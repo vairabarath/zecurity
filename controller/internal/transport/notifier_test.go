@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"testing"
+	"time"
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -73,6 +74,7 @@ func TestNotifier_TransportAndPolicyPlanesAreIndependent(t *testing.T) {
 	policyCache.SetIfEpoch(
 		workspaceID,
 		&clientv1.ACLSnapshot{Version: 1},
+		time.Time{},
 		policyCache.Epoch(workspaceID),
 	)
 
