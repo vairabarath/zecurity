@@ -54,6 +54,8 @@ type IdpTestResult {
 
 extend type Query {
   idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
+  # Whether the workspace still offers the shared platform IdP as a login path.
+  platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
@@ -64,4 +66,8 @@ extend type Mutation {
   setIdpConnectionStatus(id: ID!, status: String!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
   deleteIdpConnection(id: ID!): Boolean! @hasRole(roles: [ADMIN])
   testIdpConnection(id: ID!): IdpTestResult! @hasRole(roles: [ADMIN])
+  # Toggle the shared platform IdP as a login path for this workspace. Disabling
+  # is refused if the workspace has no active identity provider of its own and
+  # the actor is not a break-glass admin (no-lockout, ADR-024 §5).
+  setPlatformLoginEnabled(enabled: Boolean!): Boolean! @hasRole(roles: [ADMIN])
 }

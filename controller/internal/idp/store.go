@@ -373,6 +373,37 @@ func (s *Store) CountActiveWorkspaceConnections(ctx context.Context, tenantID st
 	return n, nil
 }
 
+// PlatformLoginEnabled reports whether the workspace still offers the shared
+// platform IdP as a login path (workspaces.platform_login_enabled, default true).
+// Read by the discovery endpoint and by the no-lockout guard.
+func (s *Store) PlatformLoginEnabled(ctx context.Context, tenantID string) (bool, error) {
+	var enabled bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT platform_login_enabled FROM workspaces WHERE id = $1`, tenantID).Scan(&enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrWorkspaceNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read platform_login_enabled: %w", err)
+	}
+	return enabled, nil
+}
+
+// SetPlatformLoginEnabled flips the workspace's platform login toggle. Callers
+// (the admin mutation) are responsible for the no-lockout guard before disabling.
+func (s *Store) SetPlatformLoginEnabled(ctx context.Context, tenantID string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE workspaces SET platform_login_enabled = $2, updated_at = NOW() WHERE id = $1`,
+		tenantID, enabled)
+	if err != nil {
+		return fmt.Errorf("set platform_login_enabled: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrWorkspaceNotFound
+	}
+	return nil
+}
+
 // WorkspaceIDBySlug resolves a workspace slug to its id. Used by the login
 // discovery endpoint to map a workspace-first request to its connections.
 func (s *Store) WorkspaceIDBySlug(ctx context.Context, slug string) (string, error) {

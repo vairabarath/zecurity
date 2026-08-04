@@ -53,9 +53,16 @@ func (s *serviceImpl) DiscoveryHandler() http.Handler {
 			return
 		}
 
+		// Phase 7 platform login toggle (ADR-024 §5): when a workspace disables
+		// platform login, the Bootstrap tier is no longer offered — its members
+		// must use the workspace's own Enterprise IdP(s).
+		platformEnabled, err := s.idpStore.PlatformLoginEnabled(ctx, tenantID)
+		if err != nil {
+			http.Error(w, "server error", http.StatusInternalServerError)
+			return
+		}
+
 		// Enterprise IdPs first, then Bootstrap IdPs as fallback (ADR-024 §0).
-		// platform_login_enabled is unconditionally true until the Phase-6/7
-		// disable toggle, so Bootstrap IdPs are always advertised.
 		var enterprise, bootstrap []discoveryProvider
 		for i := range conns {
 			c := conns[i]
@@ -64,6 +71,9 @@ func (s *serviceImpl) DiscoveryHandler() http.Handler {
 			}
 			dp := discoveryProvider{ID: c.ID, Display: c.DisplayName, Type: c.Protocol}
 			if c.TenantID == nil {
+				if !platformEnabled {
+					continue // platform login disabled for this workspace
+				}
 				dp.Tier = "bootstrap"
 				bootstrap = append(bootstrap, dp)
 			} else {

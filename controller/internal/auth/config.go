@@ -18,6 +18,7 @@ type connectionStore interface {
 	GetPlatformByProvider(ctx context.Context, provider string) (*idp.Connection, error)
 	ListForWorkspace(ctx context.Context, tenantID string) ([]idp.Connection, error)
 	WorkspaceIDBySlug(ctx context.Context, slug string) (string, error)
+	PlatformLoginEnabled(ctx context.Context, tenantID string) (bool, error)
 }
 
 // Config holds all dependencies and settings for the auth service.

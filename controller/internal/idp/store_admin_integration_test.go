@@ -114,6 +114,25 @@ func TestIdpStore_AdminMethods_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("platform login toggle defaults true and round-trips", func(t *testing.T) {
+		enabled, err := store.PlatformLoginEnabled(ctx, ws)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if !enabled {
+			t.Fatal("platform login should default to true")
+		}
+		if err := store.SetPlatformLoginEnabled(ctx, ws, false); err != nil {
+			t.Fatalf("disable: %v", err)
+		}
+		if enabled, _ = store.PlatformLoginEnabled(ctx, ws); enabled {
+			t.Fatal("expected platform login disabled after set")
+		}
+		if err := store.SetPlatformLoginEnabled(ctx, ws, true); err != nil {
+			t.Fatalf("re-enable: %v", err)
+		}
+	})
+
 	t.Run("users-for-connection returns linked users", func(t *testing.T) {
 		var userID string
 		if err := pool.QueryRow(ctx,

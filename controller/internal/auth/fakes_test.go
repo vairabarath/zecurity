@@ -11,10 +11,17 @@ import (
 
 // fakeConnStore is a connectionStore for unit tests — no database.
 type fakeConnStore struct {
-	byID        map[string]*idp.Connection
-	platform    map[string]*idp.Connection
-	workspaces  map[string]string // slug -> tenantID
-	connections []idp.Connection  // used by ListForWorkspace
+	byID             map[string]*idp.Connection
+	platform         map[string]*idp.Connection
+	workspaces       map[string]string // slug -> tenantID
+	connections      []idp.Connection  // used by ListForWorkspace
+	platformDisabled map[string]bool   // tenantID -> platform login disabled
+}
+
+// PlatformLoginEnabled defaults to true (nil map) unless a tenant is marked
+// disabled — mirroring the workspaces.platform_login_enabled default.
+func (f *fakeConnStore) PlatformLoginEnabled(_ context.Context, tenantID string) (bool, error) {
+	return !f.platformDisabled[tenantID], nil
 }
 
 func (f *fakeConnStore) GetByID(_ context.Context, id string) (*idp.Connection, error) {

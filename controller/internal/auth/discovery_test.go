@@ -107,6 +107,26 @@ func TestDiscovery_MultipleEnterprise_DeterministicOrder(t *testing.T) {
 	}
 }
 
+// TestDiscovery_PlatformLoginDisabled_OmitsBootstrap covers the Phase 7 toggle:
+// when a workspace disables platform login, the Bootstrap tier is not advertised
+// and platformFallback is false — only the workspace's own Enterprise IdP(s).
+func TestDiscovery_PlatformLoginDisabled_OmitsBootstrap(t *testing.T) {
+	store := discoveryStore()
+	store.platformDisabled = map[string]bool{"ws-acme-id": true}
+	svc := &serviceImpl{idpStore: store}
+
+	w, resp := doDiscovery(t, svc, "acme")
+	if w.Code != http.StatusOK {
+		t.Fatalf("code %d", w.Code)
+	}
+	if len(resp.Providers) != 1 || resp.Providers[0].Tier != "enterprise" || resp.Providers[0].ID != "okta-conn" {
+		t.Fatalf("want only the enterprise Okta IdP, got %+v", resp.Providers)
+	}
+	if resp.PlatformFallback {
+		t.Fatal("platformFallback must be false when platform login is disabled")
+	}
+}
+
 func TestDiscovery_UnknownWorkspace_404(t *testing.T) {
 	svc := &serviceImpl{idpStore: discoveryStore()}
 	w, _ := doDiscovery(t, svc, "nope")

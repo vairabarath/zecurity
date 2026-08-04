@@ -32,3 +32,30 @@ func TestLastLoginPathGuard(t *testing.T) {
 		})
 	}
 }
+
+// Disabling platform login (Phase 7) is refused when the workspace has no active
+// IdP of its own, unless the actor is a break-glass admin.
+func TestPlatformDisableGuard(t *testing.T) {
+	cases := []struct {
+		name       string
+		activeOwn  int
+		breakGlass bool
+		wantErr    bool
+	}{
+		{"has own IdP → safe to disable platform", 1, false, false},
+		{"multiple own IdPs → safe", 3, false, false},
+		{"no own IdP but break-glass admin → allowed", 0, true, false},
+		{"no own IdP, not break-glass → refused", 0, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := platformDisableGuard(c.activeOwn, c.breakGlass)
+			if c.wantErr && err == nil {
+				t.Fatalf("expected refusal, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("expected nil, got %v", err)
+			}
+		})
+	}
+}

@@ -9,11 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"strings"
 
 	"github.com/yourorg/ztna/controller/graph"
-	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -161,6 +158,34 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 	return &graph.IdpTestResult{Ok: true, Issuer: &issuer}, nil
 }
 
+// SetPlatformLoginEnabled is the resolver for the setPlatformLoginEnabled field.
+func (r *mutationResolver) SetPlatformLoginEnabled(ctx context.Context, enabled bool) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	// No-lockout (ADR-024 §5): disabling platform login is refused when the
+	// workspace has no active identity provider of its own, unless the actor is a
+	// break-glass admin — otherwise the workspace would strand every member.
+	if !enabled {
+		n, err := r.IdpStore.CountActiveWorkspaceConnections(ctx, tc.TenantID)
+		if err != nil {
+			return false, fmt.Errorf("setPlatformLoginEnabled: %w", err)
+		}
+		if err := platformDisableGuard(n, r.BreakGlassEmails[tc.Email]); err != nil {
+			return false, err
+		}
+	}
+
+	if err := r.IdpStore.SetPlatformLoginEnabled(ctx, tc.TenantID, enabled); err != nil {
+		return false, fmt.Errorf("setPlatformLoginEnabled: %w", err)
+	}
+	action := "idp.platform_login.enable"
+	if !enabled {
+		action = "idp.platform_login.disable"
+	}
+	r.auditIdp(ctx, tc, action, tc.TenantID, nil)
+	return enabled, nil
+}
+
 // IdpConnections is the resolver for the idpConnections field.
 func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
@@ -176,108 +201,13 @@ func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceI
 	return out, nil
 }
 
-// ── helpers ─────────────────────────────────────────────────────────────────
+// PlatformLoginEnabled is the resolver for the platformLoginEnabled field.
+func (r *queryResolver) PlatformLoginEnabled(ctx context.Context) (bool, error) {
+	tc := tenant.MustGet(ctx)
 
-// idpConnToGQL maps a store connection to its GraphQL view. The client secret is
-// NEVER mapped — it must not leave the server (ADR-024).
-func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
-	proto := graph.IdpProtocolOidc
-	if strings.EqualFold(c.Protocol, "saml") {
-		proto = graph.IdpProtocolSaml
-	}
-	out := &graph.WorkspaceIdpConnection{
-		ID:          c.ID,
-		Protocol:    proto,
-		Provider:    c.Provider,
-		DisplayName: c.DisplayName,
-		Issuer:      c.Issuer,
-		Scopes:      c.Scopes,
-		Status:      c.Status,
-		Managed:     c.Managed,
-	}
-	if c.ClientID != "" {
-		id := c.ClientID
-		out.ClientID = &id
-	}
-	if c.DiscoveryURL != "" {
-		d := c.DiscoveryURL
-		out.DiscoveryURL = &d
-	}
-	if c.DomainHint != "" {
-		h := c.DomainHint
-		out.DomainHint = &h
-	}
-	return out
-}
-
-// auditIdp writes a durable audit_logs row for an IdP admin action. Best-effort:
-// the mutation has already committed, so a failed audit write is logged, not fatal.
-func (r *Resolver) auditIdp(ctx context.Context, tc tenant.TenantContext, action, targetID string, details map[string]any) {
-	_ = audit.Record(ctx, r.Pool, audit.Entry{
-		TenantID:    tc.TenantID,
-		ActorUserID: tc.UserID,
-		ActorEmail:  tc.Email,
-		Action:      action,
-		TargetType:  "idp_connection",
-		TargetID:    targetID,
-		Details:     details,
-	})
-}
-
-// revokeConnectionSessions bumps identity_generation for every user linked to
-// the connection, killing their sessions.
-func (r *Resolver) revokeConnectionSessions(ctx context.Context, tc tenant.TenantContext, connectionID string) {
-	userIDs, err := r.IdpStore.UserIDsForConnection(ctx, tc.TenantID, connectionID)
+	enabled, err := r.IdpStore.PlatformLoginEnabled(ctx, tc.TenantID)
 	if err != nil {
-		log.Printf("idp: users for connection %s: %v", connectionID, err)
-		return
+		return false, fmt.Errorf("platformLoginEnabled: %w", err)
 	}
-	r.bumpUsers(ctx, tc, userIDs)
-}
-
-// bumpUsers revokes each user's sessions via the Revoker (best-effort per user).
-func (r *Resolver) bumpUsers(ctx context.Context, tc tenant.TenantContext, userIDs []string) {
-	if r.Revoker == nil {
-		return
-	}
-	for _, uid := range userIDs {
-		if _, err := r.Revoker.BumpGeneration(ctx, tc.TenantID, uid, tc.Email); err != nil {
-			log.Printf("idp: bump generation for user %s: %v", uid, err)
-		}
-	}
-}
-
-// guardLastLoginPath enforces the no-lockout invariant (ADR-024 §5) before a
-// connection is disabled/deleted.
-func (r *Resolver) guardLastLoginPath(ctx context.Context, tc tenant.TenantContext) error {
-	n, err := r.IdpStore.CountActiveWorkspaceConnections(ctx, tc.TenantID)
-	if err != nil {
-		return fmt.Errorf("no-lockout check: %w", err)
-	}
-	return lastLoginPathGuard(n, r.platformFallbackAvailable(), r.BreakGlassEmails[tc.Email])
-}
-
-// platformFallbackAvailable reports whether the shared platform IdP (e.g.
-// Google) is still a usable login path for the workspace. It is unconditionally
-// true today; the platform-disable toggle (Phase 7) is what can flip it, at
-// which point the no-lockout guard below becomes load-bearing.
-func (r *Resolver) platformFallbackAvailable() bool { return true }
-
-// lastLoginPathGuard is the pure no-lockout decision. Removing a workspace's
-// last active BYO connection is refused ONLY when the platform fallback is also
-// unavailable and the actor is not a configured break-glass admin — otherwise a
-// workspace could strand its admins with no way back in.
-func lastLoginPathGuard(activeConnections int, platformAvailable, actorIsBreakGlass bool) error {
-	if activeConnections > 1 || platformAvailable || actorIsBreakGlass {
-		return nil
-	}
-	return fmt.Errorf("refusing to remove the workspace's last active identity provider: " +
-		"configure another provider or a break-glass admin (IDP_BREAK_GLASS_EMAILS) first")
-}
-
-func deref(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
+	return enabled, nil
 }
