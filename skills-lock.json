@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "skills": {
+    "computer-use": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/computer-use/SKILL.md",
+      "computedHash": "afe48be623c1f6190ade7dacc4c1d334d4150b503ed00b28dda23a499e5bdc30"
+    },
+    "linear-tickets": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/linear-tickets/SKILL.md",
+      "computedHash": "971dd8d93bec651b03a95b6a2fe3daec51f2e81f992cc5f72951d24bb44195a7"
+    },
+    "orca-cli": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orca-cli/SKILL.md",
+      "computedHash": "e8b505366def7cf8c5d5682922da2a3a8496fb5b443de91997a08500b696a2b0"
+    },
+    "orca-emulator": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orca-emulator/SKILL.md",
+      "computedHash": "711db912faee9c8463896d77da45b8c7f067d69f7e2a723ba337c255f74e8339"
+    },
+    "orca-emulator-android": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orca-emulator-android/SKILL.md",
+      "computedHash": "4aa62668dea3ab16809620dfeb49bf0a6c9fd85015df4076a3607f48eb496d1b"
+    },
+    "orca-linear": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orca-linear/SKILL.md",
+      "computedHash": "1f33df439a944da163a57abd13d60097d27ab2f241ca0c26848d7a3dc900f2fa"
+    },
+    "orca-per-workspace-env": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orca-per-workspace-env/SKILL.md",
+      "computedHash": "0c4642c02480ed6219e3427475b5654fc6c06a84f2ce33fb8d7223baf2bdb17f"
+    },
+    "orchestration": {
+      "source": "stablyai/orca",
+      "sourceType": "github",
+      "skillPath": "skills/orchestration/SKILL.md",
+      "computedHash": "b5c364878fb07d21a369f091f2e96b823da94308b15b39636f2585d8b5621b51"
+    }
+  }
+}

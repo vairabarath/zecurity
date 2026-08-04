@@ -39,6 +39,14 @@ pub fn quic_advertise_addr() -> Option<&'static str> {
 
 #[derive(Deserialize)]
 struct TunnelRequest {
+    /// The resource the client is asserting it wants to reach. When present we
+    /// authorize by identity and dial the ACL's own address for it. Optional only
+    /// during the rollout — once every client sends it, a request without one is
+    /// denied (Sprint 16 Phase 3).
+    #[serde(default)]
+    resource_id: Option<String>,
+    /// Address the client believes the resource is at. Cross-checked against the
+    /// ACL entry; never used as the dial target when `resource_id` is present.
     destination: String,
     port: u16,
     #[serde(default = "default_tcp")]
@@ -174,7 +182,19 @@ where
         .await
         .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
 
+    // Which authorization path this request takes. Logged so the Phase 3 cutover
+    // (making resource_id mandatory) can be confirmed from logs before the legacy
+    // branch is deleted.
+    let asserted_resource_id = req.resource_id.as_deref().filter(|id| !id.is_empty());
+    let auth_path = if asserted_resource_id.is_some() {
+        "resource_id"
+    } else {
+        "legacy_destination"
+    };
+
     tracing::debug!(
+        resource_id = asserted_resource_id.unwrap_or(""),
+        auth_path,
         destination = %req.destination,
         port = req.port,
         protocol = %req.protocol,
@@ -182,28 +202,57 @@ where
         "received tunnel request"
     );
 
-    let decision = match acl.resolve_resource(&req.destination, req.port, &req.protocol) {
-        Some(acl_entry) => {
-            if !acl_entry
-                .allowed_spiffe_ids
-                .iter()
-                .any(|id| id == &client_spiffe_id)
-            {
-                None
-            } else {
-                Some(acl_entry)
+    // Order matters: look the resource up, THEN authorize the principal for it,
+    // THEN cross-check the claimed destination. Policy lives on the resource, so
+    // nothing can be authorized before it is resolved, and no dial target is
+    // chosen before authorization succeeds.
+    let (decision, deny_reason) = match asserted_resource_id {
+        // Identity path: authorize by resource_id; the dial target comes from the ACL.
+        Some(resource_id) => {
+            match acl.resolve_by_resource_id(resource_id, req.port, &req.protocol) {
+                None => (None, "unknown_resource"),
+                Some(entry)
+                    if !entry
+                        .allowed_spiffe_ids
+                        .iter()
+                        .any(|id| id == &client_spiffe_id) =>
+                {
+                    (None, "unauthorized_spiffe")
+                }
+                // The client may state where it thinks the resource is, but it must
+                // agree with the ACL. Disagreement is a denial, never a silent
+                // preference for either value.
+                Some(entry) if !req.destination.is_empty() && req.destination != entry.address => {
+                    (None, "destination_mismatch")
+                }
+                Some(entry) => (Some(entry), ""),
             }
         }
-        None => None,
+        // Legacy path (removed in Phase 3): resolve by the network tuple the client
+        // sent. resolve_resource already matched on that address, so no cross-check.
+        None => match acl.resolve_resource(&req.destination, req.port, &req.protocol) {
+            None => (None, "no_acl_match"),
+            Some(entry)
+                if !entry
+                    .allowed_spiffe_ids
+                    .iter()
+                    .any(|id| id == &client_spiffe_id) =>
+            {
+                (None, "unauthorized_spiffe")
+            }
+            Some(entry) => (Some(entry), ""),
+        },
     };
 
     if decision.is_none() {
         tracing::warn!(
             spiffe_id = %client_spiffe_id,
+            resource_id = asserted_resource_id.unwrap_or(""),
+            auth_path,
             dest = %req.destination,
             port = req.port,
             proto = %req.protocol,
-            reason = "no_acl_match",
+            reason = deny_reason,
             "access denied",
         );
         let response = TunnelResponse {
@@ -216,17 +265,17 @@ where
             control_tx,
             connector_id,
             AccessLogFields {
-                resource_id: "",
+                resource_id: asserted_resource_id.unwrap_or(""),
                 client_spiffe_id: &client_spiffe_id,
                 route_type: "",
                 destination: &req.destination,
                 port: req.port,
                 protocol: &req.protocol,
                 action: "deny",
-                error: "no_acl_match",
+                error: deny_reason,
                 legacy_message: format!(
-                    "deny spiffe_id={} dest={}:{} proto={} reason=no_acl_match",
-                    client_spiffe_id, req.destination, req.port, req.protocol,
+                    "deny spiffe_id={} dest={}:{} proto={} reason={}",
+                    client_spiffe_id, req.destination, req.port, req.protocol, deny_reason,
                 ),
             },
         )
@@ -314,8 +363,9 @@ where
         )
         .await;
 
+        // Dial target comes from the ACL entry, never from req.destination.
         match tunnel_hub
-            .open_relay_session(&shield_id, &req.destination, req.port, &req.protocol)
+            .open_relay_session(&shield_id, &acl_entry.address, req.port, &req.protocol)
             .await
         {
             Ok(relay) => {
@@ -445,11 +495,13 @@ where
         )
         .await;
 
-        relay_udp(&mut stream, &req.destination, req.port).await?;
+        // Dial target comes from the ACL entry, never from req.destination.
+        relay_udp(&mut stream, &acl_entry.address, req.port).await?;
         return Ok(());
     }
 
-    let target = format!("{}:{}", req.destination, req.port);
+    // Dial target comes from the ACL entry, never from req.destination.
+    let target = format!("{}:{}", acl_entry.address, req.port);
     let mut resource_conn = match TcpStream::connect(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");

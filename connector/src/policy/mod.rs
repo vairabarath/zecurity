@@ -8,9 +8,15 @@ pub struct PolicyCache {
     snapshot: RwLock<Option<AclSnapshot>>,
 }
 
-/// Resource resolved by network tuple, returned by [`PolicyCache::resolve_resource`].
+/// Resource resolved from the ACL snapshot, returned by
+/// [`PolicyCache::resolve_resource`] and [`PolicyCache::resolve_by_resource_id`].
 pub struct ResourceAcl {
     pub resource_id: String,
+    /// The resource's address **as the controller declared it**. This is the
+    /// authoritative dial target — callers must use it rather than any address
+    /// supplied by the client, so a client can never steer the connector at a
+    /// destination the ACL didn't authorize.
+    pub address: String,
     pub allowed_spiffe_ids: Vec<String>,
     pub route_type: String,
     pub shield_id: String,
@@ -97,12 +103,30 @@ impl PolicyCache {
                 && e.port == port as u32
                 && e.protocol.eq_ignore_ascii_case(protocol)
         })?;
-        Some(ResourceAcl {
-            resource_id: entry.resource_id.clone(),
-            allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
-            route_type: entry.route_type.clone(),
-            shield_id: entry.shield_id.clone(),
-        })
+        Some(resource_acl_from(entry))
+    }
+
+    /// Look up a resource by its **identity** (`resource_id`) instead of its
+    /// network tuple, then confirm the requested port + protocol match the entry.
+    /// This is the identity-based authorization path: the caller dials
+    /// [`ResourceAcl::address`], never an address the client supplied.
+    ///
+    /// Returns `None` — and the caller must deny — when no snapshot is loaded,
+    /// the resource is unknown, or the port/protocol don't match. A resource
+    /// authorized on `:5432` is therefore not reachable on `:22`.
+    pub fn resolve_by_resource_id(
+        &self,
+        resource_id: &str,
+        port: u16,
+        protocol: &str,
+    ) -> Option<ResourceAcl> {
+        let guard = self.snapshot.read();
+        let snapshot = guard.as_ref()?;
+        let entry = find_entry_by_id(snapshot, resource_id)?;
+        if entry.port != port as u32 || !entry.protocol.eq_ignore_ascii_case(protocol) {
+            return None;
+        }
+        Some(resource_acl_from(entry))
     }
 }
 
@@ -111,6 +135,16 @@ fn find_entry_by_id<'a>(snapshot: &'a AclSnapshot, resource_id: &str) -> Option<
         .entries
         .iter()
         .find(|e| e.resource_id == resource_id)
+}
+
+fn resource_acl_from(entry: &AclEntry) -> ResourceAcl {
+    ResourceAcl {
+        resource_id: entry.resource_id.clone(),
+        address: entry.address.clone(),
+        allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
+        route_type: entry.route_type.clone(),
+        shield_id: entry.shield_id.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +327,80 @@ mod tests {
             vec!["spiffe://ws/client/device-1"],
         )]));
         assert!(cache.resolve_resource("10.0.0.1", 80, "tcp").is_none());
+    }
+
+    #[test]
+    fn resolve_resource_carries_the_acl_address() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        let result = cache.resolve_resource("10.0.0.1", 443, "tcp").unwrap();
+        assert_eq!(result.address, "10.0.0.1");
+    }
+
+    #[test]
+    fn resolve_by_resource_id_returns_none_without_snapshot() {
+        let cache = PolicyCache::new();
+        assert!(cache.resolve_by_resource_id("res-1", 443, "tcp").is_none());
+    }
+
+    #[test]
+    fn resolve_by_resource_id_matches_and_yields_acl_address() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        let result = cache.resolve_by_resource_id("res-1", 443, "tcp").unwrap();
+        assert_eq!(result.resource_id, "res-1");
+        // The dial target comes from the ACL, not from anything a client sent.
+        assert_eq!(result.address, "10.0.0.1");
+        assert_eq!(result.route_type, "shield");
+        assert_eq!(result.shield_id, "shield-test");
+    }
+
+    #[test]
+    fn resolve_by_resource_id_returns_none_on_unknown_resource() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        assert!(cache
+            .resolve_by_resource_id("res-unknown", 443, "tcp")
+            .is_none());
+    }
+
+    // A resource authorized on :443 must not be reachable on another port.
+    #[test]
+    fn resolve_by_resource_id_returns_none_on_port_mismatch() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        assert!(cache.resolve_by_resource_id("res-1", 22, "tcp").is_none());
+    }
+
+    #[test]
+    fn resolve_by_resource_id_returns_none_on_protocol_mismatch() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        assert!(cache.resolve_by_resource_id("res-1", 443, "udp").is_none());
+    }
+
+    #[test]
+    fn resolve_by_resource_id_is_protocol_case_insensitive() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![entry(
+            "res-1",
+            vec!["spiffe://ws/client/device-1"],
+        )]));
+        assert!(cache.resolve_by_resource_id("res-1", 443, "TCP").is_some());
     }
 }
