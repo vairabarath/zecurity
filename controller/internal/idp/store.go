@@ -263,6 +263,116 @@ func (s *Store) DeleteWorkspaceConnection(ctx context.Context, tenantID, id stri
 	return nil
 }
 
+// UpdateInput is the mutable field set for updating a workspace connection.
+// A nil pointer leaves that column unchanged; a non-nil ClientSecret replaces
+// the encrypted secret (an empty string is a valid — if unusual — new secret).
+// Issuer and provider are immutable after creation (they anchor the identity
+// key), so they are not updatable here.
+type UpdateInput struct {
+	DisplayName  *string
+	ClientID     *string
+	ClientSecret *string
+	DiscoveryURL *string
+	Scopes       *string
+	DomainHint   *string
+}
+
+// UpdateWorkspaceConnection applies a partial update to a workspace (BYO)
+// connection. The `managed = FALSE` guard means a platform connection can never
+// be edited through this path, and the tenant_id guard scopes it to the caller's
+// workspace. The client secret is re-encrypted only when a new one is supplied.
+func (s *Store) UpdateWorkspaceConnection(ctx context.Context, tenantID, id string, in UpdateInput) (*Connection, error) {
+	var encSecret, nonce *string
+	setSecret := false
+	if in.ClientSecret != nil {
+		ct, n, err := s.enc.EncryptSecret([]byte(*in.ClientSecret), secretContext(tenantID))
+		if err != nil {
+			return nil, fmt.Errorf("encrypt client secret: %w", err)
+		}
+		encSecret, nonce, setSecret = &ct, &n, true
+	}
+
+	row := s.pool.QueryRow(ctx,
+		`UPDATE identity_connections SET
+		    display_name = COALESCE($3, display_name),
+		    client_id    = COALESCE($4, client_id),
+		    discovery_url= COALESCE($5, discovery_url),
+		    scopes       = COALESCE($6, scopes),
+		    domain_hint  = COALESCE($7, domain_hint),
+		    encrypted_client_secret = CASE WHEN $8 THEN $9  ELSE encrypted_client_secret END,
+		    secret_nonce            = CASE WHEN $8 THEN $10 ELSE secret_nonce END,
+		    updated_at = NOW()
+		  WHERE id = $1 AND tenant_id = $2 AND managed = FALSE
+		  RETURNING `+connColumns,
+		id, tenantID, in.DisplayName, in.ClientID, in.DiscoveryURL, in.Scopes, in.DomainHint,
+		setSecret, encSecret, nonce)
+	c, err := s.scanConnection(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrConnectionNotFound
+	}
+	return c, err
+}
+
+// ListWorkspaceConnections returns ONLY the workspace's own (BYO) connections —
+// not the platform IdPs. This is the admin management view (create/edit/delete),
+// as distinct from ListForWorkspace, which is the login-resolution view that
+// also includes the shared platform IdPs.
+func (s *Store) ListWorkspaceConnections(ctx context.Context, tenantID string) ([]Connection, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+connColumns+` FROM identity_connections
+		 WHERE tenant_id = $1
+		 ORDER BY display_name`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query workspace connections: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Connection
+	for rows.Next() {
+		c, err := s.scanConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// UserIDsForConnection returns the canonical users that have an external
+// identity through this connection — the set whose sessions must be revoked
+// when the connection is disabled or deleted (their login path is gone).
+func (s *Store) UserIDsForConnection(ctx context.Context, tenantID, connectionID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT user_id::text FROM external_identities
+		 WHERE tenant_id = $1 AND connection_id = $2`, tenantID, connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("query users for connection: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// CountActiveWorkspaceConnections counts a workspace's own active connections.
+// Used by the no-lockout guard before disabling/deleting a connection.
+func (s *Store) CountActiveWorkspaceConnections(ctx context.Context, tenantID string) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM identity_connections
+		 WHERE tenant_id = $1 AND status = 'active'`, tenantID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count active workspace connections: %w", err)
+	}
+	return n, nil
+}
+
 // WorkspaceIDBySlug resolves a workspace slug to its id. Used by the login
 // discovery endpoint to map a workspace-first request to its connections.
 func (s *Store) WorkspaceIDBySlug(ctx context.Context, slug string) (string, error) {

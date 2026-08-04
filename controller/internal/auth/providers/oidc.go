@@ -98,6 +98,18 @@ func (p *OIDCProvider) discover(ctx context.Context) (*oidcDiscovery, error) {
 	return &d, nil
 }
 
+// Probe fetches the OIDC discovery document and returns the issuer it
+// advertises. Used by the admin testIdpConnection mutation to verify a
+// connection's issuer/discovery URL is reachable and well-formed (matching
+// issuer, required endpoints present) without running a full login.
+func (p *OIDCProvider) Probe(ctx context.Context) (string, error) {
+	d, err := p.discover(ctx)
+	if err != nil {
+		return "", err
+	}
+	return d.Issuer, nil
+}
+
 // AuthURL builds the OIDC authorization-redirect URL from the discovered
 // authorization_endpoint, injecting PKCE + nonce.
 func (p *OIDCProvider) AuthURL(ctx context.Context, params AuthURLParams) (string, error) {

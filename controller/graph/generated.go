@@ -105,6 +105,12 @@ type ComplexityRoot struct {
 		UpdatedAt   func(childComplexity int) int
 	}
 
+	IdpTestResult struct {
+		Issuer  func(childComplexity int) int
+		Message func(childComplexity int) int
+		Ok      func(childComplexity int) int
+	}
+
 	Invitation struct {
 		CreatedAt func(childComplexity int) int
 		Email     func(childComplexity int) int
@@ -117,11 +123,13 @@ type ComplexityRoot struct {
 		AddGroupMember            func(childComplexity int, groupID string, userID string) int
 		AssignResourceToGroup     func(childComplexity int, resourceID string, groupID string) int
 		CreateGroup               func(childComplexity int, name string, description *string) int
+		CreateIdpConnection       func(childComplexity int, input CreateIdpConnectionInput) int
 		CreateInvitation          func(childComplexity int, email string) int
 		CreateRemoteNetwork       func(childComplexity int, name string, location NetworkLocation) int
 		CreateResource            func(childComplexity int, input CreateResourceInput) int
 		DeleteConnector           func(childComplexity int, id string) int
 		DeleteGroup               func(childComplexity int, id string) int
+		DeleteIdpConnection       func(childComplexity int, id string) int
 		DeleteRemoteNetwork       func(childComplexity int, id string) int
 		DeleteResource            func(childComplexity int, id string) int
 		DeleteShield              func(childComplexity int, id string) int
@@ -135,10 +143,13 @@ type ComplexityRoot struct {
 		RevokeConnector           func(childComplexity int, id string) int
 		RevokeDevice              func(childComplexity int, deviceID string) int
 		RevokeShield              func(childComplexity int, id string) int
+		SetIdpConnectionStatus    func(childComplexity int, id string, status string) int
+		TestIdpConnection         func(childComplexity int, id string) int
 		TriggerScan               func(childComplexity int, connectorID string, targets []string, ports []int) int
 		UnassignResourceFromGroup func(childComplexity int, resourceID string, groupID string) int
 		UnprotectResource         func(childComplexity int, id string) int
 		UpdateGroup               func(childComplexity int, id string, name *string, description *string) int
+		UpdateIdpConnection       func(childComplexity int, id string, input UpdateIdpConnectionInput) int
 		UpdateResource            func(childComplexity int, id string, input UpdateResourceInput) int
 	}
 
@@ -152,6 +163,7 @@ type ComplexityRoot struct {
 		GetScanResults          func(childComplexity int, requestID string) int
 		Group                   func(childComplexity int, id string) int
 		Groups                  func(childComplexity int) int
+		IdpConnections          func(childComplexity int) int
 		Invitation              func(childComplexity int, token string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
@@ -240,6 +252,20 @@ type ComplexityRoot struct {
 		Status    func(childComplexity int) int
 	}
 
+	WorkspaceIdpConnection struct {
+		ClientID     func(childComplexity int) int
+		DiscoveryURL func(childComplexity int) int
+		DisplayName  func(childComplexity int) int
+		DomainHint   func(childComplexity int) int
+		ID           func(childComplexity int) int
+		Issuer       func(childComplexity int) int
+		Managed      func(childComplexity int) int
+		Protocol     func(childComplexity int) int
+		Provider     func(childComplexity int) int
+		Scopes       func(childComplexity int) int
+		Status       func(childComplexity int) int
+	}
+
 	WorkspaceListResult struct {
 		Workspaces func(childComplexity int) int
 	}
@@ -283,6 +309,11 @@ type MutationResolver interface {
 	RemoveGroupMember(ctx context.Context, groupID string, userID string) (*Group, error)
 	AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
 	UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
+	CreateIdpConnection(ctx context.Context, input CreateIdpConnectionInput) (*WorkspaceIdpConnection, error)
+	UpdateIdpConnection(ctx context.Context, id string, input UpdateIdpConnectionInput) (*WorkspaceIdpConnection, error)
+	SetIdpConnectionStatus(ctx context.Context, id string, status string) (*WorkspaceIdpConnection, error)
+	DeleteIdpConnection(ctx context.Context, id string) (bool, error)
+	TestIdpConnection(ctx context.Context, id string) (*IdpTestResult, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -306,6 +337,7 @@ type QueryResolver interface {
 	Groups(ctx context.Context) ([]*Group, error)
 	Group(ctx context.Context, id string) (*Group, error)
 	ConnectorLogs(ctx context.Context, limit *int) ([]*ConnectorLog, error)
+	IdpConnections(ctx context.Context) ([]*WorkspaceIdpConnection, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -596,6 +628,25 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Group.UpdatedAt(childComplexity), true
 
+	case "IdpTestResult.issuer":
+		if e.ComplexityRoot.IdpTestResult.Issuer == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.Issuer(childComplexity), true
+	case "IdpTestResult.message":
+		if e.ComplexityRoot.IdpTestResult.Message == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.Message(childComplexity), true
+	case "IdpTestResult.ok":
+		if e.ComplexityRoot.IdpTestResult.Ok == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.Ok(childComplexity), true
+
 	case "Invitation.createdAt":
 		if e.ComplexityRoot.Invitation.CreatedAt == nil {
 			break
@@ -660,6 +711,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.CreateGroup(childComplexity, args["name"].(string), args["description"].(*string)), true
+	case "Mutation.createIdpConnection":
+		if e.ComplexityRoot.Mutation.CreateIdpConnection == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_createIdpConnection_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.CreateIdpConnection(childComplexity, args["input"].(CreateIdpConnectionInput)), true
 	case "Mutation.createInvitation":
 		if e.ComplexityRoot.Mutation.CreateInvitation == nil {
 			break
@@ -715,6 +777,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.DeleteGroup(childComplexity, args["id"].(string)), true
+	case "Mutation.deleteIdpConnection":
+		if e.ComplexityRoot.Mutation.DeleteIdpConnection == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_deleteIdpConnection_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.DeleteIdpConnection(childComplexity, args["id"].(string)), true
 	case "Mutation.deleteRemoteNetwork":
 		if e.ComplexityRoot.Mutation.DeleteRemoteNetwork == nil {
 			break
@@ -858,6 +931,28 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeShield(childComplexity, args["id"].(string)), true
+	case "Mutation.setIdpConnectionStatus":
+		if e.ComplexityRoot.Mutation.SetIdpConnectionStatus == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_setIdpConnectionStatus_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.SetIdpConnectionStatus(childComplexity, args["id"].(string), args["status"].(string)), true
+	case "Mutation.testIdpConnection":
+		if e.ComplexityRoot.Mutation.TestIdpConnection == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_testIdpConnection_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.TestIdpConnection(childComplexity, args["id"].(string)), true
 	case "Mutation.triggerScan":
 		if e.ComplexityRoot.Mutation.TriggerScan == nil {
 			break
@@ -902,6 +997,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateGroup(childComplexity, args["id"].(string), args["name"].(*string), args["description"].(*string)), true
+	case "Mutation.updateIdpConnection":
+		if e.ComplexityRoot.Mutation.UpdateIdpConnection == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateIdpConnection_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateIdpConnection(childComplexity, args["id"].(string), args["input"].(UpdateIdpConnectionInput)), true
 	case "Mutation.updateResource":
 		if e.ComplexityRoot.Mutation.UpdateResource == nil {
 			break
@@ -998,6 +1104,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Groups(childComplexity), true
+	case "Query.idpConnections":
+		if e.ComplexityRoot.Query.IdpConnections == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.IdpConnections(childComplexity), true
 
 	case "Query.invitation":
 		if e.ComplexityRoot.Query.Invitation == nil {
@@ -1432,6 +1544,73 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.Workspace.Status(childComplexity), true
 
+	case "WorkspaceIdpConnection.clientId":
+		if e.ComplexityRoot.WorkspaceIdpConnection.ClientID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.ClientID(childComplexity), true
+	case "WorkspaceIdpConnection.discoveryUrl":
+		if e.ComplexityRoot.WorkspaceIdpConnection.DiscoveryURL == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.DiscoveryURL(childComplexity), true
+	case "WorkspaceIdpConnection.displayName":
+		if e.ComplexityRoot.WorkspaceIdpConnection.DisplayName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.DisplayName(childComplexity), true
+	case "WorkspaceIdpConnection.domainHint":
+		if e.ComplexityRoot.WorkspaceIdpConnection.DomainHint == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.DomainHint(childComplexity), true
+	case "WorkspaceIdpConnection.id":
+		if e.ComplexityRoot.WorkspaceIdpConnection.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.ID(childComplexity), true
+	case "WorkspaceIdpConnection.issuer":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Issuer == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Issuer(childComplexity), true
+	case "WorkspaceIdpConnection.managed":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Managed == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Managed(childComplexity), true
+	case "WorkspaceIdpConnection.protocol":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Protocol == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Protocol(childComplexity), true
+	case "WorkspaceIdpConnection.provider":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Provider == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Provider(childComplexity), true
+	case "WorkspaceIdpConnection.scopes":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Scopes == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Scopes(childComplexity), true
+	case "WorkspaceIdpConnection.status":
+		if e.ComplexityRoot.WorkspaceIdpConnection.Status == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.Status(childComplexity), true
+
 	case "WorkspaceListResult.workspaces":
 		if e.ComplexityRoot.WorkspaceListResult.Workspaces == nil {
 			break
@@ -1479,7 +1658,9 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 	opCtx := graphql.GetOperationContext(ctx)
 	ec := newExecutionContext(opCtx, e, make(chan graphql.DeferredResult))
 	inputUnmarshalMap := graphql.BuildUnmarshalerMap(
+		ec.unmarshalInputCreateIdpConnectionInput,
 		ec.unmarshalInputCreateResourceInput,
+		ec.unmarshalInputUpdateIdpConnectionInput,
 		ec.unmarshalInputUpdateResourceInput,
 	)
 	first := true
@@ -1555,7 +1736,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls" "idp.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -1575,6 +1756,7 @@ var sources = []*ast.Source{
 	{Name: "client.graphqls", Input: sourceData("client.graphqls"), BuiltIn: false},
 	{Name: "policy.graphqls", Input: sourceData("policy.graphqls"), BuiltIn: false},
 	{Name: "log.graphqls", Input: sourceData("log.graphqls"), BuiltIn: false},
+	{Name: "idp.graphqls", Input: sourceData("idp.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
 
@@ -1708,6 +1890,18 @@ func (ec *executionContext) childFields_Group(ctx context.Context, field graphql
 		return ec.fieldContext_Group_updatedAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
+}
+
+func (ec *executionContext) childFields_IdpTestResult(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "ok":
+		return ec.fieldContext_IdpTestResult_ok(ctx, field)
+	case "issuer":
+		return ec.fieldContext_IdpTestResult_issuer(ctx, field)
+	case "message":
+		return ec.fieldContext_IdpTestResult_message(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type IdpTestResult", field.Name)
 }
 
 func (ec *executionContext) childFields_Invitation(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -1872,6 +2066,34 @@ func (ec *executionContext) childFields_Workspace(ctx context.Context, field gra
 		return ec.fieldContext_Workspace_createdAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Workspace", field.Name)
+}
+
+func (ec *executionContext) childFields_WorkspaceIdpConnection(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_WorkspaceIdpConnection_id(ctx, field)
+	case "protocol":
+		return ec.fieldContext_WorkspaceIdpConnection_protocol(ctx, field)
+	case "provider":
+		return ec.fieldContext_WorkspaceIdpConnection_provider(ctx, field)
+	case "displayName":
+		return ec.fieldContext_WorkspaceIdpConnection_displayName(ctx, field)
+	case "issuer":
+		return ec.fieldContext_WorkspaceIdpConnection_issuer(ctx, field)
+	case "clientId":
+		return ec.fieldContext_WorkspaceIdpConnection_clientId(ctx, field)
+	case "discoveryUrl":
+		return ec.fieldContext_WorkspaceIdpConnection_discoveryUrl(ctx, field)
+	case "scopes":
+		return ec.fieldContext_WorkspaceIdpConnection_scopes(ctx, field)
+	case "domainHint":
+		return ec.fieldContext_WorkspaceIdpConnection_domainHint(ctx, field)
+	case "status":
+		return ec.fieldContext_WorkspaceIdpConnection_status(ctx, field)
+	case "managed":
+		return ec.fieldContext_WorkspaceIdpConnection_managed(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type WorkspaceIdpConnection", field.Name)
 }
 
 func (ec *executionContext) childFields_WorkspaceListResult(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2100,6 +2322,20 @@ func (ec *executionContext) field_Mutation_createGroup_args(ctx context.Context,
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_createIdpConnection_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "input",
+		func(ctx context.Context, v any) (CreateIdpConnectionInput, error) {
+			return ec.unmarshalNCreateIdpConnectionInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCreateIdpConnectionInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_createInvitation_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -2165,6 +2401,20 @@ func (ec *executionContext) field_Mutation_deleteConnector_args(ctx context.Cont
 }
 
 func (ec *executionContext) field_Mutation_deleteGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_deleteIdpConnection_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
@@ -2416,6 +2666,42 @@ func (ec *executionContext) field_Mutation_revokeShield_args(ctx context.Context
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_setIdpConnectionStatus_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "status",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["status"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_testIdpConnection_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_triggerScan_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -2509,6 +2795,28 @@ func (ec *executionContext) field_Mutation_updateGroup_args(ctx context.Context,
 		return nil, err
 	}
 	args["description"] = arg2
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateIdpConnection_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "input",
+		func(ctx context.Context, v any) (UpdateIdpConnectionInput, error) {
+			return ec.unmarshalNUpdateIdpConnectionInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateIdpConnectionInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg1
 	return args, nil
 }
 
@@ -3799,6 +4107,75 @@ func (ec *executionContext) _Group_updatedAt(ctx context.Context, field graphql.
 }
 func (ec *executionContext) fieldContext_Group_updatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("Group", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_ok(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_ok(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Ok, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_ok(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_issuer(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_issuer(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Issuer, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_issuer(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_message(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_message(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Message, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_message(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _Invitation_id(ctx context.Context, field graphql.CollectedField, obj *Invitation) (ret graphql.Marshaler) {
@@ -5510,6 +5887,316 @@ func (ec *executionContext) fieldContext_Mutation_unassignResourceFromGroup(ctx 
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_createIdpConnection(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_createIdpConnection(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().CreateIdpConnection(ctx, fc.Args["input"].(CreateIdpConnectionInput))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *WorkspaceIdpConnection) graphql.Marshaler {
+			return ec.marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_createIdpConnection(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceIdpConnection(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_createIdpConnection_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateIdpConnection(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateIdpConnection(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateIdpConnection(ctx, fc.Args["id"].(string), fc.Args["input"].(UpdateIdpConnectionInput))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *WorkspaceIdpConnection) graphql.Marshaler {
+			return ec.marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateIdpConnection(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceIdpConnection(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateIdpConnection_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_setIdpConnectionStatus(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_setIdpConnectionStatus(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().SetIdpConnectionStatus(ctx, fc.Args["id"].(string), fc.Args["status"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *WorkspaceIdpConnection) graphql.Marshaler {
+			return ec.marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_setIdpConnectionStatus(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceIdpConnection(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_setIdpConnectionStatus_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_deleteIdpConnection(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_deleteIdpConnection(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().DeleteIdpConnection(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_deleteIdpConnection(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_deleteIdpConnection_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_testIdpConnection(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_testIdpConnection(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().TestIdpConnection(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *IdpTestResult
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *IdpTestResult
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *IdpTestResult) graphql.Marshaler {
+			return ec.marshalNIdpTestResult2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpTestResult(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_testIdpConnection(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_IdpTestResult(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_testIdpConnection_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_me(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -6604,6 +7291,56 @@ func (ec *executionContext) fieldContext_Query_connectorLogs(ctx context.Context
 	if fc.Args, err = ec.field_Query_connectorLogs_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_idpConnections(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_idpConnections(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().IdpConnections(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*WorkspaceIdpConnection
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*WorkspaceIdpConnection
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*WorkspaceIdpConnection) graphql.Marshaler {
+			return ec.marshalNWorkspaceIdpConnection2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnectionᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_idpConnections(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceIdpConnection(ctx, field)
+		},
 	}
 	return fc, nil
 }
@@ -7948,6 +8685,259 @@ func (ec *executionContext) fieldContext_Workspace_createdAt(_ context.Context, 
 	return graphql.NewScalarFieldContext("Workspace", field, true, true, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _WorkspaceIdpConnection_id(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_protocol(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_protocol(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Protocol, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v IdpProtocol) graphql.Marshaler {
+			return ec.marshalNIdpProtocol2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpProtocol(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_protocol(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type IdpProtocol does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_provider(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_provider(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Provider, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_provider(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_displayName(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_displayName(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DisplayName, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_displayName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_issuer(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_issuer(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Issuer, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_issuer(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_clientId(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_clientId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ClientID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_clientId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_discoveryUrl(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_discoveryUrl(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DiscoveryURL, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_discoveryUrl(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_scopes(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_scopes(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Scopes, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_scopes(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_domainHint(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_domainHint(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DomainHint, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_domainHint(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_status(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_status(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Status, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_status(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_managed(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_managed(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Managed, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_managed(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
 func (ec *executionContext) _WorkspaceListResult_workspaces(ctx context.Context, field graphql.CollectedField, obj *WorkspaceListResult) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -9163,6 +10153,85 @@ func (ec *executionContext) fieldContext___Type_isOneOf(_ context.Context, field
 
 // region    **************************** input.gotpl *****************************
 
+func (ec *executionContext) unmarshalInputCreateIdpConnectionInput(ctx context.Context, obj any) (CreateIdpConnectionInput, error) {
+	var it CreateIdpConnectionInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"provider", "displayName", "issuer", "clientId", "clientSecret", "discoveryUrl", "scopes", "domainHint"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "provider":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("provider"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Provider = data
+		case "displayName":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("displayName"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DisplayName = data
+		case "issuer":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("issuer"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Issuer = data
+		case "clientId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("clientId"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ClientID = data
+		case "clientSecret":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("clientSecret"))
+			data, err := ec.unmarshalNString2string(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ClientSecret = data
+		case "discoveryUrl":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("discoveryUrl"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DiscoveryURL = data
+		case "scopes":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("scopes"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Scopes = data
+		case "domainHint":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("domainHint"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DomainHint = data
+		}
+	}
+	return it, nil
+}
+
 func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Context, obj any) (CreateResourceInput, error) {
 	var it CreateResourceInput
 	if obj == nil {
@@ -9230,6 +10299,71 @@ func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Contex
 				return it, err
 			}
 			it.PortTo = data
+		}
+	}
+	return it, nil
+}
+
+func (ec *executionContext) unmarshalInputUpdateIdpConnectionInput(ctx context.Context, obj any) (UpdateIdpConnectionInput, error) {
+	var it UpdateIdpConnectionInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"displayName", "clientId", "clientSecret", "discoveryUrl", "scopes", "domainHint"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "displayName":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("displayName"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DisplayName = data
+		case "clientId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("clientId"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ClientID = data
+		case "clientSecret":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("clientSecret"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ClientSecret = data
+		case "discoveryUrl":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("discoveryUrl"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DiscoveryURL = data
+		case "scopes":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("scopes"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Scopes = data
+		case "domainHint":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("domainHint"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.DomainHint = data
 		}
 	}
 	return it, nil
@@ -9728,6 +10862,49 @@ func (ec *executionContext) _Group(ctx context.Context, sel ast.SelectionSet, ob
 	return out
 }
 
+var idpTestResultImplementors = []string{"IdpTestResult"}
+
+func (ec *executionContext) _IdpTestResult(ctx context.Context, sel ast.SelectionSet, obj *IdpTestResult) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, idpTestResultImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("IdpTestResult")
+		case "ok":
+			out.Values[i] = ec._IdpTestResult_ok(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "issuer":
+			out.Values[i] = ec._IdpTestResult_issuer(ctx, field, obj)
+		case "message":
+			out.Values[i] = ec._IdpTestResult_message(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var invitationImplementors = []string{"Invitation"}
 
 func (ec *executionContext) _Invitation(ctx context.Context, sel ast.SelectionSet, obj *Invitation) graphql.Marshaler {
@@ -9984,6 +11161,41 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "unassignResourceFromGroup":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_unassignResourceFromGroup(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "createIdpConnection":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_createIdpConnection(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateIdpConnection":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateIdpConnection(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "setIdpConnectionStatus":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_setIdpConnectionStatus(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deleteIdpConnection":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_deleteIdpConnection(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "testIdpConnection":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_testIdpConnection(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -10465,6 +11677,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_connectorLogs(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "idpConnections":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_idpConnections(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -11102,6 +12336,86 @@ func (ec *executionContext) _Workspace(ctx context.Context, sel ast.SelectionSet
 	return out
 }
 
+var workspaceIdpConnectionImplementors = []string{"WorkspaceIdpConnection"}
+
+func (ec *executionContext) _WorkspaceIdpConnection(ctx context.Context, sel ast.SelectionSet, obj *WorkspaceIdpConnection) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, workspaceIdpConnectionImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("WorkspaceIdpConnection")
+		case "id":
+			out.Values[i] = ec._WorkspaceIdpConnection_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "protocol":
+			out.Values[i] = ec._WorkspaceIdpConnection_protocol(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "provider":
+			out.Values[i] = ec._WorkspaceIdpConnection_provider(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "displayName":
+			out.Values[i] = ec._WorkspaceIdpConnection_displayName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "issuer":
+			out.Values[i] = ec._WorkspaceIdpConnection_issuer(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "clientId":
+			out.Values[i] = ec._WorkspaceIdpConnection_clientId(ctx, field, obj)
+		case "discoveryUrl":
+			out.Values[i] = ec._WorkspaceIdpConnection_discoveryUrl(ctx, field, obj)
+		case "scopes":
+			out.Values[i] = ec._WorkspaceIdpConnection_scopes(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "domainHint":
+			out.Values[i] = ec._WorkspaceIdpConnection_domainHint(ctx, field, obj)
+		case "status":
+			out.Values[i] = ec._WorkspaceIdpConnection_status(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "managed":
+			out.Values[i] = ec._WorkspaceIdpConnection_managed(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var workspaceListResultImplementors = []string{"WorkspaceListResult"}
 
 func (ec *executionContext) _WorkspaceListResult(ctx context.Context, sel ast.SelectionSet, obj *WorkspaceListResult) graphql.Marshaler {
@@ -11698,6 +13012,11 @@ func (ec *executionContext) marshalNConnectorToken2ᚖgithubᚗcomᚋyourorgᚋz
 	return ec._ConnectorToken(ctx, sel, v)
 }
 
+func (ec *executionContext) unmarshalNCreateIdpConnectionInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCreateIdpConnectionInput(ctx context.Context, v any) (CreateIdpConnectionInput, error) {
+	res, err := ec.unmarshalInputCreateIdpConnectionInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
 func (ec *executionContext) unmarshalNCreateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐCreateResourceInput(ctx context.Context, v any) (CreateResourceInput, error) {
 	res, err := ec.unmarshalInputCreateResourceInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -11773,6 +13092,30 @@ func (ec *executionContext) marshalNID2string(ctx context.Context, sel ast.Selec
 		}
 	}
 	return res
+}
+
+func (ec *executionContext) unmarshalNIdpProtocol2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpProtocol(ctx context.Context, v any) (IdpProtocol, error) {
+	var res IdpProtocol
+	err := res.UnmarshalGQL(v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) marshalNIdpProtocol2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpProtocol(ctx context.Context, sel ast.SelectionSet, v IdpProtocol) graphql.Marshaler {
+	return v
+}
+
+func (ec *executionContext) marshalNIdpTestResult2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpTestResult(ctx context.Context, sel ast.SelectionSet, v IdpTestResult) graphql.Marshaler {
+	return ec._IdpTestResult(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNIdpTestResult2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐIdpTestResult(ctx context.Context, sel ast.SelectionSet, v *IdpTestResult) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._IdpTestResult(ctx, sel, v)
 }
 
 func (ec *executionContext) unmarshalNInt2int(ctx context.Context, v any) (int, error) {
@@ -12088,6 +13431,11 @@ func (ec *executionContext) marshalNString2ᚕstringᚄ(ctx context.Context, sel
 	return ret
 }
 
+func (ec *executionContext) unmarshalNUpdateIdpConnectionInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateIdpConnectionInput(ctx context.Context, v any) (UpdateIdpConnectionInput, error) {
+	res, err := ec.unmarshalInputUpdateIdpConnectionInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
 func (ec *executionContext) unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput(ctx context.Context, v any) (UpdateResourceInput, error) {
 	res, err := ec.unmarshalInputUpdateResourceInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
@@ -12135,6 +13483,36 @@ func (ec *executionContext) marshalNWorkspace2ᚖgithubᚗcomᚋyourorgᚋztna�
 		return graphql.Null
 	}
 	return ec._Workspace(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNWorkspaceIdpConnection2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx context.Context, sel ast.SelectionSet, v WorkspaceIdpConnection) graphql.Marshaler {
+	return ec._WorkspaceIdpConnection(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNWorkspaceIdpConnection2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnectionᚄ(ctx context.Context, sel ast.SelectionSet, v []*WorkspaceIdpConnection) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx context.Context, sel ast.SelectionSet, v *WorkspaceIdpConnection) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._WorkspaceIdpConnection(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalNWorkspaceListResult2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceListResult(ctx context.Context, sel ast.SelectionSet, v WorkspaceListResult) graphql.Marshaler {

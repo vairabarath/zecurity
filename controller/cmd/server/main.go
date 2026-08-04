@@ -110,6 +110,14 @@ func main() {
 		log.Fatalf("auth init: %v", err)
 	}
 
+	// Session-generation revoker (PENDING-04 Phase 6): admin actions that remove
+	// a login path (disable/delete a connection) bump users.identity_generation
+	// and drop the live refresh session — authSvc satisfies
+	// identity.SessionInvalidator. Break-glass admins may always authenticate via
+	// the platform IdP so a workspace can never lock itself out (ADR-024 §5).
+	identityRevoker := identity.NewRevoker(db.Pool, authSvc, identity.NewAuditSink(db.Pool))
+	breakGlassEmails := parseBreakGlassEmails(os.Getenv("IDP_BREAK_GLASS_EMAILS"))
+
 	connectorCfg := connector.Config{
 		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
 		EnrollmentTokenTTL:  mustDuration("CONNECTOR_ENROLLMENT_TOKEN_TTL", 24*time.Hour),
@@ -218,6 +226,9 @@ func main() {
 				PolicyStore:       policyStore,
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
+				IdpStore:          idpStore,
+				Revoker:           identityRevoker,
+				BreakGlassEmails:  breakGlassEmails,
 			},
 			Directives: graph.DirectiveRoot{
 				HasRole: resolvers.HasRole,
@@ -836,6 +847,20 @@ func loadOptionalEnv() {
 
 		log.Fatalf("load %s: %v", path, err)
 	}
+}
+
+// parseBreakGlassEmails parses IDP_BREAK_GLASS_EMAILS (comma-separated) into a
+// lowercased set of workspace admins who may always authenticate via the
+// platform IdP, so a workspace can never lock itself out (ADR-024 §5). Consulted
+// by the no-lockout guard. Empty/unset → no break-glass admins.
+func parseBreakGlassEmails(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range strings.Split(raw, ",") {
+		if email := strings.ToLower(strings.TrimSpace(e)); email != "" {
+			out[email] = true
+		}
+	}
+	return out
 }
 
 // seedProviderUsers upserts each email in PROVIDER_BOOTSTRAP_EMAILS as an active

@@ -50,6 +50,17 @@ type ConnectorToken struct {
 	ConnectorID string `json:"connectorId"`
 }
 
+type CreateIdpConnectionInput struct {
+	Provider     string  `json:"provider"`
+	DisplayName  string  `json:"displayName"`
+	Issuer       string  `json:"issuer"`
+	ClientID     string  `json:"clientId"`
+	ClientSecret string  `json:"clientSecret"`
+	DiscoveryURL *string `json:"discoveryUrl,omitempty"`
+	Scopes       *string `json:"scopes,omitempty"`
+	DomainHint   *string `json:"domainHint,omitempty"`
+}
+
 type CreateResourceInput struct {
 	RemoteNetworkID string  `json:"remoteNetworkId"`
 	Name            string  `json:"name"`
@@ -78,6 +89,12 @@ type Group struct {
 	Resources   []*Resource    `json:"resources"`
 	CreatedAt   string         `json:"createdAt"`
 	UpdatedAt   string         `json:"updatedAt"`
+}
+
+type IdpTestResult struct {
+	Ok      bool    `json:"ok"`
+	Issuer  *string `json:"issuer,omitempty"`
+	Message *string `json:"message,omitempty"`
 }
 
 type Invitation struct {
@@ -152,6 +169,15 @@ type ShieldToken struct {
 	ShieldID string `json:"shieldId"`
 }
 
+type UpdateIdpConnectionInput struct {
+	DisplayName  *string `json:"displayName,omitempty"`
+	ClientID     *string `json:"clientId,omitempty"`
+	ClientSecret *string `json:"clientSecret,omitempty"`
+	DiscoveryURL *string `json:"discoveryUrl,omitempty"`
+	Scopes       *string `json:"scopes,omitempty"`
+	DomainHint   *string `json:"domainHint,omitempty"`
+}
+
 type UpdateResourceInput struct {
 	RemoteNetworkID *string `json:"remoteNetworkId,omitempty"`
 	Name            *string `json:"name,omitempty"`
@@ -159,6 +185,20 @@ type UpdateResourceInput struct {
 	Protocol        *string `json:"protocol,omitempty"`
 	PortFrom        *int    `json:"portFrom,omitempty"`
 	PortTo          *int    `json:"portTo,omitempty"`
+}
+
+type WorkspaceIdpConnection struct {
+	ID           string      `json:"id"`
+	Protocol     IdpProtocol `json:"protocol"`
+	Provider     string      `json:"provider"`
+	DisplayName  string      `json:"displayName"`
+	Issuer       string      `json:"issuer"`
+	ClientID     *string     `json:"clientId,omitempty"`
+	DiscoveryURL *string     `json:"discoveryUrl,omitempty"`
+	Scopes       string      `json:"scopes"`
+	DomainHint   *string     `json:"domainHint,omitempty"`
+	Status       string      `json:"status"`
+	Managed      bool        `json:"managed"`
 }
 
 type WorkspaceListResult struct {
@@ -230,6 +270,61 @@ func (e *ConnectorStatus) UnmarshalJSON(b []byte) error {
 }
 
 func (e ConnectorStatus) MarshalJSON() ([]byte, error) {
+	var buf bytes.Buffer
+	e.MarshalGQL(&buf)
+	return buf.Bytes(), nil
+}
+
+type IdpProtocol string
+
+const (
+	IdpProtocolOidc IdpProtocol = "OIDC"
+	IdpProtocolSaml IdpProtocol = "SAML"
+)
+
+var AllIdpProtocol = []IdpProtocol{
+	IdpProtocolOidc,
+	IdpProtocolSaml,
+}
+
+func (e IdpProtocol) IsValid() bool {
+	switch e {
+	case IdpProtocolOidc, IdpProtocolSaml:
+		return true
+	}
+	return false
+}
+
+func (e IdpProtocol) String() string {
+	return string(e)
+}
+
+func (e *IdpProtocol) UnmarshalGQL(v any) error {
+	str, ok := v.(string)
+	if !ok {
+		return fmt.Errorf("enums must be strings")
+	}
+
+	*e = IdpProtocol(str)
+	if !e.IsValid() {
+		return fmt.Errorf("%s is not a valid IdpProtocol", str)
+	}
+	return nil
+}
+
+func (e IdpProtocol) MarshalGQL(w io.Writer) {
+	fmt.Fprint(w, strconv.Quote(e.String()))
+}
+
+func (e *IdpProtocol) UnmarshalJSON(b []byte) error {
+	s, err := strconv.Unquote(string(b))
+	if err != nil {
+		return err
+	}
+	return e.UnmarshalGQL(s)
+}
+
+func (e IdpProtocol) MarshalJSON() ([]byte, error) {
 	var buf bytes.Buffer
 	e.MarshalGQL(&buf)
 	return buf.Bytes(), nil
