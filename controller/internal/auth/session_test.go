@@ -15,7 +15,7 @@ func TestIssueAccessToken_ValidJWT(t *testing.T) {
 		redisClient: rc,
 	}
 
-	token, err := svc.issueAccessToken("user-123", "tenant-456", "admin", "user@example.com")
+	token, err := svc.issueAccessToken("user-123", "tenant-456", "admin", "user@example.com", 1)
 	if err != nil {
 		t.Fatalf("issueAccessToken: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestIssueAccessToken_Issuer(t *testing.T) {
 		redisClient: rc,
 	}
 
-	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com", 1)
 	claims, _ := svc.verifyAccessToken(token)
 
 	iss, _ := claims.GetIssuer()
@@ -65,7 +65,7 @@ func TestIssueAccessToken_Expiry(t *testing.T) {
 	cfg.JWTAccessTTL = "15m"
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com", 1)
 	claims, _ := svc.verifyAccessToken(token)
 
 	exp, _ := claims.GetExpirationTime()
@@ -84,7 +84,7 @@ func TestIssueAccessToken_HS256(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
-	tokenStr, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
+	tokenStr, _ := svc.issueAccessToken("u", "t", "r", "u@example.com", 1)
 
 	// Parse without validation to check the header alg.
 	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
@@ -101,7 +101,7 @@ func TestVerifyAccessToken_WrongSecret(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com", 1)
 
 	// Try verifying with a different secret.
 	badSvc := &serviceImpl{
@@ -122,7 +122,7 @@ func TestVerifyAccessToken_WrongIssuer(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: cfg, redisClient: rc}
 
-	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com")
+	token, _ := svc.issueAccessToken("u", "t", "r", "u@example.com", 1)
 
 	// Verify with a different expected issuer.
 	badSvc := &serviceImpl{

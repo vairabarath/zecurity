@@ -42,6 +42,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
@@ -83,9 +84,19 @@ func main() {
 	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
 	idpStore := idp.NewStore(db.Pool, pkiService)
 
+	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
+	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
+	// invokes on a resolver miss; the audit sink writes identity events to
+	// audit_logs.
+	identitySvc := identity.NewService(
+		db.Pool,
+		identity.NewLinker(bootstrapSvc),
+		identity.NewAuditSink(db.Pool),
+	)
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
 		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
 		JWTIssuer:          appmeta.ControllerIssuer,

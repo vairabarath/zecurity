@@ -28,6 +28,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/auth"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
+	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
@@ -361,10 +362,24 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		inviteRow = inv
 	}
 
-	user, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, inviteRow != nil)
+	// Re-resolve the connection from the session's stored id to obtain the issuer
+	// for the identity link, and to fail closed if the connection was deleted or
+	// disabled during the login window.
+	conn, err := s.idpStore.GetByID(ctx, sess.ConnectionID)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity connection unavailable: %v", err)
+	}
+	if conn.Status != "active" {
+		return nil, status.Error(codes.Unauthenticated, "identity connection is not active")
+	}
+
+	user, gen, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, conn.ID, conn.Issuer, inviteRow != nil)
 	if err != nil {
 		if errors.Is(err, errUserNotInvited) {
 			return nil, status.Error(codes.PermissionDenied, "no membership in workspace; ask an admin for an invitation")
+		}
+		if errors.Is(err, identity.ErrUserNotActive) {
+			return nil, status.Error(codes.PermissionDenied, "account is not active")
 		}
 		return nil, status.Errorf(codes.Internal, "upsert user: %v", err)
 	}
@@ -376,7 +391,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email)
+	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
 	}

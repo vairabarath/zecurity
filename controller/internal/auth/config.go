@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
-	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 )
 
@@ -72,9 +72,10 @@ type Config struct {
 	// Used by: main.go for CORS middleware configuration.
 	AllowedOrigin string
 
-	// BootstrapService provisions or retrieves the user's workspace membership
-	// during the auth callback flow.
-	BootstrapService *bootstrap.Service
+	// IdentityService is the identity pipeline (resolve → lifecycle → link →
+	// Principal → event). The callback flow runs a proven AuthenticationContext
+	// through it instead of provisioning users directly. PENDING-04 Phase 5.
+	IdentityService *identity.Service
 
 	// IdpStore resolves identity connections (Bootstrap + Enterprise IdPs) at
 	// login. Provided by main.go as *idp.Store; PENDING-04.
@@ -86,10 +87,10 @@ type Config struct {
 // Created by: NewService() below.
 // Methods implemented in: oidc.go, callback.go, refresh.go, session.go, exchange.go.
 type serviceImpl struct {
-	cfg          Config
-	redisClient  *valkeyClient
-	bootstrapSvc *bootstrap.Service
-	idpStore     connectionStore
+	cfg         Config
+	redisClient *valkeyClient
+	identitySvc *identity.Service
+	idpStore    connectionStore
 }
 
 // minJWTSecretBytes is the floor on JWT_SECRET length, in bytes.
@@ -124,8 +125,8 @@ func NewService(cfg Config) (Service, error) {
 	if cfg.RedirectURI == "" {
 		return nil, fmt.Errorf("auth: RedirectURI is required")
 	}
-	if cfg.BootstrapService == nil {
-		return nil, fmt.Errorf("auth: BootstrapService is required")
+	if cfg.IdentityService == nil {
+		return nil, fmt.Errorf("auth: IdentityService is required")
 	}
 	if cfg.IdpStore == nil {
 		return nil, fmt.Errorf("auth: IdpStore is required")
@@ -153,9 +154,9 @@ func NewService(cfg Config) (Service, error) {
 	}
 
 	return &serviceImpl{
-		cfg:          cfg,
-		redisClient:  rc,
-		bootstrapSvc: cfg.BootstrapService,
-		idpStore:     cfg.IdpStore,
+		cfg:         cfg,
+		redisClient: rc,
+		identitySvc: cfg.IdentityService,
+		idpStore:    cfg.IdpStore,
 	}, nil
 }

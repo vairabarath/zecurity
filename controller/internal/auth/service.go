@@ -53,11 +53,18 @@ type Service interface {
 
 	// IssueAccessToken signs and returns a Zecurity access JWT for the given
 	// user, plus its TTL in seconds (so callers can populate expires_in).
-	IssueAccessToken(userID, tenantID, role, email string) (token string, expiresIn int64, err error)
+	// generation is stamped as the "gen" claim for session-generation revocation
+	// (PENDING-04 Phase 5).
+	IssueAccessToken(userID, tenantID, role, email string, generation int) (token string, expiresIn int64, err error)
 
 	// IssueRefreshToken generates a fresh refresh token, stores it in Redis,
 	// and returns the raw value.
 	IssueRefreshToken(ctx context.Context, userID string) (string, error)
+
+	// InvalidateUserSessions deletes the user's server-side refresh session so a
+	// generation bump (identity.Revoker) takes effect immediately rather than at
+	// the current access token's expiry. Satisfies identity.SessionInvalidator.
+	InvalidateUserSessions(ctx context.Context, userID string) error
 
 	// VerifyAccessToken parses and verifies a Zecurity JWT and returns the
 	// embedded identity claims. Returns an error if the token is invalid,

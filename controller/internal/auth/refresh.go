@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
 // RefreshHandler handles POST /auth/refresh.
@@ -93,12 +95,33 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 			return
 		}
 
-		if email == "" && s.cfg.Pool != nil {
+		// Enforce lifecycle + session-generation revocation at refresh (PENDING-04
+		// Phase 5). Access tokens are short-lived, so gating the refresh chain
+		// here kills every session for a suspended/locked user or a bumped
+		// identity_generation — with no per-request DB read. The new access token
+		// is re-stamped with the CURRENT generation. Skipped only when no pool is
+		// configured (unit tests exercising token mechanics in isolation).
+		currentGen := claims.IdentityGeneration
+		if s.cfg.Pool != nil {
+			var dbEmail, status string
 			if err := s.cfg.Pool.QueryRow(ctx,
-				`SELECT email FROM users WHERE id = $1`,
+				`SELECT email, status, identity_generation FROM users WHERE id = $1`,
 				userID,
-			).Scan(&email); err != nil {
+			).Scan(&dbEmail, &status, &currentGen); err != nil {
 				writeJSONError(w, http.StatusUnauthorized, "token missing claims")
+				return
+			}
+			if email == "" {
+				email = dbEmail
+			}
+			if err := identity.CheckLifecycle(status); err != nil {
+				s.redisClient.DeleteRefreshToken(ctx, userID)
+				writeJSONError(w, http.StatusUnauthorized, "session revoked")
+				return
+			}
+			if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
+				s.redisClient.DeleteRefreshToken(ctx, userID)
+				writeJSONError(w, http.StatusUnauthorized, "session revoked")
 				return
 			}
 		}
@@ -133,9 +156,9 @@ func (s *serviceImpl) RefreshHandler() http.Handler {
 			return
 		}
 
-		// Step 5 — Issue new access JWT.
+		// Step 5 — Issue new access JWT stamped with the current generation.
 		// Called: session.go → issueAccessToken()
-		accessToken, err := s.issueAccessToken(userID, tenantID, role, email)
+		accessToken, err := s.issueAccessToken(userID, tenantID, role, email, currentGen)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "token issue failed")
 			return

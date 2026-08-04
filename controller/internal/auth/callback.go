@@ -90,34 +90,26 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			return
 		}
 
-		// Step 7 — identity anchor is Subject, never email.
-		email := authCtx.Email
-		name := authCtx.Name
-		if name == "" {
-			name = email
-		}
-		bootstrapName := name
-		if pkce.WorkspaceName != "" {
-			bootstrapName = pkce.WorkspaceName
-		}
-
-		// Step 8 — Bootstrap (existing login flow; Phase 5 replaces its internals
-		// with the identity pipeline). Provider/Subject come from the adapter.
-		result, err := s.bootstrapSvc.Bootstrap(ctx, email, authCtx.Provider, authCtx.Subject, bootstrapName)
+		// Step 7 — run the proven identity through the pipeline: resolve →
+		// lifecycle-gate → (link/JIT-create) → Principal. The identity anchor is
+		// Subject (never email); pkce.WorkspaceName names a brand-new workspace on
+		// first-time signup. Fails closed on an inactive/rejected user.
+		principal, err := s.identitySvc.Authenticate(ctx, authCtx, conn.ID, pkce.WorkspaceName)
 		if err != nil {
-			fail("bootstrap_failed")
+			fail("authentication_failed")
 			return
 		}
+		core := principal.Core
 
-		// Step 9 — issue access JWT.
-		accessToken, err := s.issueAccessToken(result.UserID, result.TenantID, result.Role, email)
+		// Step 8 — issue access JWT stamped with the identity generation.
+		accessToken, err := s.issueAccessToken(core.UserID, core.TenantID, core.Role, core.Email, core.Generation)
 		if err != nil {
 			fail("token_issue_failed")
 			return
 		}
 
-		// Step 10 — issue refresh token as an httpOnly cookie.
-		refreshToken, err := s.issueRefreshToken(ctx, result.UserID)
+		// Step 9 — issue refresh token as an httpOnly cookie.
+		refreshToken, err := s.issueRefreshToken(ctx, core.UserID)
 		if err != nil {
 			fail("refresh_issue_failed")
 			return
