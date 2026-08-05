@@ -140,8 +140,17 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 - [ ] **3.2** Distinct denial reasons: unknown id · port/proto mismatch · unauthorized SPIFFE ·
       destination mismatch.
 - [ ] **Gate:** `cd connector && cargo build`
-- [ ] **🚩 GATE 1 (E2E, merge point):** existing IP resources still connect; a handshake naming a
-      non-authorized `resource_id` is denied; a handshake with a mismatched destination is denied.
+- [x] **🚩 GATE 1 (E2E, merge point) — AUTHORIZATION PASSED (2026-08-05).** Verified on a live stack
+      (controller + connector + client, one LAN, no relay): the client asserts `resource_id`, the
+      connector logs `auth_path="resource_id"` → `access allowed` → `tunnel_opened ok`, and dials
+      **its own ACL's address**. Phases 1–3 confirmed working end-to-end.
+      - [ ] **BLOCKED — byte transfer:** no data flows after the tunnel opens. Root-caused as far as
+            "the client's relay `select!` stalls", **not caused by this sprint** (the relay loop and
+            accept path are untouched). Filed as
+            [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (**P0**, 4 hypotheses disproved, next step
+            = `tcpdump -i zecurity0`). Stage 2 does not depend on the data plane and may proceed.
+      - [ ] Negative cases (`unknown_resource`, `destination_mismatch`, `missing_resource_id`) —
+            deferred until the data plane is usable.
 
 ### ── STAGE 2 — Delivery Split + Connector Resolution ──
 

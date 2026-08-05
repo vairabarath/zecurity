@@ -663,7 +663,16 @@ async fn emit_access_log<'a>(
             },
         )),
     };
-    let _ = control_tx.send(log_msg).await;
+    // Never block the data plane on audit logging. This runs immediately before
+    // copy_bidirectional, so a blocking send on a full mailbox stops the tunnel's
+    // byte pump entirely: the connector stops reading, QUIC flow control blocks the
+    // client's write, its flow queue fills, and the connection dies with no data
+    // transferred. A full mailbox means the control stream is wedged or slow —
+    // drop the log line instead. Mirrors connectorStreamClient::send's fail-fast
+    // contract ("a wedged connector can't stall a GraphQL resolver").
+    if control_tx.try_send(log_msg).is_err() {
+        tracing::warn!("control mailbox full — dropping access log entry");
+    }
 }
 
 /// Extract (spiffe_uri, cert_serial_bytes) from a DER-encoded peer certificate.
