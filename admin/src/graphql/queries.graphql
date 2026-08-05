@@ -318,3 +318,20 @@ query GetClientDevices {
     revokedAt
   }
 }
+
+query GetDeviceProfiles {
+  deviceProfiles {
+    id
+    name
+    mode
+    requirements {
+      id
+      checkId
+      allowUnsupported
+    }
+    boundResources {
+      id
+      name
+    }
+  }
+}

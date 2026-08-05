@@ -29,8 +29,6 @@ const mainItems = [
   { to: '/shields', label: 'Shields', icon: Shield },
   { to: '/resources', label: 'Resources', icon: Box },
   { to: '/settings', label: 'Settings', icon: Settings },
-  { to: '/access-log', label: 'Access Log', icon: ScrollText },
-  { to: '/devices', label: 'Devices', icon: Laptop },
 ]
 
 const teamItems = [
@@ -140,6 +138,7 @@ export function Sidebar() {
           <>
             <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
             <NavItem to="/devices"        label="Devices"        icon={Laptop} />
+            <NavItem to="/device-profiles" label="Device Profiles" icon={ShieldCheck} />
             <NavItem to="/client-install" label="Install Client" icon={Download} />
           </>
         )}

@@ -188,3 +188,11 @@ mutation UnassignResourceFromGroup($resourceId: ID!, $groupId: ID!) {
 mutation RevokeDevice($deviceId: ID!) {
   revokeDevice(deviceId: $deviceId)
 }
+
+mutation CreateDeviceProfile($name: String!) {
+  createDeviceProfile(name: $name) {
+    id
+    name
+    mode
+  }
+}
