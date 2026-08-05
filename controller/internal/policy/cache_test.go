@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 )
 
@@ -181,12 +183,12 @@ func TestSetIfEpoch_KeepsVersionGuard(t *testing.T) {
 // TestGetOrCompile_HitReturnsCached: a cache hit short-circuits compilation.
 func TestGetOrCompile_HitReturnsCached(t *testing.T) {
 	c := NewSnapshotCache()
-	c.set("ws", snap("ws", 5),time.Time{})
+	c.set("ws", snap("ws", 5), time.Time{})
 	calls := 0
 	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		calls++
 		return &CompiledACL{
-			Snapshot: snap("ws", 99),
+			Snapshot:   snap("ws", 99),
 			ValidUntil: time.Time{},
 		}, nil
 	})
@@ -202,7 +204,7 @@ func TestGetOrCompile_MissCompilesAndStores(t *testing.T) {
 	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
 		calls++
 		return &CompiledACL{
-			Snapshot: snap("ws", 7),
+			Snapshot:   snap("ws", 7),
 			ValidUntil: time.Time{},
 		}, nil
 	})
@@ -225,14 +227,14 @@ func TestGetOrCompile_MidCompileInvalidationRecompiles(t *testing.T) {
 		if calls == 1 {
 			c.Invalidate("ws") // a change races compile #1
 			return &CompiledACL{
-				Snapshot: snap("ws", 1),
+				Snapshot:   snap("ws", 1),
 				ValidUntil: time.Time{},
 			}, nil
 		}
 		return &CompiledACL{
-				Snapshot: snap("ws", 2),
-				ValidUntil: time.Time{},
-			}, nil // recompile sees the latest
+			Snapshot:   snap("ws", 2),
+			ValidUntil: time.Time{},
+		}, nil // recompile sees the latest
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -269,15 +271,15 @@ func TestGetOrCompile_BoundedUnderChurn(t *testing.T) {
 	c := NewSnapshotCache()
 	calls := 0
 	got, err := c.GetOrCompile("ws", func() (*CompiledACL, error) {
-	calls++
-	
-	c.Invalidate("ws")
+		calls++
 
-	return &CompiledACL{
-		Snapshot:   snap("ws", 99),
-		ValidUntil: time.Time{},
-	}, nil
-})
+		c.Invalidate("ws")
+
+		return &CompiledACL{
+			Snapshot:   snap("ws", 99),
+			ValidUntil: time.Time{},
+		}, nil
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -305,7 +307,7 @@ func TestGetOrCompile_CrossPathConvergesToLatest(t *testing.T) {
 	var wg sync.WaitGroup
 
 	compileLatest := func() (*CompiledACL, error) {
-		return &CompiledACL{Snapshot: &clientv1.ACLSnapshot{WorkspaceId: ws, Version: n.Version(ws),}, ValidUntil: time.Time{},}, nil
+		return &CompiledACL{Snapshot: &clientv1.ACLSnapshot{WorkspaceId: ws, Version: n.Version(ws)}, ValidUntil: time.Time{}}, nil
 	}
 
 	wg.Add(1)
@@ -356,7 +358,7 @@ func TestCache_ConcurrentGetOrCompileAndInvalidate(t *testing.T) {
 			for i := 1; i <= iters; i++ {
 				_, _ = c.GetOrCompile(ws, func() (*CompiledACL, error) {
 					return &CompiledACL{
-						Snapshot: snap(ws, uint64(i)),
+						Snapshot:   snap(ws, uint64(i)),
 						ValidUntil: time.Time{},
 					}, nil
 				})
@@ -367,4 +369,138 @@ func TestCache_ConcurrentGetOrCompileAndInvalidate(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+}
+
+func TestSnapshotCache_ExpiredEntryIsMiss(t *testing.T) {
+	cache := NewSnapshotCache()
+
+	now := time.Now()
+	cache.now = func() time.Time { return now }
+
+	workspaceID := "ws-1"
+
+	cache.entries[workspaceID] = &cacheEntry{
+		snapshot: &clientv1.ACLSnapshot{
+			Version: 1,
+		},
+		validUntil: now.Add(-time.Minute), // already expired
+	}
+
+	snap, ok := cache.Get(workspaceID)
+
+	require.False(t, ok)
+	require.Nil(t, snap)
+
+	_, exists := cache.entries[workspaceID]
+	require.False(t, exists)
+}
+
+func TestSnapshotCache_GetOrCompile_Singleflight(t *testing.T) {
+	cache := NewSnapshotCache()
+
+	const workspaceID = "ws-1"
+
+	var compileCount atomic.Int32
+
+	compileFn := func() (*CompiledACL, error) {
+		compileCount.Add(1)
+
+		// Make compilation slow enough for all goroutines to overlap.
+		time.Sleep(50 * time.Millisecond)
+
+		return &CompiledACL{
+			Snapshot: &clientv1.ACLSnapshot{
+				Version: 1,
+			},
+		}, nil
+	}
+
+	const callers = 50
+
+	var wg sync.WaitGroup
+	wg.Add(callers)
+
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+
+			snap, err := cache.GetOrCompile(workspaceID, compileFn)
+			require.NoError(t, err)
+			require.NotNil(t, snap)
+		}()
+	}
+
+	wg.Wait()
+
+	require.Equal(t, int32(1), compileCount.Load())
+}
+
+func TestSnapshotCache_ExpiryNotificationOnce(t *testing.T) {
+	cache := NewSnapshotCache()
+
+	now := time.Now()
+	cache.now = func() time.Time { return now }
+
+	const workspaceID = "ws-1"
+
+	cache.entries[workspaceID] = &cacheEntry{
+		snapshot: &clientv1.ACLSnapshot{
+			Version: 1,
+		},
+		validUntil: now.Add(-time.Minute),
+	}
+
+	var notifyCount atomic.Int32
+
+	RegisterExpiryNotifier(func(string) {
+		notifyCount.Add(1)
+	})
+
+	const callers = 50
+
+	var wg sync.WaitGroup
+	wg.Add(callers)
+
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			cache.Get(workspaceID)
+		}()
+	}
+
+	wg.Wait()
+
+	require.Equal(t, int32(1), notifyCount.Load())
+}
+func TestSnapshotCache_GetOrCompile_CompileFailure(t *testing.T) {
+	cache := NewSnapshotCache()
+
+	const workspaceID = "ws-1"
+
+	expectedErr := errors.New("compile failed")
+
+	var compileCount atomic.Int32
+
+	compileFn := func() (*CompiledACL, error) {
+		compileCount.Add(1)
+		return nil, expectedErr
+	}
+
+	snap, err := cache.GetOrCompile(workspaceID, compileFn)
+
+	require.ErrorIs(t, err, expectedErr)
+	require.Nil(t, snap)
+
+	_, ok := cache.Get(workspaceID)
+	require.False(t, ok)
+
+	_, exists := cache.entries[workspaceID]
+	require.False(t, exists)
+
+	// Verify we retry instead of returning a stale result.
+	snap, err = cache.GetOrCompile(workspaceID, compileFn)
+
+	require.ErrorIs(t, err, expectedErr)
+	require.Nil(t, snap)
+	require.Equal(t, int32(2), compileCount.Load())
 }

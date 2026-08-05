@@ -293,8 +293,8 @@ cd controller && go build ./... && go test ./internal/...
 - [x] **M1-E1** `controller/graph/posture.graphqls` — Device Profile CRUD + bindings + audit/enforce toggle + posture visibility + `supportedPostureChecks` query; all mutations ADMIN + workspace-scoped; enforce-mode requires ≥1 requirement across mode-switch, bind, **and** requirement-removal.
 - [x] **M1-E1b** `controller/graph/resolvers/resolver.go` + `cmd/server/main.go` — `PostureStore`/evaluator field added and wired; the generated resolvers have nothing to call otherwise.
 - [x] **M1-E2** `go generate ./graph/...`.
-- [ ] **M1-E3** `CompileACLSnapshot` returns `*CompiledACL{Snapshot, ValidUntil}`; applies enforce-only OR, freshness, profile-revision matching, and batch evaluation queries. Update only the compile closures in ClientService, connector control/heartbeat, and ACLPusher; `GetOrCompile` continues returning a bare protobuf snapshot to their downstream logic. Update direct compiler and cache mocks/tests for the internal result type.
-- [ ] **M1-E3b** `controller/internal/policy/cache.go` — `cacheEntry{snapshot, validUntil}`, injectable clock, and one-time `RegisterExpiryNotifier` callback wired after cache/notifier construction. On expiry, a per-workspace singleflight closure rechecks and claims expiry, releases locks, calls `NotifyPolicyChange` exactly once, recompiles exactly once, and never returns a known-stale snapshot.
+- [x] **M1-E3** `CompileACLSnapshot` returns `*CompiledACL{Snapshot, ValidUntil}`; applies enforce-only OR, freshness, profile-revision matching, and batch evaluation queries. Update only the compile closures in ClientService, connector control/heartbeat, and ACLPusher; `GetOrCompile` continues returning a bare protobuf snapshot to their downstream logic. Update direct compiler and cache mocks/tests for the internal result type.
+- [x] **M1-E3b** `controller/internal/policy/cache.go` — `cacheEntry{snapshot, validUntil}`, injectable clock, and one-time `RegisterExpiryNotifier` callback wired after cache/notifier construction. On expiry, a per-workspace singleflight closure rechecks and claims expiry, releases locks, calls `NotifyPolicyChange` exactly once, recompiles exactly once, and never returns a known-stale snapshot.
 - [x] **M1-E4** Every posture-relevant mutation (not only evaluation transitions) → policy version bump → ACL cache invalidation → snapshot push, via existing `NotifyPolicyChange`.
 - [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
 
@@ -343,10 +343,16 @@ added. The database-backed resolver cases compile and run when
 `RESOURCE_TEST_DATABASE_URL` and `RESOURCE_TEST_SHIELD_ID` are configured. This stable
 schema unblocks M4's Admin UI phase.
 
-**Still open:** `CompileACLSnapshot` still returns a plain
-`*clientv1.ACLSnapshot` and does not apply posture gating, revision/freshness checks,
-batch evaluations, or OR-aware `ValidUntil`. `SnapshotCache` still stores bare snapshots
-without expiry metadata, an injectable clock, expiry notification, or singleflight.
+**Completed after this verification:** `CompileACLSnapshot` now returns `CompiledACL`
+metadata, applies enforce-only OR posture gating with revision/freshness checks, batch
+loads evaluations, and computes posture-derived expiry. `SnapshotCache` stores expiry
+metadata, removes expired entries, performs one expiry notification/version bump per
+workspace, recompiles through singleflight, and does not cache compile failures or known
+stale snapshots. Policy cache tests cover expiry, concurrent callers, notification count,
+singleflight, and compile failure; `go test -race ./internal/policy` passes.
+
+**Still open:** the full `go test ./internal/...` gate may require the local Valkey/Docker
+test environment, and the separate M1-F0 retention worker remains pending.
 
 **Verification:** `go generate ./graph/...`, focused resolver/posture/policy/resource
 tests, and `go build ./...` passed. The full `go test ./internal/...` gate remains open
