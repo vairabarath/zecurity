@@ -182,19 +182,12 @@ where
         .await
         .map_err(|e| anyhow!("invalid tunnel request: {}", e))?;
 
-    // Which authorization path this request takes. Logged so the Phase 3 cutover
-    // (making resource_id mandatory) can be confirmed from logs before the legacy
-    // branch is deleted.
+    // resource_id is mandatory (Phase 3): the connector authorizes by identity and
+    // dials the ACL's address. A request without one cannot be authorized → deny.
     let asserted_resource_id = req.resource_id.as_deref().filter(|id| !id.is_empty());
-    let auth_path = if asserted_resource_id.is_some() {
-        "resource_id"
-    } else {
-        "legacy_destination"
-    };
 
     tracing::debug!(
         resource_id = asserted_resource_id.unwrap_or(""),
-        auth_path,
         destination = %req.destination,
         port = req.port,
         protocol = %req.protocol,
@@ -228,27 +221,15 @@ where
                 Some(entry) => (Some(entry), ""),
             }
         }
-        // Legacy path (removed in Phase 3): resolve by the network tuple the client
-        // sent. resolve_resource already matched on that address, so no cross-check.
-        None => match acl.resolve_resource(&req.destination, req.port, &req.protocol) {
-            None => (None, "no_acl_match"),
-            Some(entry)
-                if !entry
-                    .allowed_spiffe_ids
-                    .iter()
-                    .any(|id| id == &client_spiffe_id) =>
-            {
-                (None, "unauthorized_spiffe")
-            }
-            Some(entry) => (Some(entry), ""),
-        },
+        // No identity asserted → cannot be authorized. Default-deny; the legacy
+        // "resolve by the client's destination string" path was removed in Phase 3.
+        None => (None, "missing_resource_id"),
     };
 
     if decision.is_none() {
         tracing::warn!(
             spiffe_id = %client_spiffe_id,
             resource_id = asserted_resource_id.unwrap_or(""),
-            auth_path,
             dest = %req.destination,
             port = req.port,
             proto = %req.protocol,
