@@ -1406,3 +1406,31 @@ func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
+
+func (s *Store) DeleteExpiredReports(
+	ctx context.Context,
+	cutoff time.Time,
+	limit int,
+) (int64, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("limit must be positive")
+	}
+	cmdTag, err := s.pool.Exec(
+		ctx,
+		`DELETE FROM device_posture_reports
+		WHERE id IN (
+			SELECT id
+			FROM device_posture_reports
+			WHERE received_at < $1
+			ORDER BY received_at
+			LIMIT $2
+		)`,
+		cutoff,
+		limit,
+	)
+
+	if err != nil {
+		return 0, fmt.Errorf("delete expired posture reports: %w", err)
+	}
+	return cmdTag.RowsAffected(), nil
+}
