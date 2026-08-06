@@ -158,7 +158,14 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
-
+	policy.RegisterExpiryNotifier(func(workspaceID string) {
+		if err := policyNotifier.NotifyPolicyChange(
+			context.Background(),
+			workspaceID,
+		); err != nil {
+			log.Printf("expiry policy notification: %v", err)
+		}
+	})
 	// ADR-015/017 Track B: transport (connectivity) plane, independent of the
 	// ACL (authorization) plane. Relay metadata/eviction and connector relay
 	// placement changes drive transportNotifier.NotifyTopologyChange — never
@@ -365,13 +372,13 @@ func main() {
 	)
 
 	connectorSvc := &connector.EnrollmentHandler{
-		Cfg:        connectorCfg,
-		Pool:       db.Pool,
-		Redis:      valkeycompat.NewAdapter(connectorValkey),
-		PKIService: pkiService,
-		ShieldSvc:  shieldSvc,
-		Registry:   connectorRegistry,
-
+		Cfg:               connectorCfg,
+		Pool:              db.Pool,
+		Redis:             valkeycompat.NewAdapter(connectorValkey),
+		PKIService:        pkiService,
+		ShieldSvc:         shieldSvc,
+		Registry:          connectorRegistry,
+		PostureStore:      postureStore,
 		PolicyStore:       policyStore,
 		PolicyCache:       policyCache,
 		PolicyNotifier:    policyNotifier,
@@ -387,7 +394,7 @@ func main() {
 	// invalidates the cache, push the fresh snapshot to all connected connectors
 	// in the workspace immediately instead of waiting for the next heartbeat.
 	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
-	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, postureStore, policyCache, policyNotifier)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
 
 	// Transport plane has no proactive push: the client is the sole consumer and

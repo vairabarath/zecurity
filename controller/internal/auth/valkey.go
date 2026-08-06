@@ -22,7 +22,8 @@ func newValkeyClient(url string) (*valkeyClient, error) {
 	}
 
 	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{addr},
+		InitAddress:  []string{addr},
+		DisableCache: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create valkey client: %w", err)

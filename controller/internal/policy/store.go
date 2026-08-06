@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -347,12 +348,18 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroup(ctx context.Context, workspaceID
 	return ids, rows.Err()
 }
 
-// ListActiveDeviceSPIFFEsForGroups returns non-revoked client device SPIFFE IDs
-// for all supplied group IDs in a single query. The returned map is keyed by
-// group ID; groups with no active devices are absent from the map.
-func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceID string, groupIDs []string) (map[string][]string, error) {
+// DeviceIdentity pairs a device's internal UUID with its SPIFFE ID.
+// This allows the compiler to securely map group membership to posture evaluations
+// without parsing untrusted SPIFFE strings.
+type DeviceIdentity struct {
+    DeviceID uuid.UUID
+    SPIFFEID string
+}
+// ListActiveDeviceSPIFFEsForGroups returns non-revoked client device identities for the
+// given groups. The map key is the group ID.
+func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceID string, groupIDs []string) (map[string][]DeviceIdentity, error) {
 	if len(groupIDs) == 0 {
-		return map[string][]string{}, nil
+		return map[string][]DeviceIdentity{}, nil
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT gm.group_id::text, cd.spiffe_id
@@ -369,13 +376,15 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 	}
 	defer rows.Close()
 
-	out := make(map[string][]string)
+	out := make(map[string][]DeviceIdentity)
 	for rows.Next() {
-		var groupID, spiffeID string
-		if err := rows.Scan(&groupID, &spiffeID); err != nil {
+		var groupID string
+		var identity DeviceIdentity
+
+		if err := rows.Scan(&groupID, &identity.DeviceID, &identity.SPIFFEID); err != nil {
 			return nil, fmt.Errorf("scan spiffe row: %w", err)
 		}
-		out[groupID] = append(out[groupID], spiffeID)
+		out[groupID] = append(out[groupID], identity)
 	}
 	return out, rows.Err()
 }

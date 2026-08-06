@@ -12,7 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	// clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -698,7 +698,7 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 }
 
 func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient, connectorVersion uint64) error {
-	if h.PolicyStore == nil || h.PolicyCache == nil || h.PolicyNotifier == nil {
+	if h.PolicyStore == nil || h.PolicyCache == nil ||h.PostureStore == nil || h.PolicyNotifier == nil {
 		return nil
 	}
 
@@ -709,8 +709,8 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 	if !ok || pn == nil {
 		return nil
 	}
-	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, h.PolicyStore, pn, client.tenantID)
+	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*policy.CompiledACL, error) {
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore,h.PostureStore, pn, client.tenantID)
 	})
 	if err != nil {
 		return fmt.Errorf("compile ACL snapshot: %w", err)

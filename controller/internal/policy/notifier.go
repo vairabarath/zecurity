@@ -27,12 +27,28 @@ type Notifier struct {
 	pushHook func(workspaceID string)
 }
 
+var (
+    expiryNotifyOnce sync.Once
+    expiryNotifier   func(string)
+)
 // NewNotifier creates a Notifier backed by the given cache.
 func NewNotifier(cache *SnapshotCache) *Notifier {
 	return &Notifier{
 		cache:    cache,
 		versions: make(map[string]*atomic.Uint64),
 	}
+}
+
+func RegisterExpiryNotifier(fn func(string)) {
+    expiryNotifyOnce.Do(func() {
+        expiryNotifier = fn
+    })
+}
+
+func notifyExpiryEvent(workspaceID string) {
+    if expiryNotifier != nil {
+        expiryNotifier(workspaceID)
+    }
 }
 
 // NotifyPolicyChange increments the version counter for workspaceID and
