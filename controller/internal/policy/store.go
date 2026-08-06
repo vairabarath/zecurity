@@ -289,7 +289,7 @@ type CompilerResourceRow struct {
 // resource host/port/name for a workspace. Used by the ACL compiler.
 func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID string) ([]*CompilerResourceRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT ar.resource_id, r.name, r.host, r.port_from, r.protocol,
+		`SELECT ar.resource_id, r.name, COALESCE(r.host, ''), r.port_from, r.protocol,
 			        ar.group_id, COALESCE(r.shield_id::text, ''),
 			        COALESCE(s.connector_id::text, ''), r.status,
 			        r.remote_network_id::text, rn.name

@@ -38,9 +38,10 @@ func (r *mutationResolver) PromoteDiscoveredService(ctx context.Context, shieldI
 	}
 
 	name := fmt.Sprintf("%s on %s", target.ServiceName, shieldID[:8])
+	boundIP := target.BoundIP // discovery always yields a concrete IP
 	row, err := resource.Create(ctx, r.Pool, tc.TenantID, resource.CreateInput{
 		Name:     name,
-		Host:     target.BoundIP,
+		Host:     &boundIP,
 		Protocol: protocol,
 		PortFrom: port,
 		PortTo:   port,

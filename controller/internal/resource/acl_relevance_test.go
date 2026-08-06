@@ -17,6 +17,11 @@ func TestACLRelevantUpdate(t *testing.T) {
 		{"name only", UpdateInput{Name: aclStrPtr("web")}, true},
 		{"protocol only", UpdateInput{Protocol: aclStrPtr("tcp")}, true},
 		{"port_from only", UpdateInput{PortFrom: aclIntPtr(443)}, true},
+		// hostname joins the ACL-relevant set in Sprint 16 Phase 4: the compiler
+		// emits it from Phase 5, so editing it must invalidate the snapshot or
+		// clients keep routing on a stale name.
+		{"hostname only", UpdateInput{Hostname: aclStrPtr("db.internal")}, true},
+		{"local_target only is not", UpdateInput{LocalTarget: aclStrPtr("127.0.0.1")}, false},
 		{"description only", UpdateInput{Description: aclStrPtr("note")}, false},
 		{"port_to only", UpdateInput{PortTo: aclIntPtr(9000)}, false},
 		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, false},

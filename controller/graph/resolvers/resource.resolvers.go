@@ -24,7 +24,7 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
-		Host:            input.Host,
+		Host:            &input.Host,
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,

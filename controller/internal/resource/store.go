@@ -28,7 +28,10 @@ type Row struct {
 	ID              string
 	Name            string
 	Description     *string
-	Host            string
+	Host            string  // pinned IP; "" for FQDN resources (host is nullable)
+	Hostname        *string // client-facing name (DNS/TLS); nil for IP-only resources
+	Resolver        *string // raw JSON: how the connector finds the endpoint; nil = none
+	LocalTarget     *string // shield-side dial target (127.0.0.1 | LAN IP); nil = default
 	Protocol        string
 	PortFrom        int
 	PortTo          int
@@ -61,18 +64,25 @@ type CreateInput struct {
 	RemoteNetworkID string
 	Name            string
 	Description     *string
-	Host            string
-	Protocol        string
-	PortFrom        int
-	PortTo          int
+	// Exactly one addressing mode is required (enforced by
+	// resources_addressable_check): a pinned IP in Host, or a name in Hostname
+	// whose endpoint the connector resolves per connection.
+	Host        *string
+	Hostname    *string
+	Resolver    *string // raw JSON object with a "type" key; DB validates shape
+	LocalTarget *string
+	Protocol    string
+	PortFrom    int
+	PortTo      int
 }
 
 const resourceSelectCols = `
-	r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
+	r.id, r.name, r.description, COALESCE(r.host, ''), r.protocol, r.port_from, r.port_to,
 	r.status, r.pending_action, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
 	COALESCE(r.shield_id::text, ''), r.remote_network_id,
 	s.name, s.status, COALESCE(s.connector_id::text, ''),
-	rn.name`
+	rn.name,
+	r.hostname, r.resolver::text, r.local_target`
 
 const resourceJoins = `
 	FROM resources r
@@ -88,6 +98,7 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 		&row.ShieldID, &row.RemoteNetworkID,
 		&row.ShieldName, &row.ShieldStatus, &row.ConnectorID,
 		&row.NetworkName,
+		&row.Hostname, &row.Resolver, &row.LocalTarget,
 	); err != nil {
 		return nil, err
 	}
@@ -96,6 +107,10 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 
 // AutoMatchShield finds an active shield whose LAN IP matches the resource host
 // within its remote network. The same private IP may exist in multiple networks.
+//
+// Only meaningful for IP-hosted resources: the match is `shields.lan_ip = host`,
+// so an FQDN resource (host NULL) can never match. Callers must skip it — see
+// Create.
 func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remoteNetworkID string) (shieldID string, err error) {
 	err = db.QueryRow(ctx,
 		`SELECT id
@@ -119,27 +134,43 @@ func AutoMatchShield(ctx context.Context, db *pgxpool.Pool, host, tenantID, remo
 // Create inserts an unprotected resource. A matching active Shield is retained
 // as a convenience for a later Protect operation, but is not required.
 func Create(ctx context.Context, db *pgxpool.Pool, tenantID string, input CreateInput) (*Row, error) {
-	shieldID, err := AutoMatchShield(ctx, db, input.Host, tenantID, input.RemoteNetworkID)
-	if err != nil && !errors.Is(err, ErrNoMatchingShield) {
-		return nil, err
-	}
+	// Shield auto-match keys on shields.lan_ip = host, so it applies only to
+	// IP-hosted resources. An FQDN resource has no pinned IP to match against and
+	// is connector-reachable by definition.
 	var shieldArg any
-	if shieldID != "" {
-		shieldArg = shieldID
+	if input.Host != nil && *input.Host != "" {
+		shieldID, err := AutoMatchShield(ctx, db, *input.Host, tenantID, input.RemoteNetworkID)
+		if err != nil && !errors.Is(err, ErrNoMatchingShield) {
+			return nil, err
+		}
+		if shieldID != "" {
+			shieldArg = shieldID
+		}
 	}
 
 	var id string
-	err = db.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		`INSERT INTO resources
 		    (tenant_id, remote_network_id, shield_id, name, description, protocol, host,
-		     port_from, port_to, status, pending_action)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unprotected', 'remove')
+		     port_from, port_to, status, pending_action, hostname, resolver, local_target)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unprotected', 'remove', $10, $11::jsonb, $12)
 		 RETURNING id`,
 		tenantID, input.RemoteNetworkID, shieldArg,
 		input.Name, input.Description, input.Protocol, input.Host, input.PortFrom, input.PortTo,
+		input.Hostname, input.Resolver, input.LocalTarget,
 	).Scan(&id)
 	if err != nil {
 		return nil, fmt.Errorf("create resource: %w", err)
+	}
+
+	// Keep the resource_shields join table in step with the singular column while
+	// both exist (migration 030). shield_id stays authoritative for now.
+	if shieldArg != nil {
+		if _, err := db.Exec(ctx,
+			`INSERT INTO resource_shields (resource_id, shield_id) VALUES ($1, $2)
+			 ON CONFLICT DO NOTHING`, id, shieldArg); err != nil {
+			return nil, fmt.Errorf("create resource: link shield: %w", err)
+		}
 	}
 
 	return GetByID(ctx, db, tenantID, id)
@@ -195,7 +226,7 @@ func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, err
 // Called on stream connect to deliver any queued instructions to a reconnecting connector.
 func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
-		`SELECT id, host, protocol, port_from, port_to, pending_action
+		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action
 		   FROM resources
 		  WHERE shield_id = $1
 		    AND status IN ('protecting', 'deleting')`,
@@ -236,7 +267,7 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 // absent — the shield's replace-semantics drops anything not listed here.
 func desiredForShield(ctx context.Context, q querier, shieldID string) ([]*PendingRow, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, host, protocol, port_from, port_to, pending_action
+		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action
 		   FROM resources
 		  WHERE shield_id = $1
 		    AND (status IN ('protected', 'failed')
@@ -352,6 +383,9 @@ type UpdateInput struct {
 	RemoteNetworkID *string
 	Name            *string
 	Description     *string
+	Hostname        *string // client-facing name; nil = leave unchanged
+	Resolver        *string // raw JSON with a "type" key; nil = leave unchanged
+	LocalTarget     *string
 	Protocol        *string
 	PortFrom        *int
 	PortTo          *int
@@ -385,6 +419,17 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 	if input.PortTo != nil {
 		add("port_to", *input.PortTo)
 	}
+	if input.Hostname != nil {
+		add("hostname", *input.Hostname)
+	}
+	if input.Resolver != nil {
+		// Cast so the jsonb shape CHECK applies; the DB rejects a missing "type".
+		args = append(args, *input.Resolver)
+		sets = append(sets, fmt.Sprintf("resolver = $%d::jsonb", len(args)))
+	}
+	if input.LocalTarget != nil {
+		add("local_target", *input.LocalTarget)
+	}
 
 	query := fmt.Sprintf(
 		`UPDATE resources SET %s
@@ -406,13 +451,12 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
 // compiler actually reads (ListEnabledRulesWithResources selects name, host,
-// port_from, protocol, shield_id). host is not editable via UpdateInput, so only
-// name/protocol/port_from matter here. description, port_to and remote_network_id
-// are invisible to the compiler, so changing only those must not invalidate the
-// per-workspace ACL snapshot. Callers use this to decide whether to fire
-// NotifyPolicyChange after an UpdateResource.
+// hostname, port_from, protocol, shield_id). host is not editable via
+// UpdateInput; hostname is, and from Phase 5 the compiler emits it — so editing
+// it must invalidate the ACL snapshot.
 func ACLRelevantUpdate(input UpdateInput) bool {
-	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil
+	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
+		input.Hostname != nil
 }
 
 func joinSets(sets []string) string {
