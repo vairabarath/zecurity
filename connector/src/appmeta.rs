@@ -99,6 +99,22 @@ pub fn connector_spiffe_id(trust_domain: &str, connector_id: &str) -> String {
     )
 }
 
+// ── Same-host client/connector interop ──────────────────────────────────────
+
+/// fwmark the CONNECTOR sets on its own egress sockets when dialing a protected
+/// resource, and which the CLIENT's nft interception chain skips.
+///
+/// Why: the client marks packets by (destination IP, destination port) in a
+/// `type route hook output` chain, which applies to EVERY process on the host. If
+/// the connector runs on the SAME host as a client (common in dev/test), the
+/// connector's own connection to a resource matches that rule and is routed into
+/// the client's TUN — a routing loop (connector -> resource -> back into the
+/// client's own tunnel). The resource never receives anything and the flow stalls.
+///
+/// The connector stamps its egress with this mark; the client's chain returns
+/// early on it. Both sides MUST agree on this value.
+pub const CONNECTOR_EGRESS_MARK: u32 = 0x5b;
+
 #[cfg(test)]
 mod tests {
     use super::*;

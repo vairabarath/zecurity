@@ -10,7 +10,9 @@ use anyhow::{anyhow, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use std::net::SocketAddr;
+use std::os::unix::io::AsRawFd;
+use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use x509_parser::prelude::*;
@@ -483,7 +485,7 @@ where
 
     // Dial target comes from the ACL entry, never from req.destination.
     let target = format!("{}:{}", acl_entry.address, req.port);
-    let mut resource_conn = match TcpStream::connect(&target).await {
+    let mut resource_conn = match connect_marked_tcp(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
             c
@@ -545,6 +547,53 @@ where
     Ok(())
 }
 
+/// Stamp `CONNECTOR_EGRESS_MARK` on a socket so a client running on the SAME host
+/// does not capture our egress with its own nft interception rules (which would
+/// create a routing loop: connector → resource → back into that client's TUN).
+///
+/// Best-effort: needs CAP_NET_ADMIN (the unit grants it via AmbientCapabilities).
+/// If it fails we log once and continue — the mark only matters in the co-located
+/// topology, and in the normal split-host deployment its absence is harmless.
+fn set_egress_mark<F: AsRawFd>(sock: &F, what: &str) {
+    let mark: libc::c_int = crate::appmeta::CONNECTOR_EGRESS_MARK as libc::c_int;
+    // SAFETY: fd is owned by `sock` and outlives this call; we pass a valid
+    // pointer/length pair for a c_int option value.
+    let rc = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            &mark as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        tracing::warn!(
+            what,
+            error = %std::io::Error::last_os_error(),
+            "could not set SO_MARK on egress socket (needs CAP_NET_ADMIN); \
+             a client co-located on this host may loop its own traffic"
+        );
+    }
+}
+
+/// TCP connect to a resource with the egress mark applied *before* connecting, so
+/// the very first SYN already carries it.
+async fn connect_marked_tcp(target: &str) -> std::io::Result<TcpStream> {
+    let addr: SocketAddr = match target.parse() {
+        Ok(a) => a,
+        // Not a literal socket address (future FQDN resources): fall back to the
+        // plain resolver path. The mark is skipped, which is safe — see above.
+        Err(_) => return TcpStream::connect(target).await,
+    };
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    set_egress_mark(&socket, "tcp");
+    socket.connect(addr).await
+}
+
 async fn relay_udp<S>(stream: &mut S, dest: &str, port: u16) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -553,6 +602,7 @@ where
     let udp = UdpSocket::bind("0.0.0.0:0")
         .await
         .map_err(|e| anyhow!("failed to bind UDP socket: {}", e))?;
+    set_egress_mark(&udp, "udp");
     udp.connect(&target)
         .await
         .map_err(|e| anyhow!("failed to connect UDP to {}: {}", target, e))?;

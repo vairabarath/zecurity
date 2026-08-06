@@ -6,6 +6,7 @@ description = "ZECURITY connector — enrollment, control streaming, and auto-up
 
 [dependencies]
 tokio              = { version = "1", features = ["full"] }
+libc               = "0.2"
 tonic              = { version = "0.14", features = ["tls-ring", "tls-webpki-roots", "transport"] }
 prost              = "0.14"
 tonic-prost        = "0.14"

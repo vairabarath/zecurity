@@ -1807,6 +1807,15 @@ fn build_transports_by_resource_with_crl(
     Ok(out)
 }
 
+/// True when `ip` belongs to this host — i.e. that peer is co-located with us.
+///
+/// Implemented by attempting a bind: the kernel only allows binding to a local
+/// address, so success means the address is ours. No extra dependency, and it
+/// asks the kernel directly rather than parsing interface tables.
+fn is_local_ip(ip: IpAddr) -> bool {
+    std::net::TcpListener::bind((ip, 0)).is_ok()
+}
+
 fn build_transport_from_coords(
     c: &ConnCoords,
     device: &DeviceInfo,
@@ -1828,6 +1837,23 @@ fn build_transport_from_coords(
         .with_context(|| {
             format!("connector tunnel address {connector_addr} resolved to no addresses")
         })?;
+
+    // Co-location check. Our nft rules capture traffic by (destination IP, port)
+    // for EVERY process on this host, so a connector running here would have its
+    // own egress to a resource pulled into our TUN — a loop in which the resource
+    // never receives anything and the flow silently stalls. The connector marks
+    // its egress (appmeta::CONNECTOR_EGRESS_MARK) and our chain skips it, but an
+    // older connector, or one lacking CAP_NET_ADMIN, cannot. Warn loudly so this
+    // shows up as a message rather than an unexplained hang.
+    if is_local_ip(connector_socket.ip()) {
+        warn!(
+            connector = %connector_socket,
+            "connector appears to run on THIS host — its egress to resources can be \
+             captured by our own tunnel rules. Requires a connector new enough to set \
+             SO_MARK on egress (with CAP_NET_ADMIN); otherwise run the client and \
+             connector on separate hosts."
+        );
+    }
 
     let direct = Arc::new(TunnelPool::new(
         &device.certificate_pem,

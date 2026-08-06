@@ -1,8 +1,9 @@
 ---
 type: bug
 severity: P0
-status: open
+status: resolved
 discovered: 2026-08-05
+resolved: 2026-08-06
 discovered_during: Sprint 16 Gate 1 (PENDING-14 Stage 1 E2E)
 caused_by_sprint16: false
 tags: [bug, p0, data-plane, client, net_stack, smoltcp, quic, tunnel]
@@ -15,6 +16,51 @@ tags: [bug, p0, data-plane, client, net_stack, smoltcp, quic, tunnel]
 > `Some(Some(target))` destructure. The accept/promotion logic, the relay loop, `transport.rs`, and
 > `tunnel_pool.rs` are **untouched** by this sprint. Sprint 16's authorization work is verified
 > working (see Gate 1 evidence below).
+
+## ✅ RESOLVED (2026-08-06) — routing loop from client/connector co-location
+
+**Root cause.** The client's nft interception chain is `type route hook output priority
+mangle` and matches purely on `(destination IP, destination port)` — so it applies to
+**every process on the host**, with no uid/cgroup filter. When the connector runs on the
+**same host** as a client (our dev setup: both on `192.168.1.87`), the connector's own
+`TcpStream::connect(<resource>)` matched that rule, was marked `0x5a`, and got routed into
+the client's TUN. The connector was talking to the client's own smoltcp stack instead of
+the resource:
+
+```
+curl → TUN → smoltcp → QUIC → connector
+                                  ↓ connect(resource)
+                          nft marks it → table 105 → zecurity0 (our own TUN!)
+                                  ↓ smoltcp accepts it as a NEW connection
+                          → another relay → another tunnel → connector → ↺
+```
+
+This explains every symptom, including the one no earlier hypothesis could: **~10 tunnels
+per single curl** (each loop iteration created another connection). The resource never
+received anything, so nothing ever came back.
+
+**Fix (A + C).**
+- **A — connector marks its egress, client skips it.** Shared constant
+  `appmeta::CONNECTOR_EGRESS_MARK = 0x5b` (both crates). The connector sets `SO_MARK` on
+  resource sockets *before* connecting (`connect_marked_tcp` via `tokio::net::TcpSocket`,
+  so the first SYN carries it; also applied to the UDP path). Best-effort — logs and
+  continues without `CAP_NET_ADMIN`. The client inserts `meta mark 0x5b return` as the
+  **first** rule of its nft chain, so marked packets follow normal kernel routing.
+  **Both halves are required** — the connector's mark alone is overwritten by the client's
+  rule.
+- **C — detect and warn.** The client checks whether the connector's tunnel address is a
+  local IP (`is_local_ip`, via a bind attempt — no new dependency) and warns loudly. Turns
+  a silent hang into one log line.
+
+**Verified end-to-end (2026-08-06):** `HTTP 200 in 0.067s`; exactly **one** tunnel per
+connection (was ~10); no `flow queue full`; no `direct stream establishment exceeded 2s`;
+fix C's warning observed. Connector 89 tests, client 39 tests green.
+
+**Production note.** In the normal topology (client on a user device, connector inside the
+remote network) the components are on different hosts and this could never occur. It is a
+co-located dev/test hazard — which is exactly why fix C exists.
+
+---
 
 ## Symptom
 

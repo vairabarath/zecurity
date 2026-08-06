@@ -81,6 +81,31 @@ impl TunManager {
             ],
         )?;
 
+        // FIRST rule in the chain: never capture the CONNECTOR's own egress.
+        //
+        // The chain below matches purely on (destination IP, destination port) and
+        // runs for EVERY process on this host. If a connector is co-located with
+        // this client, its connection to a resource matches too and gets routed
+        // into our TUN — a loop (connector → resource → back into our tunnel) in
+        // which the resource never receives anything. The connector stamps its
+        // egress sockets with CONNECTOR_EGRESS_MARK; we return before marking so
+        // those packets follow normal kernel routing.
+        let egress_mark = format!("{:#x}", crate::appmeta::CONNECTOR_EGRESS_MARK);
+        run_command(
+            "nft",
+            &[
+                "add",
+                "rule",
+                "inet",
+                ZECURITY_TABLE,
+                ZECURITY_CHAIN,
+                "meta",
+                "mark",
+                &egress_mark,
+                "return",
+            ],
+        )?;
+
         for flow in &unique_flows {
             let ip = flow.ip.to_string();
             let port = flow.port.to_string();
