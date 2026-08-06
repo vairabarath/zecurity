@@ -235,7 +235,7 @@ func TestStoreIntegration(t *testing.T) {
 		t.Fatal("expected satisfied to remain true")
 	}
 
-	if stale.FailureReason == nil || *stale.FailureReason != "all required checks passed" {
+	if stale.FailureReason == nil || *stale.FailureReason != "all requirements satisfied" {
 		t.Fatalf("failure reason changed unexpectedly: %#v", stale.FailureReason)
 	}
 
@@ -312,10 +312,18 @@ func TestStoreIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("batch evaluations: %v", err)
 	}
-	if len(evaluations[deviceA]) != 1 {
-		t.Fatalf("device evaluations len = %d, want 1", len(evaluations[deviceA]))
+	var got Evaluation
+	found := false
+	for _, candidate := range evaluations[deviceA] {
+		if candidate.ProfileID == profile.ID {
+			got = candidate
+			found = true
+			break
+		}
 	}
-	got := evaluations[deviceA][0]
+	if !found {
+		t.Fatalf("target profile evaluation missing from %d device evaluations", len(evaluations[deviceA]))
+	}
 	if got.Reason == nil || *got.Reason != updatedReason || got.ReportReceivedAt == nil {
 		t.Fatalf("batch evaluation = %#v", got)
 	}

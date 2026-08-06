@@ -14,8 +14,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -61,7 +63,14 @@ import (
 func main() {
 	loadOptionalEnv()
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	defer stop()
+
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
@@ -428,6 +437,25 @@ func main() {
 	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
 	go shieldSvc.RunDisconnectWatcher(ctx)
 	go relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+
+	retentionDays := envOrInt(
+		"POSTURE_RETENTION_DAYS",
+		30,
+	)
+
+	retentionBatchSize := envOrInt(
+		"POSTURE_RETENTION_BATCH_SIZE",
+		2000,
+	)
+
+	retentionWorker := posture.NewRetentionWorker(
+		postureStore,
+		time.Duration(retentionDays)*24*time.Hour,
+		retentionBatchSize,
+		nil,
+	)
+	go retentionWorker.Run(ctx)
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -459,7 +487,6 @@ func main() {
 			log.Printf("metrics server stopped: %v", err)
 		}
 	}()
-
 	addr := ":" + envOr("PORT", "8080")
 	log.Printf("listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
@@ -852,4 +879,24 @@ func seedProviderUsers(ctx context.Context, store *provider.Store) {
 		}
 		log.Printf("seeded provider super-admin: %s", email)
 	}
+}
+
+func envOrInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf(
+			"invalid value for %s=%q, using default %d",
+			key,
+			v,
+			fallback,
+		)
+		return fallback
+	}
+
+	return n
 }
