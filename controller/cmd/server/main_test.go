@@ -2,7 +2,12 @@ package main
 
 import (
 	// "os"
+	"context"
+	"net"
+	"net/http"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestEnvOrInt(t *testing.T) {
@@ -64,4 +69,56 @@ func TestEnvOrInt(t *testing.T) {
 
 func stringPtr(s string) *string {
 	return &s
+}
+
+func TestHTTPServerShutdown(t *testing.T) {
+	handler := http.NewServeMux()
+	handler.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	server := &http.Server{
+		Handler: handler,
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := server.Serve(listener); err != nil &&
+			err != http.ErrServerClosed {
+			t.Errorf("serve: %v", err)
+		}
+	}()
+
+	shutdownCtx, cancel := context.WithTimeout(
+		context.Background(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+
+	done := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success.
+
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
 }

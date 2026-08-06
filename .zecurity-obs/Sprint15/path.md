@@ -220,7 +220,7 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase F0 — M1: Retention Worker
 > See [[Sprint15/Member1-Go/Phase4-Retention-Worker]]. Depends on Phase C's `ON DELETE SET NULL` fix.
-- [ ] **M1-F0** Controller worker with `POSTURE_RETENTION_DAYS=30`, `POSTURE_RETENTION_BATCH_SIZE=2000`, daily cadence, and bounded batches. `main.go` adds `signal.NotifyContext`, waits for worker exit, and gracefully stops HTTP/gRPC with a 10-second bound.
+- [x] **M1-F0** Controller worker with `POSTURE_RETENTION_DAYS=30`, `POSTURE_RETENTION_BATCH_SIZE=2000`, daily cadence, and bounded batches. `main.go` adds `signal.NotifyContext`, waits for worker exit, and gracefully stops HTTP/gRPC with a 10-second bound.
 - [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
 
 ### Phase E2 — M4: Admin UI

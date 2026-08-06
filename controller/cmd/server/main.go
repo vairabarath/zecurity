@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -56,6 +57,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/transport"
+	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -70,6 +72,7 @@ func main() {
 	)
 
 	defer stop()
+	var wg sync.WaitGroup
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
@@ -434,9 +437,26 @@ func main() {
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
-	go shieldSvc.RunDisconnectWatcher(ctx)
-	go relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
+	}()
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		shieldSvc.RunDisconnectWatcher(ctx)
+	}()
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	}()
 
 	retentionDays := envOrInt(
 		"POSTURE_RETENTION_DAYS",
@@ -454,22 +474,39 @@ func main() {
 		retentionBatchSize,
 		nil,
 	)
-	go retentionWorker.Run(ctx)
+	wg.Add(1)
 
 	go func() {
+		defer wg.Done()
+		retentionWorker.Run(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
-			if err := discovery.PurgeScanResults(context.Background(), db.Pool, cutoff); err != nil {
-				log.Printf("discovery: purge scan results: %v", err)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
+				if err := discovery.PurgeScanResults(ctx, db.Pool, cutoff); err != nil {
+					log.Printf("discovery: purge scan results: %v", err)
+				}
 			}
 		}
 	}()
-
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
+
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
-		if err := grpcServer.Serve(grpcListener); err != nil {
+		if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("grpc serve: %v", err)
 		}
 	}()
@@ -478,18 +515,69 @@ func main() {
 	// must not sit on the public mux. Defaults to loopback; set METRICS_ADDR (e.g.
 	// ":9102") to expose to a network scraper behind your own firewall. A failure
 	// here is logged, not fatal — metrics are non-critical to serving traffic.
+
+	metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsServer := &http.Server{
+		Addr:    metricsAddr,
+		Handler: metricsMux,
+	}
+
+	wg.Add(1)
 	go func() {
-		metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", metrics.Handler())
-		log.Printf("metrics listening on %s/metrics", metricsAddr)
-		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
+		defer wg.Done()
+
+		log.Printf("metrics listenin on %s/metrics", metricsAddr)
+
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
 		}
 	}()
+
 	addr := ":" + envOr("PORT", "8080")
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http serve: %v", err)
+
+		}
+	}()
+	<-ctx.Done()
+	log.Printf("shutdown requested")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown error: %v", err)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics server shutdown error: %v", err)
+	}
+	grpcStopped := make(chan struct{})
+
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcStopped)
+	}()
+	select {
+	case <-grpcStopped:
+		// Success. Nothing more required.
+	case <-shutdownCtx.Done():
+		log.Printf("gRPC graceful shutdown timed out; forcing stop")
+		grpcServer.Stop()
+	}
+
+	wg.Wait()
 }
 
 // publicRootFields are the GraphQL root fields callable WITHOUT authentication —
