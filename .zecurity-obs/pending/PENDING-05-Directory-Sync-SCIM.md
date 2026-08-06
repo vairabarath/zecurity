@@ -7,12 +7,16 @@ priority: P2
 created: 2026-07-03
 related:
   - PENDING-04-Multiple-IdPs-Enterprise-SSO
+  - ADR-025-SCIM-Directory-Synchronization
 tags: [pending, adr, identity, scim, provisioning]
 ---
 
 # Pending ADR 05 — Directory Sync (SCIM)
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: PENDING — proposed design captured in [[ADR-025-SCIM-Directory-Synchronization]] (PROPOSED, 2026-08-06).**
+> Awaiting team ratification. **Implementation does not begin until ADR-025 is ACCEPTED** — at which
+> point ADR-025 becomes the authoritative SCIM design (exactly as ADR-024 is authoritative for identity
+> federation). The options/recommendation below are the original framing; the resolved decisions live in ADR-025.
 
 ## Context / Current State
 
