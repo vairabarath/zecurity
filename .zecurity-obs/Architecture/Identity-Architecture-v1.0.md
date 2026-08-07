@@ -30,6 +30,33 @@ flowchart LR
 
 ---
 
+## Identity maturity model
+
+Where we are — and why *"not built yet" ≠ "missing."* Identity capability grows in stages, each building
+on the last. This orients any engineer: **we are completing Stage 3.**
+
+```mermaid
+flowchart LR
+    P1["Stage 1 · Bootstrap Identity<br/>platform IdP · signup · break-glass<br/>✅ shipped"]
+    P2["Stage 2 · Enterprise Identity<br/>per-workspace OIDC (BYO IdP)<br/>✅ shipped — PENDING-04"]
+    P3["Stage 3 · Enterprise Lifecycle<br/>SCIM provisioning + deprovisioning<br/>◐ designed (ADR-025), impl next — PENDING-05"]
+    P4["Stage 4 · Identity Governance<br/>identity linking · access reviews · source-of-authority<br/>○ future — reserved ADR-026"]
+    P1 --> P2 --> P3 --> P4
+    classDef done fill:#1b4332,stroke:#40916c,color:#d8f3dc;
+    classDef now fill:#3a0ca3,stroke:#f72585,color:#fff,stroke-width:2px;
+    classDef future fill:#2b2d42,stroke:#8d99ae,color:#edf2f4;
+    class P1,P2 done;
+    class P3 now;
+    class P4 future;
+```
+
+Read it the right way: **contractor→employee conversion and explicit identity linking are Stage 4
+(Governance)** — they *follow* federation and lifecycle by design; they are **not** an unfinished part of
+PENDING-05. That is why they live in a reserved future ADR ([[ADR-026-Identity-Governance-and-Identity-Linking]]),
+not in the SCIM work.
+
+---
+
 ## 0. TL;DR
 
 Zecurity authentication is **provider-agnostic** and terminates in a **canonical identity pipeline**, not in a login handler. A login — from a browser or the CLI — is turned into a neutral `AuthenticationContext` by a protocol adapter, then run through `resolve → lifecycle-gate → link → Principal → session → event`. Identity is keyed on `(connection, subject)`, **never email**. Sessions carry a generation stamp so an admin action can revoke them. A workspace can bring its own OIDC IdP and, if it wants, turn off the shared platform IdP — guarded so it can never lock itself out.
@@ -453,3 +480,4 @@ Someone will eventually ask *"can we support WorkOS / Auth0 / Keycloak / Dex?"* 
 | Version | Date | Change |
 | --- | --- | --- |
 | 1.0 | 2026-08-04 | First frozen baseline. PENDING-04 Phases 1–7 complete and merged (`6078ea4`). |
+| 1.0.1 | 2026-08-06 | Amended: added the Identity Maturity Model (orientation; no behavioral change). |
