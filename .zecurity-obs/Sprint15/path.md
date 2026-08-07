@@ -186,16 +186,16 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase A — M2: Proto + Collectors
 > See [[Sprint15/Member2-Rust-Client/Phase1-Proto-and-Linux-Collectors]]. Depends on nothing — Day 1.
-- [ ] **M2-A1** `proto/client/v1/client.proto` — `ReportDevicePostureRequest{access_token, device_id, report}`, `ReportDevicePostureResponse`, `DevicePostureReport`/`PostureCheck` messages (unix-epoch `int64` timestamps, no `google.protobuf.Timestamp`/`prost-types` dependency).
-- [ ] **M2-A2** `buf generate` from repo root regenerates the **Go** stubs only; `cargo build` in `client/` regenerates the Rust stubs via `client/build.rs`. Commit both.
-- [ ] **M2-A3** `client/src/posture.rs` (new) — Linux collectors: OS/version, LUKS, firewall, Secure Boot (does **not** require a TPM); normalize to `PASS/FAIL/UNSUPPORTED/UNKNOWN/ERROR` against registered check IDs; per-collector timeout **and** panic isolation (run each collector in its own task, handle `JoinError` as `ERROR` — a bare timeout does not catch a panic).
-- [ ] **Build gate:** `cd client && cargo build`
+- [x] **M2-A1** `proto/client/v1/client.proto` — `ReportDevicePostureRequest{access_token, device_id, report}`, `ReportDevicePostureResponse`, `DevicePostureReport`/`PostureCheck` messages (unix-epoch `int64` timestamps, no `google.protobuf.Timestamp`/`prost-types` dependency).
+- [x] **M2-A2** `buf generate` from repo root regenerates the **Go** stubs only; `cargo build` in `client/` regenerates the Rust stubs via `client/build.rs`. Commit both.
+- [x] **M2-A3** `client/src/posture.rs` (new) — Linux collectors: OS/version, LUKS, firewall, Secure Boot (does **not** require a TPM); normalize to `PASS/FAIL/UNSUPPORTED/UNKNOWN/ERROR` against registered check IDs; per-collector timeout **and** panic isolation (run each collector in its own task, handle `JoinError` as `ERROR` — a bare timeout does not catch a panic).
+- [x] **Build gate:** `cd client && cargo build`
 
 ### Phase B — M2: Daemon Collection Scheduler
 > See [[Sprint15/Member2-Rust-Client/Phase2-Daemon-Collection-Scheduler]]. Depends on Phase A.
-- [ ] **M2-B1** `client/src/daemon.rs` — run collection at startup and every 5 minutes; if not logged in yet at startup, defer and trigger immediately after successful login instead of silently skipping; one failed collector must not block submission of the rest.
-- [ ] **M2-B2** Submit `ReportDevicePostureRequest{access_token, device_id, report}` over the existing refreshed access token path (reuse `fetch_acl_snapshot_with_refresh`'s auth-attach pattern).
-- [ ] **Build gate:** `cd client && cargo build && cargo test`
+- [x] **M2-B1** `client/src/daemon.rs` — run collection at startup and every 5 minutes; if not logged in yet at startup, defer and trigger immediately after successful login instead of silently skipping; one failed collector must not block submission of the rest.
+- [x] **M2-B2** Submit `ReportDevicePostureRequest{access_token, device_id, report}` over the existing refreshed access token path (reuse `fetch_acl_snapshot_with_refresh`'s auth-attach pattern).
+- [x] **Build gate:** `cd client && cargo build && cargo test`
 
 ### Phase C — M1: Migration + Posture Store
 > See [[Sprint15/Member1-Go/Phase1-Migration-and-Posture-Store]]. Depends on nothing — Day 1.
@@ -221,7 +221,7 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 ### Phase F0 — M1: Retention Worker
 > See [[Sprint15/Member1-Go/Phase4-Retention-Worker]]. Depends on Phase C's `ON DELETE SET NULL` fix.
 - [x] **M1-F0** Controller worker with `POSTURE_RETENTION_DAYS=30`, `POSTURE_RETENTION_BATCH_SIZE=2000`, daily cadence, and bounded batches. `main.go` adds `signal.NotifyContext`, waits for worker exit, and gracefully stops HTTP/gRPC with a 10-second bound.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
 
 ### Phase E2 — M4: Admin UI
 > See [[Sprint15/Member4-Frontend/Phase1-Device-Profile-Admin-UI]]. Depends on Phase E's GraphQL schema.
@@ -249,17 +249,17 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 ### Phase F — M3: Active-Session Registry
 > See [[Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry]]. Depends on nothing — Day 1.
 - [x] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` (neither is a dependency today).
-- [ ] **M3-F1** `connector/src/device_tunnel.rs` — shared `DashMap<(SpiffeId, ResourceId), HashMap<SessionId, CancellationToken>>` (nested per-session map, **not** `Vec` — a bare `Vec`/single-level map keyed only by `(spiffe,resource)` would let one tunnel's cleanup remove a sibling tunnel's still-live token when two sessions share the same pair). Create the token **before** `tokio::spawn`, clone it into the future, register `(spiffe,resource) → {session_id: token}` **after** ACL resolution succeeds inside `handle_stream`, drop-guard removes only its own `session_id`, removing the outer key only when the inner map is empty.
+- [x] **M3-F1** `connector/src/device_tunnel.rs` — shared `DashMap<(SpiffeId, ResourceId), HashMap<SessionId, CancellationToken>>` (nested per-session map, **not** `Vec` — a bare `Vec`/single-level map keyed only by `(spiffe,resource)` would let one tunnel's cleanup remove a sibling tunnel's still-live token when two sessions share the same pair). Create the token **before** `tokio::spawn`, clone it into the future, register `(spiffe,resource) → {session_id: token}` **after** ACL resolution succeeds inside `handle_stream`, drop-guard removes only its own `session_id`, removing the outer key only when the inner map is empty.
 - [x] **M3-F2** `connector/src/quic_listener.rs` — identical registration path for QUIC-accepted streams (also calls `handle_stream`).
 - [x] **Build gate:** `cd connector && cargo build`
 
 ### Phase G — M3: ACL-Diff Teardown
 > See [[Sprint15/Member3-Rust-Connector/Phase2-ACL-Diff-Teardown]]. Depends on Phase F.
-- [ ] **M3-G1** `connector/src/policy/mod.rs` — before `policy_cache.update(snap)` overwrites it, flatten the *previous* snapshot into a `HashSet<(spiffe_id, resource_id)>`.
-- [ ] **M3-G2** `connector/src/control_stream.rs` (`AclSnapshot` match arm) — diff old vs. new; for every `(spiffe,resource)` pair present in old but missing in new, `.cancel()` every token in that pair's inner session map. Scope is **per-pair, never device-wide**.
-- [ ] **M3-G3** Fix the authorization/registration race: after registering, **unconditionally** re-run `is_allowed(resource, spiffe)` against the current policy cache — no version-equality gate (versions are process-local and can miss real content changes across a controller restart) — and cancel on the spot if it fails.
-- [ ] **M3-G4** `connector/src/agent_tunnel.rs` — `RelaySession::relay_stream()`'s `d2s` child task must share the same `CancellationToken` as the outer task (or be unified into one `select!`), so external cancellation doesn't orphan it — this was a confirmed leak, not a hypothetical.
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M3-G1** `connector/src/policy/mod.rs` — before `policy_cache.update(snap)` overwrites it, flatten the *previous* snapshot into a `HashSet<(spiffe_id, resource_id)>`.
+- [x] **M3-G2** `connector/src/control_stream.rs` (`AclSnapshot` match arm) — diff old vs. new; for every `(spiffe,resource)` pair present in old but missing in new, `.cancel()` every token in that pair's inner session map. Scope is **per-pair, never device-wide**.
+- [x] **M3-G3** Fix the authorization/registration race: after registering, **unconditionally** re-run `is_allowed(resource, spiffe)` against the current policy cache — no version-equality gate (versions are process-local and can miss real content changes across a controller restart) — and cancel on the spot if it fails.
+- [x] **M3-G4** `connector/src/agent_tunnel.rs` — `RelaySession::relay_stream()`'s `d2s` child task must share the same `CancellationToken` as the outer task (or be unified into one `select!`), so external cancellation doesn't orphan it — this was a confirmed leak, not a hypothetical.
+- [x] **Build gate:** `cd connector && cargo build`
 
 ### Phase H — M3: Posture-Aware Auth Path + Observability
 > See [[Sprint15/Member3-Rust-Connector/Phase3-Posture-Aware-Auth-and-Metrics]]. Depends on Phase G + M1-E (ACL carries posture).

@@ -63,9 +63,9 @@ cd client && cargo build && cargo test
 ```
 
 ## Implementation Checklist
-- [ ] **M2-B1** `daemon.rs` — startup + 5-min scheduler loop; defers cleanly if not logged in yet and fires immediately after login; per-collector-timeout-and-panic-tolerant report assembly.
-- [ ] **M2-B2** Submit `ReportDevicePostureRequest{access_token, device_id, report}` over the existing refreshed-access-token path; idempotent retry via stable `report_id`.
-- [ ] **Build gate:** `cd client && cargo build && cargo test`
+- [x] **M2-B1** `daemon.rs` — startup + 5-min scheduler loop; defers cleanly if not logged in yet and fires immediately after login; per-collector-timeout-and-panic-tolerant report assembly.
+- [x] **M2-B2** Submit `ReportDevicePostureRequest{access_token, device_id, report}` over the existing refreshed-access-token path; idempotent retry via stable `report_id`.
+- [x] **Build gate:** `cd client && cargo build && cargo test`
 
 ## Post-Phase Fixes
 _None yet._

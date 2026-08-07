@@ -135,10 +135,10 @@ cd client && cargo build
 ```
 
 ## Implementation Checklist
-- [ ] **M2-A1** `proto/client/v1/client.proto` — `ReportDevicePostureRequest{access_token, device_id, report}`, `ReportDevicePostureResponse`, `DevicePostureReport`/`PostureCheck` messages (`int64` timestamps, no `Timestamp`/`prost-types`).
-- [ ] **M2-A2** `buf generate` from repo root (Go stubs) + `cd client && cargo build` (Rust stubs via `build.rs`); commit both.
-- [ ] **M2-A3** `client/src/posture.rs` — 4 Linux collectors, normalized statuses, each in its own task with a timeout **and** panic isolation via `JoinError` handling.
-- [ ] **Build gate:** `cd client && cargo build`
+- [x] **M2-A1** `proto/client/v1/client.proto` — `ReportDevicePostureRequest{access_token, device_id, report}`, `ReportDevicePostureResponse`, `DevicePostureReport`/`PostureCheck` messages (`int64` timestamps, no `Timestamp`/`prost-types`).
+- [x] **M2-A2** `buf generate` from repo root (Go stubs) + `cd client && cargo build` (Rust stubs via `build.rs`); commit both.
+- [x] **M2-A3** `client/src/posture.rs` — 4 Linux collectors, normalized statuses, each in its own task with a timeout **and** panic isolation via `JoinError` handling.
+- [x] **Build gate:** `cd client && cargo build`
 
 ## Post-Phase Fixes
 _None yet._
