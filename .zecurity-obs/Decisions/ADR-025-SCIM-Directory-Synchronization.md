@@ -342,3 +342,28 @@ Builds on ADR-023 (planes), ADR-024 (linking key, no email-merge), and the froze
 [[Identity-Architecture-v1.0]] (Resolver/Linker/Revoker, invariants). Integrates with PENDING-02
 (cert revocation) and PENDING-13 (device lifecycle) on the deprovision path. Independent of PENDING-06
 (step-up), which consumes login-time `amr`/`acr`.
+
+---
+
+## Addendum — SCIM system-architecture decisions (2026-08-06)
+
+Ratified from the [[Identity-Lifecycle-and-Ownership-Design-Review]] (full reasoning + UX there). Only
+the architectural decisions live here; presentation details (confirmation copy, health badge colors and
+thresholds) stay in the review.
+
+- **Connection lifecycle `ACTIVE → DISABLED → DELETED`.** `identity_connections.status` already carries
+  active/disabled (migration 031); this fixes the *behavior*:
+  - **DISABLE** (reversible): new logins fail, sessions revoked, **linked users suspended**; re-enabling
+    restores them. This is where mass user-state change lives — and it is undoable.
+  - **DELETE** (terminal, guarded): permitted only when **no users are linked**, or behind an explicit
+    destructive confirmation; only then does the `external_identities` cascade run. Deletion is never a
+    silent side effect that mass-suspends users.
+- **Identity Health.** Each connection exposes a sync-health state — **Healthy / Delayed / Disconnected**
+  — derived from a new `identity_connections.last_sync_at`, because *SCIM availability equals deprovision
+  timeliness*. The health **concept** is architectural; its presentation is not specified here.
+- **Directory Sync Instance ID.** Each SCIM connect opens a **Sync Instance** (new `scim_sync_instances`
+  row, UUID); every provisioned object records the `sync_instance_id` that created/last-touched it, so a
+  disable→re-enable reconnect reconciles current-vs-stale objects and audits provenance.
+
+*Schema deltas (implementation detail, summarized): `identity_connections.last_sync_at`; a
+`scim_sync_instances` table; `sync_instance_id` on provisioned users/external_identities.*

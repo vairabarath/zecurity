@@ -237,3 +237,28 @@ same encrypted-secret columns (or a small additive column) — no redesign of `0
 Accepted as the baseline for PENDING-04 implementation. Options B/C (assisted/self-service linking)
 and the SCIM-driven lifecycle transitions ([[PENDING-05-Directory-Sync-SCIM]]) are explicit
 follow-ups.
+
+---
+
+## Addendum — Lifecycle & ownership decisions (2026-08-06)
+
+Architectural rules ratified from the [[Identity-Lifecycle-and-Ownership-Design-Review]], which holds
+the full reasoning, alternatives, enterprise comparison, and the operational/UX detail. **Only the
+decisions live here.**
+
+- **Source of Authority.** Every canonical user has exactly one authoritative source that owns its
+  lifecycle and directory-owned attributes (`users.source_of_authority`). V1 always has one external
+  identity per user, so this equals that identity's connection (or `manual` for invited users).
+  Multi-identity linking is **not permitted without it** — that is the future Identity-Governance ADR.
+- **Email is never in identity *or membership* logic.** Extending the no-email-merge rule: SCIM does
+  **not** fulfill invitations by email. A pending invite expires by its own TTL; provisioning is
+  independent. Email is a notification address, never a join key.
+- **Ownership is enforced at the mutation layer.** Directory-owned attributes of a directory-managed
+  user are **rejected by GraphQL mutations**, not merely greyed out in the UI. The "no conflict"
+  guarantee is API-enforced, not cosmetic.
+- **Workspace Mode.** A workspace is `Hybrid` (platform + enterprise IdPs) or `Enterprise-Managed`
+  (enterprise only). Selecting Enterprise-Managed disables platform login (the §5 `platform_login_enabled`
+  toggle) — the intent-level expression of that switch ("the company now owns all identities").
+- **Duplicate-identity detection.** When two canonical users share an email under distinct
+  `(connection, subject)` keys, the system surfaces a **warning** to admins — never an automatic merge.
+  Detection only; resolution is manual (or the future linking workflow).
