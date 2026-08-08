@@ -70,10 +70,18 @@ cd controller && go build ./... && go test ./internal/posture/...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-F0-1** `internal/posture/retention.go` — daily worker using `POSTURE_RETENTION_DAYS=30` and `POSTURE_RETENTION_BATCH_SIZE=2000`, explicit loop termination, context-cancellable.
-- [ ] **M1-F0-2** `cmd/server/main.go` — add `signal.NotifyContext`; start/wait for the worker; gracefully stop HTTP and gRPC with a 10-second bound.
-- [ ] **M1-F0-3** Test proving a referenced report is still deletable (regression test for the Phase 1 FK fix).
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...`
+- [x] **M1-F0-1** `internal/posture/retention.go` — daily worker using `POSTURE_RETENTION_DAYS=30` and `POSTURE_RETENTION_BATCH_SIZE=2000`, explicit loop termination, context-cancellable.
+- [x] **M1-F0-2** `cmd/server/main.go` — add `signal.NotifyContext`; start/wait for the worker; gracefully stop HTTP and gRPC with a 10-second bound.
+- [x] **M1-F0-3** Test proving a referenced report is still deletable (regression test for the Phase 1 FK fix).
+- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/...` (targeted posture/server tests pass; full-suite socket-dependent tests require the host environment).
 
 ## Post-Phase Fixes
 _None yet._
+
+## Progress
+
+Implemented the context-cancellable daily retention worker, configurable retention
+defaults, startup wiring, signal-aware lifecycle, graceful HTTP/metrics/gRPC shutdown,
+and retention regression tests. PostgreSQL-backed posture tests pass when the Docker
+database is available. Tests requiring local socket binding may be blocked in restricted
+execution environments.

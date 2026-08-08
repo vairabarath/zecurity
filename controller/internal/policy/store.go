@@ -352,9 +352,10 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroup(ctx context.Context, workspaceID
 // This allows the compiler to securely map group membership to posture evaluations
 // without parsing untrusted SPIFFE strings.
 type DeviceIdentity struct {
-    DeviceID uuid.UUID
-    SPIFFEID string
+	DeviceID uuid.UUID
+	SPIFFEID string
 }
+
 // ListActiveDeviceSPIFFEsForGroups returns non-revoked client device identities for the
 // given groups. The map key is the group ID.
 func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceID string, groupIDs []string) (map[string][]DeviceIdentity, error) {
@@ -362,7 +363,7 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		return map[string][]DeviceIdentity{}, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT DISTINCT gm.group_id::text, cd.spiffe_id
+		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id
 		 FROM group_members gm
 		 JOIN client_devices cd ON cd.user_id = gm.user_id
 		 WHERE gm.group_id = ANY($1::uuid[])
