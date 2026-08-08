@@ -25,6 +25,7 @@ pub mod relay_probe;
 pub mod relay_ranking;
 pub mod relay_selector;
 pub mod renewal;
+pub mod resolver;
 pub mod tls;
 pub mod updater;
 pub mod util;

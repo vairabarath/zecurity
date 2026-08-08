@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 passed 2026-08-06) · Stage 2 phases 4–5 complete · next = Phase 6
+progress: Stage 1 complete (Gate 1 passed 2026-08-06) · Stage 2 phases 4–6 complete · next = Phase 7
 solo: true
 owner: M3
 tags:
@@ -223,26 +223,56 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 **Known gaps, deferred to Gate 2:** `loadResourceByID` is manually verified but has no regression
 test; the GraphQL `createResource` path with `hostname` has never been executed end-to-end.
 
-#### Phase 6 — Connector resolver module
-> See [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]. **← next unchecked phase.**
-- [ ] **6.0** `connector/src/policy/mod.rs` — `ResourceAcl` += `hostname` + `resolver` (populate in
-      `resource_acl_from`; the resolver has no input without them). **And define the precedence for a
-      row with BOTH `address` and `hostname` — make it `reason=ambiguous_addressing`, fail closed.**
+#### Phase 6 — Connector resolver module ✅ DONE (2026-08-08)
+> See [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]].
+- [x] **6.0** `connector/src/policy/mod.rs` — `ResourceAcl` += `hostname` + `resolver` (populated in
+      `resource_acl_from`), plus **`remote_network_id`** (not in the original task list — the resolver's
+      cache key cannot exist without it). `ResourceAcl::addressing()` returns
+      `Addressing::{Pinned, Named, Invalid}`; a row with BOTH `address` and `hostname` is
+      `Invalid("ambiguous_addressing")` — **fail closed, never "address wins"**.
       Exactly-one is enforced *only* at the GraphQL layer (`validateAddressing`); the DB check is
       at-least-one, so any SQL-inserted row — which Phase 5's own solo tip recommends — can carry both.
-- [ ] **6.1** new `connector/src/resolver.rs` — `dns` + `static`; TTL-aware cache keyed by
-      `(remote_network_id, name, family)`; TTL clamp (min ~5s, max ~300s); brief negative cache;
-      single-flight per key. ⚠️ **Dependency decision:** `tokio::net::lookup_host` does **not** expose
-      record TTLs, so the TTL clamp and stale-while-revalidate are unimplementable with it —
-      `hickory-resolver` (or an explicit "fixed cache duration" downgrade) must be chosen deliberately.
-- [ ] **6.2** Typed errors: NXDOMAIN · timeout/resolver-down · no-A-record · dial-failure (distinct
-      from DNS failure). **Stale-while-revalidate** on resolver failure (serve last-known-good) — but
-      **never on NXDOMAIN**, and with a bounded stale window so a dead resolver eventually fails closed.
-- [ ] **6.3** IPv4-only this sprint — explicit, not accidental.
-- [ ] **Gate:** `cd connector && cargo build && cargo test` (baseline 89 + 4)
+- [x] **6.1** new `connector/src/resolver.rs` — `dns` + `static`; TTL-aware cache keyed by
+      `(remote_network_id, name, family)`; TTL clamp (5s–300s); negative cache; single-flight per key.
+      **Dependency decided: `hickory-resolver` 0.26.1**, added as
+      `--no-default-features --features tokio,system-config`. `tokio::net::lookup_host` was rejected —
+      it exposes no record TTL, which makes the clamp and stale handling unimplementable.
+      *Verified: hickory pulls no TLS stack, and the `aws-lc-rs` already in the tree came from
+      `reqwest`/`hyper-rustls`, not from this change.*
+      ⚠️ **Deviation from spec:** the negative cache covers **NXDOMAIN *and* NODATA**, not NXDOMAIN
+      alone. NODATA is equally authoritative and equally likely to be retried per connection, so
+      leaving it uncached let a deleted A record re-query on every connection attempt. The reason is
+      *stored* alongside the deadline so a suppressed NODATA is never reported as NXDOMAIN.
+- [x] **6.2** Typed errors, all non-collapsible: `nxdomain` · `resolver_unavailable` ·
+      **`resolver_failure`** (SERVFAIL/REFUSED — added; same policy as unavailable but a different
+      system to go look at) · `no_address_record` · `unsupported_resolver` ·
+      `invalid_resolver_config`. **No `dial_failed` variant** — resolution succeeding while the dial
+      fails is Phase 7's concern, and folding it in here would conflate "DNS is broken" with "the
+      resource is down".
+      Policy is expressed once, as `ResolveError::may_serve_stale()` / `invalidates_cache()`, which are
+      asserted disjoint: **serve stale only for failures that say nothing about the name; discard the
+      cached address for answers that say the endpoint is gone** (NXDOMAIN *and* NODATA).
+      ⚠️ **Deviation from spec:** implemented as **stale-on-error + a 5s `STALE_RETRY` backoff**, not
+      background revalidation. Without the backoff, "serving stale" still made *every* connection during
+      an outage wait out a full resolver timeout first. Bounded by `STALE_MAX` (1h) so a permanently
+      dead resolver eventually fails closed. True prefetch-before-expiry is a later optimisation; the
+      cache shape already supports it.
+- [x] **6.3** IPv4-only, structurally: explicit `Family::V4` in the cache key and `RData::A`-only
+      extraction — not an accident of taking the first result.
+- [x] **Gate:** `cd connector && cargo build && cargo test` — **PASS: 128 unit + 4 integration**
+      (baseline was 89 + 4). Zero warnings; zero clippy findings in the new files; `rustfmt` clean.
+- [x] 📌 **Known limitations, deliberately not fixed** (see the phase file): the cache never evicts
+      (bounded by distinct resource names over process lifetime, controller-supplied, not
+      client-influenced); `static` with multiple addresses takes the first valid one (no round-robin);
+      unknown `resolver.config` keys are tolerated while `server` is rejected.
 
 #### Phase 7 — Connector delivery branch
-> See [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]].
+> See [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]]. **← next unchecked phase.**
+> 📌 **Scope is wider than the File Map says:** `handle_stream` has **three** call sites, so threading
+> `Arc<Resolver>` through touches `device_tunnel.rs`, `quic_listener.rs:110`, `relay_handler.rs:183`
+> **and `main.rs`** (two listener spawns). `HickoryBackend::from_system()` is constructed there — it is
+> currently unreferenced, and being a public item in a lib crate it produces **no** dead-code warning,
+> so nothing will remind you.
 - [ ] **7.0** ⚠️ **Scope amendment — do this first.** Authorization currently denies **every**
       name-addressed resource *before* the `route_type` branch is reached:
       `device_tunnel.rs:225` compares `req.destination != entry.address`, and `entry.address` is empty
@@ -418,11 +448,19 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 
 | Decision | Phase | Why it can't wait |
 |---|---|---|
-| Ambiguous addressing: what happens when a row has **both** `host` and `hostname`? | **6.0** | Exactly-one is enforced only at the GraphQL layer; SQL-inserted rows bypass it. **Recommend fail closed.** |
-| DNS client crate — `hickory-resolver` vs `lookup_host` | **6.1** | `lookup_host` exposes no record TTL, so the TTL clamp and stale-while-revalidate are unimplementable with it. |
 | What `destination` carries for named resources | **7.0 + 9.4** | Both halves must agree, or every FQDN resource is denied as `destination_mismatch`. |
+| `resolver.config["server"]` — implement per-resource DNS servers, or fix the schema comment? | **10.1** | Phase 6 **rejects** `server` as `invalid_resolver_config` (silently ignoring it would resolve against the connector's own resolver — a different answer than the operator asked for). But [resource.graphqls](../../controller/graph/resource.graphqls) still shows `{"type":"dns","config":{"server":"..."}}` as the example. One of the two must change. |
 | How the synthetic CIDR is steered into the TUN (nft mark shape) | **9.3** | Routing is mark-driven; a route alone won't capture traffic. |
 | Non-`systemd-resolved` hosts: rewrite `resolv.conf` or refuse OS DNS? | **12.1** | Failure mode is the user's DNS left broken after our daemon exits. |
+
+### Settled in Phase 6
+
+| Decision | Resolution |
+|---|---|
+| Ambiguous addressing — a row with **both** `host` and `hostname` | ✅ **Fail closed.** `Addressing::Invalid("ambiguous_addressing")`; never "address wins". |
+| DNS client crate | ✅ **`hickory-resolver` 0.26.1**, `--no-default-features --features tokio,system-config`. `lookup_host` rejected: no record TTL. |
+| Does NODATA get negative-cached? | ✅ **Yes**, alongside NXDOMAIN, with its own reason stored. Both are authoritative "no endpoint" answers. |
+| Stale-while-revalidate shape | ✅ **Stale-on-error + 5s retry backoff**, bounded by `STALE_MAX`. No background refresh task. |
 
 ## Deferred (explicitly out of scope)
 
@@ -446,8 +484,8 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 3 | [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]] | ✅ done (Gate 1 passed; negative tests outstanding) |
 | 4 | [[Sprint16/Member3-Go-Rust/Phase4-Migration-030-Resource-Model]] | ✅ done |
 | 5 | [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]] | ✅ done |
-| 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ⬜ **next** |
-| 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ⬜ |
+| 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ✅ done (128 + 4 tests green) |
+| 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ⬜ **next** |
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ⬜ |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ — closes **Gate 2** |
@@ -488,6 +526,38 @@ message, never by how the data is grouped in the DB.*
 client's TUN (~10 tunnels per curl). Fixed with `CONNECTOR_EGRESS_MARK = 0x5b` (connector sets
 `SO_MARK`; client's chain returns early on it) plus a co-location warning. **Not caused by this sprint.**
 → [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]]
+
+### Fix: stale-on-error charged a resolver timeout to every connection
+**Phase 6.2.** `store` returned the last-known-good address but recorded nothing, so `check_cache` had
+nothing to hit — during a DNS outage *every* connection re-queried and waited out a full resolver
+timeout before receiving an address we already had. "Serving stale" with the outage's latency attached
+to each request.
+
+**Fix:** `Entry.retry_after` + `STALE_RETRY` (5s). One query per backoff window; the rest are served
+from the fast path. Guard: `stale_is_served_from_the_fast_path_without_requerying` (asserts the query
+count does not grow) and `stale_backoff_expires_and_recovery_is_picked_up`.
+→ [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]
+
+### Fix: NODATA re-queried on every connection, and nearly reported the wrong reason
+**Phase 6.1.** The spec said "negative cache for NXDOMAIN", so NODATA was left uncached — but a deleted
+A record is equally authoritative and gets retried just as often, so it floods DNS identically.
+
+The naive fix was a trap: with `negative_until: Option<Instant>`, `check_cache` returned a hardcoded
+`Err(NxDomain)`, which would have reported a suppressed NODATA **as NXDOMAIN** — destroying exactly the
+reason fidelity Phase 6.2 exists for.
+
+**Fix:** `negative: Option<(ResolveError, Instant)>` — store the reason, don't assume it.
+Guard: `nodata_is_negative_cached_with_its_own_reason`.
+→ [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]
+
+### Fix: the hickory success path had no test coverage
+**Phase 6.1.** `classify` had five tests but the `answers() → (Ipv4Addr, ttl)` extraction had none — the
+only real logic in the module without coverage, and a bug there would first surface at Phase 7 E2E.
+
+**Fix:** extracted `a_records(&Lookup, now)` and tested it against hand-built `Lookup`s: multi-A
+extraction, **CNAME-chain skipping** (intermediate records must not make a resolved alias read as
+NODATA), empty answers, and TTL saturation on a past deadline.
+→ [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]
 
 ### Outstanding (doc-only): stale comment on `ACLRelevantUpdate`
 `internal/resource/store.go` (~454) still documents `local_target` as reaching the wire and being part of

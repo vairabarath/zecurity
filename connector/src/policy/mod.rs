@@ -1,6 +1,6 @@
 use parking_lot::RwLock;
 
-use crate::client::v1::{AclEntry, AclSnapshot};
+use crate::client::v1::{AclEntry, AclResolver, AclSnapshot};
 
 /// Local ACL snapshot cache. Updated from Controller heartbeat; enforces default-deny.
 #[derive(Debug)]
@@ -12,14 +12,89 @@ pub struct PolicyCache {
 /// [`PolicyCache::resolve_resource`] and [`PolicyCache::resolve_by_resource_id`].
 pub struct ResourceAcl {
     pub resource_id: String,
-    /// The resource's address **as the controller declared it**. This is the
-    /// authoritative dial target — callers must use it rather than any address
-    /// supplied by the client, so a client can never steer the connector at a
-    /// destination the ACL didn't authorize.
+    /// Routing scope, carried for the resolver's cache key. The **same hostname can
+    /// legitimately resolve differently in two remote networks**, so omitting this
+    /// from the key would cross-contaminate them — a correctness *and* isolation bug.
+    pub remote_network_id: String,
+    /// Pinned address **as the controller declared it**. This is the authoritative
+    /// dial target for IP-addressed resources — callers must use it rather than any
+    /// address supplied by the client, so a client can never steer the connector at
+    /// a destination the ACL didn't authorize.
+    ///
+    /// **Empty for name-addressed resources**, which carry `hostname` instead and are
+    /// resolved per connection. Never branch on this field directly — call
+    /// [`ResourceAcl::addressing`], which makes the invalid combinations explicit.
     pub address: String,
+    /// The name to resolve instead of dialing `address`. Empty for IP-addressed
+    /// resources. Exactly one of `address` / `hostname` is meant to be set.
+    pub hostname: String,
+    /// How to resolve `hostname`. `None` for IP-addressed resources — and also `None`
+    /// when the controller stored a malformed resolver, because `parseResolver`
+    /// deliberately degrades to nil rather than failing the whole workspace's
+    /// snapshot. Either way a `hostname` without a resolver is unusable → deny.
+    pub resolver: Option<AclResolver>,
     pub allowed_spiffe_ids: Vec<String>,
     pub route_type: String,
     pub shield_id: String,
+}
+
+/// How a resource is addressed, with every invalid combination named rather than
+/// silently resolved to a preference.
+///
+/// The exactly-one rule (`address` XOR `hostname`) is enforced by the controller's
+/// GraphQL layer (`validateAddressing`). The database check is weaker — it only
+/// requires `host IS NOT NULL OR hostname IS NOT NULL` — so a row inserted directly
+/// by SQL can legally carry **both**. This type is where that gap fails closed:
+/// a caller cannot accidentally prefer one value, because there is no variant that
+/// offers both.
+pub enum Addressing {
+    /// IP-pinned: dial this address, as today.
+    Pinned(String),
+    /// Name-addressed: resolve `hostname` with `resolver`, then dial the result.
+    Named {
+        hostname: String,
+        resolver: AclResolver,
+    },
+    /// Not dialable. The payload is the deny reason, logged verbatim so the four
+    /// failure modes stay countable and distinguishable from a resolver error.
+    Invalid(&'static str),
+}
+
+/// Treats whitespace-only as empty. Hand-inserted rows bypass the controller's
+/// `blankToNil` normalisation, and `" "` must not read as "addressed".
+fn non_blank(s: &str) -> Option<&str> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t)
+    }
+}
+
+impl ResourceAcl {
+    /// Classify this entry's addressing. Callers branch on the result instead of
+    /// inspecting `address` / `hostname` directly, so a new addressing mode cannot
+    /// be added without every caller being forced to handle it.
+    pub fn addressing(&self) -> Addressing {
+        match (non_blank(&self.address), non_blank(&self.hostname)) {
+            // Both set: the ACL is self-contradictory and nothing here is entitled
+            // to pick a winner. Silently preferring one is exactly the class of bug
+            // Stage 1 removed from the handshake.
+            (Some(_), Some(_)) => Addressing::Invalid("ambiguous_addressing"),
+            (None, None) => Addressing::Invalid("unaddressable"),
+            (Some(address), None) => Addressing::Pinned(address.to_string()),
+            (None, Some(hostname)) => match &self.resolver {
+                Some(r) if non_blank(&r.r#type).is_some() => Addressing::Named {
+                    hostname: hostname.to_string(),
+                    resolver: r.clone(),
+                },
+                // A name with no usable resolver is unreachable. Confining the
+                // blast radius here — to one resource — is why the controller's
+                // parseResolver returns nil instead of erroring the snapshot.
+                _ => Addressing::Invalid("missing_resolver"),
+            },
+        }
+    }
 }
 
 impl PolicyCache {
@@ -140,7 +215,10 @@ fn find_entry_by_id<'a>(snapshot: &'a AclSnapshot, resource_id: &str) -> Option<
 fn resource_acl_from(entry: &AclEntry) -> ResourceAcl {
     ResourceAcl {
         resource_id: entry.resource_id.clone(),
+        remote_network_id: entry.remote_network_id.clone(),
         address: entry.address.clone(),
+        hostname: entry.hostname.clone(),
+        resolver: entry.resolver.clone(),
         allowed_spiffe_ids: entry.allowed_spiffe_ids.clone(),
         route_type: entry.route_type.clone(),
         shield_id: entry.shield_id.clone(),
@@ -178,6 +256,24 @@ mod tests {
             // Name-addressed entries get their own builder in Phase 6.
             hostname: String::new(),
             resolver: None,
+        }
+    }
+
+    /// Name-addressed counterpart to `entry()`: no `address`, a `hostname`, and a
+    /// resolver. `resolver: None` exercises the missing-resolver deny path.
+    fn named_entry(resource_id: &str, hostname: &str, resolver: Option<AclResolver>) -> AclEntry {
+        AclEntry {
+            address: String::new(),
+            hostname: hostname.into(),
+            resolver,
+            ..entry(resource_id, vec!["spiffe://ws/client/device-1"])
+        }
+    }
+
+    fn dns_resolver() -> AclResolver {
+        AclResolver {
+            r#type: "dns".into(),
+            config: Default::default(),
         }
     }
 
@@ -407,5 +503,98 @@ mod tests {
             vec!["spiffe://ws/client/device-1"],
         )]));
         assert!(cache.resolve_by_resource_id("res-1", 443, "TCP").is_some());
+    }
+
+    // ── Addressing classification (Sprint 16 Phase 6.0) ──────────────────────
+    //
+    // `addressing()` has no production caller until Phase 7, so these tests are
+    // the only thing exercising it — in particular the two fail-closed branches
+    // that a hand-inserted SQL row can reach.
+
+    #[test]
+    fn addressing_pinned_for_classic_ip_entry() {
+        let acl = resource_acl_from(&entry("res-1", vec!["spiffe://ws/client/device-1"]));
+        match acl.addressing() {
+            Addressing::Pinned(addr) => assert_eq!(addr, "10.0.0.1"),
+            _ => panic!("expected Pinned"),
+        }
+    }
+
+    #[test]
+    fn addressing_named_when_hostname_and_resolver_present() {
+        let acl = resource_acl_from(&named_entry("res-1", "app.internal", Some(dns_resolver())));
+        match acl.addressing() {
+            Addressing::Named { hostname, resolver } => {
+                assert_eq!(hostname, "app.internal");
+                assert_eq!(resolver.r#type, "dns");
+            }
+            _ => panic!("expected Named"),
+        }
+    }
+
+    #[test]
+    fn addressing_invalid_when_hostname_has_no_resolver() {
+        let acl = resource_acl_from(&named_entry("res-1", "app.internal", None));
+        assert!(matches!(
+            acl.addressing(),
+            Addressing::Invalid("missing_resolver")
+        ));
+    }
+
+    #[test]
+    fn addressing_invalid_when_resolver_type_is_blank() {
+        let blank = AclResolver {
+            r#type: "   ".into(),
+            config: Default::default(),
+        };
+        let acl = resource_acl_from(&named_entry("res-1", "app.internal", Some(blank)));
+        assert!(matches!(
+            acl.addressing(),
+            Addressing::Invalid("missing_resolver")
+        ));
+    }
+
+    /// The DB check is at-least-one (`host IS NOT NULL OR hostname IS NOT NULL`), so
+    /// a hand-inserted row can carry both. Fail closed rather than letting either
+    /// value win — silently preferring one is the class of bug Stage 1 removed.
+    #[test]
+    fn addressing_invalid_when_both_address_and_hostname_set() {
+        let both = AclEntry {
+            hostname: "app.internal".into(),
+            resolver: Some(dns_resolver()),
+            ..entry("res-1", vec!["spiffe://ws/client/device-1"])
+        };
+        let acl = resource_acl_from(&both);
+        assert!(matches!(
+            acl.addressing(),
+            Addressing::Invalid("ambiguous_addressing")
+        ));
+    }
+
+    #[test]
+    fn addressing_invalid_when_neither_address_nor_hostname_set() {
+        let neither = AclEntry {
+            address: String::new(),
+            ..entry("res-1", vec!["spiffe://ws/client/device-1"])
+        };
+        let acl = resource_acl_from(&neither);
+        assert!(matches!(
+            acl.addressing(),
+            Addressing::Invalid("unaddressable")
+        ));
+    }
+
+    #[test]
+    fn resolve_by_resource_id_carries_hostname_and_resolver() {
+        let cache = PolicyCache::new();
+        cache.update(snapshot_with(vec![named_entry(
+            "res-1",
+            "app.internal",
+            Some(dns_resolver()),
+        )]));
+        let acl = cache.resolve_by_resource_id("res-1", 443, "tcp").unwrap();
+        assert_eq!(acl.hostname, "app.internal");
+        assert!(acl.resolver.is_some());
+        assert!(acl.address.is_empty());
     }
 }
