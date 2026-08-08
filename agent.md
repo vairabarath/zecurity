@@ -230,7 +230,7 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 | Build shield (release) | `cargo build --manifest-path shield/Cargo.toml --release` |
 | Build client (dev) | `cd client && cargo build` |
 | Generate proto (all) | `make generate-proto` (from repo root) |
-| Regenerate GraphQL | `cd controller && go generate ./graph/...` |
+| Regenerate GraphQL | `make gqlgen` (from repo root — there is no `//go:generate` directive, so `go generate` is a silent no-op) |
 | Frontend codegen | `cd admin && npm run codegen` |
 | Test renewal (short TTL) | Set `CONNECTOR_CERT_TTL=3m CONNECTOR_RENEWAL_WINDOW=2m CONNECTOR_HEARTBEAT_INTERVAL=5s` in `.env` |
 | Release connector binary | `git tag connector-vX.Y.Z && git push origin connector-vX.Y.Z` |

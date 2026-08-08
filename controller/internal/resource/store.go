@@ -450,13 +450,23 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 }
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
-// compiler actually reads (ListEnabledRulesWithResources selects name, host,
-// hostname, port_from, protocol, shield_id). host is not editable via
-// UpdateInput; hostname is, and from Phase 5 the compiler emits it — so editing
-// it must invalidate the ACL snapshot.
+// compiler actually reads. As of Phase 5 that set is: name, host, hostname,
+// resolver, local_target, port_from, protocol, shield_id — everything
+// ListEnabledRulesWithResources selects and CompileACLSnapshot emits into an
+// ACLEntry.
+//
+// host and shield_id are not editable through UpdateInput, so they cannot
+// appear here. The other three addressing fields are editable and all three
+// reach the wire: hostname is what the connector resolves, resolver is how, and
+// local_target is what a shield dials. Changing any of them without bumping the
+// ACL version would leave every connected client acting on a stale target until
+// something unrelated happened to recompile the snapshot.
+//
+// Keep this in step with the ACLEntry literal in policy/compiler.go — a field
+// added there and forgotten here fails silently, which is the worst kind.
 func ACLRelevantUpdate(input UpdateInput) bool {
 	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
-		input.Hostname != nil
+		input.Hostname != nil || input.Resolver != nil
 }
 
 func joinSets(sets []string) string {

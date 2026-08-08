@@ -271,6 +271,13 @@ func (s *Store) ListResourcesForGroup(ctx context.Context, groupID string) ([]st
 // ── Compiler queries ──────────────────────────────────────────────────────
 
 // CompilerResourceRow is the minimal resource data the compiler needs.
+//
+// Addressing (PENDING-14): a resource is reachable either by a pinned IP
+// (Address) or by a name the connector resolves at dial time (Hostname +
+// Resolver). Exactly one is populated — migration 030's
+// resources_addressable_check enforces that at the DB level. Both are read as
+// COALESCE to the empty string, so a NULL column never lands in a
+// non-nullable Go string.
 type CompilerResourceRow struct {
 	ResourceID        string
 	Name              string
@@ -283,6 +290,11 @@ type CompilerResourceRow struct {
 	Status            string
 	RemoteNetworkID   string
 	RemoteNetworkName string
+	// Hostname is the name to resolve. Empty for IP-pinned resources.
+	Hostname string
+	// Resolver is the raw resolver JSON ({"type":...,"config":{...}}), read as
+	// text so this package needs no JSONB dependency. Empty when Hostname is.
+	Resolver string
 }
 
 // ListEnabledRulesWithResources returns all enabled access_rules joined with
@@ -292,7 +304,8 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 		`SELECT ar.resource_id, r.name, COALESCE(r.host, ''), r.port_from, r.protocol,
 			        ar.group_id, COALESCE(r.shield_id::text, ''),
 			        COALESCE(s.connector_id::text, ''), r.status,
-			        r.remote_network_id::text, rn.name
+			        r.remote_network_id::text, rn.name,
+			        COALESCE(r.hostname, ''), COALESCE(r.resolver::text, '')
 			 FROM access_rules ar
 			 JOIN resources r ON r.id = ar.resource_id
 			 JOIN remote_networks rn ON rn.id = r.remote_network_id
@@ -310,7 +323,7 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 	var out []*CompilerResourceRow
 	for rows.Next() {
 		r := &CompilerResourceRow{}
-		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID, &r.ShieldConnectorID, &r.Status, &r.RemoteNetworkID, &r.RemoteNetworkName); err != nil {
+		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID, &r.ShieldConnectorID, &r.Status, &r.RemoteNetworkID, &r.RemoteNetworkName, &r.Hostname, &r.Resolver); err != nil {
 			return nil, fmt.Errorf("scan rule row: %w", err)
 		}
 		out = append(out, r)

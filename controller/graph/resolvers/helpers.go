@@ -153,12 +153,21 @@ func (r *queryResolver) loadShields(ctx context.Context, tenantID, remoteNetwork
 	return result, nil
 }
 
+// toResourceGQL maps a store row onto the GraphQL type.
+//
+// Note the addressing asymmetry: Host is a plain string (the store COALESCEs a
+// NULL host to ""), while Hostname/Resolver/LocalTarget are *string and pass
+// through as nil. That mirrors the schema — Resource.host stayed String! so
+// existing clients don't break, and the new fields are nullable.
 func toResourceGQL(row *resource.Row) *graph.Resource {
 	res := &graph.Resource{
 		ID:             row.ID,
 		Name:           row.Name,
 		Description:    row.Description,
 		Host:           row.Host,
+		Hostname:       row.Hostname,
+		Resolver:       row.Resolver,
+		LocalTarget:    row.LocalTarget,
 		Protocol:       row.Protocol,
 		PortFrom:       row.PortFrom,
 		PortTo:         row.PortTo,

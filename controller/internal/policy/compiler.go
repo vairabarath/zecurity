@@ -2,6 +2,7 @@ package policy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"time"
@@ -34,11 +35,14 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 		port       uint32
 		protocol   string
 	}
+
 	names := make(map[entryKey]string)
 	shieldIDs := make(map[entryKey]string)
 	preferredConnectorIDs := make(map[entryKey]string)
 	routeTypes := make(map[entryKey]string)
-	rnByKey := make(map[entryKey]string)     // entryKey → remote_network_id
+	rnByKey := make(map[entryKey]string) // entryKey → remote_network_id
+	hostnames := make(map[entryKey]string)
+	resolvers := make(map[entryKey]*clientv1.ACLResolver)
 	keyGroups := make(map[entryKey][]string) // groups contributing to each entry
 
 	groupIDSet := make(map[string]struct{})
@@ -56,6 +60,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 			preferredConnectorIDs[key] = rule.ShieldConnectorID
 			routeTypes[key] = routeType
 			rnByKey[key] = rule.RemoteNetworkID
+			hostnames[key] = rule.Hostname
+			resolvers[key] = parseResolver(rule.Resolver)
 		}
 		keyGroups[key] = append(keyGroups[key], rule.GroupID)
 		groupIDSet[rule.GroupID] = struct{}{}
@@ -150,6 +156,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 			ShieldId:             shieldIDs[key],
 			RemoteNetworkId:      rnByKey[key],
 			PreferredConnectorId: preferredConnectorIDs[key],
+			Hostname:             hostnames[key],
+			Resolver:             resolvers[key],
 		})
 	}
 
@@ -201,6 +209,30 @@ func resolveConnectorRelayAddr(publicAddr, observedHost string) string {
 		return net.JoinHostPort(observedHost, defaultRelayPort)
 	}
 	return ""
+}
+
+// parseResolver converts the resolver JSON stored on a resource into its proto
+// form. The stored shape is {"type": "...", "config": {"k": "v", ...}}; the DB
+// only guarantees the "type" key exists (resources_resolver_shape_check).
+//
+// A malformed, empty, or type-less value yields nil rather than an error. This
+// is deliberate: CompileACLSnapshot returning an error makes the caller
+// default-deny the ENTIRE workspace, so one bad resolver would take every user
+// offline. Returning nil instead confines the blast radius to the one resource
+// — the connector treats an absent resolver on a hostname-addressed entry as
+// unresolvable and denies just that dial.
+func parseResolver(raw string) *clientv1.ACLResolver {
+	if raw == "" {
+		return nil
+	}
+	var v struct {
+		Type   string            `json:"type"`
+		Config map[string]string `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil || v.Type == "" {
+		return nil
+	}
+	return &clientv1.ACLResolver{Type: v.Type, Config: v.Config}
 }
 
 func routeTypeForResource(status, shieldID string) (string, error) {

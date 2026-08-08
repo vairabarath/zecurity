@@ -20,11 +20,23 @@ import (
 func (r *mutationResolver) CreateResource(ctx context.Context, input graph.CreateResourceInput) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
+	host := blankToNil(input.Host)
+	hostname := blankToNil(input.Hostname)
+	if err := validateAddressing(host, hostname); err != nil {
+		return nil, fmt.Errorf("createResource: %w", err)
+	}
+	if err := validateResolverJSON(input.Resolver); err != nil {
+		return nil, fmt.Errorf("createResource: %w", err)
+	}
+
 	row, err := resource.Create(ctx, r.ResourceCfg.DB, tc.TenantID, resource.CreateInput{
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
-		Host:            &input.Host,
+		Host:            host,
+		Hostname:        hostname,
+		Resolver:        blankToNil(input.Resolver),
+		LocalTarget:     blankToNil(input.LocalTarget),
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,
@@ -43,14 +55,22 @@ func (r *mutationResolver) CreateResource(ctx context.Context, input graph.Creat
 func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input graph.UpdateResourceInput) (*graph.Resource, error) {
 	tc := tenant.MustGet(ctx)
 
+	if err := validateResolverJSON(input.Resolver); err != nil {
+		return nil, fmt.Errorf("updateResource: %w", err)
+	}
+
 	updIn := resource.UpdateInput{
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
+		Hostname:        blankToNil(input.Hostname),
+		Resolver:        blankToNil(input.Resolver),
+		LocalTarget:     blankToNil(input.LocalTarget),
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,
 	}
+
 	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)

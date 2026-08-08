@@ -89,7 +89,7 @@ cd connector && cargo build                                  # Rust connector
 cargo build --manifest-path shield/Cargo.toml               # Rust shield
 cd client && cargo build                                   # Rust client CLI
 buf generate                                                 # Proto → Go stubs (from repo root)
-cd controller && go generate ./graph/...                     # GraphQL codegen
+make gqlgen                                                  # GraphQL codegen (from repo root)
 cd admin && npm run codegen                                  # Frontend TS hooks
 ```
 

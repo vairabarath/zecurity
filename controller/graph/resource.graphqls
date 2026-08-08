@@ -2,7 +2,17 @@ type Resource {
   id:             ID!
   name:           String!
   description:    String
+  # Pinned IP. Empty string (never null) when the resource is name-addressed —
+  # kept non-null so existing clients don't break.
   host:           String!
+  # Name-addressed resources (PENDING-14). Null for classic IP-pinned ones.
+  hostname:       String
+  # Raw resolver JSON as stored, e.g. {"type":"dns","config":{"server":"..."}}.
+  # Null unless hostname is set.
+  resolver:       String
+  # Shield-delivered resources only: the address the shield dials on its own
+  # host (127.0.0.1 or its LAN IP).
+  localTarget:    String
   protocol:       String!
   portFrom:       Int!
   portTo:         Int!
@@ -19,7 +29,17 @@ input CreateResourceInput {
   remoteNetworkId: String!
   name:            String!
   description:     String
-  host:            String!       # IP of the resource host — must match a shield's lan_ip
+  # Exactly one of host / hostname must be given.
+  #   host     — IP of the resource host; must match a shield's lan_ip
+  #   hostname — a name the connector resolves at dial time
+  # Relaxed from String! to String in Sprint 16; omitting both is rejected by
+  # the resolver and, as a backstop, by resources_addressable_check.
+  host:            String
+  hostname:        String
+  # Resolver JSON: a JSON object with a required "type" ("dns" | "static") and
+  # an optional "config" object of string values. Only meaningful with hostname.
+  resolver:        String
+  localTarget:     String
   protocol:        String!       # "tcp", "udp", "any"
   portFrom:        Int!
   portTo:          Int!
@@ -29,6 +49,9 @@ input UpdateResourceInput {
   remoteNetworkId: String
   name:            String
   description:     String
+  hostname:        String
+  resolver:        String
+  localTarget:     String
   protocol:        String
   portFrom:        Int
   portTo:          Int

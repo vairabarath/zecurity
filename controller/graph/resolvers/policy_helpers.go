@@ -34,6 +34,12 @@ func loadUser(ctx context.Context, pool *pgxpool.Pool, userID string) (*models.U
 }
 
 // loadResourceByID fetches a minimal resource record by ID for policy responses.
+//
+// host is COALESCEd because it is nullable since migration 030 — a
+// name-addressed resource stores NULL there, and scanning NULL into
+// graph.Resource.Host (a non-nullable string) is a runtime error that would
+// fail the whole group query. The three addressing fields are nullable in the
+// schema too, so they scan straight into *string.
 func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, resourceID string) (*graph.Resource, error) {
 	var (
 		res          graph.Resource
@@ -46,9 +52,10 @@ func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, resourceID string
 		networkName  string
 	)
 	err := pool.QueryRow(ctx,
-		`SELECT r.id, r.name, r.description, r.host, r.protocol, r.port_from, r.port_to,
+		`SELECT r.id, r.name, r.description, COALESCE(r.host, ''), r.protocol, r.port_from, r.port_to,
 		        r.status, r.error_message, r.applied_at, r.last_verified_at, r.created_at,
-		        r.remote_network_id, rn.name
+		        r.remote_network_id, rn.name,
+		        r.hostname, r.resolver::text, r.local_target
 		 FROM resources r
 		 JOIN remote_networks rn ON rn.id = r.remote_network_id
 		 WHERE r.id = $1`,
@@ -57,6 +64,7 @@ func loadResourceByID(ctx context.Context, pool *pgxpool.Pool, resourceID string
 		&res.ID, &res.Name, &description, &res.Host, &res.Protocol, &res.PortFrom, &res.PortTo,
 		&res.Status, &errorMessage, &appliedAt, &lastVerified, &createdAt,
 		&networkID, &networkName,
+		&res.Hostname, &res.Resolver, &res.LocalTarget,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("resource %s not found", resourceID)

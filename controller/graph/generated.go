@@ -184,13 +184,16 @@ type ComplexityRoot struct {
 		ErrorMessage   func(childComplexity int) int
 		Groups         func(childComplexity int) int
 		Host           func(childComplexity int) int
+		Hostname       func(childComplexity int) int
 		ID             func(childComplexity int) int
 		LastVerifiedAt func(childComplexity int) int
+		LocalTarget    func(childComplexity int) int
 		Name           func(childComplexity int) int
 		PortFrom       func(childComplexity int) int
 		PortTo         func(childComplexity int) int
 		Protocol       func(childComplexity int) int
 		RemoteNetwork  func(childComplexity int) int
+		Resolver       func(childComplexity int) int
 		Shield         func(childComplexity int) int
 		Status         func(childComplexity int) int
 	}
@@ -1192,6 +1195,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.Host(childComplexity), true
+	case "Resource.hostname":
+		if e.ComplexityRoot.Resource.Hostname == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Resource.Hostname(childComplexity), true
 	case "Resource.id":
 		if e.ComplexityRoot.Resource.ID == nil {
 			break
@@ -1204,6 +1213,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.LastVerifiedAt(childComplexity), true
+	case "Resource.localTarget":
+		if e.ComplexityRoot.Resource.LocalTarget == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Resource.LocalTarget(childComplexity), true
 	case "Resource.name":
 		if e.ComplexityRoot.Resource.Name == nil {
 			break
@@ -1234,6 +1249,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.RemoteNetwork(childComplexity), true
+	case "Resource.resolver":
+		if e.ComplexityRoot.Resource.Resolver == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Resource.Resolver(childComplexity), true
 	case "Resource.shield":
 		if e.ComplexityRoot.Resource.Shield == nil {
 			break
@@ -1758,6 +1779,12 @@ func (ec *executionContext) childFields_Resource(ctx context.Context, field grap
 		return ec.fieldContext_Resource_description(ctx, field)
 	case "host":
 		return ec.fieldContext_Resource_host(ctx, field)
+	case "hostname":
+		return ec.fieldContext_Resource_hostname(ctx, field)
+	case "resolver":
+		return ec.fieldContext_Resource_resolver(ctx, field)
+	case "localTarget":
+		return ec.fieldContext_Resource_localTarget(ctx, field)
 	case "protocol":
 		return ec.fieldContext_Resource_protocol(ctx, field)
 	case "portFrom":
@@ -6970,6 +6997,75 @@ func (ec *executionContext) fieldContext_Resource_host(_ context.Context, field 
 	return graphql.NewScalarFieldContext("Resource", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _Resource_hostname(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Resource_hostname(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Hostname, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Resource_hostname(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Resource", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _Resource_resolver(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Resource_resolver(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Resolver, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Resource_resolver(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Resource", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _Resource_localTarget(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Resource_localTarget(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.LocalTarget, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Resource_localTarget(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Resource", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _Resource_protocol(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -9166,7 +9262,7 @@ func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Contex
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "host", "protocol", "portFrom", "portTo"}
+	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "host", "hostname", "resolver", "localTarget", "protocol", "portFrom", "portTo"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -9196,11 +9292,32 @@ func (ec *executionContext) unmarshalInputCreateResourceInput(ctx context.Contex
 			it.Description = data
 		case "host":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("host"))
-			data, err := ec.unmarshalNString2string(ctx, v)
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
 			if err != nil {
 				return it, err
 			}
 			it.Host = data
+		case "hostname":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("hostname"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Hostname = data
+		case "resolver":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("resolver"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Resolver = data
+		case "localTarget":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("localTarget"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.LocalTarget = data
 		case "protocol":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("protocol"))
 			data, err := ec.unmarshalNString2string(ctx, v)
@@ -9238,7 +9355,7 @@ func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Contex
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "protocol", "portFrom", "portTo"}
+	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "hostname", "resolver", "localTarget", "protocol", "portFrom", "portTo"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -9266,6 +9383,27 @@ func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Contex
 				return it, err
 			}
 			it.Description = data
+		case "hostname":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("hostname"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Hostname = data
+		case "resolver":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("resolver"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Resolver = data
+		case "localTarget":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("localTarget"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.LocalTarget = data
 		case "protocol":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("protocol"))
 			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
@@ -10602,6 +10740,12 @@ func (ec *executionContext) _Resource(ctx context.Context, sel ast.SelectionSet,
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "hostname":
+			out.Values[i] = ec._Resource_hostname(ctx, field, obj)
+		case "resolver":
+			out.Values[i] = ec._Resource_resolver(ctx, field, obj)
+		case "localTarget":
+			out.Values[i] = ec._Resource_localTarget(ctx, field, obj)
 		case "protocol":
 			out.Values[i] = ec._Resource_protocol(ctx, field, obj)
 			if out.Values[i] == graphql.Null {

@@ -155,24 +155,59 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 ### ── STAGE 2 — Delivery Split + Connector Resolution ──
 
 #### Phase 4 — Migration 030 + resource model
-- [ ] **4.1** `controller/migrations/030_fqdn_resources.sql` — add `hostname`, `resolver` (jsonb),
+- [x] **4.1** `controller/migrations/030_fqdn_resources.sql` — add `hostname`, `resolver` (jsonb),
       `local_target`; make `host` nullable for FQDN resources; keep `route_type` semantics.
       *(027–029 are taken by Sprint 14 — **030 is the next free number**.)*
-- [ ] **4.2** `internal/resource/store.go` — Create/Update carry `hostname` + `resolver`;
+      Also replaces the `(tenant_id, remote_network_id, host, name)` unique index with one on
+      `COALESCE(host, hostname)` — NULLs are distinct in Postgres, so the old index would have
+      allowed unlimited duplicate FQDN resources.
+- [x] **4.2** `internal/resource/store.go` — Create/Update carry `hostname` + `resolver`;
       `AutoMatchShield` applies only to IP-hosted (Protected-eligible) resources.
-- [ ] **4.3** Decide `shield_ids[]` shape (array column vs join table) — see decisions below.
-- [ ] **Gate:** `cd controller && go build ./...`
+      ⚠️ Making `host` nullable breaks **every** `Scan` into a non-nullable Go `string`; all
+      read sites now `COALESCE(host, '')`.
+- [x] **4.3** Decide `shield_ids[]` shape — **join table** `resource_shields`, written alongside
+      the singular `shield_id` while both exist.
+- [x] **Gate:** `cd controller && go build ./...` — **PASS**
+      *(Covered by `internal/resource/create_addressing_test.go`, DB-gated on
+      `RESOURCE_TEST_DATABASE_URL`.)*
 
 #### Phase 5 — Proto + ACL emission + GraphQL
-- [ ] **5.1** `proto/client/v1/client.proto` — `ACLEntry` **add fields 11+**: `hostname`,
-      `resolver` (nested message: `type` + `config`), `local_target` (+ `pattern` if wildcards are
-      adopted). **Fields 1–10 are in use; never renumber.**
-- [ ] **5.2** `buf generate` (Go stubs) + `cargo build` (Rust stubs, via build.rs).
-- [ ] **5.3** `internal/policy/store.go` + `compiler.go` — select and emit the new fields.
-- [ ] **5.4** GraphQL schema + `resource.resolvers.go` create/edit; `go generate ./graph/...`.
-- [ ] **Gate:** `cd controller && go build ./... && go vet ./...`
-- [ ] 💡 **Solo tip:** hand-insert one FQDN resource row via SQL here — it unblocks Phases 6–9 without
-      waiting on the UI (Phase 10).
+- [x] **5.1** `proto/client/v1/client.proto` — `ACLEntry` **add fields 11+**: `hostname` (11),
+      `resolver` (12, nested `ACLResolver` message: `type` + `config`). **Fields 1–10 are in use;
+      never renumber.** `reserved 13` (see the design correction below), `reserved 14` for
+      `pattern` if wildcards are adopted.
+- [x] **5.2** `buf generate` (Go stubs) + `cargo build` (Rust stubs, via build.rs).
+- [x] **5.3** `internal/policy/store.go` + `compiler.go` — select and emit the new fields.
+      Also `graph/resolvers/policy_helpers.go`, the **second** resource read path, whose raw
+      `SELECT r.host` would hard-fail on a NULL host (see design correction below).
+- [x] **5.4** GraphQL schema + `resource.resolvers.go` create/edit + `helpers.go` presenter;
+      regenerate with **`make gqlgen`** (`go generate ./graph/...` is a no-op — no directive exists).
+- [x] **Gate:** `cd controller && go build ./... && go vet ./...` — **PASS**
+- [x] 💡 **Solo tip:** hand-insert one FQDN resource row via SQL here — it unblocks Phases 6–9 without
+      waiting on the UI (Phase 10). *Done: scratch DB `ztna_p5test` built from migrations 001–030.*
+
+> **⚠️ Design correction — `local_target` does NOT belong in `ACLEntry`.**
+> 5.1 originally listed `local_target` alongside `hostname`/`resolver`, because migration 030
+> adds all three columns together. That grouping is right for the **database** (a shared store)
+> and wrong for the **wire** (point-to-point). `ACLSnapshot` reaches only clients and connectors;
+> neither dials a resource's on-host address. The **Shield** does, and Shields receive
+> `shield.v1.ResourceInstruction` — built by the controller in
+> `internal/connector/control_stream.go` — and never see an `ACLEntry`.
+> Keeping it there would have leaked an internal loopback address to every client, churned the
+> ACL version on every edit, and still not delivered it to the Shield.
+> **Resolution:** field 13 removed before it shipped and marked `reserved 13`. `local_target`
+> moves to Phase 8 (see 8.0). `TestACLRelevantUpdate`'s `local_target only → false` case is the
+> guard that fails if it reappears.
+> **Rule for later phases:** justify each new wire field by asking *"who receives this message,
+> and does each recipient need it?"* — never by how the data is grouped in the DB. Build, vet,
+> `buf breaking` and even mutation tests cannot catch a misplaced field; they only prove that
+> what you emit arrives.
+
+**Phase 5 test coverage:** `internal/policy/compiler_fqdn_test.go` (`TestParseResolver` ×8 no-DB,
+`TestCompileACLSnapshot_FQDNAddressing` ×3 DB-gated on `PKI_TEST_DATABASE_URL`),
+`graph/resolvers/resource_addressing_test.go` (×26), `internal/resource/acl_relevance_test.go` (×12).
+**Known gaps, deferred to Gate 2:** `loadResourceByID` is manually verified but has no regression
+test; the GraphQL `createResource` path with `hostname` has never been executed end-to-end.
 
 #### Phase 6 — Connector resolver module
 - [ ] **6.1** new `connector/src/resolver.rs` — `dns` + `static`; TTL-aware cache keyed by
@@ -189,6 +224,13 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 - [ ] **Gate:** `cd connector && cargo build`
 
 #### Phase 8 — Shield `local_target`
+- [ ] **8.0** **Deliver `local_target` to the Shield** (moved here from 5.1 — see the design
+      correction under Phase 5). `proto/shield/v1/shield.proto` — add `string local_target = 7`
+      to `ResourceInstruction` (fields 1–6 in use; never renumber). Then
+      `internal/resource/store.go` `BuildShieldSnapshot` selects the column, and
+      `internal/connector/control_stream.go` populates it in **all three**
+      `ResourceInstruction{}` construction sites (~lines 169, 220, 532).
+      `buf generate` + `cargo build --manifest-path shield/Cargo.toml`.
 - [ ] **8.1** `shield/src/resources.rs` — `validate_host` accepts the resource's `local_target`
       (`127.0.0.1` | own LAN IP). ⚠️ This touches a **non-negotiable rule** (`resource.host ==
       detect_lan_ip()`); the check must stay **equally strict**, only more explicitly sourced.

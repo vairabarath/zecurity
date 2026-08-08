@@ -153,8 +153,25 @@ message ACLSnapshot {
   repeated ACLRemoteNetwork remote_networks = 10;
 }
 
+// ACLResolver tells the connector how to turn a resource's `hostname` into a
+// dialable address at connect time. Only meaningful when `hostname` is set.
+//
+//   type = "dns"    → resolve `hostname` via the connector's own resolver
+//                     (config may carry "server", "port"; empty = system resolver)
+//   type = "static" → do not resolve; config["address"] is the literal target
+//
+// An unknown `type` must be treated as unresolvable and denied — never as a
+// silent fallback to `address`.
+message ACLResolver {
+  string type               = 1;
+  map<string, string> config = 2;
+}
+
 message ACLEntry {
   string resource_id                 = 1;
+  // Pinned IP address. Empty when the resource is addressed by `hostname`.
+  // Exactly one of `address` / `hostname` is set (enforced by the controller's
+  // resources_addressable_check).
   string address                     = 2;
   uint32 port                        = 3;
   string protocol                    = 4;
@@ -164,6 +181,20 @@ message ACLEntry {
   string shield_id                   = 8; // set when route_type == "shield"
   string remote_network_id           = 9; // routing reference — look up ACLRemoteNetwork to find connectors
   string preferred_connector_id      = 10; // set for shield routes when the Shield's current Connector is known
+
+  // ── Name-addressed resources (PENDING-14 / Sprint 16 Stage 2) ────────────
+  // The name the connector resolves instead of dialing `address`. Empty for
+  // classic IP-pinned resources, which keep working unchanged.
+  string hostname                    = 11;
+  // How to resolve `hostname`. Absent when `hostname` is empty.
+  ACLResolver resolver               = 12;
+
+  // 13 was briefly `local_target` during Sprint 16 Phase 5 and was removed
+  // before it shipped. It belongs on shield.v1.ResourceInstruction, not here:
+  // ACLSnapshot reaches only clients and connectors, and neither dials a
+  // resource's on-host address — the Shield does, and it never sees an ACLEntry.
+  reserved 13;
+  reserved 14; // reserved for `pattern` (wildcard hostnames) — deferred, do not reuse
 }
 
 // ── Transport plane (ADR-015 Track B) ───────────────────────────────────────

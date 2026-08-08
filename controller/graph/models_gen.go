@@ -54,7 +54,10 @@ type CreateResourceInput struct {
 	RemoteNetworkID string  `json:"remoteNetworkId"`
 	Name            string  `json:"name"`
 	Description     *string `json:"description,omitempty"`
-	Host            string  `json:"host"`
+	Host            *string `json:"host,omitempty"`
+	Hostname        *string `json:"hostname,omitempty"`
+	Resolver        *string `json:"resolver,omitempty"`
+	LocalTarget     *string `json:"localTarget,omitempty"`
 	Protocol        string  `json:"protocol"`
 	PortFrom        int     `json:"portFrom"`
 	PortTo          int     `json:"portTo"`
@@ -110,6 +113,9 @@ type Resource struct {
 	Name           string         `json:"name"`
 	Description    *string        `json:"description,omitempty"`
 	Host           string         `json:"host"`
+	Hostname       *string        `json:"hostname,omitempty"`
+	Resolver       *string        `json:"resolver,omitempty"`
+	LocalTarget    *string        `json:"localTarget,omitempty"`
 	Protocol       string         `json:"protocol"`
 	PortFrom       int            `json:"portFrom"`
 	PortTo         int            `json:"portTo"`
@@ -156,6 +162,9 @@ type UpdateResourceInput struct {
 	RemoteNetworkID *string `json:"remoteNetworkId,omitempty"`
 	Name            *string `json:"name,omitempty"`
 	Description     *string `json:"description,omitempty"`
+	Hostname        *string `json:"hostname,omitempty"`
+	Resolver        *string `json:"resolver,omitempty"`
+	LocalTarget     *string `json:"localTarget,omitempty"`
 	Protocol        *string `json:"protocol,omitempty"`
 	PortFrom        *int    `json:"portFrom,omitempty"`
 	PortTo          *int    `json:"portTo,omitempty"`
