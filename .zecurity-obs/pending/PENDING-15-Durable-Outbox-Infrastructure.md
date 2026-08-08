@@ -32,8 +32,8 @@ delete), all of that user's device trust must be revoked. Today the controller h
 no durable outbox: side effects are performed inline or fire-and-forget, with no
 retry, no persistence, and no delivery guarantee.
 
-ADR-025 (§7 "Lifecycle and Device Trust", §15 "Transaction and Concurrency
-Requirements", §17 "Final Review Status") explicitly requires:
+ADR-025 (§5 "Lifecycle + Device-Trust Integration", §8 "Synchronization Semantics",
+§5.1 "Device Outbox Events") explicitly requires:
 
 > "External and device-side effects, including certificate revocation, are
 > delivered through a durable outbox with retry and observability."
@@ -76,7 +76,7 @@ What generic outbox infrastructure do we build so that:
 CREATE TABLE outbox_events (
     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type      TEXT        NOT NULL,
-    tenant_id       UUID        NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+    workspace_id    UUID        NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
     user_id         UUID        REFERENCES users(id) ON DELETE SET NULL,
     correlation_id  UUID        NOT NULL,
     payload         JSONB       NOT NULL,
@@ -96,9 +96,9 @@ CREATE INDEX idx_outbox_claim
     ON outbox_events (status, next_attempt_at, retry_count)
     WHERE status IN ('pending', 'failed');
 
--- Tenant-scoped lookups and cleanup.
-CREATE INDEX idx_outbox_tenant_event
-    ON outbox_events (tenant_id, event_type);
+-- Workspace-scoped lookups and cleanup.
+CREATE INDEX idx_outbox_workspace_event
+    ON outbox_events (workspace_id, event_type);
 
 CREATE INDEX idx_outbox_processing
     ON outbox_events (status, claimed_at)
@@ -107,7 +107,7 @@ CREATE INDEX idx_outbox_processing
 
 **Conventions followed:**
 - UUIDs match all other tables (`gen_random_uuid()`).
-- `tenant_id` is NOT NULL + `ON DELETE RESTRICT`; workspace deletion must resolve outstanding events
+- `workspace_id` is NOT NULL + `ON DELETE RESTRICT`; workspace deletion must resolve outstanding events
   explicitly rather than implicitly deleting committed work.
 - `created_at` / `updated_at` TIMESTAMPTZ NOT NULL DEFAULT NOW(), matching every existing table.
 - `claimed_at` is the lease timestamp; `updated_at` remains a general row-update timestamp.
@@ -142,7 +142,7 @@ durable events.
 func (o *Outbox) Enqueue(ctx context.Context, tx pgx.Tx, evt Event) error
 ```
 
-The identity transaction flow (ADR-025 §7):
+The identity transaction flow (ADR-025 §8):
 
 ```
 identity mutation
@@ -419,13 +419,13 @@ PENDING-13 consumer (device lifecycle)
 device trust / certificate operation
 ```
 
-**Events ADR-025 will eventually emit** (defined by ADR-025 §7, consumed by
+**Events ADR-025 will eventually emit** (defined by ADR-025 §5.1, consumed by
 PENDING-13):
 
 | event_type | payload | triggered by |
 |---|---|---|
-| `device.trust.revoke.requested` | `{tenant_id, user_id, reason: "suspended"\|"deleted", correlation_id}` | SCIM `PATCH active=false`, `DELETE` |
-| `device.trust.re_enrollment_required` | `{tenant_id, user_id, correlation_id}` | SCIM `PATCH active=true` (reactivation) |
+| `device.trust.revoke.requested` | `{workspace_id, user_id, reason: "suspended"\|"deleted", correlation_id}` | SCIM `PATCH active=false`, `DELETE` |
+| `device.trust.re_enrollment_required` | `{workspace_id, user_id, correlation_id}` | SCIM `PATCH active=true` (reactivation) |
 
 **The outbox does NOT implement these handlers.** PENDING-15 defines only the
 generic event-delivery mechanism. PENDING-13 owns the device-side consumer,
@@ -502,7 +502,7 @@ usage). Do not invent a new observability framework.
 
 Requirements:
 
-- **Processing failures:** log the event type, tenant_id, user_id, retry number,
+- **Processing failures:** log the event type, workspace_id, user_id, retry number,
   and error message.
 - **Retry count:** tracked in the `retry_count` column; logged on each failure.
 - **Event status:** queryable via `status` column (`pending`, `processing`,
@@ -553,7 +553,7 @@ Those belong to ADR-025 implementation work or PENDING-13.
   at startup alongside other background goroutines (mirroring
   `connector.RunDisconnectWatcher`, `shieldSvc.RunDisconnectWatcher`,
   `relay.RunExpiryLoop`).
-- ADR-025's durable-outbox architectural requirement (§7, §15, §17).
+- ADR-025's durable-outbox architectural requirement (§5, §5.1, §8).
 
 ### Consumed by
 - ADR-025 SCIM lifecycle implementation — emits `device.trust.revoke.requested`
@@ -576,7 +576,7 @@ Those belong to ADR-025 implementation work or PENDING-13.
 - Four-state `status` model: `pending`, `processing`, `done`, `failed`.
 - Indexes on `(status, next_attempt_at, retry_count)` for claiming and
   `(status, claimed_at)` for reaping.
-- `tenant_id` NOT NULL + FK to `workspaces(id) ON DELETE RESTRICT` for tenant
+- `workspace_id` NOT NULL + FK to `workspaces(id) ON DELETE RESTRICT` for workspace
   isolation; workspace deletion cannot implicitly delete committed outbox events.
 - `lease_id` and `claimed_at` are present; `updated_at` is not used as the lease
   timestamp.
@@ -677,12 +677,15 @@ recovery correctness — mocks cannot prove these guarantees.
 > contract for the durable outbox. This PENDING task implements the reusable
 > platform infrastructure required to satisfy that contract.
 
-ADR-025 §7 requires that "External and device-side effects, including certificate
-revocation, are delivered through a durable outbox with retry and observability."
-ADR-025 §15 requires "Device certificate revocation or durable outbox enqueue" as
-a transaction boundary. ADR-025 §17 states it remains PROPOSED "until the final
-architectural review and implementation-readiness check approve the resulting
-migrations, authorization model, outbox, and interoperability test plan."
+ADR-025 §5 requires that device-trust side-effects be delivered through a durable
+outbox, and that a downstream device/policy failure must never roll back the
+committed identity lifecycle mutation.
+ADR-025 §5.1 defines the event contract (§8 defines the transactional sequence:
+identity mutation + audit + outbox event committed atomically before post-commit
+processing).
+ADR-025 remains PROPOSED "until the final architectural review and
+implementation-readiness check approve the resulting migrations, authorization
+model, **outbox**, and interoperability test plan."
 
 This PENDING provides that outbox infrastructure so ADR-025 can emit
 identity-lifecycle-triggered device-trust revocation events durably and reliably.
@@ -700,7 +703,7 @@ PENDING-13 (Client Device Lifecycle & Cert Renewal) owns:
 
 PENDING-13 will register handlers for the outbox events this PENDING defines the
 delivery mechanism for:
-- `device.trust.revoke.requested` → `client.RevokeUserDevices(tenantID, userID, reason)`
+- `device.trust.revoke.requested` → `client.RevokeUserDevices(workspaceID, userID, reason)`
 - `device.trust.re_enrollment_required` → invalidate/revoke device trust state
 
 This PENDING (PENDING-15) does **not** implement those handlers.
