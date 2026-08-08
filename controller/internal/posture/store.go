@@ -24,6 +24,7 @@ var (
 	ErrEmptyEnforceProfile  = errors.New("enforced profile must have at least one requirement")
 	ErrInvalidMode          = errors.New("invalid device profile mode")
 	ErrInvalidProfileName   = errors.New("device profile name is required")
+	ErrNoVerificationMethod = errors.New("profile must have at least one verification method")
 )
 
 const (
@@ -72,13 +73,14 @@ type Observation struct {
 }
 
 type Profile struct {
-	ID          uuid.UUID
-	WorkspaceID uuid.UUID
-	Name        string
-	Mode        string
-	Revision    int64
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID                 uuid.UUID
+	WorkspaceID        uuid.UUID
+	Name               string
+	Mode               string
+	Revision           int64
+	ManualTrustEnabled bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 type Requirement struct {
@@ -311,6 +313,7 @@ func (s *Store) CreateProfile(
 	ctx context.Context,
 	workspaceID uuid.UUID,
 	name string,
+	manualTrustEnabled bool,
 ) (*Profile, error) {
 	profile := &Profile{}
 	name = strings.TrimSpace(name)
@@ -322,24 +325,28 @@ func (s *Store) CreateProfile(
 		ctx,
 		`INSERT INTO device_profiles (
 		     workspace_id,
-		     name
+		     name,
+		     manual_trust_enabled
 		 )
-		 VALUES ($1, $2)
+		 VALUES ($1, $2, $3)
 		 RETURNING id,
 		           workspace_id,
 		           name,
 		           mode,
 		           revision,
+		           manual_trust_enabled,
 		           created_at,
 		           updated_at`,
 		workspaceID,
 		name,
+		manualTrustEnabled,
 	).Scan(
 		&profile.ID,
 		&profile.WorkspaceID,
 		&profile.Name,
 		&profile.Mode,
 		&profile.Revision,
+		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -395,6 +402,7 @@ func (s *Store) GetProfile(
 	        name,
 	        mode,
 	        revision,
+	        manual_trust_enabled,
 	        created_at,
 	        updated_at
 	   FROM device_profiles
@@ -408,6 +416,7 @@ func (s *Store) GetProfile(
 		&profile.Name,
 		&profile.Mode,
 		&profile.Revision,
+		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -433,6 +442,7 @@ func (s *Store) ListProfiles(
 		        name,
 		        mode,
 		        revision,
+		        manual_trust_enabled,
 		        created_at,
 		        updated_at
 		   FROM device_profiles
@@ -456,6 +466,7 @@ func (s *Store) ListProfiles(
 			&profile.Name,
 			&profile.Mode,
 			&profile.Revision,
+			&profile.ManualTrustEnabled,
 			&profile.CreatedAt,
 			&profile.UpdatedAt,
 		); err != nil {
@@ -533,6 +544,7 @@ func (s *Store) UpdateProfileMode(
 		name,
 		mode,
 		revision,
+		manual_trust_enabled,
 		created_at,
 		updated_at;`,
 
@@ -545,6 +557,7 @@ func (s *Store) UpdateProfileMode(
 		&profile.Name,
 		&profile.Mode,
 		&profile.Revision,
+		&profile.ManualTrustEnabled,
 		&profile.CreatedAt,
 		&profile.UpdatedAt,
 	)
@@ -557,6 +570,62 @@ func (s *Store) UpdateProfileMode(
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit update profile mode: %w", err)
 	}
+	return profile, nil
+}
+
+func (s *Store) UpdateProfileManualTrust(
+	ctx context.Context,
+	workspaceID,
+	profileID uuid.UUID,
+	enabled bool,
+) (*Profile, error) {
+	profile := &Profile{}
+
+	// Manual Trust is currently the only verification method that exists.
+	// Disabling it would leave the profile with zero verification methods,
+	// so it's rejected the same way an empty-requirement enforce profile is
+	// rejected elsewhere. Once a second trust method type exists, this
+	// check should move to counting enabled methods rather than a hardcoded
+	// refusal.
+	if !enabled {
+		return nil, ErrNoVerificationMethod
+	}
+
+	err := s.pool.QueryRow(
+		ctx,
+		`UPDATE device_profiles
+		    SET manual_trust_enabled = $3,
+		        updated_at = NOW()
+		  WHERE workspace_id = $1
+		    AND id = $2
+		RETURNING id,
+		          workspace_id,
+		          name,
+		          mode,
+		          revision,
+		          manual_trust_enabled,
+		          created_at,
+		          updated_at`,
+		workspaceID,
+		profileID,
+		enabled,
+	).Scan(
+		&profile.ID,
+		&profile.WorkspaceID,
+		&profile.Name,
+		&profile.Mode,
+		&profile.Revision,
+		&profile.ManualTrustEnabled,
+		&profile.CreatedAt,
+		&profile.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("update device profile manual trust: %w", err)
+	}
+
 	return profile, nil
 }
 

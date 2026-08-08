@@ -86,11 +86,24 @@ func TestStoreIntegration(t *testing.T) {
 		t.Fatalf("observations = %#v", observations)
 	}
 
-	profile, err := store.CreateProfile(ctx, workspaceA, "Managed Linux")
+	profile, err := store.CreateProfile(ctx, workspaceA, "Managed Linux", true)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}
-	emptyProfile, err := store.CreateProfile(ctx, workspaceA, "Empty enforce guard")
+	if !profile.ManualTrustEnabled {
+		t.Fatalf("profile.ManualTrustEnabled = false, want true")
+	}
+	if _, err := store.UpdateProfileManualTrust(ctx, workspaceA, profile.ID, false); !errors.Is(err, ErrNoVerificationMethod) {
+		t.Fatalf("disable manual trust error = %v, want %v", err, ErrNoVerificationMethod)
+	}
+	trustedProfile, err := store.UpdateProfileManualTrust(ctx, workspaceA, profile.ID, true)
+	if err != nil {
+		t.Fatalf("re-enable manual trust: %v", err)
+	}
+	if !trustedProfile.ManualTrustEnabled {
+		t.Fatalf("trustedProfile.ManualTrustEnabled = false, want true")
+	}
+	emptyProfile, err := store.CreateProfile(ctx, workspaceA, "Empty enforce guard", true)
 	if err != nil {
 		t.Fatalf("create empty profile: %v", err)
 	}

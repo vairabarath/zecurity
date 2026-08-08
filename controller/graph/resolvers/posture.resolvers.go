@@ -95,7 +95,7 @@ func (r *deviceProfileResolver) BoundResources(ctx context.Context, obj *graph.D
 }
 
 // CreateDeviceProfile is the resolver for the createDeviceProfile field.
-func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string) (*graph.DeviceProfile, error) {
+func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string, manualTrust *bool) (*graph.DeviceProfile, error) {
 	tc := tenant.MustGet(ctx)
 
 	workspaceID, err := uuid.Parse(tc.TenantID)
@@ -103,7 +103,12 @@ func (r *mutationResolver) CreateDeviceProfile(ctx context.Context, name string)
 		return nil, fmt.Errorf("invalid workspace id: %w", err)
 	}
 
-	profile, err := r.PostureStore.CreateProfile(ctx, workspaceID, name)
+	manualTrustEnabled := true
+	if manualTrust != nil {
+		manualTrustEnabled = *manualTrust
+	}
+
+	profile, err := r.PostureStore.CreateProfile(ctx, workspaceID, name, manualTrustEnabled)
 	if err != nil {
 		if errors.Is(err, posture.ErrInvalidProfileName) {
 			return nil, apperr.UserErrorf("createDeviceProfile: name is required")
@@ -148,6 +153,37 @@ func (r *mutationResolver) UpdateDeviceProfileMode(ctx context.Context, id strin
 	}
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return nil, fmt.Errorf("updateDeviceProfileMode notify: %w", err)
+	}
+
+	return postureProfileToGQL(profile), nil
+}
+
+// UpdateDeviceProfileManualTrust is the resolver for the updateDeviceProfileManualTrust field.
+func (r *mutationResolver) UpdateDeviceProfileManualTrust(ctx context.Context, id string, enabled bool) (*graph.DeviceProfile, error) {
+	tc := tenant.MustGet(ctx)
+
+	workspaceID, err := uuid.Parse(tc.TenantID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid workspace id: %w", err)
+	}
+
+	profileID, err := uuid.Parse(id)
+	if err != nil {
+		return nil, apperr.UserErrorf("invalid profile id")
+	}
+
+	profile, err := r.PostureStore.UpdateProfileManualTrust(ctx, workspaceID, profileID, enabled)
+	if err != nil {
+		if errors.Is(err, posture.ErrNoVerificationMethod) {
+			return nil, apperr.UserErrorf("updateDeviceProfileManualTrust: profile must have at least one verification method")
+		}
+		if errors.Is(err, posture.ErrNotFound) {
+			return nil, apperr.UserErrorf("updateDeviceProfileManualTrust: profile not found")
+		}
+		return nil, fmt.Errorf("updateDeviceProfileManualTrust: %w", err)
+	}
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return nil, fmt.Errorf("updateDeviceProfileManualTrust notify: %w", err)
 	}
 
 	return postureProfileToGQL(profile), nil

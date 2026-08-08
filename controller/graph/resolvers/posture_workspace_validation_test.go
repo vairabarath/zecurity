@@ -29,7 +29,7 @@ func TestDeleteDeviceProfileRejectsCrossWorkspaceProfile(t *testing.T) {
 		_, _ = f.pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, otherWorkspaceID)
 	})
 
-	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-delete")
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-delete", true)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestAddProfileRequirementRejectsCrossWorkspaceProfile(t *testing.T) {
 		_, _ = f.pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, otherWorkspaceID)
 	})
 
-	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-add-req")
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-add-req", true)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestRemoveProfileRequirementRejectsCrossWorkspaceProfile(t *testing.T) {
 		_, _ = f.pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, otherWorkspaceID)
 	})
 
-	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-remove-req")
+	profile, err := f.mr.PostureStore.CreateProfile(f.ctx, otherWorkspaceID, "cross-ws-remove-req", true)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
 	}

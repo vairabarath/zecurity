@@ -94,7 +94,7 @@ func TestStoreDeleteExpiredReports(t *testing.T) {
 		}
 	}
 
-	profile, err := store.CreateProfile(ctx, workspaceID, "retention-profile")
+	profile, err := store.CreateProfile(ctx, workspaceID, "retention-profile", true)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
 	}

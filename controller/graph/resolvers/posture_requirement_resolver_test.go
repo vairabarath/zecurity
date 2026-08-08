@@ -18,6 +18,7 @@ func TestAddProfileRequirement_UnknownCheck(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-unknown-check-add-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -50,6 +51,7 @@ func TestRemoveProfileRequirement_UnknownCheck(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-unknown-check-remove-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -83,6 +85,7 @@ func TestAddProfileRequirement_Duplicate(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-duplicate-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -124,6 +127,7 @@ func TestAddProfileRequirement_Success(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-add-success-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -157,6 +161,7 @@ func TestRemoveProfileRequirement_Success(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-remove-success-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -197,6 +202,7 @@ func TestRemoveProfileRequirement_LastEnforceRejected(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"test-last-enforce-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)

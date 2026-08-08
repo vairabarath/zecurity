@@ -15,9 +15,10 @@ import (
 
 func postureProfileToGQL(profile *posture.Profile) *graph.DeviceProfile {
 	return &graph.DeviceProfile{
-		ID:   profile.ID.String(),
-		Name: profile.Name,
-		Mode: graph.DeviceProfileMode(strings.ToUpper(profile.Mode)),
+		ID:          profile.ID.String(),
+		Name:        profile.Name,
+		Mode:        graph.DeviceProfileMode(strings.ToUpper(profile.Mode)),
+		ManualTrust: profile.ManualTrustEnabled,
 	}
 }
 

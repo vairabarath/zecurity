@@ -84,6 +84,39 @@ func TestCreateDeviceProfileBlankNameReturnsUserError(t *testing.T) {
 	}
 }
 
+func TestUpdateDeviceProfileManualTrustRejectsDisable(t *testing.T) {
+	ctx := tenant.Set(context.Background(), tenant.TenantContext{
+		TenantID: uuid.NewString(),
+		UserID:   uuid.NewString(),
+		Role:     "admin",
+	})
+
+	srv := handler.NewDefaultServer(graph.NewExecutableSchema(graph.Config{
+		Resolvers: &Resolver{PostureStore: posture.NewStore(nil)},
+		Directives: graph.DirectiveRoot{
+			HasRole: HasRole,
+		},
+	}))
+	srv.SetErrorPresenter(ErrorPresenter)
+	body := []byte(`{"query":"mutation { updateDeviceProfileManualTrust(id: \"00000000-0000-0000-0000-000000000001\", enabled: false) { id } }"}`)
+	req := httptest.NewRequest("POST", "/graphql", bytes.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, req)
+
+	var response struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode GraphQL response: %v; body=%s", err, recorder.Body.String())
+	}
+	if len(response.Errors) != 1 || response.Errors[0].Message != "updateDeviceProfileManualTrust: profile must have at least one verification method" {
+		t.Fatalf("GraphQL errors = %#v, want safe no-verification-method error", response.Errors)
+	}
+}
+
 func TestDevicePostureVisibilityRequiresAdmin(t *testing.T) {
 	ctx := tenant.Set(context.Background(), tenant.TenantContext{
 		TenantID: uuid.NewString(),
@@ -124,6 +157,7 @@ func TestPostureBindingResolversNotifyAndLoadBoundResources(t *testing.T) {
 		f.ctx,
 		uuid.MustParse(f.tenantID),
 		"posture-resolver-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -201,6 +235,7 @@ func TestBindResourceToProfileRejectsEmptyEnforcedProfile(t *testing.T) {
 		f.ctx,
 		workspaceID,
 		"posture-empty-enforce-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -250,6 +285,7 @@ func TestBindResourceToProfileRejectsCrossWorkspaceProfile(t *testing.T) {
 		f.ctx,
 		otherWorkspaceID,
 		"cross-workspace-profile",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
@@ -330,6 +366,7 @@ func TestDevicePostureVisibilityResolver(t *testing.T) {
 		f.ctx,
 		workspaceID,
 		"visibility-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -454,6 +491,7 @@ func TestDevicePostureVisibilityResolverRejectsCrossWorkspaceProfile(t *testing.
 		f.ctx,
 		otherWorkspaceID,
 		"other-workspace-visibility",
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)

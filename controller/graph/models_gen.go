@@ -84,6 +84,7 @@ type DeviceProfile struct {
 	ID             string                      `json:"id"`
 	Name           string                      `json:"name"`
 	Mode           DeviceProfileMode           `json:"mode"`
+	ManualTrust    bool                        `json:"manualTrust"`
 	Requirements   []*DeviceProfileRequirement `json:"requirements"`
 	BoundResources []*Resource                 `json:"boundResources"`
 }

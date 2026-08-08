@@ -19,6 +19,7 @@ func TestDeleteDeviceProfile_Success(t *testing.T) {
 		f.ctx,
 		workspaceID,
 		"delete-me-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)
@@ -71,6 +72,7 @@ func TestDeleteDeviceProfile_NotFound(t *testing.T) {
 		f.ctx,
 		otherWorkspaceID,
 		"cross-ws-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create other-workspace profile: %v", err)
@@ -94,6 +96,7 @@ func TestDeleteDeviceProfile_NoNotifyOnStoreError(t *testing.T) {
 		f.ctx,
 		workspaceID,
 		"delete-fail-"+uuid.NewString(),
+		true,
 	)
 	if err != nil {
 		t.Fatalf("create profile: %v", err)

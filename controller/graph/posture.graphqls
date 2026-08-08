@@ -28,6 +28,7 @@ type DeviceProfile {
   id: ID!
   name: String!
   mode: DeviceProfileMode!
+  manualTrust: Boolean!
   requirements: [DeviceProfileRequirement!]! @goField(forceResolver: true)
   boundResources: [Resource!]! @goField(forceResolver: true)
 }
@@ -65,11 +66,17 @@ extend type Query {
 extend type Mutation {
   createDeviceProfile(
     name: String!
+    manualTrust: Boolean = true
   ): DeviceProfile! @hasRole(roles: [ADMIN])
 
   updateDeviceProfileMode(
     id: ID!
     mode: DeviceProfileMode!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  updateDeviceProfileManualTrust(
+    id: ID!
+    enabled: Boolean!
   ): DeviceProfile! @hasRole(roles: [ADMIN])
 
   addProfileRequirement(

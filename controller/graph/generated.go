@@ -109,6 +109,7 @@ type ComplexityRoot struct {
 	DeviceProfile struct {
 		BoundResources func(childComplexity int) int
 		ID             func(childComplexity int) int
+		ManualTrust    func(childComplexity int) int
 		Mode           func(childComplexity int) int
 		Name           func(childComplexity int) int
 		Requirements   func(childComplexity int) int
@@ -149,39 +150,40 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		AddGroupMember            func(childComplexity int, groupID string, userID string) int
-		AddProfileRequirement     func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
-		AssignResourceToGroup     func(childComplexity int, resourceID string, groupID string) int
-		BindResourceToProfile     func(childComplexity int, profileID string, resourceID string) int
-		CreateDeviceProfile       func(childComplexity int, name string) int
-		CreateGroup               func(childComplexity int, name string, description *string) int
-		CreateInvitation          func(childComplexity int, email string) int
-		CreateRemoteNetwork       func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource            func(childComplexity int, input CreateResourceInput) int
-		DeleteConnector           func(childComplexity int, id string) int
-		DeleteDeviceProfile       func(childComplexity int, id string) int
-		DeleteGroup               func(childComplexity int, id string) int
-		DeleteRemoteNetwork       func(childComplexity int, id string) int
-		DeleteResource            func(childComplexity int, id string) int
-		DeleteShield              func(childComplexity int, id string) int
-		ForceDeleteResource       func(childComplexity int, id string) int
-		GenerateConnectorToken    func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken       func(childComplexity int, remoteNetworkID string, shieldName string) int
-		InitiateAuth              func(childComplexity int, provider string, workspaceName *string) int
-		PromoteDiscoveredService  func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource           func(childComplexity int, id string) int
-		RemoveGroupMember         func(childComplexity int, groupID string, userID string) int
-		RemoveProfileRequirement  func(childComplexity int, profileID string, checkID string) int
-		RevokeConnector           func(childComplexity int, id string) int
-		RevokeDevice              func(childComplexity int, deviceID string) int
-		RevokeShield              func(childComplexity int, id string) int
-		TriggerScan               func(childComplexity int, connectorID string, targets []string, ports []int) int
-		UnassignResourceFromGroup func(childComplexity int, resourceID string, groupID string) int
-		UnbindResourceFromProfile func(childComplexity int, profileID string, resourceID string) int
-		UnprotectResource         func(childComplexity int, id string) int
-		UpdateDeviceProfileMode   func(childComplexity int, id string, mode DeviceProfileMode) int
-		UpdateGroup               func(childComplexity int, id string, name *string, description *string) int
-		UpdateResource            func(childComplexity int, id string, input UpdateResourceInput) int
+		AddGroupMember                 func(childComplexity int, groupID string, userID string) int
+		AddProfileRequirement          func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
+		AssignResourceToGroup          func(childComplexity int, resourceID string, groupID string) int
+		BindResourceToProfile          func(childComplexity int, profileID string, resourceID string) int
+		CreateDeviceProfile            func(childComplexity int, name string, manualTrust *bool) int
+		CreateGroup                    func(childComplexity int, name string, description *string) int
+		CreateInvitation               func(childComplexity int, email string) int
+		CreateRemoteNetwork            func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource                 func(childComplexity int, input CreateResourceInput) int
+		DeleteConnector                func(childComplexity int, id string) int
+		DeleteDeviceProfile            func(childComplexity int, id string) int
+		DeleteGroup                    func(childComplexity int, id string) int
+		DeleteRemoteNetwork            func(childComplexity int, id string) int
+		DeleteResource                 func(childComplexity int, id string) int
+		DeleteShield                   func(childComplexity int, id string) int
+		ForceDeleteResource            func(childComplexity int, id string) int
+		GenerateConnectorToken         func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken            func(childComplexity int, remoteNetworkID string, shieldName string) int
+		InitiateAuth                   func(childComplexity int, provider string, workspaceName *string) int
+		PromoteDiscoveredService       func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource                func(childComplexity int, id string) int
+		RemoveGroupMember              func(childComplexity int, groupID string, userID string) int
+		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
+		RevokeConnector                func(childComplexity int, id string) int
+		RevokeDevice                   func(childComplexity int, deviceID string) int
+		RevokeShield                   func(childComplexity int, id string) int
+		TriggerScan                    func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnassignResourceFromGroup      func(childComplexity int, resourceID string, groupID string) int
+		UnbindResourceFromProfile      func(childComplexity int, profileID string, resourceID string) int
+		UnprotectResource              func(childComplexity int, id string) int
+		UpdateDeviceProfileManualTrust func(childComplexity int, id string, enabled bool) int
+		UpdateDeviceProfileMode        func(childComplexity int, id string, mode DeviceProfileMode) int
+		UpdateGroup                    func(childComplexity int, id string, name *string, description *string) int
+		UpdateResource                 func(childComplexity int, id string, input UpdateResourceInput) int
 	}
 
 	PostureCheckDescriptor struct {
@@ -339,8 +341,9 @@ type MutationResolver interface {
 	RemoveGroupMember(ctx context.Context, groupID string, userID string) (*Group, error)
 	AssignResourceToGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
 	UnassignResourceFromGroup(ctx context.Context, resourceID string, groupID string) (*Resource, error)
-	CreateDeviceProfile(ctx context.Context, name string) (*DeviceProfile, error)
+	CreateDeviceProfile(ctx context.Context, name string, manualTrust *bool) (*DeviceProfile, error)
 	UpdateDeviceProfileMode(ctx context.Context, id string, mode DeviceProfileMode) (*DeviceProfile, error)
+	UpdateDeviceProfileManualTrust(ctx context.Context, id string, enabled bool) (*DeviceProfile, error)
 	AddProfileRequirement(ctx context.Context, profileID string, checkID string, allowUnsupported bool) (*DeviceProfile, error)
 	DeleteDeviceProfile(ctx context.Context, id string) (bool, error)
 	RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*DeviceProfile, error)
@@ -674,6 +677,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.DeviceProfile.ID(childComplexity), true
+	case "DeviceProfile.manualTrust":
+		if e.ComplexityRoot.DeviceProfile.ManualTrust == nil {
+			break
+		}
+
+		return e.ComplexityRoot.DeviceProfile.ManualTrust(childComplexity), true
 	case "DeviceProfile.mode":
 		if e.ComplexityRoot.DeviceProfile.Mode == nil {
 			break
@@ -883,7 +892,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.CreateDeviceProfile(childComplexity, args["name"].(string)), true
+		return e.ComplexityRoot.Mutation.CreateDeviceProfile(childComplexity, args["name"].(string), args["manualTrust"].(*bool)), true
 	case "Mutation.createGroup":
 		if e.ComplexityRoot.Mutation.CreateGroup == nil {
 			break
@@ -1159,6 +1168,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UnprotectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.updateDeviceProfileManualTrust":
+		if e.ComplexityRoot.Mutation.UpdateDeviceProfileManualTrust == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateDeviceProfileManualTrust_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateDeviceProfileManualTrust(childComplexity, args["id"].(string), args["enabled"].(bool)), true
 	case "Mutation.updateDeviceProfileMode":
 		if e.ComplexityRoot.Mutation.UpdateDeviceProfileMode == nil {
 			break
@@ -2046,6 +2066,8 @@ func (ec *executionContext) childFields_DeviceProfile(ctx context.Context, field
 		return ec.fieldContext_DeviceProfile_name(ctx, field)
 	case "mode":
 		return ec.fieldContext_DeviceProfile_mode(ctx, field)
+	case "manualTrust":
+		return ec.fieldContext_DeviceProfile_manualTrust(ctx, field)
 	case "requirements":
 		return ec.fieldContext_DeviceProfile_requirements(ctx, field)
 	case "boundResources":
@@ -2551,6 +2573,14 @@ func (ec *executionContext) field_Mutation_createDeviceProfile_args(ctx context.
 		return nil, err
 	}
 	args["name"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "manualTrust",
+		func(ctx context.Context, v any) (*bool, error) {
+			return ec.unmarshalOBoolean2ᚖbool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["manualTrust"] = arg1
 	return args, nil
 }
 
@@ -3005,6 +3035,28 @@ func (ec *executionContext) field_Mutation_unprotectResource_args(ctx context.Co
 		return nil, err
 	}
 	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateDeviceProfileManualTrust_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "enabled",
+		func(ctx context.Context, v any) (bool, error) {
+			return ec.unmarshalNBoolean2bool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["enabled"] = arg1
 	return args, nil
 }
 
@@ -4421,6 +4473,29 @@ func (ec *executionContext) _DeviceProfile_mode(ctx context.Context, field graph
 }
 func (ec *executionContext) fieldContext_DeviceProfile_mode(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type DeviceProfileMode does not have child fields"))
+}
+
+func (ec *executionContext) _DeviceProfile_manualTrust(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_DeviceProfile_manualTrust(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ManualTrust, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_DeviceProfile_manualTrust(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("DeviceProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
 }
 
 func (ec *executionContext) _DeviceProfile_requirements(ctx context.Context, field graphql.CollectedField, obj *DeviceProfile) (ret graphql.Marshaler) {
@@ -6615,7 +6690,7 @@ func (ec *executionContext) _Mutation_createDeviceProfile(ctx context.Context, f
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().CreateDeviceProfile(ctx, fc.Args["name"].(string))
+			return ec.Resolvers.Mutation().CreateDeviceProfile(ctx, fc.Args["name"].(string), fc.Args["manualTrust"].(*bool))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -6723,6 +6798,68 @@ func (ec *executionContext) fieldContext_Mutation_updateDeviceProfileMode(ctx co
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_updateDeviceProfileMode_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateDeviceProfileManualTrust(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateDeviceProfileManualTrust(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateDeviceProfileManualTrust(ctx, fc.Args["id"].(string), fc.Args["enabled"].(bool))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *DeviceProfile
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfile(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateDeviceProfileManualTrust(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateDeviceProfileManualTrust_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -11528,6 +11665,11 @@ func (ec *executionContext) _DeviceProfile(ctx context.Context, sel ast.Selectio
 			if out.Values[i] == graphql.Null {
 				atomic.AddUint32(&out.Invalids, 1)
 			}
+		case "manualTrust":
+			out.Values[i] = ec._DeviceProfile_manualTrust(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		case "requirements":
 			field := field
 
@@ -12077,6 +12219,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "updateDeviceProfileMode":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_updateDeviceProfileMode(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateDeviceProfileManualTrust":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateDeviceProfileManualTrust(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
