@@ -1,7 +1,8 @@
 ---
 type: planning
-status: planned
+status: in-progress
 sprint: 16
+progress: Stage 1 complete (Gate 1 passed 2026-08-06) · Stage 2 phases 4–5 complete · next = Phase 6
 solo: true
 owner: M3
 tags:
@@ -113,48 +114,55 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 
 #### Phase 1 — Connector accepts `resource_id` (tolerant)
 > See [[Sprint16/Member3-Go-Rust/Phase1-Connector-Identity-Handshake]].
-- [ ] **1.1** `connector/src/policy/mod.rs` — **`ResourceAcl` += `address`** (its absence is the root
+- [x] **1.1** `connector/src/policy/mod.rs` — **`ResourceAcl` += `address`** (its absence is the root
       cause: the lookup result carries no address, so the handler must use the client's string);
       add `resolve_by_resource_id(resource_id, port, protocol)` reusing the **existing** private
       `find_entry_by_id`; populate `address` in `resolve_resource` too.
-- [ ] **1.2** `connector/src/device_tunnel.rs` — `TunnelRequest` (line 41) gains **optional**
+- [x] **1.2** `connector/src/device_tunnel.rs` — `TunnelRequest` (line 41) gains **optional**
       `resource_id`; reorder `handle_stream` (line 133) to lookup → authorize → destination-cross-check
       → branch; dial **`acl.address`**, not `req.destination` (audit every `req.destination` use).
-- [ ] **1.3** Keep the legacy destination path working (tolerant reader) so the client can roll after.
-- [ ] **Gate:** `cd connector && cargo build && cargo test`
-- [ ] 📌 **Already exists — do not rebuild:** `is_allowed(resource_id, client_spiffe_id)`
+- [x] **1.3** Keep the legacy destination path working (tolerant reader) so the client can roll after.
+- [x] **Gate:** `cd connector && cargo build && cargo test`
+- [x] 📌 **Already exists — do not rebuild:** `is_allowed(resource_id, client_spiffe_id)`
       (`policy/mod.rs:42`) already performs identity-based SPIFFE authorization, and
       `find_entry_by_id` (`:109`) already does the id lookup. **Real scope: ~1 new function +
       1 struct field + 1 handler reorder.**
 
 #### Phase 2 — Client sends `resource_id`
 > See [[Sprint16/Member3-Go-Rust/Phase2-Client-Identity-Handshake]]. Depends on Phase 1.
-- [ ] **2.1** `client/src/net_stack.rs` — `TunnelRequest` += `resource_id`; populate it.
-- [ ] **2.2** `client/src/daemon.rs` — thread `resource_id` through `build_transports_by_resource`
+- [x] **2.1** `client/src/net_stack.rs` — `TunnelRequest` += `resource_id`; populate it.
+- [x] **2.2** `client/src/daemon.rs` — thread `resource_id` through `build_transports_by_resource`
       (it is already on the ACL entry — pass it along, don't re-derive).
-- [ ] **Gate:** `cd client && cargo build && cargo test`
+- [x] **Gate:** `cd client && cargo build && cargo test`
 
 #### Phase 3 — Connector requires `resource_id`
+> See [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]].
 > Depends on Phase 2 being deployed everywhere.
-- [ ] **3.1** `device_tunnel.rs` — reject a handshake with no `resource_id` (default-deny).
-- [ ] **3.2** Distinct denial reasons: unknown id · port/proto mismatch · unauthorized SPIFFE ·
+- [x] **3.1** `device_tunnel.rs` — reject a handshake with no `resource_id` (default-deny).
+- [x] **3.2** Distinct denial reasons: unknown id · port/proto mismatch · unauthorized SPIFFE ·
       destination mismatch.
-- [ ] **Gate:** `cd connector && cargo build`
-- [x] **🚩 GATE 1 (E2E, merge point) — AUTHORIZATION PASSED (2026-08-05).** Verified on a live stack
-      (controller + connector + client, one LAN, no relay): the client asserts `resource_id`, the
-      connector logs `auth_path="resource_id"` → `access allowed` → `tunnel_opened ok`, and dials
-      **its own ACL's address**. Phases 1–3 confirmed working end-to-end.
-      - [ ] **BLOCKED — byte transfer:** no data flows after the tunnel opens. Root-caused as far as
-            "the client's relay `select!` stalls", **not caused by this sprint** (the relay loop and
-            accept path are untouched). Filed as
-            [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (**P0**, 4 hypotheses disproved, next step
-            = `tcpdump -i zecurity0`). Stage 2 does not depend on the data plane and may proceed.
-      - [ ] Negative cases (`unknown_resource`, `destination_mismatch`, `missing_resource_id`) —
-            deferred until the data plane is usable.
+- [x] **Gate:** `cd connector && cargo build`
+- [x] **🚩 GATE 1 (E2E, merge point) — PASSED.** Authorization verified 2026-08-05; byte transfer
+      verified 2026-08-06. On a live stack (controller + connector + client, one LAN, no relay) the
+      client asserts `resource_id`, the connector logs `auth_path="resource_id"` → `access allowed` →
+      `tunnel_opened ok`, and dials **its own ACL's address**. Phases 1–3 confirmed end-to-end.
+      - [x] **Byte transfer — RESOLVED (2026-08-06).** `HTTP 200 in 0.067s`; exactly **one** tunnel per
+            connection (was ~10). Root cause was a routing loop from running the client and connector on
+            the **same host**: the client's nft chain matches on `(daddr, dport)` for every process, so
+            the connector's own egress was captured into the client's TUN. Fixed with a shared
+            `CONNECTOR_EGRESS_MARK = 0x5b` (connector sets `SO_MARK`, client returns early on it) plus a
+            co-location warning. **Not caused by this sprint.** Full analysis:
+            [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]].
+      - [ ] **Negative cases — outstanding, now unblocked.** `missing_resource_id` ·
+            `unknown_resource` · `destination_mismatch` · `unauthorized_spiffe` · shields-all-offline
+            fails closed. These were deferred while the data plane was broken; it works now, so they are
+            cheap. **Write `destination_mismatch` before Phase 7** — Phase 7 task 7.0 modifies exactly
+            that check, and this test is the guard that fails if it is deleted rather than scoped.
 
 ### ── STAGE 2 — Delivery Split + Connector Resolution ──
 
 #### Phase 4 — Migration 030 + resource model
+> See [[Sprint16/Member3-Go-Rust/Phase4-Migration-030-Resource-Model]].
 - [x] **4.1** `controller/migrations/030_fqdn_resources.sql` — add `hostname`, `resolver` (jsonb),
       `local_target`; make `host` nullable for FQDN resources; keep `route_type` semantics.
       *(027–029 are taken by Sprint 14 — **030 is the next free number**.)*
@@ -172,6 +180,7 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
       `RESOURCE_TEST_DATABASE_URL`.)*
 
 #### Phase 5 — Proto + ACL emission + GraphQL
+> See [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]].
 - [x] **5.1** `proto/client/v1/client.proto` — `ACLEntry` **add fields 11+**: `hostname` (11),
       `resolver` (12, nested `ACLResolver` message: `type` + `config`). **Fields 1–10 are in use;
       never renumber.** `reserved 13` (see the design correction below), `reserved 14` for
@@ -183,6 +192,11 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 - [x] **5.4** GraphQL schema + `resource.resolvers.go` create/edit + `helpers.go` presenter;
       regenerate with **`make gqlgen`** (`go generate ./graph/...` is a no-op — no directive exists).
 - [x] **Gate:** `cd controller && go build ./... && go vet ./...` — **PASS**
+- [x] **Rust gate (was missed):** `cd connector && cargo build && cargo test` — **PASS (89 + 4)**.
+      The original Phase 5 commit contained zero Rust files, so `cargo test` was left broken: the
+      exhaustive `AclEntry` literal in `policy/mod.rs`'s test helper needs `hostname: String::new(),
+      resolver: None`. `cargo build` passed (the literal is under `#[cfg(test)]`), which is why the
+      Go-only gate did not catch it. **A proto change is never Go-only.**
 - [x] 💡 **Solo tip:** hand-insert one FQDN resource row via SQL here — it unblocks Phases 6–9 without
       waiting on the UI (Phase 10). *Done: scratch DB `ztna_p5test` built from migrations 001–030.*
 
@@ -210,20 +224,46 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
 test; the GraphQL `createResource` path with `hostname` has never been executed end-to-end.
 
 #### Phase 6 — Connector resolver module
+> See [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]. **← next unchecked phase.**
+- [ ] **6.0** `connector/src/policy/mod.rs` — `ResourceAcl` += `hostname` + `resolver` (populate in
+      `resource_acl_from`; the resolver has no input without them). **And define the precedence for a
+      row with BOTH `address` and `hostname` — make it `reason=ambiguous_addressing`, fail closed.**
+      Exactly-one is enforced *only* at the GraphQL layer (`validateAddressing`); the DB check is
+      at-least-one, so any SQL-inserted row — which Phase 5's own solo tip recommends — can carry both.
 - [ ] **6.1** new `connector/src/resolver.rs` — `dns` + `static`; TTL-aware cache keyed by
-      `(remote_network_id, name, family)`; TTL clamp (min ~5s, max ~300s); brief negative cache.
+      `(remote_network_id, name, family)`; TTL clamp (min ~5s, max ~300s); brief negative cache;
+      single-flight per key. ⚠️ **Dependency decision:** `tokio::net::lookup_host` does **not** expose
+      record TTLs, so the TTL clamp and stale-while-revalidate are unimplementable with it —
+      `hickory-resolver` (or an explicit "fixed cache duration" downgrade) must be chosen deliberately.
 - [ ] **6.2** Typed errors: NXDOMAIN · timeout/resolver-down · no-A-record · dial-failure (distinct
-      from DNS failure). **Stale-while-revalidate** on resolver failure (serve last-known-good).
+      from DNS failure). **Stale-while-revalidate** on resolver failure (serve last-known-good) — but
+      **never on NXDOMAIN**, and with a bounded stale window so a dead resolver eventually fails closed.
 - [ ] **6.3** IPv4-only this sprint — explicit, not accidental.
-- [ ] **Gate:** `cd connector && cargo build && cargo test`
+- [ ] **Gate:** `cd connector && cargo build && cargo test` (baseline 89 + 4)
 
 #### Phase 7 — Connector delivery branch
-- [ ] **7.1** `device_tunnel.rs` — after authorization: `route_type == "shield"` → existing shield
-      session (**never fall back to direct**); else → `resolver.resolve()` → dial.
-- [ ] **7.2** Preserve `resource_id` + hostname in logs/metrics (never the synthetic IP).
-- [ ] **Gate:** `cd connector && cargo build`
+> See [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]].
+- [ ] **7.0** ⚠️ **Scope amendment — do this first.** Authorization currently denies **every**
+      name-addressed resource *before* the `route_type` branch is reached:
+      `device_tunnel.rs:225` compares `req.destination != entry.address`, and `entry.address` is empty
+      for a named resource. Scope the check to `!entry.address.is_empty()` — **do not delete it**, it
+      stays fully strict for every IP resource. Phase 9.4 must agree by sending an **empty**
+      `destination` for named resources; if either half ships alone, every FQDN resource is denied.
+      *(No live breakage today: clients drop these entries at `daemon.rs:657`.)*
+- [ ] **7.1** `device_tunnel.rs` — branch on **`route_type` first**: `"shield"` → existing shield
+      session (**never fall back to direct**); `"connector"` → `Pinned` → dial address, `Named` →
+      `resolver.resolve()` → dial, `Invalid` → deny. ⚠️ **Never `match resolver.type { …, shield }`** —
+      delivery (field 7) and resolution (field 12) are orthogonal axes; collapsing them breaks
+      invariant #3. Keep `connect_marked_tcp` (`CONNECTOR_EGRESS_MARK`) on the new dial path or the
+      Gate 1 co-location loop returns.
+- [ ] **7.2** Preserve `resource_id` + hostname + resolved address in logs/metrics (never the synthetic
+      IP). Emit resolution latency + cache hit/miss so the TTL clamp can be tuned from data.
+- [ ] **Gate:** `cd connector && cargo build && cargo test`
+      📌 Phases 6–7 have **no E2E proof available** until Phase 9 — no client can express a
+      name-addressed resource before the binding registry exists. Unit tests are the gate, deliberately.
 
 #### Phase 8 — Shield `local_target`
+> See [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]].
 - [ ] **8.0** **Deliver `local_target` to the Shield** (moved here from 5.1 — see the design
       correction under Phase 5). `proto/shield/v1/shield.proto` — add `string local_target = 7`
       to `ResourceInstruction` (fields 1–6 in use; never renumber). Then
@@ -238,36 +278,71 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 - [ ] **Gate:** `cargo build --manifest-path shield/Cargo.toml`
 
 #### Phase 9 — Client binding registry + synthetic routing
+> See [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]].
+> **Largest and most security-sensitive phase of Stage 2.**
 - [ ] **9.1** new `client/src/registry.rs` — durable `hostname → synthetic IP → resource_id`;
-      stable across restarts; **quarantine before reuse**; collision-aware CIDR selection.
-- [ ] **9.2** `client/src/state_store.rs` — persist the registry (encrypted at rest, per ADR-002).
+      stable across restarts; **quarantine before reuse**; collision-aware CIDR selection. Preserve the
+      three-state semantics (`Some(with transports)` / `Some(empty)` = fail closed / `None` = unmanaged).
+- [ ] **9.2** `client/src/state_store.rs` — persist the registry (encrypted at rest, per ADR-002); a
+      corrupt table rebuilds empty **with everything quarantined**, rather than refusing to start.
 - [ ] **9.3** `client/src/tun.rs` — route the **synthetic CIDR once**; stop installing per-`/32`
-      routes for FQDN resources (per-`/32` does not scale).
-- [ ] **9.4** `client/src/net_stack.rs` — synthetic IP → `resource_id`; **rewrite the response source
-      to the synthetic IP** (the app's socket will drop anything else).
-- [ ] **9.5** Testable without DNS via a `hosts` entry → synthetic IP (this preserves TLS
-      SNI/validation; connecting to a **raw** synthetic IP does **not**).
-- [ ] **Gate:** `cd client && cargo build && cargo test`
+      routes for FQDN resources (per-`/32` does not scale). Pinned IPs keep per-`/32` unchanged.
+      ⚠️ **A route alone will not pull traffic into the TUN.** Steering is nft-mark based
+      (`ip daddr … tcp dport … meta mark set` → `ip rule fwmark` → table 105). **Decide:** per-`(ip,port)`
+      rules as today, or **one port-agnostic `ip daddr <SYN_CIDR>` mark rule** (recommended — constant
+      ruleset size; then a non-ACL port on a synthetic IP must refuse cleanly, not hang). The
+      `meta mark 0x5b return` rule must stay **first** or the Gate 1 co-location loop returns.
+      ⚠️ Also verify the synthetic-CIDR route against **split-tunnelling (ADR-009)**.
+- [ ] **9.4** `client/src/net_stack.rs` — synthetic IP → `resource_id`; send `destination` **empty** for
+      named resources (must match Phase 7 task 7.0); **rewrite the response source to the synthetic IP**
+      (the app's socket will drop anything else — and this failure looks exactly like the Gate 1 stall,
+      which will send you down the wrong path).
+- [ ] **9.5** Testable without DNS via a `hosts` entry → connect **by name** (this preserves TLS
+      SNI/validation; connecting to a **raw** synthetic IP does **not**). ⚠️ Resource must **not** be on
+      the client's host — the `local` table beats any TUN route and produces a false pass.
+- [ ] **Gate:** `cd client && cargo build && cargo test` (baseline 39)
+- [ ] 📌 **Regression test (acceptance-critical):** a restart must not remap a synthetic IP to a
+      different resource. Automate it; a silent remap makes the client assert the wrong identity.
 
 #### Phase 10 — Admin UI
-- [ ] **10.1** Create/edit an FQDN resource: hostname + resolver type/config.
-- [ ] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error.
+> See [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]].
+- [ ] **10.1** Create/edit an FQDN resource: addressing **mode selector** (IP vs hostname — make
+      violating exactly-one unrepresentable) + resolver **type dropdown** (`dns`|`static`) with
+      type-specific config serialized to JSON. ⚠️ **Do not offer `shield` as a resolver type.**
+      `localTarget` editable only for shield-delivered resources.
+- [ ] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error, with
+      Phase 6's failure classes kept distinct. ⚠️ **Scope check:** there is no connector→controller
+      transport for resolver health today; inventing one would breach the no-new-RPCs rule. Ship without
+      live health and record the gap.
 - [ ] **Gate:** `cd admin && npm run codegen && npx tsc --noEmit`
-- [ ] **🚩 GATE 2 (E2E, merge point):** an FQDN resource is reachable via its synthetic IP; **changing
-      the backend IP requires no controller action, bumps no ACL version, and restarts no tunnel.**
+- [ ] **🚩 GATE 2 (E2E, merge point):** an FQDN resource created **through the UI** is reachable by name;
+      **changing the backend IP requires no controller action, bumps no ACL version, and restarts no
+      tunnel** (verify `acl_snapshot_version` is unchanged across a DNS change). Closes Phase 5's known
+      gap that `createResource` with `hostname` had never run end-to-end.
 
 ### ── STAGE 3 — Name Access (consider deferring to Sprint 17) ──
 
 #### Phase 11 — Client DNS responder
-- [ ] **11.1** new `client/src/dns.rs` — UDP **and** TCP/53; managed `A` → synthetic IP;
-      managed `AAAA` → **NODATA**; TTL 30–60s; exact-name match (no wildcards yet).
-- [ ] **11.2** Unmanaged names: passthrough per decision #4.
+> See [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]].
+- [ ] **11.1** new `client/src/dns.rs` — UDP **and** TCP/53 (a truncated UDP answer is retried over TCP;
+      UDP-only produces intermittent failures); managed `A` → synthetic IP; managed `AAAA` →
+      **NODATA, not NXDOMAIN** (NXDOMAIN can suppress the `A` lookup entirely); TTL 30–60s; exact-name
+      match (no wildcards yet); loopback-bind only — **never an open resolver**.
+- [ ] **11.2** Unmanaged names never reach us (per-domain OS config, decision #4); if one does anyway,
+      answer **REFUSED** — a forged NXDOMAIN breaks the user's unrelated DNS.
 - [ ] **Gate:** `cd client && cargo build && cargo test`
 
 #### Phase 12 — OS DNS integration
+> See [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]]. **Highest-risk phase in the sprint** —
+> the only one that mutates host-wide state outside our own interface.
 - [ ] **12.1** new `client/src/os_dns.rs` — **per-domain** DNS config (never hijack all DNS);
-      reliable teardown on daemon stop/logout; conflict handling with other VPNs.
-- [ ] **12.2** Interaction with split-tunneling (ADR-009) verified explicitly.
+      reliable teardown on **every** exit path incl. SIGKILL (persist the prior config; reconcile at
+      startup, mirroring `tun.rs::cleanup_policy_routes()`); conflict handling with other VPNs =
+      **refuse, never silently overwrite**. **Decide:** no-`systemd-resolved` hosts → back up and
+      rewrite `resolv.conf`, or **refuse to enable OS DNS** and document the `hosts` fallback
+      (recommended — `resolv.conf` rewrites race with NetworkManager/dhcpcd).
+- [ ] **12.2** Interaction with split-tunneling (ADR-009) verified explicitly — pairs with 9.3. DNS makes
+      this failure **silent**: the name resolves and the connection then hangs.
 - [ ] **🚩 GATE 3 (E2E):** `dig managed.name` → synthetic IP; app connects through the tunnel;
       unmanaged names resolve normally; DNS settings restore cleanly on stop.
 
@@ -279,9 +354,9 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 | 2 | `client/src/net_stack.rs`, `client/src/daemon.rs` |
 | 4 | `controller/migrations/030_fqdn_resources.sql` **(new)**, `internal/resource/store.go` |
 | 5 | `proto/client/v1/client.proto`, `internal/policy/{store,compiler}.go`, `graph/**` |
-| 6 | `connector/src/resolver.rs` **(new)** |
+| 6 | `connector/src/resolver.rs` **(new)**, `connector/src/policy/mod.rs` (6.0), `connector/Cargo.toml` |
 | 7 | `connector/src/device_tunnel.rs` |
-| 8 | `shield/src/resources.rs`, `shield/src/tunnel.rs` |
+| 8 | `proto/shield/v1/shield.proto`, `internal/resource/store.go`, `internal/connector/control_stream.go`, `shield/src/resources.rs`, `shield/src/tunnel.rs` |
 | 9 | `client/src/registry.rs` **(new)**, `state_store.rs`, `tun.rs`, `net_stack.rs`, `runtime.rs` |
 | 10 | `admin/src/pages/Resource*.tsx` + gql |
 | 11 | `client/src/dns.rs` **(new)**, `Cargo.toml` |
@@ -325,17 +400,29 @@ cd admin && npm run codegen && npx tsc --noEmit
 - [ ] Stage 3 only: managed names → synthetic IPs, unmanaged names unaffected, OS DNS config fully
       restored on daemon stop.
 
-## Decisions Required (settle before Phase 4)
+## Decisions — settled during Phases 4–5
 
-| # | Decision | Recommendation |
+Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here so they aren't re-litigated.
+
+| # | Decision | Resolution | Where it landed |
+|---|---|---|---|
+| 1 | **Wildcards** (`*.internal`) — does the wire carry `requested_host`? | ✅ **Exact names only; field reserved.** `requested_host` is **not** on the wire. | `ACLEntry` `reserved 14` for `pattern`. Invariant #4 applies only if it is ever adopted. |
+| 2 | `shield_ids[]` — array column or join table? | ✅ **Join table.** Written alongside the singular `shield_id`, which stays authoritative for existing readers. | `resource_shields` (migration 030), Phase 4.3 |
+| 3 | **IPv6** | ⏳ Deferred. `AAAA → NODATA` in Stage 3; A-records only in Phase 6. | Phase 6.3, Phase 11.1 |
+| 4 | **Unmanaged DNS** — per-domain OS config or full proxy? | ⏳ **Per-domain** (far less invasive) — settle the non-`systemd-resolved` fallback in Phase 12.1. | Phase 12.1 |
+| 5 | **Synthetic CIDR** | ⏳ A `100.64.0.0/10` subrange, collision-checked at startup (CGNAT is used in the wild). **Open sub-decision:** how it is *steered* (see Phase 9.3 — a route alone is insufficient). | Phase 9.1, 9.3 |
+| 6 | **Name collisions across remote networks** | ✅ **Rejected at create**, per remote network. | `UNIQUE (tenant_id, remote_network_id, COALESCE(host, hostname), name)` — migration 030 |
+| 7 | **Per-principal ACL scoping** | ❌ **Not this sprint** — but it is the blocker for 100k resources / 50k clients. Track separately. | — |
+
+### Still open (must settle before the named phase)
+
+| Decision | Phase | Why it can't wait |
 |---|---|---|
-| 1 | **Wildcards** (`*.internal`) — does the wire carry `requested_host`? | **Decide now**; it shapes the resource model. Exact names first, but reserve the field. |
-| 2 | `shield_ids[]` — array column or join table? | Join table (HA is expensive to retrofit). |
-| 3 | **IPv6** | Later. `AAAA → NODATA` in Stage 3. |
-| 4 | **Unmanaged DNS** — per-domain OS config or full proxy? | Per-domain (far less invasive). |
-| 5 | **Synthetic CIDR** | A `100.64.0.0/10` subrange, collision-checked at startup (CGNAT is used in the wild). |
-| 6 | **Name collisions across remote networks** | Per-network DNS suffix, or reject duplicates at create. |
-| 7 | **Per-principal ACL scoping** | **Not this sprint** — but it is the blocker for 100k resources / 50k clients. Track separately. |
+| Ambiguous addressing: what happens when a row has **both** `host` and `hostname`? | **6.0** | Exactly-one is enforced only at the GraphQL layer; SQL-inserted rows bypass it. **Recommend fail closed.** |
+| DNS client crate — `hickory-resolver` vs `lookup_host` | **6.1** | `lookup_host` exposes no record TTL, so the TTL clamp and stale-while-revalidate are unimplementable with it. |
+| What `destination` carries for named resources | **7.0 + 9.4** | Both halves must agree, or every FQDN resource is denied as `destination_mismatch`. |
+| How the synthetic CIDR is steered into the TUN (nft mark shape) | **9.3** | Routing is mark-driven; a route alone won't capture traffic. |
+| Non-`systemd-resolved` hosts: rewrite `resolv.conf` or refuse OS DNS? | **12.1** | Failure mode is the user's DNS left broken after our daemon exits. |
 
 ## Deferred (explicitly out of scope)
 
@@ -350,13 +437,86 @@ cd admin && npm run codegen && npx tsc --noEmit
   cleanup.
 - **Connector selection policy** for the client→connector hop (unchanged this sprint).
 
+## Phase Files
+
+| Phase | File | Status |
+|---|---|---|
+| 1 | [[Sprint16/Member3-Go-Rust/Phase1-Connector-Identity-Handshake]] | ✅ done |
+| 2 | [[Sprint16/Member3-Go-Rust/Phase2-Client-Identity-Handshake]] | ✅ done |
+| 3 | [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]] | ✅ done (Gate 1 passed; negative tests outstanding) |
+| 4 | [[Sprint16/Member3-Go-Rust/Phase4-Migration-030-Resource-Model]] | ✅ done |
+| 5 | [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]] | ✅ done |
+| 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ⬜ **next** |
+| 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ⬜ |
+| 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ⬜ |
+| 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ |
+| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ — closes **Gate 2** |
+| 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
+| 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
+
+Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 2026-08-06).
+
+## Post-Sprint Fixes
+
+Overview only — each fix is documented in full in its phase file.
+
+### Fix: unique index silently disarmed by making `host` nullable
+**Phase 4.** Postgres treats NULLs as distinct, so `UNIQUE (tenant_id, remote_network_id, host, name)`
+stopped enforcing anything for FQDN rows. Replaced with a unique index on `COALESCE(host, hostname)`.
+→ [[Sprint16/Member3-Go-Rust/Phase4-Migration-030-Resource-Model]]
+
+### Fix: `local_target` was briefly an `ACLEntry` field
+**Phase 5.** Removed before shipping (`reserved 13`); it belongs on `shield.v1.ResourceInstruction` and
+is delivered in Phase 8.0. Establishes the rule: *justify each new wire field by who receives the
+message, never by how the data is grouped in the DB.*
+→ [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]]
+
+### Fix: `AclEntry` test literal broke `cargo test`
+**Phase 5.2.** The Phase 5 commit contained zero Rust files; the exhaustive `AclEntry` literal in
+`connector/src/policy/mod.rs`'s `entry()` helper needed `hostname: String::new(), resolver: None`.
+`cargo build` passed (the literal is `#[cfg(test)]`), so the Go-only gate missed it.
+→ [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]]
+
+### Fix: blocking audit-log send on the data-plane critical path
+**Phase 3.** `emit_access_log` used `send().await` immediately before `copy_bidirectional`. Switched to
+`try_send`. Not the cause of the Gate 1 stall (hypothesis #4), but a real defect.
+→ [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]]
+
+### Fix (P0, resolved): tunnel opened but no bytes flowed
+**Gate 1.** Client/connector co-location routing loop — the client's nft chain matches
+`(daddr, dport)` for every process on the host, so it captured the connector's own egress into the
+client's TUN (~10 tunnels per curl). Fixed with `CONNECTOR_EGRESS_MARK = 0x5b` (connector sets
+`SO_MARK`; client's chain returns early on it) plus a co-location warning. **Not caused by this sprint.**
+→ [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]]
+
+### Outstanding (doc-only): stale comment on `ACLRelevantUpdate`
+`internal/resource/store.go` (~454) still documents `local_target` as reaching the wire and being part of
+what `CompileACLSnapshot` emits into an `ACLEntry`. The **code is correct** (it is excluded, and
+`acl_relevance_test.go` asserts `local_target only → false`); only the comment contradicts the Phase 5
+design correction — i.e. it is wrong about exactly the rule the correction established.
+
+### Outstanding (out of sprint scope): direct-path cooldown with no fallback
+`client/src/transport.rs` — `mark_direct_failure()` assumes an alternative transport exists. With
+direct-only (no relay provisioned), a single transient timeout becomes a hard outage until the cooldown
+expires. Cooldown should be skipped or drastically shortened when there is no fallback. Currently
+recorded only inside the resolved bug doc; needs its own item.
+
 ## Notes for AI Agents
 
-1. Read this `path.md`, then the phase file for the first unchecked phase.
+1. Read this `path.md`, then the phase file for the first unchecked phase — see **Phase Files** above.
 2. **Solo sprint — phases are strictly sequential.** Do not start a phase until the previous gate is green.
 3. **Stage 1 must be fully green before Stage 2.** It is the contract everything else rests on.
-4. `ACLEntry` fields **1–10 are in use** — add 11+, **never renumber** (standing rule).
+4. `ACLEntry` fields **1–12 are in use**, `13`/`14` are **reserved** — add 15+, **never renumber**
+   (standing rule). `shield.v1.ResourceInstruction` fields 1–6 in use; Phase 8 adds 7.
 5. **Do not touch `relay/**`, `client/src/relay_pool.rs`, or `client/src/transport.rs`.**
-6. Every new path must **fail closed**: unknown id, missing ACL, unresolvable endpoint → deny.
+6. Every new path must **fail closed**: unknown id, missing ACL, unresolvable endpoint, ambiguous
+   addressing → deny.
 7. Never log or persist a synthetic IP as identity — log `resource_id`.
 8. Stages 1 and 2 are separate merge points. Ship them independently.
+9. **Two orthogonal axes — never conflate them.** `route_type` (field 7, `connector`|`shield`) answers
+   *who delivers*; `resolver.type` (field 12, `dns`|`static`) answers *how the connector finds the
+   endpoint*. **`shield` is not a resolver type.** The connector branches on `route_type` first;
+   `resolver` is consulted only inside the `connector` arm. Collapsing them breaks invariant #3.
+10. **A proto change is never Go-only.** Any `buf generate` must be followed by
+    `cargo build && cargo test` in the connector, client, and shield as applicable — `cargo build`
+    alone will not catch broken test-only struct literals.

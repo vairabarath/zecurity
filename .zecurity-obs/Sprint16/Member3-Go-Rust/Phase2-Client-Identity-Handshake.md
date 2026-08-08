@@ -3,9 +3,11 @@ type: phase
 sprint: 16
 stage: 1
 phase: 2
+title: Client Sends `resource_id`
 owner: M3
-depends_on: [Sprint16-Phase1]
-status: not-started
+depends_on:
+  - Sprint16/Member3-Go-Rust/Phase1-Connector-Identity-Handshake
+status: done
 tags: [sprint16, client, rust, identity, handshake]
 ---
 
@@ -57,24 +59,24 @@ None (absent)                → unmanaged traffic                   → no tunn
 ### 2.1 — Carry `resource_id` in the transports map
 `client/src/daemon.rs`
 
-- [ ] Introduce `ResourceTarget { resource_id: String, transports: Vec<Arc<ClientTransport>> }`
+- [x] Introduce `ResourceTarget { resource_id: String, transports: Vec<Arc<ClientTransport>> }`
       (`pub(crate)` so `daemon_tests.rs` can construct it).
-- [ ] `build_transports_by_resource(...)` populates `resource_id` from the ACL entry it is already
+- [x] `build_transports_by_resource(...)` populates `resource_id` from the ACL entry it is already
       iterating. **Do not re-derive or look it up again.**
-- [ ] Preserve the `Some(empty) = fail closed` vs `None = unmanaged` distinction — losing it turns a
+- [x] Preserve the `Some(empty) = fail closed` vs `None = unmanaged` distinction — losing it turns a
       fail-closed case into an unmanaged passthrough (a security regression).
-- [ ] Update the existing tests in `client/src/daemon_tests.rs` that assert on the map shape
+- [x] Update the existing tests in `client/src/daemon_tests.rs` that assert on the map shape
       (`build_transports_*`, `connector_with_relay_addr_*`, `two_connectors_*`).
 
 ### 2.2 — Send it on the handshake
 `client/src/net_stack.rs`
 
-- [ ] `TunnelRequest` += `resource_id: String`.
-- [ ] Thread the target through `run(...)` → the smoltcp flow setup → `relay_tcp_to_quic(...)` so the
+- [x] `TunnelRequest` += `resource_id: String`.
+- [x] Thread the target through `run(...)` → the smoltcp flow setup → `relay_tcp_to_quic(...)` so the
       request is built with the id for **that** flow.
-- [ ] Keep sending `destination` this phase — the connector cross-checks it
+- [x] Keep sending `destination` this phase — the connector cross-checks it
       (`destination_mismatch` denial). It is removed only if/when Stage 2 drops it.
-- [ ] Do **not** change `ClientTransport`, `relay_pool.rs`, or `transport.rs` — transport selection is
+- [x] Do **not** change `ClientTransport`, `relay_pool.rs`, or `transport.rs` — transport selection is
       unrelated to identity, and the relay never sees this handshake.
 
 ## Build gate
@@ -89,7 +91,10 @@ don't weaken the assertion.
 
 ## Verify (manual)
 
-- [ ] Tunnel opens to an existing IP resource; the connector logs `auth_path=resource_id`
+> Gate 1 exercised the first item on a live stack (`route="connector"`). The rest were **not** verified
+> — the shield path in particular was never exercised in Gate 1's topology.
+
+- [x] Tunnel opens to an existing IP resource; the connector logs `auth_path=resource_id`
       (proves the new field is being read, not the legacy fallback).
 - [ ] A shield-routed resource still goes via the shield.
 - [ ] Connector-offline case still **fails closed** (empty transports), not passthrough.

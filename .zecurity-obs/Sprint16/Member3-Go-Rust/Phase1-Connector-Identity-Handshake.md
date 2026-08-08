@@ -3,9 +3,10 @@ type: phase
 sprint: 16
 stage: 1
 phase: 1
+title: Connector Accepts `resource_id` (tolerant)
 owner: M3
 depends_on: []
-status: not-started
+status: done
 tags: [sprint16, connector, rust, identity, handshake, security]
 ---
 
@@ -79,10 +80,10 @@ than the original 4-file estimate, because the two functions above are already i
 ### 1.1 — ACL lookup by identity
 `connector/src/policy/mod.rs`
 
-- [ ] **`ResourceAcl` += `pub address: String`** — the dial target, sourced from the ACL entry.
+- [x] **`ResourceAcl` += `pub address: String`** — the dial target, sourced from the ACL entry.
       *This is the change that fixes the bug; everything else follows from it.*
-- [ ] Populate `address` in the **existing** `resolve_resource(...)` too (one line, `entry.address.clone()`).
-- [ ] Add the identity lookup — reuse the existing private `find_entry_by_id`:
+- [x] Populate `address` in the **existing** `resolve_resource(...)` too (one line, `entry.address.clone()`).
+- [x] Add the identity lookup — reuse the existing private `find_entry_by_id`:
 
 ```rust
 /// Look up a resource by identity. Returns None when no snapshot is loaded, the
@@ -103,16 +104,16 @@ pub fn resolve_by_resource_id(
 }
 ```
 
-- [ ] Keep `resolve_resource` — Phase 1 is tolerant; **Phase 3** removes its use.
-- [ ] Tests: mirror the existing `resolve_resource_matches_network_tuple` and
+- [x] Keep `resolve_resource` — Phase 1 is tolerant; **Phase 3** removes its use.
+- [x] Tests: mirror the existing `resolve_resource_matches_network_tuple` and
       `resolve_resource_returns_none_on_port_mismatch` for the id path, plus
       `resolve_by_resource_id_returns_none_on_protocol_mismatch`.
 
 ### 1.2 — Handshake: optional `resource_id`, dial from the ACL
 `connector/src/device_tunnel.rs` — `struct TunnelRequest` (line 41) and `handle_stream(...)` (line 133)
 
-- [ ] `TunnelRequest` += `#[serde(default)] resource_id: Option<String>` (tolerant: old clients omit it).
-- [ ] Reorder the top of `handle_stream` to this exact sequence (**invariants #1, #2, #3**):
+- [x] `TunnelRequest` += `#[serde(default)] resource_id: Option<String>` (tolerant: old clients omit it).
+- [x] Reorder the top of `handle_stream` to this exact sequence (**invariants #1, #2, #3**):
 
 ```text
 1. req.resource_id present?
@@ -133,15 +134,15 @@ pub fn resolve_by_resource_id(
      else                       → dial acl.address          ← NOT req.destination
 ```
 
-- [ ] **Dial `acl.address` everywhere `req.destination` was used as the target** (both the TCP bridge
+- [x] **Dial `acl.address` everywhere `req.destination` was used as the target** (both the TCP bridge
       and `relay_udp`). Grep for `req.destination` and audit every hit.
-- [ ] Preserve the existing shield branch semantics unchanged.
-- [ ] `emit_access_log` / `AccessLogFields` — log `resource_id` as the identity; keep `destination` as
+- [x] Preserve the existing shield branch semantics unchanged.
+- [x] `emit_access_log` / `AccessLogFields` — log `resource_id` as the identity; keep `destination` as
       the *observed* value only.
 
 ### 1.3 — Keep the legacy path alive (this phase only)
-- [ ] When `resource_id` is absent, fall back to today's `resolve_resource(&req.destination, ...)`.
-- [ ] Log which path was taken (`auth_path=resource_id|legacy_destination`) so the Phase 3 cutover can
+- [x] When `resource_id` is absent, fall back to today's `resolve_resource(&req.destination, ...)`.
+- [x] Log which path was taken (`auth_path=resource_id|legacy_destination`) so the Phase 3 cutover can
       be verified from logs before the legacy branch is deleted.
 
 ## Build gate
@@ -152,11 +153,17 @@ cd connector && cargo build && cargo test
 
 ## Verify (manual, before moving on)
 
-- [ ] An existing IP resource still connects (legacy path, since the client isn't updated yet).
-- [ ] A hand-crafted handshake with a valid `resource_id` connects, and the connector logs
+> ⚠️ Only the positive path was exercised on a live stack (Gate 1). The negative cases below were
+> deferred while the data plane was broken and are **still outstanding** — they are tracked as the
+> single authoritative list in
+> [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]] § *GATE 1*. Do not mark them here.
+
+- [x] An existing IP resource still connects (legacy path, since the client isn't updated yet).
+- [x] A hand-crafted handshake with a valid `resource_id` connects, and the connector logs
       `auth_path=resource_id`.
 - [ ] A handshake with a valid `resource_id` but a **wrong port** is denied.
 - [ ] A handshake with a valid `resource_id` and a **mismatched `destination`** is denied.
+      📌 **Write this one before Phase 7** — task 7.0 modifies exactly this check.
 - [ ] A handshake with an unknown `resource_id` is denied — and **no dial is attempted** (check that
       no connection to any backend appears in logs).
 - [ ] A shield-routed resource still goes via the shield session; with the shield down it **fails**
@@ -166,15 +173,10 @@ cd connector && cargo build && cargo test
 
 # Follow-up: Phase 3 — Require `resource_id`
 
-> Do this only after Phase 2 has shipped and every client sends `resource_id`.
-
-- [ ] **3.1** Remove the `resolve_resource(&req.destination, ...)` fallback; a handshake without
-      `resource_id` is **denied** (`reason=missing_resource_id`) — default-deny.
-- [ ] **3.2** Ensure four distinct denial reasons are logged and countable:
-      `missing_resource_id` · `unknown_resource` · `destination_mismatch` · `unauthorized_spiffe`.
-- [ ] **Gate:** `cd connector && cargo build`
-- [ ] **🚩 GATE 1 (E2E, merge point):** IP resources still work end-to-end; unauthorized
-      `resource_id` denied; mismatched destination denied.
+> **Moved.** Phase 3 now has its own file:
+> [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]].
+> It carries tasks 3.1/3.2, the four denial reasons, and the **GATE 1** evidence.
+> Kept as a pointer so the "do this only after Phase 2 ships everywhere" sequencing note isn't lost.
 
 ## Notes
 

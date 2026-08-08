@@ -173,6 +173,11 @@ mod tests {
             allowed_spiffe_ids: allowed.into_iter().map(String::from).collect(),
             route_type: "shield".into(),
             shield_id: "shield-test".into(),
+            // Sprint 16 Stage 2 (fields 11–12): this helper builds classic
+            // IP-pinned entries, which keep `address` and leave these empty.
+            // Name-addressed entries get their own builder in Phase 6.
+            hostname: String::new(),
+            resolver: None,
         }
     }
 
