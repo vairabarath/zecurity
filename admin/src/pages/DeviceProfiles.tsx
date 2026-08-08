@@ -1,51 +1,100 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useQuery } from "@apollo/client/react";
-import { Plus, ShieldCheck } from "lucide-react";
-import { DeviceProfileMode, GetDeviceProfilesDocument } from "@/generated/graphql";
-import { Button } from "@/components/ui/button";
-import { CreateDeviceProfileModal } from "@/components/CreateDeviceProfileModal";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useMutation, useQuery } from "@apollo/client/react";
+import { Plus, ShieldCheck } from "lucide-react";
 import {
-  EmptyState,
-  ErrorState,
-  EntityIcon,
-  StatusPill,
-} from "@/lib/console";
+  DeleteDeviceProfileDocument,
+  GetDeviceProfilesDocument,
+} from "@/generated/graphql";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { CreateDeviceProfileModal } from "@/components/CreateDeviceProfileModal";
+import { EditDeviceProfileModal } from "@/components/EditDeviceProfileModal";
 
-function modeTone(mode: DeviceProfileMode): "ok" | "muted" {
-  return mode === DeviceProfileMode.Enforce ? "ok" : "muted";
+import { EmptyState, ErrorState, EntityIcon } from "@/lib/console";
+
+type EditableProfile = {
+  id: string;
+  name: string;
+  manualTrust: boolean;
+  requirements: { checkId: string }[];
+};
+
+function DeleteDeviceProfileDialog({
+  profile,
+  onClose,
+  onConfirm,
+  loading,
+}: {
+  profile: { id: string; name: string } | null;
+  onClose: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+}) {
+  return (
+    <Dialog open={!!profile} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete device profile</DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          Are you sure you want to delete{" "}
+          <span className="font-semibold text-foreground">{profile?.name}</span>?
+          Devices bound through this profile will no longer be gated by it.
+        </p>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={loading}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={onConfirm} disabled={loading}>
+            {loading ? "Deleting…" : "Delete"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 export default function DeviceProfiles() {
-  const navigate = useNavigate();
   const [showAdd, setShowAdd] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
+  const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string } | null>(null);
 
-  const { data, loading, error, refetch } = useQuery(GetDeviceProfilesDocument, {
-    fetchPolicy: "cache-and-network",
-    pollInterval: 30000,
-  });
+  const { data, loading, error, refetch } = useQuery(
+    GetDeviceProfilesDocument,
+    {
+      fetchPolicy: "cache-and-network",
+      pollInterval: 30000,
+    },
+  );
+
+  const [deleteDeviceProfile, { loading: deleting }] = useMutation(
+    DeleteDeviceProfileDocument,
+    {
+      onCompleted: () => {
+        setDeletingProfile(null);
+        refetch();
+      },
+      refetchQueries: [{ query: GetDeviceProfilesDocument }],
+    },
+  );
 
   const deviceProfiles = useMemo(() => data?.deviceProfiles ?? [], [data]);
-  const enforceCount = useMemo(
-    () => deviceProfiles.filter((p) => p.mode === DeviceProfileMode.Enforce).length,
-    [deviceProfiles],
-  );
 
   return (
     <div className="space-y-6">
       <div className="page-header">
         <div>
           <h2 className="page-title">Device Profiles</h2>
-          <p className="page-subtitle">
-            Manage device posture profiles.
-          </p>
+          <p className="page-subtitle">Manage device posture profiles.</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="status-pill border-[oklch(0.82_0.12_160/0.28)] bg-[oklch(0.82_0.12_160/0.12)] text-secure">
-            <span className="status-pill-dot bg-secure" />
-            <span className="font-bold">{enforceCount}</span> enforcing
-          </span>
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">
               {deviceProfiles.length}
@@ -61,12 +110,12 @@ export default function DeviceProfiles() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_140px_160px_160px_120px] gap-4 px-5 py-4">
-            {["Name", "Mode", "Requirements", "Bound Resources", "Actions"].map(
+          <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4">
+            {["Name", "Requirements", "Bound Resources", "Actions"].map(
               (label, index) => (
                 <div
                   key={label + index}
-                  className={`table-head-label ${index === 4 ? "text-right" : ""}`}
+                  className={`table-head-label ${index === 3 ? "text-right" : ""}`}
                 >
                   {label}
                 </div>
@@ -104,7 +153,7 @@ export default function DeviceProfiles() {
               {deviceProfiles.map((profile) => (
                 <div
                   key={profile.id}
-                  className="admin-table-row group grid items-center grid-cols-[1.5fr_140px_160px_160px_120px] gap-4 px-5 py-4"
+                  className="admin-table-row group grid items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4"
                 >
                   <div className="flex min-w-0 items-center gap-3">
                     <EntityIcon type="resource" />
@@ -113,9 +162,6 @@ export default function DeviceProfiles() {
                         {profile.name}
                       </div>
                     </div>
-                  </div>
-                  <div>
-                    <StatusPill label={profile.mode} tone={modeTone(profile.mode)} />
                   </div>
                   <div className="text-[13px] font-semibold text-muted-foreground">
                     {profile.requirements.length === 0 ? (
@@ -134,15 +180,26 @@ export default function DeviceProfiles() {
                       profile.boundResources.length
                     )}
                   </div>
-                  <div className="text-right">
+
+                  <div className="flex items-center justify-end gap-3">
                     <button
-                      onClick={() => navigate(`/device-profiles/${profile.id}`)}
-                      className="inline-flex items-center gap-1 text-[13px] font-bold text-primary transition hover:opacity-80"
+                      onClick={() =>
+                        setEditingProfile({
+                          id: profile.id,
+                          name: profile.name,
+                          manualTrust: profile.manualTrust,
+                          requirements: profile.requirements,
+                        })
+                      }
+                      className="text-[13px] font-bold text-muted-foreground transition hover:text-foreground"
                     >
-                      Manage{" "}
-                      <span className="transition-transform group-hover:translate-x-0.5">
-                        →
-                      </span>
+                      Edit
+                    </button>
+                    <button
+                      onClick={() => setDeletingProfile({ id: profile.id, name: profile.name })}
+                      className="text-[13px] font-bold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
+                    >
+                      Delete
                     </button>
                   </div>
                 </div>
@@ -156,6 +213,31 @@ export default function DeviceProfiles() {
         open={showAdd}
         onOpenChange={setShowAdd}
         onSuccess={() => refetch()}
+      />
+
+      <EditDeviceProfileModal
+        open={editingProfile !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditingProfile(null);
+          }
+        }}
+        profile={editingProfile}
+        onSuccess={() => {
+          setEditingProfile(null);
+          refetch();
+        }}
+      />
+
+      <DeleteDeviceProfileDialog
+        profile={deletingProfile}
+        loading={deleting}
+        onClose={() => setDeletingProfile(null)}
+        onConfirm={() => {
+          if (deletingProfile) {
+            deleteDeviceProfile({ variables: { id: deletingProfile.id } });
+          }
+        }}
       />
     </div>
   );

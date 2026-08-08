@@ -323,7 +323,7 @@ query GetDeviceProfiles {
   deviceProfiles {
     id
     name
-    mode
+    manualTrust
     requirements {
       id
       checkId
@@ -332,6 +332,33 @@ query GetDeviceProfiles {
     boundResources {
       id
       name
+    }
+  }
+}
+
+query GetSupportedPostureChecks {
+  supportedPostureChecks {
+    id
+    label
+    platform
+    allowUnsupportedMeaningful
+  }
+}
+
+query GetDevicePostureVisibility($profileId: ID!) {
+  devicePostureVisibility(profileId: $profileId) {
+    deviceId
+    deviceName
+    satisfied
+    stale
+    failureReason
+    evaluatedAt
+    reportAgeSeconds
+    observations {
+      checkId
+      status
+      observedAt
+      collectorError
     }
   }
 }
