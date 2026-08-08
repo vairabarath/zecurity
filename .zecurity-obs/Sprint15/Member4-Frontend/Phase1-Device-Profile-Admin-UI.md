@@ -25,15 +25,15 @@ practice, not just incomplete — this phase must ship both, not just the former
 
 ## Files
 
-| File | Change |
-|------|--------|
-| `admin/src/pages/DeviceProfiles.tsx` | **new** — list view, mirrors `admin/src/pages/Resources.tsx` |
-| `admin/src/components/CreateDeviceProfileModal.tsx` | **new**, mirrors `CreateResourceModal.tsx` |
-| `admin/src/components/EditDeviceProfileModal.tsx` | **new**, mirrors `EditResourceModal.tsx` |
-| `admin/src/pages/DeviceProfileDetail.tsx` | **new** — requirements editor, resource-binding picker, audit/enforce toggle, per-device posture visibility |
-| `admin/src/graphql/*` | new queries/mutations against M1's schema |
-| `admin/src/App.tsx` | **new `<Route>` entries** for `DeviceProfiles` and `DeviceProfileDetail` — pages are unreachable without this |
-| navigation/sidebar config (wherever `admin/src`'s existing nav entries are declared) | new nav item linking to the Device Profiles list |
+| File                                                                                 | Change                                                                                                        |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| `admin/src/pages/DeviceProfiles.tsx`                                                 | **new** — list view, mirrors `admin/src/pages/Resources.tsx`                                                  |
+| `admin/src/components/CreateDeviceProfileModal.tsx`                                  | **new**, mirrors `CreateResourceModal.tsx`                                                                    |
+| `admin/src/components/EditDeviceProfileModal.tsx`                                    | **new**, mirrors `EditResourceModal.tsx`                                                                      |
+| `admin/src/pages/DeviceProfileDetail.tsx`                                            | **new** — requirements editor, resource-binding picker, audit/enforce toggle, per-device posture visibility   |
+| `admin/src/graphql/*`                                                                | new queries/mutations against M1's schema                                                                     |
+| `admin/src/App.tsx`                                                                  | **new `<Route>` entries** for `DeviceProfiles` and `DeviceProfileDetail` — pages are unreachable without this |
+| navigation/sidebar config (wherever `admin/src`'s existing nav entries are declared) | new nav item linking to the Device Profiles list                                                              |
 
 ## Scope
 

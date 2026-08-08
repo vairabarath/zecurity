@@ -230,6 +230,22 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 - [ ] **M4-A3** Component tests for the new screens.
 - [ ] **Build gate:** `cd admin && npm run codegen && npm run build`
 
+### Phase E3 — M4: Policies Page + Create Trusted Linux Profile Panel
+> See [[Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile]]. Depends on Phase E2.
+> User-directed follow-up (not from PENDING-08): moves Device Profiles under a new
+> Policies page/tab, adds an OS-first create flow scoped to Linux, and rebuilds the
+> create panel to match a provided mockup. Required a real `manualTrust` field on
+> `DeviceProfile` since the mockup's "Verification Requirements" section had no
+> backing schema anywhere — this touched M1-owned files
+> (`posture.graphqls`, `internal/posture/store.go`, `graph/resolvers/*`) with the
+> user's explicit go-ahead; flagging for whoever picks up remaining M1 phases.
+- [x] **M4-B1–B8** Backend `manualTrust` field/mutation + tests, GraphQL codegen,
+  `Switch` component, rebuilt create panel, new `Policies.tsx`, routes/nav updated.
+  Full checklist in the phase file.
+- [ ] Component tests for `Policies.tsx` and the rebuilt create modal.
+- [ ] Manual/E2E pass against a running backend (not done this session).
+- [x] **Build gate:** controller `go build`/`go test` + admin `codegen`/`build`, all green.
+
 ### Phase F — M3: Active-Session Registry
 > See [[Sprint15/Member3-Rust-Connector/Phase1-Active-Session-Registry]]. Depends on nothing — Day 1.
 - [x] **M3-F0** `connector/Cargo.toml` — add `dashmap` and `tokio-util` (neither is a dependency today).
