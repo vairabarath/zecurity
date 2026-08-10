@@ -42,6 +42,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region | operations | P2 | ADR-013 |
 | [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) | Client Device Lifecycle & Cert Renewal | identity/ops | P2 | ADR-002 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
+| [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.
