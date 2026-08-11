@@ -9,6 +9,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
+use crate::resolver::Resolver;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -30,6 +31,7 @@ pub async fn listen(
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    resolver: Arc<Resolver>,
 ) -> Result<()> {
     let tls_config = build_device_tunnel_tls(&store)?;
 
@@ -59,7 +61,7 @@ pub async fn listen(
         let crl = crl_manager.clone();
         let conn_id = connector_id.clone();
         let ctrl_tx = control_tx.clone();
-
+        let resolver = resolver.clone();
         tokio::spawn(async move {
             let conn = match incoming.await {
                 Ok(c) => c,
@@ -105,10 +107,10 @@ pub async fn listen(
                 let ctrl_tx = ctrl_tx.clone();
                 let sid = spiffe_id.clone();
                 let serial = cert_serial.clone();
-
+                let resolver = resolver.clone();
                 tokio::spawn(async move {
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx,
+                        stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx, resolver,
                     )
                     .await
                     {

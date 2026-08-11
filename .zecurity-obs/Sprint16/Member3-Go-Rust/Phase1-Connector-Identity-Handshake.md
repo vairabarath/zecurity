@@ -153,21 +153,25 @@ cd connector && cargo build && cargo test
 
 ## Verify (manual, before moving on)
 
-> ⚠️ Only the positive path was exercised on a live stack (Gate 1). The negative cases below were
-> deferred while the data plane was broken and are **still outstanding** — they are tracked as the
-> single authoritative list in
-> [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]] § *GATE 1*. Do not mark them here.
+> The positive path was exercised on a live stack (Gate 1); the negative cases were deferred while the
+> data plane was broken and were finally written **during Phase 7**, as automated tests rather than
+> manual checks. The authoritative list lives in
+> [[Sprint16/Member3-Go-Rust/Phase3-Connector-Requires-ResourceId]] § *GATE 1*; the test names are
+> noted inline below.
 
 - [x] An existing IP resource still connects (legacy path, since the client isn't updated yet).
 - [x] A hand-crafted handshake with a valid `resource_id` connects, and the connector logs
       `auth_path=resource_id`.
-- [ ] A handshake with a valid `resource_id` but a **wrong port** is denied.
-- [ ] A handshake with a valid `resource_id` and a **mismatched `destination`** is denied.
+- [x] A handshake with a valid `resource_id` but a **wrong port** is denied.
+      *(`wrong_port_is_denied_as_unknown_resource`, added 2026-08-10 with Phase 7's harness.)*
+- [x] A handshake with a valid `resource_id` and a **mismatched `destination`** is denied.
+      *(`destination_mismatch_is_denied_for_pinned_resources`.)*
       📌 **Write this one before Phase 7** — task 7.0 modifies exactly this check.
-- [ ] A handshake with an unknown `resource_id` is denied — and **no dial is attempted** (check that
-      no connection to any backend appears in logs).
-- [ ] A shield-routed resource still goes via the shield session; with the shield down it **fails**
+- [x] A handshake with an unknown `resource_id` is denied — and **no dial is attempted**.
+      *(`unknown_resource_id_is_denied_without_dialing`.)*
+- [x] A shield-routed resource still goes via the shield session; with the shield down it **fails**
       (never silently dials direct).
+      *(`shield_route_is_never_resolved_and_fails_closed`.)*
 
 ---
 

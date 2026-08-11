@@ -91,14 +91,21 @@ don't weaken the assertion.
 
 ## Verify (manual)
 
-> Gate 1 exercised the first item on a live stack (`route="connector"`). The rest were **not** verified
-> — the shield path in particular was never exercised in Gate 1's topology.
+> Gate 1 exercised the first item on a live stack (`route="connector"`). The shield path was covered
+> later by a connector-side test. The last two are **client-side** three-state semantics and remain
+> genuinely unverified — they cannot be proven from connector tests, and belong with Phase 9, which
+> rewrites exactly that code path.
 
 - [x] Tunnel opens to an existing IP resource; the connector logs `auth_path=resource_id`
       (proves the new field is being read, not the legacy fallback).
-- [ ] A shield-routed resource still goes via the shield.
+- [x] A shield-routed resource still goes via the shield.
+      *(`shield_route_is_never_resolved_and_fails_closed`, connector-side, added during Phase 7.)*
 - [ ] Connector-offline case still **fails closed** (empty transports), not passthrough.
-- [ ] Unmanaged traffic is still untunnelled.
+      ⚠️ **Client-side, still unverified.** `client/src/daemon_tests.rs` covers `build_transports_*`
+      map shape but not the `Some(empty)` = fail-closed vs `None` = unmanaged distinction. Losing it
+      converts a fail-closed case into a passthrough — a security regression. **Phase 9.1 must assert
+      it**, since Phase 9 rewrites this exact code.
+- [ ] Unmanaged traffic is still untunnelled. ⚠️ Same gap, same owner: Phase 9.1.
 
 ## Then
 

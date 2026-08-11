@@ -19,6 +19,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
+use crate::resolver::Resolver;
 use crate::tls::cert_store::CertStore;
 use crate::ControlMessage;
 
@@ -92,6 +93,7 @@ pub struct RelayHandler {
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    resolver: Arc<Resolver>,
     handshake_timeout: Duration,
     stream_permits: Arc<Semaphore>,
 }
@@ -104,6 +106,7 @@ impl RelayHandler {
         crl_manager: CrlManager,
         connector_id: String,
         control_tx: mpsc::Sender<ControlMessage>,
+        resolver: Arc<Resolver>,
         handshake_timeout_secs: u64,
         max_tunnel_streams: usize,
     ) -> Result<Self> {
@@ -117,6 +120,7 @@ impl RelayHandler {
             crl_manager,
             connector_id,
             control_tx,
+            resolver,
             handshake_timeout: Duration::from_secs(handshake_timeout_secs),
             stream_permits: Arc::new(Semaphore::new(max_tunnel_streams)),
         })
@@ -189,6 +193,7 @@ impl RelayHandler {
             self.crl_manager.clone(),
             &self.connector_id,
             &self.control_tx,
+            self.resolver.clone(),
         )
         .await
     }

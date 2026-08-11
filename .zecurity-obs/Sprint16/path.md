@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 passed 2026-08-06) · Stage 2 phases 4–6 complete · next = Phase 7
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10, negatives included) · Stage 2 phases 4–7 complete · next = Phase 8
 solo: true
 owner: M3
 tags:
@@ -153,11 +153,12 @@ client-supplied address (a confused-deputy / SSRF-shaped surface).
             `CONNECTOR_EGRESS_MARK = 0x5b` (connector sets `SO_MARK`, client returns early on it) plus a
             co-location warning. **Not caused by this sprint.** Full analysis:
             [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]].
-      - [ ] **Negative cases — outstanding, now unblocked.** `missing_resource_id` ·
-            `unknown_resource` · `destination_mismatch` · `unauthorized_spiffe` · shields-all-offline
-            fails closed. These were deferred while the data plane was broken; it works now, so they are
-            cheap. **Write `destination_mismatch` before Phase 7** — Phase 7 task 7.0 modifies exactly
-            that check, and this test is the guard that fails if it is deleted rather than scoped.
+      - [x] **Negative cases — DONE (2026-08-10, in Phase 7).** All five now covered by the
+            `device_tunnel.rs` test harness: `missing_resource_id` · `unknown_resource` (asserted to
+            attempt **no dial**) · `destination_mismatch` · `unauthorized_spiffe` · shield route with
+            every shield offline **fails closed** as `SHIELD_NOT_ATTACHED` and is never resolved.
+            They were deferred while the data plane was broken; writing them alongside Phase 7 was what
+            surfaced the 7.0 correction recorded there.
 
 ### ── STAGE 2 — Delivery Split + Connector Resolution ──
 
@@ -266,34 +267,53 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       client-influenced); `static` with multiple addresses takes the first valid one (no round-robin);
       unknown `resolver.config` keys are tolerated while `server` is rejected.
 
-#### Phase 7 — Connector delivery branch
-> See [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]]. **← next unchecked phase.**
-> 📌 **Scope is wider than the File Map says:** `handle_stream` has **three** call sites, so threading
-> `Arc<Resolver>` through touches `device_tunnel.rs`, `quic_listener.rs:110`, `relay_handler.rs:183`
-> **and `main.rs`** (two listener spawns). `HickoryBackend::from_system()` is constructed there — it is
-> currently unreferenced, and being a public item in a lib crate it produces **no** dead-code warning,
-> so nothing will remind you.
-- [ ] **7.0** ⚠️ **Scope amendment — do this first.** Authorization currently denies **every**
-      name-addressed resource *before* the `route_type` branch is reached:
-      `device_tunnel.rs:225` compares `req.destination != entry.address`, and `entry.address` is empty
-      for a named resource. Scope the check to `!entry.address.is_empty()` — **do not delete it**, it
-      stays fully strict for every IP resource. Phase 9.4 must agree by sending an **empty**
-      `destination` for named resources; if either half ships alone, every FQDN resource is denied.
-      *(No live breakage today: clients drop these entries at `daemon.rs:657`.)*
-- [ ] **7.1** `device_tunnel.rs` — branch on **`route_type` first**: `"shield"` → existing shield
-      session (**never fall back to direct**); `"connector"` → `Pinned` → dial address, `Named` →
-      `resolver.resolve()` → dial, `Invalid` → deny. ⚠️ **Never `match resolver.type { …, shield }`** —
-      delivery (field 7) and resolution (field 12) are orthogonal axes; collapsing them breaks
-      invariant #3. Keep `connect_marked_tcp` (`CONNECTOR_EGRESS_MARK`) on the new dial path or the
-      Gate 1 co-location loop returns.
-- [ ] **7.2** Preserve `resource_id` + hostname + resolved address in logs/metrics (never the synthetic
-      IP). Emit resolution latency + cache hit/miss so the TTL clamp can be tuned from data.
-- [ ] **Gate:** `cd connector && cargo build && cargo test`
+#### Phase 7 — Connector delivery branch ✅ DONE (2026-08-10)
+> See [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]].
+> 📌 **Scope was wider than the File Map said:** `handle_stream` has **three** call sites, so threading
+> `Arc<Resolver>` touched `device_tunnel.rs`, `quic_listener.rs:110`, `relay_handler.rs:183`
+> **and `main.rs`** (two listener spawns + `RelayHandler::new`) — 4 files, not 1. Plus `resolver.rs`
+> for `UnavailableBackend` and `Resolved::cache_hit`.
+- [x] **7.0** Cross-check scoped to `!entry.address.is_empty()` at `device_tunnel.rs` — a
+      name-addressed resource has no pinned address for a client-supplied `destination` to agree with.
+      The check stays **fully strict** for every IP-pinned resource; it was scoped, not deleted.
+      ⚠️ **Correction to this plan's earlier claim.** It said authorization *"currently denies every
+      name-addressed resource."* **It did not.** The original arm read
+      `!req.destination.is_empty() && req.destination != entry.address`, so with an empty `destination`
+      the first clause was already false and the arm never fired. 7.0 is therefore **defensive
+      hardening plus a Phase 9.4 contract**, not a fix for a live break. Discovered while writing the
+      guard test: the first attempt sent `destination: ""` and passed with *and* without the fix — a
+      test that guarded nothing. The real guard sends a **non-empty (synthetic) destination**, and was
+      verified by reverting the scoping: exactly one test fails
+      (`named_resource_is_not_denied_for_a_non_empty_destination`).
+      **Phase 9.4 must still send `destination` empty** — that contract is unchanged.
+- [x] **7.1** `device_tunnel.rs` — branches on **`route_type` first**: `"shield"` → existing shield
+      session (**never falls back to direct**); `"connector"` \| `"direct"` → `Pinned` → dial address,
+      `Named` → `resolver.resolve()` → dial, `Invalid` → deny. No `match resolver.type { …, shield }`
+      exists. `connect_marked_tcp` (`CONNECTOR_EGRESS_MARK`) preserved on the new dial path, so the
+      Gate 1 co-location loop cannot return. **Both** the TCP bridge and `relay_udp` take the resolved
+      address — verified by grep that no `req.destination` survives as a dial target anywhere.
+- [x] **7.2** Logs carry `resource_id` (identity) + `hostname` + the **resolved** address, never a
+      synthetic IP. Resolution latency and cache hit/miss emitted at `debug` via a new
+      `Resolved::cache_hit` field — see the Post-Sprint Fix below; this bullet was **missed on the
+      first pass** and only caught by a verification round.
+      📌 `AccessLogFields` was deliberately **not** extended: typed audit fields would need a
+      `ConnectorLog` **proto** change, which is the same "who receives this message?" question that
+      caught `local_target` in Phase 5. Structured `tracing` + `legacy_message` instead.
+- [x] **Gate:** `cd connector && cargo build && cargo test` — **PASS: 148 unit + 4 integration**
+      (baseline 129). Zero warnings; no new clippy findings; `rustfmt` clean;
+      `cargo build --manifest-path relay/Cargo.toml` still green (no accidental coupling).
       📌 Phases 6–7 have **no E2E proof available** until Phase 9 — no client can express a
-      name-addressed resource before the binding registry exists. Unit tests are the gate, deliberately.
+      name-addressed resource before the binding registry exists. Unit tests are the gate, deliberately,
+      and the first real exercise of both phases is Phase 9.5's `hosts`-entry test.
+- [x] 📌 **19 tests added.** A `#[cfg(test)] mod tests` now exists in `device_tunnel.rs` (there was
+      none): a duplex-stream harness that drives the real framed-JSON handshake and asserts on the
+      emitted `ConnectorLog`. **Gate 1's outstanding negative cases are now all covered** — see Gate 1
+      above. Harness note: a fresh `CrlManager` reports `Unavailable` (fail-closed by construction) and
+      would deny before authorization is ever reached, so every test calls the pre-existing
+      `#[cfg(test)] install_test_cache(vec![])`.
 
 #### Phase 8 — Shield `local_target`
-> See [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]].
+> See [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]. **← next unchecked phase.**
 - [ ] **8.0** **Deliver `local_target` to the Shield** (moved here from 5.1 — see the design
       correction under Phase 5). `proto/shield/v1/shield.proto` — add `string local_target = 7`
       to `ResourceInstruction` (fields 1–6 in use; never renumber). Then
@@ -313,6 +333,11 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 - [ ] **9.1** new `client/src/registry.rs` — durable `hostname → synthetic IP → resource_id`;
       stable across restarts; **quarantine before reuse**; collision-aware CIDR selection. Preserve the
       three-state semantics (`Some(with transports)` / `Some(empty)` = fail closed / `None` = unmanaged).
+      📌 **Inherited debt — assert the three states here.** Phase 2's verify list still carries two
+      unverified client-side items (connector-offline fails closed; unmanaged traffic untunnelled).
+      `daemon_tests.rs` covers the map *shape* but not that distinction, and losing it converts a
+      fail-closed case into a passthrough — a security regression. Phase 9 rewrites this exact code, so
+      it owns the assertion.
 - [ ] **9.2** `client/src/state_store.rs` — persist the registry (encrypted at rest, per ADR-002); a
       corrupt table rebuilds empty **with everything quarantined**, rather than refusing to start.
 - [ ] **9.3** `client/src/tun.rs` — route the **synthetic CIDR once**; stop installing per-`/32`
@@ -485,8 +510,8 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 4 | [[Sprint16/Member3-Go-Rust/Phase4-Migration-030-Resource-Model]] | ✅ done |
 | 5 | [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]] | ✅ done |
 | 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ✅ done (128 + 4 tests green) |
-| 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ⬜ **next** |
-| 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ⬜ |
+| 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ✅ done (148 + 4 tests green) |
+| 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ⬜ **next** |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ — closes **Gate 2** |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
@@ -558,6 +583,39 @@ only real logic in the module without coverage, and a bug there would first surf
 extraction, **CNAME-chain skipping** (intermediate records must not make a resolved alias read as
 NODATA), empty answers, and TTL saturation on a past deadline.
 → [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]]
+
+### Fix: task 7.2's metrics bullet was silently skipped
+**Phase 7.2.** The logging half shipped; *"emit resolution latency and cache hit/miss so the TTL clamp
+can be tuned from data"* did not, and the phase's own gate passed anyway — a green gate proves the
+specified tests pass, not that every listed task was done. Only a task-by-task audit caught it.
+
+**Fix:** `Resolved` gains `cache_hit: bool` (set at all five construction sites; always `false` for
+`static`, which has no cache), and `device_tunnel.rs` times the resolve and emits `resolved`,
+`cache_hit`, `stale`, `resolve_us` at **`debug`** — not `info`, since it fires on every connection to a
+named resource. The crate has **no metrics facility** (no `prometheus`, no `metrics` crate), so
+structured logs are the only sink that exists today. 3 tests assert the flag is trustworthy, including
+the subtle case: the *first* stale answer is `cache_hit: false` (a query was attempted and failed)
+while the *backoff-served* one is `true`.
+→ [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]]
+
+### Fix: a guard test that guarded nothing
+**Phase 7.0.** The first `destination_mismatch` test for named resources sent `destination: ""` and
+passed with *and* without the 7.0 scoping — because the original arm was already inert for an empty
+destination. Writing it is what disproved this plan's claim that authorization "denies every
+name-addressed resource".
+
+**Fix:** the real guard sends a **non-empty (synthetic) destination**, and was validated by reverting
+the scoping and confirming exactly one test fails. Lesson worth keeping: **a passing test is not
+evidence of a guard — revert the fix and watch it fail.**
+→ [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]]
+
+### Fix: leaked navigation hints and an untested legacy alias
+**Phase 7.** Two smaller items from the same audit round:
+- Comments reading `// … (line ~482)` / `// ~487` — navigation aids for applying a patch by hand —
+  were pasted into the source and pointed at wrong lines once the file grew. Removed.
+- `route_type == "direct"`, the legacy alias for `"connector"`, reaches the same Phase 7.1 addressing
+  code but had **no test**. A future tightening of the route_type check would silently break named
+  resources on older ACL snapshots. Added `legacy_direct_route_type_still_resolves`.
 
 ### Outstanding (doc-only): stale comment on `ACLRelevantUpdate`
 `internal/resource/store.go` (~454) still documents `local_target` as reaching the wire and being part of

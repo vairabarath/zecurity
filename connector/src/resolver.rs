@@ -117,6 +117,12 @@ impl ResolveError {
 pub struct Resolved {
     pub address: Ipv4Addr,
     pub stale: bool,
+    /// True when this answer came from the cache without issuing a query.
+    ///
+    /// Exists so the TTL clamp can be tuned from observed hit rates rather than
+    /// guesswork (Phase 7.2). Always false for `static`, which has no cache and
+    /// never queries anything.
+    pub cache_hit: bool,
 }
 
 // ── DNS backend boundary ─────────────────────────────────────────────────────
@@ -134,6 +140,23 @@ pub trait DnsBackend: Send + Sync + 'static {
         &'a self,
         name: &'a str,
     ) -> BoxFut<'a, Result<Vec<(Ipv4Addr, Duration)>, ResolveError>>;
+}
+
+/// Backend for a host with no usable DNS configuration. Every lookup fails as
+/// `ResolverUnavailable`, so name-addressed resources deny with a truthful reason
+/// while IP-pinned resources — which never reach a resolver — are untouched.
+///
+/// This exists so a missing `/etc/resolv.conf` degrades the connector instead of
+/// preventing it from starting.
+pub struct UnavailableBackend;
+
+impl DnsBackend for UnavailableBackend {
+    fn lookup_a<'a>(
+        &'a self,
+        _name: &'a str,
+    ) -> BoxFut<'a, Result<Vec<(Ipv4Addr, Duration)>, ResolveError>> {
+        Box::pin(async { Err(ResolveError::ResolverUnavailable) })
+    }
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
@@ -289,6 +312,7 @@ impl Resolver {
             return Some(Ok(Resolved {
                 address: good.address,
                 stale: false,
+                cache_hit: true,
             }));
         }
 
@@ -300,6 +324,7 @@ impl Resolver {
             return Some(Ok(Resolved {
                 address: good.address,
                 stale: true,
+                cache_hit: true,
             }));
         }
         None
@@ -326,6 +351,7 @@ impl Resolver {
                     Ok(Resolved {
                         address,
                         stale: false,
+                        cache_hit: false,
                     })
                 }
                 // NODATA: an authoritative NOERROR answer. The name exists, its A
@@ -363,6 +389,7 @@ impl Resolver {
                         Ok(Resolved {
                             address: good.address,
                             stale: true,
+                            cache_hit: false,
                         })
                     }
                     _ => Err(e),
@@ -402,6 +429,7 @@ fn resolve_static(resolver: &AclResolver) -> Result<Resolved, ResolveError> {
         .map(|address| Resolved {
             address,
             stale: false,
+            cache_hit: false,
         })
         .ok_or(ResolveError::InvalidResolverConfig)
 }
@@ -611,6 +639,44 @@ mod tests {
         r.resolve_at(rn, host, cfg, now).await
     }
 
+    // ── degraded host (no usable /etc/resolv.conf) ──
+
+    /// `main.rs` falls back to `UnavailableBackend` when `HickoryBackend::from_system()`
+    /// fails, so the connector boots on a host with no DNS configuration rather than
+    /// refusing to start. This asserts the consequence the sprint's acceptance criteria
+    /// depend on: name-addressed resources deny with a truthful reason, and IP-pinned
+    /// resources — which never reach a resolver — keep working.
+    #[tokio::test]
+    async fn unavailable_backend_denies_names_but_leaves_static_working() {
+        let r = Resolver::new(Arc::new(UnavailableBackend));
+        let t0 = Instant::now();
+
+        assert_eq!(
+            resolve(&r, "rn-1", "app.internal", &res("dns", &[]), t0).await,
+            Err(ResolveError::ResolverUnavailable)
+        );
+
+        // No last-known-good exists, so stale-on-error has nothing to serve and the
+        // request fails closed rather than inventing an address.
+        assert_eq!(
+            resolve(&r, "rn-1", "app.internal", &res("dns", &[]), t0).await,
+            Err(ResolveError::ResolverUnavailable)
+        );
+
+        // `static` needs no DNS at all — unaffected by a broken resolver host.
+        let out = resolve(
+            &r,
+            "rn-1",
+            "app.internal",
+            &res("static", &[("address", "10.0.0.9")]),
+            t0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.address, Ipv4Addr::new(10, 0, 0, 9));
+        assert!(!out.stale);
+    }
+
     // ── dispatch ──
 
     #[tokio::test]
@@ -711,6 +777,69 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(dns.count(), 1);
+    }
+
+    /// Phase 7.2: the hit/miss flag must be trustworthy, since it is what the TTL
+    /// clamp would be tuned from.
+    #[tokio::test]
+    async fn cache_hit_flag_distinguishes_served_from_queried() {
+        let dns = FakeDns::new(vec![FakeDns::ok([10, 0, 0, 5], 60)]);
+        let r = Resolver::new(dns.clone());
+        let cfg = res("dns", &[]);
+        let t0 = Instant::now();
+
+        // A query was issued.
+        assert!(!resolve(&r, "rn-1", "h", &cfg, t0).await.unwrap().cache_hit);
+        // Served from cache, no query.
+        assert!(
+            resolve(&r, "rn-1", "h", &cfg, t0 + Duration::from_secs(30))
+                .await
+                .unwrap()
+                .cache_hit
+        );
+        assert_eq!(dns.count(), 1);
+    }
+
+    /// A stale address served from the backoff fast path is still a cache hit; the
+    /// one that had to attempt a query first is not.
+    #[tokio::test]
+    async fn stale_from_backoff_is_a_cache_hit_but_the_first_stale_is_not() {
+        let dns = FakeDns::new(vec![
+            FakeDns::ok([10, 0, 0, 5], 60),
+            Err(ResolveError::ResolverUnavailable),
+        ]);
+        let r = Resolver::new(dns.clone());
+        let cfg = res("dns", &[]);
+        let t0 = Instant::now();
+        resolve(&r, "rn-1", "h", &cfg, t0).await.unwrap();
+
+        let first = resolve(&r, "rn-1", "h", &cfg, t0 + Duration::from_secs(61))
+            .await
+            .unwrap();
+        assert!(first.stale && !first.cache_hit, "a query was attempted");
+
+        let second = resolve(&r, "rn-1", "h", &cfg, t0 + Duration::from_secs(63))
+            .await
+            .unwrap();
+        assert!(
+            second.stale && second.cache_hit,
+            "served from the fast path"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_resolver_is_never_reported_as_a_cache_hit() {
+        let r = Resolver::new(FakeDns::new(vec![FakeDns::ok([1, 1, 1, 1], 60)]));
+        let out = resolve(
+            &r,
+            "rn-1",
+            "app.internal",
+            &res("static", &[("address", "10.9.9.9")]),
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+        assert!(!out.cache_hit, "static has no cache and queries nothing");
     }
 
     #[tokio::test]

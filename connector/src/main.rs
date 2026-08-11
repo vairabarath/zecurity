@@ -27,7 +27,7 @@ use tracing::{error, info};
 use zecurity_connector::{
     agent_server, appmeta, config::ConnectorConfig, control_stream, controller_client, crl,
     device_tunnel, enrollment, net_util, policy, quic_listener, relay_attachment, relay_handler,
-    relay_selector, tls, updater, watchdog, ControlMessage,
+    relay_selector, resolver, tls, updater, watchdog, ControlMessage,
 };
 
 #[tokio::main]
@@ -193,6 +193,28 @@ async fn main() -> anyhow::Result<()> {
     // ConnectorHealthReport.
     let relay_attachment_slot = relay_attachment::new_slot();
 
+    // Sprint 16 Phase 7: one shared endpoint resolver for every tunnel path
+    // (TLS :9092, QUIC :9092, and relay-inbound). Built ONCE — it owns the DNS
+    // connection pool and the TTL cache, so a per-connection instance would
+    // defeat both and turn the single-flight gate into a no-op.
+    //
+    // A host with no usable /etc/resolv.conf must NOT stop the connector booting:
+    // it may serve only IP-pinned resources, and the sprint's acceptance criteria
+    // require those to behave identically. Degrade instead — name-addressed
+    // resources then deny with `resolver_unavailable`, which is exactly the truth.
+    let dns_backend: Arc<dyn resolver::DnsBackend> = match resolver::HickoryBackend::from_system() {
+        Ok(b) => Arc::new(b),
+        Err(e) => {
+            error!(
+                error = %e,
+                "no usable system DNS configuration — name-addressed resources will be denied \
+                 with resolver_unavailable; IP-pinned resources are unaffected",
+            );
+            Arc::new(resolver::UnavailableBackend)
+        }
+    };
+    let resolver = Arc::new(resolver::Resolver::new(dns_backend));
+
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
         let store = cert_store.clone();
@@ -201,9 +223,10 @@ async fn main() -> anyhow::Result<()> {
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
+        let res = resolver.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, crl, cid, tx).await
+                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, crl, cid, tx, res).await
             {
                 error!(error = %e, "device tunnel (TLS) on :9092 failed");
             }
@@ -218,6 +241,7 @@ async fn main() -> anyhow::Result<()> {
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
+        let res = resolver.clone();
         tokio::spawn(async move {
             if let Err(e) = quic_listener::listen(
                 "0.0.0.0:9092",
@@ -228,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
                 crl,
                 cid,
                 tx,
+                res,
             )
             .await
             {
@@ -252,6 +277,7 @@ async fn main() -> anyhow::Result<()> {
             crl_manager.clone(),
             connector_id.clone(),
             ctrl_tx.clone(),
+            resolver.clone(),
             cfg.relay_inner_handshake_timeout_secs,
             cfg.relay_max_tunnel_streams as usize,
         )

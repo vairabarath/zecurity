@@ -80,15 +80,18 @@ address**. Phases 1–3 confirmed working end-to-end.
       blocked for one day by a P0 data-plane stall that was **not caused by this sprint**; see
       [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (resolved 2026-08-06, client/connector
       co-location routing loop).
-- [ ] **Negative cases — still outstanding.** These were deferred while the data plane was broken.
-      The data plane is fixed, so they are now cheap and should be written **before Phase 7**:
-      - [ ] `missing_resource_id` — handshake with no id is denied
-      - [ ] `unknown_resource` — unknown id is denied **and no dial is attempted**
-      - [ ] `destination_mismatch` — valid id, wrong destination, is denied
-        > ⚠️ This one is load-bearing for Stage 2. Phase 7 must *scope* this check rather than delete
-        > it (see Phase 7 task **7.0**); this test is the guard that fails if someone deletes it.
-      - [ ] `unauthorized_spiffe` — valid id, wrong principal, is denied
-      - [ ] shield-routed resource with every shield offline **fails closed** (invariant #3)
+- [x] **Negative cases — DONE (2026-08-10, written during Phase 7).** All covered by the new
+      `device_tunnel.rs` test harness (`tokio::io::duplex` + assertions on the emitted `ConnectorLog`):
+      - [x] `missing_resource_id` — handshake with no id is denied
+      - [x] `unknown_resource` — unknown id is denied, and **no dial is attempted**
+      - [x] `destination_mismatch` — valid id, wrong destination, is denied
+        > This one is load-bearing for Stage 2. Phase 7.0 **scoped** it rather than deleting it, and
+        > `destination_mismatch_is_denied_for_pinned_resources` is the guard. Note Phase 7 also
+        > corrected an overstatement about this check — see
+        > [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] § *Scope correction*.
+      - [x] `unauthorized_spiffe` — valid id, wrong principal, is denied
+      - [x] shield-routed resource with every shield offline **fails closed** (invariant #3) as
+            `SHIELD_NOT_ATTACHED`, and is never resolved
 
 ## Verify (manual)
 

@@ -9,9 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Result};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use std::net::SocketAddr;
 use std::os::unix::io::AsRawFd;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -19,7 +19,8 @@ use x509_parser::prelude::*;
 
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
-use crate::policy::PolicyCache;
+use crate::policy::{Addressing, PolicyCache};
+use crate::resolver::Resolver;
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -76,6 +77,7 @@ pub async fn listen(
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    resolver: Arc<Resolver>,
 ) -> Result<()> {
     use std::sync::Arc as StdArc;
     use tokio::net::TcpListener;
@@ -95,6 +97,7 @@ pub async fn listen(
         let conn_id_clone = connector_id.clone();
         let tx_clone = control_tx.clone();
         let acceptor_clone = acceptor.clone();
+        let resolver_clone = resolver.clone();
 
         tokio::spawn(async move {
             let tls_stream = match acceptor_clone.accept(stream).await {
@@ -131,6 +134,7 @@ pub async fn listen(
                 crl_clone,
                 &conn_id_clone,
                 &tx_clone,
+                resolver_clone,
             )
             .await
             {
@@ -149,6 +153,7 @@ pub async fn handle_stream<S>(
     crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
+    resolver: Arc<Resolver>,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -217,7 +222,19 @@ where
                 // The client may state where it thinks the resource is, but it must
                 // agree with the ACL. Disagreement is a denial, never a silent
                 // preference for either value.
-                Some(entry) if !req.destination.is_empty() && req.destination != entry.address => {
+                //
+                // Sprint 16 Phase 7.0: only meaningful when the ACL HAS a pinned
+                // address to compare against. A name-addressed resource has none —
+                // the client's synthetic IP is client-local and deliberately
+                // meaningless here, so it sends `destination` empty (Phase 9.4).
+                // The check stays fully strict for every IP-pinned resource, which
+                // is every resource that exists today. Do NOT delete it: that
+                // reopens the confused-deputy surface Stage 1 closed.
+                Some(entry)
+                    if !entry.address.is_empty()
+                        && !req.destination.is_empty()
+                        && req.destination != entry.address =>
+                {
                     (None, "destination_mismatch")
                 }
                 Some(entry) => (Some(entry), ""),
@@ -437,15 +454,165 @@ where
         ));
     }
 
+    // ── Sprint 16 Phase 7.1 — determine the dial target ─────────────────────
+    //
+    // Reached ONLY on the connector branch: the shield arm returned above, and
+    // route_type has been validated. A shield-delivered resource is never resolved
+    // — the Shield IS the endpoint. Never branch on `resolver.type` out here;
+    // delivery (route_type, field 7) and resolution (resolver.type, field 12) are
+    // orthogonal axes, and collapsing them would make a Protected resource
+    // directly dialable (invariant #3).
+    //
+    // Invariant #2 holds structurally: authorization already succeeded above, so no
+    // DNS query is ever issued for an unauthorized request.
+    let (dial_ip, resource_hostname, from_stale) = match acl_entry.addressing() {
+        Addressing::Pinned(address) => (address, String::new(), false),
+
+        Addressing::Named {
+            hostname,
+            resolver: spec,
+        } => {
+            let started = std::time::Instant::now();
+            match resolver
+                .resolve(&acl_entry.remote_network_id, &hostname, &spec)
+                .await
+            {
+                Ok(resolved) => {
+                    // Phase 7.2 — resolution latency and cache hit/miss, so the TTL
+                    // clamp can be tuned from observed data rather than guesswork.
+                    // `debug` rather than `info`: this fires on every connection to a
+                    // named resource, and the access log above is the audit record.
+                    // The crate has no metrics facility, so structured logs are the
+                    // only sink available today.
+                    tracing::debug!(
+                        resource_id = %acl_entry.resource_id,
+                        hostname = %hostname,
+                        resolved = %resolved.address,
+                        cache_hit = resolved.cache_hit,
+                        stale = resolved.stale,
+                        resolve_us = started.elapsed().as_micros(),
+                        "resolved resource endpoint",
+                    );
+                    (resolved.address.to_string(), hostname, resolved.stale)
+                }
+                Err(e) => {
+                    // Unresolvable endpoint → deny (invariant #7). The reason is the
+                    // resolver's own typed token, so nxdomain / resolver_unavailable /
+                    // resolver_failure / no_address_record stay distinguishable — and
+                    // stay distinct from a dial failure below, which means resolution
+                    // SUCCEEDED and the resource is down.
+                    tracing::warn!(
+                        spiffe_id = %client_spiffe_id,
+                        resource_id = %acl_entry.resource_id,
+                        hostname = %hostname,
+                        reason = e.reason(),
+                        "access denied — could not resolve resource endpoint",
+                    );
+                    let response = TunnelResponse {
+                        ok: false,
+                        error: Some("access denied".to_string()),
+                        quic_addr: quic_advertise_addr().map(String::from),
+                    };
+                    send_response(&mut stream, &response).await?;
+                    emit_access_log(
+                        control_tx,
+                        connector_id,
+                        AccessLogFields {
+                            resource_id: &acl_entry.resource_id,
+                            client_spiffe_id: &client_spiffe_id,
+                            route_type: "connector",
+                            destination: &req.destination,
+                            port: req.port,
+                            protocol: &req.protocol,
+                            action: "deny",
+                            error: e.reason(),
+                            legacy_message: format!(
+                                "deny spiffe_id={} resource={} hostname={} port={} proto={} reason={}",
+                                client_spiffe_id,
+                                acl_entry.resource_id,
+                                hostname,
+                                req.port,
+                                req.protocol,
+                                e.reason(),
+                            ),
+                        },
+                    )
+                    .await;
+                    return Err(anyhow!(
+                        "could not resolve {} for resource {}: {}",
+                        hostname,
+                        acl_entry.resource_id,
+                        e.reason()
+                    ));
+                }
+            }
+        }
+
+        // A self-contradictory or unaddressable ACL entry: both `address` and
+        // `hostname` set, neither set, or a hostname with no usable resolver.
+        // Fail closed — nothing here is entitled to pick a winner.
+        Addressing::Invalid(reason) => {
+            tracing::error!(
+                spiffe_id = %client_spiffe_id,
+                resource_id = %acl_entry.resource_id,
+                reason,
+                "access denied — resource is not addressable",
+            );
+            let response = TunnelResponse {
+                ok: false,
+                error: Some("access denied".to_string()),
+                quic_addr: quic_advertise_addr().map(String::from),
+            };
+            send_response(&mut stream, &response).await?;
+            emit_access_log(
+                control_tx,
+                connector_id,
+                AccessLogFields {
+                    resource_id: &acl_entry.resource_id,
+                    client_spiffe_id: &client_spiffe_id,
+                    route_type: "connector",
+                    destination: &req.destination,
+                    port: req.port,
+                    protocol: &req.protocol,
+                    action: "deny",
+                    error: reason,
+                    legacy_message: format!(
+                        "deny spiffe_id={} resource={} port={} proto={} reason={}",
+                        client_spiffe_id, acl_entry.resource_id, req.port, req.protocol, reason,
+                    ),
+                },
+            )
+            .await;
+            return Err(anyhow!(
+                "resource {} is not addressable: {}",
+                acl_entry.resource_id,
+                reason
+            ));
+        }
+    };
+
+    // Phase 7.2 — `resource_id` is the identity; `hostname` and the resolved address
+    // are observations. Never a synthetic IP: those are client-local and meaningless
+    // to the connector (7.0 stops us even comparing against one).
     tracing::info!(
         spiffe_id = %client_spiffe_id,
         resource_id = %acl_entry.resource_id,
-        dest = %req.destination,
+        hostname = %resource_hostname,
+        dest = %dial_ip,
+        stale = from_stale,
         port = req.port,
         proto = %req.protocol,
         route = "connector",
         "access allowed",
     );
+    if from_stale {
+        tracing::warn!(
+            resource_id = %acl_entry.resource_id,
+            hostname = %resource_hostname,
+            dest = %dial_ip,
+            "dialing a last-known-good address — resolver is unreachable",
+        );
+    }
 
     if req.protocol.to_lowercase() == "udp" {
         let response = TunnelResponse {
@@ -478,13 +645,13 @@ where
         )
         .await;
 
-        // Dial target comes from the ACL entry, never from req.destination.
-        relay_udp(&mut stream, &acl_entry.address, req.port).await?;
+        // Dial target is the RESOLVED address, never req.destination.
+        relay_udp(&mut stream, &dial_ip, req.port).await?;
         return Ok(());
     }
 
-    // Dial target comes from the ACL entry, never from req.destination.
-    let target = format!("{}:{}", acl_entry.address, req.port);
+    // Dial target is the RESOLVED address, never req.destination.
+    let target = format!("{}:{}", dial_ip, req.port);
     let mut resource_conn = match connect_marked_tcp(&target).await {
         Ok(c) => {
             tracing::info!(resource_id = %acl_entry.resource_id, dest = %target, "tunnel_opened ok");
@@ -750,4 +917,612 @@ fn extract_peer_info(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
     }
 
     Err(anyhow!("peer certificate has no SPIFFE URI in SAN"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::v1::{AclEntry, AclResolver, AclSnapshot};
+    use crate::proto::connector_control_message::Body;
+    use crate::resolver::{DnsBackend, Resolver, UnavailableBackend};
+    use tokio::net::TcpListener;
+
+    const SPIFFE: &str = "spiffe://ws.test/client/device-1";
+    const OTHER_SPIFFE: &str = "spiffe://ws.test/client/device-OTHER";
+
+    // ── harness ──────────────────────────────────────────────────────────────
+
+    /// Write a `TunnelRequest` in the handler's own wire format: a 4-byte
+    /// big-endian length followed by the JSON body (see `read_framed_json`).
+    async fn write_request<W: AsyncWrite + Unpin>(w: &mut W, req: serde_json::Value) {
+        let body = serde_json::to_vec(&req).unwrap();
+        w.write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        w.write_all(&body).await.unwrap();
+        w.flush().await.unwrap();
+    }
+
+    /// `TunnelResponse` is `Serialize`-only, so read it back as a generic value.
+    /// `None` means the handler closed without responding — which is what the
+    /// dial-failure path does.
+    async fn read_response<R: AsyncRead + Unpin>(r: &mut R) -> Option<serde_json::Value> {
+        let mut len = [0u8; 4];
+        r.read_exact(&mut len).await.ok()?;
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        r.read_exact(&mut body).await.ok()?;
+        serde_json::from_slice(&body).ok()
+    }
+
+    fn snapshot(entry: AclEntry) -> AclSnapshot {
+        AclSnapshot {
+            version: 1,
+            workspace_id: "ws-test".into(),
+            generated_at: 0,
+            entries: vec![entry],
+            ..Default::default()
+        }
+    }
+
+    /// Classic IP-pinned entry: `address` set, `hostname` empty.
+    fn pinned_entry(address: &str, port: u16) -> AclEntry {
+        AclEntry {
+            resource_id: "res-1".into(),
+            name: "res-1".into(),
+            remote_network_id: "rn-1".into(),
+            address: address.into(),
+            port: port as u32,
+            protocol: "tcp".into(),
+            allowed_spiffe_ids: vec![SPIFFE.to_string()],
+            route_type: "connector".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Name-addressed entry: `address` empty, `hostname` + resolver set.
+    fn named_entry(hostname: &str, port: u16, resolver: Option<AclResolver>) -> AclEntry {
+        AclEntry {
+            hostname: hostname.into(),
+            resolver,
+            ..pinned_entry("", port)
+        }
+    }
+
+    fn static_resolver(address: &str) -> AclResolver {
+        let mut config = std::collections::HashMap::new();
+        config.insert("address".to_string(), address.to_string());
+        AclResolver {
+            r#type: "static".into(),
+            config,
+        }
+    }
+
+    fn dns_resolver() -> AclResolver {
+        AclResolver {
+            r#type: "dns".into(),
+            config: Default::default(),
+        }
+    }
+
+    /// A loopback port with nothing listening: bind, note the port, drop the
+    /// listener. Gives a deterministic ECONNREFUSED instead of guessing a port.
+    async fn closed_port() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    struct Outcome {
+        result: Result<()>,
+        response: Option<serde_json::Value>,
+        logs: Vec<crate::proto::ConnectorLog>,
+    }
+
+    impl Outcome {
+        fn log(&self) -> &crate::proto::ConnectorLog {
+            self.logs.last().expect("expected at least one access log")
+        }
+
+        /// Borrow the error text instead of `unwrap_err()`, which would partially
+        /// move `Outcome` and block any later `log()` access in the same test.
+        fn err_text(&self) -> String {
+            match &self.result {
+                Err(e) => e.to_string(),
+                Ok(()) => panic!("expected handle_stream to fail"),
+            }
+        }
+
+        fn response(&self) -> &serde_json::Value {
+            self.response
+                .as_ref()
+                .expect("expected the handler to answer the client")
+        }
+    }
+
+    async fn run_with(
+        entry: AclEntry,
+        backend: Arc<dyn DnsBackend>,
+        spiffe: &str,
+        req: serde_json::Value,
+    ) -> Outcome {
+        let acl = Arc::new(PolicyCache::new());
+        acl.update(snapshot(entry));
+
+        // A fresh CrlManager reports `Unavailable` — fail-closed by construction —
+        // which would deny before authorization is ever reached. Install a valid,
+        // empty CRL so these tests exercise the policy path, not the CRL gate.
+        let crl = CrlManager::new();
+        crl.install_test_cache(vec![]);
+
+        let (tx, mut rx) = mpsc::channel::<ControlMessage>(16);
+        let (mut client, server) = tokio::io::duplex(8192);
+        let resolver = Arc::new(Resolver::new(backend));
+        let spiffe = spiffe.to_string();
+
+        let handle = tokio::spawn(async move {
+            handle_stream(
+                server,
+                spiffe,
+                vec![1, 2, 3],
+                acl,
+                AgentTunnelHub::new(),
+                crl,
+                "connector-test",
+                &tx,
+                resolver,
+            )
+            .await
+        });
+
+        write_request(&mut client, req).await;
+        let response = read_response(&mut client).await;
+        let result = handle.await.unwrap();
+
+        let mut logs = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Some(Body::ConnectorLog(log)) = msg.body {
+                logs.push(log);
+            }
+        }
+        Outcome {
+            result,
+            response,
+            logs,
+        }
+    }
+
+    /// Most cases need no DNS at all: `static` resolves without I/O, and
+    /// `UnavailableBackend` gives a deterministic resolver failure.
+    async fn run(entry: AclEntry, req: serde_json::Value) -> Outcome {
+        run_with(entry, Arc::new(UnavailableBackend), SPIFFE, req).await
+    }
+
+    // ── 7.0 — the destination cross-check ────────────────────────────────────
+
+    /// Gate 1's outstanding negative case, and the guard for task 7.0: scoping the
+    /// check to `!entry.address.is_empty()` must NOT weaken it for pinned resources.
+    /// If someone deletes the check instead of scoping it, this fails.
+    #[tokio::test]
+    async fn destination_mismatch_is_denied_for_pinned_resources() {
+        let out = run(
+            pinned_entry("10.0.0.1", 443),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "10.9.9.9",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().action, "deny");
+        assert_eq!(out.log().error, "destination_mismatch");
+    }
+
+    /// **This is the actual guard for task 7.0.** A named resource has no pinned
+    /// address, so there is nothing for a non-empty `destination` to agree with.
+    ///
+    /// Without the `!entry.address.is_empty()` scoping, `entry.address` is `""`, the
+    /// client's value is non-empty and differs, so the arm fires and the resource is
+    /// denied. This is the case that matters if Phase 9 ever sends the synthetic IP
+    /// rather than an empty string — which is the only reason the scoping exists.
+    #[tokio::test]
+    async fn named_resource_is_not_denied_for_a_non_empty_destination() {
+        let port = closed_port().await;
+        let out = run(
+            named_entry("app.internal", port, Some(static_resolver("127.0.0.1"))),
+            serde_json::json!({
+                "resource_id": "res-1",
+                // A client-local synthetic IP: meaningless to the connector, and
+                // deliberately not comparable to anything in the ACL.
+                "destination": "100.64.0.7",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            out.log().error,
+            "destination_mismatch",
+            "a named resource has no pinned address to cross-check against"
+        );
+        assert!(out.err_text().contains(&format!("127.0.0.1:{port}")));
+    }
+
+    /// The empty-destination case Phase 9.4 actually specifies. Note this passes
+    /// with or without 7.0's scoping — the original arm was already inert for an
+    /// empty `destination`. Kept as a contract test for 9.4, not as a 7.0 guard.
+    #[tokio::test]
+    async fn named_resource_with_empty_destination_is_not_denied() {
+        let port = closed_port().await;
+        let out = run(
+            named_entry("app.internal", port, Some(static_resolver("127.0.0.1"))),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert_ne!(
+            out.log().error,
+            "destination_mismatch",
+            "a named resource must not be denied for having no pinned address"
+        );
+        assert_eq!(
+            out.log().action,
+            "error",
+            "should reach the dial, not a denial"
+        );
+    }
+
+    // ── 7.1 — the delivery branch ────────────────────────────────────────────
+
+    /// Proves the connector dials the RESOLVED address. The returned error carries
+    /// the dial target, which is the only place it is observable — the audit log
+    /// deliberately does not gain a `resolved` wire field (that would need a
+    /// ConnectorLog proto change).
+    #[tokio::test]
+    async fn named_resource_dials_the_resolved_address() {
+        let port = closed_port().await;
+        let out = run(
+            named_entry("app.internal", port, Some(static_resolver("127.0.0.1"))),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        let err = out.err_text();
+        assert!(
+            err.contains(&format!("127.0.0.1:{port}")),
+            "expected the resolved address as the dial target, got: {err}"
+        );
+        assert!(out.log().error.starts_with("connect_failed"));
+    }
+
+    /// Regression: a pinned resource still dials its own ACL address, unchanged.
+    #[tokio::test]
+    async fn pinned_resource_still_dials_the_acl_address() {
+        let port = closed_port().await;
+        let out = run(
+            pinned_entry("127.0.0.1", port),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "127.0.0.1",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        let err = out.err_text();
+        assert!(err.contains(&format!("127.0.0.1:{port}")), "got: {err}");
+    }
+
+    /// A resolver failure is a DENIAL with the resolver's own typed reason — and it
+    /// must stay distinct from `connect_failed`, which means resolution SUCCEEDED
+    /// and the resource is down. Conflating them sends operators to the wrong system.
+    #[tokio::test]
+    async fn resolver_failure_denies_with_the_typed_reason() {
+        let out = run(
+            named_entry("app.internal", 443, Some(dns_resolver())),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().action, "deny");
+        assert_eq!(out.log().error, "resolver_unavailable");
+        assert_ne!(out.log().error, "connect_failed");
+    }
+
+    /// A hostname with no resolver is unusable. `parseResolver` degrades to nil on
+    /// malformed JSON precisely so the blast radius lands here, on one resource.
+    #[tokio::test]
+    async fn named_resource_without_a_resolver_is_denied() {
+        let out = run(
+            named_entry("app.internal", 443, None),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().action, "deny");
+        assert_eq!(out.log().error, "missing_resolver");
+    }
+
+    /// `"direct"` is a legacy alias for `"connector"` kept for older ACL snapshots.
+    /// It reaches the same Phase 7.1 addressing code, so a future tightening of the
+    /// route_type check would silently break named resources on old snapshots.
+    #[tokio::test]
+    async fn legacy_direct_route_type_still_resolves() {
+        let port = closed_port().await;
+        let entry = AclEntry {
+            route_type: "direct".into(),
+            ..named_entry("app.internal", port, Some(static_resolver("127.0.0.1")))
+        };
+        let out = run(
+            entry,
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(
+            out.err_text().contains(&format!("127.0.0.1:{port}")),
+            "legacy alias must resolve and dial like \"connector\": {}",
+            out.err_text()
+        );
+    }
+
+    /// Verify item: "unknown resolver type → deny". `addressing()` accepts it (the
+    /// type string is non-empty), so the rejection happens one layer down in the
+    /// resolver and must surface as its own reason — never as a default to DNS.
+    #[tokio::test]
+    async fn unknown_resolver_type_is_denied() {
+        let mut config = std::collections::HashMap::new();
+        config.insert("address".to_string(), "127.0.0.1".to_string());
+        let bogus = AclResolver {
+            r#type: "k8s".into(), // interface reserved for later; not implemented
+            config,
+        };
+        let out = run(
+            named_entry("app.internal", 443, Some(bogus)),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().action, "deny");
+        assert_eq!(out.log().error, "unsupported_resolver");
+    }
+
+    /// Both `address` and `hostname` set. Exactly-one is enforced only at the
+    /// GraphQL layer, so a SQL-inserted row can carry both — fail closed rather
+    /// than silently preferring either value.
+    #[tokio::test]
+    async fn ambiguous_addressing_is_denied() {
+        let entry = AclEntry {
+            hostname: "app.internal".into(),
+            resolver: Some(static_resolver("127.0.0.1")),
+            ..pinned_entry("10.0.0.1", 443)
+        };
+        let out = run(
+            entry,
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "10.0.0.1",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().action, "deny");
+        assert_eq!(out.log().error, "ambiguous_addressing");
+    }
+
+    /// Invariant #3. A shield-delivered resource is NEVER resolved — the Shield is
+    /// the endpoint. With no shield attached it must fail closed as
+    /// SHIELD_NOT_ATTACHED, never fall through to a direct dial, and never surface
+    /// a resolver error (which would prove the resolver ran).
+    #[tokio::test]
+    async fn shield_route_is_never_resolved_and_fails_closed() {
+        let entry = AclEntry {
+            route_type: "shield".into(),
+            shield_id: "shield-1".into(),
+            hostname: "app.internal".into(),
+            resolver: Some(dns_resolver()),
+            ..pinned_entry("", 443)
+        };
+        let out = run(
+            entry,
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.response()["error"], ERR_SHIELD_NOT_ATTACHED);
+        assert_eq!(out.log().route_type, "shield");
+        assert_ne!(
+            out.log().error,
+            "resolver_unavailable",
+            "a shield route must not consult the resolver"
+        );
+    }
+
+    // ── unchanged authorization paths (regression) ───────────────────────────
+
+    #[tokio::test]
+    async fn unauthorized_spiffe_is_denied() {
+        let out = run_with(
+            pinned_entry("10.0.0.1", 443),
+            Arc::new(UnavailableBackend),
+            OTHER_SPIFFE,
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "10.0.0.1",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().error, "unauthorized_spiffe");
+    }
+
+    #[tokio::test]
+    async fn missing_resource_id_is_denied() {
+        let out = run(
+            pinned_entry("10.0.0.1", 443),
+            serde_json::json!({ "destination": "10.0.0.1", "port": 443, "protocol": "tcp" }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().error, "missing_resource_id");
+    }
+
+    /// Port and protocol are part of the identity lookup: a resource authorized on
+    /// :443 is not reachable on :22. Reported as `unknown_resource`, deliberately
+    /// indistinguishable from "no such id" so a caller cannot probe which resource
+    /// ids exist by comparing error strings.
+    #[tokio::test]
+    async fn wrong_port_is_denied_as_unknown_resource() {
+        let out = run(
+            pinned_entry("10.0.0.1", 443),
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "10.0.0.1",
+                "port": 22,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().error, "unknown_resource");
+        assert_eq!(out.log().action, "deny");
+    }
+
+    #[tokio::test]
+    async fn unknown_resource_id_is_denied_without_dialing() {
+        let out = run(
+            pinned_entry("10.0.0.1", 443),
+            serde_json::json!({
+                "resource_id": "res-does-not-exist",
+                "destination": "10.0.0.1",
+                "port": 443,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        assert!(out.result.is_err());
+        assert_eq!(out.log().error, "unknown_resource");
+        assert_eq!(out.log().action, "deny", "no dial may be attempted");
+    }
+
+    // ── end-to-end over a real socket ────────────────────────────────────────
+
+    /// The only test that proves bytes actually traverse a RESOLVED endpoint:
+    /// a real listener, reached via a `static` resolver rather than a pinned address.
+    #[tokio::test]
+    async fn named_resource_relays_bytes_to_the_resolved_backend() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Backend: echo one payload back, uppercased, so the response is provably ours.
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 16];
+            let n = sock.read(&mut buf).await.unwrap();
+            let reply = String::from_utf8_lossy(&buf[..n]).to_uppercase();
+            sock.write_all(reply.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let acl = Arc::new(PolicyCache::new());
+        acl.update(snapshot(named_entry(
+            "app.internal",
+            port,
+            Some(static_resolver("127.0.0.1")),
+        )));
+        let crl = CrlManager::new();
+        crl.install_test_cache(vec![]);
+        let (tx, _rx) = mpsc::channel::<ControlMessage>(16);
+        let (mut client, server) = tokio::io::duplex(8192);
+        let resolver = Arc::new(Resolver::new(Arc::new(UnavailableBackend)));
+
+        tokio::spawn(async move {
+            let _ = handle_stream(
+                server,
+                SPIFFE.to_string(),
+                vec![1, 2, 3],
+                acl,
+                AgentTunnelHub::new(),
+                crl,
+                "connector-test",
+                &tx,
+                resolver,
+            )
+            .await;
+        });
+
+        write_request(
+            &mut client,
+            serde_json::json!({
+                "resource_id": "res-1",
+                "destination": "",
+                "port": port,
+                "protocol": "tcp"
+            }),
+        )
+        .await;
+
+        let response = read_response(&mut client).await.expect("response");
+        assert_eq!(response["ok"], true);
+
+        client.write_all(b"ping").await.unwrap();
+        client.flush().await.unwrap();
+        let mut buf = [0u8; 4];
+        client.read_exact(&mut buf).await.unwrap();
+        assert_eq!(
+            &buf, b"PING",
+            "bytes must round-trip via the resolved backend"
+        );
+    }
 }
