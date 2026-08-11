@@ -1,19 +1,39 @@
 ---
 type: adr
-status: pending
-id: PENDING-02
+status: accepted
+id: ADR-027
+former_id: PENDING-02
 domain: security
 priority: P0
 created: 2026-07-03
+decided: 2026-08-10
 related:
   - ADR-014-Relay-Stabilization
   - Relay-E2E-Flow-and-Security-Review (F2)
-tags: [pending, adr, security, pki, revocation]
+tags: [adr, security, pki, revocation]
 ---
 
-# Pending ADR 02 — Certificate Revocation (CRL/OCSP) Enforcement
+# ADR-027 — Certificate Revocation (CRL/OCSP) Enforcement
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: ACCEPTED (2026-08-10).** Promoted from `PENDING-02`.
+>
+> **Decision: Option A** — CRL as the mesh-wide baseline, implemented at all three
+> trust boundaries this doc named: relay outer QUIC mTLS (per-workspace
+> `WorkspaceCrlManager`, fail-closed 3-state check — `relay/src/crl.rs`,
+> `relay/src/listener.rs`), controller relay-heartbeat validation
+> (`RelayRevocationChecker`, fails closed on an unready/unloaded state —
+> `controller/internal/connector/relay_revocation.go`, `spiffe.go`), and the
+> connector's existing inner client mTLS check (hardened to the same 3-state
+> pattern — `connector/src/crl.rs`, `connector/src/device_tunnel.rs`). All four CRL
+> consumers (relay, connector×2, client) refresh on a 60s + 0–15s jitter cycle.
+> Client-side relay-revocation checking was added beyond this doc's original
+> scope (`client/src/crl.rs`, `relay_pool.rs`, `tunnel_pool.rs`). OCSP remains
+> unimplemented, consistent with this doc's own recommendation to defer it.
+> **Implemented in commit `dfb2c65`**, independently verified end-to-end
+> (code read + tests run, not just the commit message) — every fail-open/closed
+> path checked fails closed, revoked-but-unexpired certs are rejected at every
+> layer, and dedicated tests now cover the two previously-untested spots
+> (the relay listener's and connector's own accept/stream match arms).
 
 ## Context / Current State
 
