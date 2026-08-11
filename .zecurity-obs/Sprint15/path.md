@@ -225,10 +225,10 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase E2 — M4: Admin UI
 > See [[Sprint15/Member4-Frontend/Phase1-Device-Profile-Admin-UI]]. Depends on Phase E's GraphQL schema.
-- [ ] **M4-A1** Device Profile list/create/edit screens, requirements editor, resource-binding picker, audit/enforce toggle, per-device posture visibility.
-- [ ] **M4-A2** `App.tsx` routes + sidebar/nav entry + permission-based visibility — pages are **unreachable without this**; confirmed every existing page (`Resources.tsx` etc.) requires an explicit `<Route>` (`App.tsx:85-87`).
-- [ ] **M4-A3** Component tests for the new screens.
-- [ ] **Build gate:** `cd admin && npm run codegen && npm run build`
+- [x] **M4-A1** Device Profile list/create/edit screens, requirements editor, resource-binding picker, audit/enforce toggle, per-device posture visibility.
+- [x] **M4-A2** `App.tsx` routes + sidebar/nav entry + permission-based visibility — pages are **unreachable without this**; confirmed every existing page (`Resources.tsx` etc.) requires an explicit `<Route>` (`App.tsx:85-87`).
+- [x] **M4-A3** Component tests for the new screens.
+- [x] **Build gate:** `cd admin && npm run codegen && npm run build`
 
 ### Phase E3 — M4: Policies Page + Create Trusted Linux Profile Panel
 > See [[Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile]]. Depends on Phase E2.
@@ -242,7 +242,7 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 - [x] **M4-B1–B8** Backend `manualTrust` field/mutation + tests, GraphQL codegen,
   `Switch` component, rebuilt create panel, new `Policies.tsx`, routes/nav updated.
   Full checklist in the phase file.
-- [ ] Component tests for `Policies.tsx` and the rebuilt create modal.
+- [x] Component tests for `Policies.tsx` and the rebuilt create modal.
 - [ ] Manual/E2E pass against a running backend (not done this session).
 - [x] **Build gate:** controller `go build`/`go test` + admin `codegen`/`build`, all green.
 
@@ -263,9 +263,9 @@ M4-A Admin UI: Device Profile screens                     (needs M1-D's GraphQL 
 
 ### Phase H — M3: Posture-Aware Auth Path + Observability
 > See [[Sprint15/Member3-Rust-Connector/Phase3-Posture-Aware-Auth-and-Metrics]]. Depends on Phase G + M1-E (ACL carries posture).
-- [ ] **M3-H1** Confirm tunnel auth at connect time naturally inherits posture gating for free (ACL already excludes non-compliant SPIFFE in enforce mode) — no separate posture check needed connector-side.
-- [ ] **M3-H2** Structured logs (report accept/reject visibility is mostly M1's concern; connector logs the consequences it sees): registry size, cancellations fired (labeled direct-TCP/QUIC/relay-routed), stale devices, ACL invalidations. Add a metrics crate only if explicitly scoped — none exists in the connector today.
-- [ ] **Build gate:** `cd connector && cargo build && cargo test`
+- [x] **M3-H1** Confirm tunnel auth at connect time naturally inherits posture gating for free (ACL already excludes non-compliant SPIFFE in enforce mode) — no separate posture check needed connector-side.
+- [x] **M3-H2** Structured logs (report accept/reject visibility is mostly M1's concern; connector logs the consequences it sees): registry size, cancellations fired (labeled direct-TCP/QUIC/relay-routed), stale devices, ACL invalidations. Add a metrics crate only if explicitly scoped — none exists in the connector today.
+- [x] **Build gate:** `cd connector && cargo build && cargo test`
 
 ## Final Build Gates
 ```bash
@@ -277,30 +277,30 @@ buf generate   # from repo root, after M2-A lands — regenerates Go stubs only;
 ```
 
 ## Acceptance Criteria
-- [ ] Linux collectors return normalized `PASS/FAIL/UNSUPPORTED/UNKNOWN/ERROR` against registered check IDs; one failed or **panicking** collector doesn't block report submission (isolated task + `JoinError` handling, not just a timeout).
-- [ ] `030_device_posture.sql` references `client_devices(id)` and `workspaces(id)`, enforces tenant-scoped and `(report_id, check_id)` uniqueness, indexes `received_at`, preserves nullable evaluation provenance with `ON DELETE SET NULL`, and includes `device_profiles.revision` plus `device_profile_evaluations.profile_revision`; Phase F0 alone owns retention execution.
-- [ ] `(*client.Service).ReportDevicePosture` lives in `controller/internal/client/posture.go` — **not** `internal/posture`, since the generated gRPC interface can only be satisfied by a method on `client.Service`. Authenticates via `{access_token, device_id}` exactly like `GetACLSnapshot`.
-- [ ] Ingestion enforces the documented concrete age, count, string, and detail limits; validates device ownership; treats same-device replay of one collection-cycle `report_id` idempotently; rejects cross-device/workspace reuse and duplicate check IDs; ignores unknown checks individually; and rejects a report when no recognized valid checks remain.
-- [ ] Evaluation: AND within a profile, OR across **enforce-mode** profiles bound to a resource (audit-mode profiles never affect authorization, pass or fail); a profile cannot be switched to enforce, bound to a resource while enforced, **or have its last requirement removed while enforced** — all three paths guarded, preventing the vacuous-truth trap of an empty profile silently granting everyone; re-evaluates on report/profile/requirement/binding change.
-- [ ] Requirement changes increment `device_profiles.revision`; only evaluations with a matching `profile_revision` may authorize, so re-evaluation lag is fail-closed.
-- [ ] GraphQL resolvers for `posture.graphqls` have their store/evaluator dependency wired via `resolvers.Resolver` + `cmd/server/main.go` — not left unconnected after `go generate`.
-- [ ] **The cached ACL snapshot itself expires**, using a `cacheEntry{snapshot, validUntil}` wrapper (not a bare `*ACLSnapshot`), with `validUntil` computed via the OR-aware formula (max over each allowed pair's satisfying enforce profiles, then min across pairs — not a flat minimum over every evaluation, which would over-expire). `GetOrCompile` recompiles once wall-clock passes it, verified sufficient via the connector's existing 15s heartbeat unconditionally re-entering `GetOrCompile`.
-- [ ] **Expiry-triggered recompiles are actually delivered to the connector** — `GetOrCompile` calls `NotifyPolicyChange(workspace_id)` as part of handling an expired entry (bumping `Notifier.Version()`) before recomputing, so `pushACLSnapshot`'s version comparison (`control_stream.go:718`) sees a real difference instead of silently dropping the corrected snapshot. This was a confirmed release blocker in review — a recompile with no version bump is invisible to the push path.
-- [ ] Concurrent expiry performs exactly one notification/version bump and one compile; expiry notification is invoked outside cache locks through registered callback wiring.
-- [ ] All profiles default to audit mode; enforce mode is explicit per profile; profile mutations require ADMIN + workspace ownership.
-- [ ] `CompileACLSnapshot` gates enforce-mode profiles only, requires evaluation/profile revision equality, uses a batch query, and returns `CompiledACL{Snapshot, ValidUntil}` with OR-aware expiry derived only from observations required by posture-gated allowed pairs; identity-only pairs are excluded.
-- [ ] Every posture-relevant mutation (not only evaluation transitions) bumps policy version, invalidates ACL cache, pushes a new snapshot.
-- [ ] `connector/Cargo.toml` declares `dashmap` and `tokio-util` explicitly (neither existed before this sprint).
-- [ ] `supportedPostureChecks` GraphQL query exists and the Admin UI's requirements editor sources its check-ID options from it, not a hardcoded frontend list.
-- [ ] Connector maintains a `(spiffe_id, resource_id) → {session_id: token}` active-session registry (nested per-session map, not a flat `Vec`) covering **TCP and QUIC** accept paths identically; a drop guard removes only its own session, never a sibling session sharing the same `(spiffe,resource)` pair; never a device-wide kill.
-- [ ] Registration uses a pre-spawn `CancellationToken`, not a post-spawn `JoinHandle` (which is structurally circular).
-- [ ] The authorization/registration race is closed via an **unconditional** re-check of `is_allowed` immediately after registering — not gated on ACL-version equality, since versions are process-local and can miss real content changes.
-- [ ] `RelaySession::relay_stream()`'s `d2s` child task is cancelled deterministically alongside the outer task (shared token or unified `select!`) — confirmed as a real leak otherwise, not just an unverified risk.
-- [ ] GraphQL admin exposes failure reason, observation time, report age, collector error — never raw command output.
-- [ ] Structured logs cover collector failures, stale devices, evaluation transitions, ACL invalidations, terminated sessions (labeled by transport); a metrics crate is only added if explicitly scoped.
-- [ ] Admin UI provides usable Device Profile administration **and is actually reachable** — routes wired into `App.tsx`, sidebar/nav entry present, permission-based visibility applied, component tests written. A page file with no route is not a completed phase.
-- [ ] `linux.os.version` is documented as visibility-only in v1 — not described as enforced anywhere, since the requirement schema has no operator/expected-value comparison this sprint.
-- [ ] `cargo test` passes for both `client` and `connector`, not just `cargo build`.
+- [x] Linux collectors return normalized `PASS/FAIL/UNSUPPORTED/UNKNOWN/ERROR` against registered check IDs; one failed or **panicking** collector doesn't block report submission (isolated task + `JoinError` handling, not just a timeout).
+- [x] `030_device_posture.sql` references `client_devices(id)` and `workspaces(id)`, enforces tenant-scoped and `(report_id, check_id)` uniqueness, indexes `received_at`, preserves nullable evaluation provenance with `ON DELETE SET NULL`, and includes `device_profiles.revision` plus `device_profile_evaluations.profile_revision`; Phase F0 alone owns retention execution.
+- [x] `(*client.Service).ReportDevicePosture` lives in `controller/internal/client/posture.go` — **not** `internal/posture`, since the generated gRPC interface can only be satisfied by a method on `client.Service`. Authenticates via `{access_token, device_id}` exactly like `GetACLSnapshot`.
+- [x] Ingestion enforces the documented concrete age, count, string, and detail limits; validates device ownership; treats same-device replay of one collection-cycle `report_id` idempotently; rejects cross-device/workspace reuse and duplicate check IDs; ignores unknown checks individually; and rejects a report when no recognized valid checks remain.
+- [x] Evaluation: AND within a profile, OR across **enforce-mode** profiles bound to a resource (audit-mode profiles never affect authorization, pass or fail); a profile cannot be switched to enforce, bound to a resource while enforced, **or have its last requirement removed while enforced** — all three paths guarded, preventing the vacuous-truth trap of an empty profile silently granting everyone; re-evaluates on report/profile/requirement/binding change.
+- [x] Requirement changes increment `device_profiles.revision`; only evaluations with a matching `profile_revision` may authorize, so re-evaluation lag is fail-closed.
+- [x] GraphQL resolvers for `posture.graphqls` have their store/evaluator dependency wired via `resolvers.Resolver` + `cmd/server/main.go` — not left unconnected after `go generate`.
+- [x] **The cached ACL snapshot itself expires**, using a `cacheEntry{snapshot, validUntil}` wrapper (not a bare `*ACLSnapshot`), with `validUntil` computed via the OR-aware formula (max over each allowed pair's satisfying enforce profiles, then min across pairs — not a flat minimum over every evaluation, which would over-expire). `GetOrCompile` recompiles once wall-clock passes it, verified sufficient via the connector's existing 15s heartbeat unconditionally re-entering `GetOrCompile`.
+- [x] **Expiry-triggered recompiles are actually delivered to the connector** — `GetOrCompile` calls `NotifyPolicyChange(workspace_id)` as part of handling an expired entry (bumping `Notifier.Version()`) before recomputing, so `pushACLSnapshot`'s version comparison (`control_stream.go:718`) sees a real difference instead of silently dropping the corrected snapshot. This was a confirmed release blocker in review — a recompile with no version bump is invisible to the push path.
+- [x] Concurrent expiry performs exactly one notification/version bump and one compile; expiry notification is invoked outside cache locks through registered callback wiring.
+- [x] All profiles default to audit mode; enforce mode is explicit per profile; profile mutations require ADMIN + workspace ownership.
+- [x] `CompileACLSnapshot` gates enforce-mode profiles only, requires evaluation/profile revision equality, uses a batch query, and returns `CompiledACL{Snapshot, ValidUntil}` with OR-aware expiry derived only from observations required by posture-gated allowed pairs; identity-only pairs are excluded.
+- [x] Every posture-relevant mutation (not only evaluation transitions) bumps policy version, invalidates ACL cache, pushes a new snapshot.
+- [x] `connector/Cargo.toml` declares `dashmap` and `tokio-util` explicitly (neither existed before this sprint).
+- [x] `supportedPostureChecks` GraphQL query exists and the Admin UI's requirements editor sources its check-ID options from it, not a hardcoded frontend list.
+- [x] Connector maintains a `(spiffe_id, resource_id) → {session_id: token}` active-session registry (nested per-session map, not a flat `Vec`) covering **TCP and QUIC** accept paths identically; a drop guard removes only its own session, never a sibling session sharing the same `(spiffe,resource)` pair; never a device-wide kill.
+- [x] Registration uses a pre-spawn `CancellationToken`, not a post-spawn `JoinHandle` (which is structurally circular).
+- [x] The authorization/registration race is closed via an **unconditional** re-check of `is_allowed` immediately after registering — not gated on ACL-version equality, since versions are process-local and can miss real content changes.
+- [x] `RelaySession::relay_stream()`'s `d2s` child task is cancelled deterministically alongside the outer task (shared token or unified `select!`) — confirmed as a real leak otherwise, not just an unverified risk.
+- [x] GraphQL admin exposes failure reason, observation time, report age, collector error — never raw command output.
+- [x] Structured logs cover collector failures, stale devices, evaluation transitions, ACL invalidations, terminated sessions (labeled by transport); a metrics crate is only added if explicitly scoped.
+- [x] Admin UI provides usable Device Profile administration **and is actually reachable** — routes wired into `App.tsx`, sidebar/nav entry present, permission-based visibility applied, component tests written. A page file with no route is not a completed phase.
+- [x] `linux.os.version` is documented as visibility-only in v1 — not described as enforced anywhere, since the requirement schema has no operator/expected-value comparison this sprint.
+- [x] `cargo test` passes for both `client` and `connector`, not just `cargo build`.
 
 ## Post-Sprint Fixes
 
@@ -340,6 +340,18 @@ binding reads were N+1, and requirement changes did not immediately refresh eval
 resources, and run a workspace re-evaluation after requirement changes. Schema-level
 ADMIN, notification, tenant-isolation, and binding regression tests were added. See the
 M1 Phase 3 Post-Phase Fixes section.
+
+### Fix: Connector CRL refresh fails with "builder error" on scheme-less controller HTTP addr
+
+**Issue:** With `CONTROLLER_HTTP_ADDR` as a bare `host:port` (e.g. `192.168.1.164:8080`),
+the connector's `/ca.crl` and `/relay.crl` refreshes failed with `CRL fetch error: builder
+error`; the fail-closed CRL check then denied every device tunnel with `certificate
+revocation state unavailable`.
+
+**Fix:** `connector/src/main.rs` now normalizes the HTTP base through a new
+`enrollment::http_base_url()` (scheme-preserving, trailing-slash-trimming — the same
+normalization `/ca.crt` already used), so both CRL URLs are absolute. Tests added in
+`enrollment_tests.rs`. See the M3 Phase 3 Post-Phase Fixes section for details.
 
 ## Deferred (out of scope this sprint)
 - Windows/macOS collectors (same interface, later).

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 use uuid::Uuid;
 
 /// (spiffe_id, resource_id) — the same pair an ACL entry's allowed_spiffe_ids
@@ -15,6 +16,32 @@ pub type SessionKey = (String, String);
 /// share the same pair and must not share an id.
 pub type SessionId = Uuid;
 
+/// How a session's tunnel was delivered to the connector. Carried on the
+/// cancellation log lines so ACL-diff teardown is observable per path —
+/// relay-routed cancellations should track roughly with direct ones, not lag
+/// or go missing (the fastest signal that the Phase 2 relay child-task fix
+/// regressed).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionTransport {
+    /// Direct connector-route tunnel over the TLS/TCP accept path.
+    Tcp,
+    /// Direct connector-route tunnel over the QUIC accept path.
+    Quic,
+    /// Shield-relay-routed tunnel (the `RelaySession`/`d2s` child-task path)
+    /// or a connector endpoint reached through a Relay.
+    Relay,
+}
+
+impl SessionTransport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionTransport::Tcp => "tcp",
+            SessionTransport::Quic => "quic",
+            SessionTransport::Relay => "relay",
+        }
+    }
+}
+
 /// Live index of open tunnels, keyed by (spiffe_id, resource_id). Nested
 /// (not a flat Vec/DashMap<SessionKey, CancellationToken>) because a device
 /// can legitimately hold more than one live tunnel to the same resource at
@@ -22,7 +49,7 @@ pub type SessionId = Uuid;
 /// still-live token, making it silently uncancellable.
 #[derive(Default)]
 pub struct SessionRegistry {
-    inner: DashMap<SessionKey, HashMap<SessionId, CancellationToken>>,
+    inner: DashMap<SessionKey, HashMap<SessionId, (CancellationToken, SessionTransport)>>,
 }
 
 impl SessionRegistry {
@@ -35,14 +62,28 @@ impl SessionRegistry {
     /// only this session) when dropped — covering every exit path (normal
     /// close, error, external cancellation) without relying on a manual
     /// cleanup call that could be forgotten on some path.
-    pub fn register(self: &Arc<Self>, key: SessionKey) -> (CancellationToken, RegistryGuard) {
+    pub fn register(
+        self: &Arc<Self>,
+        key: SessionKey,
+        transport: SessionTransport,
+    ) -> (CancellationToken, RegistryGuard) {
         let token = CancellationToken::new();
         let session_id = Uuid::new_v4();
 
         self.inner
             .entry(key.clone())
             .or_default()
-            .insert(session_id, token.clone());
+            .insert(session_id, (token.clone(), transport));
+
+        let total_sessions: usize = self.inner.iter().map(|e| e.value().len()).sum();
+        info!(
+            spiffe_id = %key.0,
+            resource_id = %key.1,
+            session_id = %session_id,
+            transport = transport.as_str(),
+            total_sessions,
+            "session registered",
+        );
 
         let guard = RegistryGuard {
             key,
@@ -56,12 +97,32 @@ impl SessionRegistry {
     /// Cancels every session currently registered under `key`. Inert until
     /// something calls it — Phase 1 never does; this is Phase 2's ACL-diff
     /// teardown entry point. Does not remove entries itself: each cancelled
-    /// session's own RegistryGuard removes its entry as it unwinds.
+    /// session's own RegistryGuard removes its entry as it unwinds. One
+    /// structured line is logged per cancelled session, labeled by transport
+    /// (tcp/quic/relay) so teardown is observable per delivery path.
     pub fn cancel_all(&self, key: &SessionKey) {
-        if let Some(sessions) = self.inner.get(key) {
-            for token in sessions.value().values() {
-                token.cancel();
-            }
+        let cancelled: Vec<(SessionId, SessionTransport)> = {
+            let Some(sessions) = self.inner.get(key) else {
+                return;
+            };
+            sessions
+                .value()
+                .iter()
+                .map(|(id, (token, transport))| {
+                    token.cancel();
+                    (*id, *transport)
+                })
+                .collect()
+        };
+        for (session_id, transport) in cancelled {
+            info!(
+                spiffe_id = %key.0,
+                resource_id = %key.1,
+                session_id = %session_id,
+                reason = "acl_diff",
+                transport = transport.as_str(),
+                "ACL diff: session cancelled",
+            );
         }
     }
 
@@ -84,6 +145,7 @@ pub struct RegistryGuard {
 
 impl Drop for RegistryGuard {
     fn drop(&mut self) {
+        let removed_session = self.session_id;
         let now_empty = match self.registry.inner.get_mut(&self.key) {
             Some(mut sessions) => {
                 sessions.value_mut().remove(&self.session_id);
@@ -93,16 +155,29 @@ impl Drop for RegistryGuard {
         };
 
         if now_empty {
-            // Re-check-and-remove atomically under the map's own lock, not
-            // based on the `now_empty` snapshot above — a concurrent register
-            // could have added a new session for this key in between.
             self.registry.inner.remove_if(&self.key, |_, v| v.is_empty());
         }
+
+        let remaining_sessions: usize = self
+            .registry
+            .inner
+            .iter()
+            .map(|e| e.value().len())
+            .sum();
+        info!(
+            spiffe_id = %self.key.0,
+            resource_id = %self.key.1,
+            session_id = %removed_session,
+            remaining_sessions,
+            "session unregistered",
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
 
     fn key(spiffe: &str, resource: &str) -> SessionKey {
@@ -112,8 +187,8 @@ mod tests {
     #[test]
     fn two_resources_for_same_spiffe_are_distinct_entries() {
         let registry = Arc::new(SessionRegistry::new());
-        let (_t1, _g1) = registry.register(key("spiffe://a", "resource-1"));
-        let (_t2, _g2) = registry.register(key("spiffe://a", "resource-2"));
+        let (_t1, _g1) = registry.register(key("spiffe://a", "resource-1"), SessionTransport::Tcp);
+        let (_t2, _g2) = registry.register(key("spiffe://a", "resource-2"), SessionTransport::Quic);
 
         assert!(registry.contains_key(&key("spiffe://a", "resource-1")));
         assert!(registry.contains_key(&key("spiffe://a", "resource-2")));
@@ -124,8 +199,8 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let k = key("spiffe://a", "resource-1");
 
-        let (token1, guard1) = registry.register(k.clone());
-        let (token2, _guard2) = registry.register(k.clone());
+        let (token1, guard1) = registry.register(k.clone(), SessionTransport::Tcp);
+        let (token2, _guard2) = registry.register(k.clone(), SessionTransport::Tcp);
 
         assert_eq!(registry.session_count(&k), 2);
 
@@ -154,7 +229,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let k = key("spiffe://a", "resource-1");
 
-        let (_token, guard) = registry.register(k.clone());
+        let (_token, guard) = registry.register(k.clone(), SessionTransport::Tcp);
         assert!(registry.contains_key(&k));
 
         drop(guard);
@@ -170,7 +245,7 @@ mod tests {
         let registry = Arc::new(SessionRegistry::new());
         let k = key("spiffe://a", "resource-1");
 
-        let (token, guard) = registry.register(k.clone());
+        let (token, guard) = registry.register(k.clone(), SessionTransport::Relay);
         registry.cancel_all(&k);
 
         assert!(token.is_cancelled());
@@ -192,7 +267,7 @@ mod tests {
             let registry = Arc::clone(&registry);
             let k = k.clone();
             handles.push(tokio::spawn(async move {
-                let (_token, guard) = registry.register(k.clone());
+                let (_token, guard) = registry.register(k.clone(), SessionTransport::Tcp);
                 tokio::task::yield_now().await;
                 registry.cancel_all(&k);
                 drop(guard);
@@ -201,5 +276,115 @@ mod tests {
         for h in handles {
             h.await.unwrap();
         }
+    }
+
+    /// Minimal `io::Write` used by the test-only global fmt subscriber.
+    ///
+    /// Bytes are staged in a per-event `local` buffer and flushed to the shared
+    /// capture buffer atomically in `Drop`, so one formatted log line can never
+    /// be interleaved with another thread's line.
+    struct RecordingWriter {
+        shared: Arc<Mutex<Vec<u8>>>,
+        local: Vec<u8>,
+    }
+
+    impl std::io::Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.local.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for RecordingWriter {
+        fn drop(&mut self) {
+            if !self.local.is_empty() {
+                self.shared.lock().unwrap().extend_from_slice(&self.local);
+            }
+        }
+    }
+
+    /// Returns the shared capture buffer, installing the process-wide test
+    /// subscriber on first use.
+    ///
+    /// The subscriber is registered via `set_global_default` **exactly once**.
+    /// Registering a fresh subscriber per test (the obvious `with_default`
+    /// approach) makes `tracing` rebuild its global callsite-interest cache on
+    /// every test, and concurrent rebuilds race — some threads' `info!` events
+    /// get statically filtered and silently dropped, producing intermittently
+    /// empty captures. A single global subscriber avoids that entirely.
+    fn test_logs() -> &'static Arc<Mutex<Vec<u8>>> {
+        static LOGS: OnceLock<Arc<Mutex<Vec<u8>>>> = OnceLock::new();
+        static INIT: OnceLock<()> = OnceLock::new();
+        INIT.get_or_init(|| {
+            let logs = LOGS.get_or_init(|| Arc::new(Mutex::new(Vec::new())));
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer({
+                    let logs = Arc::clone(logs);
+                    move || RecordingWriter {
+                        shared: Arc::clone(&logs),
+                        local: Vec::new(),
+                    }
+                })
+                .with_ansi(false)
+                .with_max_level(tracing::Level::INFO)
+                .finish();
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+        LOGS.get().expect("capture buffer initialized")
+    }
+
+    /// Byte offset of the end of the shared log buffer.
+    fn log_len() -> usize {
+        test_logs().lock().unwrap().len()
+    }
+
+    /// Bytes appended to the shared buffer since `start`.
+    fn log_slice(start: usize) -> String {
+        let logs = test_logs().lock().unwrap();
+        String::from_utf8_lossy(&logs[start..]).into_owned()
+    }
+
+    #[test]
+    fn registry_size_log_updates_on_insert_and_remove() {
+        let start = log_len();
+        let registry = Arc::new(SessionRegistry::new());
+        let k = key("spiffe://a", "res-1");
+
+        let (_t1, guard1) = registry.register(k.clone(), SessionTransport::Tcp);
+        let (_t2, guard2) = registry.register(k.clone(), SessionTransport::Quic);
+        assert_eq!(registry.session_count(&k), 2);
+
+        drop(guard1);
+        assert_eq!(registry.session_count(&k), 1);
+
+        drop(guard2);
+        assert_eq!(registry.session_count(&k), 0);
+
+        let log = log_slice(start);
+        assert!(log.contains("total_sessions=2"), "log was:\n{log}");
+        assert!(log.contains("remaining_sessions=1"), "log was:\n{log}");
+        assert!(log.contains("remaining_sessions=0"), "log was:\n{log}");
+    }
+
+    #[test]
+    fn cancellation_logs_are_labeled_by_transport() {
+        let start = log_len();
+        let registry = Arc::new(SessionRegistry::new());
+        let k = key("spiffe://a", "res-1");
+
+        let (_tcp, _g_tcp) = registry.register(k.clone(), SessionTransport::Tcp);
+        let (_quic, _g_quic) = registry.register(k.clone(), SessionTransport::Quic);
+        let (_relay, _g_relay) = registry.register(k.clone(), SessionTransport::Relay);
+
+        registry.cancel_all(&k);
+
+        let log = log_slice(start);
+        assert!(log.contains("transport=\"tcp\""), "log was:\n{log}");
+        assert!(log.contains("transport=\"quic\""), "log was:\n{log}");
+        assert!(log.contains("transport=\"relay\""), "log was:\n{log}");
+        assert!(log.contains("reason=\"acl_diff\""), "log was:\n{log}");
     }
 }

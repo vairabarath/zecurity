@@ -19,7 +19,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
-use crate::session_registry::SessionRegistry;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::ControlMessage;
 
@@ -190,6 +190,7 @@ impl RelayHandler {
             cert_serial,
             self.acl.clone(),
             self.registry.clone(),
+            SessionTransport::Relay,
             self.tunnel_hub.clone(),
             self.crl_manager.clone(),
             &self.connector_id,

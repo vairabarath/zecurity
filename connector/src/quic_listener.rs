@@ -9,7 +9,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
-use crate::session_registry::SessionRegistry;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -112,7 +112,16 @@ pub async fn listen(
 
                 tokio::spawn(async move {
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, sid, serial, acl, registry,hub, crl, &conn_id, &ctrl_tx,
+                        stream,
+                        sid,
+                        serial,
+                        acl,
+                        registry,
+                        SessionTransport::Quic,
+                        hub,
+                        crl,
+                        &conn_id,
+                        &ctrl_tx,
                     )
                     .await
                     {

@@ -4,7 +4,7 @@ member: M3
 sprint: 15
 phase: 3
 title: Posture-Aware Auth Path + Observability
-status: planned
+status: done
 depends_on: [Phase2-ACL-Diff-Teardown]
 tags: [rust, connector, posture, observability, pending-08]
 ---
@@ -81,9 +81,64 @@ cd connector && cargo build && cargo test
 ```
 
 ## Implementation Checklist
-- [ ] **M3-H1** Integration test confirming posture gating requires no new connector-side check — falls out of the existing ACL membership check.
-- [ ] **M3-H2** Structured logs: registry size, cancellations fired (labeled by transport). Add a metrics crate only if explicitly scoped as a sub-task — default to logs-only.
-- [ ] **Build gate:** `cd connector && cargo build && cargo test`
+- [x] **M3-H1** Integration test confirming posture gating requires no new connector-side check — falls out of the existing ACL membership check.
+- [x] **M3-H2** Structured logs: registry size, cancellations fired (labeled by transport). Add a metrics crate only if explicitly scoped as a sub-task — default to logs-only.
+- [x] **Build gate:** `cd connector && cargo build && cargo test`
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: CRL / relay-CRL URLs fail with "builder error" when controller HTTP addr has no scheme
+**File:** `connector/src/enrollment.rs`, `connector/src/main.rs`, `connector/src/enrollment_tests.rs`
+**Issue:** On a connector whose config had `CONTROLLER_HTTP_ADDR=192.168.1.164:8080` (bare `host:port` — the documented default for co-located/dev installs), the CRL refresh loop logged `CRL refresh failed: CRL fetch error: builder error` every ~60s and the CRL cache never populated. Because the connector is fail-closed, every device tunnel was denied with `certificate revocation state unavailable` (observed in `device_tunnel.rs`'s `RevocationStatus::Unavailable` branch while validating the Sprint 15 posture-auth path).
+
+**Root Cause:** `enrollment.rs` normalizes a bare `host:port` to `http://host:port` when building the `/ca.crt` URL (`ca_cert_url`), but `main.rs` built the `/ca.crl` and `/relay.crl` URLs directly from the raw `http_base` via `format!("{}/ca.crl?...", http_base.trim_end_matches('/'))`. `reqwest::get` rejects the resulting scheme-less URL (its error displays as "builder error"), so the CRL refresh always failed.
+
+**Fix Applied (enrollment.rs, line ~316):**
+```rust
+// BEFORE:
+fn ca_cert_url(http_addr: &str) -> String {
+    if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        format!("{}/ca.crt", http_addr.trim_end_matches('/'))
+    } else {
+        format!("http://{}/ca.crt", http_addr)
+    }
+}
+
+// AFTER:
+pub fn http_base_url(http_addr: &str) -> String {
+    if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
+        http_addr.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", http_addr.trim_end_matches('/'))
+    }
+}
+
+fn ca_cert_url(http_addr: &str) -> String {
+    format!("{}/ca.crt", http_base_url(http_addr))
+}
+```
+
+**Fix Applied (main.rs, line ~160):**
+```rust
+// BEFORE:
+let crl_url = format!(
+    "{}/ca.crl?workspace_id={}",
+    http_base.trim_end_matches('/'),
+    enrollment_state.workspace_id
+);
+
+// AFTER:
+let http_base = enrollment::http_base_url(&http_base);
+let crl_url = format!(
+    "{}/ca.crl?workspace_id={}",
+    http_base,
+    enrollment_state.workspace_id
+);
+```
+
+The same normalization now applies to the `/relay.crl` URL built right below it.
+
+**Tests:** added `http_base_bare_host_port_defaults_to_http`, `http_base_explicit_scheme_is_preserved`, `http_base_trailing_slash_is_trimmed` to `enrollment_tests.rs` (`cargo test --lib enrollment`: 6 passed).
+
+**Deployment note:** the running connector was also fixed immediately via config (`CONTROLLER_HTTP_ADDR=http://192.168.1.164:8080` in `/etc/zecurity/connector.conf`) + service restart, then the rebuilt binary replaced `/usr/local/bin/zecurity-connector`. Verified: no `builder error` after restart; `device_tunnel` logs `access allowed ... dest=192.168.1.42 port=5175 route="shield"` and the client logs `tunnel opened`.
+

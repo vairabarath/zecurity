@@ -18,7 +18,7 @@ use x509_parser::prelude::*;
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
-use crate::session_registry::SessionRegistry;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -121,6 +121,7 @@ pub async fn listen(
                 cert_serial,
                 acl_clone,
                 registry_clone,
+                SessionTransport::Tcp,
                 hub_clone,
                 crl_clone,
                 &conn_id_clone,
@@ -140,6 +141,7 @@ pub async fn handle_stream<S>(
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
     registry: Arc<SessionRegistry>,
+    accept_transport: SessionTransport,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: &str,
@@ -241,7 +243,16 @@ where
    let acl_entry = decision.unwrap();
 
     let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
-    let (cancel_token, _session_guard) = registry.register(session_key);
+    // Shield-relay sessions take the `RelaySession`/d2s child-task path — label
+    // them `relay` regardless of how the device reached the connector so
+    // cancellations are observable per data path. Everything else keeps the
+    // accept-path transport (tcp/quic).
+    let session_transport = if acl_entry.route_type == "shield" {
+        SessionTransport::Relay
+    } else {
+        accept_transport
+    };
+    let (cancel_token, _session_guard) = registry.register(session_key, session_transport);
 
     // Closes the window where a diff-and-cancel pass may have already scanned
     // the registry before this session finished registering. Unconditional —
@@ -348,6 +359,8 @@ where
                         tracing::info!(
                             spiffe_id = %client_spiffe_id,
                             resource_id = %acl_entry.resource_id,
+                            transport = session_transport.as_str(),
+                            reason = "acl_diff",
                             "session cancelled — authorization revoked mid-session",
                         );
                     }
@@ -474,6 +487,8 @@ where
                 tracing::info!(
                     spiffe_id = %client_spiffe_id,
                     resource_id = %acl_entry.resource_id,
+                    transport = session_transport.as_str(),
+                    reason = "acl_diff",
                     "session cancelled — authorization revoked mid-session",
                 );
             }
@@ -546,6 +561,8 @@ where
             tracing::info!(
                 spiffe_id = %client_spiffe_id,
                 resource_id = %acl_entry.resource_id,
+                transport = session_transport.as_str(),
+                reason = "acl_diff",
                 "session cancelled — authorization revoked mid-session",
             );
         }
