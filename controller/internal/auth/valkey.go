@@ -50,47 +50,40 @@ func parseValkeyAddr(rawURL string) (string, error) {
 	return after, nil
 }
 
-func (r *valkeyClient) SetPKCEState(ctx context.Context, state, codeVerifier string, workspaceName *string) error {
-	key := pkceKey(state)
-
-	if workspaceName != nil && *workspaceName != "" {
-		payload := map[string]string{
-			"code_verifier": codeVerifier,
-			"workspaceName": *workspaceName,
-		}
-		jsonBytes, err := json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("marshal pkce state: %w", err)
-		}
-		return r.rdb.Set(ctx, key, string(jsonBytes), 5*time.Minute).Err()
-	}
-
-	return r.rdb.Set(ctx, key, codeVerifier, 5*time.Minute).Err()
+// PKCEState is the login scratchpad stored in Redis between the IdP redirect and
+// the callback, keyed by `state` and single-use (5-min TTL). CodeVerifier is the
+// PKCE verifier; WorkspaceName is set on the signup flow; Nonce and ConnectionID
+// support OIDC login — which connection/adapter to verify against, plus id_token
+// replay protection (PENDING-04 Phase 4).
+type PKCEState struct {
+	CodeVerifier  string `json:"code_verifier"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
+	Nonce         string `json:"nonce,omitempty"`
+	ConnectionID  string `json:"connection_id,omitempty"`
 }
 
-func (r *valkeyClient) GetAndDeletePKCEState(ctx context.Context, state string) (string, string, bool, error) {
+func (r *valkeyClient) SetPKCEState(ctx context.Context, state string, st PKCEState) error {
+	payload, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal pkce state: %w", err)
+	}
+	return r.rdb.Set(ctx, pkceKey(state), string(payload), 5*time.Minute).Err()
+}
+
+func (r *valkeyClient) GetAndDeletePKCEState(ctx context.Context, state string) (PKCEState, bool, error) {
 	val, err := r.rdb.GetDel(ctx, pkceKey(state)).Result()
 	if err == valkeycompat.Nil {
-		return "", "", false, nil
+		return PKCEState{}, false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("get pkce state: %w", err)
+		return PKCEState{}, false, fmt.Errorf("get pkce state: %w", err)
 	}
 
-	var codeVerifier, workspaceName string
-	if val[0] == '{' {
-		var payload map[string]string
-		if err := json.Unmarshal([]byte(val), &payload); err != nil {
-			return "", "", false, fmt.Errorf("unmarshal pkce state: %w", err)
-		}
-		codeVerifier = payload["code_verifier"]
-		workspaceName = payload["workspaceName"]
-	} else {
-		codeVerifier = val
-		workspaceName = ""
+	var st PKCEState
+	if err := json.Unmarshal([]byte(val), &st); err != nil {
+		return PKCEState{}, false, fmt.Errorf("unmarshal pkce state: %w", err)
 	}
-
-	return codeVerifier, workspaceName, true, nil
+	return st, true, nil
 }
 
 // RefreshSession is the Redis payload for a user's active refresh token.

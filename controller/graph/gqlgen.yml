@@ -8,6 +8,7 @@ schema:
   - graph/policy.graphqls
   - graph/log.graphqls
   - graph/posture.graphqls
+  - graph/idp.graphqls
 
 exec:
   filename: graph/generated.go

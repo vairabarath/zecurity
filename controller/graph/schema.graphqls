@@ -40,7 +40,11 @@ type Mutation {
   # Go generates PKCE pair, stores code_verifier in Redis,
   # builds and returns the Google OAuth redirect URL.
   # workspaceName is optional — set during signup flow, empty during normal login.
-  initiateAuth(provider: String!, workspaceName: String): AuthInitPayload!
+  # connectionId is optional — the identity_connections id from the discovery API
+  # (GET /workspaces/{slug}/auth); when set it selects that exact connection
+  # (Enterprise or Bootstrap). When omitted, the platform IdP for `provider` is
+  # resolved. It is the ONLY connection selector; resolution is server-side.
+  initiateAuth(provider: String!, workspaceName: String, connectionId: ID): AuthInitPayload!
 }
 
 type AuthInitPayload {

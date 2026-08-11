@@ -733,9 +733,9 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 }
 
 func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *connectorStreamClient, batch *pb.ShieldStatusBatch) {
-	var anyConnectorChanged bool
+	var anyConnectorChanged, anyLanIPChanged bool
 	for _, s := range batch.Shields {
-		connectorChanged, err := h.ShieldSvc.UpdateShieldHealth(
+		connectorChanged, lanIPChanged, err := h.ShieldSvc.UpdateShieldHealth(
 			ctx, s.ShieldId, client.connectorID, s.Status, s.Version, s.LanIp, s.LastSeenUnix,
 		)
 		if err != nil {
@@ -746,10 +746,18 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 			anyConnectorChanged = true
 			log.Printf("control stream: shield %s moved to connector %s", s.ShieldId, client.connectorID)
 		}
+		if lanIPChanged {
+			anyLanIPChanged = true
+			log.Printf("control stream: shield %s LAN IP changed to %q — re-synced resource hosts", s.ShieldId, s.LanIp)
+		}
 	}
-	if anyConnectorChanged && h.PolicyNotifier != nil {
+	// Either a connector move or a LAN-IP change alters the compiled ACL
+	// (connector move → routing; LAN-IP change → resource.host was re-synced), so
+	// bump the workspace ACL version once for the batch. The shield's own resource
+	// instructions pick up the new host via the snapshot fingerprint separately.
+	if (anyConnectorChanged || anyLanIPChanged) && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
-			log.Printf("control stream: notify after shield connector move tenant=%s: %v", client.tenantID, err)
+			log.Printf("control stream: notify after shield status change tenant=%s: %v", client.tenantID, err)
 		}
 	}
 }

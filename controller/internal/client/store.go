@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
 // ── Sentinel errors ─────────────────────────────────────────────────────────
@@ -61,12 +63,18 @@ func lookupWorkspaceSlug(ctx context.Context, db *pgxpool.Pool, workspaceID stri
 
 // ── User upsert ─────────────────────────────────────────────────────────────
 //
-// Schema (migration 001) keys users by (tenant_id, provider_sub). The same
-// Google account in two workspaces is two rows. So "upsert" here means:
-//   - lookup by (tenant_id, provider, provider_sub)
-//   - if found  → update last_login_at, return existing row
-//   - if missing and createIfMissing → insert role='member'
+// Identity is keyed on external_identities (tenant_id, connection_id, subject)
+// — the ADR-024 key, never email — resolved via the shared identity.Resolver so
+// the CLI and web flow agree on "who is this". The CLI logs in workspace-first,
+// so tenantID scopes the lookup. "upsert" here means:
+//   - resolve (tenant, connection, subject) → canonical user
+//   - if found  → lifecycle-gate, update last_login_at, return existing row
+//   - if missing and createIfMissing → insert user + external_identities (one tx)
 //   - if missing and !createIfMissing → errUserNotInvited
+//
+// Unlike the web flow (bootstrap), the CLI never creates a workspace: an
+// unresolved identity either joins the known workspace as 'member' (invited) or
+// is rejected.
 
 type userRow struct {
 	ID   string
@@ -76,54 +84,67 @@ type userRow struct {
 func upsertUser(
 	ctx context.Context,
 	db *pgxpool.Pool,
-	tenantID, email, provider, providerSub string,
+	tenantID, email, provider, providerSub, connectionID, issuer string,
 	createIfMissing bool,
-) (*userRow, bool, error) {
+) (row *userRow, generation int, created bool, err error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	var u userRow
-	err := db.QueryRow(ctx,
-		`SELECT id, role
-		   FROM users
-		  WHERE tenant_id = $1
-		    AND provider = $2
-		    AND provider_sub = $3`,
-		tenantID, provider, providerSub,
-	).Scan(&u.ID, &u.Role)
+	core, found, err := identity.NewResolver(db).Resolve(ctx, connectionID, providerSub, tenantID)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("resolve identity: %w", err)
+	}
 
-	switch {
-	case err == nil:
+	if found {
+		// Fail closed on a suspended/locked/deleted canonical user.
+		if err := identity.CheckLifecycle(core.Status); err != nil {
+			return nil, 0, false, err
+		}
 		if _, uErr := db.Exec(ctx,
 			`UPDATE users
 			    SET last_login_at = NOW(), updated_at = NOW()
 			  WHERE id = $1`,
-			u.ID,
+			core.UserID,
 		); uErr != nil {
-			// Last-login bookkeeping should never fail the login;
-			// surface it as a log line by returning nil for the error.
-			fmt.Printf("warning: update last_login_at for user %s: %v\n", u.ID, uErr)
+			// Last-login bookkeeping should never fail the login; log and proceed.
+			fmt.Printf("warning: update last_login_at for user %s: %v\n", core.UserID, uErr)
 		}
-		return &u, false, nil
-
-	case errors.Is(err, pgx.ErrNoRows):
-		if !createIfMissing {
-			return nil, false, errUserNotInvited
-		}
-		err = db.QueryRow(ctx,
-			`INSERT INTO users
-			   (tenant_id, email, provider, provider_sub, role, status, last_login_at)
-			 VALUES ($1, $2, $3, $4, 'member', 'active', NOW())
-			 RETURNING id, role`,
-			tenantID, email, provider, providerSub,
-		).Scan(&u.ID, &u.Role)
-		if err != nil {
-			return nil, false, fmt.Errorf("insert user: %w", err)
-		}
-		return &u, true, nil
-
-	default:
-		return nil, false, fmt.Errorf("lookup user: %w", err)
+		return &userRow{ID: core.UserID, Role: core.Role}, core.Generation, false, nil
 	}
+
+	if !createIfMissing {
+		return nil, 0, false, errUserNotInvited
+	}
+
+	// JIT-create the member and its identity link atomically.
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("begin user tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var u userRow
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO users
+		   (tenant_id, email, provider, provider_sub, role, status, last_login_at)
+		 VALUES ($1, $2, $3, $4, 'member', 'active', NOW())
+		 RETURNING id, role`,
+		tenantID, email, provider, providerSub,
+	).Scan(&u.ID, &u.Role); err != nil {
+		return nil, 0, false, fmt.Errorf("insert user: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO external_identities (tenant_id, user_id, connection_id, issuer, subject)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, u.ID, connectionID, issuer, providerSub,
+	); err != nil {
+		return nil, 0, false, fmt.Errorf("insert external_identity: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, false, fmt.Errorf("commit user tx: %w", err)
+	}
+	return &u, 1, true, nil
 }
 
 // ── Invitation lookup / accept ──────────────────────────────────────────────

@@ -72,6 +72,17 @@ export type ConnectorToken = {
   connectorId: Scalars['ID']['output'];
 };
 
+export type CreateIdpConnectionInput = {
+  clientId: Scalars['String']['input'];
+  clientSecret: Scalars['String']['input'];
+  discoveryUrl?: InputMaybe<Scalars['String']['input']>;
+  displayName: Scalars['String']['input'];
+  domainHint?: InputMaybe<Scalars['String']['input']>;
+  issuer: Scalars['String']['input'];
+  provider: Scalars['String']['input'];
+  scopes?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type CreateResourceInput = {
   description?: InputMaybe<Scalars['String']['input']>;
   host: Scalars['String']['input'];
@@ -148,6 +159,18 @@ export type Group = {
   updatedAt: Scalars['String']['output'];
 };
 
+export enum IdpProtocol {
+  Oidc = 'OIDC',
+  Saml = 'SAML'
+}
+
+export type IdpTestResult = {
+  __typename?: 'IdpTestResult';
+  issuer?: Maybe<Scalars['String']['output']>;
+  message?: Maybe<Scalars['String']['output']>;
+  ok: Scalars['Boolean']['output'];
+};
+
 export type Invitation = {
   __typename?: 'Invitation';
   createdAt: Scalars['String']['output'];
@@ -165,12 +188,14 @@ export type Mutation = {
   bindResourceToProfile: DeviceProfile;
   createDeviceProfile: DeviceProfile;
   createGroup: Group;
+  createIdpConnection: WorkspaceIdpConnection;
   createInvitation: Invitation;
   createRemoteNetwork: RemoteNetwork;
   createResource: Resource;
   deleteConnector: Scalars['Boolean']['output'];
   deleteDeviceProfile: Scalars['Boolean']['output'];
   deleteGroup: Scalars['Boolean']['output'];
+  deleteIdpConnection: Scalars['Boolean']['output'];
   deleteRemoteNetwork: Scalars['Boolean']['output'];
   deleteResource: Scalars['Boolean']['output'];
   deleteShield: Scalars['Boolean']['output'];
@@ -185,6 +210,9 @@ export type Mutation = {
   revokeConnector: Scalars['Boolean']['output'];
   revokeDevice: Scalars['Boolean']['output'];
   revokeShield: Scalars['Boolean']['output'];
+  setIdpConnectionStatus: WorkspaceIdpConnection;
+  setPlatformLoginEnabled: Scalars['Boolean']['output'];
+  testIdpConnection: IdpTestResult;
   triggerScan: Scalars['String']['output'];
   unassignResourceFromGroup: Resource;
   unbindResourceFromProfile: DeviceProfile;
@@ -192,6 +220,7 @@ export type Mutation = {
   updateDeviceProfileManualTrust: DeviceProfile;
   updateDeviceProfileMode: DeviceProfile;
   updateGroup: Group;
+  updateIdpConnection: WorkspaceIdpConnection;
   updateResource: Resource;
 };
 
@@ -233,6 +262,11 @@ export type MutationCreateGroupArgs = {
 };
 
 
+export type MutationCreateIdpConnectionArgs = {
+  input: CreateIdpConnectionInput;
+};
+
+
 export type MutationCreateInvitationArgs = {
   email: Scalars['String']['input'];
 };
@@ -260,6 +294,11 @@ export type MutationDeleteDeviceProfileArgs = {
 
 
 export type MutationDeleteGroupArgs = {
+  id: Scalars['ID']['input'];
+};
+
+
+export type MutationDeleteIdpConnectionArgs = {
   id: Scalars['ID']['input'];
 };
 
@@ -297,6 +336,7 @@ export type MutationGenerateShieldTokenArgs = {
 
 
 export type MutationInitiateAuthArgs = {
+  connectionId?: InputMaybe<Scalars['ID']['input']>;
   provider: Scalars['String']['input'];
   workspaceName?: InputMaybe<Scalars['String']['input']>;
 };
@@ -341,6 +381,22 @@ export type MutationRevokeShieldArgs = {
 };
 
 
+export type MutationSetIdpConnectionStatusArgs = {
+  id: Scalars['ID']['input'];
+  status: Scalars['String']['input'];
+};
+
+
+export type MutationSetPlatformLoginEnabledArgs = {
+  enabled: Scalars['Boolean']['input'];
+};
+
+
+export type MutationTestIdpConnectionArgs = {
+  id: Scalars['ID']['input'];
+};
+
+
 export type MutationTriggerScanArgs = {
   connectorId: Scalars['ID']['input'];
   ports: Array<Scalars['Int']['input']>;
@@ -381,6 +437,12 @@ export type MutationUpdateGroupArgs = {
   description?: InputMaybe<Scalars['String']['input']>;
   id: Scalars['ID']['input'];
   name?: InputMaybe<Scalars['String']['input']>;
+};
+
+
+export type MutationUpdateIdpConnectionArgs = {
+  id: Scalars['ID']['input'];
+  input: UpdateIdpConnectionInput;
 };
 
 
@@ -433,11 +495,13 @@ export type Query = {
   getScanResults: Array<ScanResult>;
   group?: Maybe<Group>;
   groups: Array<Group>;
+  idpConnections: Array<WorkspaceIdpConnection>;
   invitation?: Maybe<Invitation>;
   lookupWorkspace: WorkspaceLookupResult;
   lookupWorkspacesByEmail: WorkspaceListResult;
   me: User;
   myDevices: Array<ClientDevice>;
+  platformLoginEnabled: Scalars['Boolean']['output'];
   remoteNetwork?: Maybe<RemoteNetwork>;
   remoteNetworks: Array<RemoteNetwork>;
   resources: Array<Resource>;
@@ -599,6 +663,15 @@ export type ShieldToken = {
   shieldId: Scalars['ID']['output'];
 };
 
+export type UpdateIdpConnectionInput = {
+  clientId?: InputMaybe<Scalars['String']['input']>;
+  clientSecret?: InputMaybe<Scalars['String']['input']>;
+  discoveryUrl?: InputMaybe<Scalars['String']['input']>;
+  displayName?: InputMaybe<Scalars['String']['input']>;
+  domainHint?: InputMaybe<Scalars['String']['input']>;
+  scopes?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type UpdateResourceInput = {
   description?: InputMaybe<Scalars['String']['input']>;
   name?: InputMaybe<Scalars['String']['input']>;
@@ -624,6 +697,21 @@ export type Workspace = {
   name: Scalars['String']['output'];
   slug: Scalars['String']['output'];
   status: WorkspaceStatus;
+};
+
+export type WorkspaceIdpConnection = {
+  __typename?: 'WorkspaceIdpConnection';
+  clientId?: Maybe<Scalars['String']['output']>;
+  discoveryUrl?: Maybe<Scalars['String']['output']>;
+  displayName: Scalars['String']['output'];
+  domainHint?: Maybe<Scalars['String']['output']>;
+  id: Scalars['ID']['output'];
+  issuer: Scalars['String']['output'];
+  managed: Scalars['Boolean']['output'];
+  protocol: IdpProtocol;
+  provider: Scalars['String']['output'];
+  scopes: Scalars['String']['output'];
+  status: Scalars['String']['output'];
 };
 
 export type WorkspaceListResult = {

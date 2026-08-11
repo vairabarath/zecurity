@@ -2,9 +2,13 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
+	"github.com/yourorg/ztna/controller/internal/idp"
 )
 
 func TestCallbackHandler_MissingParams(t *testing.T) {
@@ -76,30 +80,79 @@ func TestCallbackHandler_StateExpired(t *testing.T) {
 	}
 }
 
-func TestCallbackHandler_TokenExchangeFails(t *testing.T) {
-	rc, _ := newTestValkey(t)
-	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
-	handler := svc.CallbackHandler()
-
-	// Generate valid state and store a verifier.
-	state, _ := generateSignedState(svc.cfg.JWTSecret)
-	if err := rc.SetPKCEState(context.Background(), state, "test-verifier", nil); err != nil {
+// storeState stores a login scratchpad and returns the signed state value.
+func storeState(t *testing.T, rc *valkeyClient, secret, connectionID string) string {
+	t.Helper()
+	state, _ := generateSignedState(secret)
+	if err := rc.SetPKCEState(context.Background(), state, PKCEState{
+		CodeVerifier: "test-verifier", ConnectionID: connectionID, Nonce: "test-nonce",
+	}); err != nil {
 		t.Fatalf("SetPKCEState: %v", err)
 	}
+	return state
+}
 
-	// The token exchange will fail because Google's endpoint rejects our fake code.
+func runCallback(handler http.Handler, state string) string {
 	req := httptest.NewRequest(http.MethodGet, "/auth/callback?code=fake-code&state="+state, nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
+	return w.Header().Get("Location")
+}
 
-	loc := w.Header().Get("Location")
-	if loc != svc.cfg.AllowedOrigin+"/login?error=token_exchange_failed" {
-		t.Fatalf("expected redirect to %s/login?error=token_exchange_failed, got %s", svc.cfg.AllowedOrigin, loc)
+// withFakeProvider overrides the adapter-selection seam for one test.
+func withFakeProvider(t *testing.T, p *fakeProvider) {
+	t.Helper()
+	orig := providerForFn
+	t.Cleanup(func() { providerForFn = orig })
+	providerForFn = func(*idp.Connection, GoogleCreds) (providers.IdentityProvider, error) { return p, nil }
+}
+
+func TestCallbackHandler_AuthenticateFails(t *testing.T) {
+	rc, _ := newTestValkey(t)
+	svc := &serviceImpl{cfg: testConfig(), redisClient: rc, idpStore: googleConnStore()}
+	withFakeProvider(t, &fakeProvider{err: fmt.Errorf("exchange rejected")})
+
+	state := storeState(t, rc, svc.cfg.JWTSecret, "google-conn")
+	loc := runCallback(svc.CallbackHandler(), state)
+
+	if loc != svc.cfg.AllowedOrigin+"/login?error=authentication_failed" {
+		t.Fatalf("expected authentication_failed redirect, got %s", loc)
 	}
+	// Scratchpad must be consumed (single-use) even though authentication failed.
+	if _, found, _ := rc.GetAndDeletePKCEState(context.Background(), state); found {
+		t.Fatal("PKCE state should have been consumed")
+	}
+}
 
-	// Verifier should have been consumed (single-use) even though exchange failed.
-	_, _, found, _ := rc.GetAndDeletePKCEState(context.Background(), state)
-	if found {
-		t.Fatal("PKCE verifier should have been consumed before exchange")
+// TestCallbackHandler_ConnectionDeleted covers the redirect window: the admin
+// deletes the IdP connection after InitiateAuth but before the callback returns.
+func TestCallbackHandler_ConnectionDeleted(t *testing.T) {
+	rc, _ := newTestValkey(t)
+	svc := &serviceImpl{cfg: testConfig(), redisClient: rc, idpStore: &fakeConnStore{}} // empty → GetByID not found
+
+	state := storeState(t, rc, svc.cfg.JWTSecret, "deleted-conn")
+	loc := runCallback(svc.CallbackHandler(), state)
+
+	if loc != svc.cfg.AllowedOrigin+"/login?error=authentication_failed" {
+		t.Fatalf("deleted connection must fail closed, got %s", loc)
+	}
+	if _, found, _ := rc.GetAndDeletePKCEState(context.Background(), state); found {
+		t.Fatal("PKCE state should have been consumed")
+	}
+}
+
+// TestCallbackHandler_ConnectionDisabled covers the admin disabling the IdP
+// connection during the redirect window.
+func TestCallbackHandler_ConnectionDisabled(t *testing.T) {
+	rc, _ := newTestValkey(t)
+	disabled := &idp.Connection{ID: "c1", Provider: "okta", Status: "disabled", Issuer: "https://acme.okta.com"}
+	store := &fakeConnStore{byID: map[string]*idp.Connection{"c1": disabled}}
+	svc := &serviceImpl{cfg: testConfig(), redisClient: rc, idpStore: store}
+
+	state := storeState(t, rc, svc.cfg.JWTSecret, "c1")
+	loc := runCallback(svc.CallbackHandler(), state)
+
+	if loc != svc.cfg.AllowedOrigin+"/login?error=authentication_failed" {
+		t.Fatalf("disabled connection must fail closed, got %s", loc)
 	}
 }

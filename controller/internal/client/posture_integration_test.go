@@ -146,22 +146,26 @@ func (a *postureTestAuth) VerifyAccessToken(string) (*auth.AccessTokenClaims, er
 	return a.claims, nil
 }
 
-func (*postureTestAuth) InitiateAuth(context.Context, string, *string) (*model.AuthInitPayload, error) {
+func (*postureTestAuth) InitiateAuth(context.Context, string, *string, *string) (*model.AuthInitPayload, error) {
 	panic("not used")
 }
-func (*postureTestAuth) CallbackHandler() http.Handler { panic("not used") }
-func (*postureTestAuth) RefreshHandler() http.Handler  { panic("not used") }
-func (*postureTestAuth) LogoutHandler() http.Handler   { panic("not used") }
+func (*postureTestAuth) CallbackHandler() http.Handler  { panic("not used") }
+func (*postureTestAuth) RefreshHandler() http.Handler   { panic("not used") }
+func (*postureTestAuth) LogoutHandler() http.Handler    { panic("not used") }
+func (*postureTestAuth) DiscoveryHandler() http.Handler { panic("not used") }
 func (*postureTestAuth) ExchangeCode(context.Context, string, string, string) (*auth.GoogleTokenResponse, error) {
 	panic("not used")
 }
 func (*postureTestAuth) VerifyIDToken(context.Context, string) (*auth.GoogleClaims, error) {
 	panic("not used")
 }
-func (*postureTestAuth) IssueAccessToken(string, string, string, string) (string, int64, error) {
+func (*postureTestAuth) IssueAccessToken(string, string, string, string, int) (string, int64, error) {
 	panic("not used")
 }
 func (*postureTestAuth) IssueRefreshToken(context.Context, string) (string, error) {
+	panic("not used")
+}
+func (*postureTestAuth) InvalidateUserSessions(context.Context, string) error {
 	panic("not used")
 }
 

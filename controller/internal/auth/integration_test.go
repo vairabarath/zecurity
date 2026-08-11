@@ -15,7 +15,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/bootstrap"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
@@ -74,9 +77,17 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		PKIService: pkiSvc,
 	}
 
+	// Real identity pipeline over the real connection store: the seeded Google
+	// platform connection (migration 031) is a genuine identity_connections row,
+	// so the external_identities.connection_id FK the pipeline writes resolves.
+	// NopPublisher keeps this test focused on login/JWT (audit is covered separately).
+	identitySvc := identity.NewService(pool, identity.NewLinker(bootstrapSvc), identity.NopPublisher{})
+	idpStore := idp.NewStore(pool, pkiSvc)
+
 	authSvcIface, err := NewService(Config{
 		Pool:               pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
+		IdpStore:           idpStore,
 		JWTSecret:          "phase-7-auth-jwt-secret-32-bytes!!",
 		JWTIssuer:          "zecurity-controller",
 		GoogleClientID:     "test-google-client-id",
@@ -92,42 +103,21 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 
 	svc := authSvcIface.(*serviceImpl)
 
-	origExchangeHook := exchangeCodeForTokensHook
-	origVerifyHook := verifyGoogleIDTokenHook
-	t.Cleanup(func() {
-		exchangeCodeForTokensHook = origExchangeHook
-		verifyGoogleIDTokenHook = origVerifyHook
-	})
-
-	exchangeCodeForTokensHook = func(_ *serviceImpl, _ context.Context, code, codeVerifier string) (*GoogleTokenResponse, error) {
-		if code != "code-1" && code != "code-2" {
-			return nil, fmt.Errorf("unexpected code: %s", code)
-		}
-		if codeVerifier == "" {
-			return nil, fmt.Errorf("missing code verifier")
-		}
-
-		return &GoogleTokenResponse{
-			IDToken:     "fake-google-id-token",
-			AccessToken: "fake-google-access-token",
-			ExpiresIn:   3600,
-			TokenType:   "Bearer",
-		}, nil
-	}
-	verifyGoogleIDTokenHook = func(_ context.Context, idToken, clientID string) (*GoogleClaims, error) {
-		if idToken != "fake-google-id-token" {
-			return nil, fmt.Errorf("unexpected id token: %s", idToken)
-		}
-		if clientID != "test-google-client-id" {
-			return nil, fmt.Errorf("unexpected client id: %s", clientID)
-		}
-
-		return &GoogleClaims{
+	// Override the adapter-selection seam with a fake provider that returns a
+	// canned AuthenticationContext — no real Google network calls. This mirrors
+	// what the (Chunk A) OIDC/Google adapters produce, so the callback → Bootstrap
+	// → JWT flow is exercised end-to-end against the real DB.
+	origProviderFor := providerForFn
+	t.Cleanup(func() { providerForFn = origProviderFor })
+	providerForFn = func(_ *idp.Connection, _ GoogleCreds) (providers.IdentityProvider, error) {
+		return &fakeProvider{result: &providers.AuthenticationContext{
+			Provider:      "google",
+			Issuer:        "https://accounts.google.com",
+			Subject:       "google-sub-123",
 			Email:         "alice@example.com",
-			EmailVerified: true,
 			Name:          "Alice Example",
-			Sub:           "google-sub-123",
-		}, nil
+			EmailVerified: true,
+		}}, nil
 	}
 
 	firstToken, firstRefreshCookie := runAuthRoundTrip(t, svc, "code-1")
@@ -233,7 +223,7 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 
 	ctx := context.Background()
 
-	initPayload, err := svc.InitiateAuth(ctx, "google", nil)
+	initPayload, err := svc.InitiateAuth(ctx, "google", nil, nil)
 	if err != nil {
 		t.Fatalf("InitiateAuth: %v", err)
 	}
@@ -327,25 +317,22 @@ func mustConnectAuthTestPool(t *testing.T, ctx context.Context, dsn string) *pgx
 }
 
 func applyAuthMigration(ctx context.Context, pool *pgxpool.Pool) error {
-	migrationPath, err := authMigrationPath()
-	if err != nil {
-		return err
+	// 001 = base schema; 031 = identity federation (identity_connections seed,
+	// external_identities, users.identity_generation) that the pipeline needs.
+	for _, name := range []string{"001_schema.sql", "031_identity_federation.sql"} {
+		path, err := filepath.Abs(filepath.Join("..", "..", "migrations", name))
+		if err != nil {
+			return err
+		}
+		sqlBytes, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("execute migration %s: %w", name, err)
+		}
 	}
-
-	sqlBytes, err := os.ReadFile(migrationPath)
-	if err != nil {
-		return fmt.Errorf("read migration file: %w", err)
-	}
-
-	if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-		return fmt.Errorf("execute migration SQL: %w", err)
-	}
-
 	return nil
-}
-
-func authMigrationPath() (string, error) {
-	return filepath.Abs(filepath.Join("..", "..", "migrations", "001_schema.sql"))
 }
 
 func withAuthTestDatabaseName(dsn, dbName string) (string, error) {
