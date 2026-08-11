@@ -4,7 +4,7 @@ member: M3
 sprint: 15
 phase: 2
 title: ACL-Diff Teardown
-status: planned
+status: done
 depends_on: [Phase1-Active-Session-Registry]
 tags: [rust, connector, acl, revocation, pending-08, pending-09]
 ---
@@ -150,11 +150,11 @@ cd connector && cargo build
 ```
 
 ## Implementation Checklist
-- [ ] **M3-G1** `policy/mod.rs` — flatten previous snapshot into `HashSet<(spiffe,resource)>` before overwrite.
-- [ ] **M3-G2** `control_stream.rs` — diff old vs. new on `AclSnapshot` receipt; cancel **every** token in the dropped pair's inner session map (not just one), never remove the outer key directly.
-- [ ] **M3-G3** Authorization/registration race fix — **unconditional** `is_allowed` re-check immediately after registration, no ACL-version gating on whether the re-check runs.
-- [ ] **M3-G4** `agent_tunnel.rs` — `RelaySession::relay_stream()`'s `d2s` child task shares cancellation with the outer task (shared token or unified `select!`); verified via the relay-routed cancellation regression test.
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M3-G1** `policy/mod.rs` — flatten previous snapshot into `HashSet<(spiffe,resource)>` before overwrite (`allow_set` + `update_and_revoked`).
+- [x] **M3-G2** `control_stream.rs` — diff old vs. new on `AclSnapshot` receipt; cancel **every** token in the dropped pair's inner session map (not just one), never remove the outer key directly.
+- [x] **M3-G3** Authorization/registration race fix — **unconditional** `is_allowed` re-check immediately after registration, no ACL-version gating on whether the re-check runs.
+- [x] **M3-G4** `agent_tunnel.rs` — `RelaySession::relay_stream()`'s `d2s` child task shares cancellation with the outer task (`with_cancel_token` builder + `select!` on the shared token); verified via the relay-routed cancellation regression test.
+- [x] **Build gate:** `cd connector && cargo build`
 
 ## Post-Phase Fixes
 _None yet._
