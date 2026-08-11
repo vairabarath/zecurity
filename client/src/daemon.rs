@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -13,16 +14,20 @@ use crate::config;
 use crate::grpc::{
     self,
     client_v1::{
-        AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest,
-        GetTransportSnapshotRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
+        AclConnector, AclEntry, AclRemoteNetwork, DevicePostureReport, GetAclSnapshotRequest,
+        GetTransportSnapshotRequest, ReportDevicePostureRequest, TransportConnector,
+        TransportRemoteNetwork, TransportSnapshot,
     },
 };
+use crate::posture;
+use uuid::Uuid;
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
-    self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
+    self, DeviceInfo, SessionInfo, SharedState, TunHandle, TunnelRestartCoordinator, UserInfo,
+    WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
@@ -92,6 +97,7 @@ pub async fn run() -> Result<()> {
                 warn!(error = %e, "startup transport snapshot fetch failed");
             }
         });
+
     }
 
     // Proactive session-refresh loop. Runs for the daemon's lifetime, sleeps
@@ -103,7 +109,16 @@ pub async fn run() -> Result<()> {
             run_refresh_scheduler(state_clone, conf_clone).await;
         });
     }
-
+    // Posture collection loop. Sibling to run_refresh_scheduler — posture
+    // cadence (fixed 5-minute interval) and token-refresh cadence are
+    // different concerns, so this is its own task, not merged into either.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_posture_scheduler(state_clone, conf_clone).await;
+        });
+    }
     let socket_path = ipc_socket_path();
 
     // Remove stale socket from a previous run.
@@ -426,7 +441,10 @@ async fn handle_request(
                     populate_runtime(&mut s, &stored);
                     info!("PostLoginState: durable state saved, runtime updated");
                     drop(s);
-
+                    {
+                        let s = state.read().await;
+                        s.posture_resync.notify_one();
+                    }
                     let result = match sync_acl_now(state, conf).await {
                         Ok(r) => r,
                         Err(e) => {
@@ -736,21 +754,46 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     }
 }
 
+/// Relay recovery, the 60s ACL tick, IPC sync/resources, and post-login can
+/// each call this concurrently. Requests are coalesced via
+/// `register_restart_request`: everyone queued before a restart pass starts
+/// shares that pass's result; anyone arriving mid-pass is deferred to the
+/// next one. This avoids one full down/up cycle per concurrent caller while
+/// still giving every caller the correct pass's real result.
 async fn restart_tunnel_if_running(
     state: &SharedState,
     conf: &config::ClientConf,
     tun_slot: &TunSlot,
 ) -> Result<()> {
-    // Serialize the whole down→up sequence. Relay recovery, the 60s ACL tick,
-    // IPC sync/resources, and post-login can each call this concurrently; without
-    // the lock two restarts interleave and corrupt the live TUN session.
-    let restart_lock = { state.read().await.tunnel_restart_lock.clone() };
-    let _restart_guard = restart_lock.lock().await;
+    let coordinator = { state.read().await.tunnel_restart.clone() };
+    let state = state.clone();
+    let conf = conf.clone();
+    let tun_slot = tun_slot.clone();
 
-    // Re-check AFTER acquiring the lock: while this task waited, another restart
-    // may have already completed the transition we intended, so there is nothing
-    // to do. (This guard drops immediately so handle_down/handle_up can take
-    // tun_slot themselves.)
+    let work = move || {
+        let state = state.clone();
+        let conf = conf.clone();
+        let tun_slot = tun_slot.clone();
+        async move {
+            perform_tunnel_restart(&state, &conf, &tun_slot)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+
+    register_restart_request(&coordinator, work)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// One down→up restart pass. Extracted so `run_restart_worker` can drive it
+/// through the queued-oneshot coordinator, and so tests can drive the
+/// coordination logic itself against a fake `work` closure.
+async fn perform_tunnel_restart(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<()> {
     if tun_slot.lock().await.is_none() {
         return Ok(());
     }
@@ -774,6 +817,400 @@ async fn restart_tunnel_if_running(
     }
 
     Ok(())
+}
+
+/// Runs restart passes for one `TunnelRestartCoordinator` until its `pending`
+/// queue is drained. Each pass answers exactly the requests queued at the
+/// moment it starts (`batch`); requests arriving mid-pass land in `pending`
+/// and are picked up by the next loop iteration. On failure, both the
+/// failing batch and everything queued during that failed pass are failed
+/// together — a later pass re-checking tunnel state could otherwise
+/// misreport success to requests that were actually waiting on the failure.
+async fn run_restart_worker<F, Fut>(coordinator: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>, work: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    loop {
+        let batch = {
+            let mut c = coordinator.lock().await;
+            if c.pending.is_empty() {
+                c.running = false;
+                return;
+            }
+            std::mem::take(&mut c.pending)
+        };
+
+        let outcome = std::panic::AssertUnwindSafe(work()).catch_unwind().await;
+        match outcome {
+            Ok(Ok(())) => {
+                for waiter in batch {
+                    let _ = waiter.send(Ok(()));
+                }
+                // Loop: pick up any stragglers that arrived mid-pass.
+            }
+            Ok(Err(e)) => {
+                // Stabilize coordinator state before publishing the failure.
+                // Otherwise a waiter can observe Err, immediately enqueue a
+                // fresh request while running is still true, and be incorrectly
+                // drained as a straggler of this failed pass.
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                return;
+            }
+            Err(_) => {
+                // Catch the panic while `batch` is still owned here. Reset the
+                // coordinator before resolving any receiver so callers cannot
+                // race a fresh request against stale running=true state.
+                let error = "tunnel restart worker panicked".to_string();
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Registers a restart request with the coordinator, starting a worker if
+/// none is running, and waits for the pass that answers this request.
+///
+/// The worker is supervised with `catch_unwind` in the same spawned task
+/// that runs it, so a panic mid-pass still resets `running` and fails any
+/// queued waiters instead of leaving the coordinator permanently wedged.
+/// This is best-effort panic recovery, not an absolute guarantee against
+/// every possible abnormal termination (e.g. process exit) — nothing
+/// currently retains the worker's `JoinHandle` to observe or abort it
+/// externally, so an in-task panic is the realistic failure mode covered.
+async fn register_restart_request<F, Fut>(
+    coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+    work: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let start_worker = {
+        let mut c = coordinator.lock().await;
+        c.pending.push(tx);
+        if c.running {
+            false
+        } else {
+            c.running = true;
+            true
+        }
+    };
+
+    if start_worker {
+        let coordinator = coordinator.clone();
+        // The worker catches panics from the restart operation per pass while
+        // it still owns that pass's batch. This outer supervisor is defensive
+        // best-effort cleanup for an unexpected panic in coordinator logic.
+        tokio::spawn(async move {
+            let outcome = std::panic::AssertUnwindSafe(run_restart_worker(coordinator.clone(), work))
+                .catch_unwind()
+                .await;
+            if outcome.is_err() {
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in stragglers {
+                    let _ = waiter.send(Err("tunnel restart worker panicked".into()));
+                }
+            }
+        });
+    }
+
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("tunnel restart worker stopped unexpectedly".into()),
+    }
+}
+
+#[cfg(test)]
+mod tunnel_restart_coordinator_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn new_coordinator() -> Arc<tokio::sync::Mutex<TunnelRestartCoordinator>> {
+        Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default()))
+    }
+
+    /// A controllable fake restart operation: counts calls, and only
+    /// completes each call once the test explicitly releases it via the
+    /// returned `Notify`, so tests can deterministically control pass
+    /// timing instead of relying on real sleeps.
+    struct FakeWork {
+        calls: Arc<AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+        result: Arc<std::sync::Mutex<std::result::Result<(), String>>>,
+    }
+
+    impl FakeWork {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                release: Arc::new(tokio::sync::Notify::new()),
+                result: Arc::new(std::sync::Mutex::new(Ok(()))),
+            }
+        }
+
+        fn set_result(&self, result: std::result::Result<(), String>) {
+            *self.result.lock().unwrap() = result;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        fn closure(&self) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> + 'static
+        {
+            let calls = self.calls.clone();
+            let release = self.release.clone();
+            let result = self.result.clone();
+            move || {
+                let calls = calls.clone();
+                let release = release.clone();
+                let result = result.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    release.notified().await;
+                    result.lock().unwrap().clone()
+                })
+            }
+        }
+    }
+
+    /// Registers one restart request as its own spawned task, so it is
+    /// driven independently by the runtime (not just when the test task
+    /// happens to poll it directly).
+    fn spawn_request<F, Fut>(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        work: F,
+    ) -> tokio::task::JoinHandle<std::result::Result<(), String>>
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { register_restart_request(&coordinator, work).await })
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if condition() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never became true");
+    }
+
+    async fn wait_for_pending(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        expected: usize,
+    ) {
+        for _ in 0..1000 {
+            if coordinator.lock().await.pending.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("pending queue never reached {expected}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_before_a_pass_share_one_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // Pre-populate one batch under the coordinator lock so this assertion
+        // does not depend on task scheduling between two registration calls.
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "only one pass should have started");
+        fake.release();
+
+        assert!(rx1.await.unwrap().is_ok());
+        assert!(rx2.await.unwrap().is_ok());
+        worker.await.unwrap();
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "both requests must be answered by the same pass");
+    }
+
+    #[tokio::test]
+    async fn request_arriving_mid_pass_is_answered_by_next_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        // Register a second request while pass 1 is still in flight.
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "straggler must not join the in-flight pass");
+
+        // Releasing pass 1 lets the worker loop and start pass 2 for the straggler.
+        fake.release();
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 2).await;
+        fake.release();
+
+        assert!(r1.await.unwrap().is_ok());
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn failing_pass_fails_its_whole_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+
+        assert_eq!(rx1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(rx2.await.unwrap(), Err("boom".to_string()));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stragglers_during_a_failing_pass_are_also_failed() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+
+        // Only one pass ever runs: it fails, and must drain+fail the
+        // straggler too instead of letting a spurious pass 2 report success.
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(r2.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        assert!(!coordinator.lock().await.running, "worker must reset running on failure");
+    }
+
+    #[tokio::test]
+    async fn fresh_request_after_failure_starts_a_new_worker() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert!(!coordinator.lock().await.running);
+
+        let fake2 = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake2.closure());
+        wait_until(|| fake2.calls.load(Ordering::SeqCst) >= 1).await;
+        fake2.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_does_not_break_other_waiters_in_the_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // r1's task (and its oneshot receiver) will be aborted before the
+        // pass completes; r2 must still get its result.
+        let r1 = spawn_request(&coordinator, fake.closure());
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        r1.abort();
+        tokio::task::yield_now().await;
+        fake.release();
+
+        assert!(
+            r2.await.unwrap().is_ok(),
+            "surviving waiter in the same batch must still get its result"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_mid_pass_resets_running_and_fails_queued_waiters() {
+        let coordinator = new_coordinator();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let work_calls = calls.clone();
+        let work = move || {
+            let work_calls = work_calls.clone();
+            Box::pin(async move {
+                work_calls.fetch_add(1, Ordering::SeqCst);
+                panic!("simulated restart panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>
+        };
+
+        let res = register_restart_request(&coordinator, work).await;
+        assert_eq!(
+            res,
+            Err("tunnel restart worker panicked".to_string()),
+            "a panicked pass must surface its explicit error, not a closed channel"
+        );
+        assert!(
+            !coordinator.lock().await.running,
+            "panic recovery must reset running so a later request can start a fresh worker"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Confirm the coordinator is usable again after the panic.
+        let fake = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
 }
 
 fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState) {
@@ -1166,7 +1603,221 @@ async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tu
         }
     }
 }
+/// Posture collection + submission loop. Sibling to run_refresh_scheduler and
+/// run_acl_sync_scheduler — posture cadence is a fixed 5-minute interval, a
+/// different concern from token-refresh or ACL-poll cadence.
+///
+/// Lifecycle:
+///   - No session in state (fresh daemon before login, or post-logout): sleep
+///     and recheck — same "not logged in yet" handling as run_refresh_scheduler.
+///   - PostLoginState signals `posture_resync` right after a successful login,
+///     so a freshly-logged-in device reports posture immediately rather than
+///     waiting for the first 5-minute tick.
+///   - Unlike run_acl_sync_scheduler, this does NOT pre-consume the ticker's
+///     immediate first tick — there is no separate startup-time posture fetch
+///     elsewhere (unlike ACL's fetch_and_store_acl spawned in run()), so the
+///     interval's natural immediate first tick IS the "collect at startup"
+///     trigger the spec asks for.
+async fn run_posture_scheduler(state: SharedState, conf: config::ClientConf) {
+    const POSTURE_COLLECT_INTERVAL_SECS: u64 = 300;
+    const NO_SESSION_POLL_SECS: u64 = 60;
 
+    let resync = { state.read().await.posture_resync.clone() };
+
+    let mut ticker =
+        tokio::time::interval(std::time::Duration::from_secs(POSTURE_COLLECT_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let has_session = { state.read().await.session.is_some() };
+        if !has_session {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_SESSION_POLL_SECS)).await;
+            continue;
+        }
+
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = resync.notified() => {}
+        }
+
+        collect_and_submit_posture(&state, &conf).await;
+    }
+}
+
+/// Collects one posture report via the real gRPC submitter. Splitting
+/// collection (here) from assembly+retry (submit_with_retry) lets tests
+/// inject a fake submitter and drive the retry path without a live
+/// controller or real system posture collection.
+async fn collect_and_submit_posture(state: &SharedState, conf: &config::ClientConf) {
+    let (ca_pem, device_id) = {
+        let s = state.read().await;
+        match s.device.as_ref() {
+            Some(d) => (d.ca_cert_pem.clone(), d.id.clone()),
+            None => return,
+        }
+    };
+
+    let collected = posture::collect().await;
+    let submitter = GrpcPostureSubmitter {
+        state,
+        conf,
+        ca_pem: &ca_pem,
+        device_id: &device_id,
+    };
+    submit_with_retry(&submitter, collected).await;
+}
+
+/// Abstracts "submit this assembled report" so the retry-with-same-report_id
+/// logic in submit_with_retry can be unit-tested without a live controller —
+/// mirrors the AclFetcher/TransportFetcher pattern used by sync_acl_now_with /
+/// fetch_and_store_transport_with.
+#[async_trait::async_trait]
+trait PostureSubmitter {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()>;
+}
+
+/// Real submitter: submits via the gRPC RPC, transparently refreshing the
+/// access token on Unauthenticated (see submit_posture_report).
+struct GrpcPostureSubmitter<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+    ca_pem: &'a str,
+    device_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl PostureSubmitter for GrpcPostureSubmitter<'_> {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+        submit_posture_report(self.conf, self.ca_pem, self.state, self.device_id, report).await
+    }
+}
+
+/// Assembles the DevicePostureReport (one fresh report_id for this cycle) and
+/// submits it, retrying once with the SAME report_id on failure so the
+/// controller's UNIQUE(report_id) constraint makes the retry idempotent
+/// rather than creating a duplicate row. Gives up after the retry — the next
+/// scheduled tick collects fresh data anyway.
+async fn submit_with_retry(submitter: &impl PostureSubmitter, collected: posture::PostureReport) {
+    let report = DevicePostureReport {
+        report_id: Uuid::new_v4().to_string(),
+        reported_at: now_unix(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        os_name: collected.os_name,
+        os_version: collected.os_version,
+        checks: collected.checks,
+    };
+
+    if let Err(e) = submitter.submit(report.clone()).await {
+        warn!(error = %e, "posture submission failed, retrying once with same report_id");
+        if let Err(e) = submitter.submit(report).await {
+            warn!(error = %e, "posture submission retry failed, will try again next cycle");
+        }
+    }
+}
+
+/// Submit a device posture report, transparently refreshing the access token
+/// on Unauthenticated — same shape as fetch_acl_snapshot_with_refresh (see
+/// its doc comment for the full flow this mirrors).
+async fn submit_posture_report(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let refresh_lock = { state.read().await.refresh_lock.clone() };
+    let (access_token, _refresh_token) = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        (sess.access_token.clone(), sess.refresh_token.clone())
+    };
+
+    match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone()).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("posture submit returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            report_device_posture(conf, ca_pem, &new_tokens.access_token, device_id, report).await
+        }
+    }
+}
+
+/// Raw ReportDevicePosture RPC.
+async fn report_device_posture(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .report_device_posture(ReportDevicePostureRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            report: Some(report),
+        })
+        .await?
+        .into_inner();
+    if !resp.accepted {
+        anyhow::bail!(
+            "controller rejected posture report: {}",
+            resp.rejection_reason
+        );
+    }
+    Ok(())
+}
 /// Early transport re-poll after a relay failure, run as its own task so it
 /// never blocks the ACL sync tick (revocations keep polling). Retries with
 /// backoff until the transport version changes (then restarts the tunnel to
@@ -2048,6 +2699,95 @@ mod fetch_tests {
             state.read().await.acl_snapshot.as_ref().unwrap().version,
             8,
             "new ACL snapshot must be stored"
+        );
+    }
+}
+
+#[cfg(test)]
+mod posture_scheduler_tests {
+    use super::*;
+
+    // --- posture_resync wiring: notify_one() actually wakes a waiter ---
+    #[tokio::test]
+    async fn posture_resync_wakes_a_waiting_task() {
+        let state = crate::runtime::new_shared();
+        let resync = state.read().await.posture_resync.clone();
+
+        let waiter = {
+            let resync = resync.clone();
+            tokio::spawn(async move {
+                resync.notified().await;
+            })
+        };
+
+        // Give the spawned task a chance to start waiting before notifying.
+        tokio::task::yield_now().await;
+        resync.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter task timed out — posture_resync did not wake it")
+            .expect("waiter task panicked");
+    }
+
+    // --- submit_with_retry: fake submitter records every report_id it saw ---
+    struct FakeSubmitter {
+        report_ids_seen: Mutex<Vec<String>>,
+        fail_first_n: usize,
+    }
+
+    impl FakeSubmitter {
+        fn new(fail_first_n: usize) -> Self {
+            Self {
+                report_ids_seen: Mutex::new(Vec::new()),
+                fail_first_n,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PostureSubmitter for FakeSubmitter {
+        async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+            let mut seen = self.report_ids_seen.lock().await;
+            seen.push(report.report_id.clone());
+            if seen.len() <= self.fail_first_n {
+                anyhow::bail!("simulated transient failure");
+            }
+            Ok(())
+        }
+    }
+
+    fn fake_collected() -> posture::PostureReport {
+        posture::PostureReport {
+            checks: Vec::new(),
+            os_name: "TestOS".into(),
+            os_version: "1.0".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_reuses_report_id_on_failure() {
+        let submitter = FakeSubmitter::new(1); // first call fails, second succeeds
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(seen.len(), 2, "expected exactly one retry");
+        assert_eq!(
+            seen[0], seen[1],
+            "retry must reuse the same report_id, not generate a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_gives_up_after_one_retry() {
+        let submitter = FakeSubmitter::new(usize::MAX); // always fails
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(
+            seen.len(),
+            2,
+            "must attempt exactly once plus one retry, then give up — not loop forever"
         );
     }
 }

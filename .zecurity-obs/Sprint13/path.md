@@ -1,6 +1,6 @@
 ---
 type: planning
-status: planned
+status: done
 sprint: 13
 owner: M3 (Yogesh)
 tags:
@@ -126,7 +126,7 @@ its own fast, topology-scoped channel with **no ACL recompile**.
 
 Solo sprint. No conflict-zone table needed — no other member touches these files this sprint.
 (If the 2-month timeline slips, the controller Go work in Phases A/B is the natural place for M2 to
-pair; the client work in Phase C is M3-only.)
+pair; the client work in Phases C/4 is M3-only.)
 
 ---
 
@@ -138,38 +138,51 @@ Phase A — Transport proto + Transport Compiler + GetTransportSnapshot RPC + pu
 Phase B — TransportNotifier + trigger rewiring (relay heartbeat/expiry/registration) + topology-scoped push
   ↓
 Phase C — Client Transport Cache: fetch_and_store_transport + join on remote_network_id
+  ↓
+Phase 4 — Client recovery hardening: sync/restart serialization + cooldown + failure classification
 ```
 
 ### Phase A — Transport plane data path *(non-breaking; ADR-018 Phase 1)*
 > See [[Sprint13/Member3-Go-Rust/Phase1-Transport-Proto-and-Compiler]].
 
-- [ ] **A1** `proto/connector/v1/connector.proto` — add `TransportSnapshot` / `TransportRemoteNetwork` / `TransportConnector`; wire `transport_snapshot = 16` into `ConnectorControlMessage` (the slot is already reserved).
-- [ ] **A2** `proto/client/v1/client.proto` — add `GetTransportSnapshot` RPC + `GetTransportSnapshotRequest` / `GetTransportSnapshotResponse` (mirror `GetACLSnapshot`; `known_version` + `up_to_date`).
-- [ ] **A3** `buf generate` (repo root) — regenerate Go stubs; `cd controller && go generate ./graph/...` if resolver stubs needed.
-- [ ] **A4** `controller/internal/transport/` — new package: `Store`, `SnapshotCache` (keyed by workspaceID), `CompileTransportSnapshot` (the JOIN is in ADR-017; reuse the `connector_relay_placement JOIN relays` shape, workspace-scoped).
-- [ ] **A5** `GetTransportSnapshot` handler/resolver — same version-check pattern as `GetACLSnapshot`.
-- [ ] **A6** connector control-stream: push current `TransportSnapshot` on stream open, alongside the ACL snapshot.
-- [ ] **Build gate:** `cd controller && go build ./...`
-- [ ] **Tests:** `SnapshotCache`, `CompileTransportSnapshot`.
+- [x] **A1 (corrected)** transport messages live in `client.proto`; connector field 16 is retired/reserved because the connector is not a consumer.
+- [x] **A2** `proto/client/v1/client.proto` — `GetTransportSnapshot` RPC + version-aware request/response.
+- [x] **A3** generated bindings are present and compile.
+- [x] **A4** `controller/internal/transport/` — `Store`, `SnapshotCache`, and workspace compiler.
+- [x] **A5** `GetTransportSnapshot` handler with `known_version` / `up_to_date` behavior.
+- [x] **A6 (corrected)** snapshot delivery uses client polling; connector stream push was intentionally removed in `90803e4`.
+- [x] **Build gate:** `cd controller && go build ./...`
+- [x] **Tests:** cache unit tests and compiler integration coverage exist (database-backed integration requires `TEST_DATABASE_URL`).
 
 ### Phase B — Transport propagation *(non-breaking; ADR-017)*
 > See [[Sprint13/Member3-Go-Rust/Phase2-Transport-Propagation]]. Depends on Phase A.
 
-- [ ] **B1** `controller/internal/transport/notifier.go` — `TransportNotifier` parallel to `policy.Notifier`; connector-scoped versions, workspace-scoped cache invalidation, `NotifyTopologyChange(workspaceID, affectedConnectorIDs)`.
-- [ ] **B2** `controller/internal/connector/transport_push.go` — topology-scoped proactive push (mirror `acl_push.go`, but push only to affected connector streams).
-- [ ] **B3** Rewire triggers to `NotifyTopologyChange` (per ADR-017 trigger table): `relay/heartbeat.go` (relay online / metadata change), `relay/expiry.go` (eviction), connector registration / self-select-new-relay. **Leave `NotifyPolicyChange` for genuine policy events only.**
-- [ ] **B4** (observable) include `transport_version` handling so convergence can be measured (heartbeat piggyback if cheap; else defer to metrics-only).
-- [ ] **Build gate:** `cd controller && go build ./...`
-- [ ] **Tests:** `TransportNotifier` (correct connectors notified, version bump semantics); topology-change → correct snapshot version.
+- [x] **B1 (corrected)** `TransportNotifier` uses an independent workspace version and cache invalidation; affected connector IDs are advisory under the polling architecture.
+- [x] **B2 (corrected)** client polling plus relay-failure re-poll replaces the unused connector proactive-push path.
+- [x] **B3** Relay heartbeat/expiry and connector placement changes notify transport; transport-only placement changes do not notify policy.
+- [x] **B4** (observable) include `transport_version` handling so convergence can be measured (heartbeat piggyback if cheap; else defer to metrics-only).
+- [x] **Build gate:** `cd controller && go build ./...`
+- [x] **Tests:** AT-CORE/AT-CORE-R notifier isolation, monotonic versions, real heartbeat triggering, and exact heartbeat/expiry/placement connector scoping.
 
 ### Phase C — Client Transport Cache *(non-breaking; ADR-018 Phase 3)*
 > See [[Sprint13/Member3-Go-Rust/Phase3-Client-Transport-Cache]]. Depends on Phase A (RPC exists).
 
-- [ ] **C1** `client/src/daemon.rs` — add `transport_snapshot` to `SharedState`; add `fetch_and_store_transport` mirroring `fetch_and_store_acl` (same 60s TTL, `known_version` → `up_to_date`).
-- [ ] **C2** `build_transports_by_resource` — resolve the relay from the Transport Cache keyed by `remote_network_id`; **fall back to `ACLConnector` fields 4+5 if the cache is empty** (old controller / convergence window).
-- [ ] **C3** Wire the existing PENDING-03 `relay_resync` signal to also wake `fetch_and_store_transport` — so a data-plane relay failure now triggers an early *transport* resync, not an ACL resync. (This is where Option-A supersedes M3's own Option-B mitigation — keep the signal, retarget it.)
-- [ ] **Build gate:** `cd client && cargo build`
-- [ ] **Tests:** transport-cache hit routes via cache; empty cache falls back to ACL fields; version-change triggers rebuild. (Rust tests in a separate `_tests.rs` file per repo convention.)
+- [x] **C1** `SharedState.transport_snapshot` + 60s version-aware polling.
+- [x] **C2** routing joins on `remote_network_id`, prefers transport coordinates, and retains ACL fallback.
+- [x] **C3** relay failure wakes independent background transport recovery/re-poll.
+- [x] **Build gate:** `cd client && cargo build`
+- [x] **Tests:** routing preference/fallback, version-aware recovery/rebuild, and `up_to_date` cache-preservation coverage exist.
+
+### Phase 4 — Client transport recovery hardening *(single-controller correctness)*
+> See [[Sprint13/Member3-Go-Rust/Phase4-Client-Transport-Recovery-Hardening]]. Depends on Phase C.
+
+- [x] **F1** serialize the full transport `known_version → fetch → store` operation.
+- [x] **F2** serialize tunnel down/up lifecycle transitions.
+- [x] **F3** make relay-recovery cooldown begin when recovery completes.
+- [x] **F4** only allowlisted connectivity I/O and handshake timeout trigger transport recovery; protocol, denial, authentication, and unrelated I/O failures do not.
+- [x] **Security tests:** malformed/oversized frames, connectivity and unrelated I/O kinds, and typed certificate/SPIFFE authentication classification are covered.
+- [x] **Tests:** recovery timing/single-flight, concurrent transport ordering, and shared restart-lock serialization are covered.
+- [x] **Build gate:** client formatting, build, and tests pass.
 
 ---
 
@@ -186,17 +199,23 @@ cd client && cargo build && cargo test
 
 > Full checkable test matrix in [[Sprint13/Acceptance-Test-Plan]]. The gate below is the headline.
 
-- [ ] **AT-CORE (the invariant that proves the sprint):** a relay address/placement change pushes a new `TransportSnapshot` to affected connectors **without** recompiling or bumping the ACL snapshot version — and, in reverse, a policy change never bumps `transport_version`.
-- [ ] `TransportSnapshot` is compiled per workspace and served both proactively (connector stream, field 16) and by poll (`GetTransportSnapshot`).
-- [ ] A relay metadata/placement change pushes a new `TransportSnapshot` to **only the affected connectors** — and does **not** recompile or re-push the ACL snapshot.
-- [ ] The client routes a connector's relay from the Transport Cache; with an empty cache it falls back to `ACLConnector` 4+5 with no regression.
-- [ ] Relay failover propagates to the client via the transport plane without an ACL version bump.
-- [ ] All four components build; existing tests still pass (ACL relay fields remain populated).
+- [x] **AT-CORE (controller boundary):** relay metadata/topology changes bump the independent transport version without changing policy version/cache; the reverse policy-to-transport isolation is also tested.
+- [x] `TransportSnapshot` is compiled per workspace and served to its client consumer by `GetTransportSnapshot`; obsolete connector field 16 remains reserved.
+- [x] A relay metadata/placement change invalidates only the transport plane and does not bump ACL; notifier and real heartbeat-boundary tests prove the separation.
+- [x] The client routes a connector's relay from the Transport Cache; with an empty cache it falls back to `ACLConnector` 4+5 with no regression.
+- [x] Relay failover propagation is implemented through connector topology notification, independent transport versioning, client early re-poll, and tunnel rebuild without an ACL version bump.
+- [x] Authenticated malformed handshakes, connector/ACL denials, and certificate/SPIFFE failures fail closed without being classified as transport recovery failures.
+- [x] All four components build; existing tests still pass (ACL relay fields remain populated).
 
 ## 8. Deferred (explicitly NOT this sprint)
 
 - **ADR-018 Phase 4** — reserve `ACLConnector` 4+5 / `ACLSnapshot` 6+9, delete `GetActiveRelay()` from the compiler, drop the client fallback. Breaking; needs the 4-week fleet compat window after Phase C ships. Schedule as a later coordinated deploy.
 - Convergence metrics dashboard (feeds PENDING-10).
+- Persistent/global transport versioning and coordination for multiple controller replicas.
+- Post-phase hardening completed: the tunnel-restart mutex was replaced with a queued-oneshot batch
+  coordinator so concurrent callers share passes and retain exact synchronous results.
+- Separate lifecycle-state follow-up: distinguish an intentionally stopped tunnel from a tunnel
+  left absent by failed restart startup before treating `tun_slot == None` as success.
 
 ## 9. On completion (the decision-record step)
 

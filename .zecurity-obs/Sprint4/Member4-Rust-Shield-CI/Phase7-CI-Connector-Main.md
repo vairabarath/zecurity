@@ -41,9 +41,9 @@ Create the GitHub Actions workflow for Shield binary releases. Modify `connector
 
 ### shield-release.yml
 
-- [ ] Trigger: `push: tags: ['shield-v*']`
-- [ ] Job: `ubuntu-latest`
-- [ ] Steps:
+- [x] Trigger: `push: tags: ['shield-v*']`
+- [x] Job: `ubuntu-latest`
+- [x] Steps:
   1. `actions/checkout@v4`
   2. `dtolnay/rust-toolchain@stable`
   3. `cargo install cross --git https://github.com/cross-rs/cross`
@@ -67,35 +67,13 @@ Create the GitHub Actions workflow for Shield binary releases. Modify `connector
 > **Coordination with M3:** M3 owns `agent_server.rs`. Agree on `ShieldServer::new()` signature before modifying main.rs.
 
 - [ ] Import `agent_server::ShieldServer` (after M3 has committed the file)
+  <!-- NOT FOUND: uses `agent_server::ShieldRegistry` instead -->
 - [ ] After loading `ConnectorState` (which has `trust_domain` and `connector_id`):
-  ```rust
-  let shield_server = ShieldServer::new(
-      controller_channel.clone(),   // existing mTLS channel to Controller
-      state.trust_domain.clone(),
-      state.connector_id.clone(),
-  );
-  let shield_server_ref = Arc::new(shield_server);
-  ```
-- [ ] Spawn Shield gRPC server on :9091:
-  ```rust
-  let shield_ref = shield_server_ref.clone();
-  tokio::spawn(async move {
-      // Build mTLS TLS config (Connector's cert, workspace_ca as trust root)
-      let tls = ServerTlsConfig::new()
-          .identity(Identity::from_pem(&connector_crt, &connector_key))
-          .client_ca_root(Certificate::from_pem(&workspace_ca))
-          .client_auth_optional(false);  // require Shield client cert
-      
-      Server::builder()
-          .tls_config(tls).expect("Shield server TLS config failed")
-          .add_service(ShieldServiceServer::new(shield_ref))
-          .serve("0.0.0.0:9091".parse().unwrap())
-          .await
-          .expect("Shield gRPC server failed");
-  });
-  ```
+  <!-- Renamed to ShieldRegistry with different API -->
+- [x] Spawn Shield gRPC server on :9091:
 - [ ] Pass `shield_server_ref` to `heartbeat::run_heartbeat()` so it can include `get_alive_shields()` in HeartbeatRequest
-- [ ] Log `info!("Shield gRPC server starting on :9091")`
+  <!-- NOT FOUND: get_alive_shields() does not exist anywhere -->
+- [x] Log `info!("Shield gRPC server starting on :9091")`
 
 ---
 

@@ -621,9 +621,9 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 
 	now := time.Now().UTC()
 	template := &x509.RevocationList{
-		Number:              crlSerial,
-		ThisUpdate:          now,
-		NextUpdate:          now.Add(24 * time.Hour),
+		Number:                    crlSerial,
+		ThisUpdate:                now,
+		NextUpdate:                now.Add(24 * time.Hour),
 		RevokedCertificateEntries: revoked,
 	}
 

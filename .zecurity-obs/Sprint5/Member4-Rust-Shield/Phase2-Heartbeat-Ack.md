@@ -126,13 +126,13 @@ for instruction in resp.resources {
 }
 ```
 
-- [ ] `HeartbeatRequest` includes `resource_acks` from drained state
-- [ ] `HeartbeatResponse.resources` processed — apply/remove handled
-- [ ] Host validation runs before nftables — failed ack sent if mismatch
-- [ ] nftables rebuilt atomically after each instruction
-- [ ] `protecting` ack sent immediately after successful nftables apply
-- [ ] Health check loop (Phase 1) upgrades status to `protected` via periodic acks
-- [ ] `remove` action cleans up active list + rebuilds chain + sends `removed` ack
+- [x] `HeartbeatRequest` includes `resource_acks` from drained state
+- [x] `HeartbeatResponse.resources` processed — apply/remove handled
+- [x] Host validation runs before nftables — failed ack sent if mismatch
+- [x] nftables rebuilt atomically after each instruction
+- [x] `protecting` ack sent immediately after successful nftables apply
+- [x] Health check loop (Phase 1) upgrades status to `protected` via periodic acks
+- [x] `remove` action cleans up active list + rebuilds chain + sends `removed` ack
 
 ---
 

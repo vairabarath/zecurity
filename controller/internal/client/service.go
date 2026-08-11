@@ -32,6 +32,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -58,6 +59,8 @@ type Service struct {
 	policyCache              *policy.SnapshotCache
 	policyNotifier           *policy.Notifier
 	transportCompiler        *transport.Compiler
+	postureStore             *posture.Store
+	postureEvaluator         *posture.Evaluator
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -72,6 +75,8 @@ func NewService(
 	policyCache *policy.SnapshotCache,
 	policyNotifier *policy.Notifier,
 	transportCompiler *transport.Compiler,
+	postureStore *posture.Store,
+	postureEvaluator *posture.Evaluator,
 ) *Service {
 	return &Service{
 		pool:                     pool,
@@ -86,6 +91,8 @@ func NewService(
 		policyCache:              policyCache,
 		policyNotifier:           policyNotifier,
 		transportCompiler:        transportCompiler,
+		postureStore:             postureStore,
+		postureEvaluator:         postureEvaluator,
 	}
 }
 
@@ -500,8 +507,8 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
 	// policy change is not cached as stale (ADR-013).
-	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, workspaceID)
+	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*policy.CompiledACL, error) {
+		return policy.CompileACLSnapshot(ctx, s.policyStore,s.postureStore, s.policyNotifier, workspaceID)
 	})
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.

@@ -138,22 +138,22 @@ Admin defines a resource (IP + port) on a Shield host → Shield applies nftable
 
 Run these once all phases are complete:
 
-- [ ] `buf generate` (from repo root) — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd connector && cargo build` — clean (warnings OK)
-- [ ] `cargo build --manifest-path shield/Cargo.toml` — clean
-- [ ] `cd admin && npm run build` — clean
-- [ ] Full DB migration: `007_resources.sql` runs on fresh DB
-- [ ] Create resource → auto-matched to shield by lan_ip → status = pending
-- [ ] Click Protect → status = managing → next heartbeat delivers to Shield
-- [ ] Shield applies nftables → `nft list ruleset` shows `chain resource_protect`
-- [ ] Port blocked on LAN: `nc -zv {shield_lan_ip} {port}` from another host → refused
-- [ ] Port reachable by local Shield relay while normal LAN access is blocked
-- [ ] Shield health check: stop the service → status = failed within 90s
-- [ ] Restart service → status = protected within 90s
-- [ ] Click Unprotect → nftables rule removed → port accessible on LAN again
-- [ ] Shield goes offline → UI shows "Shield Offline" on all its resources
-- [ ] Host with no Shield installed → Create resource rejected with "no shield on this host"
+- [x] `buf generate` (from repo root) — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd connector && cargo build` — clean (warnings OK)
+- [x] `cargo build --manifest-path shield/Cargo.toml` — clean
+- [x] `cd admin && npm run build` — clean
+- [x] Full DB migration: `007_resources.sql` runs on fresh DB
+- [x] Create resource → auto-matched to shield by lan_ip → status = pending
+- [x] Click Protect → status = managing → next heartbeat delivers to Shield
+- [x] Shield applies nftables → `nft list ruleset` shows `chain resource_protect`
+- [x] Port blocked on LAN: `nc -zv {shield_lan_ip} {port}` from another host → refused
+- [x] Port reachable by local Shield relay while normal LAN access is blocked
+- [x] Shield health check: stop the service → status = failed within 90s
+- [x] Restart service → status = protected within 90s
+- [x] Click Unprotect → nftables rule removed → port accessible on LAN again
+- [x] Shield goes offline → UI shows "Shield Offline" on all its resources
+- [x] Host with no Shield installed → Create resource rejected with "no shield on this host"
 
 ---
 

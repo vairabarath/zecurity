@@ -4,7 +4,7 @@ member: M1
 sprint: 14
 phase: 2
 title: Provider Revoke Transaction
-status: planned
+status: done
 depends_on:
   - Sprint14/Member1-Go/Phase1-Relay-Cert-History-Data-Model
 tags: [go, relay, provider, authz, audit, revocation, pending-02]
@@ -64,11 +64,11 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-B1** `ActionRelayRevoke` + `CanRevokeRelay`.
-- [ ] **M1-B2** `Revoke` handler — atomic revoke + non-active + audit + broadcast.
-- [ ] **M1-B3** `Delete` = revoke-then-remove; row preserved; never hard-delete.
-- [ ] **M1-B4** `POST /provider/relays/{id}/revoke` route + broadcaster wiring.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-B1** `ActionRelayRevoke` + `CanRevokeRelay`.
+- [x] **M1-B2** `Revoke` handler — revocation rows + non-active status + audit commit atomically; broadcast runs after commit.
+- [x] **M1-B3** `Delete` = atomic revoke-then-remove + audit; row preserved; never hard-delete.
+- [x] **M1-B4** `POST /provider/relays/{id}/revoke` route + broadcaster wiring.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **True atomicity (must-fix).** `RevokeAllForRelay` + status update + `InsertAudit` as separate pool
@@ -88,4 +88,12 @@ cd controller && go build ./...
   against** provisioning. (Touches `store.go` + `relay/provision.go` — coordinate with Phase 1/4.)
 
 ## Post-Phase Fixes
-_None yet._
+
+### Fix: Revoke/delete and provider audit are atomic
+**Issue:** `RevokeRelay` previously committed relay certificate/status changes before `InsertAudit`;
+`Delete` also called `MarkDeleted` separately, allowing partial privileged actions.
+
+**Fix Applied:** `RevokeRelay` now accepts an in-transaction hook. `Revoke` inserts its audit through
+`InsertAuditTx`; `Delete` performs the deleted-status transition and audit through the same hook.
+Any hook failure rolls back certificate and relay-status changes. Checker refresh and convergence
+fan-out run only after the transaction commits.

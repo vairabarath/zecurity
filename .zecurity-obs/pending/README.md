@@ -28,7 +28,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 |---|-------|--------|----------|---------|
 | PENDING-01 ✅ → [ADR-020](../Decisions/ADR-020-Authenticated-Relay-Provisioning.md) | Authenticated Relay Provisioning *(accepted, Sprint 12)* | security/relay | **P0** | ADR-014, Sprint 10.3 |
 | PENDING-02 ✅ → [ADR-027](../Decisions/ADR-027-Certificate-Revocation-Enforcement.md) | Certificate Revocation (CRL/OCSP) Enforcement *(accepted 2026-08-10)* | security | **P0** | ADR-014 |
-| [PENDING-03](PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) | relay | P1 | ADR-015/016/017/018 |
+| ✅ [PENDING-03](PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) — implemented in Sprint 13 | relay | P1 | ADR-015/016/017/018 |
 | [PENDING-04](PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO | identity | P1 | ADR-005/006 |
 | [PENDING-05](PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) | identity | P2 | — |
 | [PENDING-06](PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication | identity | P2 | PENDING-04 |
@@ -104,4 +104,3 @@ P2 = differentiation / maturity.
 - **10** → feeds the 07 dashboard fleet views and 03 failover visibility.
 - **07** (vision) is a reference/north-star, not a build step; it decomposes into 07a (Phase 0)
   and 07b (Phase 2).
-

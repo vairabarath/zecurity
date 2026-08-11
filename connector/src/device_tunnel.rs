@@ -18,6 +18,7 @@ use x509_parser::prelude::*;
 use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -62,6 +63,7 @@ pub async fn listen(
     addr: &str,
     store: CertStore,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
@@ -80,6 +82,7 @@ pub async fn listen(
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let acl_clone = acl.clone();
+        let registry_clone = registry.clone();
         let hub_clone = tunnel_hub.clone();
         let crl_clone = crl_manager.clone();
         let conn_id_clone = connector_id.clone();
@@ -117,6 +120,8 @@ pub async fn listen(
                 spiffe_id,
                 cert_serial,
                 acl_clone,
+                registry_clone,
+                SessionTransport::Tcp,
                 hub_clone,
                 crl_clone,
                 &conn_id_clone,
@@ -147,6 +152,8 @@ pub async fn handle_stream<S>(
     client_spiffe_id: String,
     cert_serial: Vec<u8>,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
+    accept_transport: SessionTransport,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: &str,
@@ -227,8 +234,27 @@ where
         .await;
         return Err(anyhow!("access denied"));
     }
+   let acl_entry = decision.unwrap();
 
-    let acl_entry = decision.unwrap();
+    let session_key = (client_spiffe_id.clone(), acl_entry.resource_id.clone());
+    // Shield-relay sessions take the `RelaySession`/d2s child-task path — label
+    // them `relay` regardless of how the device reached the connector so
+    // cancellations are observable per data path. Everything else keeps the
+    // accept-path transport (tcp/quic).
+    let session_transport = if acl_entry.route_type == "shield" {
+        SessionTransport::Relay
+    } else {
+        accept_transport
+    };
+    let (cancel_token, _session_guard) = registry.register(session_key, session_transport);
+
+    // Closes the window where a diff-and-cancel pass may have already scanned
+    // the registry before this session finished registering. Unconditional —
+    // no ACL-version gating, since policy versions are process-local and can
+    // miss a real content change across a controller restart.
+    if !acl.is_allowed(&acl_entry.resource_id, &client_spiffe_id) {
+        cancel_token.cancel();
+    }
 
     if acl_entry.route_type == "shield" {
         if acl_entry.shield_id.is_empty() {
@@ -322,7 +348,18 @@ where
                     quic_addr: quic_advertise_addr().map(String::from),
                 };
                 send_response(&mut stream, &response).await?;
-                relay.relay_stream(stream).await?;
+                 tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::info!(
+                            spiffe_id = %client_spiffe_id,
+                            resource_id = %acl_entry.resource_id,
+                            transport = session_transport.as_str(),
+                            reason = "acl_diff",
+                            "session cancelled — authorization revoked mid-session",
+                        );
+                    }
+                    result = relay.with_cancel_token(cancel_token.clone()).relay_stream(stream) => { result?; }
+                }
             }
             Err(e) => {
                 tracing::error!(shield = %shield_id,
@@ -439,7 +476,18 @@ where
         )
         .await;
 
-        relay_udp(&mut stream, &req.destination, req.port).await?;
+       tokio::select! {
+            _ = cancel_token.cancelled() => {
+                tracing::info!(
+                    spiffe_id = %client_spiffe_id,
+                    resource_id = %acl_entry.resource_id,
+                    transport = session_transport.as_str(),
+                    reason = "acl_diff",
+                    "session cancelled — authorization revoked mid-session",
+                );
+            }
+            result = relay_udp(&mut stream, &req.destination, req.port) => { result?; }
+        }
         return Ok(());
     }
 
@@ -502,7 +550,18 @@ where
     )
     .await;
 
-    tokio::io::copy_bidirectional(&mut stream, &mut resource_conn).await?;
+      tokio::select! {
+        _ = cancel_token.cancelled() => {
+            tracing::info!(
+                spiffe_id = %client_spiffe_id,
+                resource_id = %acl_entry.resource_id,
+                transport = session_transport.as_str(),
+                reason = "acl_diff",
+                "session cancelled — authorization revoked mid-session",
+            );
+        }
+        result = tokio::io::copy_bidirectional(&mut stream, &mut resource_conn) => { result?; }
+    }
     Ok(())
 }
 

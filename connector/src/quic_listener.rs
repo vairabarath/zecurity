@@ -9,6 +9,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::tls::server_cfg::build_device_tunnel_tls;
 use crate::ControlMessage;
@@ -26,6 +27,7 @@ pub async fn listen(
     advertise_addr: &str,
     store: CertStore,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
@@ -55,6 +57,7 @@ pub async fn listen(
         };
 
         let acl = acl.clone();
+         let registry = registry.clone();
         let tunnel_hub = tunnel_hub.clone();
         let crl = crl_manager.clone();
         let conn_id = connector_id.clone();
@@ -99,6 +102,7 @@ pub async fn listen(
 
                 let stream = tokio::io::join(recv, send);
                 let acl = acl.clone();
+                 let registry = registry.clone();
                 let hub = tunnel_hub.clone();
                 let crl = crl.clone();
                 let conn_id = conn_id.clone();
@@ -108,7 +112,16 @@ pub async fn listen(
 
                 tokio::spawn(async move {
                     if let Err(e) = device_tunnel::handle_stream(
-                        stream, sid, serial, acl, hub, crl, &conn_id, &ctrl_tx,
+                        stream,
+                        sid,
+                        serial,
+                        acl,
+                        registry,
+                        SessionTransport::Quic,
+                        hub,
+                        crl,
+                        &conn_id,
+                        &ctrl_tx,
                     )
                     .await
                     {

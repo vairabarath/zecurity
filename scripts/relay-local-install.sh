@@ -15,7 +15,7 @@
 #   CONTROLLER_ADDR        — controller gRPC address, e.g. "localhost:9090"
 #   CONTROLLER_HTTP_ADDR   — controller HTTP address, e.g. "localhost:8080"
 #   RELAY_ID               — canonical lowercase UUID; must match the row
-#                            created by POST /api/relays on the controller
+#                            created by POST /provider/relays on the controller
 #   RELAY_CA_FINGERPRINT   — 64-char SHA-256 hex of the controller
 #                            intermediate CA (operator pre-pins; relay
 #                            verifies after fetching /ca.crt)
@@ -25,8 +25,8 @@
 #   RELAY_DNS_SANS                   (comma-separated, e.g. relay.example.com)
 #   RELAY_IP_SANS                    (comma-separated, e.g. 10.0.0.50)
 #   RELAY_STATE_DIR                  (default /var/lib/zecurity-relay/pki)
-#   RELAY_PROVISIONING_TOKEN         (forward-compat; ignored until controller
-#                                     enforces token auth on Provision)
+#   RELAY_PROVISIONING_TOKEN         single-use token returned by
+#                                     POST /provider/relays; required on first boot
 #   LOG_LEVEL                        (default info)
 #   RELAY_MAX_CONNECTIONS
 #   RELAY_MAX_LOOKUP_BRIDGES
@@ -61,7 +61,7 @@ Installs the ZECURITY relay locally.
 Required env vars:
   CONTROLLER_ADDR        gRPC host:port for provisioning + heartbeat (e.g. localhost:9090)
   CONTROLLER_HTTP_ADDR   HTTP host:port for /ca.crt fetch              (e.g. localhost:8080)
-  RELAY_ID               Canonical lowercase UUID; must match POST /api/relays response
+  RELAY_ID               Canonical lowercase UUID; must match POST /provider/relays response
   RELAY_CA_FINGERPRINT   64-char SHA-256 hex of the controller intermediate CA
 
 Optional env vars (passed through to /etc/zecurity/relay.conf if set):

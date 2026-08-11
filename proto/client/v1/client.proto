@@ -41,8 +41,43 @@ service ClientService {
   // user + workspace. Removes the device's SPIFFE from subsequent ACL
   // compiles and bumps the workspace policy version.
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+
+  rpc ReportDevicePosture(ReportDevicePostureRequest) returns (ReportDevicePostureResponse);
+}
+message ReportDevicePostureRequest {
+  string access_token = 1;
+  string device_id = 2;
+  DevicePostureReport report = 3;
 }
 
+message ReportDevicePostureResponse {
+  bool accepted = 1;
+  string rejection_reason = 2;
+}
+
+message DevicePostureReport {
+  string report_id = 1;
+  int64 reported_at = 2;
+  string client_version = 3;
+  string os_name = 4;
+  string os_version = 5;
+  repeated PostureCheck checks = 6;
+}
+
+message PostureCheck {
+  string check_id = 1;
+  CheckStatus status = 2;
+  string detail = 3;
+}
+
+enum CheckStatus {
+  CHECK_STATUS_UNSPECIFIED = 0;
+  PASS = 1;
+  FAIL = 2;
+  UNSUPPORTED = 3;
+  UNKNOWN = 4;
+  ERROR = 5;
+}
 // ── GetAuthConfig ──────────────────────────────────────────────────────────
 
 message GetAuthConfigRequest {

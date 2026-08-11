@@ -1,6 +1,6 @@
 ---
 type: planning
-status: active
+status: in-progress
 sprint: 14
 tags:
   - sprint14
@@ -99,31 +99,31 @@ M2-B Connector + client consume /relay.crl        (needs M1-C endpoint + M2-A ma
 
 ### Phase A — M1: Relay Cert-History + Revocation Data Model
 > See [[Sprint14/Member1-Go/Phase1-Relay-Cert-History-Data-Model]]. Depends on nothing — Day 1.
-- [ ] **M1-A1** `controller/migrations/027_relay_certificates.sql` — `relay_certificates` history table.
-- [ ] **M1-A2** `internal/relay/store.go` — `RecordIssuedCert`, `RevokeAllForRelay(id, reason)`, `ListRevokedRelaySerials()` (unexpired only).
-- [ ] **M1-A3** `store.go` — `MarkProvisioned` also records the issued cert (same transaction); `BuildLabelledRelayList` excludes revoked relays.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-A1** `controller/migrations/027_relay_certificates.sql` — `relay_certificates` history table.
+- [x] **M1-A2** `internal/relay/store.go` — `RecordIssuedCert`, `RevokeAllForRelay(id, reason)`, `ListRevokedRelaySerials()` (unexpired only).
+- [x] **M1-A3** `store.go` — `MarkProvisioned` also records the issued cert (same transaction); `BuildLabelledRelayList` excludes revoked relays.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase B — M1: Provider Revoke Transaction
 > See [[Sprint14/Member1-Go/Phase2-Provider-Revoke-Transaction]]. Depends on Phase A.
-- [ ] **M1-B1** `internal/provider/authz.go` — `ActionRelayRevoke="relay.revoke"` + `CanRevokeRelay`.
-- [ ] **M1-B2** `internal/relay/admin_handler.go` — `Revoke` handler: `RevokeAllForRelay` → mark non-active → `InsertAudit("relay.revoke")` → `broadcastRelayList`, atomically.
-- [ ] **M1-B3** `admin_handler.go` — `Delete` = revoke-then-remove; **row preserved**, never hard-delete.
-- [ ] **M1-B4** `cmd/server/main.go` — route `POST /provider/relays/{id}/revoke` behind `requireProvider`; inject broadcaster.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-B1** `internal/provider/authz.go` — `ActionRelayRevoke="relay.revoke"` + `CanRevokeRelay`.
+- [x] **M1-B2** `internal/relay/admin_handler.go` — `Revoke` handler: certificate revocation + non-active status + `InsertAuditTx("relay.revoke")` commit atomically; convergence fan-out runs after commit.
+- [x] **M1-B3** `admin_handler.go` — `Delete` = atomic revoke-then-remove + audit; **row preserved**, never hard-delete.
+- [x] **M1-B4** `cmd/server/main.go` — route `POST /provider/relays/{id}/revoke` behind `requireProvider`; inject broadcaster.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase C — M1: Relay CRL Generation + Endpoint
 > See [[Sprint14/Member1-Go/Phase3-Relay-CRL-Generation-Endpoint]]. Depends on Phase A.
-- [ ] **M1-C1** `internal/pki/service.go` — add `GenerateRelayCRL(ctx) ([]byte, error)` to the interface.
-- [ ] **M1-C2** new `internal/pki/relay_crl.go` — Intermediate-CA-signed CRL from `ListRevokedRelaySerials()`; set a sane `nextUpdate` (≥ refresh interval).
-- [ ] **M1-C3** `internal/connector/ca_endpoint.go` + `main.go` — `RelayCRLEndpointHandler` + `GET /relay.crl`.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-C1** `internal/pki/service.go` — add `GenerateRelayCRL` to the interface.
+- [x] **M1-C2** new `internal/pki/relay_crl.go` — Intermediate-CA-signed CRL from `ListRevokedRelaySerials()`; `nextUpdate` is 10 minutes.
+- [x] **M1-C3** `internal/relay/crl_handler.go` + `main.go` — `RelayCRLHandler` + `GET /relay.crl`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase D — M1: Controller Revocation Enforcement
 > See [[Sprint14/Member1-Go/Phase4-Controller-Revocation-Enforcement]]. Depends on Phase A (+ B for the refresh-on-revoke hook).
-- [ ] **M1-D1** `internal/connector/spiffe.go` — a DB-backed `RevocationChecker` (in-memory cache, refreshed on revoke + periodically); consult it in `verifyRelayCertificate`; **fail closed** if state unavailable.
-- [ ] **M1-D2** `cmd/server/main.go` — construct + wire the checker; refresh it inside the revoke transaction.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-D1** `internal/connector/spiffe.go` — a DB-backed `RevocationChecker` (in-memory cache, refreshed on revoke + periodically); consult it for authenticated relay RPCs; **fail closed** if state unavailable.
+- [x] **M1-D2** `cmd/server/main.go` — construct + wire the checker; refresh it **after commit** through the revoke convergence hook.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ### Phase E — M2: Hardened CRL Manager
 > See [[Sprint14/Member2-Rust/Phase1-Hardened-CRL-Manager]]. Depends on nothing — Day 1.
@@ -136,7 +136,7 @@ M2-B Connector + client consume /relay.crl        (needs M1-C endpoint + M2-A ma
 - [x] **M2-F1** `connector/src/relay_client.rs` — reject a revoked relay cert (relay-CRL check via the hardened manager) when dialing the relay.
 - [x] **M2-F2** `client/src/relay_pool.rs` — same on the client side, including live cached-connection eviction.
 - [x] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
-- [ ] **M2-F3 E2E gate:** Controller revoke + stale `LabelledRelayList` connector/client rejection.
+- [x] **M2-F3 E2E gate:** Controller revoke + stale `LabelledRelayList` connector/client rejection.
 
 ## Final Build Gates
 ```bash
@@ -147,18 +147,18 @@ cd relay && cargo build
 ```
 
 ## Acceptance Criteria
-- [ ] `relay_certificates` history table exists; revoke marks **every unexpired serial** for the relay.
-- [ ] `POST /provider/relays/{id}/revoke` (provider-auth) revokes + removes-from-pool + audits (`relay.revoke`) + broadcasts, **atomically**; relay row **preserved**.
-- [ ] `DELETE /provider/relays/{id}` = revoke-then-remove; **no path physically deletes** a relay or its cert-history rows.
-- [ ] `GenerateRelayCRL` emits an **Intermediate-CA-signed** CRL of exactly the revoked unexpired relay serials; verifies against the Intermediate CA; `GET /relay.crl` returns parseable `application/pkix-crl`.
+- [x] `relay_certificates` history table exists; revoke marks **every unexpired serial** for the relay.
+- [x] `POST /provider/relays/{id}/revoke` (provider-auth) revokes + removes-from-pool + audits (`relay.revoke`) **atomically**, then broadcasts after commit; relay row **preserved**.
+- [x] `DELETE /provider/relays/{id}` = revoke-then-remove; **no path physically deletes** a relay or its cert-history rows. *(Atomicity with audit remains covered by the unchecked criterion below.)*
+- [x] `GenerateRelayCRL` emits an **Intermediate-CA-signed** CRL of exactly the revoked unexpired relay serials; verifies against the Intermediate CA; `GET /relay.crl` returns parseable `application/pkix-crl`.
 - [x] Hardened CRL manager verifies **signature + issuer + thisUpdate + nextUpdate**, **denies once past nextUpdate**, keeps last-good on transient failure, and is **fail-closed on cold-boot**.
-- [ ] Controller rejects a revoked relay at **Heartbeat + authenticated relay RPCs** via a cache (no per-RPC DB query); **fails closed** when state is unavailable. (Provision is skipped by the SPIFFE interceptor — `connector/spiffe.go:162` — so it is **not** covered by the verifier.)
-- [ ] Re-provisioning of a revoked relay is denied by a **Provision-time DB status guard** (`MarkProvisioned` guarded; revoke serializes against Provision) — a revoke cannot be silently undone.
-- [ ] Connector **and** client reject a revoked relay cert — including from a cached `LabelledRelayList`.
-- [ ] Revocation **evicts already-established** relay connections (connector session + client `RelayPool` cache), not just future handshakes.
-- [ ] A revoked relay is removed from `LabelledRelayList` and a broadcast fires immediately.
-- [ ] The revoke transaction is **atomic** (revocation rows + relay status + audit in one DB tx); cache refresh + broadcast happen **after commit**.
-- [ ] Relay serials use one **canonical normalized form** (`SerialNumber.Text(16)`) across DB, CRL, and checker; invalid serials rejected.
+- [x] Controller rejects a revoked relay at **Heartbeat + authenticated relay RPCs** via a cache (no per-RPC DB query); **fails closed** when state is unavailable. (Provision is skipped by the SPIFFE interceptor, so it is covered by the DB status guard instead.)
+- [x] Re-provisioning of a revoked relay is denied by a **Provision-time DB status guard** (`MarkProvisioned` guarded; revoke serializes against Provision) — a revoke cannot be silently undone.
+- [x] Connector **and** client reject a revoked relay cert — including from a cached `LabelledRelayList`.
+- [x] Revocation **evicts already-established** relay connections (connector session + client `RelayPool` cache), not just future handshakes.
+- [x] A revoked relay is removed from `LabelledRelayList` and a broadcast fires immediately.
+- [x] The revoke transaction is **atomic** (revocation rows + relay status + audit in one DB tx); cache refresh + broadcast happen **after commit**.
+- [x] Relay serials use one **canonical normalized form** (`SerialNumber.Text(16)`) across DB, CRL, and checker; invalid serials rejected.
 - [x] Refresh interval is **60s + jitter**.
 
 ## Deferred (out of scope this sprint)

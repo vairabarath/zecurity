@@ -23,6 +23,7 @@ import (
 //     interceptor before this handler runs),
 //   - the connector verified the shield's mTLS before proxying,
 //   - here we confirm req.ShieldId is a shield managed by THAT connector.
+//
 // A connector already controls its shields' traffic, so letting it renew their
 // certs stays within the existing trust boundary.
 //

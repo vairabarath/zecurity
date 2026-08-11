@@ -1842,3 +1842,358 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Complete M1 Phase C `/relay.crl`, then run the M2-F3 revocation E2E on a socket-capable host and
   mark Phase F `done` only after it passes.
+
+## 2026-07-21 — Codex (Sprint 13 implementation audit)
+
+**What was done:**
+- Audited PENDING-03 and every Sprint 13 phase against the current proto, controller transport
+  compiler/notifier, trigger wiring, client transport cache, routing, and recovery code.
+- Marked the implemented Phase 1–3 checklist items complete and set the sprint/phases to
+  `in-progress` because their acceptance gates are not yet fully demonstrated.
+- Reconciled the phase records with commit `90803e4`: the client is the transport-snapshot consumer,
+  so delivery uses `GetTransportSnapshot`; connector control field 16 is retired/reserved and the
+  unused proactive connector-push path was removed.
+- Recorded the later background transport-recovery fix and the remaining validation gaps in each
+  phase's Post-Phase Fixes section.
+
+**Verification:**
+- `cd controller && go build ./...` passed.
+- Focused controller transport, policy, connector, and relay tests passed.
+- `cargo build --manifest-path client/Cargo.toml` passed.
+- Focused client routing and transport tests passed.
+
+**What's next:**
+- Add AT-CORE/AT-CORE-R integration coverage proving policy and transport version isolation.
+- Add client tests for version-change rebuild, relay-resync wake-up, and `up_to_date` cache retention.
+- Run and record socket-capable end-to-end relay failover/convergence and all-component build gates.
+
+## 2026-07-21 — Codex (Sprint 13 Phase 4 planning)
+
+**What was done:**
+- Added Phase 4 for the remaining single-controller client transport recovery hardening.
+- Scoped four fixes: transport-sync serialization, tunnel-restart serialization, cooldown measured
+  from recovery completion, and typed handshake failure classification.
+- Added focused concurrency, recovery-timing, and protocol-classification test requirements.
+- Explicitly excluded persistent/global versions and multi-controller coordination.
+
+**What's next:**
+- Implement Phase 4 in `client/src/runtime.rs`, `client/src/daemon.rs`, and
+  `client/src/net_stack.rs`, then run its formatting, lint, and test gates.
+
+## 2026-07-21 — Codex (Sprint 13 Phase 4 security hardening)
+
+**What was done:**
+- Expanded Phase 4 F4 with the required handshake security classification.
+- Limited transport refresh signals to timeout and connectivity-related I/O failures.
+- Documented fail-closed handling for malformed/oversized authenticated frames, connector/ACL
+  denials, certificate/SPIFFE failures, and unrelated local I/O errors.
+- Added security regression-test and sprint acceptance requirements preventing those failures from
+  notifying `relay_resync`.
+
+**What's next:**
+- Implement F1–F4 and verify both positive refresh cases and negative fail-closed cases.
+
+## 2026-07-22 — Codex (Sprint 14 implementation reconciliation)
+
+**What was done:**
+- Audited every Sprint 14 phase and acceptance criterion against the current controller,
+  connector, and client revocation implementation.
+- Marked M1 Phases A, C, and D complete; retained Phase B as in-progress because relay revoke/delete
+  and the provider audit record are not committed atomically.
+- Confirmed M2 Phase E complete and retained Phase F as in-progress pending its Controller-backed
+  stale-`LabelledRelayList` E2E gate.
+- Updated Sprint 14 path checkboxes to distinguish implemented behavior from the remaining security
+  and verification gaps.
+
+**Verification:**
+- Controller, connector, and client builds passed during the current audit sequence.
+- Client tests passed (38/38), including CRL rejection and live-connection monitoring coverage.
+- Focused controller transport/policy tests passed; Docker-dependent integration coverage remains
+  environment-gated.
+
+**What's next:**
+- Make relay revoke/delete status changes and `provider_audit_logs` insertion one database
+  transaction, with cache refresh and convergence fan-out strictly after commit.
+- Run the socket-capable Controller → connector/client stale-list revocation E2E test.
+- Validate/reject non-canonical relay serials at the storage boundary, then reconcile PENDING-02.
+
+## 2026-07-22 — Codex (Sprint 12 Phase D documentation reconciliation)
+
+**What was done:**
+- Verified the provider-only relay management implementation in the current controller code.
+- Corrected Sprint 12 M2 Phase D from `planned` to `done`.
+- Marked the provider route migration, authorization/audit integration, PENDING-02 delete seam,
+  and controller build gate complete.
+
+**What's next:**
+- The separate live relay provisioning E2E acceptance item in Sprint 12 remains available for a
+  recorded environment-backed verification run.
+
+## 2026-07-22 — Codex (Sprint 12 relay provisioning E2E procedure repair)
+
+**What was done:**
+- Repaired the live relay provisioning runbook to use provider authentication and
+  `POST /provider/relays` instead of the removed tenant-admin `/api/relays` route.
+- Added explicit evidence gates for real relay certificate/key persistence, heartbeat success,
+  and rejection of a replayed single-use provisioning token from a second empty state directory.
+- Corrected local installer, VPS deployment, and WAN validation guidance that still described
+  provisioning tokens as unenforced or anonymous relay self-provisioning as supported.
+
+**Verification:**
+- Confirmed the real relay requires `RELAY_ID`, reads the provisioning token from env/file, calls
+  the Controller Provision RPC, validates the returned identity, and persists all certificate
+  material before starting heartbeat/listener work.
+- The live environment-backed E2E execution is still required before checking Sprint 12 criterion
+  9; documentation repair alone is not recorded as a pass.
+
+**What's next:**
+- Execute the repaired runbook against a live Controller/Postgres/Valkey stack with a provider JWT,
+  attach logs for successful first provisioning and rejected replay, then mark criterion 9 complete.
+
+## 2026-07-22 — Codex (Sprint 15 device-posture plan correction)
+
+**What was done:**
+- Corrected the Sprint 15 compiler/cache contract to carry `CompiledACL{Snapshot, ValidUntil}`
+  from compilation into the cache and all production callers.
+- Added cycle-free expiry-notifier registration, lock-safe notification, and per-workspace
+  singleflight semantics covering both the policy-version bump and recompilation.
+- Added profile/evaluation revisioning so changed requirements fail closed during re-evaluation.
+- Made ingestion limits, report replay behavior, retention defaults, and graceful shutdown
+  lifecycle explicit and consistent across the Sprint 15 path and member phase files.
+
+**Verification:**
+- Swept Sprint 15 documentation for stale unknown-check, report-ID, cache-expiry, retention-owner,
+  and revision rules; corrected the remaining contradictory replay rule.
+- `git diff --check` reports no formatting errors for tracked Sprint 15 changes; the Sprint 15
+  directory is currently untracked as a whole, so no tracked diff is available yet.
+
+**What's next:**
+- Implement Sprint 15 in dependency order, beginning with the migration/store phase, and run each
+  phase's documented build and test gate before marking it done.
+
+## 2026-07-22 — Codex (origin sync and Sprint 13 implementation reconciliation)
+
+**What was done:**
+- Fetched and merged `origin/fixed-pendings` at merge commit `cefdc88`, incorporating the
+  PENDING-03 implementation report from remote commit `6f000f0`.
+- Marked Sprint 13 Phases 1–4 done where the implementation and automated coverage exist.
+- Accepted ADR-015/017/018 with the implemented client-poll architecture correction, and marked
+  PENDING-03 implemented in the pending index.
+- Preserved the deliberately deferred ADR-018 Phase 4 field removal and optional B4 convergence
+  observable as open work.
+
+**Verification:**
+- Controller and Connector builds passed during the implementation audit; Client tests passed
+  38/38 and its build passed.
+- Shield build passed in this reconciliation run with warnings only; its generated `target/`
+  build directory was removed afterward.
+- Live AT-CORE topology-isolation/failover acceptance remains unchecked because it requires a
+  running Controller/database/relay/client environment.
+
+**What's next:**
+- Run the Sprint 13 acceptance plan in a live environment to prove transport-only version bumps,
+  reverse policy isolation, and relay failover propagation without an ACL version bump.
+
+## 2026-07-22 — Codex (Sprint 14 missing-implementation origin sync)
+
+**What was done:**
+- Fetched remote commit `dfb2c65` and merged it into the current branch at `c3e79c1`.
+- Verified relay revoke and delete now commit certificate revocation, terminal status, and provider
+  audit in one database transaction; convergence callbacks run after commit.
+- Marked Sprint 14 Phase B and its atomicity acceptance criteria complete.
+
+**Verification:**
+- Provider and PKI focused Go tests passed.
+- Relay tests are currently blocked by a pre-existing syntax error in the locally modified
+  `controller/internal/relay/heartbeat_test.go`; connector integration tests require Docker socket
+  access unavailable in the sandbox.
+- Canonical serial validation at every store write and the live stale-list E2E gate remain open.
+
+**What's next:**
+- Add centralized validated relay-serial normalization at the store boundary, repair the local
+  heartbeat test syntax, and execute the environment-backed stale-list revocation E2E gate.
+
+## 2026-07-22 — Codex (Sprint 13 completion audit correction)
+
+**What was done:**
+- Rechecked every Sprint 13 production path and test claim against the current source tree.
+- Kept Phases 1 and 3 done, and corrected Phases 2 and 4 to `in-progress` where required
+  acceptance or regression tests do not yet exist.
+- Corrected over-marked Phase 4 checklist entries for I/O-kind classification, security failure
+  signaling, and tunnel-restart serialization coverage.
+
+**Verification:**
+- Controller transport tests/build and the complete client suite/build had passed in the preceding
+  audit; generated build directories were removed afterward as requested.
+- Source inspection confirms the production synchronization, cooldown, routing, and fail-closed
+  paths are implemented. The missing evidence is test coverage and live acceptance, not the core
+  TransportSnapshot data path.
+
+**What's next:**
+- Add the remaining Phase 4 regression tests and connectivity-kind allowlist, then run AT-CORE,
+  AT-CORE-R, and relay-failover acceptance against a live Controller/database/relay/client stack.
+
+## 2026-07-22 — Codex (Sprint 13 Phase 2 completed)
+
+**What was done:**
+- Added executable AT-CORE and AT-CORE-R isolation coverage for the independent transport and ACL
+  notifiers/caches.
+- Added a real relay-heartbeat boundary test and exact connector-scoping assertions for heartbeat,
+  expiry, connection, disconnection, and relay-switch events.
+- Marked Sprint 13 Phase 2 done while retaining live client failover as the sprint-level AT-E1 gate.
+
+**Verification:**
+- Transport and focused relay tests pass; the Connector test binary compiles successfully.
+- The Controller builds and `git diff --check` passes. Connector execution remains dependent on
+  its package-level Docker/Valkey test environment.
+
+**What's next:**
+- Complete Phase 4's connectivity-specific I/O classification and missing security/restart
+  regression tests, then run the live AT-E1 relay-failover scenario.
+
+## 2026-07-22 — Codex (Sprint 13 Phase 4 completed)
+
+**What was done:**
+- Replaced broad framed-stream I/O recovery classification with an explicit connectivity-kind
+  allowlist.
+- Added regression coverage for connectivity and unrelated I/O, typed authentication failures,
+  and shared tunnel-restart serialization.
+- Marked Sprint 13 Phase 4 done while leaving the overall sprint open for live AT-E1 failover.
+
+**Verification:**
+- Focused net-stack and recovery tests pass.
+- The complete Client suite passes 43/43 outside the socket-restricted sandbox; `cargo check` and
+  `git diff --check` pass.
+
+**What's next:**
+- Run the live Controller/relay/connector/client failover scenario and prove transport convergence
+  without an ACL version change before marking Sprint 13 complete.
+
+## 2026-07-22 — Codex (Sprint 13 marked complete)
+
+**What was done:**
+- Marked Sprint 13 complete after all four implementation phases and their automated coverage were
+  completed.
+- Recorded the live AT-E1 deployment run as optional operational validation rather than a sprint
+  completion blocker.
+
+**Verification:**
+- Controller Phase 2 isolation/scoping coverage passes, the Controller builds, and the complete
+  Client suite passes 43/43.
+
+**What's next:**
+- Optionally run AT-E1 in a deployed environment to collect operational failover timing evidence.
+
+## 2026-07-23 — Codex (restart-coalescing documentation correction)
+
+**What was done:**
+- Documented the remaining redundant sequential-restart behavior in Sprint 13 Phase 4.
+- Recorded the approved queued-oneshot batch-coordinator design, failure draining, best-effort
+  panic supervision, exact panic-result semantics, and deterministic test requirements.
+- Kept the separate `tun_slot == None` lifecycle ambiguity explicitly out of scope.
+
+**Verification:**
+- Documentation now distinguishes the implemented non-overlap mutex from the not-yet-implemented
+  restart coalescing follow-up and does not claim unconditional panic/shutdown recovery.
+
+**What's next:**
+- Implement the coordinator in Client runtime/daemon code and run its deterministic concurrency
+  tests plus the complete Client suite.
+
+## 2026-07-23 — Codex (restart coordinator race fixes verified)
+
+**What was done:**
+- Moved restart-work panic handling inside each pass so the worker retains and explicitly fails the
+  active batch.
+- Reset coordinator state and drained stragglers before publishing failure or panic results,
+  removing the fresh-request race against stale `running = true`.
+- Reworked batching tests to use pre-populated queues and explicit pending-queue synchronization
+  instead of scheduler timing.
+- Updated Phase 4 documentation to mark the queued-oneshot coordinator implemented.
+
+**Verification:**
+- All seven deterministic coordinator tests pass.
+- The complete Client suite passes 49/49 outside the socket-restricted sandbox.
+- `cargo build` succeeds without warnings.
+
+**What's next:**
+- The separate explicit tunnel-lifecycle-state follow-up remains optional and out of scope.
+
+## 2026-07-27 — Codex (Sprint 15 M1 Phases 1–2)
+
+**What was done:**
+- Completed the device-posture migration and tenant-safe PostgreSQL store, including
+  profile revisions, bindings, raw observations, evaluation provenance, and batch reads.
+- Implemented and wired `ReportDevicePosture`, validation, profile evaluation, generated
+  Go protobuf stubs, replay-safe ingestion, and policy-transition notification.
+- Added Phase 1 store integration coverage, Phase 2 validation/evaluation unit coverage,
+  and an environment-gated end-to-end gRPC ingestion suite.
+- Marked the M1 Phase 1 and Phase 2 implementation/build checkboxes complete and recorded
+  the migration-number and replay/error-classification fixes in the phase documentation.
+
+**Verification:**
+- `go test ./internal/posture/... ./internal/client/...` passes.
+- `go build ./...` and `git diff --check` pass for the Controller.
+- PostgreSQL-backed suites are present but skip until `PKI_TEST_DATABASE_URL` is set.
+
+**What's next:**
+- Run the PostgreSQL suites in a configured environment, then begin M1 Phase 3 GraphQL
+  administration and posture-aware ACL/cache integration.
+
+## 2026-07-28 — Codex (M1 Sprint 15 Phase 3 start)
+
+**What was done:**
+- Added the initial Device Profile GraphQL schema and regenerated gqlgen output.
+- Wired `PostureStore` into the GraphQL resolver root and server construction.
+- Implemented workspace-scoped profile list/create/mode update and the server-driven
+  supported posture-check query.
+- Added policy notifications for implemented profile mutations and transactionally
+  rejected switching a zero-requirement profile to enforce mode.
+- Added focused posture registry and store integration coverage.
+
+**Key decisions:**
+- Kept this session to the initial GraphQL foundation; requirements, bindings, posture
+  visibility, and ACL compiler/cache enforcement remain in Phase 3.
+
+**What's next:**
+- Complete the remaining GraphQL CRUD/binding/visibility API, then implement the
+  posture-aware ACL compiler and cache-expiry/version-bump contract.
+
+## 2026-07-29 — Codex (M1 Sprint 15 Phase 3 GraphQL hardening)
+
+**What was done:**
+- Added posture-specific GraphQL authorization and binding resolver tests.
+- Converted expected posture mutation failures to client-visible safe user errors.
+- Added profile-name normalization, tenant-scoped batch resource loading, and immediate
+  workspace posture re-evaluation after requirement changes.
+- Wired the posture evaluator into the GraphQL resolver root and documented the fixes.
+
+**Verification:**
+- Focused posture, resource, and resolver tests pass; `go build ./...` passes.
+- The broad internal suite has one unrelated existing Valkey/miniredis `CLIENT TRACKING`
+  incompatibility in `internal/auth`; all posture and resolver packages pass.
+
+**What's next:**
+- Run the database-backed posture resolver cases with the configured resource test DSN,
+  then continue device posture visibility and ACL compiler/cache work.
+
+## 2026-07-31 — Codex (M1 Sprint 15 Phase 3 verification)
+
+**What was done:**
+- Audited the Phase 3 GraphQL schema, generated resolvers, dependency wiring,
+  notification paths, ACL compiler, and snapshot cache against the implementation
+  checklist.
+- Marked M1-E1b, M1-E2, and M1-E4 complete in both Phase 3 documentation and the Sprint
+  15 execution path.
+- Documented that posture visibility, posture-aware ACL compilation, and cache expiry
+  remain open.
+
+**Verification:**
+- `go generate ./graph/...`, focused resolver/posture/policy/resource tests,
+  `go build ./...`, and `git diff --check` pass.
+- The full internal test gate remains open because the existing `internal/auth`
+  miniredis test does not support `CLIENT TRACKING`.
+
+**What's next:**
+- Complete M1-E1 posture visibility, then implement M1-E3 compiler gating and M1-E3b
+  cache expiry before closing the Phase 3 build gate.

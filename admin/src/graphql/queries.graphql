@@ -318,3 +318,47 @@ query GetClientDevices {
     revokedAt
   }
 }
+
+query GetDeviceProfiles {
+  deviceProfiles {
+    id
+    name
+    manualTrust
+    requirements {
+      id
+      checkId
+      allowUnsupported
+    }
+    boundResources {
+      id
+      name
+    }
+  }
+}
+
+query GetSupportedPostureChecks {
+  supportedPostureChecks {
+    id
+    label
+    platform
+    allowUnsupportedMeaningful
+  }
+}
+
+query GetDevicePostureVisibility($profileId: ID!) {
+  devicePostureVisibility(profileId: $profileId) {
+    deviceId
+    deviceName
+    satisfied
+    stale
+    failureReason
+    evaluatedAt
+    reportAgeSeconds
+    observations {
+      checkId
+      status
+      observedAt
+      collectorError
+    }
+  }
+}

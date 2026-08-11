@@ -311,18 +311,24 @@ fn parse_jwt_payload(token: &str) -> Result<JwtClaims> {
     Ok(claims)
 }
 
-/// Builds the /ca.crt URL from a configured HTTP address.
+/// Normalize a configured controller HTTP address to an absolute base URL
+/// (scheme included, no trailing slash).
 ///
 /// `http_addr` may be a bare "host:port" (assumed http://, for co-located/dev use —
 /// e.g. the relay-style "127.0.0.1:8080" pattern) or a full URL with an explicit
 /// "http://" / "https://" scheme (required when the controller is on a different
 /// network and only reachable via its public HTTPS endpoint).
-fn ca_cert_url(http_addr: &str) -> String {
+pub fn http_base_url(http_addr: &str) -> String {
     if http_addr.starts_with("http://") || http_addr.starts_with("https://") {
-        format!("{}/ca.crt", http_addr.trim_end_matches('/'))
+        http_addr.trim_end_matches('/').to_string()
     } else {
-        format!("http://{}/ca.crt", http_addr)
+        format!("http://{}", http_addr.trim_end_matches('/'))
     }
+}
+
+/// Builds the /ca.crt URL from a configured HTTP address.
+fn ca_cert_url(http_addr: &str) -> String {
+    format!("{}/ca.crt", http_base_url(http_addr))
 }
 
 /// Step 3: Fetch the CA certificate from the controller's HTTP endpoint.

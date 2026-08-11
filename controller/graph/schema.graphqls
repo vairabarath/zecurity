@@ -7,6 +7,10 @@
 # Widen the list (e.g. [ADMIN, AUDITOR]) when new roles are added.
 directive @hasRole(roles: [Role!]!) on FIELD_DEFINITION
 
+# gqlgen built-in: forces a field to be resolved by a hand-written resolver method
+# instead of reading a matching struct field directly off the parent Go model.
+directive @goField(forceResolver: Boolean, name: String) on FIELD_DEFINITION | INPUT_FIELD_DEFINITION
+
 type Query {
   # Returns the currently authenticated user.
   # Requires valid JWT in Authorization header.

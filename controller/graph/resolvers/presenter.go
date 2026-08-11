@@ -13,9 +13,9 @@ import (
 // ErrorPresenter is gqlgen's error hook. It is fail-closed: an error reaches the
 // client verbatim only if it is
 //
-//	1. an *apperr.UserError — an intentional, user-safe message; or
-//	2. a *gqlerror.Error — gqlgen's own parse/validation errors, which carry only
-//	   query/schema info (no internal detail) and whose masking would wreck dev UX.
+//  1. an *apperr.UserError — an intentional, user-safe message; or
+//  2. a *gqlerror.Error — gqlgen's own parse/validation errors, which carry only
+//     query/schema info (no internal detail) and whose masking would wreck dev UX.
 //
 // Every other error — raw resolver/DB/infra failures wrapped with fmt.Errorf — is
 // logged server-side and replaced with a generic message, so internals (Postgres

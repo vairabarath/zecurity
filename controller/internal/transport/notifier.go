@@ -28,6 +28,7 @@ import (
 //     redundant fetch, never a stale route).
 //   - Multiple replicas keep independent version counters, so a client that
 //     hops between replicas may re-fetch on each hop (churn, still correct).
+//
 // This is a system-wide single-controller assumption shared with the ACL plane,
 // not specific to transport. Making it multi-replica-safe (persist the version
 // epoch, or distribute invalidations via Valkey) is Controller-HA scope

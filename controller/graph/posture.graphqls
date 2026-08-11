@@ -1,0 +1,106 @@
+enum DeviceProfileMode {
+  AUDIT
+  ENFORCE
+}
+
+enum PostureCheckStatus {
+  PASS
+  FAIL
+  UNSUPPORTED
+  UNKNOWN
+  ERROR
+}
+
+type PostureCheckDescriptor {
+  id: String!
+  label: String!
+  platform: String!
+  allowUnsupportedMeaningful: Boolean!
+}
+
+type DeviceProfileRequirement {
+  id: ID!
+  checkId: String!
+  allowUnsupported: Boolean!
+}
+
+type DeviceProfile {
+  id: ID!
+  name: String!
+  mode: DeviceProfileMode!
+  manualTrust: Boolean!
+  requirements: [DeviceProfileRequirement!]! @goField(forceResolver: true)
+  boundResources: [Resource!]! @goField(forceResolver: true)
+}
+
+type DevicePostureObservation {
+  checkId: String!
+  status: PostureCheckStatus!
+  observedAt: String!
+  collectorError: String
+}
+
+type DevicePostureVisibility {
+  deviceId: ID!
+  deviceName: String!
+  profileId: ID!
+  satisfied: Boolean!
+  stale: Boolean!
+  failureReason: String
+  evaluatedAt: String!
+  reportReceivedAt: String
+  reportAgeSeconds: Int
+  observations: [DevicePostureObservation!]!
+}
+
+
+extend type Query {
+  supportedPostureChecks: [PostureCheckDescriptor!]! @hasRole(roles: [ADMIN])
+  deviceProfiles: [DeviceProfile!]! @hasRole(roles: [ADMIN])
+
+  devicePostureVisibility(
+    profileId: ID!
+  ): [DevicePostureVisibility!]! @hasRole(roles: [ADMIN])
+}
+
+extend type Mutation {
+  createDeviceProfile(
+    name: String!
+    manualTrust: Boolean = true
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  updateDeviceProfileMode(
+    id: ID!
+    mode: DeviceProfileMode!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  updateDeviceProfileManualTrust(
+    id: ID!
+    enabled: Boolean!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  addProfileRequirement(
+    profileId: ID!
+    checkId: String!
+    allowUnsupported: Boolean!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  deleteDeviceProfile(
+    id: ID!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  removeProfileRequirement(
+    profileId: ID!
+    checkId: String!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  bindResourceToProfile(
+    profileId: ID!
+    resourceId: ID!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+
+  unbindResourceFromProfile(
+    profileId: ID!
+    resourceId: ID!
+  ): DeviceProfile! @hasRole(roles: [ADMIN])
+}

@@ -27,7 +27,7 @@ use tracing::{error, info};
 use zecurity_connector::{
     agent_server, appmeta, config::ConnectorConfig, control_stream, controller_client, crl,
     device_tunnel, enrollment, net_util, policy, quic_listener, relay_attachment, relay_handler,
-    relay_selector, tls, updater, watchdog, ControlMessage,
+    relay_selector,session_registry, tls, updater, watchdog, ControlMessage,
 };
 
 #[tokio::main]
@@ -101,6 +101,8 @@ async fn main() -> anyhow::Result<()> {
     // every ShieldHealthReport to piggyback the peer-Connector list.
     let policy_cache = Arc::new(policy::PolicyCache::new());
 
+ let session_registry = Arc::new(session_registry::SessionRegistry::new());
+
     let shield_registry = agent_server::ShieldRegistry::new(
         controller_channel,
         enrollment_state.trust_domain.clone(),
@@ -155,9 +157,10 @@ async fn main() -> anyhow::Result<()> {
             .to_string();
         format!("http://{}:8080", host)
     });
+    let http_base = enrollment::http_base_url(&http_base);
     let crl_url = format!(
         "{}/ca.crl?workspace_id={}",
-        http_base.trim_end_matches('/'),
+        http_base,
         enrollment_state.workspace_id
     );
 
@@ -197,13 +200,14 @@ async fn main() -> anyhow::Result<()> {
     {
         let store = cert_store.clone();
         let acl = acl.clone();
+        let registry = session_registry.clone();
         let hub = tunnel_hub.clone();
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                device_tunnel::listen("0.0.0.0:9092", store, acl, hub, crl, cid, tx).await
+                device_tunnel::listen("0.0.0.0:9092", store, acl,registry, hub, crl, cid, tx).await
             {
                 error!(error = %e, "device tunnel (TLS) on :9092 failed");
             }
@@ -214,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let store = cert_store.clone();
         let acl = acl.clone();
+         let registry = session_registry.clone();
         let hub = tunnel_hub.clone();
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
@@ -224,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
                 &quic_advertise,
                 store,
                 acl,
+                registry,
                 hub,
                 crl,
                 cid,
@@ -248,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         relay_handler::RelayHandler::new(
             &cert_store,
             acl.clone(),
+            session_registry.clone(),
             tunnel_hub.clone(),
             crl_manager.clone(),
             connector_id.clone(),
@@ -304,6 +311,7 @@ async fn main() -> anyhow::Result<()> {
         ack_rx,
         ctrl_rx,
         policy_cache,
+        session_registry,
         relay_attachment_slot,
         relay_list_tx,
     )

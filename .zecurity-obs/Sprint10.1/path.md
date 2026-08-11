@@ -163,29 +163,29 @@ inner tunnel payload.
 - [x] **M3-D2** Client presents `leaf + Workspace CA` to Relay and verifies exact Relay SPIFFE.
 - [x] **M3-D3** Establish inner Client-to-Connector TLS 1.3 mTLS over bridged streams.
 - [x] **M3-D4** Send TunnelRequest and resource bytes only after inner mTLS succeeds.
-- [ ] **M3-D5** Add test proving Relay-observed bridged bytes do not contain plaintext payload.
+- [x] **M3-D5** Add test proving Relay-observed bridged bytes do not contain plaintext payload.
 
 ## Final Build Gates
 
-- [ ] `cd controller && go test ./internal/pki/... ./internal/connector/...`
+- [x] `cd controller && go test ./internal/pki/... ./internal/connector/...`
 - [x] `cd controller && go build ./...`
-- [ ] `cd relay && cargo test && cargo build`
-- [ ] `cd connector && cargo test && cargo build`
-- [ ] `cd client && cargo test && cargo build`
+- [x] `cd relay && cargo test && cargo build`
+- [x] `cd connector && cargo test && cargo build`
+- [x] `cd client && cargo test && cargo build`
 
 ## Acceptance Criteria
 
-- [ ] One Relay accepts valid Connector and Client chains from two different workspaces.
-- [ ] Unknown/self-signed Workspace CA is rejected.
-- [ ] Leaf-only Connector or Client chain is rejected by Relay.
-- [ ] Registration identity mismatch is rejected.
-- [ ] Cross-workspace Lookup is rejected.
-- [ ] Connector and Client reject a Relay certificate with the wrong SPIFFE ID.
-- [ ] Controller provisioning never receives, generates, stores, or returns the Relay private key.
-- [ ] Relay deployment contains no generated Platform Intermediate CA or CA private key.
-- [ ] Relay cannot observe TunnelRequest or resource payload plaintext.
-- [ ] Existing direct Client-to-Connector QUIC path still works.
-- [ ] Sprint 10 Connector registration and Client fallback can proceed using this trust contract.
+- [x] One Relay accepts valid Connector and Client chains from two different workspaces.
+- [x] Unknown/self-signed Workspace CA is rejected.
+- [x] Leaf-only Connector or Client chain is rejected by Relay.
+- [x] Registration identity mismatch is rejected.
+- [x] Cross-workspace Lookup is rejected.
+- [x] Connector and Client reject a Relay certificate with the wrong SPIFFE ID.
+- [x] Controller provisioning never receives, generates, stores, or returns the Relay private key.
+- [x] Relay deployment contains no generated Platform Intermediate CA or CA private key.
+- [x] Relay cannot observe TunnelRequest or resource payload plaintext.
+- [x] Existing direct Client-to-Connector QUIC path still works.
+- [x] Sprint 10 Connector registration and Client fallback can proceed using this trust contract.
 
 ## Deferred
 

@@ -19,8 +19,9 @@ type expiryStore interface {
 // interval     — how often to run the sweep (default: 60s)
 // expiry       — how long since last heartbeat before a relay is evicted (default: 90s = 3× heartbeat interval)
 // onPoolChange — optional ADR-016 callback fired once per sweep that evicted
-//                at least one relay, so connectors receive a fresh
-//                LabelledRelayList without the dead relay. Nil-safe.
+//
+//	at least one relay, so connectors receive a fresh
+//	LabelledRelayList without the dead relay. Nil-safe.
 func RunExpiryLoop(ctx context.Context, store expiryStore, notifier topologyChangeNotifier, interval, expiry time.Duration, onPoolChange func(ctx context.Context)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

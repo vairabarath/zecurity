@@ -19,8 +19,14 @@ mutation DeleteRemoteNetwork($id: ID!) {
   deleteRemoteNetwork(id: $id)
 }
 
-mutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) {
-  generateConnectorToken(remoteNetworkId: $remoteNetworkId, connectorName: $connectorName) {
+mutation GenerateConnectorToken(
+  $remoteNetworkId: ID!
+  $connectorName: String!
+) {
+  generateConnectorToken(
+    remoteNetworkId: $remoteNetworkId
+    connectorName: $connectorName
+  ) {
     connectorId
   }
 }
@@ -34,7 +40,10 @@ mutation DeleteConnector($id: ID!) {
 }
 
 mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
-  generateShieldToken(remoteNetworkId: $remoteNetworkId, shieldName: $shieldName) {
+  generateShieldToken(
+    remoteNetworkId: $remoteNetworkId
+    shieldName: $shieldName
+  ) {
     shieldId
   }
 }
@@ -98,8 +107,16 @@ mutation ForceDeleteResource($id: ID!) {
   forceDeleteResource(id: $id)
 }
 
-mutation PromoteDiscoveredService($shieldId: ID!, $protocol: String!, $port: Int!) {
-  promoteDiscoveredService(shieldId: $shieldId, protocol: $protocol, port: $port) {
+mutation PromoteDiscoveredService(
+  $shieldId: ID!
+  $protocol: String!
+  $port: Int!
+) {
+  promoteDiscoveredService(
+    shieldId: $shieldId
+    protocol: $protocol
+    port: $port
+  ) {
     id
     name
     status
@@ -187,4 +204,73 @@ mutation UnassignResourceFromGroup($resourceId: ID!, $groupId: ID!) {
 
 mutation RevokeDevice($deviceId: ID!) {
   revokeDevice(deviceId: $deviceId)
+}
+
+mutation CreateDeviceProfile($name: String!, $manualTrust: Boolean) {
+  createDeviceProfile(name: $name, manualTrust: $manualTrust) {
+    id
+    name
+    manualTrust
+  }
+}
+
+mutation UpdateDeviceProfileManualTrust($id: ID!, $enabled: Boolean!) {
+  updateDeviceProfileManualTrust(id: $id, enabled: $enabled) {
+    id
+    manualTrust
+  }
+}
+
+mutation AddProfileRequirement(
+  $profileId: ID!
+  $checkId: String!
+  $allowUnsupported: Boolean!
+) {
+  addProfileRequirement(
+    profileId: $profileId
+    checkId: $checkId
+    allowUnsupported: $allowUnsupported
+  ) {
+    id
+    requirements {
+      id
+      checkId
+      allowUnsupported
+    }
+  }
+}
+
+mutation RemoveProfileRequirement($profileId: ID!, $checkId: String!) {
+  removeProfileRequirement(profileId: $profileId, checkId: $checkId) {
+    id
+    requirements {
+      id
+      checkId
+      allowUnsupported
+    }
+  }
+}
+
+mutation BindResourceToProfile($profileId: ID!, $resourceId: ID!) {
+  bindResourceToProfile(profileId: $profileId, resourceId: $resourceId) {
+    id
+    boundResources {
+      id
+      name
+    }
+  }
+}
+
+mutation UnbindResourceFromProfile($profileId: ID!, $resourceId: ID!) {
+  unbindResourceFromProfile(profileId: $profileId, resourceId: $resourceId) {
+    id
+    boundResources {
+      id
+      name
+    }
+  }
+}
+
+mutation DeleteDeviceProfile($id: ID!) {
+  deleteDeviceProfile(id: $id)
 }

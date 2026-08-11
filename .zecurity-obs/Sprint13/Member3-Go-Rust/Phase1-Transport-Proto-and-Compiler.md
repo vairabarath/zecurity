@@ -4,7 +4,7 @@ member: M3
 sprint: 13
 phase: 1
 title: Transport Proto + Transport Compiler + GetTransportSnapshot RPC
-status: planned
+status: done
 depends_on: []
 tags: [go, proto, transport, compiler, acl-decoupling, pending-03]
 ---
@@ -115,14 +115,26 @@ cd controller && go test ./internal/transport/...
 
 ## Implementation checklist
 
-- [ ] **A1** proto: transport messages + field 16
-- [ ] **A2** proto: `GetTransportSnapshot` RPC
-- [ ] **A3** `buf generate` + Go build green
-- [ ] **A4** `internal/transport`: store + cache + compiler
-- [ ] **A5** `GetTransportSnapshot` handler (version-check)
-- [ ] **A6** push `TransportSnapshot` on connector stream open
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **A1 (architecture-corrected)** transport messages are owned by `client.proto`; connector control-message field 16 is retired and reserved because connectors do not consume client routing topology
+- [x] **A2** proto: `GetTransportSnapshot` RPC
+- [x] **A3** generated Go/Rust bindings are present and the Go build is green
+- [x] **A4** `internal/transport`: store + cache + compiler
+- [x] **A5** `GetTransportSnapshot` handler (`known_version` / `up_to_date` version check)
+- [x] **A6 (architecture-corrected)** snapshots are served to the sole consumer through the client polling RPC; connector stream-open push was intentionally removed
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: Transport delivery moved from connector push to client poll
+
+**Issue:** The original phase plan placed `TransportSnapshot` on connector control-message field 16
+and pushed it when a connector stream opened, although the client—not the connector—is the routing
+topology consumer.
+
+**Fix applied:** Commit `90803e4` removed the unused connector push path, reserved field 16, and
+made `client.v1.ClientService/GetTransportSnapshot` the delivery path. The compiler, cache, store,
+and version-aware handler remain implemented under `controller/internal/transport/`.
+
+**Verification:** `go build ./...` and the focused controller transport/policy/connector/relay tests
+pass. Cache and notifier unit coverage exists; the database compiler integration test still requires
+`TEST_DATABASE_URL`, and the cross-plane AT-CORE integration test remains outstanding.

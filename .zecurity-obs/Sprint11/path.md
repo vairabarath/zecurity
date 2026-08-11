@@ -120,29 +120,29 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 > Depends on Phase A + C. See [[Sprint11/Member3-Rust/Phase1-Probe-Ranking]], [[Sprint11/Member3-Rust/Phase2-Selector-Migration]].
 
-- [ ] **M3-D1** `connector/src/relay_probe.rs` (new) — parallel QUIC probe, RTT measurement, `request_id` generation and validation, QUIC peer SPIFFE validation against `LabelledRelayInfo.spiffe_id`, RTT-only score computation, concurrent probe cap. Connector must not consume relay `connection_count`.
-- [ ] **M3-D2** `connector/src/relay_ranking.rs` (new) — `RelayRanking` struct; atomic state file write/read (`list_version`, `probed_at`, top-5 entries); staleness check on startup; validation against current `LabelledRelayList`
-- [ ] **M3-D3** `connector/src/relay_selector.rs` (new) — three-phase state machine:
+- [x] **M3-D1** `connector/src/relay_probe.rs` (new) — parallel QUIC probe, RTT measurement, `request_id` generation and validation, QUIC peer SPIFFE validation against `LabelledRelayInfo.spiffe_id`, RTT-only score computation, concurrent probe cap. Connector must not consume relay `connection_count`.
+- [x] **M3-D2** `connector/src/relay_ranking.rs` (new) — `RelayRanking` struct; atomic state file write/read (`list_version`, `probed_at`, top-5 entries); staleness check on startup; validation against current `LabelledRelayList`
+- [x] **M3-D3** `connector/src/relay_selector.rs` (new) — three-phase state machine:
   - Startup: ranked[0] if valid → random Tier 1 → random Tier 2 → backoff
   - Background optimization: probe all Tier 1+2, exhausted-active forced migration, normal threshold migration
   - Make-before-break: register new → route new streams → drain old (`RELAY_DRAIN_TIMEOUT_SECS`) → report `ConnectorRelayState`
-- [ ] **M3-D4** `connector/src/relay_selector.rs` — failover: filter ranking to current list → try in order → full probe → exponential backoff
-- [ ] **M3-D5** `connector/src/control_stream.rs` — handle `LabelledRelayList` body variant (field 17) → send to relay selector via watch channel
-- [ ] **M3-D6** `connector/src/relay_client.rs` — dual-connection support during Phase 3 drain; route new streams to new relay while old drains
-- [ ] **M3-D7** `connector/src/config.rs` — remove static `RELAY_ADDR` / `RELAY_SPIFFE_ID`; add all `RELAY_*` config vars from ADR-016 config table
-- [ ] **Build gate:** `cd connector && cargo build`
+- [x] **M3-D4** `connector/src/relay_selector.rs` — failover: filter ranking to current list → try in order → full probe → exponential backoff
+- [x] **M3-D5** `connector/src/control_stream.rs` — handle `LabelledRelayList` body variant (field 17) → send to relay selector via watch channel
+- [x] **M3-D6** `connector/src/relay_client.rs` — dual-connection support during Phase 3 drain; route new streams to new relay while old drains
+- [x] **M3-D7** `connector/src/config.rs` — remove static `RELAY_ADDR` / `RELAY_SPIFFE_ID`; add all `RELAY_*` config vars from ADR-016 config table
+- [x] **Build gate:** `cd connector && cargo build`
 
 ### Phase E — M2 + M3: Integration & Validation
 
 > Depends on Phases B–D. See [[Sprint11/Member2-Go/Phase3-Integration]], [[Sprint11/Member3-Rust/Phase3-Integration]].
 
-- [ ] **TEAM-E1** Two connectors on different relays → each reports `ConnectorRelayState` → controller records distinct placements → ACL snapshot shows each `ACLConnector` with correct `relay_addr`
-- [ ] **TEAM-E2** Relay crosses 80% capacity → label promoted to exhausted after hold-down → dropped from `LabelledRelayList` → connectors migrate to next best relay → new placement recorded
-- [ ] **TEAM-E3** Connector process restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; clients continue routing through the 15s ACL sync window
-- [ ] **TEAM-E4** All Tier 1 relays full → connector falls back to Tier 2 for startup → controller alert fires
-- [ ] **TEAM-E5** Probe with mismatched `request_id` → discarded; probe from wrong SPIFFE peer → treated as failure
-- [ ] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no Tier 1 relay receives > 2× average connections
-- [ ] **TEAM-E7** Background optimization finds relay with > 15% + 10ms improvement → make-before-break migration → no active mock traffic dropped
+- [x] **TEAM-E1** Two connectors on different relays → each reports `ConnectorRelayState` → controller records distinct placements → ACL snapshot shows each `ACLConnector` with correct `relay_addr`
+- [x] **TEAM-E2** Relay crosses 80% capacity → label promoted to exhausted after hold-down → dropped from `LabelledRelayList` → connectors migrate to next best relay → new placement recorded
+- [x] **TEAM-E3** Connector process restart → reads persisted ranking → connects to `ranked[0]` immediately → background re-probe fires; clients continue routing through the 15s ACL sync window
+- [x] **TEAM-E4** All Tier 1 relays full → connector falls back to Tier 2 for startup → controller alert fires
+- [x] **TEAM-E5** Probe with mismatched `request_id` → discarded; probe from wrong SPIFFE peer → treated as failure
+- [x] **TEAM-E6** 1,000 simulated connectors boot simultaneously → no Tier 1 relay receives > 2× average connections
+- [x] **TEAM-E7** Background optimization finds relay with > 15% + 10ms improvement → make-before-break migration → no active mock traffic dropped
 
 ---
 
@@ -150,24 +150,24 @@ Phase E — Integration & end-to-end validation (M2 + M3)
 
 - [x] `buf generate`
 - [x] `cd controller && go build ./...`
-- [ ] `cd controller && go test ./internal/relay/... ./internal/connector/...`
+- [x] `cd controller && go test ./internal/relay/... ./internal/connector/...`
 - [x] `cd relay && cargo build`
 - [x] `cd relay && cargo test`
-- [ ] `cd connector && cargo build`
-- [ ] `cd connector && cargo test`
+- [x] `cd connector && cargo build`
+- [x] `cd connector && cargo test`
 
 ---
 
 ## Acceptance Criteria
 
-- [ ] Connector starts without `RELAY_ADDR` env var and selects relay dynamically from controller push.
-- [ ] Relay capacity label changes trigger `LabelledRelayList` push after hold-down; connectors re-probe immediately on version increment.
-- [ ] Make-before-break migration: new streams route to new relay before old relay is torn down.
-- [ ] Exhausted relay triggers immediate migration regardless of score threshold.
-- [ ] Persisted ranking survives process restart; connector online before re-probe completes.
-- [ ] Probe `request_id` mismatch and SPIFFE mismatch both treated as probe failure.
-- [ ] Exponential backoff on disconnected retry; caps at `RELAY_RECONNECT_MAX_SECS`.
-- [ ] Controller `connector_relay_placement` always reflects current live placement.
+- [x] Connector starts without `RELAY_ADDR` env var and selects relay dynamically from controller push.
+- [x] Relay capacity label changes trigger `LabelledRelayList` push after hold-down; connectors re-probe immediately on version increment.
+- [x] Make-before-break migration: new streams route to new relay before old relay is torn down.
+- [x] Exhausted relay triggers immediate migration regardless of score threshold.
+- [x] Persisted ranking survives process restart; connector online before re-probe completes.
+- [x] Probe `request_id` mismatch and SPIFFE mismatch both treated as probe failure.
+- [x] Exponential backoff on disconnected retry; caps at `RELAY_RECONNECT_MAX_SECS`.
+- [x] Controller `connector_relay_placement` always reflects current live placement.
 
 ---
 

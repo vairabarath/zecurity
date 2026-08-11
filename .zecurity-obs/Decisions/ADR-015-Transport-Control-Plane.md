@@ -1,6 +1,6 @@
 # ADR-015: Transport Control Plane
 
-**Status:** Proposed
+**Status:** Accepted — implemented by Sprint 13 (transitional ACL fallback retained)
 **Track:** B — Architecture
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-25

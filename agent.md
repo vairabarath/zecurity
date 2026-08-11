@@ -11,16 +11,21 @@ A team member will tell you their member number. When they do, execute this sequ
 
 ```
 1. Read this file (agent.md) fully
-2. Read .zecurity-obs/Sprint8/path.md
+2. Read .zecurity-obs/Sprint15/path.md
 3. Find the first unchecked phase for your member where all depends_on are checked
 4. Read that phase file
 5. Tell the member: what they're building, which files to touch, the build check command
 ```
 
-If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), M3 (Go+Rust), or M4 (Rust)?"*
+If no member number is given, ask which Sprint 15 member role the human is working as.
 
-**Active sprint plan:** `.zecurity-obs/Sprint8/path.md`
-**Follow-on sprint plans:** `.zecurity-obs/Sprint8.5/path.md`, `.zecurity-obs/Sprint9/path.md`
+**Active sprint plan:** `.zecurity-obs/Sprint15/path.md`
+
+**Sprint 15 member roles:**
+- M1: Go Controller — posture persistence, evaluation, GraphQL, ACL integration, retention
+- M2: Rust Client — posture collectors and reporting scheduler
+- M3: Rust Connector — active-session teardown and posture-aware enforcement
+- M4: React Admin UI — Device Profile administration and posture visibility
 
 ---
 
@@ -50,9 +55,26 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - Sprint 5: Resource protection — Shield applies nftables rules per resource, lifecycle `pending → managing → protecting → protected` via heartbeat piggyback
 
 **What's active:**
-- Sprint 8: Policy Engine — groups, access rules, ACL snapshot compilation, Connector ACL push, Client `GetACLSnapshot` support. See `.zecurity-obs/Sprint8/path.md`
-- Sprint 8.5: M4 client daemon foundation — planned bridge before Sprint 9. See `.zecurity-obs/Sprint8.5/path.md`
-- Sprint 9: RDE dataplane — planned after Sprint 8 + 8.5. See `.zecurity-obs/Sprint9/path.md`
+- Sprint 15: Device Posture + Continuous Authorization. See `.zecurity-obs/Sprint15/path.md`.
+- M1 GraphQL administration and workspace-scoped posture visibility are complete, so M4 is unblocked.
+- M1's next task is M1-E3: posture-aware ACL compilation. M1-E3b cache-expiry handling follows it.
+
+### Current M1 Task — M1-E3
+
+Wire enforced device posture into ACL compilation:
+
+- Preserve existing group authorization; posture is an additional filter and must never grant access by itself.
+- Ignore audit-mode profiles for authorization.
+- When a resource has enforced profiles, authorize a device only if at least one enforced profile has a satisfied, fresh evaluation at the current profile revision.
+- Fail closed for missing evaluations, revision mismatches, missing report timestamps, and reports older than `posture.MaxReportAge`.
+- Batch-load evaluations with `posture.Store.EvaluationsForDevices`; do not add per-device or per-resource queries.
+- Return internal `CompiledACL{Snapshot, ValidUntil}` metadata while keeping cache consumers on `*clientv1.ACLSnapshot`.
+- Calculate each posture-gated device/resource pair's expiry as the maximum expiry among its satisfying enforced profiles (OR semantics), then calculate snapshot `ValidUntil` as the minimum across those gated pairs. Identity-only pairs do not contribute.
+- Add compiler tests for identity-only, audit-only, satisfied/failed OR cases, missing/stale/revision-mismatched evaluations, and OR-aware expiry.
+
+Primary files: `controller/internal/policy/compiler.go`, compiler/cache tests, and the compile closures in `controller/internal/client/service.go`, `controller/internal/connector/control_stream.go`, and `controller/internal/connector/acl_push.go`.
+
+Do not fold the full M1-E3b expiry notifier/version-bump/singleflight implementation into M1-E3 unless required by the phase contract. Verify with `go test ./internal/policy ./internal/client ./internal/connector`, `go build ./...`, and `git diff --check` from `controller/`.
 
 ---
 
@@ -110,9 +132,7 @@ The shared brain. All agents should read relevant notes before working on a subs
   Sprint1/ (complete) - Sprint5/ (complete)
   Sprint6/ (complete) - Discovery
   Sprint7/ (complete) - Client Application
-  Sprint8/ (ACTIVE)  - Policy Engine: Groups, Resources, ACL Push
-  Sprint8.5/ (planned) - Client Daemon Foundation
-  Sprint9/ (planned) - RDE Dataplane
+  Sprint15/ (ACTIVE) - Device Posture + Continuous Authorization
   Decisions/
   Research/
 ```
@@ -134,7 +154,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 1. Read `agent.md` (this file)
 2. Read `.zecurity-obs/Planning/Session Log.md` for recent context
 3. Read `.zecurity-obs/Planning/Roadmap.md` for current priorities
-4. **If Sprint 8:** Read `.zecurity-obs/Sprint8/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
+4. **For Sprint 15:** Read `.zecurity-obs/Sprint15/path.md` — check which phases are unchecked and confirm all dependencies for your phase are met
 5. Read relevant service note(s) if touching a specific subsystem
 
 ### During Work
@@ -144,7 +164,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 - Connector: `cargo build` must pass (warnings OK, errors not)
 - Shield: `cargo build --manifest-path shield/Cargo.toml` must pass
 - Client: `cargo build --manifest-path client/Cargo.toml` must pass
-- **Sprint 8:** After completing a phase, check its box in `Sprint8/path.md` and update the phase file `status:` frontmatter to `done`
+- **Sprint 15:** After completing a phase, check its box in `Sprint15/path.md` and update the phase file `status:` frontmatter to `done`
 - If making an architecture decision, document it or flag it for Claude Code
 - Do not touch files owned by other members — see conflict zone table in `Sprint6/path.md`
 
@@ -236,7 +256,7 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 | Release connector binary | `git tag connector-vX.Y.Z && git push origin connector-vX.Y.Z` |
 | Release shield binary | `git tag shield-vX.Y.Z && git push origin shield-vX.Y.Z` |
 | Open vault | Open `.zecurity-obs/` in Obsidian |
-| Sprint 8 dependency map | Read `.zecurity-obs/Sprint8/path.md` |
+| Active sprint dependency map | Read `.zecurity-obs/Sprint15/path.md` |
 
 ---
 

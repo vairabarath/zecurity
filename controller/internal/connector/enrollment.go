@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -27,7 +28,7 @@ type EnrollmentHandler struct {
 	PKIService pki.Service
 	ShieldSvc  shield.Service
 	Registry   *ConnectorRegistry // tracks active Control streams
-
+	PostureStore *posture.Store
 	PolicyStore       *policy.Store
 	PolicyCache       *policy.SnapshotCache
 	PolicyNotifier    PolicyChangeNotifier

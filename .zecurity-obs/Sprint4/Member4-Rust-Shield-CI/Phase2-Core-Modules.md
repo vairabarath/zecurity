@@ -46,8 +46,8 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
 
 ### appmeta.rs
 
-- [ ] Mirror `connector/src/appmeta.rs` exactly for shared constants
-- [ ] Add Shield-specific constants:
+- [x] Mirror `connector/src/appmeta.rs` exactly for shared constants
+- [x] Add Shield-specific constants:
   ```rust
   pub const SPIFFE_ROLE_SHIELD: &str     = "shield";
   pub const SPIFFE_ROLE_CONNECTOR: &str  = "connector";
@@ -58,47 +58,48 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
   pub const SPIFFE_GLOBAL_TRUST_DOMAIN: &str = "zecurity.in";
   pub const SPIFFE_CONTROLLER_ID: &str   = "spiffe://zecurity.in/controller/global";
   ```
-- [ ] Verify constants match Go `appmeta/identity.go` exactly (same strings)
+- [x] Verify constants match Go `appmeta/identity.go` exactly (same strings)
 
 ### config.rs
 
-- [ ] `ShieldConfig` struct with `#[derive(Deserialize)]`
-- [ ] Required fields: `controller_addr: String`, `controller_http_addr: String`, `enrollment_token: Option<String>`
-- [ ] Optional with defaults: `auto_update_enabled: bool` (false), `log_level: String` ("info"), `shield_heartbeat_interval_secs: u64` (30)
-- [ ] State dir: `state_dir: String` (default: `/var/lib/zecurity-shield`)
-- [ ] `pub fn load() -> anyhow::Result<ShieldConfig>` using figment env + TOML
-- [ ] Config file: `/etc/zecurity/shield.conf` (TOML format)
+- [x] `ShieldConfig` struct with `#[derive(Deserialize)]`
+- [x] Required fields: `controller_addr: String`, `controller_http_addr: String`, `enrollment_token: Option<String>`
+- [x] Optional with defaults: `auto_update_enabled: bool` (false), `log_level: String` ("info")
+- [ ] `shield_heartbeat_interval_secs: u64` (30) — NOT FOUND: uses hardcoded `HEALTH_INTERVAL_SECS = 15` instead
+- [x] State dir: `state_dir: String` (default: `/var/lib/zecurity-shield`)
+- [x] `pub fn load() -> anyhow::Result<ShieldConfig>` using figment env + TOML
+- [x] Config file: `/etc/zecurity/shield.conf` (TOML format)
 
 ### main.rs (full startup)
 
-- [ ] Init tracing (from `LOG_LEVEL`)
-- [ ] Load config via `config::load()`
-- [ ] Check if `state.json` exists in state_dir:
+- [x] Init tracing (from `LOG_LEVEL`)
+- [x] Load config via `config::load()`
+- [x] Check if `state.json` exists in state_dir:
   - Not exists → run `enrollment::enroll(&cfg).await`
   - Exists → load `ShieldState` from `state.json`
-- [ ] `tokio::spawn(heartbeat::run(state.clone(), cfg.clone()))` 
-- [ ] If `auto_update_enabled`: `tokio::spawn(updater::run(cfg.clone()))`
-- [ ] Wait for SIGTERM signal
-- [ ] On SIGTERM: call `heartbeat::goodbye(&state, &cfg).await` (best-effort)
-- [ ] Graceful shutdown
+- [x] `tokio::spawn(heartbeat::run(state.clone(), cfg.clone()))` 
+- [x] If `auto_update_enabled`: `tokio::spawn(updater::run(cfg.clone()))`
+- [x] Wait for SIGTERM signal
+- [x] On SIGTERM: call `heartbeat::goodbye(&state, &cfg).await` (best-effort)
+- [x] Graceful shutdown
 
 ### crypto.rs
 
-- [ ] Mirror `connector/src/crypto.rs` with same functions:
+- [x] Mirror `connector/src/crypto.rs` with same functions:
   - `generate_keypair() -> anyhow::Result<rcgen::Certificate>`
   - `save_private_key(key: &str, path: &Path) -> anyhow::Result<()>` (mode 0600)
   - `build_csr(key, cn, spiffe_uri) -> anyhow::Result<Vec<u8>>` (DER-encoded PKCS#10)
   - `parse_cert_not_after(pem: &[u8]) -> anyhow::Result<DateTime<Utc>>`
-  - `pem_to_der(pem: &[u8]) -> anyhow::Result<Vec<u8>>`
+  - ~~`pem_to_der(pem: &[u8]) -> anyhow::Result<Vec<u8>>`~~ — NOT FOUND: replaced by `load_private_key` + `extract_public_key_der`
 
 ### tls.rs
 
-- [ ] `verify_connector_spiffe(cert_der: &[u8], expected_spiffe_id: &str) -> anyhow::Result<()>`
+- [x] `verify_connector_spiffe(cert_der: &[u8], expected_spiffe_id: &str) -> anyhow::Result<()>`
   - Parse cert with `x509-parser`
   - Extract URI SAN
   - Compare against `expected_spiffe_id`
   - Return error if mismatch
-- [ ] The expected ID is built in `heartbeat.rs` (now `control_stream.rs`):
+- [x] The expected ID is built in `heartbeat.rs` (now `control_stream.rs`):
   ```rust
   let expected = format!("spiffe://{}/{}/{}",
       state.trust_domain,
@@ -108,16 +109,16 @@ Implement the core infrastructure modules: appmeta constants, config loading, ma
 
 ### util.rs
 
-- [ ] `read_hostname() -> String` — reads `/etc/hostname` or `hostname()` syscall
-- [ ] `get_public_ip() -> Option<String>` — HTTP GET to IP echo service (use `reqwest`)
-- [ ] `sha256_hex(data: &[u8]) -> String` — for CA fingerprint verification
+- [x] `read_hostname() -> String` — reads `/etc/hostname` or `hostname()` syscall
+- [x] `get_public_ip() -> Option<String>` — HTTP GET to IP echo service (use `reqwest`)
+- [ ] `sha256_hex(data: &[u8]) -> String` — NOT FOUND in util.rs (implemented in crypto.rs instead)
 
 ### ShieldState struct (in main.rs or a types.rs)
 
-- [ ] `#[derive(Serialize, Deserialize, Clone)]`
-- [ ] Fields: `shield_id`, `trust_domain`, `connector_id`, `connector_addr`, `interface_addr`, `enrolled_at`, `cert_not_after`
-- [ ] `fn load(state_dir: &str) -> anyhow::Result<ShieldState>`
-- [ ] `fn save(&self, state_dir: &str) -> anyhow::Result<()>`
+- [x] `#[derive(Serialize, Clone)]` + custom Deserialize
+- [ ] Fields: `shield_id`, `trust_domain`, `connector_id`, `connector_addr`, `interface_addr`, `enrolled_at`, `cert_not_after` — PARTIAL: `connector_id`/`connector_addr` stored as `connectors: Vec<ConnectorRef>`, not direct fields
+- [x] `fn load(state_dir: &str) -> anyhow::Result<ShieldState>`
+- [x] `fn save(&self, state_dir: &str) -> anyhow::Result<()>`
 
 ---
 

@@ -8,8 +8,9 @@ This is the manual end-to-end verification procedure for the Client direct-first
 
 ## Pre-conditions
 
-- Controller built and running with `RELAY_ADDR` + `RELAY_SPIFFE_ID` set.
-- Relay binary built; provisioning token issued via `POST /api/relays`.
+- Controller built and running with Postgres + Valkey and its RelayService enabled.
+- A valid **provider** bearer token is available (`aud=provider`); a tenant/admin JWT is rejected.
+- Relay binary built; provisioning token issued via `POST /provider/relays`.
 - Connector built and registered against the same workspace.
 - Client built and configured (`zecurity-client setup`) against the same Controller.
 - `journalctl -u zecurity-client` follow window open in a second terminal.
@@ -41,22 +42,40 @@ material. The Controller burns it on the first accepted provisioning request;
 reprovisioning requires a newly issued token.
 
 ```bash
-# Issue provisioning token (admin auth required)
-curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" \
-     -X POST https://controller.local/api/relays \
+# Issue provisioning token (provider auth required — not a tenant/admin JWT)
+relay_json=$(curl -fsS -H "Authorization: Bearer $PROVIDER_TOKEN" \
+     -H "Content-Type: application/json" \
+     -X POST https://controller.local/provider/relays \
      -d '{"name":"relay-1","dns_allowlist":["relay.local"],"ip_allowlist":[]}' \
-  | jq -r .provisioning_token > /tmp/relay.token
+)
+relay_id=$(printf '%s' "$relay_json" | jq -r .relay_id)
+printf '%s' "$relay_json" | jq -r .provisioning_token > /tmp/relay.token
 
-# Start relay; it consumes the token and provisions
-RELAY_ID=<from-response> RELAY_PROVISIONING_TOKEN=$(cat /tmp/relay.token) ./relay
+# Pin the Intermediate CA fetched from the Controller HTTP endpoint.
+relay_ca_fingerprint=$(curl -fsS http://controller.local:8080/ca.crt \
+  | openssl x509 -outform DER | sha256sum | awk '{print $1}')
+
+# Use a fresh state directory so this run exercises Provision rather than loading an old cert.
+relay_state_dir=$(mktemp -d /tmp/zecurity-relay-e2e.XXXXXX)
+RELAY_ID="$relay_id" \
+RELAY_PROVISIONING_TOKEN=$(cat /tmp/relay.token) \
+RELAY_CA_FINGERPRINT="$relay_ca_fingerprint" \
+RELAY_STATE_DIR="$relay_state_dir" \
+CONTROLLER_ADDR=controller.local:9090 \
+CONTROLLER_HTTP_ADDR=controller.local:8080 \
+RELAY_DNS_SANS=relay.local \
+./relay
 ```
 
 Alternatively, supply a protected token file:
 
 ```bash
 install -m 0640 -o root -g zecurity /tmp/relay.token /etc/zecurity/relay-provisioning.token
-RELAY_ID=<from-response> \
+RELAY_ID="$relay_id" \
 RELAY_PROVISIONING_TOKEN_FILE=/etc/zecurity/relay-provisioning.token \
+RELAY_CA_FINGERPRINT="$relay_ca_fingerprint" \
+CONTROLLER_ADDR=controller.local:9090 \
+CONTROLLER_HTTP_ADDR=controller.local:8080 \
 ./relay
 ```
 
@@ -69,6 +88,35 @@ require the consumed token.
 relay provisioning successful cert_serial=... cert_not_after=...
 relay heartbeat ok
 ```
+
+Verify the real relay persisted all three bootstrap artifacts:
+
+```bash
+test -s "$relay_state_dir/relay.key"
+test -s "$relay_state_dir/relay.crt"
+test -s "$relay_state_dir/intermediate-ca.crt"
+```
+
+Finally, prove the token is single-use. Stop the first relay, use a second empty state directory,
+and start it with the same relay ID and consumed token. The Provision RPC must fail with
+`PermissionDenied`; it must not create certificate files:
+
+```bash
+replay_state_dir=$(mktemp -d /tmp/zecurity-relay-replay.XXXXXX)
+RELAY_ID="$relay_id" \
+RELAY_PROVISIONING_TOKEN=$(cat /tmp/relay.token) \
+RELAY_CA_FINGERPRINT="$relay_ca_fingerprint" \
+RELAY_STATE_DIR="$replay_state_dir" \
+CONTROLLER_ADDR=controller.local:9090 \
+CONTROLLER_HTTP_ADDR=controller.local:8080 \
+RELAY_DNS_SANS=relay.local \
+./relay
+
+test ! -e "$replay_state_dir/relay.crt"
+```
+
+Only after both the successful first provisioning and rejected replay are recorded should the
+Sprint 12 live E2E acceptance box be checked.
 
 ### Step 3 — Connector registers
 

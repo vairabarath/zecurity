@@ -16,11 +16,10 @@
 #   CONTROLLER_HTTP_ADDR   — controller HTTP address, e.g. "localhost:8080"
 #
 # Optional environment variables (auto-derived when omitted):
-#   RELAY_ID               — canonical lowercase UUID; must match the row
-#                            created by POST /api/relays on the controller.
-#                            If unset: generated once, persisted under the
-#                            state dir at ${STATE_DIR}/relay_id, and reused
-#                            on subsequent installs.
+#   RELAY_ID               — legacy local-test behavior only. Production
+#                            provisioning requires the canonical UUID returned by
+#                            POST /provider/relays; a locally generated UUID will
+#                            be rejected as an unregistered relay.
 #   RELAY_CA_FINGERPRINT   — 64-char SHA-256 hex of the controller
 #                            intermediate CA (operator pre-pins; relay
 #                            verifies after fetching /ca.crt). If unset:
@@ -32,8 +31,8 @@
 #   RELAY_DNS_SANS                   (comma-separated, e.g. relay.example.com)
 #   RELAY_IP_SANS                    (comma-separated, e.g. 10.0.0.50)
 #   RELAY_STATE_DIR                  (default /var/lib/zecurity-relay/pki)
-#   RELAY_PROVISIONING_TOKEN         (forward-compat; ignored until controller
-#                                     enforces token auth on Provision)
+#   RELAY_PROVISIONING_TOKEN         single-use token returned by
+#                                     POST /provider/relays; required on first boot
 #   LOG_LEVEL                        (default info)
 #   RELAY_MAX_CONNECTIONS
 #   RELAY_MAX_LOOKUP_BRIDGES
@@ -69,9 +68,10 @@ Required env vars:
   CONTROLLER_ADDR        gRPC host:port for provisioning + heartbeat (e.g. localhost:9090)
   CONTROLLER_HTTP_ADDR   HTTP host:port for /ca.crt fetch              (e.g. localhost:8080)
 
-Auto-derived if not set (override only when the controller enforces them):
-  RELAY_ID               Canonical lowercase UUID. Generated + persisted at
-                         \${STATE_DIR}/relay_id on first run; reused after.
+Auto-derived if not set (legacy local testing only):
+  RELAY_ID               Production requires the UUID returned by
+                         POST /provider/relays. A generated UUID is rejected by
+                         current authenticated provisioning.
   RELAY_CA_FINGERPRINT   64-char SHA-256 hex of the controller intermediate CA.
                          Computed from http://\${CONTROLLER_HTTP_ADDR}/ca.crt.
 

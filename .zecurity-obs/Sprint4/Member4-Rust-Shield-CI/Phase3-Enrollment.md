@@ -39,50 +39,51 @@ Implement the Shield enrollment flow: parse JWT → fetch + verify CA fingerprin
 
 ### enroll() function
 
-- [ ] `pub async fn enroll(cfg: &ShieldConfig) -> anyhow::Result<ShieldState>`
+- [x] `pub async fn enroll(cfg: &ShieldConfig) -> anyhow::Result<ShieldState>`
 
 ### Step-by-step flow
 
-- [ ] **Step 1**: Parse JWT payload (base64url decode middle segment, parse JSON — no signature verification in Rust)
+- [x] **Step 1**: Parse JWT payload (base64url decode middle segment, parse JSON — no signature verification in Rust)
   - Extract: `shield_id`, `workspace_id`, `trust_domain`, `ca_fingerprint`, `connector_id`, `connector_addr`, `interface_addr`
   
-- [ ] **Step 2**: Bootstrap CA verification
+- [x] **Step 2**: Bootstrap CA verification
   - `GET http://<CONTROLLER_HTTP_ADDR>/ca.crt` (plain HTTP, not HTTPS)
   - Compute SHA-256 of downloaded CA cert DER bytes
   - Compare hex against `ca_fingerprint` from JWT
   - On mismatch: `error!("CA fingerprint mismatch"); std::process::exit(1)` (do not proceed)
 
-- [ ] **Step 3**: Generate EC P-384 keypair
+- [x] **Step 3**: Generate EC P-384 keypair
   - Call `crypto::generate_keypair()`
   - Save `shield.key` to `{state_dir}/shield.key` with mode 0600
 
-- [ ] **Step 4**: Build PKCS#10 CSR
+- [x] **Step 4**: Build PKCS#10 CSR
   - CN: `format!("{}{}", appmeta::PKI_SHIELD_CN_PREFIX, shield_id)`
   - SPIFFE URI SAN: `format!("spiffe://{}/{}/{}", trust_domain, appmeta::SPIFFE_ROLE_SHIELD, shield_id)`
   - Call `crypto::build_csr(key, cn, spiffe_uri)`
 
-- [ ] **Step 5**: Connect to Controller via plain TLS (no client cert yet)
+- [x] **Step 5**: Connect to Controller via plain TLS (no client cert yet)
   - Use `CONTROLLER_ADDR` from config
   - Trust root: the downloaded CA cert
 
-- [ ] **Step 6**: Call `ShieldService.Enroll` RPC
+- [x] **Step 6**: Call `ShieldService.Enroll` RPC
   - `EnrollRequest { enrollment_token: cfg.enrollment_token, csr_der: csr, version: env!("CARGO_PKG_VERSION"), hostname: util::read_hostname() }`
 
-- [ ] **Step 7**: Process `EnrollResponse`
+- [x] **Step 7**: Process `EnrollResponse`
   - Save `shield.crt` to `{state_dir}/shield.crt`
   - Save `workspace_ca.crt` to `{state_dir}/workspace_ca.crt` (workspace_ca_pem + intermediate_ca_pem concatenated)
   - Parse `cert_not_after` from `certificate_pem`
 
-- [ ] **Step 8**: Write `state.json`
+- [x] **Step 8**: Write `state.json`
   - `ShieldState { shield_id, trust_domain, connector_id, connector_addr, interface_addr, enrolled_at: now(), cert_not_after }`
 
-- [ ] **Step 9**: Update config file — remove `ENROLLMENT_TOKEN`, write `SHIELD_ID=<id>` to `/etc/zecurity/shield.conf`
+- [x] **Step 9**: Update config file — remove `ENROLLMENT_TOKEN`, write `SHIELD_ID=<id>` to `/etc/zecurity/shield.conf`
 
 - [ ] **Step 10**: Call `network::setup(interface_addr, connector_addr).await`
+  <!-- NOT IMPLEMENTED: shield/src/network.rs does not exist; enrollment skips this step entirely -->
 
-- [ ] **Step 11**: Log `info!("enrollment complete shield_id={}", shield_id)`
+- [x] **Step 11**: Log `info!("enrollment complete shield_id={}", shield_id)`
 
-- [ ] **Step 12**: Return `ShieldState`
+- [x] **Step 12**: Return `ShieldState`
 
 ---
 
