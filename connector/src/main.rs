@@ -157,9 +157,10 @@ async fn main() -> anyhow::Result<()> {
             .to_string();
         format!("http://{}:8080", host)
     });
+    let http_base = enrollment::http_base_url(&http_base);
     let crl_url = format!(
         "{}/ca.crl?workspace_id={}",
-        http_base.trim_end_matches('/'),
+        http_base,
         enrollment_state.workspace_id
     );
 
