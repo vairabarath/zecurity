@@ -27,7 +27,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | # | Title | Domain | Priority | Related |
 |---|-------|--------|----------|---------|
 | PENDING-01 ✅ → [ADR-020](../Decisions/ADR-020-Authenticated-Relay-Provisioning.md) | Authenticated Relay Provisioning *(accepted, Sprint 12)* | security/relay | **P0** | ADR-014, Sprint 10.3 |
-| [PENDING-02](PENDING-02-Certificate-Revocation-Enforcement.md) | Certificate Revocation (CRL/OCSP) Enforcement | security | **P0** | ADR-014 |
+| PENDING-02 ✅ → [ADR-027](../Decisions/ADR-027-Certificate-Revocation-Enforcement.md) | Certificate Revocation (CRL/OCSP) Enforcement *(accepted 2026-08-10)* | security | **P0** | ADR-014 |
 | ✅ [PENDING-03](PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) — implemented in Sprint 13 | relay | P1 | ADR-015/016/017/018 |
 | [PENDING-04](PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO | identity | P1 | ADR-005/006 |
 | [PENDING-05](PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) | identity | P2 | — |
@@ -42,6 +42,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region | operations | P2 | ADR-013 |
 | [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) | Client Device Lifecycle & Cert Renewal | identity/ops | P2 | ADR-002 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
+| [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.
