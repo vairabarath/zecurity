@@ -1,10 +1,11 @@
 ---
 type: adr
-status: proposed
+status: accepted
 id: ADR-025
 domain: identity
 priority: P2
 created: 2026-08-06
+decided: 2026-08-10
 related:
   - PENDING-05-Directory-Sync-SCIM
   - PENDING-04-Multiple-IdPs-Enterprise-SSO
@@ -17,8 +18,8 @@ tags: [adr, identity, scim, provisioning, directory, security]
 
 # ADR-025 — SCIM Directory Synchronization
 
-> **Status: PROPOSED (2026-08-06).** The product-behavior decisions behind PENDING-05. On team
-> ratification, flip to ACCEPTED and it governs the implementation. Governed by
+> **Status: ACCEPTED (2026-08-10).** Ratified by the team; **authoritative** for PENDING-05
+> implementation. Governed by
 > [[ADR-023-Identity-Philosophy]]; builds directly on the identity model of
 > [[ADR-024-Identity-Linking-and-Provider-Migration]] and the frozen
 > [[Identity-Architecture-v1.0]]. Wrong provisioning behavior — especially failed deprovisioning — is
