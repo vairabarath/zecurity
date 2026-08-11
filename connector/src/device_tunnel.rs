@@ -130,6 +130,18 @@ pub async fn listen(
     }
 }
 
+/// Pure fail-closed revocation decision for the inner client mTLS stream: only
+/// `NotRevoked` may proceed. `Revoked` and `Unavailable` are both rejected — an
+/// unknown revocation state is never treated as "allow by default".
+/// Ok(()) = allow; Err(message) = reject with this error message.
+fn revocation_action(status: RevocationStatus) -> Result<(), &'static str> {
+    match status {
+        RevocationStatus::NotRevoked => Ok(()),
+        RevocationStatus::Unavailable => Err("certificate revocation state unavailable"),
+        RevocationStatus::Revoked => Err("certificate revoked"),
+    }
+}
+
 pub async fn handle_stream<S>(
     mut stream: S,
     client_spiffe_id: String,
@@ -143,32 +155,14 @@ pub async fn handle_stream<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    match crl_manager.check(&cert_serial) {
-        RevocationStatus::NotRevoked => {}
-        RevocationStatus::Unavailable => {
-            let response = TunnelResponse {
-                ok: false,
-                error: Some("certificate revocation state unavailable".to_string()),
-                quic_addr: quic_advertise_addr().map(String::from),
-            };
-            send_response(&mut stream, &response).await?;
-            return Err(anyhow!(
-                "certificate revocation state unavailable for spiffe_id={}",
-                client_spiffe_id
-            ));
-        }
-        RevocationStatus::Revoked => {
-            let response = TunnelResponse {
-                ok: false,
-                error: Some("certificate revoked".to_string()),
-                quic_addr: quic_advertise_addr().map(String::from),
-            };
-            send_response(&mut stream, &response).await?;
-            return Err(anyhow!(
-                "certificate revoked for spiffe_id={}",
-                client_spiffe_id
-            ));
-        }
+    if let Err(message) = revocation_action(crl_manager.check(&cert_serial)) {
+        let response = TunnelResponse {
+            ok: false,
+            error: Some(message.to_string()),
+            quic_addr: quic_advertise_addr().map(String::from),
+        };
+        send_response(&mut stream, &response).await?;
+        return Err(anyhow!("{} for spiffe_id={}", message, client_spiffe_id));
     }
     let req: TunnelRequest = read_framed_json(&mut stream)
         .await
@@ -658,4 +652,30 @@ fn extract_peer_info(cert_der: &[u8]) -> Result<(String, Vec<u8>)> {
     }
 
     Err(anyhow!("peer certificate has no SPIFFE URI in SAN"))
+}
+
+#[cfg(test)]
+mod revocation_action_tests {
+    use super::*;
+
+    #[test]
+    fn allows_not_revoked() {
+        assert!(revocation_action(RevocationStatus::NotRevoked).is_ok());
+    }
+
+    #[test]
+    fn rejects_revoked() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Revoked),
+            Err("certificate revoked"),
+        );
+    }
+
+    #[test]
+    fn fails_closed_on_unavailable() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Unavailable),
+            Err("certificate revocation state unavailable"),
+        );
+    }
 }
