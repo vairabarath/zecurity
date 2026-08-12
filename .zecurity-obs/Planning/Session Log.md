@@ -10,6 +10,29 @@ tags:
 
 ---
 
+## 2026-08-11 — Kilo — Sprint 18 Phase 2 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 2 (Transactional Enqueue) is implemented.
+- `controller/internal/outbox/event.go` defines the provider-independent `Event` struct with caller-supplied `CorrelationID` and opaque `Payload` (`json.RawMessage`).
+- `controller/internal/outbox/store.go` implements `Enqueue(ctx, tx, evt)` using the caller's `pgx.Tx`, never falling back to the pool; it inserts `status='pending'`, `retry_count=0`, `next_attempt_at=NOW()`, and rejects `nil` transactions with `ErrNilTx`.
+- `controller/internal/outbox/store_integration_test.go` covers COMMIT persistence, ROLLBACK removal, and nil-transaction rejection.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 2 complete in `.zecurity-obs/Sprint18/path.md` and `Phase2-Transactional-Enqueue.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 1 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 1 (Database / Migration) is implemented.
+- `controller/migrations/033_outbox_events.sql` exists with full `outbox_events` schema (four-state `status` CHECK, `workspace_id` FK `ON DELETE RESTRICT`, `user_id` FK `ON DELETE SET NULL`, `correlation_id`, JSONB `payload`, retry/lease columns, `last_error`) and three required indexes (`idx_outbox_claim`, `idx_outbox_workspace_event`, `idx_outbox_processing`).
+- `ON DELETE RESTRICT` on `workspace_id` satisfies M18-1b workspace-deletion handling.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 1 complete in `.zecurity-obs/Sprint18/path.md` and `Phase1-Database-Migration.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-07-11 — Claude Code (Opus 4.8) — Sprint 12 Planning (Provider Tier + Relay Provisioning)
 
 **Member:** M2 (bairava)
