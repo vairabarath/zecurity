@@ -5,20 +5,47 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrNilTx = errors.New("outbox enqueue: transaction is nil")
+var (
+	ErrNilTx      = errors.New("outbox enqueue: transaction is nil")
+	ErrStaleLease = errors.New("outbox: stale or lost lease")
+)
+
+// DefaultMaxRetries is the default retry limit defined by PENDING-15.
+const DefaultMaxRetries = 100
 
 // Outbox persists durable events using caller-owned transactions.
 type Outbox struct {
-	pool *pgxpool.Pool
+	pool       *pgxpool.Pool
+	maxRetries int
 }
 
 // NewOutbox creates an outbox store.
 func NewOutbox(pool *pgxpool.Pool) *Outbox {
-	return &Outbox{pool: pool}
+	return &Outbox{
+		pool:       pool,
+		maxRetries: DefaultMaxRetries,
+	}
+}
+
+// NewOutboxWithMaxRetries creates an outbox store with an explicit retry limit.
+//
+// Configuration validation belongs to the processor/configuration phase.
+// This constructor rejects invalid values so the store itself cannot operate
+// with a nonsensical retry limit.
+func NewOutboxWithMaxRetries(pool *pgxpool.Pool, maxRetries int) (*Outbox, error) {
+	if maxRetries < 1 || maxRetries > 1000 {
+		return nil, fmt.Errorf("outbox max retries must be between 1 and 1000: %d", maxRetries)
+	}
+
+	return &Outbox{
+		pool:       pool,
+		maxRetries: maxRetries,
+	}, nil
 }
 
 // Enqueue inserts an event into the caller's transaction.
@@ -59,3 +86,188 @@ func (o *Outbox) Enqueue(
 
 	return nil
 }
+
+// ClaimEvents atomically transitions eligible events to processing and returns
+// the rows claimed by this worker.
+//
+// FOR UPDATE SKIP LOCKED is deliberately kept inside the same SQL statement
+// as the UPDATE so concurrent workers cannot claim the same eligible event.
+func (o *Outbox) ClaimEvents(
+	ctx context.Context,
+	limit int,
+) ([]OutboxEvent, error) {
+	if limit <= 0 {
+		return []OutboxEvent{}, nil
+	}
+
+	rows, err := o.pool.Query(
+		ctx,
+		`WITH candidates AS (
+			SELECT id
+			  FROM outbox_events
+			 WHERE (status = 'pending'
+			        OR (status = 'failed' AND retry_count < $2))
+			   AND next_attempt_at <= NOW()
+			 ORDER BY next_attempt_at, created_at
+			 LIMIT $1
+			 FOR UPDATE SKIP LOCKED
+		)
+		UPDATE outbox_events o
+		   SET status       = 'processing',
+		       lease_id     = gen_random_uuid(),
+		       claimed_at   = NOW(),
+		       updated_at   = NOW()
+		  FROM candidates c
+		 WHERE o.id = c.id
+		RETURNING
+			o.id,
+			o.event_type,
+			o.workspace_id,
+			o.user_id,
+			o.correlation_id,
+			o.payload,
+			o.status,
+			o.retry_count,
+			o.created_at,
+			o.updated_at,
+			o.next_attempt_at,
+			o.lease_id,
+			o.claimed_at,
+			o.last_error`,
+		limit,
+		o.maxRetries,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("claim outbox events: %w", err)
+	}
+	defer rows.Close()
+
+	events := make([]OutboxEvent, 0)
+
+	for rows.Next() {
+		var evt OutboxEvent
+
+		if err := rows.Scan(
+			&evt.ID,
+			&evt.EventType,
+			&evt.WorkspaceID,
+			&evt.UserID,
+			&evt.CorrelationID,
+			&evt.Payload,
+			&evt.Status,
+			&evt.RetryCount,
+			&evt.CreatedAt,
+			&evt.UpdatedAt,
+			&evt.NextAttemptAt,
+			&evt.LeaseID,
+			&evt.ClaimedAt,
+			&evt.LastError,
+		); err != nil {
+			return nil, fmt.Errorf("scan claimed outbox event: %w", err)
+		}
+
+		events = append(events, evt)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate claimed outbox events: %w", err)
+	}
+
+	return events, nil
+}
+
+// MarkDone marks an event successfully processed.
+//
+// The event can only be completed by the worker holding its current lease.
+// A zero-row update means the lease was lost, replaced, or the event was
+// already transitioned by another worker.
+func (o *Outbox) MarkDone(
+	ctx context.Context,
+	eventID uuid.UUID,
+	leaseID uuid.UUID,
+) error {
+	tag, err := o.pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET status     = 'done',
+		        lease_id   = NULL,
+		        claimed_at = NULL,
+		        updated_at = NOW()
+		  WHERE id = $1
+		    AND lease_id = $2
+		    AND status = 'processing'`,
+		eventID,
+		leaseID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark outbox event done: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrStaleLease
+	}
+
+	return nil
+}
+
+// MarkFailed marks an event as failed while retaining ownership checks.
+//
+// Retry scheduling/backoff is intentionally not implemented here yet;
+// Phase 4 owns the processing/retry scheduling behavior. For Phase 3,
+// the event becomes immediately eligible for the next processing pass.
+func (o *Outbox) MarkFailed(
+	ctx context.Context,
+	eventID uuid.UUID,
+	leaseID uuid.UUID,
+	handlerErr error,
+) error {
+	lastError := truncateError(handlerErr)
+
+	tag, err := o.pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET status           = 'failed',
+		        retry_count      = retry_count + 1,
+		        next_attempt_at  = NOW(),
+		        lease_id         = NULL,
+		        claimed_at       = NULL,
+		        last_error       = $3,
+		        updated_at       = NOW()
+		  WHERE id = $1
+		    AND lease_id = $2
+		    AND status = 'processing'`,
+		eventID,
+		leaseID,
+		lastError,
+	)
+	if err != nil {
+		return fmt.Errorf("mark outbox event failed: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrStaleLease
+	}
+
+	return nil
+}
+
+// truncateError bounds persisted errors to the PENDING-15 limit.
+func truncateError(err error) *string {
+	if err == nil {
+		return nil
+	}
+
+	const maxErrorBytes = 4096
+
+	value := err.Error()
+	data := []byte(value)
+
+	if len(data) > maxErrorBytes {
+		data = data[:maxErrorBytes]
+		value = string(data)
+	}
+
+	return &value
+}
+
+// Keep json.RawMessage visible to this package's public event contract.

@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 3
 title: Concurrency-Safe Claiming
-status: planned
+status: done
 depends_on: [1]
 tags: [go, outbox, concurrency, platform, pending-15]
 ---
@@ -27,7 +27,7 @@ and `claimed_at`, and returns exactly the claimed rows.
 
 ## Steps
 
-- [ ] **M18-3** `ClaimEvents(ctx, limit)` — single atomic statement (PENDING-15 §3, verbatim):
+- [x] **M18-3** `ClaimEvents(ctx, limit)` — single atomic statement (PENDING-15 §3, verbatim):
 
 ```sql
 WITH candidates AS (
@@ -50,10 +50,10 @@ UPDATE outbox_events o
 RETURNING o.*;
 ```
 
-- [ ] **M18-3** `max_retries` is a configuration value on the `Outbox` store/processor — it is
+- [x] **M18-3** `max_retries` is a configuration value on the `Outbox` store/processor — it is
       **not** a per-call `ClaimEvents` argument. `LIMIT` bounds the batch; `ORDER BY
       next_attempt_at, created_at` gives deterministic ordering.
-- [ ] **M18-3** Stale-worker protection — `MarkDone`/`MarkFailed` update **only** the current lease:
+- [x] **M18-3** Stale-worker protection — `MarkDone`/`MarkFailed` update **only** the current lease:
 
 ```sql
 WHERE id = $1
@@ -66,7 +66,7 @@ func (o *Outbox) MarkDone(ctx context.Context, eventID, leaseID uuid.UUID) error
 func (o *Outbox) MarkFailed(ctx context.Context, eventID, leaseID uuid.UUID, err error) error
 ```
 
-- [ ] **M18-3** Zero affected rows from `MarkDone`/`MarkFailed` is a **stale or lost lease** — return
+- [x] **M18-3** Zero affected rows from `MarkDone`/`MarkFailed` is a **stale or lost lease** — return
       an explicit error, never update the event without ownership.
 
 ## Rules

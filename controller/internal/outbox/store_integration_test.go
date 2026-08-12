@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -137,7 +138,18 @@ func TestEnqueueIntegration(t *testing.T) {
 			t.Fatalf("correlation_id = %s, want %s", gotCorrelationID, event.CorrelationID)
 		}
 
-		if string(gotPayload) != string(event.Payload) {
+		var gotJSON any
+		var wantJSON any
+
+		if err := json.Unmarshal(gotPayload, &gotJSON); err != nil {
+			t.Fatalf("decode stored payload: %v", err)
+		}
+
+		if err := json.Unmarshal(event.Payload, &wantJSON); err != nil {
+			t.Fatalf("decode expected payload: %v", err)
+		}
+
+		if !reflect.DeepEqual(gotJSON, wantJSON) {
 			t.Fatalf("payload = %s, want %s", gotPayload, event.Payload)
 		}
 
@@ -322,35 +334,34 @@ func insertOutboxTestUser(
 	t.Helper()
 
 	var id uuid.UUID
-	email := fmt.Sprintf("outbox-%d@example.test", time.Now().UnixNano())
 
-	err := pool.QueryRow(
+	email := fmt.Sprintf(
+		"outbox-test-%d@example.test",
+		time.Now().UnixNano(),
+	)
+
+	providerSub := fmt.Sprintf(
+		"outbox-test-%d",
+		time.Now().UnixNano(),
+	)
+
+	if err := pool.QueryRow(
 		ctx,
 		`INSERT INTO users (
-			email
+			tenant_id,
+			email,
+			provider,
+			provider_sub,
+			role,
+			status
 		)
-		VALUES ($1)
+		VALUES ($1, $2, 'test', $3, 'member', 'active')
 		RETURNING id`,
-		email,
-	).Scan(&id)
-	if err != nil {
-		t.Fatalf("insert user: %v", err)
-	}
-
-	// Keep the user associated with the workspace using the repository's
-	// existing workspace_members relationship.
-	_, err = pool.Exec(
-		ctx,
-		`INSERT INTO workspace_members (
-			workspace_id,
-			user_id
-		)
-		VALUES ($1, $2)`,
 		workspaceID,
-		id,
-	)
-	if err != nil {
-		t.Fatalf("insert workspace membership: %v", err)
+		email,
+		providerSub,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert user: %v", err)
 	}
 
 	return id
@@ -359,3 +370,674 @@ func insertOutboxTestUser(
 // Ensure pgx remains referenced by this integration test package when the
 // repository's pgx version changes its concrete transaction interfaces.
 var _ pgx.Tx
+
+func TestClaimEventsIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	events := []Event{
+		{
+			EventType:     "test.claim.one",
+			WorkspaceID:   workspaceID,
+			UserID:        &userID,
+			CorrelationID: uuid.New(),
+			Payload:       json.RawMessage(`{"n":1}`),
+		},
+		{
+			EventType:     "test.claim.two",
+			WorkspaceID:   workspaceID,
+			UserID:        &userID,
+			CorrelationID: uuid.New(),
+			Payload:       json.RawMessage(`{"n":2}`),
+		},
+	}
+
+	for _, event := range events {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin enqueue transaction: %v", err)
+		}
+
+		if err := store.Enqueue(ctx, tx, event); err != nil {
+			tx.Rollback(ctx)
+			t.Fatalf("enqueue event: %v", err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit enqueue transaction: %v", err)
+		}
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim events: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	event := claimed[0]
+
+	if event.Status != "processing" {
+		t.Fatalf("status = %q, want processing", event.Status)
+	}
+
+	if event.LeaseID == nil {
+		t.Fatal("lease_id is nil, want generated lease")
+	}
+
+	if event.ClaimedAt == nil {
+		t.Fatal("claimed_at is nil, want populated timestamp")
+	}
+
+	if event.UpdatedAt.IsZero() {
+		t.Fatal("updated_at is zero")
+	}
+
+	if event.EventType != "test.claim.one" {
+		t.Fatalf("event_type = %q, want test.claim.one", event.EventType)
+	}
+
+	var remaining int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM outbox_events
+		  WHERE status = 'pending'`,
+	).Scan(&remaining); err != nil {
+		t.Fatalf("count pending events: %v", err)
+	}
+
+	if remaining != 1 {
+		t.Fatalf("pending events = %d, want 1", remaining)
+	}
+}
+
+func TestMarkDoneIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.done",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"done":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	if err := store.MarkDone(ctx, claimedEvent.ID, *claimedEvent.LeaseID); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status FROM outbox_events WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+
+	if status != "done" {
+		t.Fatalf("status = %q, want done", status)
+	}
+}
+
+func TestStaleLeaseIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.stale",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"stale":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("lease_id is nil")
+	}
+
+	staleLease := uuid.New()
+
+	if err := store.MarkDone(ctx, claimedEvent.ID, staleLease); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("MarkDone stale lease error = %v, want %v", err, ErrStaleLease)
+	}
+
+	if err := store.MarkFailed(ctx, claimedEvent.ID, staleLease, errors.New("stale worker")); !errors.Is(err, ErrStaleLease) {
+		t.Fatalf("MarkFailed stale lease error = %v, want %v", err, ErrStaleLease)
+	}
+}
+
+func TestConcurrentClaimEventsIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+	store := NewOutbox(pool)
+
+	const eventCount = 20
+
+	for i := 0; i < eventCount; i++ {
+		event := Event{
+			EventType:     "test.concurrent",
+			WorkspaceID:   workspaceID,
+			UserID:        &userID,
+			CorrelationID: uuid.New(),
+			Payload:       json.RawMessage(fmt.Sprintf(`{"index":%d}`, i)),
+		}
+
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin enqueue: %v", err)
+		}
+
+		if err := store.Enqueue(ctx, tx, event); err != nil {
+			tx.Rollback(ctx)
+			t.Fatalf("enqueue event %d: %v", i, err)
+		}
+
+		if err := tx.Commit(ctx); err != nil {
+			t.Fatalf("commit event %d: %v", i, err)
+		}
+	}
+
+	type result struct {
+		events []OutboxEvent
+		err    error
+	}
+
+	results := make(chan result, 2)
+
+	go func() {
+		events, err := store.ClaimEvents(ctx, eventCount)
+		results <- result{events: events, err: err}
+	}()
+
+	go func() {
+		events, err := store.ClaimEvents(ctx, eventCount)
+		results <- result{events: events, err: err}
+	}()
+
+	first := <-results
+	second := <-results
+
+	if first.err != nil {
+		t.Fatalf("first worker claim: %v", first.err)
+	}
+
+	if second.err != nil {
+		t.Fatalf("second worker claim: %v", second.err)
+	}
+
+	seen := make(map[uuid.UUID]struct{}, eventCount)
+
+	for _, event := range first.events {
+		if _, exists := seen[event.ID]; exists {
+			t.Fatalf("duplicate event %s claimed by first worker", event.ID)
+		}
+		seen[event.ID] = struct{}{}
+	}
+
+	for _, event := range second.events {
+		if _, exists := seen[event.ID]; exists {
+			t.Fatalf("event %s claimed by both workers", event.ID)
+		}
+		seen[event.ID] = struct{}{}
+	}
+
+	if len(seen) != eventCount {
+		t.Fatalf(
+			"unique claimed events = %d, want %d",
+			len(seen),
+			eventCount,
+		)
+	}
+
+	var processingCount int
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM outbox_events
+		  WHERE status = 'processing'`,
+	).Scan(&processingCount); err != nil {
+		t.Fatalf("count processing events: %v", err)
+	}
+
+	if processingCount != eventCount {
+		t.Fatalf(
+			"processing events = %d, want %d",
+			processingCount,
+			eventCount,
+		)
+	}
+}
+
+func TestMarkFailedIntegration(t *testing.T) {
+	// Reuse the same DB setup pattern as TestMarkDoneIntegration.
+
+	// create workspace/user
+	// enqueue event
+	// claim event
+
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.done",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"done":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	handlerErr := errors.New("handler failed")
+
+	if err := store.MarkFailed(
+		ctx,
+		claimedEvent.ID,
+		*claimedEvent.LeaseID,
+		handlerErr,
+	); err != nil {
+		t.Fatalf("mark failed: %v", err)
+	}
+
+	var (
+		status     string
+		retryCount int
+		lastError  *string
+		leaseID    *uuid.UUID
+		claimedAt  *time.Time
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        last_error,
+		        lease_id,
+		        claimed_at
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&status,
+		&retryCount,
+		&lastError,
+		&leaseID,
+		&claimedAt,
+	)
+	if err != nil {
+		t.Fatalf("load failed event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+
+	if lastError == nil || *lastError != handlerErr.Error() {
+		t.Fatalf("last_error = %v, want %q", lastError, handlerErr.Error())
+	}
+
+	if leaseID != nil {
+		t.Fatalf("lease_id = %v, want NULL", leaseID)
+	}
+
+	if claimedAt != nil {
+		t.Fatalf("claimed_at = %v, want NULL", claimedAt)
+	}
+}
+
+func TestMaxRetriesIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store, err := NewOutboxWithMaxRetries(pool, 2)
+	if err != nil {
+		t.Fatalf("create outbox store: %v", err)
+	}
+
+	for retryCount := 1; retryCount <= 2; retryCount++ {
+		_, err := pool.Exec(
+			ctx,
+			`INSERT INTO outbox_events (
+				event_type,
+				workspace_id,
+				user_id,
+				correlation_id,
+				payload,
+				status,
+				retry_count,
+				next_attempt_at
+			)
+			VALUES ($1, $2, $3, $4, $5, 'failed', $6, NOW())`,
+			fmt.Sprintf("test.retry.%d", retryCount),
+			workspaceID,
+			userID,
+			uuid.New(),
+			json.RawMessage(`{"retry":true}`),
+			retryCount,
+		)
+		if err != nil {
+			t.Fatalf("insert retry=%d event: %v", retryCount, err)
+		}
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 10)
+	if err != nil {
+		t.Fatalf("claim events: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed events = %d, want 1", len(claimed))
+	}
+
+	if claimed[0].RetryCount != 1 {
+		t.Fatalf(
+			"claimed retry_count = %d, want 1",
+			claimed[0].RetryCount,
+		)
+	}
+
+	var retryTwoStatus string
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status
+		   FROM outbox_events
+		  WHERE retry_count = 2`,
+	).Scan(&retryTwoStatus)
+	if err != nil {
+		t.Fatalf("load retry=2 event: %v", err)
+	}
+
+	if retryTwoStatus != "failed" {
+		t.Fatalf(
+			"retry=2 status = %q, want failed",
+			retryTwoStatus,
+		)
+	}
+}

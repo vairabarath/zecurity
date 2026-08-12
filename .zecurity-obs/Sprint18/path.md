@@ -135,7 +135,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 3 — Concurrency-Safe Claiming
 > See [[Sprint18/Member1-Go/Phase3-Concurrency-Safe-Claiming]]. Depends on Phase 1.
-- [ ] **M18-3** `ClaimEvents(ctx, limit)` — `FOR UPDATE SKIP LOCKED`, deterministic ordering, unique `lease_id`/`claimed_at`, bounded batch, retry-eligibility filter, atomic `UPDATE ... RETURNING`. `MarkDone`/`MarkFailed` require `id + lease_id + status='processing'`.
+- [x] **M18-3** `ClaimEvents(ctx, limit)` — `FOR UPDATE SKIP LOCKED`, deterministic ordering, unique `lease_id`/`claimed_at`, bounded batch, retry-eligibility filter, atomic `UPDATE ... RETURNING`. `MarkDone`/`MarkFailed` require `id + lease_id + status='processing'`.
 
 ### Phase 4 — Retry / Backoff
 > See [[Sprint18/Member1-Go/Phase4-Retry-Backoff]]. Depends on Phase 3.
