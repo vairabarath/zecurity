@@ -139,7 +139,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 4 — Retry / Backoff
 > See [[Sprint18/Member1-Go/Phase4-Retry-Backoff]]. Depends on Phase 3.
-- [ ] **M18-4** `MarkFailed` with retry counter, exponential backoff + jitter, configurable `OUTBOX_MAX_RETRIES` (default 100, validated 1..1000), retry exhaustion → permanently ineligible `failed`. Injectable clock + jitter for tests.
+- [x] **M18-4** `MarkFailed` with retry counter, exponential backoff + jitter, configurable `OUTBOX_MAX_RETRIES` (default 100, validated 1..1000), retry exhaustion → permanently ineligible `failed`. Injectable clock + jitter for tests.
 
 ### Phase 5 — Crash / Lease Recovery
 > See [[Sprint18/Member1-Go/Phase5-Crash-Lease-Recovery]]. Depends on Phase 3.

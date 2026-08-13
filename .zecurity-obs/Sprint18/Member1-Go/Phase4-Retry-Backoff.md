@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 4
 title: Retry / Backoff
-status: planned
+status: done
 depends_on: [3]
 tags: [go, outbox, retry, backoff, platform, pending-15]
 ---
@@ -29,7 +29,7 @@ discarded.
 
 ## Steps
 
-- [ ] **M18-4** Failure lifecycle (PENDING-15 §4):
+- [x] **M18-4** Failure lifecycle (PENDING-15 §4):
 
 ```text
 handler returns error
@@ -41,16 +41,16 @@ status = failed
 eligible for re-claim on next poll
 ```
 
-- [ ] **M18-4** `MarkFailed` records `last_error` (bounded to 4096 bytes) and increments
+- [x] **M18-4** `MarkFailed` records `last_error` (bounded to 4096 bytes) and increments
       `retry_count`, updating only the current lease (Phase 3's `id + lease_id + status='processing'`).
-- [ ] **M18-4** Backoff — exponential: `min(5m, 2^retry_count * base)` with jitter, so transient
+- [x] **M18-4** Backoff — exponential: `min(5m, 2^retry_count * base)` with jitter, so transient
       failures back off quickly and persistent ones don't hammer downstream services.
-- [ ] **M18-4** `OUTBOX_MAX_RETRIES` — default **100**, validated to the inclusive range
+- [x] **M18-4** `OUTBOX_MAX_RETRIES` — default **100**, validated to the inclusive range
       `1..1000`. Read via the existing env-var convention (`envOr`/`mustEnv` in `cmd/server/main.go`).
-- [ ] **M18-4** Retry exhaustion: events with `retry_count >= max_retries` remain `failed` with the
+- [x] **M18-4** Retry exhaustion: events with `retry_count >= max_retries` remain `failed` with the
       final `last_error`, are **permanently ineligible** for automatic claiming, and are **never
       silently discarded**.
-- [ ] **M18-4** Injectable clock + jitter source so tests deterministically verify `retry_count`,
+- [x] **M18-4** Injectable clock + jitter source so tests deterministically verify `retry_count`,
       backoff, and `next_attempt_at` without real sleeps or nondeterministic randomness.
 
 ## Rules

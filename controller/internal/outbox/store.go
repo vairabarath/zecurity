@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,15 +21,20 @@ const DefaultMaxRetries = 100
 
 // Outbox persists durable events using caller-owned transactions.
 type Outbox struct {
-	pool       *pgxpool.Pool
-	maxRetries int
+	pool        *pgxpool.Pool
+	retryPolicy RetryPolicy
+	jitter      JitterSource
+	clock       func() time.Time
 }
 
 // NewOutbox creates an outbox store.
 func NewOutbox(pool *pgxpool.Pool) *Outbox {
+	policy := DefaultRetryPolicy()
 	return &Outbox{
-		pool:       pool,
-		maxRetries: DefaultMaxRetries,
+		pool:        pool,
+		retryPolicy: policy,
+		jitter:      NoJitter{},
+		clock:       time.Now,
 	}
 }
 
@@ -41,10 +47,14 @@ func NewOutboxWithMaxRetries(pool *pgxpool.Pool, maxRetries int) (*Outbox, error
 	if maxRetries < 1 || maxRetries > 1000 {
 		return nil, fmt.Errorf("outbox max retries must be between 1 and 1000: %d", maxRetries)
 	}
+	policy := DefaultRetryPolicy()
+	policy.MaxRetries = maxRetries
 
 	return &Outbox{
-		pool:       pool,
-		maxRetries: maxRetries,
+		pool:        pool,
+		retryPolicy: policy,
+		jitter:      NoJitter{},
+		clock:       time.Now,
 	}, nil
 }
 
@@ -135,7 +145,7 @@ func (o *Outbox) ClaimEvents(
 			o.claimed_at,
 			o.last_error`,
 		limit,
-		o.maxRetries,
+		o.retryPolicy.MaxRetries,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("claim outbox events: %w", err)
@@ -221,6 +231,29 @@ func (o *Outbox) MarkFailed(
 	leaseID uuid.UUID,
 	handlerErr error,
 ) error {
+	var retryCount int
+
+	err := o.pool.QueryRow(
+		ctx,
+		`SELECT retry_count
+       FROM outbox_events
+      WHERE id = $1
+        AND lease_id = $2
+        AND status = 'processing'`,
+		eventID,
+		leaseID,
+	).Scan(&retryCount)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrStaleLease
+		}
+
+		return fmt.Errorf("get outbox retry count: %w", err)
+	}
+
+	retryCount++
+	nextAttemptAt := o.nextAttemptAt(retryCount)
 	lastError := truncateError(handlerErr)
 
 	tag, err := o.pool.Exec(
@@ -228,16 +261,17 @@ func (o *Outbox) MarkFailed(
 		`UPDATE outbox_events
 		    SET status           = 'failed',
 		        retry_count      = retry_count + 1,
-		        next_attempt_at  = NOW(),
+		        next_attempt_at  = $3,
 		        lease_id         = NULL,
 		        claimed_at       = NULL,
-		        last_error       = $3,
+		        last_error       = $4,
 		        updated_at       = NOW()
 		  WHERE id = $1
 		    AND lease_id = $2
 		    AND status = 'processing'`,
 		eventID,
 		leaseID,
+		nextAttemptAt,
 		lastError,
 	)
 	if err != nil {
@@ -271,3 +305,15 @@ func truncateError(err error) *string {
 }
 
 // Keep json.RawMessage visible to this package's public event contract.
+
+func (o *Outbox) nextAttemptAt(retryCount int) *time.Time {
+	if retryCount >= o.retryPolicy.MaxRetries {
+		return nil
+	}
+
+	delay := o.retryPolicy.Backoff(retryCount)
+	delay = o.jitter.Apply(delay, o.retryPolicy.Jitter)
+
+	next := o.clock().Add(delay)
+	return &next
+}

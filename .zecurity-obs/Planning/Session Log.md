@@ -10,6 +10,31 @@ tags:
 
 ---
 
+## 2026-08-11 — Kilo — Sprint 18 Phase 4 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 4 (Retry / Backoff) is implemented.
+- `controller/internal/outbox/backoff.go` implements `RetryPolicy.Backoff()` with `min(5m, 2^retryCount * base)` and injectable jitter interfaces.
+- `controller/internal/outbox/backoff_test.go` covers deterministic backoff values, negative retry counts, policy validation, and jitter behavior.
+- `controller/internal/outbox/store.go` updates `MarkFailed` to compute `next_attempt_at` via backoff, set `NULL` when `retryCount >= maxRetries`, and preserve 4096-byte `last_error` truncation.
+- `controller/internal/outbox/store_integration_test.go` updates `TestMaxRetriesIntegration` to drive two `MarkFailed` calls and assert exhaustion produces `next_attempt_at = NULL`.
+- `gofmt -w cmd/server/main.go` applied; `cd controller && go build ./...` and `go test ./internal/outbox/... -v` pass cleanly.
+- Marked Phase 4 complete in `.zecurity-obs/Sprint18/path.md` and `Phase4-Retry-Backoff.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 3 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 3 (Concurrency-Safe Claiming) is implemented.
+- `controller/internal/outbox/store.go` adds `ClaimEvents(ctx, limit)` with the exact atomic CTE from PENDING-15 §3, `MarkDone`, `MarkFailed`, and `maxRetries` config on `Outbox`.
+- `controller/internal/outbox/event.go` adds `OutboxEvent` for claimed rows.
+- `controller/internal/outbox/store_integration_test.go` adds integration tests for claim, mark done/failed, stale-lease rejection, and concurrent claiming.
+- `cd controller && go build ./...` and `go vet ./internal/outbox/...` pass cleanly.
+- Marked Phase 3 complete in `.zecurity-obs/Sprint18/path.md` and `Phase3-Concurrency-Safe-Claiming.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-08-11 — Kilo — Sprint 18 Phase 2 Verification
 
 **What was done:**

@@ -891,11 +891,12 @@ func TestMarkFailedIntegration(t *testing.T) {
 	}
 
 	var (
-		status     string
-		retryCount int
-		lastError  *string
-		leaseID    *uuid.UUID
-		claimedAt  *time.Time
+		status        string
+		retryCount    int
+		lastError     *string
+		leaseID       *uuid.UUID
+		claimedAt     *time.Time
+		nextAttemptAt *time.Time
 	)
 
 	err = pool.QueryRow(
@@ -904,7 +905,8 @@ func TestMarkFailedIntegration(t *testing.T) {
 		        retry_count,
 		        last_error,
 		        lease_id,
-		        claimed_at
+		        claimed_at,
+				next_attempt_at
 		   FROM outbox_events
 		  WHERE id = $1`,
 		claimedEvent.ID,
@@ -914,6 +916,7 @@ func TestMarkFailedIntegration(t *testing.T) {
 		&lastError,
 		&leaseID,
 		&claimedAt,
+		&nextAttemptAt,
 	)
 	if err != nil {
 		t.Fatalf("load failed event: %v", err)
@@ -927,6 +930,16 @@ func TestMarkFailedIntegration(t *testing.T) {
 		t.Fatalf("retry_count = %d, want 1", retryCount)
 	}
 
+	if nextAttemptAt == nil {
+		t.Fatal("next_attempt_at = NULL, want a scheduled retry")
+	}
+
+	if !nextAttemptAt.After(time.Now().UTC()) {
+		t.Fatalf(
+			"next_attempt_at = %v, want a future retry time",
+			*nextAttemptAt,
+		)
+	}
 	if lastError == nil || *lastError != handlerErr.Error() {
 		t.Fatalf("last_error = %v, want %q", lastError, handlerErr.Error())
 	}
@@ -981,63 +994,173 @@ func TestMaxRetriesIntegration(t *testing.T) {
 		t.Fatalf("create outbox store: %v", err)
 	}
 
-	for retryCount := 1; retryCount <= 2; retryCount++ {
-		_, err := pool.Exec(
-			ctx,
-			`INSERT INTO outbox_events (
-				event_type,
-				workspace_id,
-				user_id,
-				correlation_id,
-				payload,
-				status,
-				retry_count,
-				next_attempt_at
-			)
-			VALUES ($1, $2, $3, $4, $5, 'failed', $6, NOW())`,
-			fmt.Sprintf("test.retry.%d", retryCount),
-			workspaceID,
-			userID,
-			uuid.New(),
-			json.RawMessage(`{"retry":true}`),
-			retryCount,
-		)
-		if err != nil {
-			t.Fatalf("insert retry=%d event: %v", retryCount, err)
-		}
+	event := Event{
+		EventType:     "test.retry.exhaustion",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"retry":true}`),
 	}
 
-	claimed, err := store.ClaimEvents(ctx, 10)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
-		t.Fatalf("claim events: %v", err)
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
 	}
 
 	if len(claimed) != 1 {
-		t.Fatalf("claimed events = %d, want 1", len(claimed))
+		t.Fatalf("first claimed events = %d, want 1", len(claimed))
 	}
 
-	if claimed[0].RetryCount != 1 {
+	first := claimed[0]
+	if first.LeaseID == nil {
+		t.Fatal("first claimed event has nil lease_id")
+	}
+
+	if err := store.MarkFailed(
+		ctx,
+		first.ID,
+		*first.LeaseID,
+		errors.New("first failure"),
+	); err != nil {
+		t.Fatalf("first mark failed: %v", err)
+	}
+
+	var (
+		firstStatus      string
+		firstRetryCount  int
+		firstNextAttempt *time.Time
+		firstLastError   *string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        last_error
+		   FROM outbox_events
+		  WHERE id = $1`,
+		first.ID,
+	).Scan(
+		&firstStatus,
+		&firstRetryCount,
+		&firstNextAttempt,
+		&firstLastError,
+	)
+	if err != nil {
+		t.Fatalf("load first failed event: %v", err)
+	}
+
+	if firstStatus != "failed" {
+		t.Fatalf("first status = %q, want failed", firstStatus)
+	}
+
+	if firstRetryCount != 1 {
+		t.Fatalf("first retry_count = %d, want 1", firstRetryCount)
+	}
+
+	if firstNextAttempt == nil {
+		t.Fatal("first next_attempt_at = NULL, want scheduled retry")
+	}
+
+	if firstLastError == nil || *firstLastError != "first failure" {
+		t.Fatalf("first last_error = %v, want %q", firstLastError, "first failure")
+	}
+
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET next_attempt_at = NOW()
+		  WHERE id = $1`,
+		first.ID,
+	)
+	if err != nil {
+		t.Fatalf("make retry eligible: %v", err)
+	}
+
+	claimed, err = store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("second claimed events = %d, want 1", len(claimed))
+	}
+
+	second := claimed[0]
+	if second.LeaseID == nil {
+		t.Fatal("second claimed event has nil lease_id")
+	}
+
+	if err := store.MarkFailed(
+		ctx,
+		second.ID,
+		*second.LeaseID,
+		errors.New("final failure"),
+	); err != nil {
+		t.Fatalf("second mark failed: %v", err)
+	}
+
+	var (
+		secondStatus      string
+		secondRetryCount  int
+		secondNextAttempt *time.Time
+		secondLastError   *string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        last_error
+		   FROM outbox_events
+		  WHERE id = $1`,
+		second.ID,
+	).Scan(
+		&secondStatus,
+		&secondRetryCount,
+		&secondNextAttempt,
+		&secondLastError,
+	)
+	if err != nil {
+		t.Fatalf("load exhausted event: %v", err)
+	}
+
+	if secondStatus != "failed" {
+		t.Fatalf("status = %q, want failed", secondStatus)
+	}
+
+	if secondRetryCount != 2 {
+		t.Fatalf("retry_count = %d, want 2", secondRetryCount)
+	}
+
+	if secondNextAttempt != nil {
 		t.Fatalf(
-			"claimed retry_count = %d, want 1",
-			claimed[0].RetryCount,
+			"next_attempt_at = %v, want NULL because retries are exhausted",
+			*secondNextAttempt,
 		)
 	}
 
-	var retryTwoStatus string
-	err = pool.QueryRow(
-		ctx,
-		`SELECT status
-		   FROM outbox_events
-		  WHERE retry_count = 2`,
-	).Scan(&retryTwoStatus)
-	if err != nil {
-		t.Fatalf("load retry=2 event: %v", err)
-	}
-
-	if retryTwoStatus != "failed" {
+	if secondLastError == nil || *secondLastError != "final failure" {
 		t.Fatalf(
-			"retry=2 status = %q, want failed",
-			retryTwoStatus,
+			"last_error = %v, want %q",
+			secondLastError,
+			"final failure",
 		)
 	}
 }
