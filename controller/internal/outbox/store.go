@@ -317,3 +317,94 @@ func (o *Outbox) nextAttemptAt(retryCount int) *time.Time {
 	next := o.clock().Add(delay)
 	return &next
 }
+
+// ReapAbandoned resets processing events whose lease has expired.
+//
+// The lease ID captured during the expiry scan is re-checked in the UPDATE.
+// This prevents the reaper from clearing a newer lease acquired after the
+// scan but before the update.
+func (o *Outbox) ReapAbandoned(
+	ctx context.Context,
+	lockWindow time.Duration,
+) (int, error) {
+	if lockWindow <= 0 {
+		return 0, fmt.Errorf("outbox reaper lock window must be positive")
+	}
+	cutoff := o.clock().Add(-lockWindow)
+
+	rows, err := o.pool.Query(
+		ctx,
+		`SELECT id, lease_id, retry_count
+		   FROM outbox_events
+		  WHERE status = 'processing'
+		    AND claimed_at <= $1`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("find abandoned outbox events: %w", err)
+	}
+	defer rows.Close()
+
+	type abandonedEvent struct {
+		id         uuid.UUID
+		leaseID    uuid.UUID
+		retryCount int
+	}
+
+	var events []abandonedEvent
+
+	for rows.Next() {
+		var event abandonedEvent
+
+		if err := rows.Scan(
+			&event.id,
+			&event.leaseID,
+			&event.retryCount,
+		); err != nil {
+			return 0, fmt.Errorf("scan abandoned outbox event: %w", err)
+		}
+
+		events = append(events, event)
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate abandoned outbox events: %w", err)
+	}
+
+	reaped := 0
+
+	for _, event := range events {
+		retryCount := event.retryCount + 1
+		nextAttemptAt := o.nextAttemptAt(retryCount)
+
+		tag, err := o.pool.Exec(
+			ctx,
+			`UPDATE outbox_events
+			    SET status          = 'failed',
+			        retry_count     = retry_count + 1,
+			        next_attempt_at = $3,
+			        lease_id        = NULL,
+			        claimed_at      = NULL,
+			        updated_at      = NOW()
+			  WHERE id = $1
+			    AND lease_id = $2
+			    AND status = 'processing'`,
+			event.id,
+			event.leaseID,
+			nextAttemptAt,
+		)
+		if err != nil {
+			return reaped, fmt.Errorf(
+				"reap abandoned outbox event %s: %w",
+				event.id,
+				err,
+			)
+		}
+
+		if tag.RowsAffected() == 1 {
+			reaped++
+		}
+	}
+
+	return reaped, nil
+}

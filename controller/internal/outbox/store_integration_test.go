@@ -953,6 +953,309 @@ func TestMarkFailedIntegration(t *testing.T) {
 	}
 }
 
+func TestReapAbandonedIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	leaseID := uuid.New()
+
+	var eventID uuid.UUID
+
+	err = pool.QueryRow(
+		ctx,
+		`INSERT INTO outbox_events (
+		event_type,
+		workspace_id,
+		user_id,
+		correlation_id,
+		payload,
+		status,
+		retry_count,
+		next_attempt_at,
+		lease_id,
+		claimed_at
+	)
+	VALUES (
+		$1, $2, $3, $4, $5,
+		'processing',
+		0,
+		NOW(),
+		$6,
+		NOW() - INTERVAL '5 minutes'
+	)
+	RETURNING id`,
+		"test.reap",
+		workspaceID,
+		userID,
+		uuid.New(),
+		json.RawMessage(`{"reap":true}`),
+		leaseID,
+	).Scan(&eventID)
+
+	if err != nil {
+		t.Fatalf("insert abandoned event: %v", err)
+	}
+	reaped, err := store.ReapAbandoned(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatalf("reap abandoned: %v", err)
+	}
+
+	if reaped != 1 {
+		t.Fatalf("reaped = %d, want 1", reaped)
+	}
+
+	var (
+		status        string
+		retryCount    int
+		nextAttemptAt *time.Time
+		gotLeaseID    *uuid.UUID
+		claimedAt     *time.Time
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT
+		status,
+		retry_count,
+		next_attempt_at,
+		lease_id,
+		claimed_at
+	   FROM outbox_events
+	  WHERE id = $1`,
+		eventID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttemptAt,
+		&gotLeaseID,
+		&claimedAt,
+	)
+	if err != nil {
+		t.Fatalf("load reaped event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+
+	if nextAttemptAt == nil {
+		t.Fatal("next_attempt_at = NULL, want scheduled retry")
+	}
+
+	if gotLeaseID != nil {
+		t.Fatalf("lease_id = %v, want NULL", gotLeaseID)
+	}
+
+	if claimedAt != nil {
+		t.Fatalf("claimed_at = %v, want NULL", claimedAt)
+	}
+}
+
+func TestReapAbandonedLeaseReplacementIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.reap.race",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"race":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// First worker claims the event and receives lease A.
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("first claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("first claim returned %d events, want 1", len(claimed))
+	}
+
+	leaseA := claimed[0].LeaseID
+	if leaseA == nil {
+		t.Fatal("first claimed event has nil lease_id")
+	}
+
+	// Make lease A expired.
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET claimed_at = NOW() - INTERVAL '1 minute'
+		  WHERE id = $1
+		    AND lease_id = $2`,
+		claimed[0].ID,
+		*leaseA,
+	)
+	if err != nil {
+		t.Fatalf("expire lease A: %v", err)
+	}
+
+	// Simulate another worker replacing the expired lease with lease B.
+	leaseB := uuid.New()
+
+	tag, err := pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET lease_id = $2,
+		        claimed_at = NOW(),
+		        status = 'processing',
+		        updated_at = NOW()
+		  WHERE id = $1
+		    AND lease_id = $3
+		    AND status = 'processing'`,
+		claimed[0].ID,
+		leaseB,
+		*leaseA,
+	)
+	if err != nil {
+		t.Fatalf("replace lease: %v", err)
+	}
+
+	if tag.RowsAffected() != 1 {
+		t.Fatalf("lease replacement affected %d rows, want 1", tag.RowsAffected())
+	}
+
+	// The reaper may have discovered lease A before lease B was installed.
+	// Its UPDATE must still refuse to clear lease B.
+	reaped, err := store.ReapAbandoned(ctx, 30*time.Second)
+	if err != nil {
+		t.Fatalf("reap abandoned: %v", err)
+	}
+
+	if reaped != 0 {
+		t.Fatalf("reaped = %d, want 0 because lease was replaced", reaped)
+	}
+
+	var (
+		status       string
+		currentLease uuid.UUID
+		retryCount   int
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        lease_id,
+		        retry_count
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimed[0].ID,
+	).Scan(
+		&status,
+		&currentLease,
+		&retryCount,
+	)
+	if err != nil {
+		t.Fatalf("load event after reap: %v", err)
+	}
+
+	if status != "processing" {
+		t.Fatalf("status = %q, want processing", status)
+	}
+
+	if currentLease != leaseB {
+		t.Fatalf(
+			"lease_id = %s, want replacement lease %s",
+			currentLease,
+			leaseB,
+		)
+	}
+
+	if retryCount != 0 {
+		t.Fatalf("retry_count = %d, want 0", retryCount)
+	}
+}
+
 func TestMaxRetriesIntegration(t *testing.T) {
 	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
 	if adminDSN == "" {

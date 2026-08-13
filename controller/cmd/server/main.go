@@ -51,7 +51,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
-	// "github.com/yourorg/ztna/controller/internal/outbox"
+	"github.com/yourorg/ztna/controller/internal/outbox"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
@@ -77,11 +77,28 @@ func main() {
 
 	defer stop()
 	var wg sync.WaitGroup
+	var outboxStore *outbox.Outbox
+	var err error
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	outboxMaxRetries := envOrInt(
+		"OUTBOX_MAX_RETRIES",
+		100,
+	)
+
+	outboxStore, err = outbox.NewOutboxWithMaxRetries(
+		db.Pool,
+		outboxMaxRetries,
+	)
+
+	if err != nil {
+		log.Fatalf("outbox init: %v", err)
+	}
+	_ = outboxStore
 
 	pkiService, err := pki.Init(ctx, db.Pool)
 	if err != nil {
