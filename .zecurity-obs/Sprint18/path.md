@@ -147,7 +147,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 6 — Generic Handler Registry
 > See [[Sprint18/Member1-Go/Phase6-Generic-Handler-Registry]]. Depends on Phase 1.
-- [ ] **M18-6** `EventHandler` interface + `HandlerRegistry` (`RegisterHandler`, lookup, dispatch). Zero event-specific logic in the outbox package. Unknown event types → terminal `failed`, never retried forever.
+- [x] **M18-6** `EventHandler` interface + `HandlerRegistry` (`RegisterHandler`, lookup, dispatch). Zero event-specific logic in the outbox package. Unknown event types → terminal `failed`, never retried forever.
 
 ### Phase 7 — Background Processor
 > See [[Sprint18/Member1-Go/Phase7-Background-Processor]]. Depends on Phases 3, 4, 5, 6.

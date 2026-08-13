@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 6
 title: Generic Handler Registry
-status: planned
+status: done
 depends_on: [1]
 tags: [go, outbox, handlers, platform, pending-15]
 ---
@@ -27,7 +27,7 @@ registered handler. The outbox package contains **no** event-specific business l
 
 ## Steps
 
-- [ ] **M18-6** `EventHandler` interface + `HandlerRegistry` (PENDING-15 §6, verbatim):
+- [x] **M18-6** `EventHandler` interface + `HandlerRegistry` (PENDING-15 §6, verbatim):
 
 ```go
 type EventHandler interface {
@@ -39,18 +39,18 @@ type HandlerRegistry struct {
 }
 ```
 
-- [ ] **M18-6** Registry mechanism only: `RegisterHandler(eventType, handler)`, lookup by
+- [x] **M18-6** Registry mechanism only: `RegisterHandler(eventType, handler)`, lookup by
       `event_type`, dispatch. Concurrent registration is not expected after startup but must not
       race — guard the map.
-- [ ] **M18-6** **Unknown event types** (no registered handler) fail safely as **terminal**
+- [x] **M18-6** **Unknown event types** (no registered handler) fail safely as **terminal**
       failures: `status='failed'`, `retry_count=max_retries`, `next_attempt_at=NULL`,
       `last_error="no handler registered for event_type X"`. The processor logs a warning but does
       **not** crash or retry the unknown event indefinitely.
-- [ ] **M18-6** Event-specific handler registration is performed by the **owning subsystem**:
+- [x] **M18-6** Event-specific handler registration is performed by the **owning subsystem**:
       PENDING-13 registers `device.trust.revoke.requested` / `device.trust.re_enrollment_required`;
       ADR-025 registers any lifecycle handlers it owns. Sprint 18 registers **none** of them — it
       only provides the seam.
-- [ ] **M18-6** Handler contract: return `nil` on success (even if the event was already applied —
+- [x] **M18-6** Handler contract: return `nil` on success (even if the event was already applied —
       idempotency); return an error if the side effect should be retried. Exactly-once external
       effects are the handler's responsibility.
 
