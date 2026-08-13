@@ -10,6 +10,17 @@ tags:
 
 ---
 
+## 2026-08-11 — Kilo — Sprint 18 Phase 5 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 5 (Crash / Lease Recovery) is implemented.
+- `controller/internal/outbox/store.go` adds `ReapAbandoned(ctx, lockWindow)` with lease-aware expired-lease scanning, `retry_count++`, backoff-based `next_attempt_at`, and lease re-checking in the UPDATE.
+- `controller/internal/outbox/store_integration_test.go` includes `TestReapAbandonedIntegration` and `TestReapAbandonedLeaseReplacementIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 5 complete in `.zecurity-obs/Sprint18/path.md` and `Phase5-Crash-Lease-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-08-11 — Kilo — Sprint 18 Phase 4 Verification
 
 **What was done:**

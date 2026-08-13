@@ -143,7 +143,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 5 — Crash / Lease Recovery
 > See [[Sprint18/Member1-Go/Phase5-Crash-Lease-Recovery]]. Depends on Phase 3.
-- [ ] **M18-5** Lease-aware reaper: `processing` with expired `claimed_at` → `failed`, retry++, backoff, clear `lease_id`/`claimed_at`. Must not clear a newer lease acquired between scan and update.
+- [x] **M18-5** Lease-aware reaper: `processing` with expired `claimed_at` → `failed`, retry++, backoff, clear `lease_id`/`claimed_at`. Must not clear a newer lease acquired between scan and update.
 
 ### Phase 6 — Generic Handler Registry
 > See [[Sprint18/Member1-Go/Phase6-Generic-Handler-Registry]]. Depends on Phase 1.

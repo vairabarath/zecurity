@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 5
 title: Crash / Lease Recovery
-status: planned
+status: done
 depends_on: [3]
 tags: [go, outbox, recovery, lease, platform, pending-15]
 ---
@@ -28,7 +28,7 @@ ever clearing a newer lease acquired concurrently.
 
 ## Steps
 
-- [ ] **M18-5** `ReapAbandoned(ctx, lockWindow time.Duration) (int, error)` — resets `processing`
+- [x] **M18-5** `ReapAbandoned(ctx, lockWindow time.Duration) (int, error)` — resets `processing`
       events whose lease has expired:
 
 ```text
@@ -48,7 +48,7 @@ lease_id = NULL
 claimed_at = NULL
 ```
 
-- [ ] **M18-5** **Lease-aware reaping** (PENDING-15 §5, verbatim) — the reaper may only transition an
+- [x] **M18-5** **Lease-aware reaping** (PENDING-15 §5, verbatim) — the reaper may only transition an
       event whose stored `lease_id` is the same expired lease it identified:
 
 ```sql
@@ -71,7 +71,7 @@ UPDATE outbox_events o
    AND o.status = 'processing'    -- not already completed/failed by another worker
 ```
 
-- [ ] **M18-5** The expired lease must be re-checked inside the UPDATE (`o.lease_id = e.lease_id`)
+- [x] **M18-5** The expired lease must be re-checked inside the UPDATE (`o.lease_id = e.lease_id`)
       — a newer lease acquired between the reaper's scan and its update must never be cleared.
 
 ## Rules
