@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 7
 title: Background Processor
-status: planned
+status: done
 depends_on: [3, 4, 5, 6]
 tags: [go, outbox, processor, platform, pending-15]
 ---
@@ -29,7 +29,7 @@ leases, and shuts down cleanly on context cancellation.
 
 ## Steps
 
-- [ ] **M18-7** Startup order (PENDING-15 §8, normative):
+- [x] **M18-7** Startup order (PENDING-15 §8, normative):
 
 ```text
 construct outbox
@@ -39,16 +39,16 @@ register all event handlers
 start processor
 ```
 
-- [ ] **M18-7** `Run` options (defaults from PENDING-15 §5): `WithPollInterval(1s)`,
+- [x] **M18-7** `Run` options (defaults from PENDING-15 §5): `WithPollInterval(1s)`,
       `WithLockWindow(30s)`, `WithMaxRetries(100)`, `WithReaperInterval(30s)` — all validated to the
       documented bounds.
-- [ ] **M18-7** Claim loop: repeatedly `ClaimEvents`; for each claimed event, look up the handler
+- [x] **M18-7** Claim loop: repeatedly `ClaimEvents`; for each claimed event, look up the handler
       in the registry and dispatch; mark `done` on success; mark retryable `failed` on handler error
       until exhaustion (Phase 4); unknown handlers become terminal (Phase 6).
-- [ ] **M18-7** Reaper task: runs every reaper interval, calls `ReapAbandoned(lockWindow)` (Phase 5).
-- [ ] **M18-7** Context cancellation: claim loop and reaper goroutines exit on cancellation;
+- [x] **M18-7** Reaper task: runs every reaper interval, calls `ReapAbandoned(lockWindow)` (Phase 5).
+- [x] **M18-7** Context cancellation: claim loop and reaper goroutines exit on cancellation;
       graceful shutdown; **no goroutine leaks**.
-- [ ] **M18-7** Registration wiring seam only — this sprint registers **no** device handlers.
+- [x] **M18-7** Registration wiring seam only — this sprint registers **no** device handlers.
       PENDING-13 owns `device.trust.*` handlers; ADR-025 owns its lifecycle handlers. `main.go`
       exposes the seam so those subsystems can register before `Run`.
 

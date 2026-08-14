@@ -27,6 +27,43 @@ type Outbox struct {
 	clock       func() time.Time
 }
 
+func (o *Outbox) MarkFailedTerminal(
+	ctx context.Context,
+	eventID uuid.UUID,
+	leaseID uuid.UUID,
+	handlerErr error,
+) error {
+	lastError := truncateError(handlerErr)
+
+	tag, err := o.pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET status          = 'failed',
+		        retry_count     = $3,
+		        next_attempt_at = NULL,
+		        lease_id        = NULL,
+		        claimed_at      = NULL,
+		        last_error      = $4,
+		        updated_at      = NOW()
+		  WHERE id = $1
+		    AND lease_id = $2
+		    AND status = 'processing'`,
+		eventID,
+		leaseID,
+		o.retryPolicy.MaxRetries,
+		lastError,
+	)
+	if err != nil {
+		return fmt.Errorf("mark terminal outbox event failed: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return ErrStaleLease
+	}
+
+	return nil
+}
+
 // NewOutbox creates an outbox store.
 func NewOutbox(pool *pgxpool.Pool) *Outbox {
 	policy := DefaultRetryPolicy()

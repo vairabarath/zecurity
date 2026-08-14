@@ -953,6 +953,123 @@ func TestMarkFailedIntegration(t *testing.T) {
 	}
 }
 
+type processorTestHandler struct {
+	err error
+}
+
+func (h processorTestHandler) Handle(
+	_ context.Context,
+	_ OutboxEvent,
+) error {
+	return h.err
+}
+
+func TestProcessorSuccessIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+	registry := NewHandlerRegistry()
+
+	if err := registry.RegisterHandler(
+		"test.processor.success",
+		processorTestHandler{},
+	); err != nil {
+		t.Fatalf("register handler: %v", err)
+	}
+
+	processor, err := NewProcessor(store, registry)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	event := Event{
+		EventType:     "test.processor.success",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"success":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	if err := processor.processEvent(ctx, claimedEvent); err != nil {
+		t.Fatalf("process event: %v", err)
+	}
+
+	var status string
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status FROM outbox_events WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(&status); err != nil {
+		t.Fatalf("read status: %v", err)
+	}
+
+	if status != "done" {
+		t.Fatalf("status = %q, want done", status)
+	}
+}
+
 func TestReapAbandonedIntegration(t *testing.T) {
 	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
 	if adminDSN == "" {
@@ -1465,5 +1582,483 @@ func TestMaxRetriesIntegration(t *testing.T) {
 			secondLastError,
 			"final failure",
 		)
+	}
+}
+
+func TestProcessorHandlerFailureIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+	registry := NewHandlerRegistry()
+
+	handlerErr := errors.New("temporary handler failure")
+
+	if err := registry.RegisterHandler(
+		"test.processor.failure",
+		processorTestHandler{err: handlerErr},
+	); err != nil {
+		t.Fatalf("register handler: %v", err)
+	}
+
+	processor, err := NewProcessor(store, registry)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	event := Event{
+		EventType:     "test.processor.failure",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"failure":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed events = %d, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	err = processor.processEvent(ctx, claimedEvent)
+	if !errors.Is(err, handlerErr) {
+		t.Fatalf("process error = %v, want %v", err, handlerErr)
+	}
+
+	var (
+		status        string
+		retryCount    int
+		nextAttemptAt *time.Time
+		lastError     *string
+	)
+
+	err = pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        last_error
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttemptAt,
+		&lastError,
+	)
+	if err != nil {
+		t.Fatalf("read failed event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != 1 {
+		t.Fatalf("retry_count = %d, want 1", retryCount)
+	}
+
+	if nextAttemptAt == nil {
+		t.Fatal("next_attempt_at = NULL, want scheduled retry")
+	}
+
+	if lastError == nil || *lastError != handlerErr.Error() {
+		t.Fatalf(
+			"last_error = %v, want %q",
+			lastError,
+			handlerErr.Error(),
+		)
+	}
+}
+
+func TestProcessorRunProcessesEventIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dbName := outboxTestDBName(t)
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+	registry := NewHandlerRegistry()
+
+	if err := registry.RegisterHandler(
+		"test.processor.run",
+		processorTestHandler{},
+	); err != nil {
+		t.Fatalf("register handler: %v", err)
+	}
+
+	processor, err := NewProcessor(
+		store,
+		registry,
+		WithPollInterval(50*time.Millisecond),
+		WithLockWindow(5*time.Second),
+		WithReaperInterval(1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	event := Event{
+		EventType:     "test.processor.run",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"run":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- processor.Run(runCtx, 1)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+
+	for {
+		var status string
+
+		err := pool.QueryRow(
+			ctx,
+			`SELECT status FROM outbox_events
+			  WHERE correlation_id = $1`,
+			event.CorrelationID,
+		).Scan(&status)
+
+		if err == nil && status == "done" {
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("event was not processed before timeout")
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	runCancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("processor returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not shut down")
+	}
+}
+func TestProcessorRunShutdownIntegration(t *testing.T) {
+	registry := NewHandlerRegistry()
+
+	store := &Outbox{
+		retryPolicy: DefaultRetryPolicy(),
+		jitter:      NoJitter{},
+		clock:       time.Now,
+	}
+
+	processor, err := NewProcessor(
+		store,
+		registry,
+		WithPollInterval(50*time.Millisecond),
+		WithLockWindow(5*time.Second),
+		WithReaperInterval(1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- processor.Run(ctx, 1)
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("processor returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not stop after context cancellation")
+	}
+}
+
+func TestProcessorRunReapsAbandonedIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+	registry := NewHandlerRegistry()
+
+	// No handler is needed. We directly create a processing event so
+	// the processor's reaper must recover it.
+	event := Event{
+		EventType:     "test.processor.reap",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"reap":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim event: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	// Make the lease older than the processor lock window.
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET claimed_at = NOW() - INTERVAL '10 seconds'
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	)
+	if err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+
+	processor, err := NewProcessor(
+		store,
+		registry,
+		WithPollInterval(50*time.Millisecond),
+		WithLockWindow(5*time.Second),
+		WithReaperInterval(1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan error, 1)
+
+	go func() {
+		done <- processor.Run(runCtx, 1)
+	}()
+
+	deadline := time.Now().Add(4 * time.Second)
+
+	for {
+		var status string
+		var retryCount int
+		var leaseID *uuid.UUID
+		var claimedAt *time.Time
+
+		err := pool.QueryRow(
+			ctx,
+			`SELECT status,
+			        retry_count,
+			        lease_id,
+			        claimed_at
+			   FROM outbox_events
+			  WHERE id = $1`,
+			claimedEvent.ID,
+		).Scan(
+			&status,
+			&retryCount,
+			&leaseID,
+			&claimedAt,
+		)
+
+		if err != nil {
+			t.Fatalf("read reaped event: %v", err)
+		}
+
+		if status == "failed" {
+			if retryCount != 1 {
+				t.Fatalf("retry_count = %d, want 1", retryCount)
+			}
+
+			if leaseID != nil {
+				t.Fatalf("lease_id = %v, want NULL", leaseID)
+			}
+
+			if claimedAt != nil {
+				t.Fatalf("claimed_at = %v, want NULL", claimedAt)
+			}
+
+			break
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("event was not reaped before timeout")
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("processor returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("processor did not shut down")
 	}
 }

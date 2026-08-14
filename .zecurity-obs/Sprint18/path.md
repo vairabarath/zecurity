@@ -151,7 +151,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 7 — Background Processor
 > See [[Sprint18/Member1-Go/Phase7-Background-Processor]]. Depends on Phases 3, 4, 5, 6.
-- [ ] **M18-7** Processor goroutine in `cmd/server/main.go`: construct → register all handlers → start. Claim loop, dispatch, done/failed, reaper, context cancellation, graceful shutdown, no goroutine leaks. Registration wiring seam only — PENDING-13 owns actual device handlers.
+- [x] **M18-7** Processor goroutine in `cmd/server/main.go`: construct → register all handlers → start. Claim loop, dispatch, done/failed, reaper, context cancellation, graceful shutdown, no goroutine leaks. Registration wiring seam only — PENDING-13 owns actual device handlers.
 
 ### Phase 8 — Terminal Event Recovery
 > See [[Sprint18/Member1-Go/Phase8-Terminal-Event-Recovery]]. Depends on Phases 1 + 6.
