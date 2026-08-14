@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 8
 title: Terminal Event Recovery
-status: planned
+status: done
 depends_on: [1, 6]
 tags: [go, outbox, recovery, ops, platform, pending-15]
 ---
@@ -27,20 +27,20 @@ An **explicit, operator-only** recovery path for events that reached a terminal 
 
 ## Steps
 
-- [ ] **M18-8** Conceptual recovery operation (PENDING-15 §6):
+- [x] **M18-8** Conceptual recovery operation (PENDING-15 §6):
 
 ```go
 func (o *Outbox) Recover(ctx context.Context, eventID, operatorID uuid.UUID, reason string, resetRetryBudget bool) error
 ```
 
-- [ ] **M18-8** Valid **only** for terminal `failed` events (`retry_count >= max_retries` or
+- [x] **M18-8** Valid **only** for terminal `failed` events (`retry_count >= max_retries` or
       unknown-handler terminal state). Non-terminal or `done`/`processing` events are rejected.
-- [ ] **M18-8** Clears `lease_id` and `claimed_at`, sets `next_attempt_at = NOW()`, and preserves
+- [x] **M18-8** Clears `lease_id` and `claimed_at`, sets `next_attempt_at = NOW()`, and preserves
       the existing retry count **unless** `resetRetryBudget` is explicitly supplied.
-- [ ] **M18-8** Requires a mandatory `reason` and records the operator identity + timestamp in the
+- [x] **M18-8** Requires a mandatory `reason` and records the operator identity + timestamp in the
       platform audit trail (`audit_logs`), as an audited operation by the owning administrative
       surface.
-- [ ] **M18-8** Recovery must **not** silently bypass the configured retry limit — a retry-budget
+- [x] **M18-8** Recovery must **not** silently bypass the configured retry limit — a retry-budget
       reset must be an explicit, authorized argument, never implied.
 
 ## Rules

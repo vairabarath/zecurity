@@ -10,6 +10,18 @@ tags:
 
 ---
 
+## 2026-08-11 — Kilo — Sprint 18 Phase 8 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 8 (Terminal Event Recovery) is implemented.
+- `controller/internal/outbox/recover.go` adds `Recover(ctx, eventID, operatorID, reason, resetRetryBudget)` for terminal `failed` events only, with mandatory reason, operator identity validation, optional retry-budget reset, and transactional audit logging.
+- `controller/internal/audit/audit.go` adds `RecordTx(ctx, tx, entry)` to support audited recovery within a caller-owned transaction.
+- `controller/internal/outbox/store_integration_test.go` includes `TestRecoverTerminalEventIntegration`, `TestRecoverTerminalEventResetRetryBudgetIntegration`, `TestRecoverRejectsNonTerminalEventsIntegration`, and `TestRecoverRequiresReasonIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 8 complete in `.zecurity-obs/Sprint18/path.md` and `Phase8-Terminal-Event-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-08-11 — Kilo — Sprint 18 Phase 7 Verification
 
 **What was done:**

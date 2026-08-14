@@ -7,8 +7,10 @@ package audit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -60,5 +62,49 @@ func Record(ctx context.Context, db *pgxpool.Pool, e Entry) error {
 	}
 
 	log.Printf("audit: %s on %s/%s by %s", e.Action, e.TargetType, e.TargetID, e.ActorEmail)
+	return nil
+}
+
+// RecordTx writes a durable audit record using a caller-owned transaction.
+//
+// The caller owns the transaction lifecycle. RecordTx never commits or
+// rolls back the supplied transaction.
+func RecordTx(ctx context.Context, tx pgx.Tx, e Entry) error {
+	var details []byte
+	if e.Details != nil {
+		b, err := json.Marshal(e.Details)
+		if err != nil {
+			return fmt.Errorf("audit: marshal details: %w", err)
+		}
+		details = b
+	}
+
+	var actorUserID any
+	if e.ActorUserID != "" {
+		actorUserID = e.ActorUserID
+	}
+
+	_, err := tx.Exec(
+		ctx,
+		`INSERT INTO audit_logs
+		   (tenant_id, actor_user_id, actor_email, action, target_type, target_id, details)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		e.TenantID,
+		actorUserID,
+		e.ActorEmail,
+		e.Action,
+		e.TargetType,
+		e.TargetID,
+		details,
+	)
+	if err != nil {
+		return fmt.Errorf("audit: record %s on %s/%s: %w",
+			e.Action,
+			e.TargetType,
+			e.TargetID,
+			err,
+		)
+	}
+
 	return nil
 }

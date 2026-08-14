@@ -2062,3 +2062,857 @@ func TestProcessorRunReapsAbandonedIntegration(t *testing.T) {
 		t.Fatal("processor did not shut down")
 	}
 }
+
+func TestRecoverTerminalEventIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	operatorID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.recover",
+		WorkspaceID:   workspaceID,
+		UserID:        &operatorID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"recover":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	// Put the event directly into the terminal failed state.
+	// Retry scheduling is already tested by MarkFailed/ClaimEvents tests;
+	// this test focuses specifically on terminal recovery.
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+	    SET status = 'failed',
+	        retry_count = $2,
+	        next_attempt_at = NULL,
+	        lease_id = NULL,
+	        claimed_at = NULL,
+	        updated_at = NOW()
+	  WHERE id = $1`,
+		claimedEvent.ID,
+		store.retryPolicy.MaxRetries,
+	)
+	if err != nil {
+		t.Fatalf("make event terminal: %v", err)
+	}
+
+	var (
+		beforeRetryCount  int
+		beforeNextAttempt *time.Time
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT retry_count, next_attempt_at
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&beforeRetryCount,
+		&beforeNextAttempt,
+	); err != nil {
+		t.Fatalf("load terminal event: %v", err)
+	}
+
+	if beforeRetryCount != store.retryPolicy.MaxRetries {
+		t.Fatalf(
+			"retry_count = %d, want %d",
+			beforeRetryCount,
+			store.retryPolicy.MaxRetries,
+		)
+	}
+
+	if beforeNextAttempt != nil {
+		t.Fatalf("next_attempt_at = %v, want NULL", *beforeNextAttempt)
+	}
+
+	if err := store.Recover(
+		ctx,
+		claimedEvent.ID,
+		operatorID,
+		"operator requested recovery",
+		false,
+	); err != nil {
+		t.Fatalf("recover terminal event: %v", err)
+	}
+
+	var (
+		status      string
+		retryCount  int
+		nextAttempt *time.Time
+		leaseID     *uuid.UUID
+		claimedAt   *time.Time
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        lease_id,
+		        claimed_at
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttempt,
+		&leaseID,
+		&claimedAt,
+	); err != nil {
+		t.Fatalf("load recovered event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != beforeRetryCount {
+		t.Fatalf(
+			"retry_count = %d, want preserved value %d",
+			retryCount,
+			beforeRetryCount,
+		)
+	}
+
+	if nextAttempt == nil {
+		t.Fatal("next_attempt_at = NULL, want recovery to make event eligible")
+	}
+
+	if leaseID != nil {
+		t.Fatalf("lease_id = %v, want NULL", *leaseID)
+	}
+
+	if claimedAt != nil {
+		t.Fatalf("claimed_at = %v, want NULL", *claimedAt)
+	}
+
+	var (
+		action      string
+		targetType  string
+		targetID    string
+		actorUserID uuid.UUID
+		details     []byte
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT action,
+		        target_type,
+		        target_id,
+		        actor_user_id,
+		        details
+		   FROM audit_logs
+		  WHERE tenant_id = $1
+		    AND target_type = 'outbox_event'
+		    AND target_id = $2
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		workspaceID,
+		claimedEvent.ID.String(),
+	).Scan(
+		&action,
+		&targetType,
+		&targetID,
+		&actorUserID,
+		&details,
+	); err != nil {
+		t.Fatalf("load recovery audit entry: %v", err)
+	}
+
+	if action != "outbox.recover" {
+		t.Fatalf("audit action = %q, want outbox.recover", action)
+	}
+
+	if targetType != "outbox_event" {
+		t.Fatalf("audit target_type = %q, want outbox_event", targetType)
+	}
+
+	if targetID != claimedEvent.ID.String() {
+		t.Fatalf(
+			"audit target_id = %q, want %q",
+			targetID,
+			claimedEvent.ID,
+		)
+	}
+
+	if actorUserID != operatorID {
+		t.Fatalf(
+			"audit actor_user_id = %s, want %s",
+			actorUserID,
+			operatorID,
+		)
+	}
+
+	if len(details) == 0 {
+		t.Fatal("audit details are empty")
+	}
+}
+
+func TestRecoverTerminalEventResetRetryBudgetIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	operatorID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.recover.reset",
+		WorkspaceID:   workspaceID,
+		UserID:        &operatorID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"recover":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	// Put the event directly into terminal failed state with an
+	// exhausted retry budget. Recovery with resetRetryBudget=true
+	// must explicitly reset that budget.
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET status = 'failed',
+		        retry_count = $2,
+		        next_attempt_at = NULL,
+		        lease_id = NULL,
+		        claimed_at = NULL,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		claimedEvent.ID,
+		store.retryPolicy.MaxRetries,
+	)
+	if err != nil {
+		t.Fatalf("make event terminal: %v", err)
+	}
+
+	var retryCountBefore int
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT retry_count
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(&retryCountBefore); err != nil {
+		t.Fatalf("load terminal event: %v", err)
+	}
+
+	if retryCountBefore != store.retryPolicy.MaxRetries {
+		t.Fatalf(
+			"retry_count = %d, want %d",
+			retryCountBefore,
+			store.retryPolicy.MaxRetries,
+		)
+	}
+
+	if err := store.Recover(
+		ctx,
+		claimedEvent.ID,
+		operatorID,
+		"reset retry budget after operator review",
+		true,
+	); err != nil {
+		t.Fatalf("recover terminal event with reset: %v", err)
+	}
+
+	var (
+		status      string
+		retryCount  int
+		nextAttempt *time.Time
+		leaseID     *uuid.UUID
+		claimedAt   *time.Time
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        lease_id,
+		        claimed_at
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttempt,
+		&leaseID,
+		&claimedAt,
+	); err != nil {
+		t.Fatalf("load recovered event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != 0 {
+		t.Fatalf(
+			"retry_count = %d, want 0 after explicit retry-budget reset",
+			retryCount,
+		)
+	}
+
+	if nextAttempt == nil {
+		t.Fatal("next_attempt_at = NULL, want recovery to make event eligible")
+	}
+
+	if leaseID != nil {
+		t.Fatalf("lease_id = %v, want NULL", *leaseID)
+	}
+
+	if claimedAt != nil {
+		t.Fatalf("claimed_at = %v, want NULL", *claimedAt)
+	}
+
+	var (
+		action      string
+		targetType  string
+		targetID    string
+		actorUserID uuid.UUID
+		details     []byte
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT action,
+		        target_type,
+		        target_id,
+		        actor_user_id,
+		        details
+		   FROM audit_logs
+		  WHERE tenant_id = $1
+		    AND target_type = 'outbox_event'
+		    AND target_id = $2
+		  ORDER BY created_at DESC
+		  LIMIT 1`,
+		workspaceID,
+		claimedEvent.ID.String(),
+	).Scan(
+		&action,
+		&targetType,
+		&targetID,
+		&actorUserID,
+		&details,
+	); err != nil {
+		t.Fatalf("load recovery audit entry: %v", err)
+	}
+
+	if action != "outbox.recover" {
+		t.Fatalf("audit action = %q, want outbox.recover", action)
+	}
+
+	if targetType != "outbox_event" {
+		t.Fatalf("audit target_type = %q, want outbox_event", targetType)
+	}
+
+	if targetID != claimedEvent.ID.String() {
+		t.Fatalf(
+			"audit target_id = %q, want %q",
+			targetID,
+			claimedEvent.ID,
+		)
+	}
+
+	if actorUserID != operatorID {
+		t.Fatalf(
+			"audit actor_user_id = %s, want %s",
+			actorUserID,
+			operatorID,
+		)
+	}
+
+	if len(details) == 0 {
+		t.Fatal("audit details are empty")
+	}
+}
+
+func TestRecoverRejectsNonTerminalEventsIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	operatorID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	tests := []struct {
+		name        string
+		status      string
+		retryCount  int
+		nextAttempt *time.Time
+	}{
+		{
+			name:        "pending",
+			status:      "pending",
+			retryCount:  0,
+			nextAttempt: nil,
+		},
+		{
+			name:        "processing",
+			status:      "processing",
+			retryCount:  0,
+			nextAttempt: nil,
+		},
+		{
+			name:        "done",
+			status:      "done",
+			retryCount:  store.retryPolicy.MaxRetries,
+			nextAttempt: nil,
+		},
+		{
+			name:       "non-terminal failed",
+			status:     "failed",
+			retryCount: 1,
+			nextAttempt: func() *time.Time {
+				t := time.Now().UTC().Add(time.Hour)
+				return &t
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			event := Event{
+				EventType:     "test.recover.reject",
+				WorkspaceID:   workspaceID,
+				UserID:        &operatorID,
+				CorrelationID: uuid.New(),
+				Payload:       json.RawMessage(`{"reject":true}`),
+			}
+
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin transaction: %v", err)
+			}
+
+			if err := store.Enqueue(ctx, tx, event); err != nil {
+				tx.Rollback(ctx)
+				t.Fatalf("enqueue: %v", err)
+			}
+
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+
+			var eventID uuid.UUID
+
+			if err := pool.QueryRow(
+				ctx,
+				`SELECT id
+				   FROM outbox_events
+				  WHERE correlation_id = $1`,
+				event.CorrelationID,
+			).Scan(&eventID); err != nil {
+				t.Fatalf("load event id: %v", err)
+			}
+
+			_, err = pool.Exec(
+				ctx,
+				`UPDATE outbox_events
+				    SET status = $2,
+				        retry_count = $3,
+				        next_attempt_at = $4,
+				        lease_id = NULL,
+				        claimed_at = NULL,
+				        updated_at = NOW()
+				  WHERE id = $1`,
+				eventID,
+				tt.status,
+				tt.retryCount,
+				tt.nextAttempt,
+			)
+			if err != nil {
+				t.Fatalf("set test state: %v", err)
+			}
+
+			err = store.Recover(
+				ctx,
+				eventID,
+				operatorID,
+				"operator attempted invalid recovery",
+				false,
+			)
+			if err == nil {
+				t.Fatalf("Recover() succeeded for %s event", tt.status)
+			}
+
+			var (
+				status      string
+				retryCount  int
+				nextAttempt *time.Time
+			)
+
+			if err := pool.QueryRow(
+				ctx,
+				`SELECT status,
+				        retry_count,
+				        next_attempt_at
+				   FROM outbox_events
+				  WHERE id = $1`,
+				eventID,
+			).Scan(
+				&status,
+				&retryCount,
+				&nextAttempt,
+			); err != nil {
+				t.Fatalf("load event after rejected recovery: %v", err)
+			}
+
+			if status != tt.status {
+				t.Fatalf(
+					"status = %q, want unchanged %q",
+					status,
+					tt.status,
+				)
+			}
+
+			if retryCount != tt.retryCount {
+				t.Fatalf(
+					"retry_count = %d, want unchanged %d",
+					retryCount,
+					tt.retryCount,
+				)
+			}
+
+			if tt.nextAttempt == nil && nextAttempt != nil {
+				t.Fatalf(
+					"next_attempt_at = %v, want NULL",
+					*nextAttempt,
+				)
+			}
+
+			if tt.nextAttempt != nil && nextAttempt == nil {
+				t.Fatal("next_attempt_at = NULL, want unchanged value")
+			}
+
+			var auditCount int
+
+			if err := pool.QueryRow(
+				ctx,
+				`SELECT COUNT(*)
+				   FROM audit_logs
+				  WHERE tenant_id = $1
+				    AND target_type = 'outbox_event'
+				    AND target_id = $2
+				    AND action = 'outbox.recover'`,
+				workspaceID,
+				eventID.String(),
+			).Scan(&auditCount); err != nil {
+				t.Fatalf("check recovery audit entry: %v", err)
+			}
+
+			if auditCount != 0 {
+				t.Fatalf(
+					"recovery audit entries = %d, want 0",
+					auditCount,
+				)
+			}
+		})
+	}
+}
+
+func TestRecoverRequiresReasonIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	operatorID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.recover.reason",
+		WorkspaceID:   workspaceID,
+		UserID:        &operatorID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"reason":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed %d events, want 1", len(claimed))
+	}
+
+	eventID := claimed[0].ID
+
+	_, err = pool.Exec(
+		ctx,
+		`UPDATE outbox_events
+		    SET status = 'failed',
+		        retry_count = $2,
+		        next_attempt_at = NULL,
+		        lease_id = NULL,
+		        claimed_at = NULL,
+		        updated_at = NOW()
+		  WHERE id = $1`,
+		eventID,
+		store.retryPolicy.MaxRetries,
+	)
+	if err != nil {
+		t.Fatalf("make event terminal: %v", err)
+	}
+
+	err = store.Recover(
+		ctx,
+		eventID,
+		operatorID,
+		"",
+		false,
+	)
+	if err == nil {
+		t.Fatal("Recover() succeeded with empty reason")
+	}
+
+	var (
+		status      string
+		retryCount  int
+		nextAttempt *time.Time
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at
+		   FROM outbox_events
+		  WHERE id = $1`,
+		eventID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttempt,
+	); err != nil {
+		t.Fatalf("load event after rejected recovery: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != store.retryPolicy.MaxRetries {
+		t.Fatalf(
+			"retry_count = %d, want %d",
+			retryCount,
+			store.retryPolicy.MaxRetries,
+		)
+	}
+
+	if nextAttempt != nil {
+		t.Fatalf(
+			"next_attempt_at = %v, want NULL",
+			*nextAttempt,
+		)
+	}
+}

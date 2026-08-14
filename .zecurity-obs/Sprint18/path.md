@@ -155,7 +155,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 8 — Terminal Event Recovery
 > See [[Sprint18/Member1-Go/Phase8-Terminal-Event-Recovery]]. Depends on Phases 1 + 6.
-- [ ] **M18-8** Explicit operator `Recover(ctx, eventID, operatorID, reason, resetRetryBudget)` for terminal `failed` events: clears lease, schedules one attempt, audited, never automatic. No generic admin UI this sprint (backend capability only).
+- [x] **M18-8** Explicit operator `Recover(ctx, eventID, operatorID, reason, resetRetryBudget)` for terminal `failed` events: clears lease, schedules one attempt, audited, never automatic. No generic admin UI this sprint (backend capability only).
 
 ### Phase 9 — Observability
 > See [[Sprint18/Member1-Go/Phase9-Observability]]. Depends on Phase 7.
