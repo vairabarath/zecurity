@@ -10,6 +10,22 @@ tags:
 
 ---
 
+## 2026-08-14 — Kilo — Sprint 18 Phase 10 Verification
+
+**What was done:**
+- Verified and completed Sprint 18 Phase 10 (Testing) for the controller outbox.
+- Confirmed all Phase 10 requirements implemented: 20 PostgreSQL integration tests (rollback, commit, concurrent claim, unique lease, stale MarkDone/MarkFailed, abandoned recovery, lease-replacement race, retry exhaustion, unknown-handler terminal, workspace-deletion protection, terminal-recovery authorization) + unit tests (TestTruncateError for 4096-byte truncation, TestHandlerIdempotency, backoff/deterministic-jitter, processor behavior, graceful shutdown) across `store_test.go`, `handler_test.go`, and `store_integration_test.go`.
+- Build gate confirmed passing: `go build ./...`, `go vet ./internal/outbox/...`, `go test ./internal/outbox/...`.
+- Marked Phase 10 complete in `path.md` (all checkboxes) and `Phase10-Testing.md` (`status: done`, all checkboxes).
+
+**Key decisions:**
+- No source code changes — only test files and documentation were committed.
+
+**What's next:**
+- Sprint 18 outbox is fully implemented, tested, and documented. Awaiting push to origin/pending-15-outbox-plan.
+
+---
+
 ## 2026-08-11 — Kilo — Sprint 18 Phase 9 Verification
 
 **What was done:**

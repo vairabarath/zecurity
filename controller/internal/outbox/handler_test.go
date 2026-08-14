@@ -190,3 +190,35 @@ func TestHandlerRegistryConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+type idempotentTestHandler struct{}
+
+func (idempotentTestHandler) Handle(
+	ctx context.Context,
+	evt OutboxEvent,
+) error {
+	// Simulate an already-applied side effect.
+	// Idempotent handlers treat redelivery as success.
+	return nil
+}
+
+func TestHandlerIdempotency(t *testing.T) {
+	registry := NewHandlerRegistry()
+
+	if err := registry.RegisterHandler(
+		"test.idempotent",
+		idempotentTestHandler{},
+	); err != nil {
+		t.Fatalf("register handler: %v", err)
+	}
+
+	evt := OutboxEvent{
+		ID:            uuid.New(),
+		EventType:     "test.idempotent",
+		CorrelationID: uuid.New(),
+	}
+
+	if err := registry.Dispatch(context.Background(), evt); err != nil {
+		t.Fatalf("idempotent redelivery returned error: %v", err)
+	}
+}

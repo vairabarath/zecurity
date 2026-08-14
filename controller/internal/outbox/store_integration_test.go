@@ -2916,3 +2916,260 @@ func TestRecoverRequiresReasonIntegration(t *testing.T) {
 		)
 	}
 }
+
+func TestProcessorUnknownHandlerTerminalIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	// Deliberately leave the event type unregistered.
+	registry := NewHandlerRegistry()
+
+	processor, err := NewProcessor(store, registry)
+	if err != nil {
+		t.Fatalf("create processor: %v", err)
+	}
+
+	event := Event{
+		EventType:     "test.processor.unknown",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"unknown":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	claimed, err := store.ClaimEvents(ctx, 1)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	if len(claimed) != 1 {
+		t.Fatalf("claimed events = %d, want 1", len(claimed))
+	}
+
+	claimedEvent := claimed[0]
+
+	if claimedEvent.LeaseID == nil {
+		t.Fatal("claimed event has nil lease_id")
+	}
+
+	err = processor.processEvent(ctx, claimedEvent)
+
+	if !errors.Is(err, ErrNoHandler) {
+		t.Fatalf("process error = %v, want ErrNoHandler", err)
+	}
+
+	var (
+		status        string
+		retryCount    int
+		nextAttemptAt *time.Time
+		lastError     *string
+	)
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT status,
+		        retry_count,
+		        next_attempt_at,
+		        last_error
+		   FROM outbox_events
+		  WHERE id = $1`,
+		claimedEvent.ID,
+	).Scan(
+		&status,
+		&retryCount,
+		&nextAttemptAt,
+		&lastError,
+	); err != nil {
+		t.Fatalf("read terminal event: %v", err)
+	}
+
+	if status != "failed" {
+		t.Fatalf("status = %q, want failed", status)
+	}
+
+	if retryCount != store.retryPolicy.MaxRetries {
+		t.Fatalf(
+			"retry_count = %d, want %d",
+			retryCount,
+			store.retryPolicy.MaxRetries,
+		)
+	}
+
+	if nextAttemptAt != nil {
+		t.Fatalf(
+			"next_attempt_at = %v, want NULL for terminal failure",
+			*nextAttemptAt,
+		)
+	}
+
+	if lastError == nil {
+		t.Fatal("last_error = NULL, want unknown-handler error")
+	}
+
+	if !strings.Contains(
+		*lastError,
+		"no handler registered for event_type "+event.EventType,
+	) {
+		t.Fatalf(
+			"last_error = %q, want unknown-handler message",
+			*lastError,
+		)
+	}
+}
+
+func TestWorkspaceDeletionProtectionIntegration(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := outboxTestDBName(t)
+
+	adminPool := outboxTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(
+			ctx,
+			"DROP DATABASE IF EXISTS "+dbName,
+		); err != nil {
+			t.Logf("drop database: %v", err)
+		}
+	}()
+
+	testDSN, err := outboxTestDSN(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test database DSN: %v", err)
+	}
+
+	pool := outboxTestPool(t, ctx, testDSN)
+	defer pool.Close()
+
+	if err := applyOutboxTestMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	workspaceID := insertOutboxTestWorkspace(t, ctx, pool)
+	userID := insertOutboxTestUser(t, ctx, pool, workspaceID)
+
+	store := NewOutbox(pool)
+
+	event := Event{
+		EventType:     "test.workspace.delete",
+		WorkspaceID:   workspaceID,
+		UserID:        &userID,
+		CorrelationID: uuid.New(),
+		Payload:       json.RawMessage(`{"delete_protection":true}`),
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tx, event); err != nil {
+		tx.Rollback(ctx)
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// The committed outbox event must prevent the owning workspace
+	// from being deleted.
+	_, err = pool.Exec(
+		ctx,
+		`DELETE FROM workspaces WHERE id = $1`,
+		workspaceID,
+	)
+	if err == nil {
+		t.Fatal("workspace deletion succeeded, want ON DELETE RESTRICT failure")
+	}
+
+	// The event must still exist after the rejected deletion.
+	var count int
+	var eventID uuid.UUID
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT id
+       FROM outbox_events
+      WHERE correlation_id = $1`,
+		event.CorrelationID,
+	).Scan(&eventID); err != nil {
+		t.Fatalf("load outbox event id: %v", err)
+	}
+
+	if err := pool.QueryRow(
+		ctx,
+		`SELECT COUNT(*)
+		   FROM outbox_events
+		  WHERE id = $1`,
+		eventID,
+	).Scan(&count); err != nil {
+		t.Fatalf("check outbox event: %v", err)
+	}
+
+	if count != 1 {
+		t.Fatalf(
+			"outbox event count = %d, want 1 after rejected workspace deletion",
+			count,
+		)
+	}
+}
