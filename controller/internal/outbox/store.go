@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -218,6 +219,28 @@ func (o *Outbox) ClaimEvents(
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate claimed outbox events: %w", err)
+	}
+
+	if len(events) > 0 {
+		eventIDs := make([]string, 0, len(events))
+
+		for _, evt := range events {
+			eventIDs = append(
+				eventIDs,
+				fmt.Sprintf(
+					"%s(event_type=%s correlation_id=%s)",
+					evt.ID,
+					evt.EventType,
+					evt.CorrelationID,
+				),
+			)
+		}
+
+		log.Printf(
+			"outbox: claimed %d event(s): %v",
+			len(events),
+			eventIDs,
+		)
 	}
 
 	return events, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -159,8 +160,18 @@ func (p *Processor) processEvent(
 			return fmt.Errorf("mark event done: %w", err)
 		}
 
+		log.Printf(
+			"outbox: completed event id=%s event_type=%s workspace_id=%s user_id=%v correlation_id=%s",
+			evt.ID,
+			evt.EventType,
+			evt.WorkspaceID,
+			evt.UserID,
+			evt.CorrelationID,
+		)
+
 		return nil
 	}
+
 	if errors.Is(err, ErrNoHandler) {
 		if markErr := p.outbox.MarkFailedTerminal(
 			ctx,
@@ -174,8 +185,20 @@ func (p *Processor) processEvent(
 			)
 		}
 
+		log.Printf(
+			"outbox: terminal failure id=%s event_type=%s workspace_id=%s user_id=%v correlation_id=%s retry_count=%d error=%v",
+			evt.ID,
+			evt.EventType,
+			evt.WorkspaceID,
+			evt.UserID,
+			evt.CorrelationID,
+			p.outbox.retryPolicy.MaxRetries,
+			err,
+		)
+
 		return err
 	}
+
 	if markErr := p.outbox.MarkFailed(
 		ctx,
 		evt.ID,
@@ -185,6 +208,32 @@ func (p *Processor) processEvent(
 		return fmt.Errorf(
 			"mark event failed: %w (handler error: %v)",
 			markErr,
+			err,
+		)
+	}
+
+	retryCount := evt.RetryCount + 1
+
+	if retryCount >= p.outbox.retryPolicy.MaxRetries {
+		log.Printf(
+			"outbox: terminal failure id=%s event_type=%s workspace_id=%s user_id=%v correlation_id=%s retry_count=%d error=%v",
+			evt.ID,
+			evt.EventType,
+			evt.WorkspaceID,
+			evt.UserID,
+			evt.CorrelationID,
+			retryCount,
+			err,
+		)
+	} else {
+		log.Printf(
+			"outbox: processing failure id=%s event_type=%s workspace_id=%s user_id=%v correlation_id=%s retry_count=%d error=%v",
+			evt.ID,
+			evt.EventType,
+			evt.WorkspaceID,
+			evt.UserID,
+			evt.CorrelationID,
+			retryCount,
 			err,
 		)
 	}
@@ -253,9 +302,14 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 				return
 
 			case <-ticker.C:
-				if _, err := p.outbox.ReapAbandoned(ctx, p.lockWindow); err != nil {
+				reaped, err := p.outbox.ReapAbandoned(ctx, p.lockWindow)
+				if err != nil {
 					errCh <- fmt.Errorf("reap abandoned outbox events: %w", err)
+					continue
 				}
+				log.Printf("outbox: reaper recovered %d abandoned event(s)",
+					reaped,
+				)
 			}
 		}
 	}()

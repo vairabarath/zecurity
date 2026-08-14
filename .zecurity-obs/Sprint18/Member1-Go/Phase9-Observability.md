@@ -4,7 +4,7 @@ member: M1
 sprint: 18
 phase: 9
 title: Observability
-status: planned
+status: done
 depends_on: [7]
 tags: [go, outbox, logging, platform, pending-15]
 ---
@@ -28,17 +28,17 @@ operator can trace one logical operation end-to-end.
 
 ## Steps
 
-- [ ] **M18-9** Log **claim activity**: when events are claimed (count + event IDs).
-- [ ] **M18-9** Log **completion**: success and final failure, with event type, workspace ID,
+- [x] **M18-9** Log **claim activity**: when events are claimed (count + event IDs).
+- [x] **M18-9** Log **completion**: success and final failure, with event type, workspace ID,
       user ID, and `correlation_id`.
-- [ ] **M18-9** Log **processing failures**: event type, workspace_id, user_id, retry number, and
+- [x] **M18-9** Log **processing failures**: event type, workspace_id, user_id, retry number, and
       error message on every failure.
-- [ ] **M18-9** Log **retry count** on each failure (from `retry_count`).
-- [ ] **M18-9** Log **terminal failures** (after max retries / unknown handler) at warning/critical
+- [x] **M18-9** Log **retry count** on each failure (from `retry_count`).
+- [x] **M18-9** Log **terminal failures** (after max retries / unknown handler) at warning/critical
       level with event details; the event stays in `failed` — never silently dropped. An operator
       can inspect `outbox_events` for stuck events.
-- [ ] **M18-9** Log **reaper activity**: how many abandoned leases were recovered per pass.
-- [ ] **M18-9** Include `correlation_id` in all outbox log lines so identity-mutation →
+- [x] **M18-9** Log **reaper activity**: how many abandoned leases were recovered per pass.
+- [x] **M18-9** Include `correlation_id` in all outbox log lines so identity-mutation →
       outbox-processing → downstream side-effect can be correlated.
 
 ## Rules

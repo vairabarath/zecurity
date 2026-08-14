@@ -159,7 +159,7 @@ P1  Schema / migration 033            (Day 1, independent)
 
 ### Phase 9 — Observability
 > See [[Sprint18/Member1-Go/Phase9-Observability]]. Depends on Phase 7.
-- [ ] **M18-9** Structured `log` for claim, completion, failure, retry count, workspace/user/event-type/correlation ID, terminal failure, reaper activity. No new observability framework.
+- [x] **M18-9** Structured `log` for claim, completion, failure, retry count, workspace/user/event-type/correlation ID, terminal failure, reaper activity. No new observability framework.
 
 ### Phase 10 — Testing
 > See [[Sprint18/Member1-Go/Phase10-Testing]]. Depends on Phases 1–9.

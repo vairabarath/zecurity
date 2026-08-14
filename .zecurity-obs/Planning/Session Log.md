@@ -10,6 +10,17 @@ tags:
 
 ---
 
+## 2026-08-11 — Kilo — Sprint 18 Phase 9 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 9 (Observability) is implemented.
+- `controller/internal/outbox/store.go` logs claim activity with count and event IDs, including `correlation_id`.
+- `controller/internal/outbox/processor.go` logs completion success, terminal failures, processing failures with retry count, and reaper recovery counts, all carrying `event_type`, `workspace_id`, `user_id`, and `correlation_id`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 9 complete in `.zecurity-obs/Sprint18/path.md` and `Phase9-Observability.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-08-11 — Kilo — Sprint 18 Phase 8 Verification
 
 **What was done:**
