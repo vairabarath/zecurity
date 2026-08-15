@@ -99,16 +99,23 @@ impl AgentTunnelHub {
     /// **M4 API contract** — do not change the signature without coordinating with M4:
     /// ```ignore
     /// let relay = agent_tunnel::open_relay_session(
-    ///     &hub, shield_id, destination, port, protocol
+    ///     &hub, shield_id, destination, port, protocol, resource_id
     /// ).await?;
     /// relay.relay_stream(stream).await?;
     /// ```
+    ///
+    /// `resource_id` is passed to the Shield so it can look up the `local_target`
+    /// IT already stored for that resource (Sprint 16 Phase 8). It is an identity,
+    /// not a dial target — the Shield must never take an address out of the
+    /// TunnelOpen message. Same shape as Stage 1 one layer up: assert who, let the
+    /// recipient decide where.
     pub async fn open_relay_session(
         &self,
         shield_id: &str,
         destination: &str,
         port: u16,
         protocol: &str,
+        resource_id: &str,
     ) -> Result<RelaySession> {
         let shield_tx = self
             .shield_txs
@@ -133,6 +140,7 @@ impl AgentTunnelHub {
                     destination: destination.to_string(),
                     port: port as u32,
                     protocol: protocol.to_string(),
+                    resource_id: resource_id.to_string(),
                 })),
             })
             .await

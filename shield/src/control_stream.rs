@@ -221,7 +221,9 @@ async fn handle_connector_msg(
                     .await
                     .is_err()
                 {
-                    return Some(Err(anyhow::anyhow!("outbound channel closed on snapshot ack")));
+                    return Some(Err(anyhow::anyhow!(
+                        "outbound channel closed on snapshot ack"
+                    )));
                 }
             }
             None
@@ -265,6 +267,9 @@ async fn handle_connector_msg(
                 open.destination,
                 open.port,
                 open.protocol,
+                // Identity from the message; the ADDRESS comes from resource_state.
+                open.resource_id,
+                resource_state.clone(),
                 out_tx.clone(),
             )
             .await;
@@ -319,7 +324,10 @@ fn apply_peer_connector_list(
     let mut new_sorted = new_list.clone();
     new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
     if current_sorted == new_sorted {
-        info!(peers = new_list.len(), "PeerConnectorList unchanged, no update");
+        info!(
+            peers = new_list.len(),
+            "PeerConnectorList unchanged, no update"
+        );
         return;
     }
 
@@ -424,7 +432,7 @@ async fn send_discovery_report(
     let full_sync = diff.full_sync;
 
     let proto_report = DiscoveryReport {
-        shield_id:   diff.shield_id,
+        shield_id: diff.shield_id,
         seq,
         fingerprint: diff.fingerprint,
         full_sync,
@@ -432,9 +440,9 @@ async fn send_discovery_report(
             .added
             .into_iter()
             .map(|s| ProtoDiscoveredService {
-                protocol:     s.protocol.to_string(),
-                port:         s.port as u32,
-                bound_ip:     s.bound_ip,
+                protocol: s.protocol.to_string(),
+                port: s.port as u32,
+                bound_ip: s.bound_ip,
                 service_name: s.service_name,
             })
             .collect(),
@@ -442,9 +450,9 @@ async fn send_discovery_report(
             .removed
             .into_iter()
             .map(|(port, proto)| ProtoDiscoveredService {
-                protocol:     proto,
-                port:         port as u32,
-                bound_ip:     String::new(),
+                protocol: proto,
+                port: port as u32,
+                bound_ip: String::new(),
                 service_name: String::new(),
             })
             .collect(),
@@ -455,7 +463,13 @@ async fn send_discovery_report(
     };
 
     match out_tx.send(msg).await {
-        Ok(()) => info!(seq, added = added_len, removed = removed_len, full_sync, "discovery: report sent"),
+        Ok(()) => info!(
+            seq,
+            added = added_len,
+            removed = removed_len,
+            full_sync,
+            "discovery: report sent"
+        ),
         Err(e) => warn!("discovery: failed to send report: {}", e),
     }
 }

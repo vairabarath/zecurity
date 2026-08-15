@@ -166,13 +166,10 @@ func buildSnapshotMsg(ctx context.Context, db *pgxpool.Pool, shieldID string) (*
 
 	resources := make([]*shieldpb.ResourceInstruction, 0, len(snap.Resources))
 	for _, row := range snap.Resources {
-		resources = append(resources, &shieldpb.ResourceInstruction{
-			ResourceId: row.ID,
-			Host:       row.Host,
-			Protocol:   row.Protocol,
-			PortFrom:   int32(row.PortFrom),
-			PortTo:     int32(row.PortTo),
-		})
+		// No per-row action: a snapshot lists desired state, and every row it
+		// carries means "enforce this". Field mapping lives in instructionFor so
+		// all three delivery paths cannot drift apart.
+		resources = append(resources, instructionFor(row, ""))
 	}
 
 	return &pb.ConnectorControlMessage{
@@ -217,14 +214,11 @@ func (r *ConnectorRegistry) PushInstruction(row *resource.Row) {
 	if row.ConnectorID == "" {
 		return
 	}
-	instr := &shieldpb.ResourceInstruction{
-		ResourceId: row.ID,
-		Host:       row.Host,
-		Protocol:   row.Protocol,
-		PortFrom:   int32(row.PortFrom),
-		PortTo:     int32(row.PortTo),
-		Action:     row.PendingAction,
-	}
+	// instructionForRow flattens Row's nullable LocalTarget and shares the field
+	// mapping with the snapshot path. Getting this path wrong is the "works after
+	// a full resync but not after an incremental push" failure — the snapshot
+	// would deliver the right value on reconnect while this one silently sent "".
+	instr := instructionForRow(row)
 	_ = r.PushResourceInstruction(row.ConnectorID, row.ShieldID, []*shieldpb.ResourceInstruction{instr})
 }
 
@@ -529,14 +523,11 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 			if r.PendingAction != "remove" {
 				continue // applies are delivered by the snapshot above
 			}
-			instrs = append(instrs, &shieldpb.ResourceInstruction{
-				ResourceId: r.ID,
-				Host:       r.Host,
-				Protocol:   r.Protocol,
-				PortFrom:   int32(r.PortFrom),
-				PortTo:     int32(r.PortTo),
-				Action:     r.PendingAction,
-			})
+			// local_target rides along but is unused here: the loop above skips
+			// everything except Action == "remove", and a remove dials nothing —
+			// the shield drops the rule and forgets the resource. Carried anyway
+			// because the shared converter is what keeps the three paths honest.
+			instrs = append(instrs, instructionFor(r, r.PendingAction))
 		}
 		if len(instrs) == 0 {
 			continue

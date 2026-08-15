@@ -48,6 +48,20 @@ message ResourceInstruction {
   int32 port_from = 4;
   int32 port_to = 5;
   string action = 6; // "apply" or "remove"
+
+  // ── Shield-side dial target (PENDING-14 / Sprint 16 Phase 8) ─────────────
+  // Which LOCAL address this shield dials for the resource, and probes for
+  // health. Empty = dial `host`, i.e. current behaviour, so an un-upgraded
+  // controller is unaffected.
+  //
+  // Selects FROM the already-allowed set { "127.0.0.1", detect_lan_ip() } —
+  // it never extends it. Anything else is rejected exactly as `host` is today.
+  // Not a hostname: the shield is not a resolver.
+  //
+  // This is the field that was briefly ACLEntry 13 in Phase 5 and removed
+  // before it shipped. It lives here because the Shield is the only component
+  // that dials a resource's on-host address, and Shields never see an ACLEntry.
+  string local_target = 7;
 }
 
 message ResourceAck {
@@ -144,6 +158,19 @@ message TunnelOpen {
   string destination = 2; // target IP or hostname
   uint32 port = 3;
   string protocol = 4; // "tcp" or "udp"
+
+  // Which resource this tunnel is for (PENDING-14 / Sprint 16 Phase 8).
+  //
+  // The shield uses this to look up the `local_target` it ALREADY STORED for
+  // the resource — it must never take a dial target out of this message. That
+  // is the same confused-deputy shape Stage 1 removed one layer up: the client
+  // asserts an identity, the connector dials its own ACL's address. Here the
+  // connector asserts an identity and the shield dials its own stored target.
+  //
+  // Empty = fall back to dialing `destination`, so an un-upgraded connector
+  // keeps working. Tightening this to mandatory is a follow-up, mirroring the
+  // Phase 1 → Phase 3 tolerant-then-require sequence.
+  string resource_id = 5;
 }
 
 message TunnelOpened {

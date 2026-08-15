@@ -770,7 +770,6 @@ mod tests {
             policy_cache,
         )
     }
-
     fn instr(id: &str) -> ResourceInstruction {
         ResourceInstruction {
             resource_id: id.to_string(),
@@ -779,6 +778,10 @@ mod tests {
             port_from: 80,
             port_to: 80,
             action: "apply".to_string(),
+            // Sprint 16 Phase 8: the connector relays instructions opaquely and
+            // never reads this — empty keeps these tests about queueing, not
+            // addressing. The shield-side behaviour is tested in the shield.
+            local_target: String::new(),
         }
     }
 

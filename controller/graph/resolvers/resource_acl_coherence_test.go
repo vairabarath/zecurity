@@ -172,22 +172,49 @@ func TestForceDeleteResource_Invalidates(t *testing.T) {
 	}
 }
 
-// TestProtectResource_DoesNotInvalidate: protect changes only status/pending_action,
-// which the compiler never reads — it must NOT invalidate (locks current behavior).
-func TestProtectResource_DoesNotInvalidate(t *testing.T) {
+// TestProtectResource_Invalidates: protect MUST invalidate.
+//
+// This test previously asserted the opposite, on the premise that protect "changes
+// only status/pending_action, which the compiler never reads". That premise is
+// false: the compiler selects r.status (internal/policy/store.go) and derives
+// ACLEntry.route_type from it (routeTypeForResource) — 'unprotected' yields
+// "connector", 'protecting' yields "shield". Protect therefore flips route_type,
+// and the connector branches on route_type FIRST (Sprint 16 Phase 7.1).
+//
+// Not propagating that flip is an enforcement bypass, not a missed optimisation:
+// connectors would keep direct-dialing a resource that is now shield-protected.
+// The test had never executed — it is gated on RESOURCE_TEST_SHIELD_ID — so the
+// wrong premise was never contradicted.
+//
+// Contrast TestUnprotectResource_DoesNotInvalidate below, where the asymmetry is
+// real and correct.
+func TestProtectResource_Invalidates(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	id := f.seedResource(t, "10.0.0.95", "unprotected")
+	before := f.notifier.Version(f.tenantID)
 
 	if _, err := f.mr.ProtectResource(f.ctx, id); err != nil {
-		t.Fatalf("ProtectResource: %v (is RESOURCE_TEST_SHIELD_ID active?)", err)
+		t.Fatalf("ProtectResource: %v (is RESOURCE_TEST_SHIELD_ID active, and does "+
+			"its lan_ip match the seeded host? MarkProtecting requires "+
+			"shields.lan_ip = resources.host)", err)
 	}
-	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("push hook fired %d times on protect, want 0", got)
+	if got := f.fires.Load(); got != 1 {
+		t.Fatalf("push hook fired %d times on protect, want 1 — route_type flips "+
+			"connector→shield and every client must learn it", got)
+	}
+	if got := f.notifier.Version(f.tenantID); got <= before {
+		t.Fatalf("version not bumped on protect: %d -> %d", before, got)
 	}
 }
 
-// TestUnprotectResource_DoesNotInvalidate: unprotect changes only status/pending_action
-// — it must NOT invalidate (locks current behavior).
+// TestUnprotectResource_DoesNotInvalidate: unprotect must NOT invalidate — and
+// unlike protect, that is correct rather than an oversight.
+//
+// Unprotect moves 'protected' → 'protecting' with pending_action='remove'. Both
+// statuses map to route_type "shield" (routeTypeForResource), so the compiled ACL
+// is byte-identical at this point and there is nothing for a client to learn. The
+// flip to "connector" happens later, when the shield acks removal and the row
+// reaches 'unprotected' — invalidation belongs on that path, not here.
 func TestUnprotectResource_DoesNotInvalidate(t *testing.T) {
 	f := newACLCoherenceFixture(t)
 	id := f.seedResource(t, "10.0.0.96", "protected")

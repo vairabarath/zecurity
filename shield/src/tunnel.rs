@@ -8,9 +8,12 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
+use tracing::{debug, warn};
+
 use crate::proto::{
     shield_control_message::Body, ShieldControlMessage, TunnelClose, TunnelData, TunnelOpened,
 };
+use crate::resources::SharedResourceState;
 
 const MAX_CHUNK: usize = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -29,18 +32,140 @@ pub fn new_hub() -> TunnelHub {
 }
 
 /// Dispatch to TCP or UDP handler based on protocol field.
+///
+/// Sprint 16 Phase 8.2: the address dialed comes from this shield's own applied
+/// state, keyed by the `resource_id` the connector asserts — never from the
+/// `destination` field of this per-connection message. Resolution happens once,
+/// here, so the TCP and UDP handlers below receive an already-decided address and
+/// cannot disagree about it.
 pub async fn handle_tunnel_open(
     hub: TunnelHub,
     connection_id: String,
     destination: String,
     port: u32,
     protocol: String,
+    resource_id: String,
+    resource_state: Arc<SharedResourceState>,
     upstream_tx: mpsc::Sender<ShieldControlMessage>,
 ) {
+    let target = resolve_dial_target(&resource_id, &destination, &resource_state, &connection_id);
+
+    debug!(
+        connection_id = %connection_id,
+        resource_id = %resource_id,
+        dial_target = %target,
+        port,
+        protocol = %protocol,
+        "opening tunnel to resource"
+    );
+
     if protocol == "udp" {
-        handle_tunnel_open_udp(hub, connection_id, destination, port, upstream_tx).await;
+        handle_tunnel_open_udp(hub, connection_id, target, port, upstream_tx).await;
     } else {
-        handle_tunnel_open_tcp(hub, connection_id, destination, port, upstream_tx).await;
+        handle_tunnel_open_tcp(hub, connection_id, target, port, upstream_tx).await;
+    }
+}
+
+/// Decide the address to dial for one tunnel-open. Extracted as a pure function so
+/// the decision is testable — the surrounding handler spawns tasks and opens real
+/// sockets, so the choice itself would otherwise have no coverage at all.
+///
+/// The rule: identity comes from the message, the ADDRESS comes from applied state.
+fn resolve_dial_target(
+    resource_id: &str,
+    destination: &str,
+    state: &SharedResourceState,
+    connection_id: &str,
+) -> String {
+    if resource_id.is_empty() {
+        // Un-upgraded connector: no identity asserted, so there is nothing to look
+        // up. Unchanged pre-Phase-8 behaviour, and the reason TunnelOpen.resource_id
+        // is tolerant rather than required — mirroring the Phase 1 → Phase 3
+        // sequence one layer up. Tightening this to a denial is a follow-up.
+        return destination.to_string();
+    }
+    match state.dial_target_for(resource_id) {
+        Some(t) => t,
+        None => {
+            // The connector asserted a resource this shield has not applied — a
+            // snapshot still in flight, or genuine divergence. Falling back is not a
+            // new hole (it is exactly what the shield did before this phase), but it
+            // IS the residual case worth tightening once every connector is known to
+            // send resource_id.
+            warn!(
+                connection_id = %connection_id,
+                resource_id = %resource_id,
+                destination = %destination,
+                "tunnel open for a resource this shield has not applied — \
+                 falling back to the connector's destination"
+            );
+            destination.to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resources::ActiveResource;
+
+    fn state_with(id: &str, dial_target: &str) -> Arc<SharedResourceState> {
+        let state = Arc::new(SharedResourceState::new());
+        *state.active.lock().unwrap() = vec![ActiveResource {
+            resource_id: id.to_string(),
+            host: "10.0.0.1".to_string(),
+            dial_target: dial_target.to_string(),
+            protocol: "tcp".to_string(),
+            port_from: 8080,
+            port_to: 8080,
+        }];
+        state
+    }
+
+    /// The whole point of Phase 8.2: the stored target wins over the address the
+    /// connector put in the message. If this ever returns `destination`, the
+    /// connector has free-form dialing inside the shield.
+    #[test]
+    fn applied_resource_dials_its_stored_target_not_the_message() {
+        let state = state_with("r1", "127.0.0.1");
+        assert_eq!(
+            resolve_dial_target("r1", "10.0.0.1", &state, "c1"),
+            "127.0.0.1"
+        );
+    }
+
+    /// Backward compatibility: an un-upgraded connector sends no resource_id, so
+    /// there is nothing to look up and behaviour must be exactly as before.
+    #[test]
+    fn empty_resource_id_falls_back_to_the_message_destination() {
+        let state = state_with("r1", "127.0.0.1");
+        assert_eq!(
+            resolve_dial_target("", "10.0.0.1", &state, "c1"),
+            "10.0.0.1"
+        );
+    }
+
+    /// Deliberately tolerant, not fail-closed: a snapshot may still be in flight.
+    /// Documented as the residual case to tighten once every connector sends an id.
+    #[test]
+    fn unapplied_resource_falls_back_to_the_message_destination() {
+        let state = state_with("r1", "127.0.0.1");
+        assert_eq!(
+            resolve_dial_target("r-other", "10.0.0.1", &state, "c1"),
+            "10.0.0.1"
+        );
+    }
+
+    /// A resource with no local_target stores host as its dial_target, so the
+    /// lookup path and the fallback path agree — the common case must not change
+    /// behaviour just because the connector started asserting an identity.
+    #[test]
+    fn resource_without_local_target_dials_its_host() {
+        let state = state_with("r1", "10.0.0.1");
+        assert_eq!(
+            resolve_dial_target("r1", "10.0.0.1", &state, "c1"),
+            "10.0.0.1"
+        );
     }
 }
 
@@ -72,7 +197,8 @@ async fn handle_tunnel_open_tcp(
         };
 
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
-        hub.0.lock()
+        hub.0
+            .lock()
             .await
             .insert(conn_id.clone(), TunnelSession { inbound_tx });
 
@@ -161,7 +287,8 @@ async fn handle_tunnel_open_udp(
         }
 
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
-        hub.0.lock()
+        hub.0
+            .lock()
             .await
             .insert(conn_id.clone(), TunnelSession { inbound_tx });
 

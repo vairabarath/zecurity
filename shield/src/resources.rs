@@ -25,6 +25,11 @@ const PROTECT_CHAIN: &str = "resource_protect";
 pub struct ActiveResource {
     pub resource_id: String,
     pub host: String,
+    /// The validated local address this shield dials and health-probes for this
+    /// resource: the instruction's `local_target` when the controller set one,
+    /// else `host`. Resolved and checked ONCE at apply time (see `dial_target`)
+    /// so the tunnel and health paths cannot re-derive it differently.
+    pub dial_target: String,
     pub protocol: String,
     pub port_from: u16,
     pub port_to: u16,
@@ -67,6 +72,27 @@ impl SharedResourceState {
         *self.state_seq.lock().unwrap() += 1;
     }
 
+    /// The address this shield dials for `resource_id`, taken from its OWN applied
+    /// state (Sprint 16 Phase 8.2).
+    ///
+    /// This exists so the tunnel path never takes a dial target out of the
+    /// per-connection `TunnelOpen` message. The connector asserts an identity; the
+    /// shield decides the address — the same split Stage 1 established one layer up,
+    /// where the client asserts a `resource_id` and the connector dials its own ACL's
+    /// address. Reading an address from the message instead would hand the connector
+    /// free-form dialing inside the shield.
+    ///
+    /// `None` means this shield has not applied that resource, so it has no opinion
+    /// about where to dial — the caller decides what to do with that.
+    pub fn dial_target_for(&self, resource_id: &str) -> Option<String> {
+        self.active
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.resource_id == resource_id)
+            .map(|r| r.dial_target.clone())
+    }
+
     /// Build the actual-state report from the in-memory active set (ADR-004
     /// Phase 3). Reflects the shield's applied intent — not raw kernel state.
     pub fn build_state_report(&self, shield_id: &str) -> crate::proto::ResourceStateReport {
@@ -101,6 +127,53 @@ pub fn validate_host(resource_host: &str) -> bool {
     }
 }
 
+/// Why a resource was refused, naming the field the bad value came from.
+///
+/// Without this, a `local_target` typo surfaced as "resource host does not match
+/// this shield's LAN IP" — pointing the operator at the wrong column.
+/// `Debug` so the tests can `unwrap_err()`, and so a rejection is printable if it
+/// ever reaches an error chain rather than only the structured log.
+#[derive(Debug)]
+pub struct RejectedTarget {
+    /// "host" or "local_target".
+    pub field: &'static str,
+    pub value: String,
+}
+
+/// Which local address this shield will dial for a resource, or why it won't.
+///
+/// `local_target` SELECTS FROM the allowed set — it never extends it. Both values
+/// go through `validate_host`, so the allowed set is exactly what it was before
+/// Phase 8: loopback, or this shield's own LAN IP. Never a hostname: the shield is
+/// not a resolver, and accepting names here would put one inside it.
+///
+/// `host` is validated even when `local_target` overrides the dial address,
+/// because `host` is what binds this resource to THIS shield. Skipping it would
+/// let an instruction naming another shield's LAN IP be applied here as long as it
+/// carried `local_target: "127.0.0.1"`.
+///
+/// Empty `local_target` → dial `host`, i.e. the pre-Phase-8 behaviour, so an
+/// un-upgraded controller and a resource with no local_target are identical.
+pub fn dial_target<'a>(host: &'a str, local_target: &'a str) -> Result<&'a str, RejectedTarget> {
+    if !validate_host(host) {
+        return Err(RejectedTarget {
+            field: "host",
+            value: host.to_string(),
+        });
+    }
+    let candidate = local_target.trim();
+    if candidate.is_empty() {
+        return Ok(host);
+    }
+    if !validate_host(candidate) {
+        return Err(RejectedTarget {
+            field: "local_target",
+            value: candidate.to_string(),
+        });
+    }
+    Ok(candidate)
+}
+
 pub fn check_port(host: &str, port: u16) -> bool {
     // Hosts reaching here are validated IPs (127.0.0.1 or detect_lan_ip()), so this
     // parses in practice — but never panic on a malformed address: an unparseable
@@ -108,7 +181,11 @@ pub fn check_port(host: &str, port: u16) -> bool {
     let addr = match format!("{}:{}", host, port).parse::<std::net::SocketAddr>() {
         Ok(addr) => addr,
         Err(_) => {
-            warn!(host = host, port = port, "check_port: unparseable address, treating as unreachable");
+            warn!(
+                host = host,
+                port = port,
+                "check_port: unparseable address, treating as unreachable"
+            );
             return false;
         }
     };
@@ -224,7 +301,7 @@ pub async fn run_health_check_loop(interval_secs: u64, state: Arc<SharedResource
         let mut fresh_acks: Vec<ResourceAck> = resources
             .iter()
             .map(|res| {
-                let reachable = check_port(&res.host, res.port_from);
+                let reachable = check_port(&res.dial_target, res.port_from);
                 ResourceAck {
                     resource_id: res.resource_id.clone(),
                     status: if reachable {
@@ -275,20 +352,28 @@ pub async fn handle_apply(
 ) -> ResourceAck {
     let now = now_unix();
 
-    if !validate_host(&instruction.host) {
-        warn!(
-            resource_id = %instruction.resource_id,
-            host = %instruction.host,
-            "resource host does not match this shield's LAN IP — rejecting"
-        );
-        return ResourceAck {
-            resource_id: instruction.resource_id.clone(),
-            status: "failed".to_string(),
-            error: "resource host does not match this shield's IP".to_string(),
-            verified_at: now,
-            port_reachable: false,
-        };
-    }
+    let target = match dial_target(&instruction.host, &instruction.local_target) {
+        Ok(t) => t.to_string(),
+        Err(rej) => {
+            warn!(
+                resource_id = %instruction.resource_id,
+                field = rej.field,
+                value = %rej.value,
+                "rejecting resource — not an address this shield may dial \
+                 (allowed: 127.0.0.1 or this shield's LAN IP)"
+            );
+            return ResourceAck {
+                resource_id: instruction.resource_id.clone(),
+                status: "failed".to_string(),
+                error: format!(
+                    "{} {:?} is not an address this shield may dial",
+                    rej.field, rej.value
+                ),
+                verified_at: now,
+                port_reachable: false,
+            };
+        }
+    };
 
     {
         let mut active = state.active.lock().unwrap();
@@ -297,6 +382,12 @@ pub async fn handle_apply(
             .find(|r| r.resource_id == instruction.resource_id)
         {
             existing.host = instruction.host.clone();
+            // Must be assigned here too. handle_snapshot rebuilds its Vec from
+            // scratch and would pick a new value up regardless; this branch mutates
+            // in place, so omitting it means a local_target change delivered as an
+            // incremental push keeps the stale target while a full resync fixes it
+            // — "works after a resync but not after a push".
+            existing.dial_target = target.clone();
             existing.protocol = instruction.protocol.clone();
             existing.port_from = instruction.port_from as u16;
             existing.port_to = instruction.port_to as u16;
@@ -304,6 +395,7 @@ pub async fn handle_apply(
             active.push(ActiveResource {
                 resource_id: instruction.resource_id.clone(),
                 host: instruction.host.clone(),
+                dial_target: target.clone(),
                 protocol: instruction.protocol.clone(),
                 port_from: instruction.port_from as u16,
                 port_to: instruction.port_to as u16,
@@ -315,9 +407,10 @@ pub async fn handle_apply(
     let snapshot = state.active.lock().unwrap().clone();
     match apply_nftables(&snapshot).await {
         Ok(()) => {
-            let reachable = check_port(&instruction.host, instruction.port_from as u16);
+            let reachable = check_port(&target, instruction.port_from as u16);
             info!(
                 resource_id = %instruction.resource_id,
+                dial_target = %target,
                 port = instruction.port_from,
                 port_reachable = reachable,
                 "resource applied — nftables chain rebuilt"
@@ -422,24 +515,32 @@ pub async fn handle_snapshot(
     let mut acks = Vec::new();
     let mut new_active = Vec::new();
     for res in &snapshot.resources {
-        if !validate_host(&res.host) {
-            warn!(
-                resource_id = %res.resource_id,
-                host = %res.host,
-                "snapshot resource host does not match this shield's LAN IP — skipping"
-            );
-            acks.push(ResourceAck {
-                resource_id: res.resource_id.clone(),
-                status: "failed".to_string(),
-                error: "resource host does not match this shield's IP".to_string(),
-                verified_at: now,
-                port_reachable: false,
-            });
-            continue;
-        }
+        let target = match dial_target(&res.host, &res.local_target) {
+            Ok(t) => t.to_string(),
+            Err(rej) => {
+                warn!(
+                    resource_id = %res.resource_id,
+                    field = rej.field,
+                    value = %rej.value,
+                    "snapshot resource skipped — not an address this shield may dial"
+                );
+                acks.push(ResourceAck {
+                    resource_id: res.resource_id.clone(),
+                    status: "failed".to_string(),
+                    error: format!(
+                        "{} {:?} is not an address this shield may dial",
+                        rej.field, rej.value
+                    ),
+                    verified_at: now,
+                    port_reachable: false,
+                });
+                continue;
+            }
+        };
         new_active.push(ActiveResource {
             resource_id: res.resource_id.clone(),
             host: res.host.clone(),
+            dial_target: target,
             protocol: res.protocol.clone(),
             port_from: res.port_from as u16,
             port_to: res.port_to as u16,
@@ -458,7 +559,7 @@ pub async fn handle_snapshot(
                 "resource snapshot applied — chain rebuilt"
             );
             for r in &applied {
-                let reachable = check_port(&r.host, r.port_from);
+                let reachable = check_port(&r.dial_target, r.port_from);
                 acks.push(ResourceAck {
                     resource_id: r.resource_id.clone(),
                     status: if reachable { "protected" } else { "failed" }.to_string(),
@@ -554,7 +655,10 @@ fn source_accept_rule(
                 len,
             })),
             Err(_) => {
-                warn!(source = source, "invalid prefix length in source rule, using literal");
+                warn!(
+                    source = source,
+                    "invalid prefix length in source rule, using literal"
+                );
                 Expression::String(Cow::Owned(source.to_string()))
             }
         },
@@ -623,10 +727,156 @@ mod tests {
         ActiveResource {
             resource_id: id.to_string(),
             host: "10.0.0.1".to_string(),
+            dial_target: "10.0.0.1".to_string(),
             protocol: "tcp".to_string(),
             port_from: port,
             port_to: port,
         }
+    }
+
+    // ── dial_target (Sprint 16 Phase 8.1) ────────────────────────────────────
+    //
+    // These sit directly on a non-negotiable project rule: a shield may only ever
+    // reach 127.0.0.1 or its own LAN IP. `local_target` was added to SELECT from
+    // that set, and the danger of such a change is that it quietly WIDENS it.
+    // Nothing in the type system prevents that, so it is pinned here.
+    //
+    // detect_lan_ip() reads real interfaces, so the LAN-IP arm cannot be forced
+    // from a unit test. Every assertion below is therefore written against values
+    // whose verdict does not depend on this machine's addresses: loopback (always
+    // allowed) and TEST-NET-3 / a hostname (never allowed anywhere).
+
+    /// 203.0.113.0/24 is TEST-NET-3 (RFC 5737) — reserved for documentation and
+    /// guaranteed never to be a real interface address, so "rejected" is a fact
+    /// about the code rather than about the machine running the test.
+    const NOT_OURS: &str = "203.0.113.7";
+
+    #[test]
+    fn empty_local_target_falls_back_to_host() {
+        // The pre-Phase-8 behaviour, and what an un-upgraded controller sends.
+        assert_eq!(dial_target("127.0.0.1", "").unwrap(), "127.0.0.1");
+    }
+
+    #[test]
+    fn whitespace_local_target_is_treated_as_absent() {
+        // A hand-inserted DB row bypasses the controller's blankToNil, so " "
+        // must not read as "the operator asked for an address".
+        assert_eq!(dial_target("127.0.0.1", "   ").unwrap(), "127.0.0.1");
+    }
+
+    #[test]
+    fn loopback_local_target_is_accepted_and_selected() {
+        // The whole point of the phase: a loopback-only service becomes dialable.
+        assert_eq!(dial_target("127.0.0.1", "127.0.0.1").unwrap(), "127.0.0.1");
+    }
+
+    #[test]
+    fn local_target_outside_the_allowed_set_is_rejected() {
+        let err = dial_target("127.0.0.1", NOT_OURS).unwrap_err();
+        assert_eq!(err.field, "local_target");
+        assert_eq!(err.value, NOT_OURS);
+    }
+
+    /// A hostname must never be accepted here. Resolving names inside the shield
+    /// is the shield-as-segment-gateway design the sprint explicitly defers; a
+    /// tolerant parse would smuggle a resolver in through this field.
+    #[test]
+    fn hostname_local_target_is_rejected() {
+        let err = dial_target("127.0.0.1", "db.internal").unwrap_err();
+        assert_eq!(err.field, "local_target");
+        assert_eq!(err.value, "db.internal");
+    }
+
+    /// The invariant no compiler protects: `host` binds a resource to THIS shield,
+    /// so it is validated even when `local_target` overrides the dial address.
+    /// Without this, an instruction naming ANOTHER shield's LAN IP would be applied
+    /// here as long as it carried `local_target: "127.0.0.1"`.
+    #[test]
+    fn host_is_still_validated_when_local_target_is_set() {
+        let err = dial_target(NOT_OURS, "127.0.0.1").unwrap_err();
+        assert_eq!(
+            err.field, "host",
+            "a resource bound to another shield must be refused on `host`, \
+             regardless of a valid local_target"
+        );
+        assert_eq!(err.value, NOT_OURS);
+    }
+
+    #[test]
+    fn unaddressable_resource_is_rejected_on_host() {
+        // migration 030 made `host` nullable and the desired-set query COALESCEs it
+        // to "", so an empty host is reachable here. Fail closed on it.
+        let err = dial_target("", "").unwrap_err();
+        assert_eq!(err.field, "host");
+    }
+
+    /// The rejection must name the field, because the two failure modes send an
+    /// operator to different columns. Before Phase 8 a local_target typo reported
+    /// "resource host does not match this shield's LAN IP" — the wrong field.
+    #[test]
+    fn rejection_names_the_field_that_failed() {
+        assert_eq!(dial_target(NOT_OURS, "").unwrap_err().field, "host");
+        assert_eq!(
+            dial_target("127.0.0.1", NOT_OURS).unwrap_err().field,
+            "local_target"
+        );
+    }
+
+    /// Whatever this machine's LAN IP is, it must be accepted as both `host` and
+    /// `local_target` — that is the "selects from the set, does not extend it"
+    /// property from the other side. Skipped where no LAN IP is detectable (CI
+    /// containers), since there is then nothing to assert about.
+    #[test]
+    fn own_lan_ip_is_accepted_as_either_field() {
+        let Some(my_ip) = util::detect_lan_ip() else {
+            eprintln!("no LAN IP detected — skipping");
+            return;
+        };
+        assert_eq!(dial_target(&my_ip, "").unwrap(), my_ip);
+        assert_eq!(dial_target(&my_ip, &my_ip).unwrap(), my_ip);
+        // And the cross case the phase file calls out: LAN-IP host, loopback target.
+        assert_eq!(dial_target(&my_ip, "127.0.0.1").unwrap(), "127.0.0.1");
+    }
+
+    // ── dial_target_for (Sprint 16 Phase 8.2) ────────────────────────────────
+    //
+    // The tunnel path's only source of a dial address. If this ever returned
+    // something derived from the TunnelOpen message rather than from applied state,
+    // the connector would get free-form dialing inside the shield.
+
+    fn state_with(resources: Vec<ActiveResource>) -> Arc<SharedResourceState> {
+        let state = Arc::new(SharedResourceState::new());
+        *state.active.lock().unwrap() = resources;
+        state
+    }
+
+    #[test]
+    fn dial_target_for_returns_the_stored_target_not_the_host() {
+        let mut r = res("r1", 8080);
+        r.dial_target = "127.0.0.1".to_string(); // loopback-only service
+        let state = state_with(vec![r]);
+        assert_eq!(
+            state.dial_target_for("r1").as_deref(),
+            Some("127.0.0.1"),
+            "must return the validated dial_target, not host (10.0.0.1)"
+        );
+    }
+
+    #[test]
+    fn dial_target_for_is_none_for_an_unapplied_resource() {
+        let state = state_with(vec![res("r1", 8080)]);
+        assert!(state.dial_target_for("r-unknown").is_none());
+        assert!(state.dial_target_for("").is_none());
+    }
+
+    #[test]
+    fn dial_target_for_selects_the_matching_resource() {
+        let mut a = res("r1", 8080);
+        a.dial_target = "127.0.0.1".to_string();
+        let b = res("r2", 9090); // dial_target stays 10.0.0.1
+        let state = state_with(vec![a, b]);
+        assert_eq!(state.dial_target_for("r1").as_deref(), Some("127.0.0.1"));
+        assert_eq!(state.dial_target_for("r2").as_deref(), Some("10.0.0.1"));
     }
 
     // F21: the rebuild must flush the chain BEFORE adding the new rules, in one batch.
@@ -659,12 +909,19 @@ mod tests {
     fn rebuild_is_single_transaction() {
         let ruleset = build_protect_ruleset(&[res("r1", 8080)]);
         let objs = ruleset.objects.as_ref();
-        assert_eq!(objs.len(), 6, "expected table+chain+flush+3 rules in one batch");
+        assert_eq!(
+            objs.len(),
+            6,
+            "expected table+chain+flush+3 rules in one batch"
+        );
         let rule_adds = objs
             .iter()
             .filter(|o| matches!(o, NfObject::CmdObject(NfCmd::Add(NfListObject::Rule(_)))))
             .count();
-        assert_eq!(rule_adds, 3, "expected 3 rules: lo-accept, localhost-accept, port-drop");
+        assert_eq!(
+            rule_adds, 3,
+            "expected 3 rules: lo-accept, localhost-accept, port-drop"
+        );
     }
 
     // ---- F21 live-kernel verification (gated) -------------------------------
@@ -707,7 +964,10 @@ mod tests {
 
         // Reach steady state first so the sampler never races initial chain creation.
         helper::apply_ruleset(&build_protect_ruleset(&resources)).expect("initial apply");
-        assert!(chain_drop_present(), "drop rule must be present after the initial apply");
+        assert!(
+            chain_drop_present(),
+            "drop rule must be present after the initial apply"
+        );
 
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(AtomicU64::new(0));
@@ -734,7 +994,10 @@ mod tests {
         let gap = gaps.load(Ordering::Relaxed);
         eprintln!("[F21 no-gap] {total} samples across 50 rebuilds; {gap} saw the port undefended");
         assert!(total > 0, "sampler took no samples");
-        assert_eq!(gap, 0, "port observed undefended {gap}/{total} times during rebuild — fail-open gap");
+        assert_eq!(
+            gap, 0,
+            "port observed undefended {gap}/{total} times during rebuild — fail-open gap"
+        );
     }
 
     // F21 (b): a failed apply leaves the old rules intact (no fail-open). We inject
@@ -751,7 +1014,10 @@ mod tests {
 
         let resources = vec![res("r1", 8080)];
         helper::apply_ruleset(&build_protect_ruleset(&resources)).expect("good apply");
-        assert!(chain_drop_present(), "drop rule must be present after the good apply");
+        assert!(
+            chain_drop_present(),
+            "drop rule must be present after the good apply"
+        );
 
         let script = format!(
             "flush chain inet {TABLE} {PROTECT_CHAIN}\n\
@@ -781,5 +1047,142 @@ mod tests {
             chain_drop_present(),
             "old drop rule must survive a failed apply — the flush has to roll back too (F21 no fail-open)"
         );
+    }
+
+    // ---- Sprint 16 Phase 8 live verification (gated) ------------------------
+    //
+    // The phase's headline claim — "a loopback-only service becomes reachable" —
+    // cannot be shown by a pure unit test: it needs real nftables, a real socket,
+    // and a LAN IP that is NOT the address the service is bound to. All three are
+    // reproducible inside the same throwaway namespace the F21 tests use, given a
+    // dummy interface carrying an RFC-1918 address ("dummy" is not in
+    // util::VIRTUAL_PREFIXES, so detect_lan_ip() picks it up):
+    //
+    //   unshare -rn sh -c '
+    //     ip link set lo up
+    //     ip link add dummy0 type dummy
+    //     ip addr add 10.99.0.1/24 dev dummy0
+    //     ip link set dummy0 up
+    //     cargo test -p zecurity-shield --lib live_phase8 -- --ignored --nocapture'
+    //
+    // Without the dummy interface detect_lan_ip() returns None inside the netns and
+    // these skip themselves rather than asserting something meaningless.
+
+    /// Bind a listener on 127.0.0.1 ONLY — the hardened posture the phase exists
+    /// for. Returns the port; the listener stays alive via the returned handle.
+    fn loopback_only_listener() -> (std::net::TcpListener, u16) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let port = l.local_addr().unwrap().port();
+        (l, port)
+    }
+
+    fn instruction(host: &str, local_target: &str, port: u16) -> crate::proto::ResourceInstruction {
+        crate::proto::ResourceInstruction {
+            resource_id: "res-phase8".to_string(),
+            host: host.to_string(),
+            protocol: "tcp".to_string(),
+            port_from: port as i32,
+            port_to: port as i32,
+            action: "apply".to_string(),
+            local_target: local_target.to_string(),
+        }
+    }
+
+    /// THE phase 8 acceptance test, both halves in one run so the contrast is the
+    /// assertion:
+    ///
+    ///   without local_target → the shield probes its LAN IP, the loopback-only
+    ///                          service is unreachable, ack = "failed"
+    ///   with    local_target → the shield probes 127.0.0.1, ack = "protected",
+    ///                          and a real TCP connection to the stored dial target
+    ///                          reaches the service
+    ///
+    /// The first half is not incidental — it is the bug being fixed, demonstrated.
+    #[tokio::test]
+    #[ignore = "live kernel test; run inside 'unshare -rn' with a dummy LAN IP (see module comment)"]
+    async fn live_phase8_loopback_only_service_becomes_reachable() {
+        let Some(lan_ip) = util::detect_lan_ip() else {
+            eprintln!("no RFC-1918 LAN IP in this namespace — add dummy0 (see module comment)");
+            return;
+        };
+        assert_ne!(
+            lan_ip, "127.0.0.1",
+            "the LAN IP must differ from loopback or this test proves nothing"
+        );
+
+        let (_listener, port) = loopback_only_listener();
+        eprintln!("[phase8] lan_ip={lan_ip} loopback-only service on 127.0.0.1:{port}");
+
+        // ── Half 1: no local_target — the pre-Phase-8 behaviour ──
+        let state = Arc::new(SharedResourceState::new());
+        let ack = handle_apply(&instruction(&lan_ip, "", port), &state).await;
+        eprintln!(
+            "[phase8] without local_target → status={} port_reachable={}",
+            ack.status, ack.port_reachable
+        );
+        assert_eq!(
+            ack.status, "failed",
+            "a loopback-only service probed at the LAN IP must be unreachable — \
+             if this says 'protected', the test is not proving anything"
+        );
+        assert!(!ack.port_reachable);
+
+        // ── Half 2: local_target = loopback ──
+        let state = Arc::new(SharedResourceState::new());
+        let ack = handle_apply(&instruction(&lan_ip, "127.0.0.1", port), &state).await;
+        eprintln!(
+            "[phase8] with local_target=127.0.0.1 → status={} port_reachable={}",
+            ack.status, ack.port_reachable
+        );
+        assert_eq!(
+            ack.status, "protected",
+            "with local_target the shield must probe loopback and find the service"
+        );
+        assert!(ack.port_reachable);
+
+        // The stored target is what the tunnel path will dial.
+        let target = state
+            .dial_target_for("res-phase8")
+            .expect("resource must be in the applied set");
+        assert_eq!(
+            target, "127.0.0.1",
+            "tunnel must dial loopback, not the LAN IP"
+        );
+
+        // And it genuinely connects — the end of the chain this phase exists to close.
+        std::net::TcpStream::connect(format!("{target}:{port}"))
+            .expect("a real TCP connection to the stored dial target must reach the service");
+        eprintln!("[phase8] TCP connect to {target}:{port} OK — loopback-only service reachable");
+    }
+
+    /// The rejection half of 8.1 against the live path: an address outside the
+    /// allowed set must ack "failed" and must NOT enter the applied set, so the
+    /// tunnel path has nothing to dial for it.
+    #[tokio::test]
+    #[ignore = "live kernel test; run inside 'unshare -rn' with a dummy LAN IP (see module comment)"]
+    async fn live_phase8_foreign_local_target_is_refused() {
+        let Some(lan_ip) = util::detect_lan_ip() else {
+            eprintln!("no RFC-1918 LAN IP in this namespace — add dummy0 (see module comment)");
+            return;
+        };
+        let (_listener, port) = loopback_only_listener();
+        let state = Arc::new(SharedResourceState::new());
+
+        let ack = handle_apply(&instruction(&lan_ip, NOT_OURS, port), &state).await;
+        assert_eq!(ack.status, "failed");
+        assert!(
+            ack.error.contains("local_target"),
+            "the ack must name the offending field, got: {}",
+            ack.error
+        );
+        assert!(
+            state.dial_target_for("res-phase8").is_none(),
+            "a refused resource must never enter the applied set"
+        );
+
+        // A hostname is refused the same way — the shield is not a resolver.
+        let ack = handle_apply(&instruction(&lan_ip, "db.internal", port), &state).await;
+        assert_eq!(ack.status, "failed");
+        assert!(state.dial_target_for("res-phase8").is_none());
     }
 }

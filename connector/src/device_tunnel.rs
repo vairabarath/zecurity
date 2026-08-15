@@ -365,7 +365,13 @@ where
 
         // Dial target comes from the ACL entry, never from req.destination.
         match tunnel_hub
-            .open_relay_session(&shield_id, &acl_entry.address, req.port, &req.protocol)
+            .open_relay_session(
+                &shield_id,
+                &acl_entry.address,
+                req.port,
+                &req.protocol,
+                &acl_entry.resource_id,
+            )
             .await
         {
             Ok(relay) => {

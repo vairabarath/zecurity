@@ -75,14 +75,30 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return nil, fmt.Errorf("updateResource: notify policy change: %w", err)
+
+	// Re-push the shield's desired set. Deliberately unconditional rather than
+	// gated on a "does the shield care?" predicate: BuildShieldSnapshot's content
+	// fingerprint already IS that test — an edit the shield cannot observe yields
+	// the same fingerprint, so the generation does not move and the shield's
+	// `generation <= last` gate drops the message. A second predicate here would
+	// be one more thing to keep in step with the wire format, which is exactly the
+	// drift that made local_target (Sprint 16 Phase 8) invisible on the
+	// incremental path. Without this call a local_target edit bumps the generation
+	// and then delivers to nobody until an unrelated protect or reconnect.
+	if row.ConnectorID != "" && row.ShieldID != "" {
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	}
 
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
-	// compiler-visible field (name/protocol/port_from). description/port_to/
-	// remote_network_id are invisible to the compiler, so changing only those
-	// must not churn the ACL version or trigger a fan-out push.
+	// compiler-visible field. description/port_to/remote_network_id/local_target
+	// are invisible to the compiler, so changing only those must not churn the ACL
+	// version or trigger a fan-out push — a version bump reaches every client as
+	// restart_tunnel_if_running.
+	//
+	// This gate used to be dead: an unconditional NotifyPolicyChange ran two lines
+	// above it, so every edit churned the version regardless. resource_acl_
+	// coherence_test.go asserted the intended behaviour the whole time but was
+	// gated on RESOURCE_TEST_SHIELD_ID and never ran.
 	if resource.ACLRelevantUpdate(updIn) {
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return nil, fmt.Errorf("updateResource notify: %w", err)
@@ -215,13 +231,11 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	}
+	// The row left the ACL compiler's output — invalidate the workspace snapshot.
+	// Exactly once: this was a duplicated block, and every extra call is another
+	// ACL version bump, i.e. another fleet-wide tunnel restart for one delete.
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("forceDeleteResource: notify policy change: %w", err)
-	}
-
-	// The row left the ACL compiler's output — invalidate the workspace snapshot.
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("forceDeleteResource notify: %w", err)
 	}
 
 	return true, nil

@@ -298,7 +298,7 @@ impl ExactRelaySpiffeVerifier {
         }))
     }
 
-        fn verify_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
+    fn verify_revocation(&self, end_entity: &CertificateDer<'_>) -> Result<(), RustlsError> {
         let (_, cert) = X509Certificate::from_der(end_entity.as_ref())
             .map_err(|_| RustlsError::InvalidCertificate(CertificateError::BadEncoding))?;
         match self.crl_manager.check(cert.raw_serial()) {
@@ -306,9 +306,9 @@ impl ExactRelaySpiffeVerifier {
             RevocationStatus::Revoked => {
                 Err(RustlsError::General("relay certificate revoked".into()))
             }
-            RevocationStatus::Unavailable => {
-                Err(RustlsError::General("relay revocation state unavailable".into()))
-            }
+            RevocationStatus::Unavailable => Err(RustlsError::General(
+                "relay revocation state unavailable".into(),
+            )),
         }
     }
 

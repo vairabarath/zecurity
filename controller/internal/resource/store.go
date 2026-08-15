@@ -57,6 +57,11 @@ type PendingRow struct {
 	PortFrom      int
 	PortTo        int
 	PendingAction string // "apply" or "remove"
+	// LocalTarget is which local address the shield dials and health-probes for
+	// this resource (Sprint 16 Phase 8). Empty = dial Host, i.e. the behaviour
+	// before this field existed. Nullable in the DB since migration 030, so every
+	// read site must COALESCE it — same trap as Host.
+	LocalTarget string
 }
 
 // CreateInput holds fields provided by the admin when creating a resource.
@@ -226,10 +231,10 @@ func GetAll(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]*Row, err
 // Called on stream connect to deliver any queued instructions to a reconnecting connector.
 func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string) ([]*PendingRow, error) {
 	rows, err := db.Query(ctx,
-		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action
-		   FROM resources
-		  WHERE shield_id = $1
-		    AND status IN ('protecting', 'deleting')`,
+		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action, COALESCE(local_target, '')
+				FROM resources
+				WHERE shield_id = $1
+					AND status IN ('protecting', 'deleting')`,
 		shieldID,
 	)
 	if err != nil {
@@ -240,7 +245,8 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 	var result []*PendingRow
 	for rows.Next() {
 		var r PendingRow
-		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo, &r.PendingAction); err != nil {
+		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo,
+			&r.PendingAction, &r.LocalTarget); err != nil {
 			return nil, err
 		}
 		result = append(result, &r)
@@ -267,7 +273,8 @@ func GetPendingForShield(ctx context.Context, db *pgxpool.Pool, shieldID string)
 // absent — the shield's replace-semantics drops anything not listed here.
 func desiredForShield(ctx context.Context, q querier, shieldID string) ([]*PendingRow, error) {
 	rows, err := q.Query(ctx,
-		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action
+		`SELECT id, COALESCE(host, ''), protocol, port_from, port_to, pending_action,
+		        COALESCE(local_target, '')
 		   FROM resources
 		  WHERE shield_id = $1
 		    AND (status IN ('protected', 'failed')
@@ -282,7 +289,8 @@ func desiredForShield(ctx context.Context, q querier, shieldID string) ([]*Pendi
 	var result []*PendingRow
 	for rows.Next() {
 		var r PendingRow
-		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo, &r.PendingAction); err != nil {
+		if err := rows.Scan(&r.ID, &r.Host, &r.Protocol, &r.PortFrom, &r.PortTo,
+			&r.PendingAction, &r.LocalTarget); err != nil {
 			return nil, fmt.Errorf("scan row: %w", err)
 		}
 		result = append(result, &r)
@@ -360,11 +368,19 @@ func BuildShieldSnapshot(ctx context.Context, db *pgxpool.Pool, shieldID string)
 // ID so a reordered query result is not mistaken for a change.
 //
 // It hashes EXACTLY the fields the snapshot's ResourceInstruction carries on the
-// wire — id, host, protocol, ports. pending_action is deliberately excluded: a
-// snapshot has no per-row action (every listed row means "enforce this"), so
-// hashing it would couple the generation to controller bookkeeping and churn the
-// version without any change the shield can observe. A row entering or leaving the
-// desired set is already reflected by its id appearing/disappearing here.
+// wire — id, host, protocol, ports, local_target. pending_action is deliberately
+// excluded: a snapshot has no per-row action (every listed row means "enforce
+// this"), so hashing it would couple the generation to controller bookkeeping and
+// churn the version without any change the shield can observe. A row entering or
+// leaving the desired set is already reflected by its id appearing/disappearing
+// here.
+//
+// This function does NOT hash "whatever PendingRow holds" — it is an explicit
+// field list. A field added to PendingRow and to the SELECT but forgotten here is
+// silently invisible: the generation never bumps, so the shield never re-applies
+// and the new value is delivered only on the next full reconnect. Adding
+// local_target to the wire (Phase 8.0) is therefore incomplete without adding it
+// to this format string.
 func fingerprintDesired(rows []*PendingRow) string {
 	sorted := make([]*PendingRow, len(rows))
 	copy(sorted, rows)
@@ -372,7 +388,8 @@ func fingerprintDesired(rows []*PendingRow) string {
 
 	h := sha256.New()
 	for _, r := range sorted {
-		fmt.Fprintf(h, "%s|%s|%s|%d|%d\n", r.ID, r.Host, r.Protocol, r.PortFrom, r.PortTo)
+		fmt.Fprintf(h, "%s|%s|%s|%d|%d|%s\n",
+			r.ID, r.Host, r.Protocol, r.PortFrom, r.PortTo, r.LocalTarget)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -450,17 +467,21 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 }
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
-// compiler actually reads. As of Phase 5 that set is: name, host, hostname,
-// resolver, local_target, port_from, protocol, shield_id — everything
-// ListEnabledRulesWithResources selects and CompileACLSnapshot emits into an
-// ACLEntry.
+// compiler actually reads. That set is: name, host, hostname, resolver,
+// port_from, protocol, shield_id — everything ListEnabledRulesWithResources
+// selects and CompileACLSnapshot emits into an ACLEntry.
 //
-// host and shield_id are not editable through UpdateInput, so they cannot
-// appear here. The other three addressing fields are editable and all three
-// reach the wire: hostname is what the connector resolves, resolver is how, and
-// local_target is what a shield dials. Changing any of them without bumping the
-// ACL version would leave every connected client acting on a stale target until
-// something unrelated happened to recompile the snapshot.
+// host and shield_id are not editable through UpdateInput, so they cannot appear
+// here. hostname and resolver are editable and both reach the wire: hostname is
+// what the connector resolves, resolver is how.
+//
+// local_target is deliberately NOT in this set. It never reaches an ACLEntry —
+// only the Shield dials a resource's on-host address, and Shields receive
+// shield.v1.ResourceInstruction, never an ACLEntry (see Sprint 16 Phase 5's
+// design correction). Its delivery path is the shield snapshot generation, which
+// fingerprintDesired bumps. Returning true for it would churn the ACL version and
+// fire a fleet-wide tunnel restart for a value no client can use.
+// acl_relevance_test.go's "local_target only → false" case guards this.
 //
 // Keep this in step with the ACLEntry literal in policy/compiler.go — a field
 // added there and forgotten here fails silently, which is the worst kind.

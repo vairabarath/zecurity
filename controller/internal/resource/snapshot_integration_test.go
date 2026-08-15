@@ -82,14 +82,78 @@ func TestBuildShieldSnapshotGeneration(t *testing.T) {
 		t.Fatalf("payload change did not bump generation: %d → %d", g2, g4)
 	}
 
+	// ── Sprint 16 Phase 8: local_target ──────────────────────────────────────
+	//
+	// Two separate failures hide here and neither breaks the build:
+	//   - desiredForShield without COALESCE(local_target, '') → the value is
+	//     always "" and every shield keeps dialing its LAN IP
+	//   - fingerprintDesired without r.LocalTarget → the generation never bumps,
+	//     so the shield is never told to re-apply and the new value lands only on
+	//     the next full reconnect
+	//
+	// Assert BOTH: the generation moved, and the value actually arrived. A test
+	// that checks only the generation passes with an empty local_target.
+	if _, err := db.Exec(ctx,
+		`UPDATE resources SET local_target = '127.0.0.1' WHERE id = $1`, resID); err != nil {
+		t.Fatalf("local_target update: %v", err)
+	}
+	snap, err := BuildShieldSnapshot(ctx, db, shieldID)
+	if err != nil {
+		t.Fatalf("BuildShieldSnapshot after local_target: %v", err)
+	}
+	gLocalTarget := snap.Generation
+	if gLocalTarget <= g4 {
+		t.Fatalf("local_target change did not bump generation: %d → %d — the shield "+
+			"would never re-apply (fingerprintDesired must hash LocalTarget)", g4, gLocalTarget)
+	}
+
+	var found *PendingRow
+	for _, r := range snap.Resources {
+		if r.ID == resID {
+			found = r
+		}
+	}
+	if found == nil {
+		t.Fatalf("test resource %s is missing from its own shield's snapshot", resID)
+	}
+	if found.LocalTarget != "127.0.0.1" {
+		t.Fatalf("local_target = %q, want 127.0.0.1 — the value never reached the "+
+			"snapshot (desiredForShield must select COALESCE(local_target, ''))",
+			found.LocalTarget)
+	}
+
+	// Clearing it back to NULL must bump again and read as "" — never a stale
+	// value and never a nil-deref. Empty is what tells the shield to fall back to
+	// dialing `host`, so the round trip to empty is as load-bearing as setting it.
+	if _, err := db.Exec(ctx,
+		`UPDATE resources SET local_target = NULL WHERE id = $1`, resID); err != nil {
+		t.Fatalf("local_target clear: %v", err)
+	}
+	snap, err = BuildShieldSnapshot(ctx, db, shieldID)
+	if err != nil {
+		t.Fatalf("BuildShieldSnapshot after clearing local_target: %v", err)
+	}
+	gCleared := snap.Generation
+	if gCleared <= gLocalTarget {
+		t.Fatalf("clearing local_target did not bump generation: %d → %d",
+			gLocalTarget, gCleared)
+	}
+	for _, r := range snap.Resources {
+		if r.ID == resID && r.LocalTarget != "" {
+			t.Fatalf("cleared local_target = %q, want empty", r.LocalTarget)
+		}
+	}
+
 	// Leaving the desired set (unprotect) MUST bump.
 	if _, err := db.Exec(ctx, `UPDATE resources SET status = 'unprotected' WHERE id = $1`, resID); err != nil {
 		t.Fatalf("unprotect update: %v", err)
 	}
 	g5 := gen()
-	if g5 <= g4 {
-		t.Fatalf("leaving desired set did not bump generation: %d → %d", g4, g5)
+	if g5 <= gCleared {
+		t.Fatalf("leaving desired set did not bump generation: %d → %d", gCleared, g5)
 	}
 
-	t.Logf("generation lifecycle OK: first=%d dedup=%d metadata=%d payload=%d left=%d", g1, g2, g3, g4, g5)
+	t.Logf("generation lifecycle OK: first=%d dedup=%d metadata=%d payload=%d "+
+		"local_target=%d cleared=%d left=%d",
+		g1, g2, g3, g4, gLocalTarget, gCleared, g5)
 }
