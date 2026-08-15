@@ -1842,3 +1842,57 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Complete M1 Phase C `/relay.crl`, then run the M2-F3 revocation E2E on a socket-capable host and
   mark Phase F `done` only after it passes.
+
+## 2026-08-15 — Claude (Sprint 16 Phase 8 — Shield `local_target`)
+
+**Context:** Verified Phases 1–7 first (all gates reproduced: connector 148+4, client 39, controller
+build/vet), then implemented Phase 8 end to end. Commit `e89f941` on
+`feat/pending-14-fqdn-resource-access`.
+
+**What shipped:**
+- `local_target` travels DB → `desiredForShield` → shield-snapshot generation → all three
+  `ResourceInstruction` delivery paths → shield, which validates it, stores it, health-probes it and
+  dials it. A loopback-only service is now reachable through a shield.
+- `TunnelOpen.resource_id = 5` (unplanned): 8.2 requires the target *stored for that resource*, but the
+  message carried no identity. Identity from the message, address from applied state — Stage 1's split
+  one layer down.
+- `dial_target()` on the shield calls the untouched `validate_host` twice and is its only production
+  caller. `host` is still validated when `local_target` is set, so an instruction naming another
+  shield's LAN IP cannot be applied locally.
+- Three `ResourceInstruction` build sites collapsed into one converter
+  (`internal/connector/instruction.go`) with a reflection test, so the next proto field cannot be
+  silently dropped on one path.
+
+**Corrections to the plan (all recorded in the phase file):**
+- `fingerprintDesired` does **not** inherit new fields — the "generation bump comes for free" claim was
+  wrong; without the fix shields never re-apply while everything still compiles and passes.
+- `check_port` ×3 was unlisted; without it every loopback-only resource reports `failed` forever.
+- `shield/build.rs` emits no `cargo:rerun-if-changed`, so proto-only edits compile against stale stubs
+  and return a false green. `cargo clean -p zecurity-shield` is required after any proto change.
+- `controller/gen/` is gitignored — `buf generate` is a local step, not a commit artifact.
+
+**Pre-existing defects found (tests that had never executed):** setting `RESOURCE_TEST_SHIELD_ID`
+un-skipped six `resource_acl_coherence_test.go` tests. `UpdateResource` was calling
+`NotifyPolicyChange` unconditionally *and* behind the `ACLRelevantUpdate` gate — so every resource edit
+bumped the client-visible ACL version and fired a fleet-wide tunnel restart; `ForceDeleteResource` had a
+duplicated notify block; and `TestProtectResource_DoesNotInvalidate` asserted the wrong behaviour
+(protect flips `route_type`, so suppressing the notify would be an enforcement bypass — code right, test
+wrong, inverted).
+
+**Verification:**
+- shield **31 passed / 4 ignored**; the 4 gated pass under `unshare -rn`.
+- Live on a real kernel with real nftables and a real socket, using a `dummy0` LAN IP so the service
+  address differs from the shield's: `without local_target → status=failed` ·
+  `with local_target=127.0.0.1 → status=protected` · `TCP connect OK`. Both halves run together because
+  the contrast is the assertion.
+- F21 atomicity re-verified in the same namespace: 0/89 samples saw the port undefended across 50
+  rebuilds.
+- connector **148 + 4** (unchanged), client **39** (untouched), relay green with zero files changed,
+  controller build/vet/test green except the pre-existing local-Valkey `CLIENT TRACKING` failure.
+- Each fix was revert-tested: removing the guard fails exactly the intended test(s) and nothing else.
+
+**What's next:**
+- ⬜ **Wire-hop E2E**: no `local_target` has crossed the controller → connector → shield gRPC path.
+  Every link is proven separately; needs a running stack with enrolled certs. Does not block Phase 9.
+- Phase 9 (client binding registry + synthetic routing) — largest and most security-sensitive phase of
+  Stage 2.

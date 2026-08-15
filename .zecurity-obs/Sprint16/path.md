@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10, negatives included) · Stage 2 phases 4–7 complete · next = Phase 8
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10, negatives included) · Stage 2 phases 4–8 complete (Phase 8 done 2026-08-15, commit e89f941; wire-hop E2E still outstanding) · next = Phase 9
 solo: true
 owner: M3
 tags:
@@ -312,20 +312,55 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       would deny before authorization is ever reached, so every test calls the pre-existing
       `#[cfg(test)] install_test_cache(vec![])`.
 
-#### Phase 8 — Shield `local_target`
-> See [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]. **← next unchecked phase.**
-- [ ] **8.0** **Deliver `local_target` to the Shield** (moved here from 5.1 — see the design
+#### Phase 8 — Shield `local_target` ✅ DONE (2026-08-15, commit `e89f941`)
+> See [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]].
+> 📌 **Scope was wider than the File Map said: 13 files, not 5.** Three exhaustive proto literals across
+> two crates, three `check_port` sites, `control_stream.rs` threading, and a second proto message.
+> Same undercount pattern as Phase 7 — worth treating as the norm.
+- [x] **8.0** **Deliver `local_target` to the Shield** (moved here from 5.1 — see the design
       correction under Phase 5). `proto/shield/v1/shield.proto` — add `string local_target = 7`
       to `ResourceInstruction` (fields 1–6 in use; never renumber). Then
       `internal/resource/store.go` `BuildShieldSnapshot` selects the column, and
       `internal/connector/control_stream.go` populates it in **all three**
       `ResourceInstruction{}` construction sites (~lines 169, 220, 532).
       `buf generate` + `cargo build --manifest-path shield/Cargo.toml`.
-- [ ] **8.1** `shield/src/resources.rs` — `validate_host` accepts the resource's `local_target`
+      ⚠️ **This plan's claim that the generation bump "comes for free" was wrong** — `fingerprintDesired`
+      is an explicit field list, not a struct hash. Without adding `LocalTarget` there, everything
+      compiles, every test passes, and the generation never bumps, so **shields never re-apply**.
+      Caught only by the phase file's own "**Verify** it changes" instruction.
+      📌 The three construction sites are now one shared converter (`internal/connector/instruction.go`)
+      with a reflection test, so the divergence the plan warns about is unrepresentable rather than
+      merely discouraged. `controller/gen/` is **gitignored** — `buf generate` is a local step, not a
+      commit artifact.
+- [x] **8.1** `shield/src/resources.rs` — `validate_host` accepts the resource's `local_target`
       (`127.0.0.1` | own LAN IP). ⚠️ This touches a **non-negotiable rule** (`resource.host ==
       detect_lan_ip()`); the check must stay **equally strict**, only more explicitly sourced.
-- [ ] **8.2** `shield/src/tunnel.rs` — dial `local_target`.
-- [ ] **Gate:** `cargo build --manifest-path shield/Cargo.toml`
+      ✅ `validate_host`'s body is **byte-identical** to its pre-phase version; a new `dial_target()`
+      calls it **twice** and is now its only production caller. `host` is validated even when
+      `local_target` is set — otherwise an instruction naming **another shield's LAN IP** would be
+      applied here as long as it carried `local_target: "127.0.0.1"`.
+      ⚠️ **`check_port` ×3 was not in the task list and the phase ships broken without it** — the health
+      probe used `host`, so a loopback-only resource would dial correctly and be reported
+      `status: "failed"` forever.
+- [x] **8.2** `shield/src/tunnel.rs` — dial `local_target`.
+      ⚠️ **Required an unplanned second proto field.** 8.2 demands the target "stored for that resource",
+      but `TunnelOpen` carried no resource identity — so `string resource_id = 5` was added, and the
+      connector passes `acl_entry.resource_id`. Tuple-matching on `(destination, protocol, port)` was
+      rejected as ambiguous by construction. Also threads `resource_state` into
+      `shield/src/control_stream.rs`.
+      📌 Unknown `resource_id` **falls back with a warning rather than failing closed** — deliberate,
+      documented, tighten later (Phase 1 → 3 sequence).
+- [x] **Gate:** `cargo build --manifest-path shield/Cargo.toml` — **PASS.** Full cross-component:
+      shield **31 + 4 gated**, connector **148 + 4** (unchanged), client **39** (untouched), relay green
+      with zero files changed, controller build/vet/test green.
+- [x] **Live verification (2026-08-15).** The headline claim is proven on a **real kernel with real
+      nftables and a real socket**, inside the F21 namespace plus a `dummy0` LAN IP:
+      `without local_target → status=failed` · `with local_target=127.0.0.1 → status=protected` ·
+      `TCP connect to 127.0.0.1:42535 OK`. Both halves run together because **the contrast is the
+      assertion**. F21 atomicity re-verified in the same namespace (0/89 samples saw the port undefended).
+- [ ] ⬜ **Outstanding — the wire hop.** No `local_target` has crossed the controller → connector →
+      shield **gRPC** path. Every link is proven separately; no message has traversed the wire. Needs a
+      running stack with enrolled certs. **Does not block Phase 9** (client-side, no overlap).
 
 #### Phase 9 — Client binding registry + synthetic routing
 > See [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]].
@@ -411,7 +446,7 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 | 5 | `proto/client/v1/client.proto`, `internal/policy/{store,compiler}.go`, `graph/**` |
 | 6 | `connector/src/resolver.rs` **(new)**, `connector/src/policy/mod.rs` (6.0), `connector/Cargo.toml` |
 | 7 | `connector/src/device_tunnel.rs` |
-| 8 | `proto/shield/v1/shield.proto`, `internal/resource/store.go`, `internal/connector/control_stream.go`, `shield/src/resources.rs`, `shield/src/tunnel.rs` |
+| 8 | **Actual: 13 files, not the 5 listed here.** `proto/shield/v1/shield.proto` (2 messages), `internal/resource/store.go`, `internal/connector/control_stream.go`, `internal/connector/instruction.go` **(new)** + `instruction_test.go` **(new)**, `internal/resource/snapshot_integration_test.go`, `graph/resolvers/resource.resolvers.go` + `resource_acl_coherence_test.go`, `shield/src/resources.rs`, `shield/src/tunnel.rs`, `shield/src/control_stream.rs`, `connector/src/agent_tunnel.rs`, `connector/src/device_tunnel.rs`, `connector/src/agent_server.rs` |
 | 9 | `client/src/registry.rs` **(new)**, `state_store.rs`, `tun.rs`, `net_stack.rs`, `runtime.rs` |
 | 10 | `admin/src/pages/Resource*.tsx` + gql |
 | 11 | `client/src/dns.rs` **(new)**, `Cargo.toml` |
@@ -511,8 +546,8 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 5 | [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]] | ✅ done |
 | 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ✅ done (128 + 4 tests green) |
 | 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ✅ done (148 + 4 tests green) |
-| 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ⬜ **next** |
-| 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ |
+| 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
+| 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ **next** |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ — closes **Gate 2** |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
@@ -617,11 +652,60 @@ evidence of a guard — revert the fix and watch it fail.**
   code but had **no test**. A future tightening of the route_type check would silently break named
   resources on older ACL snapshots. Added `legacy_direct_route_type_still_resolves`.
 
-### Outstanding (doc-only): stale comment on `ACLRelevantUpdate`
-`internal/resource/store.go` (~454) still documents `local_target` as reaching the wire and being part of
-what `CompileACLSnapshot` emits into an `ACLEntry`. The **code is correct** (it is excluded, and
-`acl_relevance_test.go` asserts `local_target only → false`); only the comment contradicts the Phase 5
-design correction — i.e. it is wrong about exactly the rule the correction established.
+### Fix: `fingerprintDesired` does not inherit new fields — this plan said it did
+**Phase 8.0.** The plan stated `BuildShieldSnapshot` "hashes whatever `desiredForShield` returns", so a
+new column's generation bump "comes for free". It does not: `fingerprintDesired` is an explicit
+`%s|%s|%s|%d|%d` format string. Adding `LocalTarget` to the struct and the `SELECT` changed nothing —
+compiles clean, all tests pass, generation never bumps, **shields never re-apply**. Caught only by the
+phase file's own "**Verify** it changes" step. Rollout note: the hash-format change bumps every shield's
+generation once.
+→ [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]
+
+### Fix: `check_port` ×3 — unlisted, and the phase ships broken without it
+**Phase 8.1.** All three health-probe sites used `host`. `check_port` is a real
+`TcpStream::connect_timeout`, so a service bound only to `127.0.0.1` refuses a connect to the shield's
+LAN IP — a `local_target` resource would dial correctly and be reported `status: "failed"` forever,
+from the first ack onward. Now probes the resolved `dial_target`. This is the first half of the live
+acceptance test, kept as a demonstration rather than deleted once it passed.
+→ [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]
+
+### Fix: 8.2 needed a second proto field (`TunnelOpen.resource_id`)
+**Phase 8.2.** The task requires dialing the target "stored for that resource", but `TunnelOpen` carried
+no resource identity, so there was no lookup key — the task was unimplementable as written. Tuple
+matching on `(destination, protocol, port)` is ambiguous by construction (two resources can share
+host+protocol+port and differ only by name). Added `string resource_id = 5`; the connector passes
+`acl_entry.resource_id`. Identity from the message, **address** from applied state — Stage 1's split one
+layer down.
+→ [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]
+
+### Fix (pre-existing): three defects in `resource.resolvers.go`, found by tests that had never run
+**Phase 8.** Setting `RESOURCE_TEST_SHIELD_ID` un-skipped the six `resource_acl_coherence_test.go`
+tests — **never executed by anyone** until this phase. Three failed:
+(1) `UpdateResource` called `NotifyPolicyChange` unconditionally *and* behind the `ACLRelevantUpdate`
+gate, making the gate dead code — so every edit bumped the client-visible ACL version and fired a
+fleet-wide `restart_tunnel_if_running`; (2) `ForceDeleteResource` had a duplicated notify block;
+(3) `TestProtectResource_DoesNotInvalidate` asserted the **wrong** behaviour — `routeTypeForResource`
+derives `route_type` from `status`, so protect flips `connector`→`shield` and suppressing the notify
+would be an **enforcement bypass**. Code was right, test was wrong; inverted it. Also added
+`PushSnapshotForShield` to `UpdateResource`, without which a `local_target` edit bumps the generation
+and delivers to nobody.
+→ [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]
+
+### Known trap: `shield/build.rs` does not track the proto
+**Phase 8.** `connector/build.rs` emits three `cargo:rerun-if-changed` lines; `shield/build.rs` emits
+none. A proto-only edit leaves the shield compiling against **stale stubs**, and `cargo build`/`cargo
+test` come back green having tested nothing new — it reported 15/15 passing against a proto without
+`local_target`, and `touch`ing the proto did not help. Workaround:
+`cargo clean -p zecurity-shield` before trusting any build after a proto change. One-line fix
+recommended but not applied (out of Phase 8 scope).
+→ [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]]
+
+### ~~Outstanding (doc-only): stale comment on `ACLRelevantUpdate`~~ ✅ RESOLVED in Phase 8
+`internal/resource/store.go` (~454) documented `local_target` as reaching the wire and being part of
+what `CompileACLSnapshot` emits into an `ACLEntry` — wrong about exactly the rule the Phase 5 design
+correction established. The code was always correct. Rewritten during Phase 8 to state why
+`local_target` is *deliberately* absent from the ACL-relevant set and that its delivery path is the
+shield snapshot generation instead.
 
 ### Outstanding (out of sprint scope): direct-path cooldown with no fallback
 `client/src/transport.rs` — `mark_direct_failure()` assumes an alternative transport exists. With
