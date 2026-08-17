@@ -29,6 +29,13 @@ func NewRelayRevocationChecker(load func(context.Context) ([]string, error)) *Re
 	return &RelayRevocationChecker{load: load, revoked: map[string]struct{}{}}
 }
 
+func normalizeHexSerial(serialHex string) string {
+	if len(serialHex)%2 == 1 {
+		return "0" + serialHex
+	}
+	return serialHex
+}
+
 // Refresh reloads the revoked set. On error the previous set + ready state are
 // kept (never un-revoke on a transient failure).
 func (c *RelayRevocationChecker) Refresh(ctx context.Context) error {
@@ -38,7 +45,7 @@ func (c *RelayRevocationChecker) Refresh(ctx context.Context) error {
 	}
 	set := make(map[string]struct{}, len(serials))
 	for _, s := range serials {
-		set[s] = struct{}{}
+		set[normalizeHexSerial(s)] = struct{}{}
 	}
 	c.mu.Lock()
 	c.revoked = set
@@ -56,12 +63,13 @@ func (c *RelayRevocationChecker) Ready() bool {
 
 // IsRevoked reports whether serialHex (canonical SerialNumber.Text(16)) is revoked.
 func (c *RelayRevocationChecker) IsRevoked(serialHex string) bool {
-	if _, err := hex.DecodeString(serialHex); err != nil {
+	check := normalizeHexSerial(serialHex)
+	if _, err := hex.DecodeString(check); err != nil {
 		return true // reject malformed serials (fail-closed)
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	_, ok := c.revoked[serialHex]
+	_, ok := c.revoked[normalizeHexSerial(serialHex)]
 	return ok
 }
 

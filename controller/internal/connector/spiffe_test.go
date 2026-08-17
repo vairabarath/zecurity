@@ -246,7 +246,7 @@ func TestUnarySPIFFEInterceptor_RelayRevoked(t *testing.T) {
 func TestUnarySPIFFEInterceptor_RelayNotRevoked_Allowed(t *testing.T) {
 	ctx, validator, store, info, handler := relayInterceptorFixture(t)
 	revChecker := NewRelayRevocationChecker(func(context.Context) ([]string, error) {
-		return []string{"some-other-serial"}, nil
+		return []string{"bb"}, nil
 	})
 	if err := revChecker.Refresh(context.Background()); err != nil {
 		t.Fatalf("Refresh: %v", err)
