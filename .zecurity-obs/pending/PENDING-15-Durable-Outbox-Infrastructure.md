@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: implemented
 id: PENDING-15
 domain: platform
 priority: P1
@@ -14,13 +14,15 @@ tags: [pending, adr, outbox, platform, reliability, scim-integration]
 
 # Pending ADR 15 — Platform Durable Outbox Infrastructure
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free
-> `ADR-0NN`.
->
-> This PENDING defines only the reusable **platform outbox infrastructure** that
-> ADR-025 (SCIM Directory Synchronization) depends on. It does NOT implement SCIM,
-> identity lifecycle, device lifecycle, or any specific event handler. Those belong
-> to ADR-025 and PENDING-13 respectively.
+> **Status: IMPLEMENTED (Sprint 18).** Transactional enqueue, concurrency-safe claiming, retry
+> backoff, crash/lease recovery, a generic handler registry, background processor, terminal-event
+> recovery, and observability all shipped and merged on `fixed-pendings` — see
+> `.zecurity-obs/Sprint18/path.md` (33/33 checkboxes) and `Sprint18/Member1-Go/Phase1-10`,
+> `controller/internal/outbox/*`, migration `033_outbox_events.sql`. As scoped, this covers only the
+> reusable platform outbox infrastructure — it does NOT implement SCIM, identity lifecycle, device
+> lifecycle, or any specific event handler; those remain ADR-025's and PENDING-13's concern
+> respectively. Options / Recommendation / Open Questions below are retained as the original
+> decision record.
 
 ---
 

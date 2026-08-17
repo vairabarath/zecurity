@@ -35,13 +35,14 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-07](PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** (functionality + phased roadmap) | operator | P1 | 07a, 07b |
 | PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
 | [PENDING-07b](PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging (separate app vs shared; alpha = CLI) | operator | P1 | 07a |
-| [PENDING-08](PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks | zero-trust | P2 | — |
-| [PENDING-09](PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization | zero-trust | P2 | ADR-001 |
+| ✅ [PENDING-08](PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15 (manual/E2E pass outstanding) | zero-trust | P2 | — |
+| [PENDING-09](PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — *Option B (bounded) implemented in Sprint 15; full decision (A/C) still open* | zero-trust | P2 | ADR-001 |
 | [PENDING-10](PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health | operations | P1 | — |
 | [PENDING-11](PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export | operations | P2 | — |
 | [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region | operations | P2 | ADR-013 |
 | [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) | Client Device Lifecycle & Cert Renewal | identity/ops | P2 | ADR-002 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
+| ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
@@ -87,8 +88,10 @@ P2 = differentiation / maturity.
 8. **PENDING-05** — SCIM directory sync *(needs 04)*.
 9. **PENDING-06** — MFA / step-up *(needs 04; relates to 09)*.
 10. **PENDING-13** — client device lifecycle + cert renewal. *Provides 02's client-device revoke trigger.*
-11. **PENDING-09** — continuous / re-evaluated authorization.
-12. **PENDING-08** — device posture *(best alongside 09)*.
+11. **PENDING-09** — continuous / re-evaluated authorization. *Option B (bounded) landed early,
+    in Sprint 15, alongside 08; Options A/C still pending team decision.*
+12. **PENDING-08** — device posture *(best alongside 09)*. ✅ **Done — Sprint 15**, ahead of this
+    sequencing (landed before 04/05/06/13 rather than after).
 
 ### Phase 4 — Maturity / GA *(P2)*
 13. **PENDING-11 (full)** — audit + SIEM export (beyond the provider-action audit slice from Phase 0).
