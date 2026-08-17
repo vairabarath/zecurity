@@ -51,6 +51,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
+	"github.com/yourorg/ztna/controller/internal/outbox"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
@@ -59,6 +60,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/transport"
+
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -75,11 +77,48 @@ func main() {
 
 	defer stop()
 	var wg sync.WaitGroup
+	var outboxStore *outbox.Outbox
+	var err error
 
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	outboxMaxRetries := envOrInt(
+		"OUTBOX_MAX_RETRIES",
+		100,
+	)
+	outboxBatchSize := envOrInt(
+		"OUTBOX_BATCH_SIZE",
+		100,
+	)
+	outboxStore, err = outbox.NewOutboxWithMaxRetries(
+		db.Pool,
+		outboxMaxRetries,
+	)
+
+	if err != nil {
+		log.Fatalf("outbox init: %v", err)
+	}
+	outboxRegistry := outbox.NewHandlerRegistry()
+	outboxProcessor, err := outbox.NewProcessor(
+		outboxStore,
+		outboxRegistry,
+		outbox.WithPollInterval(
+			mustDuration("OUTBOX_POLL_INTERVAL", 1*time.Second),
+		),
+		outbox.WithLockWindow(
+			mustDuration("OUTBOX_LOCK_WINDOW", 30*time.Second),
+		),
+		outbox.WithReaperInterval(
+			mustDuration("OUTBOX_REAPER_INTERVAL", 30*time.Second),
+		),
+		outbox.WithMaxRetries(outboxMaxRetries),
+	)
+	if err != nil {
+		log.Fatalf("outbox processor init: %v", err)
+	}
 
 	pkiService, err := pki.Init(ctx, db.Pool)
 	if err != nil {
@@ -467,6 +506,16 @@ func main() {
 	// Google redirects here after user consent; controller exchanges the code
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+
+		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
+			log.Printf("outbox processor stopped: %v", err)
+		}
+	}()
 
 	wg.Add(1)
 

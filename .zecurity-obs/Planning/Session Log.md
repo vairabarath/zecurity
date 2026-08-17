@@ -10,6 +10,127 @@ tags:
 
 ---
 
+## 2026-08-14 — Kilo — Sprint 18 Phase 10 Verification
+
+**What was done:**
+- Verified and completed Sprint 18 Phase 10 (Testing) for the controller outbox.
+- Confirmed all Phase 10 requirements implemented: 20 PostgreSQL integration tests (rollback, commit, concurrent claim, unique lease, stale MarkDone/MarkFailed, abandoned recovery, lease-replacement race, retry exhaustion, unknown-handler terminal, workspace-deletion protection, terminal-recovery authorization) + unit tests (TestTruncateError for 4096-byte truncation, TestHandlerIdempotency, backoff/deterministic-jitter, processor behavior, graceful shutdown) across `store_test.go`, `handler_test.go`, and `store_integration_test.go`.
+- Build gate confirmed passing: `go build ./...`, `go vet ./internal/outbox/...`, `go test ./internal/outbox/...`.
+- Marked Phase 10 complete in `path.md` (all checkboxes) and `Phase10-Testing.md` (`status: done`, all checkboxes).
+
+**Key decisions:**
+- No source code changes — only test files and documentation were committed.
+
+**What's next:**
+- Sprint 18 outbox is fully implemented, tested, and documented. Awaiting push to origin/pending-15-outbox-plan.
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 9 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 9 (Observability) is implemented.
+- `controller/internal/outbox/store.go` logs claim activity with count and event IDs, including `correlation_id`.
+- `controller/internal/outbox/processor.go` logs completion success, terminal failures, processing failures with retry count, and reaper recovery counts, all carrying `event_type`, `workspace_id`, `user_id`, and `correlation_id`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 9 complete in `.zecurity-obs/Sprint18/path.md` and `Phase9-Observability.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 8 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 8 (Terminal Event Recovery) is implemented.
+- `controller/internal/outbox/recover.go` adds `Recover(ctx, eventID, operatorID, reason, resetRetryBudget)` for terminal `failed` events only, with mandatory reason, operator identity validation, optional retry-budget reset, and transactional audit logging.
+- `controller/internal/audit/audit.go` adds `RecordTx(ctx, tx, entry)` to support audited recovery within a caller-owned transaction.
+- `controller/internal/outbox/store_integration_test.go` includes `TestRecoverTerminalEventIntegration`, `TestRecoverTerminalEventResetRetryBudgetIntegration`, `TestRecoverRejectsNonTerminalEventsIntegration`, and `TestRecoverRequiresReasonIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 8 complete in `.zecurity-obs/Sprint18/path.md` and `Phase8-Terminal-Event-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 7 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 7 (Background Processor) is implemented.
+- `controller/internal/outbox/processor.go` adds `Processor`, options, `NewProcessor`, `processEvent`, and `Run(ctx, batchSize)` with claim/dispatch/reap loops and clean shutdown.
+- `controller/cmd/server/main.go` wires `outboxStore`, `outboxProcessor`, and starts `outboxProcessor.Run(ctx, outboxBatchSize)` with graceful shutdown logging.
+- `controller/internal/outbox/store_integration_test.go` includes `TestProcessorRunProcessesEventIntegration`, `TestProcessorRunShutdownIntegration`, and `TestProcessorRunReapsAbandonedIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 7 complete in `.zecurity-obs/Sprint18/path.md` and `Phase7-Background-Processor.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 6 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 6 (Generic Handler Registry) is implemented.
+- `controller/internal/outbox/handler.go` adds `EventHandler` interface, `HandlerRegistry`, `RegisterHandler`, lookup, dispatch, and unknown-event terminal error behavior.
+- `controller/internal/outbox/handler_test.go` covers register/dispatch, handler error propagation, unknown event terminal failure, invalid registration, duplicate registration, and concurrent access.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 6 complete in `.zecurity-obs/Sprint18/path.md` and `Phase6-Generic-Handler-Registry.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 5 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 5 (Crash / Lease Recovery) is implemented.
+- `controller/internal/outbox/store.go` adds `ReapAbandoned(ctx, lockWindow)` with lease-aware expired-lease scanning, `retry_count++`, backoff-based `next_attempt_at`, and lease re-checking in the UPDATE.
+- `controller/internal/outbox/store_integration_test.go` includes `TestReapAbandonedIntegration` and `TestReapAbandonedLeaseReplacementIntegration`.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 5 complete in `.zecurity-obs/Sprint18/path.md` and `Phase5-Crash-Lease-Recovery.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 4 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 4 (Retry / Backoff) is implemented.
+- `controller/internal/outbox/backoff.go` implements `RetryPolicy.Backoff()` with `min(5m, 2^retryCount * base)` and injectable jitter interfaces.
+- `controller/internal/outbox/backoff_test.go` covers deterministic backoff values, negative retry counts, policy validation, and jitter behavior.
+- `controller/internal/outbox/store.go` updates `MarkFailed` to compute `next_attempt_at` via backoff, set `NULL` when `retryCount >= maxRetries`, and preserve 4096-byte `last_error` truncation.
+- `controller/internal/outbox/store_integration_test.go` updates `TestMaxRetriesIntegration` to drive two `MarkFailed` calls and assert exhaustion produces `next_attempt_at = NULL`.
+- `gofmt -w cmd/server/main.go` applied; `cd controller && go build ./...` and `go test ./internal/outbox/... -v` pass cleanly.
+- Marked Phase 4 complete in `.zecurity-obs/Sprint18/path.md` and `Phase4-Retry-Backoff.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 3 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 3 (Concurrency-Safe Claiming) is implemented.
+- `controller/internal/outbox/store.go` adds `ClaimEvents(ctx, limit)` with the exact atomic CTE from PENDING-15 §3, `MarkDone`, `MarkFailed`, and `maxRetries` config on `Outbox`.
+- `controller/internal/outbox/event.go` adds `OutboxEvent` for claimed rows.
+- `controller/internal/outbox/store_integration_test.go` adds integration tests for claim, mark done/failed, stale-lease rejection, and concurrent claiming.
+- `cd controller && go build ./...` and `go vet ./internal/outbox/...` pass cleanly.
+- Marked Phase 3 complete in `.zecurity-obs/Sprint18/path.md` and `Phase3-Concurrency-Safe-Claiming.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 2 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 2 (Transactional Enqueue) is implemented.
+- `controller/internal/outbox/event.go` defines the provider-independent `Event` struct with caller-supplied `CorrelationID` and opaque `Payload` (`json.RawMessage`).
+- `controller/internal/outbox/store.go` implements `Enqueue(ctx, tx, evt)` using the caller's `pgx.Tx`, never falling back to the pool; it inserts `status='pending'`, `retry_count=0`, `next_attempt_at=NOW()`, and rejects `nil` transactions with `ErrNilTx`.
+- `controller/internal/outbox/store_integration_test.go` covers COMMIT persistence, ROLLBACK removal, and nil-transaction rejection.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 2 complete in `.zecurity-obs/Sprint18/path.md` and `Phase2-Transactional-Enqueue.md` (`status: done`, all checkboxes checked).
+
+---
+
+## 2026-08-11 — Kilo — Sprint 18 Phase 1 Verification
+
+**What was done:**
+- Verified Sprint 18 Phase 1 (Database / Migration) is implemented.
+- `controller/migrations/033_outbox_events.sql` exists with full `outbox_events` schema (four-state `status` CHECK, `workspace_id` FK `ON DELETE RESTRICT`, `user_id` FK `ON DELETE SET NULL`, `correlation_id`, JSONB `payload`, retry/lease columns, `last_error`) and three required indexes (`idx_outbox_claim`, `idx_outbox_workspace_event`, `idx_outbox_processing`).
+- `ON DELETE RESTRICT` on `workspace_id` satisfies M18-1b workspace-deletion handling.
+- `cd controller && go build ./...` passes cleanly.
+- Marked Phase 1 complete in `.zecurity-obs/Sprint18/path.md` and `Phase1-Database-Migration.md` (`status: done`, all checkboxes checked).
+
+---
+
 ## 2026-07-11 — Claude Code (Opus 4.8) — Sprint 12 Planning (Provider Tier + Relay Provisioning)
 
 **Member:** M2 (bairava)
