@@ -3,34 +3,20 @@ type: phase
 member: M2
 sprint: 17
 phase: 1
-title: Durable Outbox Infrastructure (PENDING-15)
-status: planned
+title: Durable Outbox Infrastructure (SUPERSEDED — shipped as Sprint 18)
+status: superseded
 depends_on: []
-tags: [go, platform, outbox, reliability, pending-15]
+tags: [go, platform, outbox, reliability, pending-15, superseded]
 ---
 
-# Phase 1 (M2) — Durable Outbox Infrastructure
+# Phase 1 (M2) — Durable Outbox Infrastructure — SUPERSEDED
 
-> Depends on nothing — Day 1. Source of truth: [[PENDING-15-Durable-Outbox-Infrastructure]].
-> Reusable platform infra; does **not** implement SCIM, identity, or device logic.
-
-## Goal
-A durable, transactional, retrying delivery layer between an identity decision and its async side-effects.
-
-## Files
-| File | Change |
-| --- | --- |
-| `controller/migrations/033_outbox_events.sql` | **new** — `outbox_events` (033; 030 skipped) |
-| `controller/internal/outbox/*.go` | **new** — Enqueue, ClaimEvents, processor, recovery, handler registry |
-
-## Steps
-- [ ] `outbox_events(id, event_type, workspace_id, payload, status[pending|processing|done|failed], retry_count, next_attempt_at, lease_id, claimed_at, correlation_id, created_at, updated_at)` + claim/processing/workspace indexes.
-- [ ] `Enqueue(ctx, tx, evt)` — inserts within the **caller's** transaction (so it commits atomically with the identity mutation).
-- [ ] `ClaimEvents(ctx, limit)` — `FOR UPDATE SKIP LOCKED`, ordered by `next_attempt_at`; sets `processing` + `lease_id` + `claimed_at`.
-- [ ] Processing lifecycle (done/failed + backoff via `next_attempt_at`); crash/lease recovery (reaper returns stuck `processing` past lease timeout to retryable); generic handler registry; background processor; idempotency; observability.
-
-## Rules
-- Outbox does **not** own handlers or device/SCIM logic — only at-least-once delivery.
-
-## Build gate
-`go build ./...` + tests: transactional enqueue, concurrent claim (no double-claim), retry/backoff, crash/lease recovery.
+> **This phase is no longer part of Sprint 17.** The durable outbox was implemented and merged into
+> `fixed-pendings` as **Sprint 18** (PENDING-15, 33/33 phases). See:
+> - `controller/internal/outbox/*` (store, processor, handler registry, backoff, recovery)
+> - `controller/migrations/033_outbox_events.sql`
+> - [[PENDING-15-Durable-Outbox-Infrastructure]] (status: IMPLEMENTED) · `Sprint18/path.md`
+>
+> Sprint 17 consumes it via `outbox.Enqueue(ctx, tx, evt)`. Nothing to build here.
+> The `DurableOutboxSink` adapter that wraps it now lives in M1
+> [[Sprint17/Member1-Go/Phase6-Deprovision-and-SideEffectSink]].

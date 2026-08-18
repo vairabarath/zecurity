@@ -25,7 +25,7 @@ Give a SCIM connection a safe lifecycle, surface sync health, and make disable�
 
 ## Steps
 - [ ] Connection `status: active → disabled → deleted`. **DISABLE** (reversible): new logins fail, sessions revoked, linked users **suspended**, `provisioning_owner scim→unmanaged`. **DELETE** guarded: only when `linked_users == 0` or explicit destructive confirmation.
-- [ ] `last_sync_at` → **Identity Health**: Healthy / Delayed / Disconnected. While the sink is interim, also surface "device-trust delivery: not configured".
+- [ ] `last_sync_at` → **Identity Health**: Healthy / Delayed / Disconnected. (Device-trust delivery is durable via the merged outbox — no "not configured" caveat.)
 - [ ] `scim_sync_instances`: open a UUID per connect; stamp `sync_instance_id` on provisioned users/external_identities; reconcile current-vs-stale on reconnect.
 
 ## Rules

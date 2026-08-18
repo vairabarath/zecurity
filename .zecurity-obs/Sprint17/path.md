@@ -18,15 +18,26 @@ tags:
 > Source of truth: [[ADR-025-SCIM-Directory-Synchronization]] (ACCEPTED) + the locked plan
 > [[PENDING-05-SCIM-Implementation-Plan]].
 > Branch: `feat/pending-05-scim` (copy of `fixed-pendings`).
-> Two members: **M1 (identity/SCIM engine)** and **M2 (durable outbox + delivery)**.
 > ADR-025 is the authoritative contract — **implement it, do not redesign it.**
+
+## ⚠️ Reconciled 2026-08-18 — the durable outbox already shipped
+
+**PENDING-15 is DONE and merged into `fixed-pendings` as Sprint 18** (33/33 phases, PRs #75/#76):
+`controller/internal/outbox/*` + `migrations/033_outbox_events.sql`. The `outbox.Enqueue(ctx, tx, evt)`
+API commits inside the caller's transaction — exactly the contract our deprovision path needs.
+
+Consequences for this sprint:
+- **Sprint 17 is now a solo M1 (SCIM) sprint.** M2's outbox work landed as Sprint 18 — there is no M2 lane here anymore.
+- **No `UnwiredSink` interim, no "not delivered" audit-record, no gap reconciliation.** The durable path
+  exists on day one; P6 wires `SideEffectSink` straight to the real `outbox.Enqueue`.
+- **SCIM migration number = `034`** (next free slot after `030`/`031`/`032`/`033` on the merged tree).
 
 ## Sprint Goal
 
 Make the workspace roster and group membership **directory-driven**, and make **offboarding
 automatic**: an IdP (Okta/Entra/…) pushes Users and Groups over SCIM 2.0; deprovision **cuts Zecurity
 access immediately** (sessions + policy) and **durably triggers device-trust revocation** through the
-outbox.
+already-merged outbox.
 
 ```text
 BEFORE                                      AFTER
@@ -39,58 +50,56 @@ groups hand-managed; offboarding is manual   deprovision kills sessions + policy
 ## The one hard boundary (memorize it)
 
 ```text
-PENDING-05 (M1)  → DECIDE + ENQUEUE   (identity lifecycle; SideEffectSink.Enqueue in-tx)
-PENDING-15 (M2)  → DURABLE DELIVERY   (outbox: persist, claim, retry, recover)
-PENDING-13       → DEVICE EXECUTION    (consume device.trust.* → cert/device revocation)
+PENDING-05 (this sprint) → DECIDE + ENQUEUE   (identity lifecycle; SideEffectSink.Enqueue in-tx)
+PENDING-15 (Sprint 18, DONE) → DURABLE DELIVERY   (outbox: persist, claim, retry, recover)
+PENDING-13 → DEVICE EXECUTION    (consume device.trust.* → cert/device revocation)
 ```
 
-**Only durable device-trust delivery depends on PENDING-15.** Everything else (provision, update, groups,
-conflict, connection lifecycle, and **access-cutting deprovision via `identity.Revoker`**) is independent
-and ships without it.
+SCIM's only job at the boundary is to **enqueue a device-trust event inside the identity transaction**.
+Persistence, retry, lease recovery, and the background processor are all provided by the merged outbox.
+Everything else (provision, update, groups, conflict, connection lifecycle, and **access-cutting
+deprovision via `identity.Revoker`**) is pure identity work with no outbox dependency at all.
 
 ## Key Design Decisions (locked)
 
 | Decision | Detail |
 | --- | --- |
-| SideEffectSink boundary | M1 defines `identity.SideEffectSink.Enqueue(ctx, tx, DeviceTrustEvent)`; M2 provides the durable impl. **No fake/best-effort device revocation** — the interim sink only audit-records "REQUESTED, not delivered" and signals it loudly. Guarantee = PENDING-15 only. |
+| SideEffectSink boundary | M1 defines `identity.SideEffectSink.Enqueue(ctx, tx, DeviceTrustEvent)` and backs it with `DurableOutboxSink` → `outbox.Enqueue` (the merged Sprint 18 infra). The interface stays so `scim`/`identity` never import `outbox` directly and unit tests can inject a fake. **No interim sink, no best-effort/fake revocation** — the durable path is real from the first commit. |
 | Break-glass = real permission | `identity.mapping.break_glass` is a **dedicated fine-grained permission**, NOT ADMIN. Smallest permission primitive; +mandatory reason +audit +MFA-when-PENDING-06. |
 | Canonical Identity Key | Per-connection `subject_claim` (OIDC) + `scim_identifier` (SCIM) resolve to `external_identities.subject`. Never hardcode `sub==externalId`. Never merge by email. |
 | Ownership | Directory owns directory attrs (rejected at the **mutation layer**, read-only in UI); Zecurity owns role/policies/manual-groups. `provisioned_by` (immutable) + `provisioning_owner` (mutable). |
 | Conflict, not merge | SCIM hitting a JIT/manual identity → `409 identity_conflict` + pending record; admin Accept-Link/Reject/Reopen. No auto-takeover, never by email. |
 | One engine | Provider **profiles** (Okta/Entra/JumpCloud/Keycloak/Generic) + per-connection overrides. **No per-provider handler types.** |
 | Atomic tx | identity mutation + audit + `policy.Notifier` + `Revoker` + `SideEffectSink.Enqueue` commit in ONE tx; downstream failure never rolls back identity. |
-| Migration number | **Not reserved.** M2 outbox = `033_outbox_events.sql` (PENDING-15). M1 SCIM migration number assigned at integration, after `030` (FQDN) + `033` land. |
-| Full stack | Backend + GraphQL + React. Frontend is a coordinated hand-off (see §Frontend), not part of the 2-member backend core. |
+| Migration number | **`034`** — next free slot after the merged `030` (device posture) / `031` (identity-federation + device-profile-manual-trust both exist) / `032` (platform-login-toggle) / `033` (outbox). Confirm no collision at branch-cut. |
+| Full stack | Backend + GraphQL + React. Frontend is a coordinated hand-off (see §Frontend). |
 
-## Team Assignments
+## Ownership
 
 | Member | Role | Area |
 | --- | --- | --- |
-| **M1** — you | Go (Controller) | SCIM identity engine: schema, SCIM token auth, break-glass permission primitive, provider profiles + mapping validation, Users provision/update/deprovision, Groups, identity-conflict workflow, connection lifecycle + health + sync instances, and the `SideEffectSink` **interface** + interim sink. |
-| **M2** — Sathiya | Go (Controller) | Durable Outbox (PENDING-15): `outbox_events` + Enqueue + claim/retry/recovery + background processor; the `DurableOutboxSink` implementation; P10 wiring + device-event contract handoff to PENDING-13; gap reconciliation. |
+| **M1** — you | Go (Controller) | The whole SCIM identity engine: schema, SCIM token auth, break-glass permission primitive, provider profiles + mapping validation, Users provision/update/deprovision, Groups, identity-conflict workflow, connection lifecycle + health + sync instances, the `SideEffectSink` interface, and the thin `DurableOutboxSink` adapter over the merged outbox. |
+| **Outbox** | Sathiya (Sprint 18) | **Already delivered & merged** — `controller/internal/outbox/*`. Not part of this sprint. If Sathiya wants to own the `DurableOutboxSink` adapter (≈15 lines) that's a trivial coordination; otherwise M1 writes it. |
 
 ## Critical Rule: Conflict Zones
 
-| File / area | Who | Rule |
-| --- | --- | --- |
-| `controller/internal/scim/**` | **M1 only** | the SCIM engine, handlers, provider profiles, DirectoryService |
-| `controller/internal/idp/store.go` | **M1 only** | SCIM-related connection columns + queries |
-| `controller/internal/identity/**` | **M1 only** | `SideEffectSink` interface, resolver/linker reuse, permission checks |
-| `controller/internal/permission/**` | **M1 only** | break-glass permission primitive |
-| `controller/graph/idp.graphqls` + `graph/resolvers/idp*.go` | **M1 only** | SCIM admin API, token mint, conflict queue |
-| `controller/migrations/<scim>.sql` | **M1 only** | number assigned at integration (after 030+033) |
-| `controller/internal/outbox/**` | **M2 only** | outbox infra (PENDING-15) |
-| `controller/migrations/033_outbox_events.sql` | **M2 only** | outbox schema |
-| `DurableOutboxSink` impl | **M2 only** | implements M1's `SideEffectSink` over the outbox |
-| `controller/cmd/server/main.go` | **coordinate** | M1 wires the SCIM engine + interim sink; M2 wires the outbox + swaps `DurableOutboxSink`. Different regions — announce edits. |
+The outbox is merged, so there is no live cross-member editing this sprint. Boundaries to respect:
 
-**The contract between M1 and M2 is one interface:** `identity.SideEffectSink`. M1 defines it and ships
-the interim sink; M2 implements `DurableOutboxSink`. Agree its shape on Day 1, then work independently.
+| File / area | Rule |
+| --- | --- |
+| `controller/internal/scim/**` | the SCIM engine, handlers, provider profiles, DirectoryService |
+| `controller/internal/idp/store.go` | SCIM-related connection columns + queries |
+| `controller/internal/identity/**` | `SideEffectSink` interface, resolver/linker reuse, permission checks |
+| `controller/internal/permission/**` | break-glass permission primitive |
+| `controller/graph/idp.graphqls` + `graph/resolvers/idp*.go` | SCIM admin API, token mint, conflict queue |
+| `controller/migrations/034_scim.sql` | SCIM schema (number confirmed at branch-cut) |
+| `controller/internal/outbox/**` | **Do not modify** — merged Sprint 18 infra; SCIM only *calls* `outbox.Enqueue`. |
+| `controller/cmd/server/main.go` | wire the SCIM engine + `DurableOutboxSink` (constructed from the existing `outbox.Outbox`). |
 
 ## Dependency Graph
 
 ```text
-M1-1 Schema (Day 1, independent)
+M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel infra to build]
    ↓
    ├── M1-2 SCIM token auth
    ├── M1-3 Break-glass permission primitive
@@ -99,17 +108,14 @@ M1-1 Schema (Day 1, independent)
    ↓
    M1-5 Users provision + update                    (needs M1-4)
    ↓
-   ├── M1-6 Users deprovision + SideEffectSink       (needs M1-5; sink IFACE only, interim impl)
+   ├── M1-6 Users deprovision + SideEffectSink→outbox (needs M1-5)
    ├── M1-7 Groups                                   (needs M1-5)
    ├── M1-8 Identity conflict workflow               (needs M1-5)
    └── M1-9 Connection lifecycle + health + sync     (needs M1-5)
-
-M2-1 Durable outbox infrastructure (Day 1, independent)
-   ↓
-M2-2 DurableOutboxSink + wiring + reconciliation     (needs M1-6 sink iface + M2-1 outbox)
 ```
 
-> Day-1 parallel starts: **M1-1** (schema) and **M2-1** (outbox). Agree the `SideEffectSink` shape Day 1.
+> Day-1 start: **M1-1** (schema). The `SideEffectSink` shape is M1's to define; it wraps the existing
+> `outbox.Event` / `outbox.Enqueue`, so there is no cross-member contract to negotiate first.
 
 ## Execution Path
 
@@ -117,8 +123,8 @@ M2-2 DurableOutboxSink + wiring + reconciliation     (needs M1-6 sink iface + M2
 
 #### Phase 1 — Schema  `[I]`
 > See [[Sprint17/Member1-Go/Phase1-Schema]]. Depends on nothing — Day 1.
-- [ ] **M1-1a** migration (number TBD at integration): `identity_connections` (+`subject_claim`, `scim_identifier`, `scim_enabled`, `last_sync_at`, `status`+`'deleted'`); `users` (+`provisioned_by`, `provisioning_owner`, `sync_instance_id`); `groups` (+`origin`, `external_id`); `external_identities` (+`sync_instance_id`); new `scim_tokens`, `scim_identity_conflicts` (+ unique pending index), `scim_sync_instances`.
-- [ ] **Build gate:** `cd controller && go build ./...`; migration applies on a fresh DB; PENDING-04 tests still green.
+- [ ] **M1-1a** migration `034_scim.sql`: `identity_connections` (+`subject_claim`, `scim_identifier`, `scim_enabled`, `last_sync_at`, `status`+`'deleted'`); `users` (+`provisioned_by`, `provisioning_owner`, `sync_instance_id`); `groups` (+`origin`, `external_id`); `external_identities` (+`sync_instance_id`); new `scim_tokens`, `scim_identity_conflicts` (+ unique pending index), `scim_sync_instances`.
+- [ ] **Build gate:** `cd controller && go build ./...`; migration applies on a fresh DB after `033`; PENDING-04 tests still green.
 
 #### Phase 2 — SCIM token authentication  `[I]`
 > See [[Sprint17/Member1-Go/Phase2-SCIM-Token-Auth]]. Depends on Phase 1.
@@ -144,11 +150,11 @@ M2-2 DurableOutboxSink + wiring + reconciliation     (needs M1-6 sink iface + M2
 - [ ] **M1-5b** provision via `Resolver`/`Linker` (`provisioned_by=scim`, `provisioning_owner=scim`, `sync_instance_id`); update = directory-owned attrs only, Zecurity-owned rejected at mutation layer; RFC 7644 envelopes, `meta.version`, `eq` filter, tombstones hidden.
 - [ ] **Build gate:** `go build ./...` + provision/update DB-integration + scope-isolation tests.
 
-#### Phase 6 — Users: deprovision + reactivate + SideEffectSink  (identity `[I]`, sink iface `[I]`)
+#### Phase 6 — Users: deprovision + reactivate + SideEffectSink→outbox  `[I]`
 > See [[Sprint17/Member1-Go/Phase6-Deprovision-and-SideEffectSink]]. Depends on Phase 5.
-- [ ] **M1-6a** define `identity.SideEffectSink` interface + interim `UnwiredSink` (audit-records "not delivered", never revokes) + a visible "device-trust delivery: not configured" signal.
-- [ ] **M1-6b** deprovision (active=false→suspend, DELETE→soft-delete) + generation bump + `Revoker` session kill + audit + `policy.Notifier` + `SideEffectSink.Enqueue`, **atomic in one tx**; reactivate enqueues `re_enrollment_required`. Repeated DELETE idempotent.
-- [ ] **Build gate:** `go build ./...` + deprovision identity-effect tests (independent of PENDING-15).
+- [ ] **M1-6a** define `identity.SideEffectSink { Enqueue(ctx, tx, DeviceTrustEvent) error }` + `DurableOutboxSink` that marshals the event and calls the merged `outbox.Enqueue(ctx, tx, outbox.Event{...})` **inside the identity tx**. No interim sink.
+- [ ] **M1-6b** deprovision (one tx): `active=false`→suspend / `DELETE`→soft-delete + `identity_generation` bump + `Revoker` session kill + audit + `policy.Notifier` + `SideEffectSink.Enqueue(device.trust.revoke.requested)`; reactivate enqueues `device.trust.re_enrollment_required`. Repeated DELETE idempotent.
+- [ ] **Build gate:** `go build ./...` + deprovision identity-effect tests (with a fake sink) **and** an integration test asserting the outbox row is written in the same tx.
 
 #### Phase 7 — SCIM Groups  `[I]`
 > See [[Sprint17/Member1-Go/Phase7-Groups]]. Depends on Phase 5.
@@ -164,27 +170,20 @@ M2-2 DurableOutboxSink + wiring + reconciliation     (needs M1-6 sink iface + M2
 #### Phase 9 — Connection lifecycle + health + sync instances  `[I]`
 > See [[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]]. Depends on Phase 5.
 - [ ] **M1-9a** connection `active→disabled→deleted`: DISABLE suspends users (reversible) + kills sessions + `provisioning_owner scim→unmanaged`; DELETE guarded (0 users or destructive confirmation).
-- [ ] **M1-9b** `last_sync_at` → Identity Health (Healthy/Delayed/Disconnected + "device-trust delivery: not configured" while interim); `scim_sync_instances` reconcile on reconnect.
+- [ ] **M1-9b** `last_sync_at` → Identity Health (Healthy/Delayed/Disconnected); `scim_sync_instances` reconcile on reconnect.
 - [ ] **Build gate:** `go build ./...` + lifecycle/health tests.
 
-### M2 — Durable outbox + delivery
+### Outbox — already merged (Sprint 18)
 
-#### Phase 1 — Durable outbox infrastructure (PENDING-15)  `[I]`
-> See [[Sprint17/Member2-Go/Phase1-Durable-Outbox]]. Depends on nothing — Day 1. Source: [[PENDING-15-Durable-Outbox-Infrastructure]].
-- [ ] **M2-1a** `migrations/033_outbox_events.sql` — `outbox_events` (status/retry/lease/claimed_at/next_attempt_at/correlation_id).
-- [ ] **M2-1b** `internal/outbox`: `Enqueue(ctx, tx, evt)` (in-caller-tx), `ClaimEvents` (`FOR UPDATE SKIP LOCKED`), processing lifecycle, crash/lease recovery, handler registry, background processor, idempotency, observability.
-- [ ] **Build gate:** `go build ./...` + outbox concurrency/recovery tests.
+The durable outbox is **not implemented in this sprint** — it is `controller/internal/outbox/*` on
+`fixed-pendings`. SCIM consumes it via `outbox.Enqueue`. See [[PENDING-15-Durable-Outbox-Infrastructure]]
+(status: IMPLEMENTED) and `.zecurity-obs/Sprint18/path.md`. The device-event contract
+(`device.trust.revoke.requested` / `device.trust.re_enrollment_required`) is handed to **PENDING-13**,
+which registers the handler that executes device/cert revocation.
 
-#### Phase 2 — DurableOutboxSink + wiring + reconciliation  `[15]`
-> See [[Sprint17/Member2-Go/Phase2-DurableOutboxSink-and-Wiring]]. Depends on M1-6a (sink iface) + M2-1.
-- [ ] **M2-2a** implement `DurableOutboxSink` over `outbox.Enqueue`; swap it in at `main.go` (replaces interim sink).
-- [ ] **M2-2b** verify enqueue commits inside the deprovision tx; downstream failure never rolls back identity.
-- [ ] **M2-2c** gap reconciliation: replay device-trust intents recorded in `audit_logs` during the interim window.
-- [ ] **Build gate:** `go build ./...` + end-to-end deprovision→outbox test (with a stub PENDING-13 consumer).
-
-## Frontend (hand-off to M1-Frontend / React — coordinated, not in the 2-member backend core)
+## Frontend (hand-off to M1-Frontend / React — coordinated, not in the backend core)
 - [ ] SCIM config on a connection (provider preset, mapping fields, enable-SCIM, mint token shown-once, SCIM base URL).
-- [ ] Identity Health indicator (+ "device-trust delivery: not configured" while interim).
+- [ ] Identity Health indicator (Healthy / Delayed / Disconnected).
 - [ ] Directory-owned fields read-only ("Managed by Google Workspace / Microsoft Entra").
 - [ ] Provisioning-Conflicts queue (Accept-Link / Reject / Reopen).
 - [ ] Origin-labelled groups (`Engineering · SCIM` / `· Local` / `· System`) — never display-name alone.
@@ -198,16 +197,14 @@ cd admin && npm run codegen && npm run build                                    
 
 ## Acceptance Criteria
 - [ ] SCIM provisions/updates users; directory-owned attrs read-only (mutation-layer enforced); Zecurity-owned editable.
-- [ ] Deprovision (`active=false`/`DELETE`) **suspends/deletes + bumps generation + kills sessions + invalidates ACL**, atomically — independent of PENDING-15.
-- [ ] Deprovision enqueues `device.trust.revoke.requested` via `SideEffectSink`; interim sink **audit-records "not delivered"** and never fakes revocation.
+- [ ] Deprovision (`active=false`/`DELETE`) **suspends/deletes + bumps generation + kills sessions + invalidates ACL**, atomically.
+- [ ] Deprovision enqueues `device.trust.revoke.requested` via `SideEffectSink` → the **durable outbox**, committed in the same tx as the identity mutation; a downstream (device) failure never rolls back identity.
 - [ ] `identity.mapping.break_glass` is a dedicated permission (ADMIN alone is denied); overrides require reason + audit.
 - [ ] Mapping validation is an **active probe-user round-trip**; unproven mapping keeps SCIM disabled.
 - [ ] Groups sync with `origin`/`external_id`; out-of-order member → `404`; policy snapshot invalidated.
 - [ ] JIT/manual collision → `409 identity_conflict` + pending record; Accept-Link is admin-authorized, atomic, audited, never email-based.
 - [ ] Connection DISABLE suspends users reversibly; DELETE guarded; Identity Health surfaces sync staleness.
 - [ ] Every SCIM path is scoped to `(workspace_id, connection_id)` from the token — never from the payload.
-- [ ] Durable outbox: transactional enqueue, concurrent claim (`SKIP LOCKED`), retry+backoff, crash/lease recovery.
-- [ ] `DurableOutboxSink` swap makes deprovision device-trust durable; gap reconciliation replays interim intents.
 - [ ] SCIM conformance suite green; **live Okta/Entra interop = PENDING tenant access** (do not mark done without tenants).
 
 ## Deferred (out of scope this sprint)
@@ -215,11 +212,12 @@ cd admin && npm run codegen && npm run build                                    
 - MFA on break-glass (activates with PENDING-06 step-up).
 - Pull-based directory sync (Google Directory / MS Graph); broker-owned SCIM.
 - Optimistic concurrency (`If-Match`) beyond emitting `meta.version`.
+- The **PENDING-13** device-trust handler that consumes the outbox events (separate track).
 
 ## Notes for AI Agents
 1. Read this `path.md`, then [[PENDING-05-SCIM-Implementation-Plan]] and [[ADR-025-SCIM-Directory-Synchronization]], then your first unchecked phase whose deps are satisfied.
 2. **ADR-025 is authoritative — implement, don't redesign.**
-3. The M1↔M2 contract is exactly `identity.SideEffectSink`; agree its shape Day 1, then work independently.
-4. **No fake device revocation.** Never create a path that could read as guaranteed enforcement before PENDING-15.
+3. The durable outbox is **already merged** (`internal/outbox/*`). Do not rebuild it; call `outbox.Enqueue`. Keep the `identity.SideEffectSink` interface as the seam so `scim`/`identity` never import `outbox` directly.
+4. **No fake device revocation.** The durable path is real now — enqueue inside the identity tx; never invent a synchronous "device revoked" path in SCIM (execution is PENDING-13's job).
 5. Never key identity on email. Never let ADMIN alone satisfy `identity.mapping.break_glass`.
-6. Migration number is assigned at integration (after `030` + `033`), not reserved now.
+6. SCIM migration is `034` — confirm no collision against the merged tree at branch-cut.
