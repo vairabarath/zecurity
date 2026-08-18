@@ -1896,3 +1896,66 @@ wrong, inverted).
   Every link is proven separately; needs a running stack with enrolled certs. Does not block Phase 9.
 - Phase 9 (client binding registry + synthetic routing) — largest and most security-sensitive phase of
   Stage 2.
+
+## 2026-08-18 — Claude (Sprint 16 Phase 9 — Client Binding Registry + Synthetic Routing)
+
+**Context:** Stage 2's largest and most security-sensitive phase. Client tests **39 → 78**, plus **4
+gated live tests** that build a real TUN, install the real nft chain and route, and push real packets.
+
+**What shipped:**
+- `client/src/registry.rs` (new) — durable `hostname → synthetic IP → resource_id`, collision-aware
+  `/22` selection inside `100.64.0.0/10`, quarantine before reuse, fail-closed reverse lookup. An
+  identity change **never rebinds**: the old address is quarantined and a fresh one issued, because
+  mutating in place would make every holder of that address silently reach a different resource.
+- Encrypted persistence in the existing AES-GCM envelope (ADR-002), with a lenient reader that
+  **salvages address-shaped strings** from a corrupt table rather than returning an empty default —
+  otherwise those addresses would look never-issued and go straight to different resources.
+- One port-agnostic whole-CIDR nft rule + one CIDR route, replacing per-resource growth. Pinned
+  resources keep their per-`(ip, port)` rules unchanged.
+- Transports map keyed on synthetic IPs; `destination` sent empty for named resources (must agree with
+  Phase 7.0 or every FQDN resource is denied).
+
+**Four bugs found only by the live test, after the unit suite was green:**
+1. **Invalid nft syntax** — a bare `tcp` protocol match. nft rejected the rule outright, so no synthetic
+   traffic would ever have been marked. The unit test asserted `contains(" tcp ")`, true of an
+   unloadable rule. **Every FQDN resource would have been silently unroutable.**
+2. **`handle_up` called `configure_allowed_flows` twice**, and it starts with `cleanup_policy_routes()`
+   — so the synthetic routing was installed and immediately destroyed while `up` reported success.
+3. **Pre-existing: smoltcp silently supported only 2 resource addresses.** Per-`/32` pushes into a
+   capacity-2 vec with `let _ =` discarding failures. Fixed with `set_any_ip(true)` + one default route,
+   which also is the only way a synthetic `/22` can work (`has_ip_addr` is an exact match).
+4. **A third silent drop site** in `net_stack`, which also let the listener set diverge from the
+   transports map.
+
+**Two of my own test defects, both producing false confidence:** `probe` mapped every `Err` to
+"refused", so a no-route failure looked like a RST and the first live run passed spuriously; and
+`#[tokio::test]` being single-threaded meant a blocking connect starved the smoltcp poll loop, producing
+a `hung` indistinguishable from the real failure. Both fixed; the first is what surfaced bug 1.
+
+**Verification:**
+- client **78 passed, 4 ignored**; build, clippy and rustfmt clean on every file touched.
+- Live, in a rootless namespace: pinned-in-ACL `→ connected` vs unmanaged-same-address `→ hung`
+  (split tunnelling both ways, pinned path undisturbed); synthetic `→ connected` (nft → ip rule →
+  table 105 → TUN → smoltcp AnyIP); unlistened synthetic port `→ refused-by-stack` (never hangs).
+- Teardown verified live: table 105 empty, ip rule gone, nft table gone.
+- Every fix revert-tested — each fails exactly the intended test(s) and nothing else.
+- Cross-component: shield, connector (148 + 4), controller build+vet, relay — all green, nothing outside
+  `client/` touched.
+
+**Decisions settled:** synthetic CIDR steering = **one port-agnostic whole-CIDR mark rule** (constant
+ruleset size). ADR-009's port-scoping invariant is deliberately relaxed **only inside the synthetic
+CIDR**, where its justifying premise (an unrelated service on another port) cannot hold.
+
+**Corrections to the plan:** the "rewrite the response source address" task is **not needed** — smoltcp
+sets a socket's local endpoint from the SYN's destination and sources replies from it. What the plan did
+*not* mention is the real obstacle: smoltcp's exact-match `has_ip_addr` with a 2-entry capacity.
+
+**Known gaps:** `sync_registry` and `handle_up` have no unit coverage (`state_dir()` is not overridable;
+`handle_up` creates a real TUN) — which is how bug 2 survived. `BindingRegistry::resolve` and
+`quarantined_rebuild` have no production caller.
+
+**What's next:**
+- ⬜ **Full-stack E2E**: Phase 8's wire hop (no `local_target` has crossed gRPC) and Phase 9's by-name
+  run via a `hosts` entry (preserves TLS SNI, which a raw synthetic IP does not). 7 of 9 Phase 9 verify
+  items need it. Also the first real exercise of Phases 6–7.
+- Phase 10 (Admin UI) — closes **Gate 2**.

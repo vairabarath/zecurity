@@ -20,6 +20,7 @@ use crate::grpc::{
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
+use crate::registry::{select_cidr, BindingRegistry, Net};
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
     self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
@@ -617,12 +618,19 @@ async fn handle_up(
         15,
     );
 
+    // Synthetic bindings for name-addressed resources, reconciled and persisted
+    // BEFORE the transports map is built — the map is keyed on the synthetic IPs
+    // this produces, and before any routing is installed, which needs the CIDR.
+    let (registry, synthetic_cidr) = sync_registry(&conf.workspace, &allowed_entries, now_unix());
+    let synthetic_count = registry.as_ref().map(|r| r.len()).unwrap_or(0);
+
     let transports = match build_transports_by_resource_with_crl(
         &allowed_entries,
         &acl.remote_networks,
         transport.as_ref(),
         &device,
         relay_crl,
+        registry.as_ref(),
     ) {
         Ok(t) => Arc::new(t),
         Err(e) => {
@@ -650,6 +658,10 @@ async fn handle_up(
 
     // Mark only the allowed TCP destination flows into the Zecurity route table.
     // Other ports on the same IP stay on the normal kernel route.
+    //
+    // PINNED-IP resources only. Name-addressed resources are covered by the single
+    // whole-CIDR rule installed alongside these (Phase 9.3), so they must NOT also
+    // get a per-flow rule — that is the per-resource growth this phase removes.
     let allowed_flows: Vec<AllowedFlow> = allowed_entries
         .iter()
         .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
@@ -664,7 +676,10 @@ async fn handle_up(
         })
         .collect();
 
-    if allowed_flows.is_empty() {
+    // A workspace of only FQDN resources has no pinned flows and is still
+    // perfectly routable. Rejecting on `allowed_flows.is_empty()` alone would
+    // refuse exactly the case this sprint exists to support.
+    if allowed_flows.is_empty() && synthetic_count == 0 {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
@@ -673,7 +688,7 @@ async fn handle_up(
         };
     }
 
-    if let Err(e) = mgr.configure_allowed_flows(&allowed_flows) {
+    if let Err(e) = mgr.configure_allowed_flows(&allowed_flows, synthetic_cidr) {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
@@ -682,7 +697,7 @@ async fn handle_up(
         };
     }
 
-    let route_count = allowed_flows.len();
+    let route_count = allowed_flows.len() + synthetic_count;
     let dev = match mgr.take_device() {
         Some(d) => d,
         None => {
@@ -697,7 +712,7 @@ async fn handle_up(
 
     let relay_resync = { state.read().await.relay_resync.clone() };
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, allowed_entries, transports, relay_resync).await {
+        if let Err(e) = net_stack::run(dev, transports, relay_resync).await {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -1708,6 +1723,72 @@ pub(crate) fn resolve_entry_coords(
         },
     }
 }
+/// Load the durable binding registry, reconcile it against the current ACL, and
+/// persist it. Returns the registry and the synthetic CIDR in use.
+///
+/// Ordering matters: **release before bind.** A resource that left the ACL gives
+/// its address up first, so the addresses it freed are already quarantined before
+/// anything new asks for one — otherwise a deleted resource's address could be
+/// handed to a new resource within the same `up`.
+///
+/// Persistence failures are logged, not fatal. A daemon that refuses to start
+/// because it cannot write bindings is worse than one whose bindings are
+/// in-memory for this session; the registry's own restore path treats anything it
+/// cannot place as quarantined, so the next start errs toward withholding.
+fn sync_registry(
+    workspace_slug: &str,
+    allowed_entries: &[AclEntry],
+    now: i64,
+) -> (Option<BindingRegistry>, Option<Net>) {
+    let observed = crate::tun::observed_local_networks();
+    let Some(cidr) = select_cidr(&observed) else {
+        warn!(
+            "no free synthetic CIDR inside 100.64.0.0/10 — every candidate block \
+             collides with a network this host already reaches. Name-addressed \
+             resources are unavailable this session; pinned-IP resources are unaffected."
+        );
+        return (None, None);
+    };
+
+    let mut stored = state_store::load_workspace_state(workspace_slug).unwrap_or_default();
+    let mut registry = BindingRegistry::from_stored(&stored.registry, cidr, now);
+
+    // 1. Release first — see the ordering note above.
+    let active: std::collections::HashSet<String> = allowed_entries
+        .iter()
+        .map(|e| e.resource_id.clone())
+        .collect();
+    let released = registry.retain_resources(&active, now);
+
+    // 2. Then bind every name-addressed resource. An entry with BOTH an address
+    //    and a hostname is ambiguous; the connector already fails those closed
+    //    (Phase 6.0 `ambiguous_addressing`), so we skip it rather than invent a
+    //    synthetic IP for something that will be denied on arrival.
+    let mut bound = 0usize;
+    for e in allowed_entries {
+        if e.hostname.trim().is_empty() || !e.address.trim().is_empty() {
+            continue;
+        }
+        match registry.bind(e.hostname.trim(), &e.resource_id, now) {
+            Ok(_) => bound += 1,
+            Err(err) => warn!(
+                hostname = %e.hostname,
+                resource_id = %e.resource_id,
+                error = %err,
+                "could not allocate a synthetic IP for a name-addressed resource"
+            ),
+        }
+    }
+
+    info!(cidr = %cidr, bound, released, "synthetic binding registry synced");
+
+    stored.registry = registry.to_stored();
+    if let Err(e) = save_workspace_state(workspace_slug, &stored) {
+        warn!(error = %e, "could not persist synthetic bindings — they will not survive a restart");
+    }
+
+    (Some(registry), Some(cidr))
+}
 
 /// A managed resource's identity paired with the transports that can reach it.
 /// Keeping them in one value means `resource_id` and its transports can never
@@ -1716,6 +1797,13 @@ pub(crate) fn resolve_entry_coords(
 pub(crate) struct ResourceTarget {
     pub(crate) resource_id: String,
     pub(crate) transports: Vec<Arc<ClientTransport>>,
+    /// True when this entry is keyed on a client-local SYNTHETIC IP rather than a
+    /// pinned address. net_stack uses it to send `destination` EMPTY on the
+    /// handshake: a synthetic IP is meaningless to the connector, and Phase 7.0
+    /// scoped the destination cross-check so a named resource has nothing to
+    /// agree with. Sending the synthetic IP instead would be denied as
+    /// `destination_mismatch`.
+    pub(crate) synthetic: bool,
 }
 
 // Build a transport map keyed by (Ipv4Addr, port) for every ACL entry.
@@ -1735,6 +1823,7 @@ pub(crate) fn build_transports_by_resource(
     remote_networks: &[AclRemoteNetwork],
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
+    synthetic: Option<&BindingRegistry>,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>> {
     build_transports_by_resource_with_crl(
         entries,
@@ -1742,6 +1831,7 @@ pub(crate) fn build_transports_by_resource(
         transport,
         device,
         crate::crl::CrlManager::new(),
+        synthetic,
     )
 }
 
@@ -1751,6 +1841,7 @@ fn build_transports_by_resource_with_crl(
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
     relay_crl: crate::crl::CrlManager,
+    synthetic: Option<&BindingRegistry>,
 ) -> Result<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>> {
     let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     for rn in remote_networks {
@@ -1768,10 +1859,25 @@ fn build_transports_by_resource_with_crl(
     let mut out: HashMap<(Ipv4Addr, u16), Option<ResourceTarget>> = HashMap::new();
     let mut transport_cache: HashMap<String, Arc<ClientTransport>> = HashMap::new();
     for entry in entries {
-        let Ok(ip) = entry.address.parse::<IpAddr>() else {
-            continue;
+        // Which address keys this entry: its pinned IP, or the synthetic IP the
+        // registry bound to its hostname. This replaces the silent
+        // `filter_map(parse.ok()?)` drop that made name-addressed resources
+        // unexpressible — the line Phase 9 exists to remove.
+        let (v4, is_synthetic) = match entry.address.trim().parse::<IpAddr>() {
+            Ok(IpAddr::V4(v4)) => (v4, false),
+            // Not a pinned IPv4 address. If it is name-addressed and the registry
+            // bound it, key on the synthetic IP instead.
+            _ => {
+                let hostname = entry.hostname.trim();
+                match synthetic.and_then(|r| r.ip_for_hostname(hostname)) {
+                    Some(ip) => (ip, true),
+                    // Neither pinned nor bound: unroutable. Skipping is correct
+                    // and fail-closed — no key means no listener and no transport,
+                    // so nothing can be asserted for it.
+                    None => continue,
+                }
+            }
         };
-        let IpAddr::V4(v4) = ip else { continue };
 
         let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
 
@@ -1800,6 +1906,7 @@ fn build_transports_by_resource_with_crl(
             Some(ResourceTarget {
                 resource_id: entry.resource_id.clone(),
                 transports,
+                synthetic: is_synthetic,
             })
         };
         out.insert((v4, entry.port as u16), slot);

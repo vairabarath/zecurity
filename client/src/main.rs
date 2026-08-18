@@ -10,6 +10,7 @@ mod grpc;
 mod ipc;
 mod login;
 mod net_stack;
+mod registry;
 mod relay_pool;
 mod runtime;
 mod state_store;

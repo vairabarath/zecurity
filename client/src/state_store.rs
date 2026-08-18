@@ -19,6 +19,7 @@ use std::{
 use crate::{
     appmeta,
     login::LoginResult,
+    registry::StoredRegistry,
     runtime::{DeviceInfo, SessionInfo, UserInfo, WorkspaceInfo},
 };
 
@@ -35,8 +36,67 @@ pub struct StoredWorkspaceState {
     pub session: StoredSession,
     #[serde(default)]
     pub resources: Vec<StoredResource>,
+    /// Synthetic-IP bindings (Sprint 16 Phase 9). Lives inside this struct, and
+    /// therefore inside the existing AES-GCM envelope, because ADR-002 requires
+    /// durable client state to be encrypted at rest — a second file with its own
+    /// crypto would be a second thing to get wrong.
+    ///
+    /// Read leniently: a binding table we cannot parse must not stop the daemon
+    /// from starting, but its addresses must not be silently reissued either.
+    /// See `registry_lenient`.
+    #[serde(default, deserialize_with = "registry_lenient")]
+    pub registry: StoredRegistry,
     #[serde(default)]
     pub last_sync_at: i64,
+}
+
+/// Deserialize the binding table without letting a malformed one take the whole
+/// state file — and without quietly forgetting which addresses were in use.
+///
+/// Buffers into a `Value` first (always succeeds for well-formed JSON), then
+/// attempts the real parse. On failure we **salvage every address-shaped string
+/// we can find** and return them as quarantined, so `BindingRegistry::from_stored`
+/// treats them as unavailable rather than pristine. Returning a plain
+/// `Default::default()` here would be the dangerous option: the addresses would
+/// look never-issued and be handed straight to different resources, which is the
+/// exact wrong-identity failure the registry exists to prevent.
+fn registry_lenient<'de, D>(d: D) -> Result<StoredRegistry, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(d)?;
+    if let Ok(parsed) = serde_json::from_value::<StoredRegistry>(value.clone()) {
+        return Ok(parsed);
+    }
+    let mut salvaged = StoredRegistry::default();
+    salvage_addresses(&value, &mut salvaged.quarantined);
+    Ok(salvaged)
+}
+
+/// Walk arbitrary JSON collecting anything that parses as an IPv4 address.
+/// Deliberately shape-agnostic: the table is malformed, so we cannot rely on it
+/// having the fields we expect. `quarantined_until` is left at 0 — the caller
+/// stamps a real deadline, and 0 never reads as "already expired" there because
+/// `from_stored` re-quarantines anything it cannot place.
+fn salvage_addresses(value: &serde_json::Value, out: &mut Vec<(String, i64)>) {
+    match value {
+        serde_json::Value::String(s) => {
+            if s.parse::<std::net::Ipv4Addr>().is_ok() {
+                out.push((s.clone(), 0));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for v in items {
+                salvage_addresses(v, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                salvage_addresses(v, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,6 +214,7 @@ impl StoredWorkspaceState {
                 expires_at: result.session.expires_at,
             },
             resources: Vec::new(),
+            registry: StoredRegistry::default(),
             last_sync_at: now_unix(),
         }
     }
@@ -579,4 +640,122 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An old state file predates the registry entirely. It must load, not error.
+    #[test]
+    fn state_without_a_registry_field_still_loads() {
+        let json = r#"{
+            "schema_version": 1,
+            "workspace": {}, "user": {}, "device": {}, "session": {},
+            "resources": [], "last_sync_at": 0
+        }"#;
+        let state: StoredWorkspaceState = serde_json::from_str(json).expect("must load");
+        assert!(state.registry.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_well_formed_registry_round_trips() {
+        let mut state = StoredWorkspaceState::default();
+        state.registry.cidr_base = "100.64.0.0".into();
+        state.registry.cidr_prefix_len = 22;
+        state.registry.bindings.push(crate::registry::Binding {
+            hostname: "db.internal".into(),
+            synthetic_ip: "100.64.0.7".into(),
+            resource_id: "res-1".into(),
+            allocated_at: 42,
+        });
+
+        let json = serde_json::to_string(&state).unwrap();
+        let back: StoredWorkspaceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.registry.bindings.len(), 1);
+        assert_eq!(back.registry.bindings[0].resource_id, "res-1");
+        assert_eq!(back.registry.cidr_prefix_len, 22);
+    }
+
+    /// ADR-002: durable client state is encrypted at rest, and the binding table
+    /// is durable client state. The serde tests above only prove the *shape*
+    /// survives JSON — this proves it survives the real AES-GCM envelope, which
+    /// is the property the ADR actually asserts. Without it "encrypted at rest"
+    /// would be an inference from where the field was declared rather than an
+    /// observation.
+    #[test]
+    fn bindings_survive_the_real_encrypted_envelope() {
+        let key = [7u8; 32];
+        let slug = "acme";
+
+        let mut state = StoredWorkspaceState::default();
+        state.registry.cidr_base = "100.64.0.0".into();
+        state.registry.cidr_prefix_len = 22;
+        state.registry.bindings.push(crate::registry::Binding {
+            hostname: "db.internal".into(),
+            synthetic_ip: "100.64.0.7".into(),
+            resource_id: "res-1".into(),
+            allocated_at: 42,
+        });
+
+        let envelope = encrypt_state(&key, slug, &state).expect("encrypt");
+        assert!(
+            !envelope.ciphertext.contains("db.internal")
+                && !envelope.ciphertext.contains("100.64.0.7"),
+            "hostnames and synthetic IPs must not be readable in the envelope"
+        );
+
+        let back = decrypt_state(&key, slug, &envelope).expect("decrypt");
+        assert_eq!(back.registry.bindings.len(), 1);
+        assert_eq!(back.registry.bindings[0].hostname, "db.internal");
+        assert_eq!(back.registry.bindings[0].synthetic_ip, "100.64.0.7");
+        assert_eq!(back.registry.bindings[0].resource_id, "res-1");
+    }
+
+    /// The envelope is bound to the workspace slug via AAD, so a binding table
+    /// cannot be lifted from one workspace's state file into another's.
+    #[test]
+    fn bindings_cannot_be_decrypted_under_a_different_workspace() {
+        let key = [7u8; 32];
+        let state = StoredWorkspaceState::default();
+        let envelope = encrypt_state(&key, "acme", &state).expect("encrypt");
+        assert!(
+            decrypt_state(&key, "other-workspace", &envelope).is_err(),
+            "AAD must bind the envelope to its workspace"
+        );
+    }
+
+    /// The case that matters: a corrupt binding table must not stop the daemon
+    /// starting, AND must not let its addresses be reissued as if never used.
+    /// `bindings` is the wrong type here, so the strict parse fails.
+    #[test]
+    fn a_corrupt_registry_loads_empty_but_quarantines_its_addresses() {
+        let json = r#"{
+            "schema_version": 1,
+            "workspace": {}, "user": {}, "device": {}, "session": {},
+            "resources": [],
+            "registry": { "cidr_base": "100.64.0.0", "cidr_prefix_len": 22,
+                          "bindings": "this should be an array, not a string",
+                          "extra": ["100.64.0.9"] },
+            "last_sync_at": 0
+        }"#;
+        let state: StoredWorkspaceState =
+            serde_json::from_str(json).expect("a corrupt table must not fail the whole load");
+
+        assert!(
+            state.registry.bindings.is_empty(),
+            "an unparseable table yields no live bindings"
+        );
+        let salvaged: Vec<&str> = state
+            .registry
+            .quarantined
+            .iter()
+            .map(|(ip, _)| ip.as_str())
+            .collect();
+        assert!(
+            salvaged.contains(&"100.64.0.0") && salvaged.contains(&"100.64.0.9"),
+            "addresses found in a corrupt table must be quarantined, not treated \
+             as never-issued; got {salvaged:?}"
+        );
+    }
 }

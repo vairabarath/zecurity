@@ -57,7 +57,7 @@ fn test_device_info() -> DeviceInfo {
 fn build_transports_empty_inputs_returns_empty_map() {
     install_crypto_provider();
     let device = test_device_info();
-    let result = build_transports_by_resource(&[], &[], None, &device);
+    let result = build_transports_by_resource(&[], &[], None, &device, None);
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());
 }
@@ -90,7 +90,7 @@ async fn connector_without_relay_addr_builds_direct_only_transport() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device, None);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
@@ -133,8 +133,8 @@ async fn transport_map_carries_resource_id() {
         ..Default::default()
     };
 
-    let map =
-        build_transports_by_resource(&[entry], &[rn], None, &device).expect("build transports");
+    let map = build_transports_by_resource(&[entry], &[rn], None, &device, None)
+        .expect("build transports");
     let key = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 5432u16);
     let target = map[&key]
         .as_ref()
@@ -177,7 +177,7 @@ async fn connector_with_relay_addr_builds_transport_with_relay() {
         ..Default::default()
     };
 
-    let result = build_transports_by_resource(&[entry], &[rn], None, &device);
+    let result = build_transports_by_resource(&[entry], &[rn], None, &device, None);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
     let key = ("10.0.0.2".parse::<Ipv4Addr>().unwrap(), 443u16);
@@ -238,7 +238,7 @@ async fn two_connectors_different_relay_addrs_build_independently() {
         },
     ];
 
-    let result = build_transports_by_resource(&entries, &remote_networks, None, &device);
+    let result = build_transports_by_resource(&entries, &remote_networks, None, &device, None);
     assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
     let map = result.unwrap();
 
@@ -384,4 +384,273 @@ fn resolve_honors_preferred_connector_in_transport() {
     let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
     assert_eq!(coords.len(), 2);
     assert_eq!(coords[0].connector_id, "c2");
+}
+
+/// Sprint 16 Phase 9.4b: a name-addressed resource must be keyed on the SYNTHETIC
+/// IP the registry bound to its hostname, not dropped.
+///
+/// Before this phase the builder did `filter_map(|e| e.address.parse().ok()?)`,
+/// which silently discarded every entry without a pinned IPv4 address — that is
+/// why an FQDN resource could not be expressed at all, and it is the line this
+/// test guards against coming back.
+#[tokio::test]
+async fn named_resource_is_keyed_on_its_synthetic_ip() {
+    install_crypto_provider();
+    let device = test_device_info();
+
+    let entry = AclEntry {
+        resource_id: "res-named".to_string(),
+        address: String::new(), // no pinned IP — this is the whole point
+        hostname: "db.internal".to_string(),
+        port: 5432,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
+            relay_addr: String::new(),
+            relay_spiffe_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let mut reg = crate::registry::BindingRegistry::new(crate::registry::Net::new(
+        "100.64.0.0".parse().unwrap(),
+        22,
+    ));
+    let synth = reg.bind("db.internal", "res-named", 0).unwrap();
+
+    let map = build_transports_by_resource(&[entry], &[rn], None, &device, Some(&reg))
+        .expect("build transports");
+
+    let target = map
+        .get(&(synth, 5432))
+        .expect("must be keyed on the synthetic IP, not dropped for lacking an address")
+        .as_ref()
+        .expect("connector is reachable, so the slot must be populated");
+    assert_eq!(target.resource_id, "res-named");
+    assert!(
+        target.synthetic,
+        "must be flagged synthetic so net_stack sends an empty destination — \
+         sending the synthetic IP would be denied as destination_mismatch"
+    );
+}
+
+/// Without a registry (or with a hostname it never bound) a name-addressed entry
+/// has no routable address, so it must be omitted entirely. No key means no
+/// listener and no transport — fail closed, never a passthrough.
+#[tokio::test]
+async fn unbound_named_resource_is_omitted_not_guessed() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res-unbound".to_string(),
+        address: String::new(),
+        hostname: "nowhere.internal".to_string(),
+        port: 443,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
+            relay_addr: String::new(),
+            relay_spiffe_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let map = build_transports_by_resource(&[entry], &[rn], None, &device, None)
+        .expect("build transports");
+    assert!(
+        map.is_empty(),
+        "an unbound name-addressed resource must not appear under any key"
+    );
+}
+
+/// Regression: pinned-IP resources are untouched by the synthetic path and must
+/// still be flagged non-synthetic, so they keep sending their destination.
+#[tokio::test]
+async fn pinned_resource_is_not_flagged_synthetic() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res-pinned".to_string(),
+        address: "10.0.0.7".to_string(),
+        port: 5432,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
+            relay_addr: String::new(),
+            relay_spiffe_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let map = build_transports_by_resource(&[entry], &[rn], None, &device, None)
+        .expect("build transports");
+    let key = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 5432u16);
+    let target = map[&key].as_ref().expect("pinned resource must be present");
+    assert!(!target.synthetic);
+}
+
+// ── The three-state transport map (ADR-009), asserted at last ────────────────
+//
+// Phase 9's task list carries this as INHERITED DEBT from Phase 2: the three
+// states were documented and relied upon but never asserted, and "losing them
+// converts a fail-closed case into a passthrough, which is a security
+// regression". Phase 9.4b rewrote the exact match arms these states feed, so the
+// debt is discharged here.
+//
+// Per ADR-009:
+//   Some(Some(target)) → managed, connector online  → tunnel via QUIC
+//   Some(None)         → managed, connector offline → FAIL CLOSED (RST)
+//   absent             → not a managed flow         → fail closed; bypass is a
+//                                                     KERNEL property (never
+//                                                     marked, never reaches TUN)
+
+fn three_state_entry(rn: &str, addr: &str, port: u32) -> AclEntry {
+    AclEntry {
+        resource_id: format!("res-{addr}-{port}"),
+        address: addr.to_string(),
+        port,
+        remote_network_id: rn.to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    }
+}
+
+fn three_state_rn(rn: &str) -> AclRemoteNetwork {
+    AclRemoteNetwork {
+        remote_network_id: rn.to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: "spiffe://test.example/connector/conn1".to_string(),
+            relay_addr: String::new(),
+            relay_spiffe_id: String::new(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+/// State 1 — connector reachable: the slot is populated and carries transports.
+#[tokio::test]
+async fn state1_connector_online_yields_a_populated_target() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = three_state_entry("rn1", "10.0.0.7", 5432);
+    let map = build_transports_by_resource(&[entry], &[three_state_rn("rn1")], None, &device, None)
+        .expect("build transports");
+
+    let key = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 5432u16);
+    let target = map
+        .get(&key)
+        .expect("managed flow must be present in the map")
+        .as_ref()
+        .expect("state 1: connector online → Some(Some(target))");
+    assert!(
+        !target.transports.is_empty(),
+        "state 1 must carry at least one transport, or net_stack cannot tunnel"
+    );
+}
+
+/// State 2 — the security-critical one. A managed resource whose remote network
+/// has no reachable connector must be present-but-empty (`Some(None)`), which
+/// net_stack treats as FAIL CLOSED.
+///
+/// If this ever became `absent` instead, the distinction between "managed but
+/// unreachable" and "not managed" would collapse — and since bypass is a kernel
+/// property keyed on the nft rules (which ARE installed for this flow), the
+/// packet would still be captured while nothing knew it was managed.
+#[tokio::test]
+async fn state2_connector_offline_is_present_but_empty_not_absent() {
+    install_crypto_provider();
+    let device = test_device_info();
+    // The entry's remote network is not in the snapshot → no connector coords.
+    let entry = three_state_entry("rn-missing", "10.0.0.8", 443);
+    let map = build_transports_by_resource(&[entry], &[three_state_rn("rn1")], None, &device, None)
+        .expect("build transports");
+
+    let key = ("10.0.0.8".parse::<Ipv4Addr>().unwrap(), 443u16);
+    assert!(
+        map.contains_key(&key),
+        "state 2 must be PRESENT — dropping the key would make a managed \
+         resource indistinguishable from unmanaged traffic"
+    );
+    assert!(
+        map[&key].is_none(),
+        "state 2 must be Some(None): managed, connector offline → fail closed"
+    );
+}
+
+/// State 3 — a flow that is not a managed resource has no key at all. net_stack
+/// fails closed on it; genuine bypass never reaches net_stack because the kernel
+/// never marks it (ADR-009).
+#[tokio::test]
+async fn state3_unmanaged_flow_is_absent_from_the_map() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = three_state_entry("rn1", "10.0.0.7", 5432);
+    let map = build_transports_by_resource(&[entry], &[three_state_rn("rn1")], None, &device, None)
+        .expect("build transports");
+
+    // Same IP, a port nobody granted.
+    let other_port = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 9999u16);
+    assert!(
+        !map.contains_key(&other_port),
+        "a non-ACL port must not appear in the map"
+    );
+    // A different IP entirely.
+    let other_ip = ("10.0.0.99".parse::<Ipv4Addr>().unwrap(), 5432u16);
+    assert!(
+        !map.contains_key(&other_ip),
+        "an unmanaged IP must be absent"
+    );
+}
+
+/// The three states must be mutually exclusive for a single flow — the property
+/// that makes net_stack's match arms a decision rather than a guess.
+#[tokio::test]
+async fn the_three_states_are_distinguishable_in_one_map() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let online = three_state_entry("rn1", "10.0.0.7", 5432); // state 1
+    let offline = three_state_entry("rn-missing", "10.0.0.8", 443); // state 2
+    let map = build_transports_by_resource(
+        &[online, offline],
+        &[three_state_rn("rn1")],
+        None,
+        &device,
+        None,
+    )
+    .expect("build transports");
+
+    let k1 = ("10.0.0.7".parse::<Ipv4Addr>().unwrap(), 5432u16);
+    let k2 = ("10.0.0.8".parse::<Ipv4Addr>().unwrap(), 443u16);
+    let k3 = ("10.0.0.9".parse::<Ipv4Addr>().unwrap(), 22u16); // state 3
+
+    assert!(map.get(&k1).is_some_and(|s| s.is_some()), "state 1");
+    assert!(map.get(&k2).is_some_and(|s| s.is_none()), "state 2");
+    assert!(map.get(&k3).is_none(), "state 3");
 }

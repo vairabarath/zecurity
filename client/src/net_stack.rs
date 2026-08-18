@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,7 +17,6 @@ use tokio::time::timeout;
 use tun::AsyncDevice;
 
 use crate::daemon::ResourceTarget;
-use crate::grpc::client_v1::AclEntry;
 use crate::transport::ClientTransport;
 use crate::tunnel_pool::TunnelOpenError;
 
@@ -207,9 +206,12 @@ struct ActiveRelay {
 
 // --- Main entry point ---
 
+/// `transports` is the ONLY description of what is managed. It was previously
+/// paired with the raw ACL entry list, which let the two disagree about which
+/// destinations exist; the map now carries both pinned and synthetic keys, so the
+/// second input was redundant and removing it makes divergence unrepresentable.
 pub async fn run(
     dev: AsyncDevice,
-    allowed_entries: Vec<AclEntry>,
     transports: Arc<HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>>,
     relay_resync: Arc<Notify>,
 ) -> Result<()> {
@@ -250,27 +252,40 @@ pub async fn run(
     config.random_seed = rand::random();
     let mut iface = Interface::new(config, &mut tun_dev, smoltcp_now());
 
-    // Collect TCP resources from the allowed (SPIFFE-filtered) entries.
-    let resource_entries: Vec<(Ipv4Addr, u16)> = allowed_entries
-        .iter()
-        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
-        .filter_map(|e| {
-            let ip = e.address.parse::<IpAddr>().ok()?;
-            match ip {
-                IpAddr::V4(v4) => Some((v4, e.port as u16)),
-                _ => None,
-            }
-        })
-        .collect();
+    // Every destination we listen on, taken from the TRANSPORTS MAP rather than
+    // re-derived from the ACL.
+    //
+    // The map is the single source of truth for "which (ip, port) is managed": the
+    // daemon already resolved pinned addresses and synthetic IPs into its keys
+    // (Phase 9.4b). Re-parsing `entry.address` here was a THIRD place that
+    // silently dropped name-addressed resources, and — worse — let the listener
+    // set diverge from the transport set, which presents as a route into the TUN
+    // with nothing behind it.
+    let resource_entries: Vec<(Ipv4Addr, u16)> = transports.keys().copied().collect();
 
-    // Assign one /32 address per resource so smoltcp accepts inbound packets.
+    // smoltcp must accept packets addressed to every managed destination.
+    //
+    // It cannot be done with per-/32 entries: `has_ip_addr` is an EXACT match
+    // (no subnet containment) and `ip_addrs` is a fixed-capacity vec —
+    // IFACE_MAX_ADDR_COUNT is 2 in this build. The previous code pushed one /32
+    // per resource and discarded the `push` failures with `let _ =`, so from the
+    // third address onward the entries were silently dropped and those resources
+    // hung. A synthetic /22 cannot be expressed that way at all.
+    //
+    // AnyIP is the mechanism for exactly this: with it enabled, smoltcp accepts a
+    // unicast destination that is not one of its own addresses PROVIDED its route
+    // table resolves that destination to a router address it *does* own. So we
+    // keep 100.64.0.1 as the interface address and add one default route via it.
+    // Scope is bounded by the kernel, which only routes our marked flows into this
+    // TUN at all.
     iface.update_ip_addrs(|addrs| {
-        for (ip, _) in &resource_entries {
-            let cidr = IpCidr::new(IpAddress::Ipv4(Ipv4Address::from(*ip)), 32);
-            let _ = addrs.push(cidr);
-        }
         let _ = addrs.push(IpCidr::new(IpAddress::v4(100, 64, 0, 1), 32));
     });
+    iface.set_any_ip(true);
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(Ipv4Address::new(100, 64, 0, 1))
+        .map_err(|_| anyhow!("smoltcp route table full — cannot install default route"))?;
 
     let mut sockets = SocketSet::new(vec![]);
 
@@ -329,6 +344,17 @@ pub async fn run(
                         if !target.transports.is_empty() {
                             let transports = target.transports.clone();
                             let resource_id = target.resource_id.clone();
+                            // A synthetic IP is CLIENT-LOCAL: the connector has no
+                            // pinned address to cross-check it against, and Phase
+                            // 7.0 scoped the check accordingly. Sending it would be
+                            // denied as `destination_mismatch`. Phase 9.4 and Phase
+                            // 7.0 must agree on this — if either ships alone every
+                            // name-addressed resource is denied.
+                            let dest = if target.synthetic {
+                                String::new()
+                            } else {
+                                dest
+                            };
                             let resync = relay_resync.clone();
                             tokio::spawn(async move {
                                 // relay_tcp_to_quic fires `resync` itself at the
@@ -713,5 +739,328 @@ mod tests {
             FramedJsonError::FrameTooLarge(value) if value == size
         ));
         assert!(!error.is_transport_failure());
+    }
+    use smoltcp::iface::{Config, Interface};
+    use smoltcp::phy::{Loopback, Medium};
+    use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+
+    /// The whole synthetic-IP design rests on smoltcp accepting a destination it
+    /// does not own. That is a claim about a third-party crate's behaviour, so it
+    /// is asserted here rather than inferred from reading its source.
+    ///
+    /// Two facts together: `ip_addrs` has capacity IFACE_MAX_ADDR_COUNT (2 in this
+    /// build) and `has_ip_addr` is an EXACT match with no subnet containment. So a
+    /// synthetic /22 can only work via AnyIP + a route to an address we do own.
+    #[test]
+    fn smoltcp_ip_addrs_cannot_hold_a_per_resource_list() {
+        let mut dev = Loopback::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 1;
+        let mut iface = Interface::new(config, &mut dev, smoltcp_now());
+
+        let mut pushed = 0;
+        iface.update_ip_addrs(|addrs| {
+            for i in 1..=8u8 {
+                if addrs
+                    .push(IpCidr::new(IpAddress::v4(10, 0, 0, i), 32))
+                    .is_ok()
+                {
+                    pushed += 1;
+                }
+            }
+        });
+        assert!(
+            pushed < 8,
+            "if this ever passes, IFACE_MAX_ADDR_COUNT grew and the per-/32 \
+             approach became viable — but note push failures were previously \
+             discarded with `let _ =`, silently dropping addresses"
+        );
+    }
+
+    /// A /22 in `ip_addrs` does NOT make smoltcp own the whole range — it owns
+    /// exactly the base address. This is why AnyIP is required and why a single
+    /// CIDR entry is not a shortcut.
+    #[test]
+    fn a_cidr_entry_covers_only_its_base_address() {
+        let mut dev = Loopback::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 1;
+        let mut iface = Interface::new(config, &mut dev, smoltcp_now());
+        iface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(IpCidr::new(IpAddress::v4(100, 64, 0, 0), 22));
+        });
+
+        assert!(iface.has_ip_addr(IpAddress::v4(100, 64, 0, 0)));
+        assert!(
+            !iface.has_ip_addr(IpAddress::v4(100, 64, 0, 7)),
+            "has_ip_addr is an exact match; a /22 entry does not cover the range"
+        );
+    }
+
+    // ── Live client data-path verification (gated) ───────────────────────────
+    //
+    // Sprint 16 Phase 9.5. These build a REAL TUN device, install the REAL nft
+    // chain and route, and push real packets, so they need root + CAP_NET_ADMIN
+    // and must not touch a host firewall. Run inside a throwaway rootless netns,
+    // the same way the shield's live_nft tests do:
+    //
+    //   cargo test --no-run                       # note the test binary path
+    //   unshare -rn sh -c '
+    //     ip link set lo up
+    //     ip link add dummy0 type dummy
+    //     ip addr add 10.99.0.1/24 dev dummy0
+    //     ip link set dummy0 up
+    //     ip route add default via 10.99.0.2 dev dummy0   # REQUIRED — see below
+    //     exec <bin> live_synthetic --ignored --nocapture --test-threads=1'
+    //
+    // ⚠️ THE DEFAULT ROUTE IS NOT TEST SCAFFOLDING — it reflects a real dependency
+    // of the whole mark-based steering design, and a bare namespace without it
+    // produces a misleading failure.
+    //
+    // `connect()` performs a main-table route lookup to choose a source address
+    // BEFORE any packet exists, and the nft output/mangle hook only runs on a
+    // packet. So with no route to the destination in the main table, connect fails
+    // immediately with ENETUNREACH and the mark rule never executes — table 105 is
+    // never consulted. On a real host the default route always covers CGNAT space,
+    // which is why this works in production. It also means: a host with no default
+    // route cannot reach name-addressed resources at all. That is a pre-existing
+    // property of the steering mechanism (it applies equally to pinned IPs outside
+    // any local subnet), not something this phase introduced.
+    //
+    // What they cover that no unit test can: that the whole-CIDR nft mark plus the
+    // CIDR route plus smoltcp's AnyIP actually combine to deliver a packet
+    // addressed to a synthetic IP into a smoltcp socket. Every piece of that was
+    // verified in isolation; this is the only place the composition is observed.
+
+    /// Connect with a bounded wait and report which of the three outcomes happened.
+    /// The distinction is the whole point: a HANG is the failure mode the
+    /// whole-CIDR decision had to rule out, and it is invisible to a test that only
+    /// asserts "not connected".
+    /// The errno distinction is load-bearing, not cosmetic.
+    ///
+    /// A first version of this returned "refused" for every `Err`, which made the
+    /// test pass even if the nft mark never fired: with no mark the packet misses
+    /// table 105, finds no route in this namespace, and `connect` fails
+    /// IMMEDIATELY with `NetworkUnreachable`. Only `ConnectionRefused` proves a
+    /// RST came back — and a RST can only come from smoltcp, which means the
+    /// packet actually traversed nft → route → TUN → stack.
+    async fn probe(addr: &str) -> &'static str {
+        // MUST be off-runtime. `#[tokio::test]` is single-threaded by default, and
+        // `connect_timeout` is blocking — calling it inline starves the spawned
+        // smoltcp poll loop, so nothing ever answers and the probe reports `hung`.
+        // That is a test artefact indistinguishable from the real failure it is
+        // meant to detect, so the tests below also use the multi_thread flavor.
+        let addr = addr.to_string();
+        tokio::task::spawn_blocking(move || probe_blocking(&addr))
+            .await
+            .unwrap()
+    }
+
+    fn probe_blocking(addr: &str) -> &'static str {
+        let sa: std::net::SocketAddr = addr.parse().unwrap();
+        match std::net::TcpStream::connect_timeout(&sa, Duration::from_millis(1500)) {
+            Ok(_) => "connected",
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::TimedOut => "hung",
+                std::io::ErrorKind::ConnectionRefused => "refused-by-stack",
+                // No route at all — the packet never left the kernel, so nothing
+                // about the TUN path was exercised.
+                _ => "unroutable",
+            },
+        }
+    }
+
+    async fn spawn_stack(
+        transports: HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>,
+        cidr: crate::registry::Net,
+    ) -> (crate::tun::TunManager, tokio::task::AbortHandle) {
+        spawn_stack_with(transports, cidr, &[]).await
+    }
+
+    async fn spawn_stack_with(
+        transports: HashMap<(Ipv4Addr, u16), Option<ResourceTarget>>,
+        cidr: crate::registry::Net,
+        flows: &[crate::tun::AllowedFlow],
+    ) -> (crate::tun::TunManager, tokio::task::AbortHandle) {
+        let mut mgr = crate::tun::TunManager::create()
+            .await
+            .expect("create TUN (needs root in a netns)");
+        mgr.configure_allowed_flows(flows, Some(cidr))
+            .expect("install nft + route");
+        let dev = mgr.take_device().expect("take device");
+        let task = tokio::spawn(async move {
+            let _ = run(dev, Arc::new(transports), Arc::new(Notify::new())).await;
+        });
+        // Let smoltcp reach its poll loop before any packet arrives.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        (mgr, task.abort_handle())
+    }
+
+    /// THE Phase 9 composition test: a packet addressed to a synthetic IP — an
+    /// address no interface owns — must reach a smoltcp listener.
+    ///
+    /// The transports slot is `Some(None)` (managed, connector offline), so the
+    /// client fails closed after accepting. That is fine for this assertion: what
+    /// is being proven is that the SYN arrives at all. If nft, the route, or AnyIP
+    /// is wrong the connect HANGS, because nothing answers.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    async fn live_synthetic_ip_reaches_the_smoltcp_stack() {
+        let cidr = crate::registry::Net::new("100.64.0.0".parse().unwrap(), 22);
+        let synth: Ipv4Addr = "100.64.0.7".parse().unwrap();
+        let mut transports = HashMap::new();
+        transports.insert((synth, 5432u16), None); // managed, connector offline
+
+        let (mgr, abort) = spawn_stack(transports, cidr).await;
+        let outcome = probe("100.64.0.7:5432").await;
+        abort.abort();
+        let _ = mgr.cleanup().await;
+
+        eprintln!("[phase9] synthetic 100.64.0.7:5432 → {outcome}");
+        assert!(
+            outcome == "connected" || outcome == "refused-by-stack",
+            "got {outcome}: a packet to a synthetic IP must reach smoltcp. \
+             `hung` means nft/route/AnyIP delivered it nowhere — the Gate 1 stall \
+             shape. `unroutable` means the nft mark never fired, so the packet \
+             never even entered table 105."
+        );
+    }
+
+    /// The consequence the whole-CIDR decision accepted, now verified rather than
+    /// assumed (path.md decision #5 says to confirm and record it).
+    ///
+    /// The mark rule is port-agnostic, so a port that is NOT in the ACL is still
+    /// steered into the TUN — where no smoltcp listener exists. That MUST be a
+    /// clean refusal. A hang here would mean every mistyped port becomes a
+    /// 2-minute stall for the user.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    async fn live_unlistened_port_on_a_synthetic_ip_refuses_rather_than_hangs() {
+        let cidr = crate::registry::Net::new("100.64.0.0".parse().unwrap(), 22);
+        let synth: Ipv4Addr = "100.64.0.7".parse().unwrap();
+        let mut transports = HashMap::new();
+        transports.insert((synth, 5432u16), None); // only :5432 is managed
+
+        let (mgr, abort) = spawn_stack(transports, cidr).await;
+        let outcome = probe("100.64.0.7:9999").await; // not in the ACL
+        abort.abort();
+        let _ = mgr.cleanup().await;
+
+        eprintln!("[phase9] unlistened 100.64.0.7:9999 → {outcome}");
+        assert_eq!(
+            outcome, "refused-by-stack",
+            "a non-ACL port on a synthetic IP must be refused BY THE STACK, not \
+             hang and not fall off the routing table — this is the accepted cost \
+             of the port-agnostic whole-CIDR rule (path.md decision #5)"
+        );
+    }
+
+    /// Verify-list item 1: a PINNED IP resource behaves identically to before.
+    ///
+    /// The exact counterpart to `live_unmanaged_destination_is_not_captured`: the
+    /// SAME address, the SAME namespace, and the opposite outcome — decided solely
+    /// by whether it is in the ACL. Together they prove split tunnelling works in
+    /// both directions, and that Phase 9 did not disturb the pinned path while
+    /// adding the synthetic one.
+    ///
+    /// 10.99.0.5 has no host behind it, so an uncaptured connect stalls on
+    /// neighbour resolution. Captured, our stack answers immediately.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    async fn live_pinned_resource_is_still_captured() {
+        let cidr = crate::registry::Net::new("100.64.0.0".parse().unwrap(), 22);
+        let pinned: Ipv4Addr = "10.99.0.5".parse().unwrap();
+        let mut transports = HashMap::new();
+        transports.insert((pinned, 8080u16), None); // managed, connector offline
+
+        let (mgr, abort) = spawn_stack_with(
+            transports,
+            cidr,
+            &[crate::tun::AllowedFlow {
+                ip: pinned,
+                port: 8080,
+            }],
+        )
+        .await;
+        let outcome = probe("10.99.0.5:8080").await;
+        abort.abort();
+        let _ = mgr.cleanup().await;
+
+        eprintln!("[phase9] pinned 10.99.0.5:8080 (in ACL) → {outcome}");
+        // "Captured" is what is being asserted, and it has two legitimate
+        // presentations: `connected` when a listener exists for the port (smoltcp
+        // completes the handshake, then the offline connector fails the flow
+        // closed), or `refused-by-stack` when it does not (immediate RST). Both
+        // prove our stack answered. Only `hung`/`unroutable` mean the packet was
+        // never captured — which for an in-ACL flow would be a regression in the
+        // pre-existing pinned path.
+        assert!(
+            outcome == "connected" || outcome == "refused-by-stack",
+            "got {outcome}: a pinned resource must still be captured by its \
+             per-(ip,port) rule. Note the unmanaged test probes this SAME address \
+             and must get `hung` — that contrast is the split-tunnelling proof."
+        );
+    }
+
+    /// The kernel half of Phase 2's inherited debt: UNMANAGED traffic must not be
+    /// captured.
+    ///
+    /// ADR-009 makes bypass a kernel property — a flow nobody granted is never
+    /// marked, so it never enters table 105 and never reaches the TUN. The map's
+    /// `absent` state is a backstop, not the mechanism. This asserts the mechanism:
+    /// an address outside both the synthetic CIDR and the pinned set must take the
+    /// normal route, which in this namespace means it does NOT get the fast
+    /// stack-generated RST that a captured flow gets.
+    ///
+    /// 10.99.0.5 is on dummy0's subnet with no host behind it, so an uncaptured
+    /// connect stalls on neighbour resolution. A captured one would be answered by
+    /// smoltcp immediately — so `refused-by-stack` here would mean we are
+    /// hijacking traffic we were never granted.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live kernel test; run inside 'unshare -rn' (see module comment)"]
+    async fn live_unmanaged_destination_is_not_captured() {
+        let cidr = crate::registry::Net::new("100.64.0.0".parse().unwrap(), 22);
+        let synth: Ipv4Addr = "100.64.0.7".parse().unwrap();
+        let mut transports = HashMap::new();
+        transports.insert((synth, 5432u16), None);
+
+        let (mgr, abort) = spawn_stack(transports, cidr).await;
+        let outcome = probe("10.99.0.5:8080").await; // granted to nobody
+        abort.abort();
+        let _ = mgr.cleanup().await;
+
+        eprintln!("[phase9] unmanaged 10.99.0.5:8080 → {outcome}");
+        assert_ne!(
+            outcome, "refused-by-stack",
+            "an unmanaged destination was answered by OUR stack — the nft rules are \
+             capturing traffic this device was never granted, which is the \
+             split-tunnelling violation ADR-009 exists to prevent"
+        );
+    }
+
+    /// AnyIP + a default route via an address we own is what makes an arbitrary
+    /// synthetic destination acceptable. Asserts the configuration this module
+    /// installs actually holds, so a future smoltcp bump that changes AnyIP
+    /// semantics fails here rather than in a live tunnel.
+    #[test]
+    fn any_ip_plus_a_default_route_is_installable() {
+        let mut dev = Loopback::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 1;
+        let mut iface = Interface::new(config, &mut dev, smoltcp_now());
+
+        iface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(IpCidr::new(IpAddress::v4(100, 64, 0, 1), 32));
+        });
+        iface.set_any_ip(true);
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(Ipv4Address::new(100, 64, 0, 1))
+            .expect("one default route must fit in IFACE_MAX_ROUTE_COUNT");
+
+        assert!(iface.any_ip());
+        // The router address the default route points at must be one we own, or
+        // AnyIP's own check rejects the packet.
+        assert!(iface.has_ip_addr(IpAddress::v4(100, 64, 0, 1)));
     }
 }

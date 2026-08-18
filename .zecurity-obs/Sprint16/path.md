@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10, negatives included) · Stage 2 phases 4–8 complete (Phase 8 done 2026-08-15, commit e89f941; wire-hop E2E still outstanding) · next = Phase 9
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete (Phase 8 done 2026-08-15 `e89f941`; Phase 9 done 2026-08-18, client data path proven live) · outstanding: full-stack E2E for Phase 8's wire hop and Phase 9's by-name run · next = Phase 10 (closes Gate 2)
 solo: true
 owner: M3
 tags:
@@ -362,10 +362,16 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       shield **gRPC** path. Every link is proven separately; no message has traversed the wire. Needs a
       running stack with enrolled certs. **Does not block Phase 9** (client-side, no overlap).
 
-#### Phase 9 — Client binding registry + synthetic routing
+#### Phase 9 — Client binding registry + synthetic routing ✅ DONE (2026-08-18)
 > See [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]].
 > **Largest and most security-sensitive phase of Stage 2.**
-- [ ] **9.1** new `client/src/registry.rs` — durable `hostname → synthetic IP → resource_id`;
+> 📌 **11 files, not the 5 the File Map listed** — `daemon_tests.rs` (5 call sites of a changed
+> signature), `main.rs`, and a **third** silent drop site in `net_stack.rs` were all unlisted.
+> 📌 **Client tests 39 → 78, plus 4 gated live tests** that build a real TUN and push real packets.
+> 📌 **Four bugs found only by the live test, after the unit suite was green** — including invalid nft
+> syntax that would have made every FQDN resource silently unroutable, and a pre-existing smoltcp
+> 2-address cap that silently truncated the client's resource list. See the phase file's fixes.
+- [x] **9.1** new `client/src/registry.rs` — durable `hostname → synthetic IP → resource_id`;
       stable across restarts; **quarantine before reuse**; collision-aware CIDR selection. Preserve the
       three-state semantics (`Some(with transports)` / `Some(empty)` = fail closed / `None` = unmanaged).
       📌 **Inherited debt — assert the three states here.** Phase 2's verify list still carries two
@@ -373,9 +379,9 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       `daemon_tests.rs` covers the map *shape* but not that distinction, and losing it converts a
       fail-closed case into a passthrough — a security regression. Phase 9 rewrites this exact code, so
       it owns the assertion.
-- [ ] **9.2** `client/src/state_store.rs` — persist the registry (encrypted at rest, per ADR-002); a
+- [x] **9.2** `client/src/state_store.rs` — persist the registry (encrypted at rest, per ADR-002); a
       corrupt table rebuilds empty **with everything quarantined**, rather than refusing to start.
-- [ ] **9.3** `client/src/tun.rs` — route the **synthetic CIDR once**; stop installing per-`/32`
+- [x] **9.3** `client/src/tun.rs` — route the **synthetic CIDR once**; stop installing per-`/32`
       routes for FQDN resources (per-`/32` does not scale). Pinned IPs keep per-`/32` unchanged.
       ⚠️ **A route alone will not pull traffic into the TUN.** Steering is nft-mark based
       (`ip daddr … tcp dport … meta mark set` → `ip rule fwmark` → table 105). **Decide:** per-`(ip,port)`
@@ -383,15 +389,15 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       ruleset size; then a non-ACL port on a synthetic IP must refuse cleanly, not hang). The
       `meta mark 0x5b return` rule must stay **first** or the Gate 1 co-location loop returns.
       ⚠️ Also verify the synthetic-CIDR route against **split-tunnelling (ADR-009)**.
-- [ ] **9.4** `client/src/net_stack.rs` — synthetic IP → `resource_id`; send `destination` **empty** for
+- [x] **9.4** `client/src/net_stack.rs` — synthetic IP → `resource_id`; send `destination` **empty** for
       named resources (must match Phase 7 task 7.0); **rewrite the response source to the synthetic IP**
       (the app's socket will drop anything else — and this failure looks exactly like the Gate 1 stall,
       which will send you down the wrong path).
-- [ ] **9.5** Testable without DNS via a `hosts` entry → connect **by name** (this preserves TLS
+- [x] **9.5** Testable without DNS (client-side; by-name run outstanding) via a `hosts` entry → connect **by name** (this preserves TLS
       SNI/validation; connecting to a **raw** synthetic IP does **not**). ⚠️ Resource must **not** be on
       the client's host — the `local` table beats any TUN route and produces a false pass.
-- [ ] **Gate:** `cd client && cargo build && cargo test` (baseline 39)
-- [ ] 📌 **Regression test (acceptance-critical):** a restart must not remap a synthetic IP to a
+- [x] **Gate:** `cd client && cargo build && cargo test` — **PASS: 78 + 4 gated** (baseline 39)
+- [x] 📌 **Regression test (acceptance-critical):** a restart must not remap a synthetic IP to a
       different resource. Automate it; a silent remap makes the client assert the wrong identity.
 
 #### Phase 10 — Admin UI
@@ -500,7 +506,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 2 | `shield_ids[]` — array column or join table? | ✅ **Join table.** Written alongside the singular `shield_id`, which stays authoritative for existing readers. | `resource_shields` (migration 030), Phase 4.3 |
 | 3 | **IPv6** | ⏳ Deferred. `AAAA → NODATA` in Stage 3; A-records only in Phase 6. | Phase 6.3, Phase 11.1 |
 | 4 | **Unmanaged DNS** — per-domain OS config or full proxy? | ⏳ **Per-domain** (far less invasive) — settle the non-`systemd-resolved` fallback in Phase 12.1. | Phase 12.1 |
-| 5 | **Synthetic CIDR** | ⏳ A `100.64.0.0/10` subrange, collision-checked at startup (CGNAT is used in the wild). **Open sub-decision:** how it is *steered* (see Phase 9.3 — a route alone is insufficient). | Phase 9.1, 9.3 |
+| 5 | **Synthetic CIDR** | ✅ A `100.64.0.0/10` subrange, collision-checked at startup (CGNAT is used in the wild). **Steering settled 2026-08-15: one port-agnostic whole-CIDR mark rule** (`ip daddr <SYN_CIDR> meta mark set ZECURITY_MARK`) — constant-size ruleset, which is the scaling problem 9.3 exists to fix. Accepted consequence: any port on a synthetic IP is steered into the TUN, so a port absent from the ACL has no smoltcp listener and **must refuse cleanly, not hang** — verify and record. | Phase 9.1, 9.3 |
 | 6 | **Name collisions across remote networks** | ✅ **Rejected at create**, per remote network. | `UNIQUE (tenant_id, remote_network_id, COALESCE(host, hostname), name)` — migration 030 |
 | 7 | **Per-principal ACL scoping** | ❌ **Not this sprint** — but it is the blocker for 100k resources / 50k clients. Track separately. | — |
 
@@ -510,7 +516,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 |---|---|---|
 | What `destination` carries for named resources | **7.0 + 9.4** | Both halves must agree, or every FQDN resource is denied as `destination_mismatch`. |
 | `resolver.config["server"]` — implement per-resource DNS servers, or fix the schema comment? | **10.1** | Phase 6 **rejects** `server` as `invalid_resolver_config` (silently ignoring it would resolve against the connector's own resolver — a different answer than the operator asked for). But [resource.graphqls](../../controller/graph/resource.graphqls) still shows `{"type":"dns","config":{"server":"..."}}` as the example. One of the two must change. |
-| How the synthetic CIDR is steered into the TUN (nft mark shape) | **9.3** | Routing is mark-driven; a route alone won't capture traffic. |
+| ~~How the synthetic CIDR is steered into the TUN (nft mark shape)~~ | ~~**9.3**~~ | ✅ **Settled 2026-08-15 — whole-CIDR mark.** See decision #5 above. |
 | Non-`systemd-resolved` hosts: rewrite `resolv.conf` or refuse OS DNS? | **12.1** | Failure mode is the user's DNS left broken after our daemon exits. |
 
 ### Settled in Phase 6
@@ -547,8 +553,8 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 6 | [[Sprint16/Member3-Go-Rust/Phase6-Connector-Resolver-Module]] | ✅ done (128 + 4 tests green) |
 | 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ✅ done (148 + 4 tests green) |
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
-| 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ⬜ **next** |
-| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ — closes **Gate 2** |
+| 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
+| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ **next** — closes **Gate 2** |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
 
@@ -706,6 +712,57 @@ what `CompileACLSnapshot` emits into an `ACLEntry` — wrong about exactly the r
 correction established. The code was always correct. Rewritten during Phase 8 to state why
 `local_target` is *deliberately* absent from the ACL-relevant set and that its delivery path is the
 shield snapshot generation instead.
+
+### Fix: invalid nft syntax — a bare `tcp` protocol match (would have broken every FQDN resource)
+**Phase 9.3.** The whole-CIDR rule was generated as `ip daddr <cidr> tcp meta mark set 0x5a`. A bare
+protocol keyword is only valid when it introduces a field match (`tcp dport 443`); alone nft rejects the
+rule with a syntax error, so **no synthetic traffic would ever have been marked**. The unit test
+asserted `contains(" tcp ")` — true of a rule nft refuses to load. Fixed to `meta l4proto tcp`, with the
+test asserting the exact token sequence. Found only by the live kernel test.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Fix: `handle_up` installed the synthetic routing then immediately destroyed it
+**Phase 9.4a.** `configure_allowed_flows` was called twice — once with the CIDR, then again with `None`
+— and it begins with `cleanup_policy_routes()`, so the second call tore down the chain and rebuilt it
+without the CIDR rule or route. `up` reported success, `route_count` counted the bindings, and
+connections hung. **Build and all tests were green**: `handle_up` has no unit coverage, and still
+doesn't.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Fix (pre-existing): smoltcp silently supported only 2 resource addresses
+**Phase 9.4b.** `net_stack` pushed one `/32` per resource entry plus `100.64.0.1` into `iface.ip_addrs`
+while **discarding every `push` failure with `let _ =`**. `IFACE_MAX_ADDR_COUNT` is **2** in this build,
+and entries are not deduplicated by IP — so one resource on two ports already overflowed, and beyond
+that inbound packets were dropped by smoltcp and the app hung. Replaced with `set_any_ip(true)` plus one
+default route, which removes the cap and is the only way a synthetic `/22` can work at all
+(`has_ip_addr` is an exact match, so a CIDR entry covers only its base address). Three tests now pin
+that smoltcp contract.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Fix: a third silent drop site, and a listener/transport divergence
+**Phase 9.4b.** `net_stack` re-derived its listener set from `entry.address` — a third place that
+dropped name-addressed resources, and a *different source* from the transports map, so the two could
+disagree (route into the TUN, nothing behind it). Listeners now come from `transports.keys()`, making
+divergence unrepresentable; `net_stack::run` lost its redundant `allowed_entries` parameter.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Verified: ADR-009's port-scoping invariant is deliberately relaxed inside the synthetic CIDR
+**Phase 9.3.** ADR-009 exists to stop non-ACL ports on a resource IP being captured, because the
+destination may host an unrelated service. The port-agnostic whole-CIDR rule reintroduces that — **but
+only where ADR-009's premise cannot hold**: a synthetic IP is client-local and serves exactly one
+resource. Pinned resources keep per-`(ip, port)` rules, proven by a live pinned/unmanaged test pair on
+the same address. ADR-009's text is now stale in two doc-only respects (it lists `allowed_entries` as an
+input to `net_stack::run`, and the map type predates Phase 2).
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Known: the mark-based steering requires a main-table route to the destination
+**Phase 9.5.** `connect()` does a main-table route lookup to choose a source address *before* any packet
+exists, and the nft output hook only runs on a packet — so with no main-table route the connect fails
+immediately with `ENETUNREACH` and the mark rule never executes. On a real host the default route covers
+CGNAT, which is why this works; but **a host with no default route cannot reach name-addressed
+resources**. Pre-existing property of the mechanism (applies equally to pinned IPs outside any local
+subnet), documented rather than changed.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
 
 ### Outstanding (out of sprint scope): direct-path cooldown with no fallback
 `client/src/transport.rs` — `mark_direct_failure()` assumes an alternative transport exists. With
