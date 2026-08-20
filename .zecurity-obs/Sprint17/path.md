@@ -123,8 +123,8 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 1 — Schema  `[I]`
 > See [[Sprint17/Member1-Go/Phase1-Schema]]. Depends on nothing — Day 1.
-- [ ] **M1-1a** migration `034_scim.sql`: `identity_connections` (+`subject_claim`, `scim_identifier`, `scim_enabled`, `last_sync_at`, `status`+`'deleted'`); `users` (+`provisioned_by`, `provisioning_owner`, `sync_instance_id`); `groups` (+`origin`, `external_id`); `external_identities` (+`sync_instance_id`); new `scim_tokens`, `scim_identity_conflicts` (+ unique pending index), `scim_sync_instances`.
-- [ ] **Build gate:** `cd controller && go build ./...`; migration applies on a fresh DB after `033`; PENDING-04 tests still green.
+- [x] **M1-1a** migration `034_scim_directory_sync.sql`: `identity_connections` (+`subject_claim`, `scim_identifier`, `scim_enabled`, `last_sync_at`, `status`+`'deleted'`); `users` (+`provisioned_by`, `provisioning_owner`, `sync_instance_id`); `groups` (+`origin`, `external_id`); `external_identities` (+`sync_instance_id`); new `scim_tokens`, `scim_identity_conflicts` (+ unique pending index), `scim_sync_instances`.
+- [x] **Build gate:** `cd controller && go build ./...`; migration applies on a fresh DB after `033`; PENDING-04 tests still green.
 
 #### Phase 2 — SCIM token authentication  `[I]`
 > See [[Sprint17/Member1-Go/Phase2-SCIM-Token-Auth]]. Depends on Phase 1.
