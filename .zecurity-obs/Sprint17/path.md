@@ -128,9 +128,9 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 2 — SCIM token authentication  `[I]`
 > See [[Sprint17/Member1-Go/Phase2-SCIM-Token-Auth]]. Depends on Phase 1.
-- [ ] **M1-2a** `scim_tokens` store: HMAC-SHA256 keyed by `SCIM_TOKEN_HASH_KEY`; dual-token rotation (≤2 active, 24h grace, `SCIM_TOKEN_ROTATION_GRACE_HOURS`); lookup-by-hash → bind `(workspace_id, connection_id)`; revoke + auto-expire event.
-- [ ] **M1-2b** Bearer middleware for `/scim/v2/*`; GraphQL mint/rotate/revoke/list (plaintext shown once).
-- [ ] **Build gate:** `go build ./...` + token unit tests (rotation/grace/scope).
+- [x] **M1-2a** `scim_tokens` store: HMAC-SHA256 keyed by `SCIM_TOKEN_HASH_KEY`; dual-token rotation (≤2 active, 24h grace, `SCIM_TOKEN_ROTATION_GRACE_HOURS`); lookup-by-hash → bind `(workspace_id, connection_id)`; revoke + auto-expire event.
+- [x] **M1-2b** Bearer middleware for `/scim/v2/*`; GraphQL mint/rotate/revoke/list (plaintext shown once).
+- [x] **Build gate:** `go build ./...` + token unit tests (rotation/grace/scope).
 
 #### Phase 3 — Break-glass permission primitive  `[I]`
 > See [[Sprint17/Member1-Go/Phase3-BreakGlass-Permission]]. Depends on nothing (parallel with 1/2).
