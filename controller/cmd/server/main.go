@@ -58,6 +58,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/transport"
 
@@ -135,6 +136,13 @@ func main() {
 	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
 	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
 	idpStore := idp.NewStore(db.Pool, pkiService)
+
+	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
+	// (SCIM_TOKEN_HASH_KEY) distinct from the PKI master secret.
+	scimStore, err := scim.NewStore(db.Pool, []byte(mustEnv("SCIM_TOKEN_HASH_KEY")), 0)
+	if err != nil {
+		log.Fatalf("scim token store init: %v", err)
+	}
 
 	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
 	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
@@ -290,6 +298,7 @@ func main() {
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
 				IdpStore:          idpStore,
+				ScimStore:         scimStore,
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 			},

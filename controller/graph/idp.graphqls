@@ -25,6 +25,23 @@ type WorkspaceIdpConnection {
   # NOTE: clientSecret is intentionally absent — it is never exposed.
 }
 
+type ScimToken {
+  id: ID!
+  workspaceId: ID!
+  connectionId: ID!
+  label: String
+  createdBy: ID
+  createdAt: Time!
+  lastUsedAt: Time
+  expiresAt: Time
+  revokedAt: Time
+}
+
+type ScimTokenMintResult {
+  token: ScimToken!
+  plaintext: String!
+}
+
 input CreateIdpConnectionInput {
   provider:     String!   # resolver key: "okta", "entra", "oidc", ...
   displayName:  String!
@@ -56,6 +73,8 @@ extend type Query {
   idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
   # Whether the workspace still offers the shared platform IdP as a login path.
   platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
+
+  scimTokens(connectionId: ID!): [ScimToken!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
@@ -70,4 +89,21 @@ extend type Mutation {
   # is refused if the workspace has no active identity provider of its own and
   # the actor is not a break-glass admin (no-lockout, ADR-024 §5).
   setPlatformLoginEnabled(enabled: Boolean!): Boolean! @hasRole(roles: [ADMIN])
+
+  mintScimToken(
+    connectionId: ID!
+    label: String
+    expiresAt: Time
+  ): ScimTokenMintResult! @hasRole(roles: [ADMIN])
+
+  rotateScimToken(
+    connectionId: ID!
+    label: String
+    expiresAt: Time
+  ): ScimTokenMintResult! @hasRole(roles: [ADMIN])
+
+  revokeScimToken(
+    connectionId: ID!
+    tokenId: ID!
+  ): Boolean! @hasRole(roles: [ADMIN])
 }

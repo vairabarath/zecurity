@@ -12,6 +12,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
@@ -36,6 +37,8 @@ type Resolver struct {
 
 	// IdpStore backs the identity-provider admin API (PENDING-04 Phase 6).
 	IdpStore *idp.Store
+	// ScimStore backs the SCIM bearer-token API (Sprint 17 / ADR-025).
+	ScimStore *scim.Store
 	// Revoker performs session-generation revocation when a connection is
 	// disabled/deleted (every user of that connection loses their login path).
 	Revoker *identity.Revoker

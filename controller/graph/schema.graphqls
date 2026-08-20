@@ -1,3 +1,5 @@
+scalar Time
+
 # controller/graph/schema.graphqls — Sprint 1 types
 
 # Restricts a field to callers whose JWT role is one of `roles`.

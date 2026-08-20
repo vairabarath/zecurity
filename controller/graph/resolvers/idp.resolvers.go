@@ -9,8 +9,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -186,6 +188,118 @@ func (r *mutationResolver) SetPlatformLoginEnabled(ctx context.Context, enabled 
 	return enabled, nil
 }
 
+// MintScimToken is the resolver for the mintScimToken field.
+func (r *mutationResolver) MintScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*graph.ScimTokenMintResult, error) {
+	tc := tenant.MustGet(ctx)
+
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return nil, err
+	}
+
+	result, err := r.ScimStore.Mint(
+		ctx,
+		tc.TenantID,
+		connectionID,
+		label,
+		stringPtrOrNil(tc.UserID),
+		expiresAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("mint SCIM token: %w", err)
+	}
+
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "scim.token.mint",
+		TargetType:  "scim_token",
+		TargetID:    result.Token.ID,
+		Details: map[string]any{
+			"connection_id": connectionID,
+			"label":         label,
+			"expires_at":    expiresAt,
+		},
+	})
+
+	return &graph.ScimTokenMintResult{
+		Token:     scimTokenToGQL(result.Token),
+		Plaintext: result.Plaintext,
+	}, nil
+}
+
+// RotateScimToken is the resolver for the rotateScimToken field.
+func (r *mutationResolver) RotateScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*graph.ScimTokenMintResult, error) {
+	tc := tenant.MustGet(ctx)
+
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return nil, err
+	}
+
+	result, err := r.ScimStore.Rotate(
+		ctx,
+		tc.TenantID,
+		connectionID,
+		label,
+		stringPtrOrNil(tc.UserID),
+		expiresAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rotate SCIM token: %w", err)
+	}
+
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "scim.token.rotate",
+		TargetType:  "scim_token",
+		TargetID:    result.Token.ID,
+		Details: map[string]any{
+			"connection_id": connectionID,
+			"label":         label,
+			"expires_at":    expiresAt,
+		},
+	})
+
+	return &graph.ScimTokenMintResult{
+		Token:     scimTokenToGQL(result.Token),
+		Plaintext: result.Plaintext,
+	}, nil
+}
+
+// RevokeScimToken is the resolver for the revokeScimToken field.
+func (r *mutationResolver) RevokeScimToken(ctx context.Context, connectionID string, tokenID string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return false, err
+	}
+
+	if err := r.ScimStore.Revoke(
+		ctx,
+		tc.TenantID,
+		connectionID,
+		tokenID,
+	); err != nil {
+		return false, fmt.Errorf("revoke SCIM token: %w", err)
+	}
+
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "scim.token.revoke",
+		TargetType:  "scim_token",
+		TargetID:    tokenID,
+		Details: map[string]any{
+			"connection_id": connectionID,
+		},
+	})
+
+	return true, nil
+}
+
 // IdpConnections is the resolver for the idpConnections field.
 func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
@@ -210,4 +324,29 @@ func (r *queryResolver) PlatformLoginEnabled(ctx context.Context) (bool, error) 
 		return false, fmt.Errorf("platformLoginEnabled: %w", err)
 	}
 	return enabled, nil
+}
+
+// ScimTokens is the resolver for the scimTokens field.
+func (r *queryResolver) ScimTokens(ctx context.Context, connectionID string) ([]*graph.ScimToken, error) {
+	tc := tenant.MustGet(ctx)
+
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return nil, err
+	}
+
+	tokens, err := r.ScimStore.List(
+		ctx,
+		tc.TenantID,
+		connectionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list SCIM tokens: %w", err)
+	}
+
+	out := make([]*graph.ScimToken, 0, len(tokens))
+	for _, token := range tokens {
+		out = append(out, scimTokenToGQL(token))
+	}
+
+	return out, nil
 }

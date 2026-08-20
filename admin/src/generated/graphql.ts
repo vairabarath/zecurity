@@ -14,6 +14,7 @@ export type Scalars = {
   Boolean: { input: boolean; output: boolean; }
   Int: { input: number; output: number; }
   Float: { input: number; output: number; }
+  Time: { input: any; output: any; }
 };
 
 export type AuthInitPayload = {
@@ -203,13 +204,16 @@ export type Mutation = {
   generateConnectorToken: ConnectorToken;
   generateShieldToken: ShieldToken;
   initiateAuth: AuthInitPayload;
+  mintScimToken: ScimTokenMintResult;
   promoteDiscoveredService: Resource;
   protectResource: Resource;
   removeGroupMember: Group;
   removeProfileRequirement: DeviceProfile;
   revokeConnector: Scalars['Boolean']['output'];
   revokeDevice: Scalars['Boolean']['output'];
+  revokeScimToken: Scalars['Boolean']['output'];
   revokeShield: Scalars['Boolean']['output'];
+  rotateScimToken: ScimTokenMintResult;
   setIdpConnectionStatus: WorkspaceIdpConnection;
   setPlatformLoginEnabled: Scalars['Boolean']['output'];
   testIdpConnection: IdpTestResult;
@@ -342,6 +346,13 @@ export type MutationInitiateAuthArgs = {
 };
 
 
+export type MutationMintScimTokenArgs = {
+  connectionId: Scalars['ID']['input'];
+  expiresAt?: InputMaybe<Scalars['Time']['input']>;
+  label?: InputMaybe<Scalars['String']['input']>;
+};
+
+
 export type MutationPromoteDiscoveredServiceArgs = {
   port: Scalars['Int']['input'];
   protocol: Scalars['String']['input'];
@@ -376,8 +387,21 @@ export type MutationRevokeDeviceArgs = {
 };
 
 
+export type MutationRevokeScimTokenArgs = {
+  connectionId: Scalars['ID']['input'];
+  tokenId: Scalars['ID']['input'];
+};
+
+
 export type MutationRevokeShieldArgs = {
   id: Scalars['ID']['input'];
+};
+
+
+export type MutationRotateScimTokenArgs = {
+  connectionId: Scalars['ID']['input'];
+  expiresAt?: InputMaybe<Scalars['Time']['input']>;
+  label?: InputMaybe<Scalars['String']['input']>;
 };
 
 
@@ -505,6 +529,7 @@ export type Query = {
   remoteNetwork?: Maybe<RemoteNetwork>;
   remoteNetworks: Array<RemoteNetwork>;
   resources: Array<Resource>;
+  scimTokens: Array<ScimToken>;
   shield?: Maybe<Shield>;
   shields: Array<Shield>;
   supportedPostureChecks: Array<PostureCheckDescriptor>;
@@ -573,6 +598,11 @@ export type QueryResourcesArgs = {
 };
 
 
+export type QueryScimTokensArgs = {
+  connectionId: Scalars['ID']['input'];
+};
+
+
 export type QueryShieldArgs = {
   id: Scalars['ID']['input'];
 };
@@ -633,6 +663,25 @@ export type ScanResult = {
   reachableFrom: Scalars['String']['output'];
   requestId: Scalars['String']['output'];
   serviceName: Scalars['String']['output'];
+};
+
+export type ScimToken = {
+  __typename?: 'ScimToken';
+  connectionId: Scalars['ID']['output'];
+  createdAt: Scalars['Time']['output'];
+  createdBy?: Maybe<Scalars['ID']['output']>;
+  expiresAt?: Maybe<Scalars['Time']['output']>;
+  id: Scalars['ID']['output'];
+  label?: Maybe<Scalars['String']['output']>;
+  lastUsedAt?: Maybe<Scalars['Time']['output']>;
+  revokedAt?: Maybe<Scalars['Time']['output']>;
+  workspaceId: Scalars['ID']['output'];
+};
+
+export type ScimTokenMintResult = {
+  __typename?: 'ScimTokenMintResult';
+  plaintext: Scalars['String']['output'];
+  token: ScimToken;
 };
 
 export type Shield = {
