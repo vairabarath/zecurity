@@ -2318,3 +2318,21 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Complete M1-E1 posture visibility, then implement M1-E3 compiler gating and M1-E3b
   cache expiry before closing the Phase 3 build gate.
+
+## 2026-08-19 — Codex (identity federation legacy-user backfill)
+
+**What was done:**
+- Diagnosed a live OAuth callback failure after the identity-federation migration: legacy
+  Google users had no `external_identities` row, so the new resolver attempted a duplicate
+  JIT provision and the callback masked the database error as `authentication_failed`.
+- Added and applied `034_backfill_legacy_external_identities.sql`, which idempotently links
+  legacy users to matching active managed platform connections.
+
+**Verification:**
+- The live database has no users without an external identity link; the existing Google user
+  is linked exactly once.
+- Focused auth/identity tests and `go build ./...` pass.
+
+**What's next:**
+- Retry the browser OAuth callback; the existing user should resolve instead of being
+  provisioned again.
