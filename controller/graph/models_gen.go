@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"time"
 
 	"github.com/yourorg/ztna/controller/internal/models"
 )
@@ -190,6 +191,23 @@ type ScanResult struct {
 	ServiceName   string `json:"serviceName"`
 	ReachableFrom string `json:"reachableFrom"`
 	FirstSeen     string `json:"firstSeen"`
+}
+
+type ScimToken struct {
+	ID           string     `json:"id"`
+	WorkspaceID  string     `json:"workspaceId"`
+	ConnectionID string     `json:"connectionId"`
+	Label        *string    `json:"label,omitempty"`
+	CreatedBy    *string    `json:"createdBy,omitempty"`
+	CreatedAt    time.Time  `json:"createdAt"`
+	LastUsedAt   *time.Time `json:"lastUsedAt,omitempty"`
+	ExpiresAt    *time.Time `json:"expiresAt,omitempty"`
+	RevokedAt    *time.Time `json:"revokedAt,omitempty"`
+}
+
+type ScimTokenMintResult struct {
+	Token     *ScimToken `json:"token"`
+	Plaintext string     `json:"plaintext"`
 }
 
 type Shield struct {
