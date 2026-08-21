@@ -106,4 +106,27 @@ extend type Mutation {
     connectionId: ID!
     tokenId: ID!
   ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Explicit fine-grained permission grant (Phase 3 break-glass primitive).
+  # ADMIN may grant, but possession is an explicit row — never implied by role.
+  # granted_to receives the permission; grantor is the authenticated admin.
+  grantPermission(
+    userId: ID!
+    permission: String!
+  ): WorkspacePermission! @hasRole(roles: [ADMIN])
+
+  # Revoke an explicit permission grant (Phase 3 break-glass primitive).
+  revokePermission(
+    userId: ID!
+    permission: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+}
+
+# One explicit (workspace, user, permission) grant. A row existing is the ONLY
+# thing that satisfies a permission check — ADMIN role does not.
+type WorkspacePermission {
+  workspaceId: ID!
+  userId: ID!
+  permission: String!
+  grantedBy: ID
 }

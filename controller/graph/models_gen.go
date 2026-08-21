@@ -270,6 +270,13 @@ type WorkspaceLookupResult struct {
 	Workspace *WorkspacePublic `json:"workspace,omitempty"`
 }
 
+type WorkspacePermission struct {
+	WorkspaceID string  `json:"workspaceId"`
+	UserID      string  `json:"userId"`
+	Permission  string  `json:"permission"`
+	GrantedBy   *string `json:"grantedBy,omitempty"`
+}
+
 type WorkspacePublic struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`

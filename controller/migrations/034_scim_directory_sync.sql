@@ -171,3 +171,21 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_uniq_pending
         canonical_identity_key
     )
     WHERE status = 'pending';
+
+-- 6. Explicit fine-grained permissions (Phase 3 — break-glass primitive).
+--
+-- A row means exactly: "user_id explicitly holds `permission` in workspace_id."
+-- Possession is NEVER implied by role (an ADMIN without a row does NOT satisfy a
+-- permission check). Grant/revoke manage rows; HasPermission answers "does the
+-- row exist?". See controller/internal/permission.
+
+CREATE TABLE IF NOT EXISTS workspace_permissions (
+    workspace_id UUID NOT NULL
+        REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id      UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE,
+    permission   TEXT NOT NULL,
+    granted_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    granted_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (workspace_id, user_id, permission)
+);

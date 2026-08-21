@@ -60,8 +60,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/transport"
-
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -143,6 +143,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("scim token store init: %v", err)
 	}
+
+	// Explicit fine-grained permission store (Sprint 17 / ADR-025 Phase 3).
+	// Backs the break-glass primitive; possession is always an explicit row.
+	permissionStore := permission.NewStore(db.Pool)
 
 	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
 	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
@@ -299,6 +303,7 @@ func main() {
 				TransportNotifier: transportNotifier,
 				IdpStore:          idpStore,
 				ScimStore:         scimStore,
+				PermissionStore:   permissionStore,
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 			},

@@ -177,6 +177,7 @@ type ComplexityRoot struct {
 		ForceDeleteResource            func(childComplexity int, id string) int
 		GenerateConnectorToken         func(childComplexity int, remoteNetworkID string, connectorName string) int
 		GenerateShieldToken            func(childComplexity int, remoteNetworkID string, shieldName string) int
+		GrantPermission                func(childComplexity int, userID string, permission string) int
 		InitiateAuth                   func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
 		MintScimToken                  func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
 		PromoteDiscoveredService       func(childComplexity int, shieldID string, protocol string, port int) int
@@ -185,6 +186,7 @@ type ComplexityRoot struct {
 		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
 		RevokeConnector                func(childComplexity int, id string) int
 		RevokeDevice                   func(childComplexity int, deviceID string) int
+		RevokePermission               func(childComplexity int, userID string, permission string) int
 		RevokeScimToken                func(childComplexity int, connectionID string, tokenID string) int
 		RevokeShield                   func(childComplexity int, id string) int
 		RotateScimToken                func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
@@ -353,6 +355,13 @@ type ComplexityRoot struct {
 		Workspace func(childComplexity int) int
 	}
 
+	WorkspacePermission struct {
+		GrantedBy   func(childComplexity int) int
+		Permission  func(childComplexity int) int
+		UserID      func(childComplexity int) int
+		WorkspaceID func(childComplexity int) int
+	}
+
 	WorkspacePublic struct {
 		ID   func(childComplexity int) int
 		Name func(childComplexity int) int
@@ -408,6 +417,8 @@ type MutationResolver interface {
 	MintScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
 	RotateScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
 	RevokeScimToken(ctx context.Context, connectionID string, tokenID string) (bool, error)
+	GrantPermission(ctx context.Context, userID string, permission string) (*WorkspacePermission, error)
+	RevokePermission(ctx context.Context, userID string, permission string) (bool, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -1139,6 +1150,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.GenerateShieldToken(childComplexity, args["remoteNetworkId"].(string), args["shieldName"].(string)), true
+	case "Mutation.grantPermission":
+		if e.ComplexityRoot.Mutation.GrantPermission == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_grantPermission_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.GrantPermission(childComplexity, args["userId"].(string), args["permission"].(string)), true
 	case "Mutation.initiateAuth":
 		if e.ComplexityRoot.Mutation.InitiateAuth == nil {
 			break
@@ -1227,6 +1249,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeDevice(childComplexity, args["deviceId"].(string)), true
+	case "Mutation.revokePermission":
+		if e.ComplexityRoot.Mutation.RevokePermission == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_revokePermission_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.RevokePermission(childComplexity, args["userId"].(string), args["permission"].(string)), true
 	case "Mutation.revokeScimToken":
 		if e.ComplexityRoot.Mutation.RevokeScimToken == nil {
 			break
@@ -2137,6 +2170,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.WorkspaceLookupResult.Workspace(childComplexity), true
 
+	case "WorkspacePermission.grantedBy":
+		if e.ComplexityRoot.WorkspacePermission.GrantedBy == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspacePermission.GrantedBy(childComplexity), true
+	case "WorkspacePermission.permission":
+		if e.ComplexityRoot.WorkspacePermission.Permission == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspacePermission.Permission(childComplexity), true
+	case "WorkspacePermission.userId":
+		if e.ComplexityRoot.WorkspacePermission.UserID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspacePermission.UserID(childComplexity), true
+	case "WorkspacePermission.workspaceId":
+		if e.ComplexityRoot.WorkspacePermission.WorkspaceID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspacePermission.WorkspaceID(childComplexity), true
+
 	case "WorkspacePublic.id":
 		if e.ComplexityRoot.WorkspacePublic.ID == nil {
 			break
@@ -2739,6 +2797,20 @@ func (ec *executionContext) childFields_WorkspaceLookupResult(ctx context.Contex
 	return nil, fmt.Errorf("no field named %q was found under type WorkspaceLookupResult", field.Name)
 }
 
+func (ec *executionContext) childFields_WorkspacePermission(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "workspaceId":
+		return ec.fieldContext_WorkspacePermission_workspaceId(ctx, field)
+	case "userId":
+		return ec.fieldContext_WorkspacePermission_userId(ctx, field)
+	case "permission":
+		return ec.fieldContext_WorkspacePermission_permission(ctx, field)
+	case "grantedBy":
+		return ec.fieldContext_WorkspacePermission_grantedBy(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type WorkspacePermission", field.Name)
+}
+
 func (ec *executionContext) childFields_WorkspacePublic(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 	switch field.Name {
 	case "id":
@@ -3241,6 +3313,28 @@ func (ec *executionContext) field_Mutation_generateShieldToken_args(ctx context.
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_grantPermission_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "userId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "permission",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["permission"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_initiateAuth_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3414,6 +3508,28 @@ func (ec *executionContext) field_Mutation_revokeDevice_args(ctx context.Context
 		return nil, err
 	}
 	args["deviceId"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_revokePermission_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "userId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["userId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "permission",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["permission"] = arg1
 	return args, nil
 }
 
@@ -8422,6 +8538,130 @@ func (ec *executionContext) fieldContext_Mutation_revokeScimToken(ctx context.Co
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_grantPermission(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_grantPermission(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().GrantPermission(ctx, fc.Args["userId"].(string), fc.Args["permission"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *WorkspacePermission
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *WorkspacePermission
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *WorkspacePermission) graphql.Marshaler {
+			return ec.marshalNWorkspacePermission2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspacePermission(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_grantPermission(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspacePermission(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_grantPermission_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_revokePermission(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_revokePermission(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().RevokePermission(ctx, fc.Args["userId"].(string), fc.Args["permission"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_revokePermission(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_revokePermission_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _PostureCheckDescriptor_id(ctx context.Context, field graphql.CollectedField, obj *PostureCheckDescriptor) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11869,6 +12109,98 @@ func (ec *executionContext) fieldContext_WorkspaceLookupResult_workspace(_ conte
 	return fc, nil
 }
 
+func (ec *executionContext) _WorkspacePermission_workspaceId(ctx context.Context, field graphql.CollectedField, obj *WorkspacePermission) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspacePermission_workspaceId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.WorkspaceID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspacePermission_workspaceId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspacePermission", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspacePermission_userId(ctx context.Context, field graphql.CollectedField, obj *WorkspacePermission) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspacePermission_userId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.UserID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspacePermission_userId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspacePermission", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspacePermission_permission(ctx context.Context, field graphql.CollectedField, obj *WorkspacePermission) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspacePermission_permission(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Permission, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspacePermission_permission(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspacePermission", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspacePermission_grantedBy(ctx context.Context, field graphql.CollectedField, obj *WorkspacePermission) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspacePermission_grantedBy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.GrantedBy, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOID2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspacePermission_grantedBy(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspacePermission", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
 func (ec *executionContext) _WorkspacePublic_id(ctx context.Context, field graphql.CollectedField, obj *WorkspacePublic) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -14429,6 +14761,20 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "grantPermission":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_grantPermission(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "revokePermission":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_revokePermission(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -15997,6 +16343,57 @@ func (ec *executionContext) _WorkspaceLookupResult(ctx context.Context, sel ast.
 	return out
 }
 
+var workspacePermissionImplementors = []string{"WorkspacePermission"}
+
+func (ec *executionContext) _WorkspacePermission(ctx context.Context, sel ast.SelectionSet, obj *WorkspacePermission) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, workspacePermissionImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("WorkspacePermission")
+		case "workspaceId":
+			out.Values[i] = ec._WorkspacePermission_workspaceId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "userId":
+			out.Values[i] = ec._WorkspacePermission_userId(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "permission":
+			out.Values[i] = ec._WorkspacePermission_permission(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "grantedBy":
+			out.Values[i] = ec._WorkspacePermission_grantedBy(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var workspacePublicImplementors = []string{"WorkspacePublic"}
 
 func (ec *executionContext) _WorkspacePublic(ctx context.Context, sel ast.SelectionSet, obj *WorkspacePublic) graphql.Marshaler {
@@ -17252,6 +17649,20 @@ func (ec *executionContext) marshalNWorkspaceLookupResult2ᚖgithubᚗcomᚋyour
 		return graphql.Null
 	}
 	return ec._WorkspaceLookupResult(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalNWorkspacePermission2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspacePermission(ctx context.Context, sel ast.SelectionSet, v WorkspacePermission) graphql.Marshaler {
+	return ec._WorkspacePermission(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNWorkspacePermission2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspacePermission(ctx context.Context, sel ast.SelectionSet, v *WorkspacePermission) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._WorkspacePermission(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalNWorkspacePublic2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspacePublicᚄ(ctx context.Context, sel ast.SelectionSet, v []*WorkspacePublic) graphql.Marshaler {

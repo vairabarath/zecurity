@@ -134,9 +134,9 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 3 — Break-glass permission primitive  `[I]`
 > See [[Sprint17/Member1-Go/Phase3-BreakGlass-Permission]]. Depends on nothing (parallel with 1/2).
-- [ ] **M1-3a** minimal permission store (`workspace_permissions`) + `HasPermission`; grant/revoke (audited).
-- [ ] **M1-3b** register `identity.mapping.break_glass`; ADMIN does **not** implicitly hold it; MFA hook (enforced when PENDING-06 lands).
-- [ ] **Build gate:** `go build ./...` + tests (explicit possession; ADMIN-without-grant denied).
+- [x] **M1-3a** minimal permission store (`workspace_permissions`) + `HasPermission`; grant/revoke (audited).
+- [x] **M1-3b** register `identity.mapping.break_glass`; ADMIN does **not** implicitly hold it; MFA hook (enforced when PENDING-06 lands).
+- [x] **Build gate:** `go build ./...` + tests (explicit possession; ADMIN-without-grant denied).
 
 #### Phase 4 — Provider profiles + mapping validation  `[I]`
 > See [[Sprint17/Member1-Go/Phase4-Provider-Profiles-and-Mapping]]. Depends on Phase 2, 3.

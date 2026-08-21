@@ -300,6 +300,71 @@ func (r *mutationResolver) RevokeScimToken(ctx context.Context, connectionID str
 	return true, nil
 }
 
+// GrantPermission is the resolver for the grantPermission field.
+//
+// The @hasRole(ADMIN) directive gates WHO may call this. Possession of the
+// granted permission is a separate, explicit row — granting it to another user
+// (admin or not) never widens what ADMIN alone can do: HasPermission always
+// answers "does the row exist?".
+func (r *mutationResolver) GrantPermission(ctx context.Context, userID string, permission string) (*graph.WorkspacePermission, error) {
+	tc := tenant.MustGet(ctx)
+
+	if userID == "" || permission == "" {
+		return nil, fmt.Errorf("grantPermission: userId and permission are required")
+	}
+
+	if err := r.PermissionStore.Grant(ctx, tc.TenantID, userID, permission, tc.UserID); err != nil {
+		return nil, fmt.Errorf("grant permission: %w", err)
+	}
+
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "permission.grant",
+		TargetType:  "user",
+		TargetID:    userID,
+		Details: map[string]any{
+			"permission": permission,
+			"granted_by": tc.UserID,
+		},
+	})
+
+	return &graph.WorkspacePermission{
+		WorkspaceID: tc.TenantID,
+		UserID:      userID,
+		Permission:  permission,
+		GrantedBy:   &tc.UserID,
+	}, nil
+}
+
+// RevokePermission is the resolver for the revokePermission field.
+func (r *mutationResolver) RevokePermission(ctx context.Context, userID string, permission string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	if userID == "" || permission == "" {
+		return false, fmt.Errorf("revokePermission: userId and permission are required")
+	}
+
+	if err := r.PermissionStore.Revoke(ctx, tc.TenantID, userID, permission); err != nil {
+		return false, fmt.Errorf("revoke permission: %w", err)
+	}
+
+	_ = audit.Record(ctx, r.Pool, audit.Entry{
+		TenantID:    tc.TenantID,
+		ActorUserID: tc.UserID,
+		ActorEmail:  tc.Email,
+		Action:      "permission.revoke",
+		TargetType:  "user",
+		TargetID:    userID,
+		Details: map[string]any{
+			"permission": permission,
+		},
+	})
+
+	return true, nil
+}
+
 // IdpConnections is the resolver for the idpConnections field.
 func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
