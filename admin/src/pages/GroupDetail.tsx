@@ -21,6 +21,7 @@ import {
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
+import { addressOf } from '@/lib/resourceAddressing'
 
 type Tab = 'members' | 'resources'
 
@@ -273,7 +274,7 @@ export default function GroupDetail() {
                     <div>
                       <div className="text-[14px] font-semibold">{resource.name}</div>
                       <div className="font-mono text-[11.5px] text-muted-foreground">
-                        {resource.host} · {resource.protocol.toUpperCase()} {resource.portFrom}
+                        {addressOf(resource)} · {resource.protocol.toUpperCase()} {resource.portFrom}
                         {resource.portFrom !== resource.portTo ? `–${resource.portTo}` : ''}
                       </div>
                     </div>
@@ -349,7 +350,7 @@ export default function GroupDetail() {
               <option value="">Select a resource…</option>
               {unassignedResources.map((r) => (
                 <option key={r.id} value={r.id}>
-                  {r.name} — {r.host} ({r.protocol.toUpperCase()} {r.portFrom})
+                  {r.name} — {addressOf(r)} ({r.protocol.toUpperCase()} {r.portFrom})
                 </option>
               ))}
             </select>

@@ -9,8 +9,15 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { AlertTriangle, Loader2, X, Server } from 'lucide-react'
+import { AlertTriangle, Loader2, X, Server, Globe, Info } from 'lucide-react'
 import { toast } from 'sonner'
+import {
+  type ResolverDraft,
+  LOCAL_TARGET_LOOPBACK,
+  allowedLocalTargets,
+  parseResolverJson,
+  toResolverJson,
+} from '@/lib/resourceAddressing'
 
 interface EditResourceModalProps {
   open: boolean
@@ -19,9 +26,15 @@ interface EditResourceModalProps {
     id: string
     name: string
     description?: string | null
+    host?: string | null
+    hostname?: string | null
+    resolver?: string | null
+    localTarget?: string | null
+    status?: string | null
     protocol: string
     portFrom: number
     portTo: number
+    shield?: { id: string } | null
     remoteNetwork?: { id: string; name: string } | null
   } | null
   onSuccess?: () => void
@@ -34,6 +47,12 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
   const [portFrom, setPortFrom] = useState('')
   const [portTo, setPortTo] = useState('')
   const [remoteNetworkId, setRemoteNetworkId] = useState('')
+  // Addressing MODE is immutable after create: `host` is not a member of
+  // UpdateResourceInput, so a pinned resource can never become name-addressed
+  // (or vice versa) through this form. Only the mode's own fields are editable.
+  const [hostname, setHostname] = useState('')
+  const [resolver, setResolver] = useState<ResolverDraft>({ type: 'dns', name: '' })
+  const [localTarget, setLocalTarget] = useState(LOCAL_TARGET_LOOPBACK)
   const [error, setError] = useState<string | null>(null)
 
   const { data: networksData, loading: networksLoading } = useQuery(GetRemoteNetworksDocument, {
@@ -49,6 +68,9 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
       setPortFrom(resource.portFrom.toString())
       setPortTo(resource.portTo.toString())
       setRemoteNetworkId(resource.remoteNetwork?.id ?? '')
+      setHostname(resource.hostname ?? '')
+      setResolver(parseResolverJson(resource.resolver))
+      setLocalTarget(resource.localTarget || LOCAL_TARGET_LOOPBACK)
       setError(null)
     }
   }, [resource])
@@ -91,6 +113,13 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
           remoteNetworkId,
           name: name.trim(),
           description: description.trim() || null,
+          // Send only the fields this resource's addressing mode can own. A
+          // pinned resource has no hostname/resolver to edit; a name-addressed
+          // one can never be shield-delivered, so it has no localTarget.
+          ...(isNameAddressedResource
+            ? { hostname: hostname.trim(), resolver: toResolverJson(resolver) ?? null }
+            : {}),
+          ...(shieldDelivered ? { localTarget: localTarget.trim() || null } : {}),
           protocol,
           portFrom: pFrom,
           portTo: pTo,
@@ -111,6 +140,13 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
   }
 
   if (!open || !resource) return null
+
+  // Derived from the resource, never from a control: a name-addressed resource
+  // has host = "" (never null) on the wire.
+  const isNameAddressedResource = !(resource.host ?? '').trim() && !!(resource.hostname ?? '').trim()
+  // The plan's literal gate: localTarget is editable only for shield-delivered
+  // resources, and in edit context that is unambiguous — a bound shield.
+  const shieldDelivered = !!resource.shield
 
   const networks = (networksData?.remoteNetworks ?? []) as GetRemoteNetworksQuery['remoteNetworks']
 
@@ -184,6 +220,133 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                   className="h-11 font-medium"
                 />
               </div>
+
+              {/* Addressing mode is FIXED after create — `host` is not part of
+                  UpdateResourceInput, so this is shown read-only rather than as a
+                  control that would silently do nothing. */}
+              <div className="space-y-2">
+                <Label className="text-sm font-semibold">Addressing</Label>
+                <div className="flex items-center gap-2 rounded-lg border border-border bg-secondary/50 px-3 py-2.5">
+                  {isNameAddressedResource ? (
+                    <>
+                      <Globe className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-sm font-medium">Hostname</span>
+                    </>
+                  ) : (
+                    <>
+                      <Server className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-sm font-medium">IP address</span>
+                      <span className="ml-auto font-mono text-xs text-muted-foreground">
+                        {resource.host}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <Info className="h-3 w-3" />
+                  <span>Addressing mode cannot be changed after creation.</span>
+                </div>
+              </div>
+
+              {isNameAddressedResource && (
+                <>
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">
+                      Hostname <span className="text-destructive">*</span>
+                    </Label>
+                    <Input
+                      value={hostname}
+                      onChange={(e) => setHostname(e.target.value)}
+                      placeholder="e.g. db.internal"
+                      className="h-11 font-mono text-sm"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-sm font-semibold">Resolver</Label>
+                    <select
+                      value={resolver.type}
+                      onChange={(e) => {
+                        const t = e.target.value
+                        setResolver(
+                          t === 'static'
+                            ? { type: 'static', address: '' }
+                            : t === 'raw'
+                              ? { type: 'raw', json: '' }
+                              : { type: 'dns', name: '' },
+                        )
+                      }}
+                      className="flex h-11 w-full rounded-lg border border-border bg-secondary px-3 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/30"
+                    >
+                      {/* No `shield` option — see resourceAddressing.ts */}
+                      <option value="dns">DNS — resolve the name at dial time</option>
+                      <option value="static">Static — a fixed backend address</option>
+                      <option value="raw">Advanced — raw JSON</option>
+                    </select>
+                    {resolver.type === 'dns' && (
+                      <Input
+                        value={resolver.name}
+                        onChange={(e) => setResolver({ type: 'dns', name: e.target.value })}
+                        placeholder={`Backend name (optional) — blank resolves ${hostname || 'the hostname'}`}
+                        className="h-11 font-mono text-xs"
+                      />
+                    )}
+                    {resolver.type === 'static' && (
+                      <Input
+                        value={resolver.address}
+                        onChange={(e) => setResolver({ type: 'static', address: e.target.value })}
+                        placeholder="e.g. 10.0.3.7"
+                        className="h-11 font-mono text-xs"
+                      />
+                    )}
+                    {resolver.type === 'raw' && (
+                      <Input
+                        value={resolver.json}
+                        onChange={(e) => setResolver({ type: 'raw', json: e.target.value })}
+                        placeholder={'{"type":"dns","config":{"name":"backend.svc.internal"}}'}
+                        className="h-11 font-mono text-xs"
+                      />
+                    )}
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <Info className="h-3 w-3" />
+                      <span>Editing the resolver bumps the ACL version — clients resync.</span>
+                    </div>
+                  </div>
+                </>
+              )}
+
+              {shieldDelivered && (
+                <div className="space-y-2">
+                  <Label className="text-sm font-semibold">Shield dials</Label>
+                  <div className="space-y-1.5">
+                    {allowedLocalTargets(resource.host ?? '').map((t) => (
+                      <label
+                        key={t}
+                        className="flex cursor-pointer items-center gap-2 rounded-lg border border-border bg-secondary px-3 py-2 text-sm"
+                      >
+                        <input
+                          type="radio"
+                          name="editLocalTarget"
+                          checked={localTarget === t}
+                          onChange={() => setLocalTarget(t)}
+                        />
+                        <span className="font-mono text-xs">{t}</span>
+                        <span className="text-xs text-muted-foreground">
+                          {t === LOCAL_TARGET_LOOPBACK
+                            ? '— loopback-only services'
+                            : "— the shield's own LAN IP"}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <Info className="h-3 w-3" />
+                    <span>
+                      Re-applies on the shield without bumping the ACL version — no tunnel restart.
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-3 gap-3">
                 <div className="space-y-2">

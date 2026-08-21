@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete (Phase 8 done 2026-08-15 `e89f941`; Phase 9 done 2026-08-18, client data path proven live) · outstanding: full-stack E2E for Phase 8's wire hop and Phase 9's by-name run · next = Phase 10 (closes Gate 2)
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete · **Phase 8's wire hop VERIFIED on a live stack 2026-08-20** · outstanding: Phase 9's by-name run, which Gate 2 subsumes · next = Phase 10 (closes Gate 2)
 solo: true
 owner: M3
 tags:
@@ -358,9 +358,21 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       `without local_target → status=failed` · `with local_target=127.0.0.1 → status=protected` ·
       `TCP connect to 127.0.0.1:42535 OK`. Both halves run together because **the contrast is the
       assertion**. F21 atomicity re-verified in the same namespace (0/89 samples saw the port undefended).
-- [ ] ⬜ **Outstanding — the wire hop.** No `local_target` has crossed the controller → connector →
-      shield **gRPC** path. Every link is proven separately; no message has traversed the wire. Needs a
-      running stack with enrolled certs. **Does not block Phase 9** (client-side, no overlap).
+- [x] ✅ **Wire hop VERIFIED on a live stack (2026-08-20).** Controller + connector + shield enrolled on
+      one host, service bound **only** to `127.0.0.1:8081` (LAN address confirmed unreachable).
+      `localTarget=127.0.0.1` → resource acks **protected**; edited to the shield's own LAN IP → **failed
+      (`port not listening`)**; edited back → **protected**. Shield generation `1 → 2 → 3` on each edit;
+      a description-only edit left it at `3`. Connector ACL version **unchanged** across all three edits
+      (last push `version=5`, seven minutes before the first edit) — the Phase 5 asymmetry holding in
+      production. Also closed Phase 5's gap that `createResource`/`updateResource` with the new
+      addressing fields had never run E2E.
+      ⚠️ NOT claimed: that the pre-Phase-8 binaries reproduced the bug. They were installed and did ack
+      `failed`, but the backing service was dead at that moment, so that run proves nothing. The
+      conclusion rests on the controlled A/B above, which is stronger.
+      ⚠️ **`strings <binary> | grep` is not a valid build check.** At `-O3` LLVM emits short string
+      literals as instruction immediates, not `.rodata` — invisible to a byte search. Proven by injecting
+      a 16-byte marker into a function whose own 5- and 7-byte literals could not be found. Verify by
+      behaviour or by md5 against the artefact you just built.
 
 #### Phase 9 — Client binding registry + synthetic routing ✅ DONE (2026-08-18)
 > See [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]].
@@ -564,6 +576,15 @@ Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 202
 
 Overview only — each fix is documented in full in its phase file.
 
+### Fix: the synthetic IP was not discoverable, and `resources` showed a blank address
+**Phase 9.5.** Step 9.5 instructs *"add a `hosts` entry `<synthetic IP>  <hostname>`"*, but nothing in
+the client ever printed that IP: `RuntimeState` held no registry, and `zecurity-client resources`
+rendered the ACL entry's `address`, which is empty for name-addressed resources. Published
+`synthetic_bindings` on `RuntimeState` (set/cleared with `tun_handle`) and added a pure, tested
+`display_address` with precedence pinned → synthetic → hostname, never a fabricated IP. Does not
+pre-empt Phase 11, which replaces the manual `hosts` entry entirely.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
 ### Fix: unique index silently disarmed by making `host` nullable
 **Phase 4.** Postgres treats NULLs as distinct, so `UNIQUE (tenant_id, remote_network_id, host, name)`
 stopped enforcing anything for FQDN rows. Replaced with a unique index on `COALESCE(host, hostname)`.
@@ -763,6 +784,39 @@ CGNAT, which is why this works; but **a host with no default route cannot reach 
 resources**. Pre-existing property of the mechanism (applies equally to pinned IPs outside any local
 subnet), documented rather than changed.
 → [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### Found by the live E2E: five defects in the enrollment / install path
+**2026-08-20, during Phase 8's wire-hop verification.** None are Sprint 16 regressions and **none is
+reachable by any test in the repo** — the enrollment/install path has no coverage at all. That absence is
+itself the finding; every one of these cost real time to diagnose from a misleading symptom.
+
+1. **Connector runtime requires a URL scheme its own docs call optional.** `ConnectorConfig`
+   documents `"host:port"` as *"assumes http://"*, but `main.rs` only prepends a scheme on the
+   *fallback* path, so a configured bare `host:port` produces `192.168.1.87:8080/ca.crl?...` →
+   reqwest `builder error` → **CRL unavailable → fail-closed → every tunnel denied**, while the log
+   talks about revocation rather than a malformed URL. The shield does this correctly
+   (`enrollment.rs:298`) — lift that helper into the connector. **Highest severity of the five.**
+2. **Shield install script prepends `http://` unconditionally**, so the documented full-URL form
+   becomes `http://https://host`. Inverse of (1): the script wants bare, the connector runtime wants a
+   scheme. Cosmetic but confusing.
+3. **A stale state dir silently adopts another workspace's identity.** With a non-empty
+   `/var/lib/zecurity-shield`, the shield logs `already enrolled, resuming` at **INFO** and ignores the
+   supplied `ENROLLMENT_TOKEN` — here it resumed a `ws-xiyo` identity while the token said `ws-yoge`,
+   and the symptom was `Connection refused` to connectors that were never configured. A token whose
+   `workspace_id`/`shield_id` disagree with `state.json` should be a hard error.
+4. **`BurnShieldJTI` uses `GETDEL` *before* validation** (`internal/shield/enrollment.go:34`), so any
+   Enroll attempt spends the token even when the call then fails — and systemd's restart loop replaces
+   the real error with `token expired or already used`. One transient failure permanently burns a
+   token. Burn after validation, or make the burn conditional on success.
+5. **A token's `interface_addr` can go stale against the DB** and burns itself proving it: the token
+   carried `100.64.0.1/32` while the row had been reassigned `100.64.0.2/32`, giving
+   `shield interface address mismatch` — after (4) had already spent the JTI. Re-generating a token
+   should invalidate prior unspent ones, or enrollment should re-read the row rather than trust the claim.
+
+**Also observed, not defects:** the workspace ACL version advances in steps of **2** across admin
+actions (something still double-notifies — *not* `UpdateResource`, which was fixed in Phase 8 and
+demonstrably did not bump), and each ACL push is logged twice at the same version, so counting log lines
+is not a reliable way to count pushes.
 
 ### Outstanding (out of sprint scope): direct-path cooldown with no fallback
 `client/src/transport.rs` — `mark_direct_failure()` assumes an alternative transport exists. With

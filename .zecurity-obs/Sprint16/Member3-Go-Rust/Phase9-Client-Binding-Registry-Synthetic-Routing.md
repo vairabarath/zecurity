@@ -262,6 +262,59 @@ applies equally to pinned IPs outside any local subnet), not something this phas
 
 ## Post-Phase Fixes
 
+### Fix: the synthetic IP was not discoverable, and `resources` rendered a blank address
+**9.5.** Step 9.5 says *"Add a `hosts` entry `<synthetic IP>  <hostname>`"* — but nothing in the client
+ever printed that IP, so its own instruction could not be followed.
+
+Two compounding causes:
+
+1. **`zecurity-client resources` showed a blank address.** The handler rendered
+   `address: e.address.clone()` straight from the ACL entry, and a name-addressed entry carries an
+   **empty** `address` by design (the whole point: no IP is pinned server-side). Same bug class as the
+   `GroupDetail`/`ShieldDetail` blank-address fix in Phase 10, but in the client CLI.
+2. **The synthetic IP was published nowhere.** `RuntimeState` had no registry field — the
+   `BindingRegistry` lived only inside `sync_registry`'s return value and in the encrypted state file.
+   The sole output was aggregate counts (`synthetic binding registry synced`, `bound`/`released`), never
+   a hostname→IP pair.
+
+Allocation *is* deterministic (`next_fresh = cidr.first() + 1`, so the first binding is `100.64.0.1`),
+which is why the live test could proceed — but predicting an address is a test artifact, not a product.
+
+**Fix.** Publish the mapping and render it:
+
+- `runtime.rs` — new `synthetic_bindings: HashMap<String, Ipv4Addr>` on `RuntimeState`.
+- `daemon.rs` — populated in `handle_up` **with** `tun_handle` and cleared in `handle_down` **with** it,
+  so a binding is only advertised while the routes serving it are installed.
+- `daemon.rs` — new pure `display_address(address, hostname, bindings)`, extracted rather than left
+  inline so it is testable (same reason as `nft_rule_plan` and `resolve_dial_target`). Precedence:
+  pinned address wins; else the binding's synthetic IP; else the bare hostname — **never a fabricated
+  IP**. A pinned address is never overridden, because an entry carrying both is failed closed by the
+  connector as `ambiguous_addressing`.
+- `ipc.rs` / `cmd/resources.rs` — `IpcResource` carries `hostname`; the table gained a **Hostname**
+  column and prints `—` for absent values, since a blank cell reads as the very bug being fixed.
+
+**6 tests** in `daemon_tests.rs`. Revert-tested: restoring the old behaviour fails exactly the three
+name-addressed cases and leaves the IP-addressed ones passing.
+
+**Two hardening changes made on review, neither fixing a live bug:**
+
+- `synthetic_bindings` is **cleared on entry** to `handle_up`, before any fallible step. Five early
+  returns sit between `sync_registry` and the publish. The invariant *"non-empty only while a bring-up
+  reached the end"* did already hold — `handle_up` rejects when already up, and
+  `restart_tunnel_if_running` always runs `handle_down` (which clears) first — but it held by an
+  argument spanning five returns, a guard in another function, and the `tun_slot`/`tun_handle`
+  correspondence. **9.4a was this same shape, and `handle_up` still has no unit coverage.** Clearing on
+  entry makes it structural.
+- The publish **trims** the hostname key. `BindingRegistry::bind` stores its argument verbatim; keys are
+  trimmed today only because `sync_registry` — its one caller — passes `e.hostname.trim()`. Normalising
+  at the publish keeps it from depending on that.
+
+**Note on scope.** This does *not* pre-empt Phase 11. Phase 11 replaces the manual `hosts` entry with a
+live DNS responder; this fix only makes the Stage 2 `hosts` workflow that Phase 11 calls *"works, but
+manual"* actually performable.
+
+---
+
 ### Fix: invalid nft syntax — a bare `tcp` protocol match
 **9.3.** The whole-CIDR rule was generated as
 `ip daddr <cidr> tcp meta mark set 0x5a`. A bare protocol keyword is only valid when it introduces a

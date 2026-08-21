@@ -41,6 +41,17 @@ pub struct RuntimeState {
     pub relay_crl: Option<crate::crl::CrlManager>,
     /// Live TUN session. Present while `zecurity up` is active.
     pub tun_handle: Option<Arc<TunHandle>>,
+    /// hostname -> synthetic IP for name-addressed resources, published by the
+    /// tunnel bring-up path.
+    ///
+    /// WHY THIS IS PUBLISHED AT ALL: the synthetic IP is the *only* address a
+    /// client can connect to for a name-addressed resource, and it is allocated
+    /// locally — the ACL entry carries an empty `address`. Without this map
+    /// `zecurity-client resources` renders a blank address and the operator has
+    /// no way to reach their own resource. Populated and cleared together with
+    /// `tun_handle`, because a binding is only meaningful while the routes that
+    /// serve it are installed.
+    pub synthetic_bindings: std::collections::HashMap<String, std::net::Ipv4Addr>,
     /// Ensures only one task refreshes the session tokens at a time.
     pub refresh_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the transport fetch/read/store operation so a concurrent
@@ -111,6 +122,7 @@ pub fn new_shared() -> SharedState {
         transport_last_sync_at: None,
         relay_crl: None,
         tun_handle: None,
+        synthetic_bindings: std::collections::HashMap::new(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
         tunnel_restart_lock: Arc::new(tokio::sync::Mutex::new(())),

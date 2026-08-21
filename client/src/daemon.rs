@@ -307,9 +307,14 @@ async fn handle_request(
                     .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe))
                     .map(|e| IpcResource {
                         name: e.name.clone(),
-                        address: e.address.clone(),
+                        address: display_address(
+                            &e.address,
+                            &e.hostname,
+                            &s.synthetic_bindings,
+                        ),
                         port: e.port,
                         protocol: e.protocol.clone(),
+                        hostname: e.hostname.clone(),
                     })
                     .collect::<Vec<_>>()
             });
@@ -519,6 +524,14 @@ async fn handle_up(
         };
     }
 
+    // Reset the published bindings on entry, BEFORE any fallible step. There are
+    // five early returns between `sync_registry` and the publish below; clearing
+    // here means the invariant "`synthetic_bindings` is non-empty only while a
+    // bring-up reached the end" holds by construction, rather than depending on
+    // `handle_down` having run first and on every one of those returns. Phase 9.4a
+    // was the same shape of bug, and `handle_up` still has no unit coverage.
+    state.write().await.synthetic_bindings.clear();
+
     if let Err(e) = refresh_acl_if_needed(state, conf).await {
         return IpcResponse {
             ok: false,
@@ -720,7 +733,23 @@ async fn handle_up(
 
     // Store TunManager (for route cleanup) and AbortHandle (for task cancel).
     *tun_slot.lock().await = Some(mgr);
-    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
+    {
+        // Publish the synthetic bindings with the handle: both describe the live
+        // session, so they cannot disagree about whether a binding is routable.
+        let mut s = state.write().await;
+        s.synthetic_bindings = registry
+            .as_ref()
+            .map(|r| {
+                r.bindings()
+                    // `bind()` stores the hostname verbatim; it is trimmed today
+                    // only because its one caller trims. Normalise here so the
+                    // publish and the `display_address` lookup cannot disagree.
+                    .map(|(ip, b)| (b.hostname.trim().to_string(), *ip))
+                    .collect()
+            })
+            .unwrap_or_default();
+        s.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
+    }
 
     info!(routes = route_count, "zecurity0 up");
     IpcResponse {
@@ -731,7 +760,13 @@ async fn handle_up(
 }
 
 async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
-    let handle = state.write().await.tun_handle.take();
+    let handle = {
+        let mut s = state.write().await;
+        // Drop the bindings with the handle: the routes serving them are about to
+        // be torn down, so continuing to advertise the addresses would be a lie.
+        s.synthetic_bindings.clear();
+        s.tun_handle.take()
+    };
     if let Some(h) = handle {
         h.abort.abort();
     }
@@ -1735,6 +1770,33 @@ pub(crate) fn resolve_entry_coords(
 /// because it cannot write bindings is worse than one whose bindings are
 /// in-memory for this session; the registry's own restore path treats anything it
 /// cannot place as quarantined, so the next start errs toward withholding.
+/// The address a client can actually connect to for one ACL entry.
+///
+/// An IP-addressed entry carries its own `address`. A name-addressed entry carries
+/// an EMPTY `address` — the connectable address is the synthetic IP allocated on
+/// this device — so returning `address` verbatim renders a blank cell, which is
+/// what `zecurity-client resources` used to do.
+///
+/// Falls back to the hostname when no binding exists (tunnel down, or allocation
+/// failed because the synthetic CIDR was contested). That is not a connectable
+/// address, but it names the resource truthfully instead of showing nothing; an
+/// empty string is only ever returned when the entry carries neither.
+pub(crate) fn display_address(
+    address: &str,
+    hostname: &str,
+    bindings: &std::collections::HashMap<String, std::net::Ipv4Addr>,
+) -> String {
+    let address = address.trim();
+    if !address.is_empty() {
+        return address.to_string();
+    }
+    let hostname = hostname.trim();
+    match bindings.get(hostname) {
+        Some(ip) => ip.to_string(),
+        None => hostname.to_string(),
+    }
+}
+
 fn sync_registry(
     workspace_slug: &str,
     allowed_entries: &[AclEntry],

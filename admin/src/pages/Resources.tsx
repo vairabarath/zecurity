@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@apollo/client/react";
-import { AlertCircle, Plus, Users, Wifi, WifiOff } from "lucide-react";
+import {
+  AlertCircle,
+  Globe,
+  Network,
+  Plus,
+  ShieldCheck,
+  Users,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import {
   GetAllResourcesDocument,
   GetRemoteNetworksDocument,
@@ -17,6 +26,11 @@ import {
   StatusPill,
   relativeTime,
 } from "@/lib/console";
+import {
+  addressOf,
+  deliveryOf,
+  isNameAddressed,
+} from "@/lib/resourceAddressing";
 
 // States that warrant fast polling — a resource mid-operation will change soon.
 // `deleting` MUST be here: a tombstone is reaped once the shield confirms removal,
@@ -131,12 +145,13 @@ export default function Resources() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-300 items-center grid-cols-[1.3fr_130px_90px_100px_180px_150px_120px_130px_100px] gap-4 px-5 py-4">
+          <div className="table-head grid min-w-300 items-center grid-cols-[1.3fr_150px_90px_100px_140px_180px_150px_120px_130px_100px] gap-4 px-5 py-4">
             {[
               "Name",
-              "Host",
+              "Address",
               "Proto",
               "Port",
+              "Delivery",
               "Shield",
               "Groups",
               "Status",
@@ -145,7 +160,7 @@ export default function Resources() {
             ].map((label, index) => (
               <div
                 key={label + index}
-                className={`table-head-label ${index === 8 ? "text-right" : ""}`}
+                className={`table-head-label ${index === 9 ? "text-right" : ""}`}
               >
                 {label}
               </div>
@@ -193,7 +208,7 @@ export default function Resources() {
                 return (
                   <div
                     key={resource.id}
-                    className="admin-table-row group grid items-center grid-cols-[1.3fr_130px_90px_100px_180px_150px_120px_130px_100px] gap-4 px-5 py-4"
+                    className="admin-table-row group grid items-center grid-cols-[1.3fr_150px_90px_100px_140px_180px_150px_120px_130px_100px] gap-4 px-5 py-4"
                   >
                     <div className="flex min-w-0 items-center gap-3">
                       <EntityIcon type="resource" />
@@ -206,14 +221,40 @@ export default function Resources() {
                         </div>
                       </div>
                     </div>
-                    <div className="font-mono text-[13px] text-muted-foreground">
-                      {resource.host}
+                    <div className="min-w-0">
+                      <div className="truncate font-mono text-[13px] text-muted-foreground">
+                        {addressOf(resource)}
+                      </div>
+                      {isNameAddressed(resource) && (
+                        <div className="flex items-center gap-1 text-[10.5px] font-medium text-muted-foreground opacity-70">
+                          <Globe className="h-2.5 w-2.5" />
+                          resolved by connector
+                        </div>
+                      )}
                     </div>
                     <div className="text-[13px] font-bold uppercase text-muted-foreground">
                       {resource.protocol}
                     </div>
                     <div className="font-mono text-[13px] text-muted-foreground">
                       {formatPort(resource.portFrom, resource.portTo)}
+                    </div>
+                    {/* Delivery: the Protected / Connector-reachable discriminator
+                        (route_type), surfaced for the first time. Derived exactly as
+                        the server derives it — a bound shield PLUS a protected-ish
+                        status. A shield merely *assigned* is not delivery, which is
+                        why this is not the same as the Shield column. */}
+                    <div className="text-[12px] font-semibold">
+                      {deliveryOf(resource) === "protected" ? (
+                        <span className="inline-flex items-center gap-1.5 text-secure">
+                          <ShieldCheck className="h-3.5 w-3.5" />
+                          Protected
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+                          <Network className="h-3.5 w-3.5" />
+                          Connector
+                        </span>
+                      )}
                     </div>
                     <div className="text-sm font-semibold text-primary">
                       {noShield && (

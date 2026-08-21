@@ -20,17 +20,30 @@ pub async fn run() -> Result<()> {
             } else {
                 println!("Resources ({}):", resources.len());
                 println!(
-                    "{:<28} {:<24} {:<6} {}",
-                    "Name", "Address", "Port", "Protocol"
+                    "{:<24} {:<17} {:<26} {:<6} {}",
+                    "Name", "Address", "Hostname", "Port", "Protocol"
                 );
-                println!("{}", "-".repeat(70));
+                println!("{}", "-".repeat(82));
                 for r in &resources {
+                    // `Address` is what you connect to: the pinned IP for an
+                    // IP-addressed resource, or the locally-allocated synthetic IP
+                    // for a name-addressed one. `Hostname` is the name that
+                    // synthetic IP stands in for — the operator needs both to map
+                    // the name locally.
                     println!(
-                        "{:<28} {:<24} {:<6} {}",
+                        "{:<24} {:<17} {:<26} {:<6} {}",
                         r.name,
-                        r.address,
+                        dash_if_empty(&r.address),
+                        dash_if_empty(&r.hostname),
                         r.port,
                         r.protocol.to_uppercase()
+                    );
+                }
+                if resources.iter().any(|r| !r.hostname.trim().is_empty()) {
+                    println!();
+                    println!(
+                        "Name-addressed resources reach a synthetic address allocated on this \
+                         device.\nMap the hostname to it locally, e.g. in /etc/hosts."
                     );
                 }
             }
@@ -47,4 +60,14 @@ pub async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Render an em dash for an absent value rather than leaving the column blank —
+/// a blank cell reads as a rendering bug, which is exactly what it used to be.
+fn dash_if_empty(v: &str) -> &str {
+    if v.trim().is_empty() {
+        "—"
+    } else {
+        v
+    }
 }

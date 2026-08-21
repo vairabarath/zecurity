@@ -7,8 +7,19 @@ type Resource {
   host:           String!
   # Name-addressed resources (PENDING-14). Null for classic IP-pinned ones.
   hostname:       String
-  # Raw resolver JSON as stored, e.g. {"type":"dns","config":{"server":"..."}}.
-  # Null unless hostname is set.
+  # Raw resolver JSON as stored. Null unless hostname is set. Valid shapes:
+  #   {"type":"dns"}                                        resolve `hostname` itself
+  #   {"type":"dns","config":{"name":"backend.svc.internal"}} resolve a different name
+  #   {"type":"static","config":{"address":"10.0.3.7"}}      no DNS at all
+  #
+  # ⚠️ There is deliberately NO "server" key. The connector REJECTS a config
+  # containing one as `invalid_resolver_config` rather than silently resolving
+  # against its own system resolver, which would give a different answer than the
+  # operator asked for. Per-resource nameservers would need a per-resource
+  # resolver instance — a later feature behind this same interface.
+  # (This comment previously showed `{"config":{"server":"..."}}` as the example,
+  # which produced resources that were unreachable on first dial. Settled in
+  # Sprint 16 Phase 10.1.)
   resolver:       String
   # Shield-delivered resources only: the address the shield dials on its own
   # host (127.0.0.1 or its LAN IP).
@@ -38,6 +49,8 @@ input CreateResourceInput {
   hostname:        String
   # Resolver JSON: a JSON object with a required "type" ("dns" | "static") and
   # an optional "config" object of string values. Only meaningful with hostname.
+  # See the `resolver` field on type Resource for the valid config keys, and for
+  # why "server" is not one of them.
   resolver:        String
   localTarget:     String
   protocol:        String!       # "tcp", "udp", "any"

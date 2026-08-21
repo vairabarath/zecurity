@@ -12,6 +12,12 @@ import {
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
 import { StatusPill, relativeTime } from '@/lib/console'
+import {
+  addressOf,
+  deliveryOf,
+  isNameAddressed,
+  parseResolverJson,
+} from '@/lib/resourceAddressing'
 import { cn } from '@/lib/utils'
 import {
   ArrowLeft,
@@ -448,12 +454,60 @@ export default function ResourceDetail() {
                 }
                 icon={<Shield className="h-3 w-3" />}
               />
+              {/* `host` is "" for name-addressed resources — show the client-facing
+                  name instead. NEVER a synthetic IP: those are client-local, the
+                  controller does not have them, and showing one would imply the
+                  server knows something it does not. */}
               <MetaCell
-                label="Host IP"
-                value={resource.host}
+                label={isNameAddressed(resource) ? 'Hostname' : 'Host IP'}
+                value={addressOf(resource)}
                 icon={<Server className="h-3 w-3" />}
                 mono
               />
+              {/* Delivery: the Protected / Connector-reachable discriminator
+                  (route_type). Derived as the server derives it — a bound shield
+                  plus a protected-ish status. Never inferred from `resolver`,
+                  which answers a different question entirely. */}
+              <MetaCell
+                label="Delivery"
+                value={
+                  deliveryOf(resource) === 'protected' ? (
+                    <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-secure">
+                      Protected — via shield
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted-foreground">
+                      Connector-reachable
+                    </span>
+                  )
+                }
+                icon={<Shield className="h-3 w-3" />}
+              />
+              {isNameAddressed(resource) && (
+                <MetaCell
+                  label="Resolver"
+                  value={(() => {
+                    const r = parseResolverJson(resource.resolver)
+                    if (r.type === 'dns') {
+                      return r.name
+                        ? `DNS — resolves ${r.name}`
+                        : 'DNS — resolves the hostname'
+                    }
+                    if (r.type === 'static') return `Static — ${r.address}`
+                    return 'Advanced (raw JSON)'
+                  })()}
+                  icon={<Globe className="h-3 w-3" />}
+                  mono
+                />
+              )}
+              {resource.localTarget && (
+                <MetaCell
+                  label="Shield dials"
+                  value={resource.localTarget}
+                  icon={<Server className="h-3 w-3" />}
+                  mono
+                />
+              )}
               <MetaCell
                 label="Protocol"
                 value={

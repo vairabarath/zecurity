@@ -53,6 +53,12 @@ mutation CreateResource($input: CreateResourceInput!) {
     name
     description
     host
+    # Read the addressing fields BACK, don't assume the server stored what we
+    # sent: exactly-one-of host/hostname is enforced server-side
+    # (validateAddressing), and resolver JSON is normalised there too.
+    hostname
+    resolver
+    localTarget
     protocol
     portFrom
     portTo
@@ -69,6 +75,10 @@ mutation UpdateResource($id: ID!, $input: UpdateResourceInput!) {
     id
     name
     description
+    host
+    hostname
+    resolver
+    localTarget
     protocol
     portFrom
     portTo

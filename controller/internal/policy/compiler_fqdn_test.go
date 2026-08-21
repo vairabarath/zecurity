@@ -51,11 +51,11 @@ func TestParseResolver(t *testing.T) {
 		}
 	})
 	t.Run("type and config", func(t *testing.T) {
-		got := parseResolver(`{"type":"dns","config":{"server":"10.0.0.53","port":"53"}}`)
+		got := parseResolver(`{"type":"dns","config":{"name":"backend.svc.internal","port":"53"}}`)
 		if got == nil || got.Type != "dns" {
 			t.Fatalf("want type=dns, got %+v", got)
 		}
-		if got.Config["server"] != "10.0.0.53" || got.Config["port"] != "53" {
+		if got.Config["name"] != "backend.svc.internal" || got.Config["port"] != "53" {
 			t.Fatalf("config mismatch: %+v", got.Config)
 		}
 	})
@@ -125,7 +125,7 @@ func TestCompileACLSnapshot_FQDNAddressing(t *testing.T) {
 
 	ipID := mustInsertResource(t, ctx, testPool, wsID, rnID, "ip-res", "10.9.0.10", 80)
 	fqdnID := mustInsertFQDNResource(t, ctx, testPool, wsID, rnID, "fqdn-res", "db.internal",
-		`{"type":"dns","config":{"server":"10.0.0.53"}}`, "127.0.0.1", 5432)
+		`{"type":"dns","config":{"name":"backend.svc.internal"}}`, "127.0.0.1", 5432)
 	badID := mustInsertFQDNResource(t, ctx, testPool, wsID, rnID, "bad-resolver-res", "broken.internal",
 		`{"type":123}`, "", 6379)
 
@@ -173,8 +173,8 @@ func TestCompileACLSnapshot_FQDNAddressing(t *testing.T) {
 		if e.Resolver.Type != "dns" {
 			t.Errorf("resolver.type = %q, want dns", e.Resolver.Type)
 		}
-		if got := e.Resolver.Config["server"]; got != "10.0.0.53" {
-			t.Errorf("resolver.config[server] = %q, want 10.0.0.53", got)
+		if got := e.Resolver.Config["name"]; got != "backend.svc.internal" {
+			t.Errorf("resolver.config[name] = %q, want backend.svc.internal", got)
 		}
 		// Note what is NOT asserted: local_target. The row has it set in the DB
 		// (see the seed below), but ACLEntry deliberately does not carry it —

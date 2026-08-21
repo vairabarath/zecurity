@@ -226,13 +226,48 @@ Both halves run together on purpose: **the contrast is the assertion.** The firs
 bug being fixed; without it a passing second half proves nothing. The test asserts `lan_ip != 127.0.0.1`
 up front so it cannot silently degrade into a tautology.
 
-### ⬜ Still outstanding — the wire hop
+### ✅ The wire hop — VERIFIED on a live stack (2026-08-20)
 
-**No `local_target` has crossed the controller → connector → shield gRPC path.** Every link is proven
-separately (DB test for the query + generation, converter tests for all three delivery paths, proto
-round-trip in Go and Rust, live tests for the shield's behaviour once it holds one), but no message has
-actually traversed the wire. Closing this needs a running stack with enrolled certs. It does **not**
-block Phase 9, which is client-side and does not overlap.
+Controller + connector + shield all enrolled on one host (`192.168.1.87`, workspace `ws-yoge`), with a
+service bound **only** to `127.0.0.1:8081` and `192.168.1.87:8081` confirmed unreachable.
+
+Resource: `host = 192.168.1.87`, `localTarget = 127.0.0.1`, tcp/8081, shield-delivered.
+
+| `local_target` | Resource ack | Shield generation |
+|---|---|---|
+| `127.0.0.1` | **protected**, `error_message` null | 0 → 1 |
+| edited to `192.168.1.87` | **failed** — `port not listening` | 1 → **2** |
+| edited back to `127.0.0.1` | **protected** | 2 → **3** |
+| description-only edit | protected (unchanged) | **3 → 3** — no churn |
+
+**Why this proves the hop.** The service is loopback-only, so `protected` is achievable *only* if the
+shield probed `127.0.0.1` — an address it can learn from nowhere except
+`ResourceInstruction.local_target` arriving over gRPC. And the A/B is controlled: the service stayed up
+and unchanged while the field was flipped, and the outcome flipped with it, in both directions, on
+demand.
+
+The generation column is the first Post-Phase Fix working in production: without adding `LocalTarget` to
+`fingerprintDesired`'s explicit format string, the generation would have stayed at 1 and the shield
+would never have re-applied.
+
+**ACL version: unchanged.** The connector's last `ACL snapshot stored` was `version=5` at 12:17:21 UTC;
+the three `localTarget` edits ran 12:24–12:25 UTC and produced **no** further pushes. That is the
+asymmetry the Phase 5 design correction exists for — the shield gets the change, the fleet is not
+disturbed, no `restart_tunnel_if_running`.
+
+Also closed as a side effect: **Phase 5's known gap** that `createResource` / `updateResource` with the
+new addressing fields had never executed end-to-end. Both ran, four times total.
+
+⚠️ **A claim NOT established:** it is tempting to say "the pre-Phase-8 binaries reproduced the bug".
+They were installed and did ack `failed`, but the service happened to be dead at that moment, so that
+run proves nothing. The evidence above stands on the controlled A/B alone, which is stronger anyway.
+
+⚠️ **Verification-method warning, learned the hard way:** `strings <binary> | grep -c local_target` is
+**not** a valid way to check whether a build contains a change. At `-O3`, LLVM emits short string
+literals as immediate operands inside instructions rather than `.rodata` entries, so they are invisible
+to a byte search — proven by injecting a 16-byte marker into a function whose own 5- and 7-byte literals
+could not be found. Verify by behaviour (a log line the new code emits) or by md5 against the artefact
+you just built.
 
 ## Build gates — all green (2026-08-15)
 

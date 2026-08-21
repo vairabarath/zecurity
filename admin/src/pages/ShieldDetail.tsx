@@ -18,6 +18,7 @@ import type {
 import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/store/auth'
 import { cn } from '@/lib/utils'
+import { addressOf } from '@/lib/resourceAddressing'
 import {
   ArrowLeft,
   Shield,
@@ -435,7 +436,7 @@ export default function ShieldDetail() {
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="text-sm font-bold truncate">{res.name}</div>
-                        <div className="text-[11px] font-mono text-muted-foreground truncate">{res.protocol.toLowerCase()}://{res.host}:{res.portFrom}</div>
+                        <div className="text-[11px] font-mono text-muted-foreground truncate">{res.protocol.toLowerCase()}://{addressOf(res)}:{res.portFrom}</div>
                       </div>
                       <Link to="/resources" className="opacity-0 group-hover:opacity-100 transition p-1 hover:text-primary">
                         <ChevronRight className="h-4 w-4" />

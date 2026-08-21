@@ -147,6 +147,12 @@ query GetAllResources {
     name
     description
     host
+    # PENDING-14: a name-addressed resource has host = "" and carries hostname
+    # instead. Every place that renders an address must fall back, or an FQDN
+    # resource shows a blank one.
+    hostname
+    resolver
+    localTarget
     protocol
     portFrom
     portTo
@@ -224,6 +230,9 @@ query GetResources($remoteNetworkId: String!) {
     name
     description
     host
+    hostname
+    resolver
+    localTarget
     protocol
     portFrom
     portTo
@@ -265,6 +274,8 @@ query GetGroups {
       id
       name
       host
+      # Needed for the address fallback: host is "" for name-addressed resources.
+      hostname
       protocol
       portFrom
       portTo
@@ -288,6 +299,8 @@ query GetGroup($id: ID!) {
       id
       name
       host
+      # Needed for the address fallback: host is "" for name-addressed resources.
+      hostname
       protocol
       portFrom
       portTo

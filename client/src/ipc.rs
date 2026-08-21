@@ -13,6 +13,11 @@ pub struct IpcResource {
     pub address: String,
     pub port: u32,
     pub protocol: String,
+    /// Client-facing name for a name-addressed resource, else empty. Kept
+    /// distinct from `address` so the CLI can show both the name to map and the
+    /// synthetic IP to map it to.
+    #[serde(default)]
+    pub hostname: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

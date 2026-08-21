@@ -4,7 +4,10 @@ use std::sync::Once;
 
 use rcgen::{CertificateParams, KeyPair, SanType};
 
-use crate::daemon::{build_transports_by_resource, ordered_connectors_for_entry, resolve_entry_coords};
+use crate::daemon::{
+    build_transports_by_resource, display_address, ordered_connectors_for_entry,
+    resolve_entry_coords,
+};
 use crate::grpc::client_v1::{
     AclConnector, AclEntry, AclRemoteNetwork, TransportConnector, TransportRemoteNetwork,
 };
@@ -653,4 +656,67 @@ async fn the_three_states_are_distinguishable_in_one_map() {
     assert!(map.get(&k1).is_some_and(|s| s.is_some()), "state 1");
     assert!(map.get(&k2).is_some_and(|s| s.is_none()), "state 2");
     assert!(map.get(&k3).is_none(), "state 3");
+}
+
+// ── display_address (Phase 9 post-phase fix) ────────────────────────────────
+//
+// The synthetic IP is the ONLY address a client can connect to for a
+// name-addressed resource, and it is allocated locally rather than carried in the
+// ACL entry. These pin the rendering so a blank address cannot come back.
+
+fn bindings(pairs: &[(&str, &str)]) -> HashMap<String, Ipv4Addr> {
+    pairs
+        .iter()
+        .map(|(h, ip)| (h.to_string(), ip.parse().unwrap()))
+        .collect()
+}
+
+#[test]
+fn an_ip_addressed_entry_shows_its_pinned_address() {
+    let b = bindings(&[("app.internal", "100.64.0.1")]);
+    assert_eq!(display_address("192.168.1.87", "", &b), "192.168.1.87");
+}
+
+/// The regression this fix exists for: the entry's own `address` is empty, so the
+/// old code rendered nothing at all.
+#[test]
+fn a_name_addressed_entry_shows_its_synthetic_ip_not_a_blank() {
+    let b = bindings(&[("app.internal", "100.64.0.1")]);
+    let got = display_address("", "app.internal", &b);
+    assert_eq!(got, "100.64.0.1");
+    assert!(!got.trim().is_empty(), "a name-addressed row must never be blank");
+}
+
+/// A pinned address always wins. If an entry somehow carries both, showing the
+/// synthetic IP would advertise a route the connector will refuse — it fails
+/// those closed as `ambiguous_addressing`.
+#[test]
+fn a_pinned_address_is_never_overridden_by_a_binding() {
+    let b = bindings(&[("app.internal", "100.64.0.1")]);
+    assert_eq!(display_address("10.0.0.5", "app.internal", &b), "10.0.0.5");
+}
+
+/// Tunnel down, or the synthetic CIDR was contested and allocation failed. The
+/// hostname is not connectable, but it names the resource — strictly better than
+/// the blank cell, and it must not invent an address.
+#[test]
+fn without_a_binding_it_degrades_to_the_hostname_never_a_fake_ip() {
+    let got = display_address("", "app.internal", &HashMap::new());
+    assert_eq!(got, "app.internal");
+    assert!(!got.contains("100.64."), "must not invent a synthetic IP");
+}
+
+#[test]
+fn whitespace_is_not_mistaken_for_an_address_or_a_hostname() {
+    let b = bindings(&[("app.internal", "100.64.0.1")]);
+    // A whitespace-only address must fall through to the binding, not be shown.
+    assert_eq!(display_address("   ", "app.internal", &b), "100.64.0.1");
+    // Padded hostnames still match the binding key, which is stored trimmed.
+    assert_eq!(display_address("", "  app.internal  ", &b), "100.64.0.1");
+}
+
+/// Only when the entry carries neither is an empty string correct.
+#[test]
+fn an_entry_with_neither_address_nor_hostname_is_empty() {
+    assert_eq!(display_address("", "", &HashMap::new()), "");
 }
