@@ -2,6 +2,7 @@ package scim
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -105,21 +106,43 @@ func TestResult_WithRoundTripSeam(t *testing.T) {
 // ── integration (DB) ─────────────────────────────────────────────────────────
 
 func TestGate_Integration(t *testing.T) {
-	dsn := os.Getenv("PKI_TEST_DATABASE_URL")
-	if dsn == "" {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
 		t.Skip("PKI_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
+
+	// Use an isolated child database so this test does not depend on, nor
+	// collide with, the shared admin DSN's schema state (mirrors the
+	// pipeline/outbox integration harnesses).
+	adminPool, err := pgxpool.New(ctx, adminDSN)
 	if err != nil {
-		t.Fatalf("connect: %v", err)
+		t.Fatalf("connect admin: %v", err)
+	}
+	defer adminPool.Close()
+	dbName := "scim_gate_test_" + fmt.Sprint(os.Getpid())
+	_, _ = adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName)
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() { _, _ = adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName) }()
+	testDSN, err := withDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test dsn: %v", err)
+	}
+	pool, err := pgxpool.New(ctx, testDSN)
+	if err != nil {
+		t.Fatalf("connect test db: %v", err)
 	}
 	defer pool.Close()
+	if err := applyAllMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
 
 	var ws, conn, admin string
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO workspaces (slug, name, status, trust_domain)
-		 VALUES ('gate-'+gen_random_uuid()::text, 'gate', 'active', 'gate.test') RETURNING id::text`,
+		 VALUES ('gate-' || gen_random_uuid()::text, 'gate', 'active', 'gate.test') RETURNING id::text`,
 	).Scan(&ws); err != nil {
 		t.Fatalf("workspace: %v", err)
 	}

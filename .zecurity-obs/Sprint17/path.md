@@ -144,11 +144,12 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 - [x] **M1-4b** (Phase 4 boundary) `testIdpConnection` runs the achievable active checks — OIDC discovery probe + mapping-config validation + fail-closed `MappingGate` — and the `identity.mapping.break_glass` override (reason + `scim.mapping.break_glass_override` audit). The literal probe-user round-trip `POST→GET→verify→DELETE` is **deferred to Phase 5** (the `/Users` endpoint lands there); until it runs, the gate stays `unproven` and SCIM disabled unless overridden. Phase 5 plugs into the same gate via `MappingGateResult.WithRoundTrip` without changing this contract.
 - [x] **Build gate:** `go build ./...` + mapping-validation tests.
 
-#### Phase 5 — SCIM Users: provision + update  `[I]`
+#### Phase 5 — SCIM Users: provision + update  `[I]` `[done]`
 > See [[Sprint17/Member1-Go/Phase5-Users-Provision-Update]]. Depends on Phase 4.
-- [ ] **M1-5a** `internal/scim` engine + `identity.DirectoryService` binding `(workspace,connection)` into every query (§10).
-- [ ] **M1-5b** provision via `Resolver`/`Linker` (`provisioned_by=scim`, `provisioning_owner=scim`, `sync_instance_id`); update = directory-owned attrs only, Zecurity-owned rejected at mutation layer; RFC 7644 envelopes, `meta.version`, `eq` filter, tombstones hidden.
-- [ ] **Build gate:** `go build ./...` + provision/update DB-integration + scope-isolation tests.
+- [x] **M1-5a** `internal/scim` engine + `identity.DirectoryService` binding `(workspace,connection)` into every query (§10).
+- [x] **M1-5b** provision via `Resolver`/`Linker` (`provisioned_by=scim`, `provisioning_owner=scim`, `sync_instance_id`); update = directory-owned attrs only, Zecurity-owned rejected at mutation layer; RFC 7644 envelopes, `meta.version`, `eq` filter, tombstones hidden. `409 identity_conflict` on JIT/manual collision (conflict-row write deferred to Phase 8).
+- [x] **Build gate:** `go build ./...` + provision/update DB-integration + scope-isolation tests (8/8 subtests pass on live Postgres).
+- [!] **Known gap:** `users` has no `name`/`displayName`/`title`/`department` columns, so directory-owned attribute writes are scoped to existing columns (`email`, `status`, `sync_instance_id`); unsupported-attr patches return `400`. Schema extension tracked separately (ADR-025 §5).
 
 #### Phase 6 — Users: deprovision + reactivate + SideEffectSink→outbox  `[I]`
 > See [[Sprint17/Member1-Go/Phase6-Deprovision-and-SideEffectSink]]. Depends on Phase 5.

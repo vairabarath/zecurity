@@ -405,6 +405,13 @@ func main() {
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
 
+	// SCIM 2.0 directory-sync endpoint (Sprint 17 / ADR-025 Phase 5). Mounted
+	// under the SCIM bearer-auth middleware, which binds (workspace_id,
+	// connection_id) from the token onto the request context. The DirectoryService
+	// derives all scope from that token — never from the request payload.
+	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier)
+	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
+
 	// REST endpoint: POST /provider/relays — creates a relay registration +
 	// provisioning token. Provider-plane action (PENDING-07a): guarded by
 	// RequireProvider (aud=provider + active allowlist), NOT the tenant model.
