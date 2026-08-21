@@ -254,3 +254,34 @@ func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID,
 	}
 	return nil
 }
+
+// revokeUserDevices revokes every one of a user's client devices within a
+// workspace, scoped by (user_id, workspace_id) and gated with
+// AND revoked_at IS NULL. It returns the number of rows actually affected.
+//
+// Idempotent on replay: re-running against already-revoked rows affects 0 rows,
+// so callers can use the 0 count to skip downstream side effects (audit,
+// notify) on at-least-once redelivery without producing duplicate entries.
+//
+// Intentionally pool-based (autocommit), not transactional with the audit
+// write: a security revocation must never be blocked by a transient failure of
+// the audit table. The durable enforcement path is revoked_at → workspace CRL
+// (connectors poll it independently); the audit row is best-effort context.
+func revokeUserDevices(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET revoked_at = NOW()
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND revoked_at IS NULL`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user devices: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
