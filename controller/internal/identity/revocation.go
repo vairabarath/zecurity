@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -64,8 +65,27 @@ func NewRevoker(pool *pgxpool.Pool, inv SessionInvalidator, pub EventPublisher) 
 // value. The DB bump is authoritative; the refresh-session delete and the audit
 // event are best-effort and never fail the caller's primary action.
 func (r *Revoker) BumpGeneration(ctx context.Context, tenantID, userID, actorEmail string) (int, error) {
+	gen, err := r.bump(ctx, r.pool, tenantID, userID, actorEmail)
+	if err != nil {
+		return 0, err
+	}
+	r.afterBump(ctx, tenantID, userID, actorEmail, gen)
+	return gen, nil
+}
+
+// BumpGenerationTx performs the generation bump inside the caller's transaction
+// (so it commits atomically with a sibling mutation, e.g. a SCIM deprovision +
+// outbox enqueue). The best-effort session invalidation + audit still happen via
+// afterBump on the Revoker's pool (post-commit, never failing the tx).
+func (r *Revoker) BumpGenerationTx(ctx context.Context, tx pgx.Tx, tenantID, userID, actorEmail string) (int, error) {
+	return r.bump(ctx, tx, tenantID, userID, actorEmail)
+}
+
+func (r *Revoker) bump(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, tenantID, userID, actorEmail string) (int, error) {
 	var gen int
-	if err := r.pool.QueryRow(ctx,
+	if err := q.QueryRow(ctx,
 		`UPDATE users SET identity_generation = identity_generation + 1, updated_at = NOW()
 		 WHERE id = $1
 		 RETURNING identity_generation`,
@@ -73,7 +93,12 @@ func (r *Revoker) BumpGeneration(ctx context.Context, tenantID, userID, actorEma
 	).Scan(&gen); err != nil {
 		return 0, fmt.Errorf("bump identity_generation: %w", err)
 	}
+	return gen, nil
+}
 
+// afterBump performs the best-effort session invalidation + audit publish that
+// accompany a generation bump. It never fails the caller's primary action.
+func (r *Revoker) afterBump(ctx context.Context, tenantID, userID, actorEmail string, gen int) {
 	if r.invalidator != nil {
 		_ = r.invalidator.InvalidateUserSessions(ctx, userID) // best-effort; refresh re-checks anyway
 	}
@@ -86,5 +111,4 @@ func (r *Revoker) BumpGeneration(ctx context.Context, tenantID, userID, actorEma
 		TargetID:    userID,
 		Details:     map[string]any{"generation": gen},
 	})
-	return gen, nil
 }

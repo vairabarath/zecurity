@@ -51,7 +51,8 @@ func TestDirectoryService_Integration(t *testing.T) {
 	connB := seedSCIMConnection(ctx, t, pool, wsB, "okta", "sub", "externalId")
 
 	idpStore := idp.NewStore(pool, nil)
-	ds := NewDirectoryService(pool, idpStore, identity.NewAuditSink(pool), policy.NewNotifier(policy.NewSnapshotCache()))
+	ds := NewDirectoryService(pool, idpStore, identity.NewAuditSink(pool), policy.NewNotifier(policy.NewSnapshotCache()),
+		nil, nil) // Phase 5 tests don't exercise deprovision/outbox: nil sink + revoker
 
 	scA := scopeFor(t, ctx, ds, wsA, connA)
 	scB := scopeFor(t, ctx, ds, wsB, connB)

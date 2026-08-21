@@ -151,11 +151,12 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 - [x] **Build gate:** `go build ./...` + provision/update DB-integration + scope-isolation tests (8/8 subtests pass on live Postgres).
 - [!] **Known gap:** `users` has no `name`/`displayName`/`title`/`department` columns, so directory-owned attribute writes are scoped to existing columns (`email`, `status`, `sync_instance_id`); unsupported-attr patches return `400`. Schema extension tracked separately (ADR-025 §5).
 
-#### Phase 6 — Users: deprovision + reactivate + SideEffectSink→outbox  `[I]`
+#### Phase 6 — Users: deprovision + reactivate + SideEffectSink→outbox  `[I]` `[done]`
 > See [[Sprint17/Member1-Go/Phase6-Deprovision-and-SideEffectSink]]. Depends on Phase 5.
-- [ ] **M1-6a** define `identity.SideEffectSink { Enqueue(ctx, tx, DeviceTrustEvent) error }` + `DurableOutboxSink` that marshals the event and calls the merged `outbox.Enqueue(ctx, tx, outbox.Event{...})` **inside the identity tx**. No interim sink.
-- [ ] **M1-6b** deprovision (one tx): `active=false`→suspend / `DELETE`→soft-delete + `identity_generation` bump + `Revoker` session kill + audit + `policy.Notifier` + `SideEffectSink.Enqueue(device.trust.revoke.requested)`; reactivate enqueues `device.trust.re_enrollment_required`. Repeated DELETE idempotent.
-- [ ] **Build gate:** `go build ./...` + deprovision identity-effect tests (with a fake sink) **and** an integration test asserting the outbox row is written in the same tx.
+- [x] **M1-6a** consume merged `identity.SideEffectSink { Enqueue(ctx, tx, DeviceTrustEvent) }` (from `feat/identity-device-trust-contract`, NOT redefined) + `DurableOutboxSink` that calls `outbox.Enqueue(ctx, tx, identity.NewDeviceTrustRevokeEvent(...))` / `...ReEnrollmentRequired(...)` **inside the identity tx**. No interim sink.
+- [x] **M1-6b** deprovision (one tx): `active=false`→suspend / `DELETE`→soft-delete + `identity_generation` bump (`Revoker.BumpGenerationTx`) + `Revoker` session kill + audit + `policy.Notifier` + `SideEffectSink.Enqueue(device.trust.revoke.requested)`; reactivate enqueues `device.trust.re_enrollment_required` (no gen bump). Repeated DELETE idempotent; unscoped/non-scim → 409.
+- [x] **Build gate:** `go build ./...` + deprovision identity-effect tests (fake sink) **and** integration test asserting the outbox row is written in the same tx, plus a forced-enqueue-error-aborts-the-whole-tx invariant (4/4 subtests pass on live Postgres).
+- [!] The plan's `identity/side_effect_sink.go` file is superseded: the contract was merged as `internal/identity/device_trust.go` with `Type` folded into `outbox.EventType`. SCIM consumes it; only `side_effect_sink_outbox.go` imports `outbox`.
 
 #### Phase 7 — SCIM Groups  `[I]`
 > See [[Sprint17/Member1-Go/Phase7-Groups]]. Depends on Phase 5.

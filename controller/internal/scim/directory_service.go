@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/identity"
@@ -20,24 +21,30 @@ import (
 //
 // Provisioning/deprovisioning of canonical users is performed through the
 // identity.Resolver (lookup) and identity.Linker (JIT-create via a SCIM
-// provisioner). Deprovision lives in Phase 6; this layer exposes provision,
-// get, filter, and attribute update only.
+// provisioner). Deprovision/Reactivate (Phase 6) run inside a single
+// transaction and enqueue a device-trust event into the durable outbox.
 type DirectoryService struct {
 	pool      *pgxpool.Pool
 	idpStore  *idp.Store
 	resolver  *identity.Resolver
 	publisher identity.EventPublisher
 	notifier  *policy.Notifier
+	sink      identity.SideEffectSink // device-trust outbox seam (Phase 6)
+	revoker   *identity.Revoker       // generation bump / session kill (Phase 6)
 }
 
 // NewDirectoryService builds a DirectoryService. A nil publisher defaults to
 // NopPublisher; a nil notifier disables ACL invalidation (acceptable for the
-// attribute-only updates in Phase 5, where membership is untouched).
+// attribute-only updates in Phase 5, where membership is untouched). A nil sink
+// disables device-trust outbox emission (deprovision still cuts access locally);
+// a nil revoker disables the generation-bump session kill.
 func NewDirectoryService(
 	pool *pgxpool.Pool,
 	idpStore *idp.Store,
 	pub identity.EventPublisher,
 	notifier *policy.Notifier,
+	sink identity.SideEffectSink,
+	revoker *identity.Revoker,
 ) *DirectoryService {
 	if pub == nil {
 		pub = identity.NopPublisher{}
@@ -48,6 +55,8 @@ func NewDirectoryService(
 		resolver:  identity.NewResolver(pool),
 		publisher: pub,
 		notifier:  notifier,
+		sink:      sink,
+		revoker:   revoker,
 	}
 }
 
@@ -296,6 +305,131 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 		return nil, newSCIMError(500, "", uerr.Error())
 	}
 	return &u, nil
+}
+
+// Deprovision cuts Zecurity access for a SCIM-owned user and durably emits a
+// device-trust revoke event. All steps run inside a single transaction so the
+// status change, generation bump, and outbox enqueue commit atomically — and a
+// sink/enqueue failure rolls back the identity mutation (build-gate invariant).
+//
+// hard=false  → status='suspended' (reversible)   + reason "suspended"
+// hard=true   → status='deleted'    (soft delete) + reason "deleted"
+//
+// The device-trust event is enqueued (not executed): downstream device cert
+// revocation is asynchronous via the durable outbox and PENDING-13. A downstream
+// failure must never roll back this committed identity mutation.
+func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID string, hard bool, syncInst string) *SCIMError {
+	// Scope + SCIM-ownership guard (mirrors Update).
+	owner, err := s.provisioningOwner(ctx, userID)
+	if err != nil {
+		return newSCIMError(404, "", "user not found")
+	}
+	if owner != "scim" {
+		return newSCIMError(409, "identity_conflict",
+			"cannot deprovision a non-SCIM owned identity via SCIM")
+	}
+	newStatus := "suspended"
+	reason := identity.DeviceTrustReasonSuspended
+	if hard {
+		newStatus = "deleted"
+		reason = identity.DeviceTrustReasonDeleted
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return newSCIMError(500, "", "begin tx: "+err.Error())
+	}
+	defer tx.Rollback(ctx)
+
+	// 1) Status change (reversible suspend or soft-delete tombstone).
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET status = $3, updated_at = NOW()
+		 WHERE id = $1 AND tenant_id = $2`,
+		userID, sc.workspaceID, newStatus,
+	); err != nil {
+		return newSCIMError(500, "", "deprovision user: "+err.Error())
+	}
+	// 2) Generation bump + best-effort session kill (revoker has its own pool
+	//    for the post-commit invalidation; the bump itself is in this tx).
+	if s.revoker != nil {
+		if _, err := s.revoker.BumpGenerationTx(ctx, tx, sc.workspaceID, userID, "scim"); err != nil {
+			return newSCIMError(500, "", "bump generation: "+err.Error())
+		}
+	}
+	// 3) Enqueue device-trust revoke event (in the SAME tx).
+	if s.sink != nil {
+		corr := uuid.New()
+		evt := identity.DeviceTrustEvent{
+			WorkspaceID:   sc.workspaceID,
+			UserID:        userID,
+			Reason:        reason,
+			CorrelationID: corr.String(),
+		}
+		if err := s.sink.Enqueue(ctx, tx, evt); err != nil {
+			return newSCIMError(500, "", "enqueue device-trust event: "+err.Error())
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return newSCIMError(500, "", "commit deprovision: "+err.Error())
+	}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+	}
+	if syncInst != "" {
+		_ = s.touchSyncInstance(ctx, syncInst)
+	}
+	return nil
+}
+
+// Reactivate restores a suspended SCIM-owned user to active and durably emits a
+// device-trust re-enrollment event. Per ADR-028 the user's devices were already
+// cert-revoked on the prior suspend, so reactivation only flips status and
+// signals re-enrollment (no generation bump — the bump already happened on
+// suspend). Idempotent against a non-active user.
+func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID string, syncInst string) *SCIMError {
+	owner, err := s.provisioningOwner(ctx, userID)
+	if err != nil {
+		return newSCIMError(404, "", "user not found")
+	}
+	if owner != "scim" {
+		return newSCIMError(409, "identity_conflict",
+			"cannot reactivate a non-SCIM owned identity via SCIM")
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return newSCIMError(500, "", "begin tx: "+err.Error())
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET status = 'active', updated_at = NOW()
+		 WHERE id = $1 AND tenant_id = $2`,
+		userID, sc.workspaceID,
+	); err != nil {
+		return newSCIMError(500, "", "reactivate user: "+err.Error())
+	}
+	if s.sink != nil {
+		corr := uuid.New()
+		evt := identity.DeviceTrustEvent{
+			WorkspaceID:   sc.workspaceID,
+			UserID:        userID,
+			CorrelationID: corr.String(),
+		}
+		if err := s.sink.Enqueue(ctx, tx, evt); err != nil {
+			return newSCIMError(500, "", "enqueue device-trust event: "+err.Error())
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return newSCIMError(500, "", "commit reactivate: "+err.Error())
+	}
+	if s.notifier != nil {
+		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+	}
+	if syncInst != "" {
+		_ = s.touchSyncInstance(ctx, syncInst)
+	}
+	return nil
 }
 
 // ── internal helpers ────────────────────────────────────────────────────────

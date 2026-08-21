@@ -23,7 +23,7 @@ func (s *Store) Router(ds *DirectoryService) http.Handler {
 	mux.HandleFunc("PATCH /scim/v2/Users/{id}", users.handlePatch)
 	// Deprovision (DELETE / active=false) is Phase 6 — explicitly rejected so the
 	// boundary is visible to IdPs rather than silently accepted.
-	mux.HandleFunc("DELETE /scim/v2/Users/{id}", users.handleDeleteNotImplemented)
+	mux.HandleFunc("DELETE /scim/v2/Users/{id}", users.handleDelete)
 
 	// Read-only discovery endpoints so Okta/Entra do not error on connection test.
 	mux.HandleFunc("GET /scim/v2/ServiceProviderConfig", handleServiceProviderConfig)
@@ -143,12 +143,21 @@ func (h *userHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 		writeSCIMError(w, newSCIMError(400, "invalidValue", perr.Error()))
 		return
 	}
-	u, serr := h.ds.Update(r.Context(), sc, id, patch, h.syncInstanceFor(r.Context(), sc))
-	if serr != nil {
+	if serr := h.dispatchActive(r.Context(), sc, id, patch); serr != nil {
 		writeSCIMError(w, serr)
 		return
 	}
-	writeUser(w, *u)
+	if patch.Active == nil {
+		// Non-active PUT is a pure attribute update.
+		u, serr := h.ds.Update(r.Context(), sc, id, patch, h.syncInstanceFor(r.Context(), sc))
+		if serr != nil {
+			writeSCIMError(w, serr)
+			return
+		}
+		writeUser(w, *u)
+		return
+	}
+	writeUser(w, User{ID: id, Schemas: []string{userSchema}})
 }
 
 func (h *userHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +168,7 @@ func (h *userHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Schemas []string       `json:"schemas"`
+		Schemas []string        `json:"schemas"`
 		Ops     []map[string]any `json:"Operations"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -171,18 +180,51 @@ func (h *userHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 		writeSCIMError(w, newSCIMError(400, "invalidValue", perr.Error()))
 		return
 	}
-	u, serr := h.ds.Update(r.Context(), sc, id, patch, h.syncInstanceFor(r.Context(), sc))
+	if serr := h.dispatchActive(r.Context(), sc, id, patch); serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	if patch.Active == nil {
+		u, serr := h.ds.Update(r.Context(), sc, id, patch, h.syncInstanceFor(r.Context(), sc))
+		if serr != nil {
+			writeSCIMError(w, serr)
+			return
+		}
+		writeUser(w, *u)
+		return
+	}
+	writeUser(w, User{ID: id, Schemas: []string{userSchema}})
+}
+
+// dispatchActive routes an active-state change (PATCH/PUT active=true|false) to
+// the transactional Deprovision/Reactivate path (which enqueues the
+// device-trust event). When Active is nil the caller falls through to Update.
+func (h *userHandler) dispatchActive(ctx context.Context, sc *scope, id string, patch *userPatch) *SCIMError {
+	if patch.Active == nil {
+		return nil
+	}
+	if *patch.Active {
+		return h.ds.Reactivate(ctx, sc, id, h.syncInstanceFor(ctx, sc))
+	}
+	return h.ds.Deprovision(ctx, sc, id, false, h.syncInstanceFor(ctx, sc))
+}
+
+func (h *userHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
 	if serr != nil {
 		writeSCIMError(w, serr)
 		return
 	}
-	writeUser(w, *u)
-}
-
-func (h *userHandler) handleDeleteNotImplemented(w http.ResponseWriter, r *http.Request) {
-	// Phase 6 takes over deprovision. For Phase 5 we fail clearly so a misconfigured
-	// IdP is visible rather than silently no-op'd.
-	writeSCIMError(w, newSCIMError(501, "", "SCIM deprovision is not implemented in this release (Phase 6)"))
+	id := r.PathValue("id")
+	// Default DELETE is a reversible soft-delete (status='deleted' tombstone).
+	// ?hard=true makes it a permanent tombstone (still soft-delete at the DB
+	// layer; the distinction is the audit reason + ADR-025 §9 semantics).
+	hard := r.URL.Query().Get("hard") == "true"
+	if serr := h.ds.Deprovision(r.Context(), sc, id, hard, h.syncInstanceFor(r.Context(), sc)); serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	writeSCIMError(w, newSCIMError(404, "", "")) // RFC 7644: 404 after delete (resource gone)
 }
 
 // ── request parsing ───────────────────────────────────────────────────────────

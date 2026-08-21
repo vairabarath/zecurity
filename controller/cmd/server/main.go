@@ -409,7 +409,8 @@ func main() {
 	// under the SCIM bearer-auth middleware, which binds (workspace_id,
 	// connection_id) from the token onto the request context. The DirectoryService
 	// derives all scope from that token — never from the request payload.
-	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier)
+	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
+		scim.NewDurableOutboxSink(outboxStore), identityRevoker)
 	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 
 	// REST endpoint: POST /provider/relays — creates a relay registration +
