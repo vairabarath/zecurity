@@ -13,8 +13,11 @@ tags: [pending, adr, client, device, pki, lifecycle]
 
 # Pending ADR 13 — Client Device Lifecycle & Cert Renewal
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
-> *(Current state partly inferred — confirm client cert-renewal status before scoping.)*
+> **Status: DRAFTED as [[ADR-028-Client-Device-Lifecycle-and-Cert-Renewal]] (PROPOSED, 2026-08-20).**
+> The scope below was written 2026-07-03 and partly inferred. It has since been **verified against the
+> code** and reshaped into three tracks (close-the-SCIM-loop / server→client trust signal / auto-renew +
+> re-enroll). **Read ADR-028 for the authoritative, grounded design** — this file is retained as the
+> original problem statement. On team ratification, ADR-028 flips to `accepted`.
 
 ## Context / Current State
 

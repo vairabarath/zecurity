@@ -40,7 +40,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-10](PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health | operations | P1 | — |
 | [PENDING-11](PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export | operations | P2 | — |
 | [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region | operations | P2 | ADR-013 |
-| [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) | Client Device Lifecycle & Cert Renewal | identity/ops | P2 | ADR-002 |
+| [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution *(proposed 2026-08-20)* | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
