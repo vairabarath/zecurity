@@ -51,7 +51,21 @@ type Connection struct {
 	Scopes        string
 	DomainHint    string
 	ClaimMappings map[string]any
-	Status        string // "active" | "disabled"
+	Status        string // "active" | "disabled" | "deleted"
+	// Mapping configuration (ADR-025 §3.1). These are the per-connection
+	// overrides of the identity-mapping extractors. subjectClaim is the OIDC
+	// claim the login adapter reads to produce AuthenticationContext.Subject;
+	// scimIdentifier is the SCIM attribute the provisioning path reads to
+	// produce the same Canonical Identity Key. Both MUST resolve to the same
+	// value for the same person, but they are NOT assumed equal (never
+	// hardcode sub == externalId).
+	SubjectClaim   string
+	ScimIdentifier string
+	// ScimEnabled reports whether SCIM provisioning is permitted for this
+	// connection. False by default and always false unless the mapping was
+	// proven (Phase 5 round-trip) or explicitly overridden via the
+	// identity.mapping.break_glass permission (Phase 4 §3.2).
+	ScimEnabled bool
 }
 
 // CreateInput is the mutable field set for a workspace (BYO) connection.
@@ -82,7 +96,7 @@ func NewStore(pool *pgxpool.Pool, enc pki.Service) *Store {
 
 const connColumns = `id, tenant_id, protocol, provider, managed, display_name, issuer,
 	client_id, encrypted_client_secret, secret_nonce, discovery_url, scopes,
-	domain_hint, claim_mappings, status`
+	domain_hint, claim_mappings, status, subject_claim, scim_identifier, scim_enabled`
 
 type scannable interface {
 	Scan(dest ...any) error
@@ -99,7 +113,7 @@ func (s *Store) scanConnection(row scannable) (*Connection, error) {
 	if err := row.Scan(
 		&c.ID, &tenantID, &c.Protocol, &c.Provider, &c.Managed, &c.DisplayName, &c.Issuer,
 		&clientID, &encSecret, &nonce, &discovery, &c.Scopes,
-		&domain, &claimMappings, &c.Status,
+		&domain, &claimMappings, &c.Status, &c.SubjectClaim, &c.ScimIdentifier, &c.ScimEnabled,
 	); err != nil {
 		return nil, err
 	}
@@ -242,6 +256,26 @@ func (s *Store) SetStatus(ctx context.Context, tenantID, id, status string) erro
 		 WHERE id = $1 AND tenant_id = $2`, id, tenantID, status)
 	if err != nil {
 		return fmt.Errorf("update status: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConnectionNotFound
+	}
+	return nil
+}
+
+// SetSCIMEnabled sets the SCIM-enablement flag for a workspace connection.
+//
+// The tenant_id guard scopes it to the caller's workspace. This flag is the
+// fail-closed result of mapping validation (Phase 4): it is FALSE unless the
+// mapping was proven (Phase 5 round-trip) or explicitly overridden via the
+// identity.mapping.break_glass permission (Phase 4 §3.2). Normal admins
+// cannot flip it — only the mapping gate / break-glass path sets it.
+func (s *Store) SetSCIMEnabled(ctx context.Context, tenantID, id string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE identity_connections SET scim_enabled = $3, updated_at = NOW()
+		 WHERE id = $1 AND tenant_id = $2`, id, tenantID, enabled)
+	if err != nil {
+		return fmt.Errorf("update scim_enabled: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrConnectionNotFound

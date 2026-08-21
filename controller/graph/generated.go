@@ -143,9 +143,12 @@ type ComplexityRoot struct {
 	}
 
 	IdpTestResult struct {
-		Issuer  func(childComplexity int) int
-		Message func(childComplexity int) int
-		Ok      func(childComplexity int) int
+		Issuer             func(childComplexity int) int
+		MappingState       func(childComplexity int) int
+		Message            func(childComplexity int) int
+		Ok                 func(childComplexity int) int
+		Reason             func(childComplexity int) int
+		ScimEnabledAllowed func(childComplexity int) int
 	}
 
 	Invitation struct {
@@ -174,6 +177,7 @@ type ComplexityRoot struct {
 		DeleteRemoteNetwork            func(childComplexity int, id string) int
 		DeleteResource                 func(childComplexity int, id string) int
 		DeleteShield                   func(childComplexity int, id string) int
+		EnableScimBreakGlass           func(childComplexity int, connectionID string, reason string) int
 		ForceDeleteResource            func(childComplexity int, id string) int
 		GenerateConnectorToken         func(childComplexity int, remoteNetworkID string, connectorName string) int
 		GenerateShieldToken            func(childComplexity int, remoteNetworkID string, shieldName string) int
@@ -186,7 +190,6 @@ type ComplexityRoot struct {
 		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
 		RevokeConnector                func(childComplexity int, id string) int
 		RevokeDevice                   func(childComplexity int, deviceID string) int
-		RevokePermission               func(childComplexity int, userID string, permission string) int
 		RevokeScimToken                func(childComplexity int, connectionID string, tokenID string) int
 		RevokeShield                   func(childComplexity int, id string) int
 		RotateScimToken                func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
@@ -418,7 +421,7 @@ type MutationResolver interface {
 	RotateScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
 	RevokeScimToken(ctx context.Context, connectionID string, tokenID string) (bool, error)
 	GrantPermission(ctx context.Context, userID string, permission string) (*WorkspacePermission, error)
-	RevokePermission(ctx context.Context, userID string, permission string) (bool, error)
+	EnableScimBreakGlass(ctx context.Context, connectionID string, reason string) (bool, error)
 }
 type QueryResolver interface {
 	Me(ctx context.Context) (*models.User, error)
@@ -886,6 +889,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.IdpTestResult.Issuer(childComplexity), true
+	case "IdpTestResult.mappingState":
+		if e.ComplexityRoot.IdpTestResult.MappingState == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.MappingState(childComplexity), true
 	case "IdpTestResult.message":
 		if e.ComplexityRoot.IdpTestResult.Message == nil {
 			break
@@ -898,6 +907,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.IdpTestResult.Ok(childComplexity), true
+	case "IdpTestResult.reason":
+		if e.ComplexityRoot.IdpTestResult.Reason == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.Reason(childComplexity), true
+	case "IdpTestResult.scimEnabledAllowed":
+		if e.ComplexityRoot.IdpTestResult.ScimEnabledAllowed == nil {
+			break
+		}
+
+		return e.ComplexityRoot.IdpTestResult.ScimEnabledAllowed(childComplexity), true
 
 	case "Invitation.createdAt":
 		if e.ComplexityRoot.Invitation.CreatedAt == nil {
@@ -1117,6 +1138,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.DeleteShield(childComplexity, args["id"].(string)), true
+	case "Mutation.enableScimBreakGlass":
+		if e.ComplexityRoot.Mutation.EnableScimBreakGlass == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_enableScimBreakGlass_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.EnableScimBreakGlass(childComplexity, args["connectionId"].(string), args["reason"].(string)), true
 	case "Mutation.forceDeleteResource":
 		if e.ComplexityRoot.Mutation.ForceDeleteResource == nil {
 			break
@@ -1249,17 +1281,6 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RevokeDevice(childComplexity, args["deviceId"].(string)), true
-	case "Mutation.revokePermission":
-		if e.ComplexityRoot.Mutation.RevokePermission == nil {
-			break
-		}
-
-		args, err := ec.field_Mutation_revokePermission_args(ctx, rawArgs)
-		if err != nil {
-			return 0, false
-		}
-
-		return e.ComplexityRoot.Mutation.RevokePermission(childComplexity, args["userId"].(string), args["permission"].(string)), true
 	case "Mutation.revokeScimToken":
 		if e.ComplexityRoot.Mutation.RevokeScimToken == nil {
 			break
@@ -2535,6 +2556,12 @@ func (ec *executionContext) childFields_IdpTestResult(ctx context.Context, field
 		return ec.fieldContext_IdpTestResult_issuer(ctx, field)
 	case "message":
 		return ec.fieldContext_IdpTestResult_message(ctx, field)
+	case "mappingState":
+		return ec.fieldContext_IdpTestResult_mappingState(ctx, field)
+	case "scimEnabledAllowed":
+		return ec.fieldContext_IdpTestResult_scimEnabledAllowed(ctx, field)
+	case "reason":
+		return ec.fieldContext_IdpTestResult_reason(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type IdpTestResult", field.Name)
 }
@@ -3255,6 +3282,28 @@ func (ec *executionContext) field_Mutation_deleteShield_args(ctx context.Context
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_enableScimBreakGlass_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "connectionId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["connectionId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "reason",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["reason"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_forceDeleteResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3508,28 +3557,6 @@ func (ec *executionContext) field_Mutation_revokeDevice_args(ctx context.Context
 		return nil, err
 	}
 	args["deviceId"] = arg0
-	return args, nil
-}
-
-func (ec *executionContext) field_Mutation_revokePermission_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
-	var err error
-	args := map[string]any{}
-	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "userId",
-		func(ctx context.Context, v any) (string, error) {
-			return ec.unmarshalNID2string(ctx, v)
-		})
-	if err != nil {
-		return nil, err
-	}
-	args["userId"] = arg0
-	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "permission",
-		func(ctx context.Context, v any) (string, error) {
-			return ec.unmarshalNString2string(ctx, v)
-		})
-	if err != nil {
-		return nil, err
-	}
-	args["permission"] = arg1
 	return args, nil
 }
 
@@ -5772,6 +5799,75 @@ func (ec *executionContext) _IdpTestResult_message(ctx context.Context, field gr
 	)
 }
 func (ec *executionContext) fieldContext_IdpTestResult_message(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_mappingState(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_mappingState(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.MappingState, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_mappingState(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_scimEnabledAllowed(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_scimEnabledAllowed(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ScimEnabledAllowed, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_scimEnabledAllowed(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _IdpTestResult_reason(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_IdpTestResult_reason(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Reason, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_IdpTestResult_reason(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("IdpTestResult", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
@@ -8600,17 +8696,17 @@ func (ec *executionContext) fieldContext_Mutation_grantPermission(ctx context.Co
 	return fc, nil
 }
 
-func (ec *executionContext) _Mutation_revokePermission(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+func (ec *executionContext) _Mutation_enableScimBreakGlass(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
 		ec.OperationContext,
 		field,
 		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
-			return ec.fieldContext_Mutation_revokePermission(ctx, field)
+			return ec.fieldContext_Mutation_enableScimBreakGlass(ctx, field)
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().RevokePermission(ctx, fc.Args["userId"].(string), fc.Args["permission"].(string))
+			return ec.Resolvers.Mutation().EnableScimBreakGlass(ctx, fc.Args["connectionId"].(string), fc.Args["reason"].(string))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -8638,7 +8734,7 @@ func (ec *executionContext) _Mutation_revokePermission(ctx context.Context, fiel
 		true,
 	)
 }
-func (ec *executionContext) fieldContext_Mutation_revokePermission(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+func (ec *executionContext) fieldContext_Mutation_enableScimBreakGlass(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	fc = &graphql.FieldContext{
 		Object:     "Mutation",
 		Field:      field,
@@ -8655,7 +8751,7 @@ func (ec *executionContext) fieldContext_Mutation_revokePermission(ctx context.C
 		}
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
-	if fc.Args, err = ec.field_Mutation_revokePermission_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+	if fc.Args, err = ec.field_Mutation_enableScimBreakGlass_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -14359,6 +14455,18 @@ func (ec *executionContext) _IdpTestResult(ctx context.Context, sel ast.Selectio
 			out.Values[i] = ec._IdpTestResult_issuer(ctx, field, obj)
 		case "message":
 			out.Values[i] = ec._IdpTestResult_message(ctx, field, obj)
+		case "mappingState":
+			out.Values[i] = ec._IdpTestResult_mappingState(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "scimEnabledAllowed":
+			out.Values[i] = ec._IdpTestResult_scimEnabledAllowed(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "reason":
+			out.Values[i] = ec._IdpTestResult_reason(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -14768,9 +14876,9 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
-		case "revokePermission":
+		case "enableScimBreakGlass":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
-				return ec._Mutation_revokePermission(ctx, field)
+				return ec._Mutation_enableScimBreakGlass(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++

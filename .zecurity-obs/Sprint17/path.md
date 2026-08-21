@@ -140,9 +140,9 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 4 — Provider profiles + mapping validation  `[I]`
 > See [[Sprint17/Member1-Go/Phase4-Provider-Profiles-and-Mapping]]. Depends on Phase 2, 3.
-- [ ] **M1-4a** built-in provider profiles + per-connection overrides (one engine, no per-provider handlers).
-- [ ] **M1-4b** `testIdpConnection` active probe-user round-trip (`POST→GET→verify→DELETE`), read-only fallback; fail-closed unless `identity.mapping.break_glass` override (reason + audit).
-- [ ] **Build gate:** `go build ./...` + mapping-validation tests.
+- [x] **M1-4a** built-in provider profiles + per-connection overrides (one engine, no per-provider handlers).
+- [x] **M1-4b** (Phase 4 boundary) `testIdpConnection` runs the achievable active checks — OIDC discovery probe + mapping-config validation + fail-closed `MappingGate` — and the `identity.mapping.break_glass` override (reason + `scim.mapping.break_glass_override` audit). The literal probe-user round-trip `POST→GET→verify→DELETE` is **deferred to Phase 5** (the `/Users` endpoint lands there); until it runs, the gate stays `unproven` and SCIM disabled unless overridden. Phase 5 plugs into the same gate via `MappingGateResult.WithRoundTrip` without changing this contract.
+- [x] **Build gate:** `go build ./...` + mapping-validation tests.
 
 #### Phase 5 — SCIM Users: provision + update  `[I]`
 > See [[Sprint17/Member1-Go/Phase5-Users-Provision-Update]]. Depends on Phase 4.

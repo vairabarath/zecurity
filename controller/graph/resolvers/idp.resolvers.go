@@ -15,6 +15,8 @@ import (
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/permission"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -134,6 +136,14 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string) (
 }
 
 // TestIdpConnection is the resolver for the testIdpConnection field.
+//
+// Phase 4 scope (ADR-025 §3.1): it runs the achievable active checks —
+// OIDC discovery reachability AND the per-connection mapping-configuration
+// validation — and returns the fail-closed mapping state. It deliberately does
+// NOT claim the mapping is "proven": the real POST→GET→verify→DELETE probe-user
+// round-trip requires the SCIM /Users endpoint, which lands in Phase 5. Until
+// that probe runs, SCIM stays disabled unless an identity.mapping.break_glass
+// override is in effect.
 func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*graph.IdpTestResult, error) {
 	tc := tenant.MustGet(ctx)
 
@@ -149,15 +159,44 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 		return nil, fmt.Errorf("testIdpConnection: connection not found")
 	}
 
-	// Reuse the real OIDC discovery (issuer match + required endpoints) without a
-	// full login. The secret is not needed to probe discovery.
+	// 1. OIDC discovery probe (issuer reachability + required endpoints).
 	p := providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, "", conn.DiscoveryURL, conn.Scopes)
 	issuer, perr := p.Probe(ctx)
 	if perr != nil {
 		msg := perr.Error()
-		return &graph.IdpTestResult{Ok: false, Message: &msg}, nil
+		reason := "OIDC discovery failed: " + msg
+		return &graph.IdpTestResult{
+			Ok:                 false,
+			Message:            &msg,
+			MappingState:       string(scim.MappingUnproven),
+			ScimEnabledAllowed: false,
+			Reason:             &reason,
+		}, nil
 	}
-	return &graph.IdpTestResult{Ok: true, Issuer: &issuer}, nil
+
+	// 2. Mapping-config validation (fail-closed). The gate never reports
+	// "proven" without a real round-trip (RoundTripVerified stays false in
+	// Phase 4), so ScimEnabledAllowed is false unless an override applies.
+	gate := scim.NewMappingGate(conn.Provider)
+	res, err := gate.Evaluate(ctx, conn.SubjectClaim, conn.ScimIdentifier, scim.BreakGlassOverride{})
+	if err != nil {
+		return nil, fmt.Errorf("testIdpConnection mapping gate: %w", err)
+	}
+
+	// Keep SCIM disabled (fail-closed): the gate's evaluation never enables
+	// SCIM without proof or an override. We persist the disabled state so a
+	// re-enable can only follow a proven mapping or a break-glass override.
+	if err := r.IdpStore.SetSCIMEnabled(ctx, tc.TenantID, id, res.ScimEnabledAllowed); err != nil {
+		return nil, fmt.Errorf("testIdpConnection set scim_enabled: %w", err)
+	}
+
+	return &graph.IdpTestResult{
+		Ok:                 true,
+		Issuer:             &issuer,
+		MappingState:       string(res.MappingState),
+		ScimEnabledAllowed: res.ScimEnabledAllowed,
+		Reason:             &res.Reason,
+	}, nil
 }
 
 // SetPlatformLoginEnabled is the resolver for the setPlatformLoginEnabled field.
@@ -338,27 +377,59 @@ func (r *mutationResolver) GrantPermission(ctx context.Context, userID string, p
 	}, nil
 }
 
-// RevokePermission is the resolver for the revokePermission field.
-func (r *mutationResolver) RevokePermission(ctx context.Context, userID string, permission string) (bool, error) {
+// EnableScimBreakGlass is the resolver for the enableScimBreakGlass field.
+//
+// It enables SCIM for a connection DESPITE an unproven identity mapping, using
+// the dedicated identity.mapping.break_glass permission (ADR-025 §3.2). The
+// @hasRole(ADMIN) directive only gates WHO may call this; possession of the
+// permission is an EXPLICIT grant checked here — an ADMIN without the row is
+// denied. A mandatory reason is required and every invocation is audited as
+// scim.mapping.break_glass_override.
+func (r *mutationResolver) EnableScimBreakGlass(ctx context.Context, connectionID string, reason string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
-	if userID == "" || permission == "" {
-		return false, fmt.Errorf("revokePermission: userId and permission are required")
+	if reason == "" {
+		return false, fmt.Errorf("enableScimBreakGlass: a mandatory reason is required")
 	}
 
-	if err := r.PermissionStore.Revoke(ctx, tc.TenantID, userID, permission); err != nil {
-		return false, fmt.Errorf("revoke permission: %w", err)
+	conn, err := r.IdpStore.GetByID(ctx, connectionID)
+	if err != nil {
+		if errors.Is(err, idp.ErrConnectionNotFound) {
+			return false, fmt.Errorf("enableScimBreakGlass: connection not found")
+		}
+		return false, fmt.Errorf("enableScimBreakGlass: %w", err)
+	}
+	if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
+		return false, fmt.Errorf("enableScimBreakGlass: connection not found")
+	}
+
+	// Explicit, authoritative permission check (NOT implied by ADMIN role).
+	held, err := r.PermissionStore.HasPermission(ctx, tc.TenantID, tc.UserID, permission.BreakGlassMapping)
+	if err != nil {
+		return false, fmt.Errorf("enableScimBreakGlass: permission check: %w", err)
+	}
+	if !held {
+		return false, fmt.Errorf("enableScimBreakGlass: requires the %q permission (ADMIN role alone is insufficient)", permission.BreakGlassMapping)
+	}
+
+	// Enable SCIM despite the unproven mapping (the override does NOT retroactively
+	// make the mapping "proven" — it only permits enabling).
+	if err := r.IdpStore.SetSCIMEnabled(ctx, tc.TenantID, connectionID, true); err != nil {
+		return false, fmt.Errorf("enableScimBreakGlass: set scim_enabled: %w", err)
 	}
 
 	_ = audit.Record(ctx, r.Pool, audit.Entry{
 		TenantID:    tc.TenantID,
 		ActorUserID: tc.UserID,
 		ActorEmail:  tc.Email,
-		Action:      "permission.revoke",
-		TargetType:  "user",
-		TargetID:    userID,
+		Action:      "scim.mapping.break_glass_override",
+		TargetType:  "idp_connection",
+		TargetID:    connectionID,
 		Details: map[string]any{
-			"permission": permission,
+			"permission":          permission.BreakGlassMapping,
+			"reason":              reason,
+			"mapping_proven":      false,
+			"validation_bypassed": true,
 		},
 	})
 

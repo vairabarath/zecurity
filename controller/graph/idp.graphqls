@@ -62,11 +62,24 @@ input UpdateIdpConnectionInput {
   domainHint:   String
 }
 
-# Result of a connection reachability check (OIDC discovery).
+# Result of a connection reachability + mapping-validation check.
+# ADR-025 §3.1: mapping "proven" enables SCIM; "unproven" keeps it disabled
+# unless identity.mapping.break_glass overrides.
 type IdpTestResult {
   ok:      Boolean!
   issuer:  String
   message: String
+  # The active mapping-validation state: "proven" or "unproven" (ADR-025 §3.1).
+  # Phase 4 cannot run the real POST→GET→verify→DELETE round-trip (the /Users
+  # endpoint lands in Phase 5), so until that probe runs this is always
+  # "unproven" and SCIM stays disabled.
+  mappingState: String!
+  # Whether SCIM provisioning is permitted for this connection after validation.
+  # False unless the mapping is proven or an identity.mapping.break_glass
+  # override applies.
+  scimEnabledAllowed: Boolean!
+  # Human-readable explanation of the mapping/validation outcome.
+  reason: String
 }
 
 extend type Query {
@@ -115,10 +128,14 @@ extend type Mutation {
     permission: String!
   ): WorkspacePermission! @hasRole(roles: [ADMIN])
 
-  # Revoke an explicit permission grant (Phase 3 break-glass primitive).
-  revokePermission(
-    userId: ID!
-    permission: String!
+  # Enable SCIM for a connection despite an unproven identity mapping, using the
+  # dedicated identity.mapping.break_glass permission (ADR-025 §3.2). ADMIN role
+  # alone is NOT sufficient — the caller must explicitly hold the permission, and
+  # a mandatory reason is required. Every invocation is audited as
+  # scim.mapping.break_glass_override.
+  enableScimBreakGlass(
+    connectionId: ID!
+    reason: String!
   ): Boolean! @hasRole(roles: [ADMIN])
 }
 

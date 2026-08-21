@@ -128,9 +128,12 @@ type Group struct {
 }
 
 type IdpTestResult struct {
-	Ok      bool    `json:"ok"`
-	Issuer  *string `json:"issuer,omitempty"`
-	Message *string `json:"message,omitempty"`
+	Ok                 bool    `json:"ok"`
+	Issuer             *string `json:"issuer,omitempty"`
+	Message            *string `json:"message,omitempty"`
+	MappingState       string  `json:"mappingState"`
+	ScimEnabledAllowed bool    `json:"scimEnabledAllowed"`
+	Reason             *string `json:"reason,omitempty"`
 }
 
 type Invitation struct {
