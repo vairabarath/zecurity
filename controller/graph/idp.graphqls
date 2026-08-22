@@ -82,12 +82,31 @@ type IdpTestResult {
   reason: String
 }
 
+# A pending/resolved SCIM identity-conflict (ADR-025 §4.1/§9). A collision between
+# a directory push and an existing JIT/manual identity is held here for an admin
+# to resolve; the directory operation returns 409 identity_conflict until resolved.
+type ScimConflict {
+  id:               ID!
+  workspaceId:      ID!
+  connectionId:     ID!
+  userId:           ID!
+  canonicalKey:     String!
+  scimExternalId:   String
+  status:           String!  # pending | linked | rejected
+  resolutionReason: String
+  createdAt:        Time!
+  resolvedAt:       Time
+}
+
 extend type Query {
   idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
   # Whether the workspace still offers the shared platform IdP as a login path.
   platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
 
   scimTokens(connectionId: ID!): [ScimToken!]! @hasRole(roles: [ADMIN])
+
+  # Provisioning-conflicts queue for a connection (admin-scoped).
+  scimConflicts(connectionId: ID!): [ScimConflict!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
@@ -135,6 +154,31 @@ extend type Mutation {
   # scim.mapping.break_glass_override.
   enableScimBreakGlass(
     connectionId: ID!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Resolve a pending SCIM identity-conflict by accepting the directory's claim and
+  # linking it to the existing user. Requires the explicit identity.mapping.break_glass
+  # permission (ADMIN role alone is NOT sufficient) and a mandatory reason. Atomic:
+  # links the external identity, sets provisioning_owner=scim, and audits in one tx.
+  acceptScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Reject a pending SCIM identity-conflict (no identity change). Audited.
+  rejectScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Reopen a rejected SCIM identity-conflict back to pending (audited as
+  # scim.user.conflict_reopened).
+  reopenScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
     reason: String!
   ): Boolean! @hasRole(roles: [ADMIN])
 }

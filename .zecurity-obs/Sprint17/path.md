@@ -160,8 +160,8 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 7 — SCIM Groups  `[I]`
 > See [[Sprint17/Member1-Go/Phase7-Groups]]. Depends on Phase 5.
-- [ ] **M1-7a** `scim`-origin groups keyed on connection-scoped `external_id`; sync `group_members`; `NotifyPolicyChange`; out-of-order member → `404` (no dangling); origin-aware identifiers.
-- [ ] **Build gate:** `go build ./...` + group-sync tests.
+- [x] **M1-7a** `scim`-origin groups keyed on connection-scoped `external_id`; sync `group_members`; `NotifyPolicyChange`; out-of-order member → `404` (no dangling); origin-aware identifiers.
+- [x] **Build gate:** `go build ./...` + group-sync tests.
 
 #### Phase 8 — Identity conflict workflow  `[I]`
 > See [[Sprint17/Member1-Go/Phase8-Identity-Conflict-Workflow]]. Depends on Phase 5.

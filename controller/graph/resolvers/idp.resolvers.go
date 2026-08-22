@@ -436,6 +436,60 @@ func (r *mutationResolver) EnableScimBreakGlass(ctx context.Context, connectionI
 	return true, nil
 }
 
+// AcceptScimConflict is the resolver for the acceptScimConflict field.
+// It requires the explicit identity.mapping.break_glass permission (ADMIN role
+// alone is insufficient) and a mandatory reason. The DirectoryService performs
+// the atomic link + provisioning_owner transition + audit.
+func (r *mutationResolver) AcceptScimConflict(ctx context.Context, connectionID string, canonicalKey string, reason string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return false, err
+	}
+	ds := r.ScimStore.DirectoryService()
+	if ds == nil {
+		return false, fmt.Errorf("acceptScimConflict: directory service unavailable")
+	}
+	serr := ds.AcceptLink(ctx, tc.TenantID, connectionID, tc.UserID, tc.Email, canonicalKey, reason)
+	if serr != nil {
+		return false, fmt.Errorf("acceptScimConflict: %w", serr)
+	}
+	return true, nil
+}
+
+// RejectScimConflict is the resolver for the rejectScimConflict field.
+func (r *mutationResolver) RejectScimConflict(ctx context.Context, connectionID string, canonicalKey string, reason string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return false, err
+	}
+	ds := r.ScimStore.DirectoryService()
+	if ds == nil {
+		return false, fmt.Errorf("rejectScimConflict: directory service unavailable")
+	}
+	serr := ds.Reject(ctx, tc.TenantID, connectionID, tc.UserID, tc.Email, canonicalKey, reason)
+	if serr != nil {
+		return false, fmt.Errorf("rejectScimConflict: %w", serr)
+	}
+	return true, nil
+}
+
+// ReopenScimConflict is the resolver for the reopenScimConflict field.
+func (r *mutationResolver) ReopenScimConflict(ctx context.Context, connectionID string, canonicalKey string, reason string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return false, err
+	}
+	ds := r.ScimStore.DirectoryService()
+	if ds == nil {
+		return false, fmt.Errorf("reopenScimConflict: directory service unavailable")
+	}
+	serr := ds.Reopen(ctx, tc.TenantID, connectionID, tc.UserID, tc.Email, canonicalKey, reason)
+	if serr != nil {
+		return false, fmt.Errorf("reopenScimConflict: %w", serr)
+	}
+	return true, nil
+}
+
 // IdpConnections is the resolver for the idpConnections field.
 func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
@@ -484,5 +538,26 @@ func (r *queryResolver) ScimTokens(ctx context.Context, connectionID string) ([]
 		out = append(out, scimTokenToGQL(token))
 	}
 
+	return out, nil
+}
+
+// ScimConflicts is the resolver for the scimConflicts field.
+func (r *queryResolver) ScimConflicts(ctx context.Context, connectionID string) ([]*graph.ScimConflict, error) {
+	tc := tenant.MustGet(ctx)
+	if err := r.validateSCIMConnection(ctx, tc.TenantID, connectionID); err != nil {
+		return nil, err
+	}
+	ds := r.ScimStore.DirectoryService()
+	if ds == nil {
+		return nil, fmt.Errorf("scimConflicts: directory service unavailable")
+	}
+	recs, err := ds.ListConflicts(ctx, tc.TenantID, connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("scimConflicts: %w", err)
+	}
+	out := make([]*graph.ScimConflict, 0, len(recs))
+	for i := range recs {
+		out = append(out, conflictToGQL(&recs[i]))
+	}
 	return out, nil
 }

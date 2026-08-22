@@ -10,6 +10,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
 )
 
@@ -31,13 +32,17 @@ type DirectoryService struct {
 	notifier  *policy.Notifier
 	sink      identity.SideEffectSink // device-trust outbox seam (Phase 6)
 	revoker   *identity.Revoker       // generation bump / session kill (Phase 6)
+	audit     identity.EventPublisher // conflict approval/transition audit (Phase 8)
+	perm      *permission.Store       // explicit fine-grained permissions (Phase 8)
 }
 
 // NewDirectoryService builds a DirectoryService. A nil publisher defaults to
 // NopPublisher; a nil notifier disables ACL invalidation (acceptable for the
 // attribute-only updates in Phase 5, where membership is untouched). A nil sink
 // disables device-trust outbox emission (deprovision still cuts access locally);
-// a nil revoker disables the generation-bump session kill.
+// a nil revoker disables the generation-bump session kill. A nil audit publisher
+// disables conflict auditing; a nil perm store disables Accept-Link authorization
+// (Accept-Link will error until a permission store is wired).
 func NewDirectoryService(
 	pool *pgxpool.Pool,
 	idpStore *idp.Store,
@@ -57,7 +62,16 @@ func NewDirectoryService(
 		notifier:  notifier,
 		sink:      sink,
 		revoker:   revoker,
+		audit:     pub, // reuse the same publisher for conflict audit unless overridden
 	}
+}
+
+// WithPermissionStore wires the explicit fine-grained permission store used by
+// Phase 8 Accept-Link authorization (identity.mapping.break_glass). It is a
+// fluent setter so existing constructor call sites need not change.
+func (s *DirectoryService) WithPermissionStore(p *permission.Store) *DirectoryService {
+	s.perm = p
+	return s
 }
 
 // scope is the resolved (workspace, connection) pair bound from the token.
@@ -115,9 +129,9 @@ func (sc *scope) canonicalKey(resource map[string]any) string {
 // provisionResult is what Provision returns: the SCIM user + whether it was newly
 // created (201) or an idempotent re-provision (200).
 type provisionResult struct {
-	user      User
-	created   bool
-	conflict  bool // true when a JIT/manual identity already occupies the key
+	user     User
+	created  bool
+	conflict bool // true when a JIT/manual identity already occupies the key
 }
 
 // Provision creates or idempotently re-provisions a canonical user from a SCIM
@@ -155,6 +169,7 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 		}
 		// Existing JIT/manual identity with this key → conflict. Phase 8 writes
 		// the persistent record; we refuse takeover here.
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, key, core.UserID, "")
 		return &provisionResult{conflict: true}, newSCIMError(409, "identity_conflict",
 			"an existing identity already owns this canonical key; admin approval required")
 	}
@@ -259,6 +274,7 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 		return nil, newSCIMError(404, "", "user not found")
 	}
 	if owner != "scim" {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
 		return nil, newSCIMError(409, "identity_conflict",
 			"cannot update a non-SCIM owned identity via SCIM")
 	}
@@ -325,6 +341,7 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 		return newSCIMError(404, "", "user not found")
 	}
 	if owner != "scim" {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
 		return newSCIMError(409, "identity_conflict",
 			"cannot deprovision a non-SCIM owned identity via SCIM")
 	}
@@ -392,6 +409,7 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 		return newSCIMError(404, "", "user not found")
 	}
 	if owner != "scim" {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
 		return newSCIMError(409, "identity_conflict",
 			"cannot reactivate a non-SCIM owned identity via SCIM")
 	}
@@ -434,6 +452,24 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 
 // ── internal helpers ────────────────────────────────────────────────────────
 
+// canonicalKeyOfUser returns the canonical identity key (external_identities.subject)
+// for a given user within the connection scope. It is used to key conflict
+// records when a collision is detected on a verb other than provision (where the
+// key is already known). Never resolves by email; scoped to the connection.
+func (s *DirectoryService) canonicalKeyOfUser(ctx context.Context, sc *scope, userID string) string {
+	var sub string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT ei.subject FROM external_identities ei
+		  WHERE ei.user_id = $1 AND ei.connection_id = $2
+		  LIMIT 1`,
+		userID, sc.connectionID,
+	).Scan(&sub); err != nil {
+		// Best-effort: an empty key simply yields no conflict row.
+		return ""
+	}
+	return sub
+}
+
 // provisioningOwner returns users.provisioning_owner for a user id.
 func (s *DirectoryService) provisioningOwner(ctx context.Context, userID string) (string, error) {
 	var owner string
@@ -449,11 +485,11 @@ func (s *DirectoryService) provisioningOwner(ctx context.Context, userID string)
 // scoped to the connection. meta.version = users.identity_generation (ADR-025 §8).
 func (s *DirectoryService) loadUser(ctx context.Context, sc *scope, userID string) (User, error) {
 	var (
-		email      string
+		email       string
 		providerSub string
-		status     string
-		gen        int
-		updatedAt  string
+		status      string
+		gen         int
+		updatedAt   string
 	)
 	err := s.pool.QueryRow(ctx,
 		`SELECT u.email, u.provider_sub, u.status, u.identity_generation,

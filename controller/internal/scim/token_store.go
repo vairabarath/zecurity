@@ -66,7 +66,19 @@ type Store struct {
 	grace      time.Duration
 	now        func() time.Time
 	randomRead func([]byte) error
+	ds         *DirectoryService
 }
+
+// WithDirectoryService attaches the DirectoryService so the SCIM HTTP router and
+// any consumer (GraphQL resolvers) share one engine instance. Fluent setter to
+// keep NewStore call sites unchanged.
+func (s *Store) WithDirectoryService(ds *DirectoryService) *Store {
+	s.ds = ds
+	return s
+}
+
+// DirectoryService returns the attached engine instance (may be nil if not wired).
+func (s *Store) DirectoryService() *DirectoryService { return s.ds }
 
 // NewStore creates a SCIM token store.
 //

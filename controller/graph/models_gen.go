@@ -196,6 +196,19 @@ type ScanResult struct {
 	FirstSeen     string `json:"firstSeen"`
 }
 
+type ScimConflict struct {
+	ID               string     `json:"id"`
+	WorkspaceID      string     `json:"workspaceId"`
+	ConnectionID     string     `json:"connectionId"`
+	UserID           string     `json:"userId"`
+	CanonicalKey     string     `json:"canonicalKey"`
+	ScimExternalID   *string    `json:"scimExternalId,omitempty"`
+	Status           string     `json:"status"`
+	ResolutionReason *string    `json:"resolutionReason,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	ResolvedAt       *time.Time `json:"resolvedAt,omitempty"`
+}
+
 type ScimToken struct {
 	ID           string     `json:"id"`
 	WorkspaceID  string     `json:"workspaceId"`

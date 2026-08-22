@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/scim"
@@ -62,4 +63,40 @@ func stringPtrOrNil(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+// conflictToGQL converts an internal ConflictRecord to the GraphQL ScimConflict
+// representation, mapping the optional resolution fields and timestamps.
+func conflictToGQL(c *scim.ConflictRecord) *graph.ScimConflict {
+	return &graph.ScimConflict{
+		ID:               c.ID,
+		WorkspaceID:      c.WorkspaceID,
+		ConnectionID:     c.ConnectionID,
+		UserID:           c.UserID,
+		CanonicalKey:     c.CanonicalKey,
+		ScimExternalID:   stringPtrOrNil(c.ScimExternalID),
+		Status:           c.Status,
+		ResolutionReason: stringPtrOrNil(c.ResolutionReason),
+		CreatedAt:        parseConflictTime(c.CreatedAt),
+		ResolvedAt:       parseConflictOptTime(c.ResolvedAt),
+	}
+}
+
+func parseConflictTime(s string) time.Time {
+	t, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func parseConflictOptTime(s string) *time.Time {
+	if s == "" {
+		return nil
+	}
+	t, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return nil
+	}
+	return &t
 }

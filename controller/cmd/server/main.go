@@ -410,7 +410,8 @@ func main() {
 	// connection_id) from the token onto the request context. The DirectoryService
 	// derives all scope from that token — never from the request payload.
 	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
-		scim.NewDurableOutboxSink(outboxStore), identityRevoker)
+		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimStore.WithDirectoryService(scimDirSvc)
 	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 
 	// REST endpoint: POST /provider/relays — creates a relay registration +
