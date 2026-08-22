@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md",
+                "file": "Sprint19/Member02/Phase2-Store-Domain.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "Phase2-Policies-Trusted-Linux-Profile"
+              "title": "Phase2-Store-Domain"
             }
           }
         ]
@@ -76,8 +76,7 @@
               "title": "Bookmarks"
             }
           }
-        ],
-        "currentTab": 1
+        ]
       }
     ],
     "direction": "horizontal",
@@ -186,10 +185,13 @@
       "bases:Create new base": false
     }
   },
-  "active": "search-leaf",
+  "active": "425b55c268a3ec00",
   "lastOpenFiles": [
-    "Sprint15/Member4-Frontend/Phase1-Device-Profile-Admin-UI.md",
+    "Sprint19/Member02/Phase1-Database-Resource-Policy.md",
+    "Sprint19/Member02/Phase3-GraphQL-API.md",
+    "Sprint19/Member02/Phase2-Store-Domain.md",
     "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md",
+    "Sprint15/Member4-Frontend/Phase1-Device-Profile-Admin-UI.md",
     "Sprint15/path.md.tmp.8205.4c5340342908",
     "Sprint15/Member4-Frontend/Phase2-Policies-Trusted-Linux-Profile.md.tmp.8205.c09e1123492e",
     "pending/PENDING-09-Continuous-Authorization.md",
@@ -218,8 +220,6 @@
     "Decisions/ADR-006-Refresh-Token-Rotation.md",
     "CodeStudy/01-Auth-Flow.md",
     "Planning/Session Log.md",
-    "Home.md",
-    "Planning/Roadmap.md",
     "Untitled.base",
     "Untitled.canvas",
     "Untitled 1.canvas",
