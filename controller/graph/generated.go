@@ -174,7 +174,7 @@ type ComplexityRoot struct {
 		DeleteConnector                func(childComplexity int, id string) int
 		DeleteDeviceProfile            func(childComplexity int, id string) int
 		DeleteGroup                    func(childComplexity int, id string) int
-		DeleteIdpConnection            func(childComplexity int, id string) int
+		DeleteIdpConnection            func(childComplexity int, id string, force bool) int
 		DeleteRemoteNetwork            func(childComplexity int, id string) int
 		DeleteResource                 func(childComplexity int, id string) int
 		DeleteShield                   func(childComplexity int, id string) int
@@ -353,17 +353,19 @@ type ComplexityRoot struct {
 	}
 
 	WorkspaceIdpConnection struct {
-		ClientID     func(childComplexity int) int
-		DiscoveryURL func(childComplexity int) int
-		DisplayName  func(childComplexity int) int
-		DomainHint   func(childComplexity int) int
-		ID           func(childComplexity int) int
-		Issuer       func(childComplexity int) int
-		Managed      func(childComplexity int) int
-		Protocol     func(childComplexity int) int
-		Provider     func(childComplexity int) int
-		Scopes       func(childComplexity int) int
-		Status       func(childComplexity int) int
+		ClientID       func(childComplexity int) int
+		DiscoveryURL   func(childComplexity int) int
+		DisplayName    func(childComplexity int) int
+		DomainHint     func(childComplexity int) int
+		ID             func(childComplexity int) int
+		IdentityHealth func(childComplexity int) int
+		Issuer         func(childComplexity int) int
+		LastSyncAt     func(childComplexity int) int
+		Managed        func(childComplexity int) int
+		Protocol       func(childComplexity int) int
+		Provider       func(childComplexity int) int
+		Scopes         func(childComplexity int) int
+		Status         func(childComplexity int) int
 	}
 
 	WorkspaceListResult struct {
@@ -431,7 +433,7 @@ type MutationResolver interface {
 	CreateIdpConnection(ctx context.Context, input CreateIdpConnectionInput) (*WorkspaceIdpConnection, error)
 	UpdateIdpConnection(ctx context.Context, id string, input UpdateIdpConnectionInput) (*WorkspaceIdpConnection, error)
 	SetIdpConnectionStatus(ctx context.Context, id string, status string) (*WorkspaceIdpConnection, error)
-	DeleteIdpConnection(ctx context.Context, id string) (bool, error)
+	DeleteIdpConnection(ctx context.Context, id string, force bool) (bool, error)
 	TestIdpConnection(ctx context.Context, id string) (*IdpTestResult, error)
 	SetPlatformLoginEnabled(ctx context.Context, enabled bool) (bool, error)
 	MintScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
@@ -1136,7 +1138,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.DeleteIdpConnection(childComplexity, args["id"].(string)), true
+		return e.ComplexityRoot.Mutation.DeleteIdpConnection(childComplexity, args["id"].(string), args["force"].(bool)), true
 	case "Mutation.deleteRemoteNetwork":
 		if e.ComplexityRoot.Mutation.DeleteRemoteNetwork == nil {
 			break
@@ -2260,12 +2262,24 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.WorkspaceIdpConnection.ID(childComplexity), true
+	case "WorkspaceIdpConnection.identityHealth":
+		if e.ComplexityRoot.WorkspaceIdpConnection.IdentityHealth == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.IdentityHealth(childComplexity), true
 	case "WorkspaceIdpConnection.issuer":
 		if e.ComplexityRoot.WorkspaceIdpConnection.Issuer == nil {
 			break
 		}
 
 		return e.ComplexityRoot.WorkspaceIdpConnection.Issuer(childComplexity), true
+	case "WorkspaceIdpConnection.lastSyncAt":
+		if e.ComplexityRoot.WorkspaceIdpConnection.LastSyncAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.LastSyncAt(childComplexity), true
 	case "WorkspaceIdpConnection.managed":
 		if e.ComplexityRoot.WorkspaceIdpConnection.Managed == nil {
 			break
@@ -2954,6 +2968,10 @@ func (ec *executionContext) childFields_WorkspaceIdpConnection(ctx context.Conte
 		return ec.fieldContext_WorkspaceIdpConnection_status(ctx, field)
 	case "managed":
 		return ec.fieldContext_WorkspaceIdpConnection_managed(ctx, field)
+	case "lastSyncAt":
+		return ec.fieldContext_WorkspaceIdpConnection_lastSyncAt(ctx, field)
+	case "identityHealth":
+		return ec.fieldContext_WorkspaceIdpConnection_identityHealth(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type WorkspaceIdpConnection", field.Name)
 }
@@ -3419,6 +3437,14 @@ func (ec *executionContext) field_Mutation_deleteIdpConnection_args(ctx context.
 		return nil, err
 	}
 	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "force",
+		func(ctx context.Context, v any) (bool, error) {
+			return ec.unmarshalNBoolean2bool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["force"] = arg1
 	return args, nil
 }
 
@@ -8528,7 +8554,7 @@ func (ec *executionContext) _Mutation_deleteIdpConnection(ctx context.Context, f
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().DeleteIdpConnection(ctx, fc.Args["id"].(string))
+			return ec.Resolvers.Mutation().DeleteIdpConnection(ctx, fc.Args["id"].(string), fc.Args["force"].(bool))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
@@ -12850,6 +12876,52 @@ func (ec *executionContext) _WorkspaceIdpConnection_managed(ctx context.Context,
 }
 func (ec *executionContext) fieldContext_WorkspaceIdpConnection_managed(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_lastSyncAt(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_lastSyncAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.LastSyncAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *time.Time) graphql.Marshaler {
+			return ec.marshalOTime2ᚖtimeᚐTime(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_lastSyncAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type Time does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_identityHealth(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_identityHealth(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.IdentityHealth, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_identityHealth(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _WorkspaceListResult_workspaces(ctx context.Context, field graphql.CollectedField, obj *WorkspaceListResult) (ret graphql.Marshaler) {
@@ -17197,6 +17269,13 @@ func (ec *executionContext) _WorkspaceIdpConnection(ctx context.Context, sel ast
 			}
 		case "managed":
 			out.Values[i] = ec._WorkspaceIdpConnection_managed(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "lastSyncAt":
+			out.Values[i] = ec._WorkspaceIdpConnection_lastSyncAt(ctx, field, obj)
+		case "identityHealth":
+			out.Values[i] = ec._WorkspaceIdpConnection_identityHealth(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}

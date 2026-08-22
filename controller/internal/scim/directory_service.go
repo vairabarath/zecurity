@@ -2,10 +2,13 @@ package scim
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/identity"
@@ -108,6 +111,12 @@ func (s *DirectoryService) resolveScope(ctx context.Context, workspaceID, connec
 	if !conn.ScimEnabled {
 		return nil, newSCIMError(403, "", "SCIM is disabled for this connection: mapping not verified")
 	}
+	// DISABLE is the reversible off-switch (ADR-025 §12): SCIM provisioning and
+	// all directory sync stop while the connection is disabled. A disabled (or
+	// deleted) connection must not accept SCIM writes until re-enabled.
+	if conn.Status != "active" {
+		return nil, newSCIMError(403, "", "SCIM is disabled for this connection: connection status is "+conn.Status)
+	}
 	return &scope{
 		workspaceID:  workspaceID,
 		connectionID: connectionID,
@@ -190,7 +199,7 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 	if err != nil {
 		return nil, newSCIMError(500, "", "provision identity: "+err.Error())
 	}
-	if err := s.touchSyncInstance(ctx, syncInst); err != nil {
+	if err := s.touchSyncInstance(ctx, sc, syncInst); err != nil {
 		return nil, newSCIMError(500, "", err.Error())
 	}
 	u, uerr := s.loadUser(ctx, sc, created.UserID)
@@ -308,7 +317,7 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 			return nil, newSCIMError(500, "", "update sync_instance: "+err.Error())
 		}
 	}
-	if err := s.touchSyncInstance(ctx, syncInst); err != nil {
+	if err := s.touchSyncInstance(ctx, sc, syncInst); err != nil {
 		return nil, newSCIMError(500, "", err.Error())
 	}
 	if s.notifier != nil {
@@ -393,7 +402,7 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if syncInst != "" {
-		_ = s.touchSyncInstance(ctx, syncInst)
+		_ = s.touchSyncInstance(ctx, sc, syncInst)
 	}
 	return nil
 }
@@ -445,7 +454,7 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if syncInst != "" {
-		_ = s.touchSyncInstance(ctx, syncInst)
+		_ = s.touchSyncInstance(ctx, sc, syncInst)
 	}
 	return nil
 }
@@ -582,8 +591,20 @@ func (s *DirectoryService) loadUsers(ctx context.Context, sc *scope, ids []strin
 	return out
 }
 
-// touchSyncInstance stamps last_sync_at on the sync instance when one is active.
-func (s *DirectoryService) touchSyncInstance(ctx context.Context, syncInst string) error {
+// touchSyncInstance stamps last_sync_at on the sync instance AND on the
+// owning connection. The connection timestamp is what Identity Health derives
+// from (ADR-025 §12: "SCIM availability equals deprovision timeliness"), so it
+// must move on every successful SCIM write — not only when a sync instance row
+// is explicitly open.
+func (s *DirectoryService) touchSyncInstance(ctx context.Context, sc *scope, syncInst string) error {
+	if sc != nil {
+		if err := s.idpStore.TouchConnectionSync(ctx, sc.workspaceID, sc.connectionID); err != nil {
+			// Best-effort: a missing connection row should not fail the write.
+			if err != idp.ErrConnectionNotFound {
+				return fmt.Errorf("touch connection sync: %w", err)
+			}
+		}
+	}
 	if syncInst == "" {
 		return nil
 	}
@@ -593,6 +614,57 @@ func (s *DirectoryService) touchSyncInstance(ctx context.Context, syncInst strin
 		return fmt.Errorf("touch sync instance: %w", err)
 	}
 	return nil
+}
+
+// IdentityHealthState enumerates the connection sync-health states (ADR-025 §12).
+type IdentityHealthState string
+
+const (
+	HealthHealthy      IdentityHealthState = "Healthy"
+	HealthDelayed      IdentityHealthState = "Delayed"
+	HealthDisconnected IdentityHealthState = "Disconnected"
+	HealthDisabled     IdentityHealthState = "Disabled"
+)
+
+// Health thresholds (ADR-025 leaves the cutoffs to implementation): staleness is
+// measured from identity_connections.last_sync_at.
+const (
+	healthHealthyMaxAge = 24 * time.Hour // ≤24h  → Healthy
+	healthDelayedMaxAge = 3 * 24 * time.Hour // ≤72h → Delayed; beyond → Disconnected
+)
+
+// IdentityHealth derives the connection's sync-health state from last_sync_at
+// and current status. A non-active connection is reported as "Disabled" (its
+// health is not meaningful once SCIM is off). Null last_sync_at → Disconnected.
+func (s *DirectoryService) IdentityHealth(ctx context.Context, workspaceID, connectionID string) (IdentityHealthState, error) {
+	var (
+		status   string
+		lastSync *time.Time
+	)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT status, last_sync_at FROM identity_connections
+		  WHERE id = $1 AND tenant_id = $2`, connectionID, workspaceID,
+	).Scan(&status, &lastSync); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", idp.ErrConnectionNotFound
+		}
+		return "", fmt.Errorf("read connection health: %w", err)
+	}
+	if status != "active" {
+		return HealthDisabled, nil
+	}
+	if lastSync == nil {
+		return HealthDisconnected, nil
+	}
+	age := time.Since(*lastSync)
+	switch {
+	case age <= healthHealthyMaxAge:
+		return HealthHealthy, nil
+	case age <= healthDelayedMaxAge:
+		return HealthDelayed, nil
+	default:
+		return HealthDisconnected, nil
+	}
 }
 
 func nullIfText(s string) any {

@@ -17,8 +17,10 @@ import (
 )
 
 // idpConnToGQL maps a store connection to its GraphQL view. The client secret is
-// NEVER mapped — it must not leave the server (ADR-024).
-func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
+// NEVER mapped — it must not leave the server (ADR-024). Identity Health and
+// LastSyncAt are derived for SCIM-capable connections via the SCIM engine when
+// it is wired (nil-safe: a nil engine yields an empty health label).
+func (r *Resolver) idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 	proto := graph.IdpProtocolOidc
 	if strings.EqualFold(c.Protocol, "saml") {
 		proto = graph.IdpProtocolSaml
@@ -32,6 +34,7 @@ func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 		Scopes:      c.Scopes,
 		Status:      c.Status,
 		Managed:     c.Managed,
+		LastSyncAt:  c.LastSyncAt,
 	}
 	if c.ClientID != "" {
 		id := c.ClientID
@@ -44,6 +47,14 @@ func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 	if c.DomainHint != "" {
 		h := c.DomainHint
 		out.DomainHint = &h
+	}
+	// Identity Health is a SCIM concept derived from last_sync_at + status
+	// (ADR-025 §12). Only meaningful for SCIM-enabled connections; for other
+	// connections we leave the label empty rather than fabricating a state.
+	if c.ScimEnabled && r.ScimStore != nil && r.ScimStore.DirectoryService() != nil {
+		if h, err := r.ScimStore.DirectoryService().IdentityHealth(context.Background(), c.TenantIDOrEmpty(), c.ID); err == nil {
+			out.IdentityHealth = string(h)
+		}
 	}
 	return out
 }

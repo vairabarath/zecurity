@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
@@ -40,7 +41,7 @@ func (r *mutationResolver) CreateIdpConnection(ctx context.Context, input graph.
 	r.auditIdp(ctx, tc, "idp.connection.create", created.ID, map[string]any{
 		"provider": created.Provider, "issuer": created.Issuer,
 	})
-	return idpConnToGQL(*created), nil
+	return r.idpConnToGQL(*created), nil
 }
 
 // UpdateIdpConnection is the resolver for the updateIdpConnection field.
@@ -64,10 +65,19 @@ func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, i
 	r.auditIdp(ctx, tc, "idp.connection.update", id, map[string]any{
 		"secret_rotated": input.ClientSecret != nil,
 	})
-	return idpConnToGQL(*updated), nil
+	return r.idpConnToGQL(*updated), nil
 }
 
 // SetIdpConnectionStatus is the resolver for the setIdpConnectionStatus field.
+// Only "active" and "disabled" are settable here (terminal deletion is a
+// separate, guarded mutation). On DISABLE (reversible, ADR-025 §12): SCIM
+// provisioning stops, the sessions of everyone authenticating through the
+// connection are revoked, affected SCIM-managed users are suspended (status
+// flips to 'suspended'), and their provisioning_owner is set to 'unmanaged'
+// (the immutable provisioned_by stays 'scim' so roles/policies/devices survive).
+// On RE-ENABLE the connection simply becomes available again — SCIM authority
+// is NOT auto-restored to those users; that requires an explicit later
+// re-enroll action.
 func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string, status string) (*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
 	if status != "active" && status != "disabled" {
@@ -91,47 +101,92 @@ func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string
 	action := "idp.connection.enable"
 	if status == "disabled" {
 		action = "idp.connection.disable"
+		// The connection is no longer a valid login path: revoke the sessions
+		// of everyone who authenticates through it, and suspend + unmanage the
+		// affected SCIM-managed users (ADR-025 §12). All best-effort — the
+		// status change above has already committed.
+		r.revokeConnectionSessions(ctx, tc, id)
+		if n, err := r.IdpStore.SuspendSCIMUsersForConnection(ctx, tc.TenantID, id); err != nil {
+			log.Printf("idp: suspend scim users for connection %s: %v", id, err)
+		} else if n > 0 {
+			log.Printf("idp: suspended %d scim users on disable of connection %s", n, id)
+		}
+		if n, err := r.IdpStore.SetSCIMUsersUnmanaged(ctx, tc.TenantID, id); err != nil {
+			log.Printf("idp: unmanage scim users for connection %s: %v", id, err)
+		} else if n > 0 {
+			log.Printf("idp: set provisioning_owner=unmanaged for %d users on disable of connection %s", n, id)
+		}
 	}
 	r.auditIdp(ctx, tc, action, id, nil)
-
-	// A disabled connection is no longer a valid login path: revoke the sessions
-	// of everyone who authenticates through it.
-	if status == "disabled" {
-		r.revokeConnectionSessions(ctx, tc, id)
-	}
 
 	conn, err := r.IdpStore.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("setIdpConnectionStatus reload: %w", err)
 	}
-	return idpConnToGQL(*conn), nil
+	return r.idpConnToGQL(*conn), nil
 }
 
 // DeleteIdpConnection is the resolver for the deleteIdpConnection field.
-func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string) (bool, error) {
+//
+// Terminal deletion is guarded (ADR-025 §12): it must never silently
+// cascade-delete users, external_identities, roles, policies, or device
+// assignments. When the connection still has linked users we refuse unless
+// `force` is true, and even then we SOFT-delete — set the affected users'
+// provisioning_owner to 'unmanaged' (preserving the immutable provisioned_by)
+// and mark the connection status='deleted'. The connection row and all user
+// data are retained for audit/provenance. Only a connection with ZERO linked
+// users is hard-deleted. A no-lockout guard still applies so the workspace is
+// never stranded without any login path (a break-glass admin may override).
+func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, force bool) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
-	// Snapshot affected users BEFORE the delete: external_identities cascades on
-	// connection delete, so after it the link rows are gone.
-	userIDs, err := r.IdpStore.UserIDsForConnection(ctx, tc.TenantID, id)
+	linked, err := r.IdpStore.LinkedUserCount(ctx, tc.TenantID, id)
 	if err != nil {
 		return false, fmt.Errorf("deleteIdpConnection: %w", err)
+	}
+
+	// Refuse to remove a connection that still governs users without an
+	// explicit confirmation.
+	if linked > 0 && !force {
+		return false, fmt.Errorf("deleteIdpConnection: connection still has %d linked user(s); pass force=true to soft-delete (users are preserved, not removed)", linked)
 	}
 
 	if err := r.guardLastLoginPath(ctx, tc); err != nil {
 		return false, err
 	}
 
-	if err := r.IdpStore.DeleteWorkspaceConnection(ctx, tc.TenantID, id); err != nil {
-		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return false, fmt.Errorf("deleteIdpConnection: connection not found")
+	action := "idp.connection.delete"
+	if linked > 0 {
+		// Soft-delete: preserve users, flip ownership to unmanaged, mark the
+		// connection terminal. Never removes the row or user data.
+		if _, err := r.IdpStore.SetSCIMUsersUnmanaged(ctx, tc.TenantID, id); err != nil {
+			return false, fmt.Errorf("deleteIdpConnection: unmanage users: %w", err)
 		}
-		return false, fmt.Errorf("deleteIdpConnection: %w", err)
+		if err := r.IdpStore.SoftDeleteConnection(ctx, tc.TenantID, id); err != nil {
+			if errors.Is(err, idp.ErrConnectionNotFound) {
+				return false, fmt.Errorf("deleteIdpConnection: connection not found")
+			}
+			return false, fmt.Errorf("deleteIdpConnection: soft-delete: %w", err)
+		}
+		action = "idp.connection.delete.soft"
+	} else {
+		// No linked users: a clean hard-delete is safe.
+		if err := r.IdpStore.DeleteWorkspaceConnection(ctx, tc.TenantID, id); err != nil {
+			if errors.Is(err, idp.ErrConnectionNotFound) {
+				return false, fmt.Errorf("deleteIdpConnection: connection not found")
+			}
+			return false, fmt.Errorf("deleteIdpConnection: %w", err)
+		}
 	}
-	r.auditIdp(ctx, tc, "idp.connection.delete", id, nil)
+	r.auditIdp(ctx, tc, action, id, map[string]any{"linked_users": linked, "force": force})
 
-	// Revoke sessions of everyone whose login path we just removed.
-	r.bumpUsers(ctx, tc, userIDs)
+	// Revoke sessions of anyone who authenticated through the connection (they
+	// must re-establish via an alternate path). Best-effort; the delete/soft-
+	// delete above has already committed.
+	userIDs, uerr := r.IdpStore.UserIDsForConnection(ctx, tc.TenantID, id)
+	if uerr == nil {
+		r.bumpUsers(ctx, tc, userIDs)
+	}
 	return true, nil
 }
 
@@ -500,7 +555,7 @@ func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceI
 	}
 	out := make([]*graph.WorkspaceIdpConnection, 0, len(conns))
 	for _, c := range conns {
-		out = append(out, idpConnToGQL(c))
+		out = append(out, r.idpConnToGQL(c))
 	}
 	return out, nil
 }

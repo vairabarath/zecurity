@@ -22,6 +22,12 @@ type WorkspaceIdpConnection {
   domainHint:   String
   status:       String!
   managed:      Boolean!
+  # Last time SCIM wrote to this connection (provision/update/group sync).
+  # Drives Identity Health (Healthy/Delayed/Disconnected). Null if SCIM has
+  # never synced (ADR-025 §12).
+  lastSyncAt:   Time
+  # Derived sync-health state: Healthy | Delayed | Disconnected | Disabled.
+  identityHealth: String!
   # NOTE: clientSecret is intentionally absent — it is never exposed.
 }
 
@@ -115,7 +121,7 @@ extend type Mutation {
   # status is "active" | "disabled". Disabling revokes the sessions of every user
   # who authenticates through this connection (their login path is gone).
   setIdpConnectionStatus(id: ID!, status: String!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
-  deleteIdpConnection(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  deleteIdpConnection(id: ID!, force: Boolean!): Boolean! @hasRole(roles: [ADMIN])
   testIdpConnection(id: ID!): IdpTestResult! @hasRole(roles: [ADMIN])
   # Toggle the shared platform IdP as a login path for this workspace. Disabling
   # is refused if the workspace has no active identity provider of its own and

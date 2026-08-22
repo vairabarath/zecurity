@@ -57,18 +57,18 @@ func (h *userHandler) scope(ctx context.Context) (*scope, *SCIMError) {
 	return h.ds.resolveScope(ctx, tok.WorkspaceID, tok.ConnectionID)
 }
 
-// syncInstanceFor resolves the current sync instance id for a connection, if any.
-// A fresh /Users POST in Phase 5 carries no sync instance, so we return "" and the
-// provisioner writes a NULL sync_instance_id (reconciled on reconnect in Phase 9).
+// syncInstanceFor ensures a sync instance exists for the connection (opening a
+// new one on first write) and returns its id. Every SCIM write carries the
+// connection's current sync instance so provisioned objects record provenance
+// and a disable→re-enable reconnect can reconcile stale-vs-current (ADR-025 §12).
 func (h *userHandler) syncInstanceFor(ctx context.Context, sc *scope) string {
-	var id string
-	_ = h.store.pool.QueryRow(ctx,
-		`SELECT id::text FROM scim_sync_instances
-		  WHERE workspace_id = $1 AND connection_id = $2
-		  ORDER BY created_at DESC LIMIT 1`,
-		sc.workspaceID, sc.connectionID,
-	).Scan(&id)
-	return id
+	inst, err := h.ds.EnsureSyncInstance(ctx, sc)
+	if err != nil {
+		// Best-effort: fall back to "" (NULL sync_instance_id) rather than
+		// failing the whole write.
+		return ""
+	}
+	return inst
 }
 
 func (h *userHandler) handlePost(w http.ResponseWriter, r *http.Request) {

@@ -264,17 +264,19 @@ type UpdateResourceInput struct {
 }
 
 type WorkspaceIdpConnection struct {
-	ID           string      `json:"id"`
-	Protocol     IdpProtocol `json:"protocol"`
-	Provider     string      `json:"provider"`
-	DisplayName  string      `json:"displayName"`
-	Issuer       string      `json:"issuer"`
-	ClientID     *string     `json:"clientId,omitempty"`
-	DiscoveryURL *string     `json:"discoveryUrl,omitempty"`
-	Scopes       string      `json:"scopes"`
-	DomainHint   *string     `json:"domainHint,omitempty"`
-	Status       string      `json:"status"`
-	Managed      bool        `json:"managed"`
+	ID             string      `json:"id"`
+	Protocol       IdpProtocol `json:"protocol"`
+	Provider       string      `json:"provider"`
+	DisplayName    string      `json:"displayName"`
+	Issuer         string      `json:"issuer"`
+	ClientID       *string     `json:"clientId,omitempty"`
+	DiscoveryURL   *string     `json:"discoveryUrl,omitempty"`
+	Scopes         string      `json:"scopes"`
+	DomainHint     *string     `json:"domainHint,omitempty"`
+	Status         string      `json:"status"`
+	Managed        bool        `json:"managed"`
+	LastSyncAt     *time.Time  `json:"lastSyncAt,omitempty"`
+	IdentityHealth string      `json:"identityHealth"`
 }
 
 type WorkspaceListResult struct {

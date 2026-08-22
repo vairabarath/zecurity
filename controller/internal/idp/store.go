@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -66,6 +67,21 @@ type Connection struct {
 	// proven (Phase 5 round-trip) or explicitly overridden via the
 	// identity.mapping.break_glass permission (Phase 4 §3.2).
 	ScimEnabled bool
+	// LastSyncAt is the last time SCIM wrote to this connection (provision /
+	// update / group sync). Null if SCIM has never synced. Drives Identity
+	// Health (ADR-025 §12). Populated by the SCIM engine's touch on every
+	// successful write.
+	LastSyncAt *time.Time
+}
+
+// TenantIDOrEmpty returns the connection's tenant (workspace) id, or "" for a
+// platform-global connection. Used by SCIM health derivation, which requires a
+// workspace scope.
+func (c *Connection) TenantIDOrEmpty() string {
+	if c.TenantID == nil {
+		return ""
+	}
+	return *c.TenantID
 }
 
 // CreateInput is the mutable field set for a workspace (BYO) connection.
@@ -96,7 +112,8 @@ func NewStore(pool *pgxpool.Pool, enc pki.Service) *Store {
 
 const connColumns = `id, tenant_id, protocol, provider, managed, display_name, issuer,
 	client_id, encrypted_client_secret, secret_nonce, discovery_url, scopes,
-	domain_hint, claim_mappings, status, subject_claim, scim_identifier, scim_enabled`
+	domain_hint, claim_mappings, status, subject_claim, scim_identifier, scim_enabled,
+	last_sync_at`
 
 type scannable interface {
 	Scan(dest ...any) error
@@ -109,15 +126,18 @@ func (s *Store) scanConnection(row scannable) (*Connection, error) {
 		c                                                       Connection
 		tenantID, clientID, encSecret, nonce, discovery, domain *string
 		claimMappings                                           []byte
+		lastSyncAt                                              *time.Time
 	)
 	if err := row.Scan(
 		&c.ID, &tenantID, &c.Protocol, &c.Provider, &c.Managed, &c.DisplayName, &c.Issuer,
 		&clientID, &encSecret, &nonce, &discovery, &c.Scopes,
 		&domain, &claimMappings, &c.Status, &c.SubjectClaim, &c.ScimIdentifier, &c.ScimEnabled,
+		&lastSyncAt,
 	); err != nil {
 		return nil, err
 	}
 	c.TenantID = tenantID
+	c.LastSyncAt = lastSyncAt
 	if clientID != nil {
 		c.ClientID = *clientID
 	}
@@ -290,6 +310,90 @@ func (s *Store) DeleteWorkspaceConnection(ctx context.Context, tenantID, id stri
 		`DELETE FROM identity_connections WHERE id = $1 AND tenant_id = $2`, id, tenantID)
 	if err != nil {
 		return fmt.Errorf("delete connection: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConnectionNotFound
+	}
+	return nil
+}
+
+// TouchConnectionSync stamps identity_connections.last_sync_at for a workspace
+// connection. SCIM provisioning/group-sync drives this so Identity Health can
+// derive Healthy/Delayed/Disconnected from staleness (ADR-025 §12).
+func (s *Store) TouchConnectionSync(ctx context.Context, tenantID, connectionID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE identity_connections SET last_sync_at = NOW(), updated_at = NOW()
+		  WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
+	if err != nil {
+		return fmt.Errorf("touch connection sync: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConnectionNotFound
+	}
+	return nil
+}
+
+// SuspendSCIMUsersForConnection sets every SCIM-provisioned, still-active user
+// of a connection to status='suspended' (reversible) when the connection is
+// disabled. Scoped to (tenant, connection) and to provisioning_owner='scim' so a
+// non-SCIM-owned user is never touched. Returns the number suspended.
+func (s *Store) SuspendSCIMUsersForConnection(ctx context.Context, tenantID, connectionID string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET status = 'suspended', updated_at = NOW()
+		  WHERE tenant_id = $1 AND status = 'active' AND provisioning_owner = 'scim'
+		    AND id IN (
+		      SELECT DISTINCT ei.user_id FROM external_identities ei
+		      WHERE ei.tenant_id = $1 AND ei.connection_id = $2
+		    )`, tenantID, connectionID)
+	if err != nil {
+		return 0, fmt.Errorf("suspend scim users: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// SetSCIMUsersUnmanaged flips provisioning_owner from 'scim' to 'unmanaged' for
+// every user still owned by a connection (used on DISABLE and DELETE per
+// ADR-025 §12 — the immutable provisioned_by stays 'scim' so roles/policies/
+// devices are preserved). Returns the number flipped.
+func (s *Store) SetSCIMUsersUnmanaged(ctx context.Context, tenantID, connectionID string) (int, error) {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE users SET provisioning_owner = 'unmanaged', updated_at = NOW()
+		  WHERE tenant_id = $1 AND provisioning_owner = 'scim'
+		    AND id IN (
+		      SELECT DISTINCT ei.user_id FROM external_identities ei
+		      WHERE ei.tenant_id = $1 AND ei.connection_id = $2
+		    )`, tenantID, connectionID)
+	if err != nil {
+		return 0, fmt.Errorf("set scim users unmanaged: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
+// LinkedUserCount returns the number of canonical users that authenticate
+// through a connection (have an external_identities row). Used by the DELETE
+// guard so a connection with live users is soft-deleted (not hard-removed) and
+// the workspace is never stranded.
+func (s *Store) LinkedUserCount(ctx context.Context, tenantID, connectionID string) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(DISTINCT user_id) FROM external_identities
+		  WHERE tenant_id = $1 AND connection_id = $2`, tenantID, connectionID,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count linked users: %w", err)
+	}
+	return n, nil
+}
+
+// SoftDeleteConnection marks a connection terminal (status='deleted') without
+// removing the row or any user data (ADR-025 §12). Callers must have already
+// flipped affected users to provisioning_owner='unmanaged'. The tenant_id guard
+// prevents touching a platform connection.
+func (s *Store) SoftDeleteConnection(ctx context.Context, tenantID, connectionID string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE identity_connections SET status = 'deleted', updated_at = NOW()
+		  WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
+	if err != nil {
+		return fmt.Errorf("soft-delete connection: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrConnectionNotFound

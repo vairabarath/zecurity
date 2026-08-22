@@ -14,14 +14,15 @@ import (
 
 // groupRow is the minimal fields needed from the groups table for SCIM.
 type groupRow struct {
-	ID           string
-	WorkspaceID  string
-	Origin       string
-	ConnectionID string
-	Name         string
-	ExternalID   string
-	CreatedAt    string
-	UpdatedAt    string
+	ID            string
+	WorkspaceID   string
+	Origin        string
+	ConnectionID  string
+	Name          string
+	ExternalID    string
+	SyncInstanceID string
+	CreatedAt     string
+	UpdatedAt     string
 }
 
 const (
@@ -60,17 +61,24 @@ var memberFilterRe = regexp.MustCompile(`^members\[value eq "([^"]*)"\]$`)
 
 // ── DirectoryService group methods ───────────────────────────────────────────
 
-// CreateGroup creates a scim-origin group for the resolved scope.
+// CreateGroup creates a scim-origin group for the resolved scope. It opens a
+// sync instance for the connection (the first SCIM write opens one), stamps the
+// group's sync_instance_id for provenance, and stamps the connection's
+// last_sync_at so Identity Health stays current.
 func (s *DirectoryService) CreateGroup(ctx context.Context, sc *scope, externalID, displayName string) (*groupRow, *SCIMError) {
 	if externalID == "" {
 		return nil, newSCIMError(400, "invalidValue", "externalId is required for scim groups")
 	}
+	inst, err := s.EnsureSyncInstance(ctx, sc)
+	if err != nil {
+		return nil, newSCIMError(500, "", "ensure sync instance: "+err.Error())
+	}
 	var g groupRow
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO groups (workspace_id, origin, connection_id, external_id, name)
-		 VALUES ($1, 'scim', $2, $3, $4)
+	err = s.pool.QueryRow(ctx,
+		`INSERT INTO groups (workspace_id, origin, connection_id, external_id, name, sync_instance_id)
+		 VALUES ($1, 'scim', $2, $3, $4, $5)
 		 RETURNING id, workspace_id, name, TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at, TO_CHAR(updated_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at`,
-		sc.workspaceID, sc.connectionID, externalID, displayName,
+		sc.workspaceID, sc.connectionID, externalID, displayName, nullIfUUID(inst),
 	).Scan(&g.ID, &g.WorkspaceID, &g.Name, &g.CreatedAt, &g.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -81,6 +89,10 @@ func (s *DirectoryService) CreateGroup(ctx context.Context, sc *scope, externalI
 	g.Origin = OriginSCIM
 	g.ConnectionID = sc.connectionID
 	g.ExternalID = externalID
+	g.SyncInstanceID = inst
+	if err := s.touchSyncInstance(ctx, sc, inst); err != nil {
+		return nil, newSCIMError(500, "", err.Error())
+	}
 	return &g, nil
 }
 
@@ -243,6 +255,9 @@ func (s *DirectoryService) ReplaceGroup(ctx context.Context, sc *scope, idOrExte
 	if s.notifier != nil {
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
 	}
+	if err := s.touchSyncInstance(ctx, sc, s.CurrentSyncInstance(ctx, sc)); err != nil {
+		return nil, newSCIMError(500, "", err.Error())
+	}
 	return &g, nil
 }
 
@@ -363,6 +378,9 @@ func (s *DirectoryService) PatchGroup(ctx context.Context, sc *scope, idOrExtern
 	}
 	if s.notifier != nil {
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
+	}
+	if err := s.touchSyncInstance(ctx, sc, s.CurrentSyncInstance(ctx, sc)); err != nil {
+		return nil, newSCIMError(500, "", err.Error())
 	}
 	return g, nil
 }

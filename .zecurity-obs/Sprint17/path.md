@@ -173,9 +173,11 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 9 — Connection lifecycle + health + sync instances  `[I]`
 > See [[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]]. Depends on Phase 5.
-- [ ] **M1-9a** connection `active→disabled→deleted`: DISABLE suspends users (reversible) + kills sessions + `provisioning_owner scim→unmanaged`; DELETE guarded (0 users or destructive confirmation).
-- [ ] **M1-9b** `last_sync_at` → Identity Health (Healthy/Delayed/Disconnected); `scim_sync_instances` reconcile on reconnect.
-- [ ] **Build gate:** `go build ./...` + lifecycle/health tests.
+- [x] **M1-9a** connection `active→disabled→deleted`: DISABLE (reversible) suspends SCIM-owned users + revokes sessions via `Revoker.BumpGeneration` + flips `provisioning_owner scim→unmanaged` (immutable `provisioned_by` preserved); SCIM writes refused while disabled (resolveScope 403); DELETE guarded (refuse unless `force` when linked users > 0) → soft-delete `status='deleted'` + ownership flip, preserving users/external_identities; hard-delete only when 0 linked users.
+- [x] **M1-9b** `last_sync_at` → **Identity Health**: Healthy (≤24h) / Delayed (≤72h) / Disconnected (>72h or null) / Disabled (status≠active); derived in `DirectoryService.IdentityHealth`; surfaced on `WorkspaceIdpConnection.identityHealth` + `lastSyncAt` in GraphQL.
+- [x] **M1-9c** `scim_sync_instances`: `EnsureSyncInstance` opens one per connection (reused until reconnect); provisioned users/external_identities/groups stamp `sync_instance_id`; `ReconcileStaleUsers`/`ReconcileStaleGroups` identify prior-instance objects on reconnect. Added migration `035_groups_sync_instance.sql` (the only schema gap — `groups.sync_instance_id` was omitted from 034).
+- [x] **Build gate:** `go build ./...` + `go vet ./...` + `lifecycle_integration_test.go` (10 subtests) + full `go test ./internal/scim/... ./internal/idp/... ./graph/...` green on live Postgres.
+- [!] **Deferred (out of scope per ADR §12 re-enable flow):** the explicit authorized admin action that re-enrolls `unmanaged` users back to `scim` ownership after a re-enable. Phase 9 guarantees ownership is NOT auto-restored on re-enable; the re-enroll verb is a separate future action. Frontend health badge is Phase 12 (backend surface only here).
 
 ### Outbox — already merged (Sprint 18)
 
