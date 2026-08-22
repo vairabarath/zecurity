@@ -23,6 +23,15 @@ func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	sort.Strings(files)
+
+	// Reset the schema so migrations are applied against a clean database on
+	// every run. Tests share a persistent DB via PKI_TEST_DATABASE_URL, and the
+	// migrations are not idempotent (plain CREATE TABLE), so without this the
+	// second run fails with "relation already exists".
+	if _, err := pool.Exec(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); err != nil {
+		return err
+	}
+
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -80,8 +89,8 @@ func TestPermissionStore_Integration(t *testing.T) {
 	}
 
 	ws := mustInsertWorkspace(t, ctx, pool, "perm-"+time.Now().Format("150405"))
-	alice := mustInsertUser(t, ctx, pool, ws, "alice@test", "admin")   // ADMIN, no grant row
-	bob := mustInsertUser(t, ctx, pool, ws, "bob@test", "member")     // member, gets grant
+	alice := mustInsertUser(t, ctx, pool, ws, "alice@test", "admin") // ADMIN, no grant row
+	bob := mustInsertUser(t, ctx, pool, ws, "bob@test", "member")    // member, gets grant
 
 	store := NewStore(pool)
 
