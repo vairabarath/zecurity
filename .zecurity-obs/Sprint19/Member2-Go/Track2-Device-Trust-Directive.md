@@ -57,9 +57,11 @@ post-revoke) — however the *authoritative* reaction happens in the ACL poll pa
 ### D-B — Revoked response: directive-in-response, not error
 Replace the `PermissionDenied` return at service.go:502-504 (and the transport twin
 at 567-569) with a structured response:
-- REVOKED / RE_ENROLL_REQUIRED → return `directive` set, `snapshot` omitted,
-  `up_to_date=true` (no ACL payload — preserves the existing control-plane gate, no
-  leak). gRPC status OK.
+- REVOKED / RE_ENROLL_REQUIRED → return `directive` set, `snapshot` **omitted
+  (empty, NOT `up_to_date=true`)**. A directive-ignoring client therefore also
+  drops its cached ACL — defense-in-depth fail-closed (the device loses access
+  even if it ignores the directive). gRPC status OK. No ACL payload regardless
+  (preserves the existing control-plane gate, no leak).
 This keeps the control-plane gate (revoked devices get no ACL data) while giving a
 clean, distinguishable signal. Keeping the bare error would force the daemon to
 match error *strings* — fragile.
@@ -106,31 +108,50 @@ across the fleet.
 |------|--------|
 | `controller/migrations/0XX_device_status.sql` | ADD COLUMN `client_devices.status` text NOT NULL DEFAULT 'active'; CHECK (status IN ('active','re_enroll_required','renew_pending')); comment that `revoked` is derived from `revoked_at`. |
 | `proto/client/v1/client.proto` | Add `enum DeviceDirective { DIRECTIVE_NONE=0; DIRECTIVE_REVOKED=1; DIRECTIVE_RE_ENROLL_REQUIRED=2; DIRECTIVE_RENEW_SOON=3; }`. Add `device_directive` + `directive_reason` to `GetACLSnapshotResponse` (and `GetTransportSnapshotResponse`). |
-| `controller/internal/client/service.go` | Factor a `deviceGate(ctx, pool, deviceID, claims) (status string, revoked bool, directive DeviceDirective, err error)` helper used by BOTH `GetACLSnapshot` and `GetTransportSnapshot`. On revoked/re-enroll: return the directive + `up_to_date=true`, no snapshot. Stamp `last_seen_at` (throttled) on success path. |
+| `controller/gen/go/proto/client/v1/client.pb.go` + `client_grpc.pb.go` | **Regenerated** via `make generate-proto` (buf). The `clientv1` Go package is generated into `controller/gen/go/...`, NOT checked in under `proto/`. Without this regen the resolver cannot set `DeviceDirective`. |
+| `client/proto/client/v1/client.rs` (generated) | Regenerated via `cargo build` (client/build.rs uses `tonic_build` on `proto/client/v1/client.proto`). |
+| `controller/internal/client/service.go` | Factor a `deviceGate(ctx, pool, deviceID, claims) (status string, revoked bool, directive DeviceDirective, err error)` helper used by BOTH `GetACLSnapshot` and `GetTransportSnapshot`. On revoked/re-enroll: return the directive + empty snapshot (no `up_to_date`), gRPC OK. Stamp `last_seen_at` (throttled) on success path. |
 | `controller/internal/client/device_trust_handler.go` | `ReEnrollHandler`: set `status='re_enroll_required'` on the user's devices (in addition to the audit it already writes). Revoke path unchanged (writes only `revoked_at`). |
-| `client/proto/client/v1/client.rs` (generated) | Regenerated stubs for the new enum + fields. |
 | `client/src/daemon.rs` | `fetch_acl_snapshot_with_refresh` must return the directive (not just `Option<AclSnapshot>`). Act on it: REVOKED → wipe key + stop tunnels + persist `device_state=revoked` + exit; RE_ENROLL_REQUIRED → wipe cert + stop tunnels + stay-disabled with re-login prompt; NONE → proceed. Fail-closed: a poll *error* keeps existing behavior; the directive can only make the client more restrictive. |
+| `client/src/state_store.rs` | Add `device_state: String` (`#[serde(default)]`) to `StoredDevice` so the REVOKED marker persists on disk. |
+| `client/src/ipc.rs` | Add `device_state` / `revoked_reason` to the `Status` IPC response so the CLI can read it. |
+| `client/src/cmd/status.rs` | Print "Status: Revoked — contact your admin" (or re-enroll prompt) when `device_state` is set, instead of the normal running status. |
 
 ## Step-by-step
 1. Migration `0XX_device_status.sql` — add `status` column (default active, CHECK).
    No backfill of revoked (derived).
-2. Proto: add `DeviceDirective` enum + fields on both responses. `cargo build` the
-   client to regenerate stubs (or run the proto gen target in Makefile).
+2. Proto: add `DeviceDirective` enum + fields on both responses.
+   - Go stubs: `cd controller && make generate-proto` (buf → `controller/gen/go/proto/client/v1/client.pb.go`).
+   - Rust stubs: `cd client && cargo build` (build.rs `tonic_build` on `proto/client/v1/client.proto`).
+   Both regen flows are required — the resolver sets the enum only after the Go
+   `clientv1` package is regenerated.
 3. `service.go`: extract `deviceGate` helper; both snapshot handlers call it;
-   revoked/re-enroll returns directive + `up_to_date`, no payload; throttle-stamp
-   `last_seen_at`.
+   revoked/re-enroll returns directive + **empty snapshot (no `up_to_date`)**;
+   throttle-stamp `last_seen_at`.
 4. `device_trust_handler.go`: `ReEnrollHandler` sets `status='re_enroll_required'`.
 5. `daemon.rs`: change `fetch_acl_snapshot_with_refresh` return type to carry the
    directive; implement REVOKED (wipe+exit+marker) and RE_ENROLL_REQUIRED
-   (wipe+disabled+prompt) reactions. Unit-test the directive mapping.
+   (wipe+disabled+prompt) reactions. Also extend `state_store.rs` (`StoredDevice`
+   marker), `ipc.rs` (Status response), and `cmd/status.rs` (print) so the
+   REVOKED state is visible via `zecurity-client status`. Unit-test the directive
+   mapping.
 6. Build gate: `cd controller && go build ./... && go vet ./...`; `cd client && cargo build`.
 7. Tests (below).
+
+## Migration number (coordinate at integration)
+The controller has no in-repo migration runner; migrations apply externally by
+filename sort, and duplicate numeric prefixes already exist (two `031_*` files).
+The next free number is **034** — which collides with Sathiya's SCIM migration
+`034_scim_directory_sync.sql` on `feat/sprint17-scim`. Track 2 keeps the
+`0XX_device_status.sql` placeholder and takes `034` only if the SCIM migration
+lands under a different number; otherwise `035`. Resolve at integration/rebase
+time.
 
 ## Tests
 - Controller unit: `deviceGate` returns correct directive for each `{status, revoked_at}`
   combination (re_enroll first, then revoked-derived, then renew_pending, then none).
 - Controller integration: revoked device calling `GetACLSnapshot` gets
-  `directive=REVOKED`, `up_to_date=true`, empty snapshot, gRPC OK (NOT PermissionDenied);
+  `directive=REVOKED`, empty snapshot (no `up_to_date`), gRPC OK (NOT PermissionDenied);
   re-enroll-event device gets `RE_ENROLL_REQUIRED`; active device gets `NONE` + snapshot.
 - `last_seen_at` throttle: call twice rapidly → second call does not advance the
   timestamp beyond the 5min window.
