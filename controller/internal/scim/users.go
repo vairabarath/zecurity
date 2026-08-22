@@ -25,6 +25,14 @@ func (s *Store) Router(ds *DirectoryService) http.Handler {
 	// boundary is visible to IdPs rather than silently accepted.
 	mux.HandleFunc("DELETE /scim/v2/Users/{id}", users.handleDelete)
 
+	groups := &groupHandler{store: s, ds: ds}
+	mux.HandleFunc("POST /scim/v2/Groups", groups.handlePost)
+	mux.HandleFunc("GET /scim/v2/Groups", groups.handleList)
+	mux.HandleFunc("GET /scim/v2/Groups/{id}", groups.handleGet)
+	mux.HandleFunc("PUT /scim/v2/Groups/{id}", groups.handlePut)
+	mux.HandleFunc("PATCH /scim/v2/Groups/{id}", groups.handlePatch)
+	mux.HandleFunc("DELETE /scim/v2/Groups/{id}", groups.handleDelete)
+
 	// Read-only discovery endpoints so Okta/Entra do not error on connection test.
 	mux.HandleFunc("GET /scim/v2/ServiceProviderConfig", handleServiceProviderConfig)
 	mux.HandleFunc("GET /scim/v2/ResourceTypes", handleResourceTypes)
@@ -168,7 +176,7 @@ func (h *userHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var body struct {
-		Schemas []string        `json:"schemas"`
+		Schemas []string         `json:"schemas"`
 		Ops     []map[string]any `json:"Operations"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
@@ -224,7 +232,10 @@ func (h *userHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
 		writeSCIMError(w, serr)
 		return
 	}
-	writeSCIMError(w, newSCIMError(404, "", "")) // RFC 7644: 404 after delete (resource gone)
+	// RFC 7644 §3.2: a successful DELETE returns 204 No Content with an empty
+	// body. Returning a 404 error envelope here would be wrong — the operation
+	// succeeded; the resource is now gone (soft-deleted tombstone).
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ── request parsing ───────────────────────────────────────────────────────────
@@ -237,7 +248,7 @@ func decodeJSON(r *http.Request, v any) error {
 // userPatch is the normalized set of directory-owned mutations Phase 5 may apply.
 // Unsupported attributes are rejected earlier (supportedDirectoryAttr).
 type userPatch struct {
-	Email string
+	Email  string
 	Active *bool
 	// Attributes carries the raw attribute names touched, for the unowned-
 	// attribute rejection check.
@@ -342,12 +353,12 @@ func handleServiceProviderConfig(w http.ResponseWriter, r *http.Request) {
 		"sort":             map[string]any{"supported": false},
 		"etag":             map[string]any{"supported": false},
 		"authenticationSchemes": []map[string]any{{
-			"name":          "OAuth Bearer Token",
-			"description":   "SCIM bearer token (HMAC-bound per workspace+connection)",
-			"specUri":       "http://www.rfc-editor.org/info/rfc6750",
+			"name":             "OAuth Bearer Token",
+			"description":      "SCIM bearer token (HMAC-bound per workspace+connection)",
+			"specUri":          "http://www.rfc-editor.org/info/rfc6750",
 			"documentationUri": "https://example.com/scim",
-			"type":          "oauthbearertoken",
-			"primary":       true,
+			"type":             "oauthbearertoken",
+			"primary":          true,
 		}},
 	})
 }
@@ -380,3 +391,217 @@ func handleSchemas(w http.ResponseWriter, r *http.Request) {
 
 // ensure idp import is used (connection status constants referenced by guards).
 
+// ── Group handler (Phase 7) ────────────────────────────────────────────────────
+
+// groupHandler dispatches SCIM Group operations, extracting scope from the
+// authenticated token and delegating to DirectoryService. Scope is bound from
+// the token only — never from the request payload.
+type groupHandler struct {
+	store *Store
+	ds    *DirectoryService
+}
+
+func (h *groupHandler) scope(ctx context.Context) (*scope, *SCIMError) {
+	tok := TokenFromContext(ctx)
+	if tok == nil {
+		return nil, newSCIMError(401, "", "missing SCIM token")
+	}
+	return h.ds.resolveScope(ctx, tok.WorkspaceID, tok.ConnectionID)
+}
+
+func (h *groupHandler) handlePost(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	var resource map[string]any
+	if err := decodeJSON(r, &resource); err != nil {
+		writeSCIMError(w, newSCIMError(400, "invalidValue", "invalid SCIM Group resource: "+err.Error()))
+		return
+	}
+	externalID := strTrim(resource["externalId"])
+	displayName := strTrim(resource["displayName"])
+	if externalID == "" {
+		writeSCIMError(w, newSCIMError(400, "invalidValue", "externalId is required"))
+		return
+	}
+	g, serr := h.ds.CreateGroup(r.Context(), sc, externalID, displayName)
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	writeGroupCreated(w, g)
+}
+
+func (h *groupHandler) handleList(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	groups, err := h.ds.ListGroups(r.Context(), sc)
+	if err != nil {
+		writeSCIMError(w, newSCIMError(500, "", "list groups: "+err.Error()))
+		return
+	}
+	writeGroupList(w, groups)
+}
+
+func (h *groupHandler) handleGet(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	id := r.PathValue("id")
+	g, serr := h.ds.GetGroup(r.Context(), sc, id)
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	members, _ := h.ds.ListGroupMembersAsMembers(r.Context(), sc, g.ID)
+	writeGroup(w, g, members)
+}
+
+func (h *groupHandler) handlePut(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	id := r.PathValue("id")
+	var resource map[string]any
+	if err := decodeJSON(r, &resource); err != nil {
+		writeSCIMError(w, newSCIMError(400, "invalidValue", "invalid SCIM Group resource: "+err.Error()))
+		return
+	}
+	displayName := strTrim(resource["displayName"])
+
+	// members may be absent (name-only PUT) or present (full replacement).
+	var members []memberChange
+	if raw, ok := resource["members"].([]any); ok {
+		for _, item := range raw {
+			obj, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			v, _ := obj["value"].(string)
+			if v == "" {
+				if ref, _ := obj["$ref"].(string); ref != "" {
+					v = ref
+				}
+			}
+			if v != "" {
+				members = append(members, memberChange{Op: "replace", Value: v})
+			}
+		}
+	}
+
+	g, serr := h.ds.ReplaceGroup(r.Context(), sc, id, displayName, members)
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	mem, _ := h.ds.ListGroupMembersAsMembers(r.Context(), sc, g.ID)
+	writeGroup(w, g, mem)
+}
+
+func (h *groupHandler) handlePatch(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Schemas []string         `json:"schemas"`
+		Ops     []map[string]any `json:"Operations"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeSCIMError(w, newSCIMError(400, "invalidValue", "invalid SCIM PATCH: "+err.Error()))
+		return
+	}
+	patch, perr := patchGroupFromOps(body.Ops)
+	if perr != nil {
+		writeSCIMError(w, newSCIMError(400, "invalidValue", perr.Error()))
+		return
+	}
+	g, serr := h.ds.PatchGroup(r.Context(), sc, id, patch)
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	members, _ := h.ds.ListGroupMembersAsMembers(r.Context(), sc, g.ID)
+	writeGroup(w, g, members)
+}
+
+func (h *groupHandler) handleDelete(w http.ResponseWriter, r *http.Request) {
+	sc, serr := h.scope(r.Context())
+	if serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	id := r.PathValue("id")
+	if serr := h.ds.DeleteGroup(r.Context(), sc, id); serr != nil {
+		writeSCIMError(w, serr)
+		return
+	}
+	// RFC 7644 §3.2: successful DELETE → 204 No Content, empty body.
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ── Group response helpers ───────────────────────────────────────────────────
+
+func writeGroup(w http.ResponseWriter, g *groupRow, members []Member) {
+	writeJSON(w, http.StatusOK, groupToResource(g, members))
+}
+
+func writeGroupCreated(w http.ResponseWriter, g *groupRow) {
+	w.Header().Set("Location", "/scim/v2/Groups/"+g.ID)
+	writeJSON(w, http.StatusCreated, groupToResource(g, nil))
+}
+
+func groupToResource(g *groupRow, members []Member) Group {
+	return Group{
+		Schemas:     []string{groupSchema},
+		ID:          g.ID,
+		DisplayName: g.Name,
+		ExternalID:  g.ExternalID,
+		Members:     members,
+		Meta: Meta{
+			ResourceType: "Group",
+			LastModified: g.UpdatedAt,
+			Location:     "/scim/v2/Groups/" + g.ID,
+		},
+	}
+}
+
+func writeGroupList(w http.ResponseWriter, groups []groupRow) {
+	resources := make([]Group, 0, len(groups))
+	for i := range groups {
+		resources = append(resources, Group{
+			Schemas:     []string{groupSchema},
+			ID:          groups[i].ID,
+			DisplayName: groups[i].Name,
+			ExternalID:  groups[i].ExternalID,
+			Meta: Meta{
+				ResourceType: "Group",
+				LastModified: groups[i].UpdatedAt,
+				Location:     "/scim/v2/Groups/" + groups[i].ID,
+			},
+		})
+	}
+	writeJSON(w, http.StatusOK, ListResponse{
+		Schemas:      []string{"urn:ietf:params:scim:api:messages:listResponse"},
+		TotalResults: len(resources),
+		StartIndex:   1,
+		ItemsPerPage: len(resources),
+		Resources:    toAnySlice(resources),
+	})
+}
+
+func strTrim(v any) string {
+	s, _ := v.(string)
+	return strings.TrimSpace(s)
+}

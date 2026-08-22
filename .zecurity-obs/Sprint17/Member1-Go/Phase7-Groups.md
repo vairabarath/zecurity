@@ -34,3 +34,25 @@ Sync directory groups + membership so the policy engine reads directory-accurate
 
 ## Build gate
 `go build ./...` + tests: group create/sync, out-of-order 404, ACL snapshot invalidation.
+
+## Audit notes (Phase 7 final review)
+- Origin-aware group uniqueness is correctly established by `controller/migrations/034_scim_directory_sync.sql`:
+  it runs `DROP CONSTRAINT IF EXISTS groups_workspace_id_name_key` (the legacy
+  `UNIQUE (workspace_id, name)` from `012_groups_acl.sql`), then adds two origin-scoped
+  partial unique indexes:
+  - `idx_groups_manual_name` ON `(workspace_id, name)` WHERE `origin IN ('manual','system')`
+  - `idx_groups_scim_external_id` ON `(workspace_id, connection_id, external_id)` WHERE `origin = 'scim'`
+  So a `scim` group and a `manual` group may share a display name, and scim identity is
+  keyed on `(connection, external_id)`, not name. Intended; no schema change needed.
+- The read-only review's "Bug #1" (supposed cross-origin/cross-connection name
+  uniqueness with a misleading 409) was a FALSE POSITIVE — raised from a truncated read
+  of migration 034 that missed the `DROP CONSTRAINT` at the top. No action required.
+- The single confirmed defect, "Bug #2" (RFC 7644 `replace` op with multiple member
+  values silently kept only the last member), is FIXED in `controller/internal/scim/groups.go`
+  (`groupPatch.Ops []patchOp` preserves the operation boundary; `PatchGroup` resets the
+  working set exactly once per replace op and applies all its members). Regression tests added
+  to `controller/internal/scim/groups_integration_test.go`:
+  - `TestGroups_Integration / patch replace with MULTIPLE values sets the exact set (Bug #2)`
+  - `TestGroups_Integration / mixed replace/add/remove in request order (Bug #2)`
+  - `TestGroups_HTTP / multi-value replace via real RFC 7644 array form` (GET asserts exact member IDs)
+  Fix verified: `gofmt` clean, `go build ./...`, `go vet ./...`, `go test ./internal/scim/... -count=1` all pass against a live Postgres. Not yet committed.
