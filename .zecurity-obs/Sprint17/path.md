@@ -165,9 +165,11 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 
 #### Phase 8 — Identity conflict workflow  `[I]`
 > See [[Sprint17/Member1-Go/Phase8-Identity-Conflict-Workflow]]. Depends on Phase 5.
-- [ ] **M1-8a** `scim_identity_conflicts`: `409 identity_conflict` on JIT/manual collision; one pending per key; consistent across verbs; no auto-takeover.
-- [ ] **M1-8b** Accept-Link (atomic: link + `provisioning_owner→scim`, preserve local) / Reject / Reopen — all audited; GraphQL admin queries.
-- [ ] **Build gate:** `go build ./...` + conflict-FSM tests.
+- [x] **M1-8a** `scim_identity_conflicts`: `409 identity_conflict` on JIT/manual collision (Provision/Update/Deprovision/Reactivate); one pending per `(workspace,connection,canonical_identity_key)` (reused on retry, never duplicated — guard skips insert when any row exists so a REJECTED conflict stays rejected); consistent across all verbs; no auto-takeover. Best-effort persistence: write failure is audited (`scim.user.conflict_persist_failed`), never swallowed, and never blocks the 409.
+- [x] **M1-8b** Accept-Link (atomic tx: verify pending → verify `identity.mapping.break_glass` → confirm/insert `external_identities` link → `provisioning_owner→scim` (immutable `provisioned_by` untouched, so roles/policies/devices preserved) → audit `scim.user.conflict_approved`); Reject / Reopen(→pending, audit `scim.user.conflict_reopened`) — all audited, fail-closed on invalid transitions. GraphQL admin API: `scimConflicts(connectionId)` query + `acceptScimConflict`/`rejectScimConflict`/`reopenScimConflict` mutations (boundary `@hasRole(roles:[ADMIN])`; accept enforces `identity.mapping.break_glass` server-side, ADMIN alone → 403).
+- [x] **Build gate:** `go build ./...` + `go vet ./...` + `TestConflict_Integration` (12 subtests, all pass on live Postgres); full `go test ./...` green except the pre-existing/environmental `internal/permission` `ca_root` failure (unrelated to Phase 8).
+- [!] **Known gap:** `scim_identity_conflicts` (migration 034) has no `resolution_reason` column, so the accept/reject/reopen `reason` is captured only in the audit `Details`, not persisted on the conflict row. Persisting reason on the row needs a follow-up migration (deferred — out of Phase 8 scope per "no migration unless schema insufficient"; flagged here).
+- [!] **Schema note:** conflict terminal state is `approved` (migration 034 CHECK = pending/approved/rejected/expired), not `linked`; Phase 8 uses `approved`.
 
 #### Phase 9 — Connection lifecycle + health + sync instances  `[I]`
 > See [[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]]. Depends on Phase 5.

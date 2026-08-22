@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/scim"
 )
 
@@ -45,7 +46,7 @@ func (r *Resolver) validateSCIMConnection(
 ) error {
 	conn, err := r.IdpStore.GetByID(ctx, connectionID)
 	if err != nil {
-		if errors.Is(err, errors.New("identity connection not found")) {
+		if errors.Is(err, idp.ErrConnectionNotFound) {
 			return fmt.Errorf("SCIM connection not found")
 		}
 		return fmt.Errorf("get SCIM connection: %w", err)
