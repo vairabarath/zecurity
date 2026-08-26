@@ -16,27 +16,32 @@ tags: [react, admin, scim, frontend, conflict, pending-05]
 ## Goal
 Surface the SCIM provisioning-conflicts queue for a connection and let an admin Accept-Link (link directory claim to existing user), Reject, or Reopen — each requiring a reason; Accept additionally requires the `identity.mapping.break_glass` permission (ADMIN alone is denied — `DirectoryService.AcceptLink` returns `403` server-side). The denial reaches the client as `extensions.code === "FORBIDDEN"` with the server's message intact — see gap 3 below.
 
-## Feasible now (core surface exists) — with three known data gaps
+## Feasible now (core surface exists) — all three known gaps now closed
 - Query `scimConflicts(connectionId: ID!): [ScimConflict!]!` (admin-scoped).
 - Mutations `acceptScimConflict` / `rejectScimConflict` / `reopenScimConflict` (each take `connectionId`, `canonicalKey`, `reason`).
-- `ScimConflict` exposes `id/workspaceId/connectionId/userId/canonicalKey/scimExternalId/status/resolutionReason/createdAt/resolvedAt`.
+- `ScimConflict` exposes `id/workspaceId/connectionId/userId/canonicalKey/scimExternalId/scimUsernameSnapshot/scimEmailSnapshot/status/resolutionReason/createdAt/resolvedAt`.
 - Break-glass enforcement is real and server-side: `DirectoryService.AcceptLink` (`internal/scim/conflict.go`) does an explicit `HasPermission(workspace, actor, identity.mapping.break_glass)` check and returns `403` when absent — ADMIN role alone is insufficient, exactly as ADR-025 §3.2 requires.
 
-**This phase is standalone-buildable** — ship `ScimConflicts.tsx` as its own page rather than a panel
-in `IdpConnectionDetail.tsx`, which does not exist yet (see
-[[Sprint17/Member1-Frontend/Phase1-SCIM-Connection-Config]] ordering note).
+**This phase is standalone-buildable** — and remains so. FE-1 has since created
+`IdpConnectionDetail.tsx`, so a panel there is now possible too, but shipping `ScimConflicts.tsx` as
+its own page is still the recommended shape: the queue is per-connection but admins reach it as a
+work list, not as a connection tab.
 
-### Known gaps (do not treat this phase as gap-free)
+### Known gaps (all three now closed — kept for the record)
 
-1. **No human-readable context on a conflict row (backend GraphQL gap).**
+1. **Human-readable context on a conflict row — FIXED 2026-08-26 (commit b5c1bce).**
    Migration 034 stores `scim_username_snapshot` and `scim_email_snapshot` on
    `scim_identity_conflicts` — the columns exist *precisely* for this screen (ADR-025 §4.1 lists them
-   as required conflict-record fields) — but **neither is exposed on the GraphQL `ScimConflict`
-   type**. With only `userId: ID!`, the queue renders raw UUIDs and an admin has no way to tell which
-   human a conflict is about. **Backend follow-up: expose `scimUsernameSnapshot` /
-   `scimEmailSnapshot` (and ideally resolve `userId` → `User`).**
+   as required conflict-record fields) — and both are **now exposed on the GraphQL `ScimConflict`
+   type** as `scimUsernameSnapshot: String` / `scimEmailSnapshot: String`. Render them so an admin
+   can see WHO the conflict is about instead of a bare UUID.
+   Two nuances from the schema comment: they are **nullable**, and null for conflicts raised by verbs
+   that carry no directory payload (deprovision / reactivate) and for rows written before the
+   snapshot was captured — so handle the empty case, falling back to `canonicalKey`.
    This does **not** conflict with the "never show email as the identity key" rule below: a snapshot
    shown as *context* is not the same as email used as a *matching key*.
+   Still not resolved server-side: `userId` remains a bare `ID!` and is not resolved to a `User`.
+   That is a nice-to-have, not a blocker — the snapshots carry the human context.
 
 2. **`resolutionReason` — FIXED 2026-08-26.**
    Migration `034_scim_directory_sync.sql` now carries the column (in the `CREATE TABLE` **and** a matching `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so databases that already ran 034 pick it up on re-apply), and
@@ -73,7 +78,7 @@ in `IdpConnectionDetail.tsx`, which does not exist yet (see
 | `admin/src/graphql/queries.graphql` + `mutations.graphql` | `scimConflicts` query + the three conflict mutations (already in schema; ensure codegen picks them up). |
 
 ## Steps
-- [ ] List pending conflicts for the connection (`scimConflicts(connectionId)`); show `canonicalKey` + `scimExternalId` + existing user.
+- [ ] List pending conflicts for the connection (`scimConflicts(connectionId)`); show `canonicalKey` + `scimExternalId` + the `scimUsernameSnapshot`/`scimEmailSnapshot` context (falling back to `canonicalKey` when both are null) + existing user.
 - [ ] **Accept-Link** — reason required; calls `acceptScimConflict`. Detect the break-glass denial via `extensions.code === "FORBIDDEN"` (gap 3 above) and show "requires the identity.mapping.break_glass permission"; the server message is safe to display verbatim. Do **not** string-match. Treat `code: "INTERNAL"` as an unexpected failure, not a denial.
 - [ ] **Reject** / **Reopen** — reason required; calls `rejectScimConflict` / `reopenScimConflict`; reflected in `status` (pending → approved/rejected → pending).
 - [ ] **Handle all four statuses.** Migration 034's CHECK is `pending | approved | rejected | expired`. `expired` is a valid terminal state no step here covers — render it (read-only, no actions) rather than falling through to an unknown-status blank.
@@ -87,3 +92,9 @@ in `IdpConnectionDetail.tsx`, which does not exist yet (see
 
 ## Build gate
 `cd admin && npm run codegen && npm run build` green; manual: create a conflict (backend test fixture), Accept/Reject/Reopen with/without break-glass. Verify the denial surfaces in the UI as `extensions.code === "FORBIDDEN"` with a readable message, and that the `scim.user.conflict_approved` / `_rejected` audit rows and the persisted `resolution_reason` are written server-side.
+
+## Audit notes
+- **2026-08-26 — gap 1 CLOSED by b5c1bce.** `scimUsernameSnapshot` / `scimEmailSnapshot` are now on the GraphQL `ScimConflict` type (`controller/graph/idp.graphqls`). The "neither is exposed" finding is stale. Remaining nice-to-have (NOT a blocker, do not treat as a gap): `userId` is still a bare `ID!` rather than a resolved `User`.
+- Gaps 2 (`resolutionReason` persisted) and 3 (`ErrorPresenter` structured extensions) were already recorded FIXED and re-confirmed: `presenter.go` handles both `scim.SCIMError` (codes) and `apperr.UserError` (verbatim, no code).
+- **Error-branching boundary (2026-08-26).** `extensions.code` branching is correct **for this phase** — `acceptScimConflict`'s break-glass denial is a `scim.SCIMError` and carries `FORBIDDEN`. It is NOT correct for FE-1's `updateScimConfig` enable refusal, which travels as `apperr.UserError` and is surfaced verbatim **without** a code. Never string-match in either place.
+- FE-1's page shells now exist, so this phase's "IdpConnectionDetail.tsx does not exist yet" note is stale — but the standalone-page recommendation stands on its own merits.

@@ -16,8 +16,15 @@ tags: [react, admin, scim, frontend, groups, pending-05]
 ## Goal
 In group listings/detail, always show the group's origin so admins never mistake a directory-pushed group for a local one: `Engineering · SCIM` / `· Local` / `· System`. Display-name alone is forbidden.
 
-## Backend prerequisite / gap (MUST close first)
-The `Group` GraphQL type (graph/policy.graphqls) exposes only `id/name/description/members/resources/createdAt/updatedAt`. It does **not** expose `origin` (or `connectionId`/`externalId`), even though the `groups` table carries `origin` (`manual`/`scim`/`system`) and `external_id` (per migration 034/035). The UI cannot label origin without this field.
+## Backend prerequisite — CLOSED 2026-08-26 (commit b5c1bce)
+The `Group` GraphQL type (`controller/graph/policy.graphqls`) now exposes the provenance this phase needs:
+- `origin: String!` — `manual` | `scim` | `system`. Read-only; the directory owns scim-origin groups.
+- `externalId: String` — SCIM group id for scim-origin groups; null for manual/system.
+- `connectionId: String` — the source connection, which makes the `Engineering · SCIM (Okta)` form possible.
+
+Resolved in `controller/graph/resolvers/policy_helpers.go:99` via `originOrManual(row.Origin)` (origin is NOT NULL in the DB; the helper defaults defensively). The `Group` model carries all three (`controller/graph/models_gen.go:120-131`).
+
+**No backend follow-up is required for this phase.**
 
 ## Files
 | File | Change |
@@ -27,16 +34,21 @@ The `Group` GraphQL type (graph/policy.graphqls) exposes only `id/name/descripti
 | `admin/src/graphql/queries.graphql` | add `Group.origin` (after backend exposes it). |
 
 ## Steps
-- [ ] Expose `origin` on `Group` (backend gap — block).
+- [x] ~~Expose `origin` on `Group`~~ — done backend-side in b5c1bce (`origin`, `externalId`, `connectionId`). No longer a blocker.
+- [ ] Select `origin` (and `connectionId` for the source-connection form) in `GetGroups` / group-detail queries; regenerate codegen.
 - [ ] Render `name · <Origin>` everywhere a group name appears (list, detail, policy assignment, member rows).
-- [ ] SCIM-origin groups may additionally show the source connection (e.g. `Engineering · SCIM (Okta)`) when `connectionId` is also exposed.
+- [ ] SCIM-origin groups may additionally show the source connection (e.g. `Engineering · SCIM (Okta)`) — `connectionId` is exposed, so resolve it to a display name via `idpConnections` (FE-1's `GetIdpConnections` already fetches `displayName`).
 
 ## Rules
 - Never display a bare group name without its origin suffix.
 - Origin is read-only (directory owns SCIM group names/metadata; Zecurity owns manual groups).
 
 ## Deferred / blocked
-- Blocked on the backend `Group.origin` exposure (documented above).
+- **Nothing is blocked.** The `Group.origin` exposure landed in b5c1bce.
+
+## Audit notes
+- **2026-08-26 — backend gap CLOSED by b5c1bce.** Verified in `controller/graph/policy.graphqls` (`origin: String!`, `externalId: String`, `connectionId: String` on `Group`), `controller/graph/models_gen.go:120-131`, and the resolver `controller/graph/resolvers/policy_helpers.go:99`. The "exposes only id/name/description/members/resources/createdAt/updatedAt" finding is stale — do not re-raise it.
+- `connectionId` is exposed too, so the optional `Engineering · SCIM (Okta)` form is buildable without further backend work.
 
 ## Build gate
 `cd admin && npm run codegen && npm run build` green; visual: SCIM/Local/System groups each labelled; no bare display names.
