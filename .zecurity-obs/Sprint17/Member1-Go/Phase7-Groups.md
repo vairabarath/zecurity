@@ -4,7 +4,7 @@ member: M1
 sprint: 17
 phase: 7
 title: SCIM Groups
-status: planned
+status: done
 depends_on: [5]
 tags: [go, identity, scim, groups, policy, pending-05]
 ---

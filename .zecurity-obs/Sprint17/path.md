@@ -177,7 +177,7 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 - [x] **M1-9b** `last_sync_at` → **Identity Health**: Healthy (≤24h) / Delayed (≤72h) / Disconnected (>72h or null) / Disabled (status≠active); derived in `DirectoryService.IdentityHealth`; surfaced on `WorkspaceIdpConnection.identityHealth` + `lastSyncAt` in GraphQL.
 - [x] **M1-9c** `scim_sync_instances`: `EnsureSyncInstance` opens one per connection (reused until reconnect); provisioned users/external_identities/groups stamp `sync_instance_id`; `ReconcileStaleUsers`/`ReconcileStaleGroups` identify prior-instance objects on reconnect. Added migration `035_groups_sync_instance.sql` (the only schema gap — `groups.sync_instance_id` was omitted from 034).
 - [x] **Build gate:** `go build ./...` + `go vet ./...` + `lifecycle_integration_test.go` (10 subtests) + full `go test ./internal/scim/... ./internal/idp/... ./graph/...` green on live Postgres.
-- [!] **Deferred (out of scope per ADR §12 re-enable flow):** the explicit authorized admin action that re-enrolls `unmanaged` users back to `scim` ownership after a re-enable. Phase 9 guarantees ownership is NOT auto-restored on re-enable; the re-enroll verb is a separate future action. Frontend health badge is Phase 12 (backend surface only here).
+- [!] **Deferred (out of scope per ADR §12 re-enable flow):** the explicit authorized admin action that re-enrolls `unmanaged` users back to `scim` ownership after a re-enable. Phase 9 guarantees ownership is NOT auto-restored on re-enable; the re-enroll verb is a separate future action. The backend Identity Health surface (`identityHealth` + `lastSyncAt`) delivered here is consumed by **FE Phase 2** (the health badge).
 
 ### Outbox — already merged (Sprint 18)
 
@@ -188,11 +188,60 @@ The durable outbox is **not implemented in this sprint** — it is `controller/i
 which registers the handler that executes device/cert revocation.
 
 ## Frontend (hand-off to M1-Frontend / React — coordinated, not in the backend core)
-- [ ] SCIM config on a connection (provider preset, mapping fields, enable-SCIM, mint token shown-once, SCIM base URL).
-- [ ] Identity Health indicator (Healthy / Delayed / Disconnected).
-- [ ] Directory-owned fields read-only ("Managed by Google Workspace / Microsoft Entra").
-- [ ] Provisioning-Conflicts queue (Accept-Link / Reject / Reopen).
-- [ ] Origin-labelled groups (`Engineering · SCIM` / `· Local` / `· System`) — never display-name alone.
+
+> Phase files live in `Member1-Frontend/Phase{1..5}-*.md`. **Three of the five items are blocked on
+> backend GraphQL gaps** (no read/write of `subjectClaim`/`scimIdentifier`/`scimEnabled`, no
+> `origin` on `Group`, no provisioning-source on `User`) — documented in each phase file's
+> "Backend prerequisite / gap" section.
+>
+> **There is no IdP UI in the admin app today.** `admin/src/pages/` has no `IdpConnections.tsx` /
+> `IdpConnectionDetail.tsx`, and `admin/src/graphql/queries.graphql` has zero `idpConnection*`
+> operations. **FE-1 owns creating both host pages and the connection queries**, so its *unblocked
+> half* (page shells + connection queries + SCIM base-URL box + token mint/rotate/revoke panel) must
+> land before FE-2 can mount anything. Only **FE-4** is genuinely standalone-buildable today, via its
+> own `ScimConflicts.tsx` page.
+>
+> **Suggested order:** FE-1 (unblocked half) → FE-2 + FE-4 → [backend gap closure] → FE-1 (mapping/
+> enable half), FE-3, FE-5.
+
+- [ ] **FE-1** SCIM config on a connection (provider preset, mapping fields, enable-SCIM, mint token shown-once, SCIM base URL) — [[Sprint17/Member1-Frontend/Phase1-SCIM-Connection-Config]] · *split: **base-URL box + token panel + host pages/queries buildable now**; mapping fields + enable/disable toggle blocked on backend config-surface gap*. **Ships the `IdpConnections.tsx` / `IdpConnectionDetail.tsx` shells that FE-2 needs.**
+- [ ] **FE-2** Identity Health indicator (Healthy / Delayed / Disconnected) — [[Sprint17/Member1-Frontend/Phase2-Identity-Health-Indicator]] · *backend surface complete (`identityHealth` + `lastSyncAt`), but **blocked on FE-1** — both files it edits are created by FE-1 and do not exist yet. The badge component alone can be built and unit-tested in isolation.*
+- [ ] **FE-3** Directory-owned fields read-only ("Managed by Google Workspace / Microsoft Entra") — [[Sprint17/Member1-Frontend/Phase3-Directory-Owned-Readonly]] · *blocked: backend `User` provisioning-source gap*.
+- [ ] **FE-4** Provisioning-Conflicts queue (Accept-Link / Reject / Reopen) — [[Sprint17/Member1-Frontend/Phase4-Provisioning-Conflicts-Queue]] · *buildable now (standalone page)*. **Three known data gaps**, see the phase file: (a) `scim_username_snapshot`/`scim_email_snapshot` exist in migration 034 but are **not exposed on GraphQL `ScimConflict`**, so rows render raw UUIDs; (b) `resolutionReason` is exposed but has no column → always null (M1-8 known gap); (c) `ErrorPresenter` exists (`controller/graph/resolvers/presenter.go`, wired at `controller/cmd/server/main.go:317`) and is fail-closed — only `*apperr.UserError`/`*gqlerror.Error` reach the client verbatim — but no SCIM resolver returns `apperr` (`grep -c apperr` on `idp.resolvers.go`/`scim_helpers.go` is 0), so `AcceptScimConflict`'s `fmt.Errorf("acceptScimConflict: %w", serr)` break-glass `403` is masked to `message: "an unexpected error occurred"` + `extensions.code="INTERNAL"` and is indistinguishable from any other error; every SCIM mutation error (conflict not found, invalid transition, missing reason, connection not found) is masked the same way, so this also blocks FE-1's token/enable flows, not just FE-4.
+- [ ] **FE-5** Origin-labelled groups (`Engineering · SCIM` / `· Local` / `· System`) — never display-name alone — [[Sprint17/Member1-Frontend/Phase5-Origin-Labelled-Groups]] · *blocked: backend `Group.origin` gap*.
+
+### Backend GraphQL follow-up required to unblock the frontend
+
+> **All 9 landed 2026-08-26.** The GraphQL exposure work is done — schema, resolvers, stores and
+> `make gqlgen` + `npm run codegen` regenerated; `go build`/`go vet` and the full live-DB suite green.
+> Migration `034` now persists the conflict resolution reason, and `ErrorPresenter` now surfaces
+> client-actionable `scim.SCIMError`s with `extensions.code`/`status`/`scimType` while still masking
+> every 5xx, zero-status and 401. **FE-1/3/4/5 are unblocked.**
+>
+> **`updateScimConfig` is deliberately NOT a free `scim_enabled` setter** — see §3.2. Disable is
+> always allowed; enable runs the fail-closed `MappingGate` and today always refuses, pointing the
+> admin at `enableScimBreakGlass`. Editing `subjectClaim`/`scimIdentifier` force-disables SCIM in the
+> same write, because `resolveScope` re-reads both on every push and a changed mapping would
+> otherwise apply to the next directory write.
+>
+> **Note:** `go generate ./graph/...` (per CLAUDE.md) is a **no-op** — there are no `go:generate`
+> directives. The real command is `make gqlgen` from the repo root, which uses an isolated
+> GOMODCACHE.
+
+
+None of these are backend *logic* gaps — every value already exists in the database and the Go
+layer. They are **exposure** gaps: the data is not on the GraphQL surface, so the UI cannot read it.
+This is the critical path for FE-1/3/5 and for FE-4's usability.
+
+- [x] `WorkspaceIdpConnection`: expose `subjectClaim`, `scimIdentifier`, `scimEnabled` (columns exist per migration 034; `conn.SubjectClaim` / `conn.ScimIdentifier` are already read in `graph/resolvers/idp.resolvers.go`). → **FE-1**
+- [x] Add an `updateScimConfig` mutation covering `subjectClaim` / `scimIdentifier` / `scimEnabled`. Today `scim_enabled` can only be set via `enableScimBreakGlass` (unproven-mapping override) or `testIdpConnection` — there is **no clean enable path for a proven mapping and no disable path at all**. → **FE-1**
+- [x] Expose the provider preset / per-connection override (profiles live in `internal/scim/profiles.go`, not on the GraphQL surface). → **FE-1**
+- [x] `User`: expose `provisionedBy` / `provisioningOwner` (or a derived `directoryManaged: Boolean!`). Columns exist per migration 034; the type currently exposes only `id/email/role/provider/createdAt`. → **FE-3**
+- [x] `Group`: expose `origin` (and ideally `externalId` / `connectionId`). Columns exist per migrations 034/035; the type exposes none of them. → **FE-5**
+- [x] `ScimConflict`: expose `scimUsernameSnapshot` / `scimEmailSnapshot` (columns exist in migration 034 and are required conflict-record fields per ADR-025 §4.1); ideally resolve `userId` → `User`. Without these the conflicts queue shows raw UUIDs. → **FE-4**
+- [x] Add `scim_identity_conflicts.resolution_reason` (folded into migration `034`, not a new file), so the exposed `ScimConflict.resolutionReason` stops being permanently null (M1-8 known gap). → **FE-4**
+- [x] Have SCIM resolvers return `apperr.UserError` for user-actionable failures and extend the existing `ErrorPresenter` (`controller/graph/resolvers/presenter.go`, wired at `controller/cmd/server/main.go:317`) to surface `scim.SCIMError.Status`/`ScimType` in `extensions` — today `AcceptScimConflict` wraps via `fmt.Errorf("acceptScimConflict: %w", serr)` and with no `apperr` in SCIM resolvers the fail-closed presenter masks it to `message:"an unexpected error occurred"` + `code:"INTERNAL"`. → **FE-4** (also unblocks FE-1 — all SCIM mutation errors are masked the same way: token mint/enable, conflict not found, invalid transition, missing reason, connection not found).
+- [x] Fix the stale comment on `controller/graph/idp.graphqls` (~line 101): `# pending | linked | rejected` should be `# pending | approved | rejected | expired`, matching `internal/scim/conflict.go:44` and migration 034's CHECK constraint.
 
 ## Final Build Gates
 ```bash
@@ -202,16 +251,123 @@ cd admin && npm run codegen && npm run build                                    
 ```
 
 ## Acceptance Criteria
-- [ ] SCIM provisions/updates users; directory-owned attrs read-only (mutation-layer enforced); Zecurity-owned editable.
-- [ ] Deprovision (`active=false`/`DELETE`) **suspends/deletes + bumps generation + kills sessions + invalidates ACL**, atomically.
-- [ ] Deprovision enqueues `device.trust.revoke.requested` via `SideEffectSink` → the **durable outbox**, committed in the same tx as the identity mutation; a downstream (device) failure never rolls back identity.
-- [ ] `identity.mapping.break_glass` is a dedicated permission (ADMIN alone is denied); overrides require reason + audit.
-- [ ] Mapping validation is an **active probe-user round-trip**; unproven mapping keeps SCIM disabled.
-- [ ] Groups sync with `origin`/`external_id`; out-of-order member → `404`; policy snapshot invalidated.
-- [ ] JIT/manual collision → `409 identity_conflict` + pending record; Accept-Link is admin-authorized, atomic, audited, never email-based.
-- [ ] Connection DISABLE suspends users reversibly; DELETE guarded; Identity Health surfaces sync staleness.
-- [ ] Every SCIM path is scoped to `(workspace_id, connection_id)` from the token — never from the payload.
-- [ ] SCIM conformance suite green; **live Okta/Entra interop = PENDING tenant access** (do not mark done without tenants).
+
+> **Verification pass 2026-08-26** — all ten criteria checked against code (graph + source reads).
+> Result at audit time: **5 met, 1 partially met, 3 not met, 1 not run.** Criterion 9 has since
+> been **fixed and is now met** (Finding B, below); criteria 2 and 5 remain open. Details inline below; the three defects
+> found are written up in full under "Verification findings" after the list.
+
+- [~] SCIM provisions/updates users; directory-owned attrs read-only (mutation-layer enforced); Zecurity-owned editable. — **PARTIAL.** Backend half met: `DirectoryService.Update` rejects non-directory attrs via `supportedDirectoryAttr` → `400 invalidValue`, and a non-`scim` `provisioning_owner` → `409 identity_conflict`. The **admin-UI read-only half is FE-3**, which is unbuilt and blocked on `User` provisioning-source exposure.
+- [ ] Deprovision (`active=false`/`DELETE`) **suspends/deletes + bumps generation + kills sessions + invalidates ACL**, atomically. — **NOT MET — see Finding A.** Status change + generation bump + outbox enqueue are correctly atomic, but **sessions are never proactively killed and no audit event is emitted** on the SCIM path. Also, `DELETE` does **not** remove `group_members`, which ADR-025 §5 explicitly requires.
+- [x] Deprovision enqueues `device.trust.revoke.requested` via `SideEffectSink` → the **durable outbox**, committed in the same tx as the identity mutation; a downstream (device) failure never rolls back identity. — **MET.** `sink.Enqueue(ctx, tx, evt)` runs inside the deprovision tx (`directory_service.go` ~L385); downstream consumption is decoupled through the outbox (PENDING-13), so a device failure cannot roll identity back.
+- [x] `identity.mapping.break_glass` is a dedicated permission (ADMIN alone is denied); overrides require reason + audit. — **MET.** `DirectoryService.AcceptLink` performs an explicit `perm.HasPermission(..., permission.BreakGlassMapping)` and returns `403` when absent; possession is row-based in `workspace_permissions` with no role implication; `enableScimBreakGlass` rejects an empty reason.
+- [ ] Mapping validation is an **active probe-user round-trip**; unproven mapping keeps SCIM disabled. — **VERIFIED NOT MET (2026-08-26).** `MappingGateResult.WithRoundTrip` (`internal/scim/validation.go:137`) has **no production caller** — only comments and its own definition reference it. There is exactly one non-test `MappingGate.Evaluate` call site, inside **`mutationResolver.TestIdpConnection`** (`graph/resolvers/idp.resolvers.go:236`), and it passes a bare `scim.BreakGlassOverride{}` without ever attaching a round-trip result. `TestIdpConnection` is precisely where ADR-025 §3.1 places the probe, so the validation entry point exists and runs the gate but **never performs the `POST→GET→verify→DELETE` probe**. M1-4b deferred the literal `POST→GET→verify→DELETE` probe to Phase 5, but **Phase 5 never wired it**. Consequence: `MappingState` can never become `proven`, so `scimEnabledAllowed` is permanently `false` and **SCIM is only enablable via `enableScimBreakGlass`** — break-glass is the sole path, not the exception. ADR-025 §3.1 requires the active probe. This is a **sprint-completion blocker**, not a frontend gap.
+- [x] Groups sync with `origin`/`external_id`; out-of-order member → `404`; policy snapshot invalidated. — **MET.** All group reads/writes filter `origin = 'scim'` and are connection-scoped; `userIDsByExternalOrUUID` resolves members only within the token's connection and excludes tombstones; unknown members are collected and returned as `404` **before any mutation** (`groups.go:212`, `:323`); `NotifyPolicyChange` fires on membership change and delete.
+- [x] JIT/manual collision → `409 identity_conflict` + pending record; Accept-Link is admin-authorized, atomic, audited, never email-based. — **MET** on the backend. Keyed on the canonical identity key, never email; `AcceptLink` is a single tx (verify pending → permission → link → ownership flip → audit). *Caveat:* the `reason` is audit-only (no `resolution_reason` column), and the admin queue that consumes this is **FE-4, unbuilt**.
+- [x] Connection DISABLE suspends users reversibly; DELETE guarded; Identity Health surfaces sync staleness. — **MET** (fully verified). `DeleteIdpConnection` refuses when `linked > 0 && !force`; with `force` it soft-deletes, preserves users, flips ownership to `unmanaged`, audits, and bumps sessions. `resolveScope` refuses all SCIM writes with `403` when `conn.Status != "active"` or `!conn.ScimEnabled`; the resolver-side lifecycle path (`bumpUsers` / `revokeConnectionSessions` / `DeleteIdpConnection`) reaches `Revoker.afterBump`, so **this path does really kill sessions** — unlike the SCIM deprovision path (Finding A). `IdentityHealth` is derived server-side.
+- [x] Every SCIM path is scoped to `(workspace_id, connection_id)` from the token — never from the payload. — **FIXED 2026-08-26 (Finding B closed).** Scope *derivation* is correct and payload is never trusted, but the deprovision path never validates the **target user** against that scope, and the generation bump has no tenant predicate at all — a valid token for workspace A can bump a user in workspace B.
+- [ ] SCIM conformance suite green; **live Okta/Entra interop = PENDING tenant access** (do not mark done without tenants). — **NOT RUN.** No conformance suite, runner, or fixture exists anywhere in the repo (`find -iname '*conformance*'` returns nothing outside planning docs). Interop remains gated on tenant access.
+
+### Verification findings (2026-08-26 code audit)
+
+Three defects found while checking the acceptance criteria. All are **backend**, all are in code
+already marked `[x]` with green build gates — they are behavioral, so compiling tests did not catch
+them.
+
+#### Finding A — SCIM deprovision never kills sessions and emits no audit event  *(criterion 2)*
+
+`Revoker.BumpGenerationTx` (`internal/identity/revocation.go:80`) is a bare
+`return r.bump(ctx, tx, ...)`. It **never calls `afterBump`** — despite its own doc comment
+asserting *"The best-effort session invalidation + audit still happen via afterBump on the
+Revoker's pool (post-commit, never failing the tx)."* That comment is false, and it is almost
+certainly why this passed review.
+
+Graph confirms it: `afterBump` is reachable only through `BumpGeneration` (the non-Tx variant).
+`DirectoryService.Deprovision` uses `BumpGenerationTx`, so on the SCIM path:
+
+- `InvalidateUserSessions` never runs → **live sessions are not proactively revoked**
+- the `ActionGenerationBump` audit event is never published → **deprovision is unaudited**
+
+Verified package-wide, not just in one file: the only `Publish` / `audit.RecordTx` call sites in
+`internal/scim` are in `conflict.go` (the conflict workflow) and `provisioner.go:93` (the *provision*
+path). Neither `Deprovision` nor the `users.go` handler layer emits anything. Suspending or deleting
+a user via SCIM therefore leaves **no audit record at all**.
+
+The generation bump itself *is* persisted, so access dies at the next token refresh rather than
+immediately. ADR-025's opening paragraph calls precisely this class of failure "a **security
+incident** … not a bug". The resolver-side connection-lifecycle path is unaffected (it calls
+`BumpGeneration`), which is why criterion 8 passes and criterion 2 does not.
+
+**Fix:** call `afterBump` from the caller after `tx.Commit`, or give `BumpGenerationTx` a returned
+closure the caller invokes post-commit. Do **not** call it inside the tx (it must not fail the tx).
+
+**Also in scope of criterion 2:** ADR-025 §5 specifies `DELETE` → "soft-delete **+ remove
+`group_members`**". `Deprovision` never touches `group_members`; the only deletes are in
+`groups.go` (member-replace/patch). A deleted user therefore remains in their groups and continues
+to appear in ACL snapshot membership.
+
+#### Finding B — cross-tenant generation bump via the deprovision path  *(criterion 9)*
+
+The target user is never validated against the token's scope before mutation:
+
+1. `handleDelete` / `handlePatch` pass the raw path `id` straight to `Deprovision` — **no scoped
+   `Get` first** (`DirectoryService.Get` *is* correctly scoped, but is not on this path).
+2. `Deprovision`'s only gate is `provisioningOwner(ctx, userID)`, whose query is
+   `SELECT provisioning_owner FROM users WHERE id = $1` — **no `tenant_id`, no `connection_id`**.
+3. The status `UPDATE` does bind `tenant_id`, so it silently affects **0 rows** — pgx returns no
+   error for that, so execution continues.
+4. `Revoker.bump` then runs
+   `UPDATE users SET identity_generation = identity_generation + 1 WHERE id = $1` — **no tenant
+   predicate at all** (`tenantID` is a parameter used only for the audit event).
+
+Net effect: a valid SCIM token for workspace A, given the UUID of a SCIM-owned user in workspace B,
+returns `204` while bumping **B's** identity generation (invalidating that user's sessions on
+refresh) and enqueueing a `device.trust.revoke.requested` event carrying `WorkspaceID = A` with
+`UserID` from B — asking PENDING-13 to revoke a foreign user's device trust.
+
+**The outbox does not incidentally block this.** `outbox_events` (migration `033`) constrains
+`workspace_id` and `user_id` with two *independent* FKs and no composite tenant check — workspace A
+and user-in-B each exist, so both FKs are satisfied, `Enqueue` succeeds, and the tx commits. There is
+no accidental rollback saving this path.
+
+**Mitigating:** requires knowing a target UUID, and no scoped SCIM read exposes out-of-scope IDs, so
+this is not enumerable through the API. It is still a tenant-isolation break.
+
+**FIXED — 2026-08-26.** Landed across two overlapping efforts; final state:
+
+- `Revoker.bump` carries `AND tenant_id = $2`.
+- All four SCIM mutation paths (Provision / Update / Deprovision / Reactivate) resolve ownership
+  through `scopedProvisioningOwner`, which binds `tenant_id` **and** reports connection linkage.
+- A 0-row status `UPDATE` in Deprovision/Reactivate is now `404` rather than silent fall-through.
+- The dead unscoped `provisioningOwner` helper was **deleted**. It had survived with a doc comment
+  claiming it was scoped while its body was not — precisely the trap that produced this bug.
+- The `hard`-delete membership purge is scoped to the workspace
+  (`group_id IN (SELECT id FROM groups WHERE workspace_id = $2)`).
+
+> **Subtlety worth keeping.** The first cut of the scoped guard used an INNER JOIN on
+> `external_identities`, which regressed ADR-025 §4.1: a JIT/manual user has no link row, so the
+> collision that must return `409 identity_conflict` (and write a pending conflict record) instead
+> returned `404` and recorded nothing. Existence and linkage must stay separate signals —
+> `tenant_id` gates the `404`; linkage feeds the conflict decision. `scopedProvisioningOwner` now
+> returns `(owner, linked, err)` and every caller treats `!linked || owner != "scim"` as a conflict,
+> which also keeps a SCIM user owned by a *different* connection out of the current token's reach.
+
+**Regression test:** `TestDeprovision_Integration/cross-tenant_deprovision_is_refused_and_mutates_nothing`
+(`internal/scim/deprovision_integration_test.go`). It lives in that file deliberately — it is the only
+SCIM test that wires a real `Revoker` and sink; under `users_integration_test.go`'s `nil, nil` the
+generation and outbox assertions pass vacuously. Verified by reintroducing the full original defect:
+the cross-tenant call then returns **success (`<nil>`, HTTP 204)** and the test fails. It also carries
+a positive control asserting the in-scope path still bumps, tombstones, and enqueues.
+
+#### Finding C — the mapping probe was never wired  *(criterion 5)*
+
+Detailed inline at criterion 5 above. `MappingGateResult.WithRoundTrip` has no production caller, so
+`scimEnabledAllowed` is permanently `false` and break-glass is the only route to enabling SCIM.
+
+> **Method note:** findings A and B were reached via the code graph (`trace_path` on `afterBump`
+> confirming a single reachable caller) and confirmed by reading source. Criteria 3, 4, 6, 7, 8 were
+> verified positively against source. Not independently re-run: the phase build gates themselves —
+> these findings are behavioral, and the existing tests pass.
 
 ## Deferred (out of scope this sprint)
 - Contractor→employee explicit **identity linking / conversion** → Stage 4 Governance, reserved [[ADR-026-Identity-Governance-and-Identity-Linking]].
