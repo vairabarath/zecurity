@@ -4,7 +4,7 @@ member: M1-Frontend
 sprint: 17
 phase: 4
 title: Provisioning-Conflicts Queue
-status: pending
+status: implemented-unverified
 depends_on: [M1-8]
 tags: [react, admin, scim, frontend, conflict, pending-05]
 ---
@@ -98,3 +98,5 @@ work list, not as a connection tab.
 - Gaps 2 (`resolutionReason` persisted) and 3 (`ErrorPresenter` structured extensions) were already recorded FIXED and re-confirmed: `presenter.go` handles both `scim.SCIMError` (codes) and `apperr.UserError` (verbatim, no code).
 - **Error-branching boundary (2026-08-26).** `extensions.code` branching is correct **for this phase** — `acceptScimConflict`'s break-glass denial is a `scim.SCIMError` and carries `FORBIDDEN`. It is NOT correct for FE-1's `updateScimConfig` enable refusal, which travels as `apperr.UserError` and is surfaced verbatim **without** a code. Never string-match in either place.
 - FE-1's page shells now exist, so this phase's "IdpConnectionDetail.tsx does not exist yet" note is stale — but the standalone-page recommendation stands on its own merits.
+- **2026-08-26 — implemented (unverified).** Added `admin/src/pages/ScimConflicts.tsx` (standalone `/scim-conflicts` work-list page, connection selector + `?connectionId=` deep-link from `IdpConnectionDetail.tsx`), `admin/src/components/scim/ConflictRow.tsx` (per-row Accept/Reject/Reopen + mandatory reason dialog, status-appropriate actions, snapshot→canonicalKey fallback, resolutionReason display), `admin/src/lib/conflictError.ts` (extensions.code-aware classifier: FORBIDDEN/NOT_FOUND/CONFLICT known, **missing/absent code → INTERNAL, never a denial** — same boundary that bit FE-1), and the three conflict ops in `queries.graphql`/`mutations.graphql` (codegen regenerated). Reopen appears only on `rejected` rows; `expired` renders read-only (allowed by the migration CHECK but never emitted server-side — noted, not asserted). Gates: `codegen` regenerated (real diff), `build` green, `test` **8 files / 40 tests** (FE-4 delta = **+1 file / +13 tests** — `ConflictRow.test.tsx`; prior total was 7/27 from FE-3), `lint` delta = 0. The 403/FORBIDDEN path is wired on Accept only (the single server-side break-glass check); Reject/Reopen never return FORBIDDEN. No `no-cache` on the conflict mutations — they return `Boolean!` with no secret, so the FE-1 secret-mutation rule does not apply.
+- **Manual gate NOT run.** Per the build-gate, acceptance requires a backend conflict fixture to exercise Accept/Reject/Reopen with/without break-glass and confirm `extensions.code === "FORBIDDEN"` surfaces with a readable message plus server-side audit rows + persisted `resolution_reason`. Marked `implemented-unverified` (not `done`) until that manual pass runs.

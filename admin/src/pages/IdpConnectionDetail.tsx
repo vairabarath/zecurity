@@ -113,6 +113,13 @@ export default function IdpConnectionDetail() {
       <ScimConfigCard connection={connection} onChanged={() => void refetch()} />
       <ScimBaseUrlBox />
       <ScimTokenPanel connectionId={connection.id} />
+      {connection.scimEnabled ? (
+        <div>
+          <Button variant="outline" onClick={() => navigate(`/scim-conflicts?connectionId=${connection.id}`)}>
+            View provisioning conflicts
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }

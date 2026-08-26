@@ -422,3 +422,26 @@ query GetScimProviderProfiles {
     quirks
   }
 }
+
+# Provisioning-conflicts queue for a connection (Sprint 17 FE-4, ADR-025 §4.1/§9).
+# ListConflicts returns every status newest-first (no server-side filter), so the
+# UI renders resolved rows (with their resolutionReason) alongside pending ones.
+query GetScimConflicts($connectionId: ID!) {
+  scimConflicts(connectionId: $connectionId) {
+    id
+    workspaceId
+    connectionId
+    userId
+    canonicalKey
+    scimExternalId
+    # Directory-claimed context so an admin sees WHO the conflict is about instead
+    # of a bare UUID. Null for deprovision/reactivate-raised conflicts and for
+    # rows written before the snapshot was captured — fall back to canonicalKey.
+    scimUsernameSnapshot
+    scimEmailSnapshot
+    status # pending | approved | rejected | expired (mutation CHECK; backend emits pending/approved/rejected only — expired is allowed but never written)
+    resolutionReason
+    createdAt
+    resolvedAt
+  }
+}
