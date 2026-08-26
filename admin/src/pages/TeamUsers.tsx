@@ -19,12 +19,16 @@ import {
 } from '@/components/ui/dialog'
 import { EmptyState, StatusPill } from '@/lib/console'
 import { cn } from '@/lib/utils'
+import { UserOwnershipBadge } from '@/components/users/UserOwnershipBadge'
 
 type User = {
   id: string
   email: string
   role: string
   createdAt: string
+  provider: string
+  provisioningOwner: string
+  provisionedBy: string
 }
 
 function roleTone(role: string): 'ok' | 'info' | 'warn' | 'muted' {
@@ -210,7 +214,15 @@ export default function TeamUsers() {
                     {/* Name */}
                     <div className="flex min-w-0 items-center gap-3">
                       <UserAvatar email={user.email} />
-                      <span className="truncate text-[14px] font-semibold">{user.email}</span>
+                      <div className="min-w-0">
+                        <span className="block truncate text-[14px] font-semibold">{user.email}</span>
+                        <div className="mt-1">
+                          <UserOwnershipBadge
+                            provisioningOwner={user.provisioningOwner}
+                            provider={user.provider}
+                          />
+                        </div>
+                      </div>
                     </div>
 
                     {/* Email */}
