@@ -4,8 +4,9 @@ import { ChevronRight, KeyRound } from 'lucide-react'
 import { GetIdpConnectionsDocument } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
-import { EmptyState, ErrorState, StatusPill, relativeTime } from '@/lib/console'
+import { EmptyState, ErrorState, StatusPill } from '@/lib/console'
 import { cn } from '@/lib/utils'
+import { IdentityHealthBadge } from '@/components/scim/IdentityHealthBadge'
 
 type IdpConnection = {
   id: string
@@ -110,9 +111,11 @@ export default function IdpConnections() {
                   label={conn.scimEnabled ? 'SCIM on' : 'SCIM off'}
                   tone={conn.scimEnabled ? 'info' : 'muted'}
                 />
-                <span className="w-28 shrink-0 text-right text-xs text-muted-foreground">
-                  {conn.scimEnabled ? `synced ${relativeTime(conn.lastSyncAt)}` : ''}
-                </span>
+                <IdentityHealthBadge
+                  identityHealth={conn.identityHealth}
+                  lastSyncAt={conn.lastSyncAt}
+                  scimEnabled={conn.scimEnabled}
+                />
                 <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
               </button>
             ))}

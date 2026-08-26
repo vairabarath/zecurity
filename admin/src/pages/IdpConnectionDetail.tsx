@@ -8,11 +8,15 @@ import { EmptyState, ErrorState, StatusPill } from '@/lib/console'
 import { ScimConfigCard, type ScimConfigConnection } from '@/components/scim/ScimConfigCard'
 import { ScimBaseUrlBox } from '@/components/scim/ScimBaseUrlBox'
 import { ScimTokenPanel } from '@/components/scim/ScimTokenPanel'
+import { IdentityHealthBadge } from '@/components/scim/IdentityHealthBadge'
 
 type IdpConnectionDetailData = ScimConfigConnection & {
   protocol: string
   issuer: string
   status: string
+  identityHealth: string
+  lastSyncAt?: string | null
+  scimEnabled: boolean
 }
 
 export default function IdpConnectionDetail() {
@@ -97,6 +101,11 @@ export default function IdpConnectionDetail() {
                 platform-managed
               </span>
             ) : null}
+            <IdentityHealthBadge
+              identityHealth={connection.identityHealth}
+              lastSyncAt={connection.lastSyncAt}
+              scimEnabled={connection.scimEnabled}
+            />
           </div>
         </div>
       </div>
