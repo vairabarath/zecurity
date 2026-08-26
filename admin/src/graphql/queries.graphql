@@ -362,3 +362,60 @@ query GetDevicePostureVisibility($profileId: ID!) {
     }
   }
 }
+
+# --- SCIM / IdP connections (ADR-025 §3, Sprint 17 FE-1) --------------------
+# clientSecret is intentionally never selected — it is write-only server-side.
+# scimEnabledAllowed is deliberately NOT selected here: it lives only on
+# IdpTestResult, and pre-gating the enable toggle client-side would duplicate a
+# fail-closed server gate (ADR-025 §3.1). The server refuses; the UI reacts.
+query GetIdpConnections {
+  idpConnections {
+    id
+    protocol
+    provider
+    displayName
+    issuer
+    clientId
+    discoveryUrl
+    scopes
+    domainHint
+    status
+    managed
+    lastSyncAt
+    identityHealth
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+  }
+}
+
+query GetScimTokens($connectionId: ID!) {
+  scimTokens(connectionId: $connectionId) {
+    id
+    workspaceId
+    connectionId
+    label
+    createdBy
+    createdAt
+    lastUsedAt
+    expiresAt
+    revokedAt
+  }
+}
+
+# Static built-in provider presets. Data only — used to offer defaults and to
+# show what a connection's per-connection overrides deviate FROM.
+query GetScimProviderProfiles {
+  scimProviderProfiles {
+    key
+    displayName
+    defaultSubjectClaim
+    defaultScimIdentifier
+    supportsCreate
+    supportsDelete
+    supportsPatch
+    paginationOk
+    supportsProbeLifecycle
+    quirks
+  }
+}

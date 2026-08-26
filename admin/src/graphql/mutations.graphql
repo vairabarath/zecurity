@@ -274,3 +274,55 @@ mutation UnbindResourceFromProfile($profileId: ID!, $resourceId: ID!) {
 mutation DeleteDeviceProfile($id: ID!) {
   deleteDeviceProfile(id: $id)
 }
+
+# --- SCIM configuration + token lifecycle (ADR-025 §3, Sprint 17 FE-1) ------
+# SAFETY: editing subjectClaim/scimIdentifier on a SCIM-enabled connection
+# force-disables SCIM in the same server-side write — re-enabling is deliberate.
+mutation UpdateScimConfig($connectionId: ID!, $input: UpdateScimConfigInput!) {
+  updateScimConfig(connectionId: $connectionId, input: $input) {
+    id
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+    identityHealth
+    lastSyncAt
+  }
+}
+
+mutation MintScimToken($connectionId: ID!, $label: String, $expiresAt: Time) {
+  mintScimToken(connectionId: $connectionId, label: $label, expiresAt: $expiresAt) {
+    plaintext
+    token {
+      id
+      label
+      createdAt
+      expiresAt
+      revokedAt
+    }
+  }
+}
+
+mutation RotateScimToken($connectionId: ID!, $label: String, $expiresAt: Time) {
+  rotateScimToken(connectionId: $connectionId, label: $label, expiresAt: $expiresAt) {
+    plaintext
+    token {
+      id
+      label
+      createdAt
+      expiresAt
+      revokedAt
+    }
+  }
+}
+
+mutation RevokeScimToken($connectionId: ID!, $tokenId: ID!) {
+  revokeScimToken(connectionId: $connectionId, tokenId: $tokenId)
+}
+
+# Enable SCIM despite an unproven identity mapping (ADR-025 §3.2). Requires the
+# explicit identity.mapping.break_glass permission — ADMIN role alone is NOT
+# sufficient — plus a mandatory reason. Audited as
+# scim.mapping.break_glass_override.
+mutation EnableScimBreakGlass($connectionId: ID!, $reason: String!) {
+  enableScimBreakGlass(connectionId: $connectionId, reason: $reason)
+}
