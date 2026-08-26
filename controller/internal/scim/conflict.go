@@ -55,16 +55,21 @@ const (
 
 // ConflictRecord is a single pending/resolved identity-conflict row.
 type ConflictRecord struct {
-	ID               string
-	WorkspaceID      string
-	ConnectionID     string
-	UserID           string // the unrelated JIT/manual identity occupying the key
-	CanonicalKey     string
-	Status           string
-	ScimExternalID   string
-	ResolutionReason string
-	CreatedAt        string
-	ResolvedAt       string
+	ID             string
+	WorkspaceID    string
+	ConnectionID   string
+	UserID         string // the unrelated JIT/manual identity occupying the key
+	CanonicalKey   string
+	Status         string
+	ScimExternalID string
+	// Directory-claimed identifiers captured when the conflict was raised.
+	// Context for the admin queue only — never used for matching (ADR-025 §4.1
+	// forbids email-based identity resolution).
+	ScimUsernameSnapshot string
+	ScimEmailSnapshot    string
+	ResolutionReason     string
+	CreatedAt            string
+	ResolvedAt           string
 }
 
 // conflictScope builds a scope with only the workspace/connection bound. The
@@ -85,7 +90,16 @@ func (s *DirectoryService) conflictScope(workspaceID, connectionID string) *scop
 // The unique partial index idx_conflicts_uniq_pending guarantees at most one
 // pending row per key; ON CONFLICT DO NOTHING reuses the existing pending row on
 // retry rather than creating a duplicate.
-func (s *DirectoryService) ensurePendingConflict(ctx context.Context, workspaceID, connectionID, canonicalKey, userID, scimExternalID string) {
+// conflictSnapshot carries what the directory claimed about the identity at
+// conflict time. Empty for verbs with no directory payload (deprovision /
+// reactivate), which is why the columns are nullable.
+type conflictSnapshot struct {
+	externalID string
+	userName   string
+	email      string
+}
+
+func (s *DirectoryService) ensurePendingConflict(ctx context.Context, workspaceID, connectionID, canonicalKey, userID string, snap conflictSnapshot) {
 	if canonicalKey == "" {
 		return
 	}
@@ -122,12 +136,14 @@ func (s *DirectoryService) ensurePendingConflict(ctx context.Context, workspaceI
 	rowID := uuid.New().String()
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO scim_identity_conflicts
-		   (id, workspace_id, connection_id, user_id, canonical_identity_key, scim_external_id, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+		   (id, workspace_id, connection_id, user_id, canonical_identity_key,
+		    scim_external_id, scim_username_snapshot, scim_email_snapshot, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')
 		 ON CONFLICT (workspace_id, connection_id, canonical_identity_key)
 		   WHERE status = 'pending'
 		   DO NOTHING`,
-		rowID, workspaceID, connectionID, userID, canonicalKey, scimExternalID,
+		rowID, workspaceID, connectionID, userID, canonicalKey,
+		nullIfText(snap.externalID), nullIfText(snap.userName), nullIfText(snap.email),
 	)
 	if err != nil {
 		// Best-effort persistence: the SCIM 409 still returns. Record (do not
@@ -160,7 +176,9 @@ func (s *DirectoryService) lookupConflict(ctx context.Context, workspaceID, conn
 	var c ConflictRecord
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, workspace_id, connection_id, user_id, canonical_identity_key,
-		        scim_external_id, status,
+		        scim_external_id,
+		        COALESCE(scim_username_snapshot, ''), COALESCE(scim_email_snapshot, ''),
+		        status, COALESCE(resolution_reason, ''),
 		        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 		        COALESCE(TO_CHAR(resolved_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS resolved_at
 		   FROM scim_identity_conflicts
@@ -168,7 +186,8 @@ func (s *DirectoryService) lookupConflict(ctx context.Context, workspaceID, conn
 		  ORDER BY created_at DESC LIMIT 1`,
 		workspaceID, connectionID, canonicalKey,
 	).Scan(&c.ID, &c.WorkspaceID, &c.ConnectionID, &c.UserID, &c.CanonicalKey,
-		&c.ScimExternalID, &c.Status, &c.CreatedAt, &c.ResolvedAt)
+		&c.ScimExternalID, &c.ScimUsernameSnapshot, &c.ScimEmailSnapshot,
+		&c.Status, &c.ResolutionReason, &c.CreatedAt, &c.ResolvedAt)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, nil
@@ -183,7 +202,9 @@ func (s *DirectoryService) lookupConflict(ctx context.Context, workspaceID, conn
 func (s *DirectoryService) ListConflicts(ctx context.Context, workspaceID, connectionID string) ([]ConflictRecord, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, workspace_id, connection_id, user_id, canonical_identity_key,
-		        scim_external_id, status,
+		        scim_external_id,
+		        COALESCE(scim_username_snapshot, ''), COALESCE(scim_email_snapshot, ''),
+		        status, COALESCE(resolution_reason, ''),
 		        TO_CHAR(created_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS created_at,
 		        COALESCE(TO_CHAR(resolved_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS resolved_at
 		   FROM scim_identity_conflicts
@@ -199,7 +220,8 @@ func (s *DirectoryService) ListConflicts(ctx context.Context, workspaceID, conne
 	for rows.Next() {
 		var c ConflictRecord
 		if err := rows.Scan(&c.ID, &c.WorkspaceID, &c.ConnectionID, &c.UserID, &c.CanonicalKey,
-			&c.ScimExternalID, &c.Status, &c.CreatedAt, &c.ResolvedAt); err != nil {
+			&c.ScimExternalID, &c.ScimUsernameSnapshot, &c.ScimEmailSnapshot,
+			&c.Status, &c.ResolutionReason, &c.CreatedAt, &c.ResolvedAt); err != nil {
 			return nil, fmt.Errorf("scan conflict: %w", err)
 		}
 		out = append(out, c)
@@ -282,9 +304,10 @@ func (s *DirectoryService) AcceptLink(ctx context.Context, workspaceID, connecti
 	// 2) Mark the conflict approved (idempotent against re-accept).
 	if _, err := tx.Exec(ctx,
 		`UPDATE scim_identity_conflicts
-		    SET status = 'approved', resolved_at = NOW(), resolved_by = $2
+		    SET status = 'approved', resolved_at = NOW(), resolved_by = $2,
+		        resolution_reason = $3
 		  WHERE id = $1 AND status = 'pending'`,
-		c.ID, nullIfText(actorUserID),
+		c.ID, nullIfText(actorUserID), nullIfText(reason),
 	); err != nil {
 		return newSCIMError(500, "", "resolve conflict: "+err.Error())
 	}
@@ -358,11 +381,19 @@ func (s *DirectoryService) transitionConflict(ctx context.Context, workspaceID, 
 	}
 	defer tx.Rollback(ctx)
 
+	// Reopen returns the row to 'pending', which by definition has no
+	// resolution — so it CLEARS resolved_at/resolved_by/resolution_reason
+	// rather than stamping a "resolution" onto an unresolved conflict. The
+	// reopen reason is not lost: ADR-025 §4.1 requires it to be audited, and
+	// scim.user.conflict_reopened carries it in the same transaction below.
 	if _, err := tx.Exec(ctx,
 		`UPDATE scim_identity_conflicts
-		    SET status = $3, resolved_at = NOW(), resolved_by = $4
+		    SET status            = $3,
+		        resolved_at       = CASE WHEN $3 = 'pending' THEN NULL ELSE NOW() END,
+		        resolved_by       = CASE WHEN $3 = 'pending' THEN NULL ELSE $4::uuid END,
+		        resolution_reason = CASE WHEN $3 = 'pending' THEN NULL ELSE $5::text END
 		  WHERE id = $1 AND status = $2`,
-		c.ID, from, to, nullIfText(actorUserID),
+		c.ID, from, to, nullIfText(actorUserID), nullIfText(reason),
 	); err != nil {
 		return newSCIMError(500, "", "transition conflict: "+err.Error())
 	}

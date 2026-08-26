@@ -151,11 +151,14 @@ export type DiscoveredService = {
 
 export type Group = {
   __typename?: 'Group';
+  connectionId?: Maybe<Scalars['ID']['output']>;
   createdAt: Scalars['String']['output'];
   description?: Maybe<Scalars['String']['output']>;
+  externalId?: Maybe<Scalars['String']['output']>;
   id: Scalars['ID']['output'];
   members: Array<User>;
   name: Scalars['String']['output'];
+  origin: Scalars['String']['output'];
   resources: Array<Resource>;
   updatedAt: Scalars['String']['output'];
 };
@@ -168,8 +171,11 @@ export enum IdpProtocol {
 export type IdpTestResult = {
   __typename?: 'IdpTestResult';
   issuer?: Maybe<Scalars['String']['output']>;
+  mappingState: Scalars['String']['output'];
   message?: Maybe<Scalars['String']['output']>;
   ok: Scalars['Boolean']['output'];
+  reason?: Maybe<Scalars['String']['output']>;
+  scimEnabledAllowed: Scalars['Boolean']['output'];
 };
 
 export type Invitation = {
@@ -183,6 +189,7 @@ export type Invitation = {
 
 export type Mutation = {
   __typename?: 'Mutation';
+  acceptScimConflict: Scalars['Boolean']['output'];
   addGroupMember: Group;
   addProfileRequirement: DeviceProfile;
   assignResourceToGroup: Resource;
@@ -200,15 +207,19 @@ export type Mutation = {
   deleteRemoteNetwork: Scalars['Boolean']['output'];
   deleteResource: Scalars['Boolean']['output'];
   deleteShield: Scalars['Boolean']['output'];
+  enableScimBreakGlass: Scalars['Boolean']['output'];
   forceDeleteResource: Scalars['Boolean']['output'];
   generateConnectorToken: ConnectorToken;
   generateShieldToken: ShieldToken;
+  grantPermission: WorkspacePermission;
   initiateAuth: AuthInitPayload;
   mintScimToken: ScimTokenMintResult;
   promoteDiscoveredService: Resource;
   protectResource: Resource;
+  rejectScimConflict: Scalars['Boolean']['output'];
   removeGroupMember: Group;
   removeProfileRequirement: DeviceProfile;
+  reopenScimConflict: Scalars['Boolean']['output'];
   revokeConnector: Scalars['Boolean']['output'];
   revokeDevice: Scalars['Boolean']['output'];
   revokeScimToken: Scalars['Boolean']['output'];
@@ -226,6 +237,14 @@ export type Mutation = {
   updateGroup: Group;
   updateIdpConnection: WorkspaceIdpConnection;
   updateResource: Resource;
+  updateScimConfig: WorkspaceIdpConnection;
+};
+
+
+export type MutationAcceptScimConflictArgs = {
+  canonicalKey: Scalars['String']['input'];
+  connectionId: Scalars['ID']['input'];
+  reason: Scalars['String']['input'];
 };
 
 
@@ -303,6 +322,7 @@ export type MutationDeleteGroupArgs = {
 
 
 export type MutationDeleteIdpConnectionArgs = {
+  force: Scalars['Boolean']['input'];
   id: Scalars['ID']['input'];
 };
 
@@ -322,6 +342,12 @@ export type MutationDeleteShieldArgs = {
 };
 
 
+export type MutationEnableScimBreakGlassArgs = {
+  connectionId: Scalars['ID']['input'];
+  reason: Scalars['String']['input'];
+};
+
+
 export type MutationForceDeleteResourceArgs = {
   id: Scalars['ID']['input'];
 };
@@ -336,6 +362,12 @@ export type MutationGenerateConnectorTokenArgs = {
 export type MutationGenerateShieldTokenArgs = {
   remoteNetworkId: Scalars['ID']['input'];
   shieldName: Scalars['String']['input'];
+};
+
+
+export type MutationGrantPermissionArgs = {
+  permission: Scalars['String']['input'];
+  userId: Scalars['ID']['input'];
 };
 
 
@@ -365,6 +397,13 @@ export type MutationProtectResourceArgs = {
 };
 
 
+export type MutationRejectScimConflictArgs = {
+  canonicalKey: Scalars['String']['input'];
+  connectionId: Scalars['ID']['input'];
+  reason: Scalars['String']['input'];
+};
+
+
 export type MutationRemoveGroupMemberArgs = {
   groupId: Scalars['ID']['input'];
   userId: Scalars['ID']['input'];
@@ -374,6 +413,13 @@ export type MutationRemoveGroupMemberArgs = {
 export type MutationRemoveProfileRequirementArgs = {
   checkId: Scalars['String']['input'];
   profileId: Scalars['ID']['input'];
+};
+
+
+export type MutationReopenScimConflictArgs = {
+  canonicalKey: Scalars['String']['input'];
+  connectionId: Scalars['ID']['input'];
+  reason: Scalars['String']['input'];
 };
 
 
@@ -475,6 +521,12 @@ export type MutationUpdateResourceArgs = {
   input: UpdateResourceInput;
 };
 
+
+export type MutationUpdateScimConfigArgs = {
+  connectionId: Scalars['ID']['input'];
+  input: UpdateScimConfigInput;
+};
+
 export enum NetworkHealth {
   Degraded = 'DEGRADED',
   Offline = 'OFFLINE',
@@ -529,6 +581,8 @@ export type Query = {
   remoteNetwork?: Maybe<RemoteNetwork>;
   remoteNetworks: Array<RemoteNetwork>;
   resources: Array<Resource>;
+  scimConflicts: Array<ScimConflict>;
+  scimProviderProfiles: Array<ScimProviderProfile>;
   scimTokens: Array<ScimToken>;
   shield?: Maybe<Shield>;
   shields: Array<Shield>;
@@ -595,6 +649,11 @@ export type QueryRemoteNetworkArgs = {
 
 export type QueryResourcesArgs = {
   remoteNetworkId: Scalars['String']['input'];
+};
+
+
+export type QueryScimConflictsArgs = {
+  connectionId: Scalars['ID']['input'];
 };
 
 
@@ -665,6 +724,36 @@ export type ScanResult = {
   serviceName: Scalars['String']['output'];
 };
 
+export type ScimConflict = {
+  __typename?: 'ScimConflict';
+  canonicalKey: Scalars['String']['output'];
+  connectionId: Scalars['ID']['output'];
+  createdAt: Scalars['Time']['output'];
+  id: Scalars['ID']['output'];
+  resolutionReason?: Maybe<Scalars['String']['output']>;
+  resolvedAt?: Maybe<Scalars['Time']['output']>;
+  scimEmailSnapshot?: Maybe<Scalars['String']['output']>;
+  scimExternalId?: Maybe<Scalars['String']['output']>;
+  scimUsernameSnapshot?: Maybe<Scalars['String']['output']>;
+  status: Scalars['String']['output'];
+  userId: Scalars['ID']['output'];
+  workspaceId: Scalars['ID']['output'];
+};
+
+export type ScimProviderProfile = {
+  __typename?: 'ScimProviderProfile';
+  defaultScimIdentifier: Scalars['String']['output'];
+  defaultSubjectClaim: Scalars['String']['output'];
+  displayName: Scalars['String']['output'];
+  key: Scalars['String']['output'];
+  paginationOk: Scalars['Boolean']['output'];
+  quirks: Array<Scalars['String']['output']>;
+  supportsCreate: Scalars['Boolean']['output'];
+  supportsDelete: Scalars['Boolean']['output'];
+  supportsPatch: Scalars['Boolean']['output'];
+  supportsProbeLifecycle: Scalars['Boolean']['output'];
+};
+
 export type ScimToken = {
   __typename?: 'ScimToken';
   connectionId: Scalars['ID']['output'];
@@ -730,12 +819,20 @@ export type UpdateResourceInput = {
   remoteNetworkId?: InputMaybe<Scalars['String']['input']>;
 };
 
+export type UpdateScimConfigInput = {
+  scimEnabled?: InputMaybe<Scalars['Boolean']['input']>;
+  scimIdentifier?: InputMaybe<Scalars['String']['input']>;
+  subjectClaim?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type User = {
   __typename?: 'User';
   createdAt: Scalars['String']['output'];
   email: Scalars['String']['output'];
   id: Scalars['ID']['output'];
   provider: Scalars['String']['output'];
+  provisionedBy: Scalars['String']['output'];
+  provisioningOwner: Scalars['String']['output'];
   role: Role;
 };
 
@@ -755,12 +852,17 @@ export type WorkspaceIdpConnection = {
   displayName: Scalars['String']['output'];
   domainHint?: Maybe<Scalars['String']['output']>;
   id: Scalars['ID']['output'];
+  identityHealth: Scalars['String']['output'];
   issuer: Scalars['String']['output'];
+  lastSyncAt?: Maybe<Scalars['Time']['output']>;
   managed: Scalars['Boolean']['output'];
   protocol: IdpProtocol;
   provider: Scalars['String']['output'];
+  scimEnabled: Scalars['Boolean']['output'];
+  scimIdentifier: Scalars['String']['output'];
   scopes: Scalars['String']['output'];
   status: Scalars['String']['output'];
+  subjectClaim: Scalars['String']['output'];
 };
 
 export type WorkspaceListResult = {
@@ -772,6 +874,14 @@ export type WorkspaceLookupResult = {
   __typename?: 'WorkspaceLookupResult';
   found: Scalars['Boolean']['output'];
   workspace?: Maybe<WorkspacePublic>;
+};
+
+export type WorkspacePermission = {
+  __typename?: 'WorkspacePermission';
+  grantedBy?: Maybe<Scalars['ID']['output']>;
+  permission: Scalars['String']['output'];
+  userId: Scalars['ID']['output'];
+  workspaceId: Scalars['ID']['output'];
 };
 
 export type WorkspacePublic = {

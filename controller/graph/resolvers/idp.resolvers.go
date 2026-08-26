@@ -10,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
@@ -57,7 +60,7 @@ func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, i
 		DomainHint:   input.DomainHint,
 	})
 	if errors.Is(err, idp.ErrConnectionNotFound) {
-		return nil, fmt.Errorf("updateIdpConnection: connection not found")
+		return nil, apperr.UserErrorf("updateIdpConnection: connection not found")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("updateIdpConnection: %w", err)
@@ -81,7 +84,7 @@ func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, i
 func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string, status string) (*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
 	if status != "active" && status != "disabled" {
-		return nil, fmt.Errorf("setIdpConnectionStatus: status must be 'active' or 'disabled'")
+		return nil, apperr.UserErrorf("setIdpConnectionStatus: status must be 'active' or 'disabled'")
 	}
 
 	// Disabling removes a login path — guard against locking the workspace out.
@@ -93,7 +96,7 @@ func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string
 
 	if err := r.IdpStore.SetStatus(ctx, tc.TenantID, id, status); err != nil {
 		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return nil, fmt.Errorf("setIdpConnectionStatus: connection not found")
+			return nil, apperr.UserErrorf("setIdpConnectionStatus: connection not found")
 		}
 		return nil, fmt.Errorf("setIdpConnectionStatus: %w", err)
 	}
@@ -148,7 +151,7 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 	// Refuse to remove a connection that still governs users without an
 	// explicit confirmation.
 	if linked > 0 && !force {
-		return false, fmt.Errorf("deleteIdpConnection: connection still has %d linked user(s); pass force=true to soft-delete (users are preserved, not removed)", linked)
+		return false, apperr.UserErrorf("deleteIdpConnection: connection still has %d linked user(s); pass force=true to soft-delete (users are preserved, not removed)", linked)
 	}
 
 	if err := r.guardLastLoginPath(ctx, tc); err != nil {
@@ -164,7 +167,7 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 		}
 		if err := r.IdpStore.SoftDeleteConnection(ctx, tc.TenantID, id); err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
-				return false, fmt.Errorf("deleteIdpConnection: connection not found")
+				return false, apperr.UserErrorf("deleteIdpConnection: connection not found")
 			}
 			return false, fmt.Errorf("deleteIdpConnection: soft-delete: %w", err)
 		}
@@ -173,7 +176,7 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 		// No linked users: a clean hard-delete is safe.
 		if err := r.IdpStore.DeleteWorkspaceConnection(ctx, tc.TenantID, id); err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
-				return false, fmt.Errorf("deleteIdpConnection: connection not found")
+				return false, apperr.UserErrorf("deleteIdpConnection: connection not found")
 			}
 			return false, fmt.Errorf("deleteIdpConnection: %w", err)
 		}
@@ -205,13 +208,13 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 	conn, err := r.IdpStore.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return nil, fmt.Errorf("testIdpConnection: connection not found")
+			return nil, apperr.UserErrorf("testIdpConnection: connection not found")
 		}
 		return nil, fmt.Errorf("testIdpConnection: %w", err)
 	}
 	// Tenant guard: only test your own connection (GetByID is not tenant-scoped).
 	if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
-		return nil, fmt.Errorf("testIdpConnection: connection not found")
+		return nil, apperr.UserErrorf("testIdpConnection: connection not found")
 	}
 
 	// 1. OIDC discovery probe (issuer reachability + required endpoints).
@@ -252,6 +255,111 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 		ScimEnabledAllowed: res.ScimEnabledAllowed,
 		Reason:             &res.Reason,
 	}, nil
+}
+
+// UpdateScimConfig is the resolver for the updateScimConfig field.
+//
+// Three rules, all from ADR-025 §3, and none of them optional:
+//
+//  1. Turning SCIM OFF is always allowed. It is the fail-closed direction.
+//  2. Turning SCIM ON goes through the fail-closed MappingGate and succeeds
+//     only for a PROVEN mapping. ADMIN alone must NOT be able to force it —
+//     §3.2 is explicit that "an ordinary administrator confirmation cannot
+//     bypass failed mapping validation". Without this the dedicated
+//     enableScimBreakGlass permission would be decorative.
+//  3. Editing subjectClaim/scimIdentifier invalidates whatever proof enabled
+//     the connection, so a mapping edit force-disables SCIM in the SAME write.
+//     resolveScope re-reads both extractors on every SCIM push, so leaving it
+//     enabled would apply the new mapping to the next directory write and
+//     silently split or merge accounts.
+func (r *mutationResolver) UpdateScimConfig(ctx context.Context, connectionID string, input graph.UpdateScimConfigInput) (*graph.WorkspaceIdpConnection, error) {
+	tc := tenant.MustGet(ctx)
+
+	conn, err := r.IdpStore.GetByID(ctx, connectionID)
+	if err != nil {
+		if errors.Is(err, idp.ErrConnectionNotFound) {
+			return nil, apperr.UserErrorf("updateScimConfig: connection not found")
+		}
+		return nil, fmt.Errorf("updateScimConfig: %w", err)
+	}
+	if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
+		return nil, apperr.UserErrorf("updateScimConfig: connection not found")
+	}
+	if conn.Managed {
+		return nil, apperr.UserErrorf("updateScimConfig: platform-managed connections are not editable")
+	}
+
+	subjectClaim, scimIdentifier := conn.SubjectClaim, conn.ScimIdentifier
+	if input.SubjectClaim != nil {
+		subjectClaim = strings.TrimSpace(*input.SubjectClaim)
+	}
+	if input.ScimIdentifier != nil {
+		scimIdentifier = strings.TrimSpace(*input.ScimIdentifier)
+	}
+	if subjectClaim == "" {
+		subjectClaim = scim.DefaultSubjectClaim
+	}
+	if scimIdentifier == "" {
+		scimIdentifier = scim.DefaultScimIdentifier
+	}
+	if err := scim.ValidateMappingConfig(subjectClaim, scimIdentifier); err != nil {
+		return nil, fmt.Errorf("updateScimConfig: %w", err)
+	}
+
+	mappingChanged := subjectClaim != conn.SubjectClaim || scimIdentifier != conn.ScimIdentifier
+
+	// Start from the current flag, then apply the rules above in order.
+	enabled := conn.ScimEnabled
+	switch {
+	case mappingChanged:
+		// Rule 3 — re-proof required. This wins over an explicit
+		// scimEnabled:true in the same input: a mapping the admin just changed
+		// has by definition not been proven under its new value.
+		enabled = false
+	case input.ScimEnabled != nil && !*input.ScimEnabled:
+		enabled = false // Rule 1
+	case input.ScimEnabled != nil && *input.ScimEnabled && !conn.ScimEnabled:
+		// Rule 2 — gate it. No break-glass override is passed here; that path
+		// is enableScimBreakGlass, which checks the dedicated permission.
+		gate := scim.NewMappingGate(conn.Provider)
+		res, gerr := gate.Evaluate(ctx, subjectClaim, scimIdentifier, scim.BreakGlassOverride{})
+		if gerr != nil {
+			return nil, fmt.Errorf("updateScimConfig: mapping validation: %w", gerr)
+		}
+		if !res.ScimEnabledAllowed {
+			reason := res.Reason
+			if reason == "" {
+				reason = "the identity mapping is not proven"
+			}
+			return nil, fmt.Errorf(
+				"updateScimConfig: cannot enable SCIM — %s. Enabling despite an unproven mapping "+
+					"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
+				reason, permission.BreakGlassMapping)
+		}
+		enabled = true
+	}
+
+	if err := r.IdpStore.SetScimMapping(ctx, tc.TenantID, connectionID, subjectClaim, scimIdentifier, enabled); err != nil {
+		if errors.Is(err, idp.ErrConnectionNotFound) {
+			return nil, apperr.UserErrorf("updateScimConfig: connection not found")
+		}
+		return nil, fmt.Errorf("updateScimConfig: %w", err)
+	}
+
+	r.auditIdp(ctx, tc, "scim.config.update", connectionID, map[string]any{
+		"subject_claim":         subjectClaim,
+		"scim_identifier":       scimIdentifier,
+		"scim_enabled":          enabled,
+		"mapping_changed":       mappingChanged,
+		"forced_disable":        mappingChanged && conn.ScimEnabled,
+		"previous_scim_enabled": conn.ScimEnabled,
+	})
+
+	updated, err := r.IdpStore.GetByID(ctx, connectionID)
+	if err != nil {
+		return nil, fmt.Errorf("updateScimConfig: reload: %w", err)
+	}
+	return r.idpConnToGQL(*updated), nil
 }
 
 // SetPlatformLoginEnabled is the resolver for the setPlatformLoginEnabled field.
@@ -404,7 +512,7 @@ func (r *mutationResolver) GrantPermission(ctx context.Context, userID string, p
 	tc := tenant.MustGet(ctx)
 
 	if userID == "" || permission == "" {
-		return nil, fmt.Errorf("grantPermission: userId and permission are required")
+		return nil, apperr.UserErrorf("grantPermission: userId and permission are required")
 	}
 
 	if err := r.PermissionStore.Grant(ctx, tc.TenantID, userID, permission, tc.UserID); err != nil {
@@ -444,18 +552,18 @@ func (r *mutationResolver) EnableScimBreakGlass(ctx context.Context, connectionI
 	tc := tenant.MustGet(ctx)
 
 	if reason == "" {
-		return false, fmt.Errorf("enableScimBreakGlass: a mandatory reason is required")
+		return false, apperr.UserErrorf("enableScimBreakGlass: a mandatory reason is required")
 	}
 
 	conn, err := r.IdpStore.GetByID(ctx, connectionID)
 	if err != nil {
 		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return false, fmt.Errorf("enableScimBreakGlass: connection not found")
+			return false, apperr.UserErrorf("enableScimBreakGlass: connection not found")
 		}
 		return false, fmt.Errorf("enableScimBreakGlass: %w", err)
 	}
 	if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
-		return false, fmt.Errorf("enableScimBreakGlass: connection not found")
+		return false, apperr.UserErrorf("enableScimBreakGlass: connection not found")
 	}
 
 	// Explicit, authoritative permission check (NOT implied by ADMIN role).
@@ -464,7 +572,7 @@ func (r *mutationResolver) EnableScimBreakGlass(ctx context.Context, connectionI
 		return false, fmt.Errorf("enableScimBreakGlass: permission check: %w", err)
 	}
 	if !held {
-		return false, fmt.Errorf("enableScimBreakGlass: requires the %q permission (ADMIN role alone is insufficient)", permission.BreakGlassMapping)
+		return false, apperr.UserErrorf("enableScimBreakGlass: requires the %q permission (ADMIN role alone is insufficient)", permission.BreakGlassMapping)
 	}
 
 	// Enable SCIM despite the unproven mapping (the override does NOT retroactively
@@ -613,6 +721,48 @@ func (r *queryResolver) ScimConflicts(ctx context.Context, connectionID string) 
 	out := make([]*graph.ScimConflict, 0, len(recs))
 	for i := range recs {
 		out = append(out, conflictToGQL(&recs[i]))
+	}
+	return out, nil
+}
+
+// ScimProviderProfiles is the resolver for the scimProviderProfiles field.
+//
+// Returns the built-in profiles (ADR-025 §3.1) in a stable, deterministic order
+// so the UI's preset picker does not reshuffle between renders — Go map
+// iteration order is randomized, so sorting here is required, not cosmetic.
+// "generic" is pinned last: it is the fallback, not a peer of the named IdPs.
+func (r *queryResolver) ScimProviderProfiles(ctx context.Context) ([]*graph.ScimProviderProfile, error) {
+	keys := make([]string, 0, len(scim.BuiltinProfiles))
+	for k := range scim.BuiltinProfiles {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		gi, gj := keys[i] == scim.GenericProfileKey, keys[j] == scim.GenericProfileKey
+		if gi != gj {
+			return gj // generic sorts last
+		}
+		return keys[i] < keys[j]
+	})
+
+	out := make([]*graph.ScimProviderProfile, 0, len(keys))
+	for _, k := range keys {
+		p := scim.BuiltinProfiles[k]
+		quirks := p.Quirks
+		if quirks == nil {
+			quirks = []string{} // non-null list in the schema
+		}
+		out = append(out, &graph.ScimProviderProfile{
+			Key:                    p.Key,
+			DisplayName:            p.DisplayName,
+			DefaultSubjectClaim:    p.DefaultSubjectClaim,
+			DefaultScimIdentifier:  p.DefaultScimIdentifier,
+			SupportsCreate:         p.Capabilities.CreateUser,
+			SupportsDelete:         p.Capabilities.DeleteUser,
+			SupportsPatch:          p.Capabilities.PatchUser,
+			PaginationOk:           p.Capabilities.PaginationOK,
+			SupportsProbeLifecycle: p.SupportsProbeLifecycle(),
+			Quirks:                 quirks,
+		})
 	}
 	return out, nil
 }

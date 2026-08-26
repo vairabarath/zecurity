@@ -161,8 +161,22 @@ CREATE TABLE IF NOT EXISTS scim_identity_conflicts (
         CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
     created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     resolved_at            TIMESTAMPTZ,
-    resolved_by            UUID
+    resolved_by            UUID,
+    -- The mandatory reason supplied to Accept-Link / Reject (ADR-025 §4.1),
+    -- stored alongside the row it explains so the admin queue is self-
+    -- describing without cross-referencing audit_logs. The audit log remains
+    -- the authoritative history; this is the current-state copy.
+    -- Nullable: a conflict returned to 'pending' by Reopen has no resolution.
+    resolution_reason      TEXT
 );
+
+-- resolution_reason was added after 034 first shipped. The CREATE TABLE above
+-- covers fresh databases, but `CREATE TABLE IF NOT EXISTS` is a no-op where the
+-- table already exists — so databases that ran the original 034 need this ALTER
+-- to pick the column up on re-apply. Same belt-and-braces pattern as the
+-- ALTER ... ADD COLUMN IF NOT EXISTS blocks above.
+ALTER TABLE scim_identity_conflicts
+    ADD COLUMN IF NOT EXISTS resolution_reason TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_conflicts_uniq_pending
     ON scim_identity_conflicts (

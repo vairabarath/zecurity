@@ -118,13 +118,16 @@ type DiscoveredService struct {
 }
 
 type Group struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	Description *string        `json:"description,omitempty"`
-	Members     []*models.User `json:"members"`
-	Resources   []*Resource    `json:"resources"`
-	CreatedAt   string         `json:"createdAt"`
-	UpdatedAt   string         `json:"updatedAt"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	Description  *string        `json:"description,omitempty"`
+	Members      []*models.User `json:"members"`
+	Resources    []*Resource    `json:"resources"`
+	CreatedAt    string         `json:"createdAt"`
+	UpdatedAt    string         `json:"updatedAt"`
+	Origin       string         `json:"origin"`
+	ExternalID   *string        `json:"externalId,omitempty"`
+	ConnectionID *string        `json:"connectionId,omitempty"`
 }
 
 type IdpTestResult struct {
@@ -197,16 +200,31 @@ type ScanResult struct {
 }
 
 type ScimConflict struct {
-	ID               string     `json:"id"`
-	WorkspaceID      string     `json:"workspaceId"`
-	ConnectionID     string     `json:"connectionId"`
-	UserID           string     `json:"userId"`
-	CanonicalKey     string     `json:"canonicalKey"`
-	ScimExternalID   *string    `json:"scimExternalId,omitempty"`
-	Status           string     `json:"status"`
-	ResolutionReason *string    `json:"resolutionReason,omitempty"`
-	CreatedAt        time.Time  `json:"createdAt"`
-	ResolvedAt       *time.Time `json:"resolvedAt,omitempty"`
+	ID                   string     `json:"id"`
+	WorkspaceID          string     `json:"workspaceId"`
+	ConnectionID         string     `json:"connectionId"`
+	UserID               string     `json:"userId"`
+	CanonicalKey         string     `json:"canonicalKey"`
+	ScimExternalID       *string    `json:"scimExternalId,omitempty"`
+	ScimUsernameSnapshot *string    `json:"scimUsernameSnapshot,omitempty"`
+	ScimEmailSnapshot    *string    `json:"scimEmailSnapshot,omitempty"`
+	Status               string     `json:"status"`
+	ResolutionReason     *string    `json:"resolutionReason,omitempty"`
+	CreatedAt            time.Time  `json:"createdAt"`
+	ResolvedAt           *time.Time `json:"resolvedAt,omitempty"`
+}
+
+type ScimProviderProfile struct {
+	Key                    string   `json:"key"`
+	DisplayName            string   `json:"displayName"`
+	DefaultSubjectClaim    string   `json:"defaultSubjectClaim"`
+	DefaultScimIdentifier  string   `json:"defaultScimIdentifier"`
+	SupportsCreate         bool     `json:"supportsCreate"`
+	SupportsDelete         bool     `json:"supportsDelete"`
+	SupportsPatch          bool     `json:"supportsPatch"`
+	PaginationOk           bool     `json:"paginationOk"`
+	SupportsProbeLifecycle bool     `json:"supportsProbeLifecycle"`
+	Quirks                 []string `json:"quirks"`
 }
 
 type ScimToken struct {
@@ -263,6 +281,12 @@ type UpdateResourceInput struct {
 	PortTo          *int    `json:"portTo,omitempty"`
 }
 
+type UpdateScimConfigInput struct {
+	SubjectClaim   *string `json:"subjectClaim,omitempty"`
+	ScimIdentifier *string `json:"scimIdentifier,omitempty"`
+	ScimEnabled    *bool   `json:"scimEnabled,omitempty"`
+}
+
 type WorkspaceIdpConnection struct {
 	ID             string      `json:"id"`
 	Protocol       IdpProtocol `json:"protocol"`
@@ -277,6 +301,9 @@ type WorkspaceIdpConnection struct {
 	Managed        bool        `json:"managed"`
 	LastSyncAt     *time.Time  `json:"lastSyncAt,omitempty"`
 	IdentityHealth string      `json:"identityHealth"`
+	SubjectClaim   string      `json:"subjectClaim"`
+	ScimIdentifier string      `json:"scimIdentifier"`
+	ScimEnabled    bool        `json:"scimEnabled"`
 }
 
 type WorkspaceListResult struct {

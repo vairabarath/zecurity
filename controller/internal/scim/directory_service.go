@@ -163,13 +163,11 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 		return nil, newSCIMError(500, "", "resolve identity: "+err.Error())
 	}
 	if found {
-		// Occupied key. If already SCIM-owned, treat as idempotent re-provision.
-		// A JIT/manual owner must not be silently taken over → conflict (Phase 8).
-		owner, perr := s.provisioningOwner(ctx, core.UserID)
+		owner, linked, perr := s.scopedProvisioningOwner(ctx, sc, core.UserID)
 		if perr != nil {
 			return nil, newSCIMError(500, "", perr.Error())
 		}
-		if owner == "scim" {
+		if owner == "scim" && linked {
 			u, uerr := s.loadUser(ctx, sc, core.UserID)
 			if uerr != nil {
 				return nil, newSCIMError(500, "", uerr.Error())
@@ -178,7 +176,8 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 		}
 		// Existing JIT/manual identity with this key → conflict. Phase 8 writes
 		// the persistent record; we refuse takeover here.
-		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, key, core.UserID, "")
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, key, core.UserID,
+			conflictSnapshot{externalID: key, userName: userNameOf(resource), email: primaryEmailOf(resource)})
 		return &provisionResult{conflict: true}, newSCIMError(409, "identity_conflict",
 			"an existing identity already owns this canonical key; admin approval required")
 	}
@@ -277,13 +276,12 @@ func (s *DirectoryService) Filter(ctx context.Context, sc *scope, filter string)
 // an unsupported/unowned attribute is rejected with 400 so the directory never
 // silently wins a tug-of-war it shouldn't (ADR-025 §4).
 func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string, patch *userPatch, syncInst string) (*User, *SCIMError) {
-	// Confirm scope + SCIM ownership before mutating.
-	owner, err := s.provisioningOwner(ctx, userID)
+	owner, linked, err := s.scopedProvisioningOwner(ctx, sc, userID)
 	if err != nil {
 		return nil, newSCIMError(404, "", "user not found")
 	}
-	if owner != "scim" {
-		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
+	if owner != "scim" || !linked {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, conflictSnapshot{})
 		return nil, newSCIMError(409, "identity_conflict",
 			"cannot update a non-SCIM owned identity via SCIM")
 	}
@@ -344,13 +342,12 @@ func (s *DirectoryService) Update(ctx context.Context, sc *scope, userID string,
 // revocation is asynchronous via the durable outbox and PENDING-13. A downstream
 // failure must never roll back this committed identity mutation.
 func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID string, hard bool, syncInst string) *SCIMError {
-	// Scope + SCIM-ownership guard (mirrors Update).
-	owner, err := s.provisioningOwner(ctx, userID)
+	owner, linked, err := s.scopedProvisioningOwner(ctx, sc, userID)
 	if err != nil {
 		return newSCIMError(404, "", "user not found")
 	}
-	if owner != "scim" {
-		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
+	if owner != "scim" || !linked {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, conflictSnapshot{})
 		return newSCIMError(409, "identity_conflict",
 			"cannot deprovision a non-SCIM owned identity via SCIM")
 	}
@@ -367,22 +364,38 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 	}
 	defer tx.Rollback(ctx)
 
-	// 1) Status change (reversible suspend or soft-delete tombstone).
-	if _, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = $3, updated_at = NOW()
 		 WHERE id = $1 AND tenant_id = $2`,
 		userID, sc.workspaceID, newStatus,
-	); err != nil {
+	)
+	if err != nil {
 		return newSCIMError(500, "", "deprovision user: "+err.Error())
 	}
-	// 2) Generation bump + best-effort session kill (revoker has its own pool
-	//    for the post-commit invalidation; the bump itself is in this tx).
+	if tag.RowsAffected() == 0 {
+		return newSCIMError(404, "", "user not found")
+	}
+	var bumpGen int
 	if s.revoker != nil {
-		if _, err := s.revoker.BumpGenerationTx(ctx, tx, sc.workspaceID, userID, "scim"); err != nil {
-			return newSCIMError(500, "", "bump generation: "+err.Error())
+		var berr error
+		bumpGen, berr = s.revoker.BumpGenerationTx(ctx, tx, sc.workspaceID, userID, "scim")
+		if berr != nil {
+			if errors.Is(berr, pgx.ErrNoRows) {
+				return newSCIMError(404, "", "user not found")
+			}
+			return newSCIMError(500, "", "bump generation: "+berr.Error())
 		}
 	}
-	// 3) Enqueue device-trust revoke event (in the SAME tx).
+	if hard {
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM group_members
+			  WHERE user_id = $1
+			    AND group_id IN (SELECT id FROM groups WHERE workspace_id = $2)`,
+			userID, sc.workspaceID,
+		); err != nil {
+			return newSCIMError(500, "", "remove group memberships: "+err.Error())
+		}
+	}
 	if s.sink != nil {
 		corr := uuid.New()
 		evt := identity.DeviceTrustEvent{
@@ -397,6 +410,9 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return newSCIMError(500, "", "commit deprovision: "+err.Error())
+	}
+	if s.revoker != nil {
+		s.revoker.AfterBump(ctx, sc.workspaceID, userID, "scim", bumpGen)
 	}
 	if s.notifier != nil {
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
@@ -413,12 +429,12 @@ func (s *DirectoryService) Deprovision(ctx context.Context, sc *scope, userID st
 // signals re-enrollment (no generation bump — the bump already happened on
 // suspend). Idempotent against a non-active user.
 func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID string, syncInst string) *SCIMError {
-	owner, err := s.provisioningOwner(ctx, userID)
+	owner, linked, err := s.scopedProvisioningOwner(ctx, sc, userID)
 	if err != nil {
 		return newSCIMError(404, "", "user not found")
 	}
-	if owner != "scim" {
-		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, "")
+	if owner != "scim" || !linked {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, s.canonicalKeyOfUser(ctx, sc, userID), userID, conflictSnapshot{})
 		return newSCIMError(409, "identity_conflict",
 			"cannot reactivate a non-SCIM owned identity via SCIM")
 	}
@@ -429,12 +445,16 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 	}
 	defer tx.Rollback(ctx)
 
-	if _, err := tx.Exec(ctx,
+	tag, err := tx.Exec(ctx,
 		`UPDATE users SET status = 'active', updated_at = NOW()
 		 WHERE id = $1 AND tenant_id = $2`,
 		userID, sc.workspaceID,
-	); err != nil {
+	)
+	if err != nil {
 		return newSCIMError(500, "", "reactivate user: "+err.Error())
+	}
+	if tag.RowsAffected() == 0 {
+		return newSCIMError(404, "", "user not found")
 	}
 	if s.sink != nil {
 		corr := uuid.New()
@@ -479,15 +499,42 @@ func (s *DirectoryService) canonicalKeyOfUser(ctx context.Context, sc *scope, us
 	return sub
 }
 
-// provisioningOwner returns users.provisioning_owner for a user id.
-func (s *DirectoryService) provisioningOwner(ctx context.Context, userID string) (string, error) {
-	var owner string
+// scopedProvisioningOwner returns users.provisioning_owner for a user id,
+// scoped to the token's (workspace, connection). The JOIN on
+// external_identities enforces connection isolation; tenant_id enforces
+// workspace isolation.
+//
+// Every SCIM mutation path MUST resolve ownership through this helper. An
+// unscoped lookup here is a tenant-isolation hole: it lets a token for one
+// workspace pass the ownership guard for a user in another, after which the
+// scoped UPDATE affects 0 rows (not an error) and execution continues into the
+// generation bump and the device-trust enqueue.
+// It reports two facts separately, because they carry different HTTP outcomes:
+//
+//	err != nil  → the user does not exist IN THIS WORKSPACE  → 404
+//	!linked     → the user exists here but is not bound to THIS connection
+//	owner       → who currently owns the user's directory attributes
+//
+// The existence test must NOT be an inner join on external_identities: a
+// JIT/manual user has no link row for this connection, and collapsing that into
+// a 404 would swallow the 409 identity_conflict + pending-conflict record that
+// ADR-025 §4.1 requires. Callers treat (!linked || owner != "scim") as a
+// conflict, which also keeps a SCIM user owned by a *different* connection out
+// of this token's reach.
+func (s *DirectoryService) scopedProvisioningOwner(ctx context.Context, sc *scope, userID string) (owner string, linked bool, err error) {
 	if err := s.pool.QueryRow(ctx,
-		`SELECT provisioning_owner FROM users WHERE id = $1`, userID,
-	).Scan(&owner); err != nil {
-		return "", fmt.Errorf("load provisioning_owner: %w", err)
+		`SELECT u.provisioning_owner,
+		        EXISTS (
+		          SELECT 1 FROM external_identities ei
+		           WHERE ei.user_id = u.id AND ei.connection_id = $3
+		        )
+		   FROM users u
+		  WHERE u.id = $1 AND u.tenant_id = $2`,
+		userID, sc.workspaceID, sc.connectionID,
+	).Scan(&owner, &linked); err != nil {
+		return "", false, fmt.Errorf("load provisioning_owner: %w", err)
 	}
-	return owner, nil
+	return owner, linked, nil
 }
 
 // loadUser reads a canonical user and projects it as a SCIM User resource,
@@ -629,7 +676,7 @@ const (
 // Health thresholds (ADR-025 leaves the cutoffs to implementation): staleness is
 // measured from identity_connections.last_sync_at.
 const (
-	healthHealthyMaxAge = 24 * time.Hour // ≤24h  → Healthy
+	healthHealthyMaxAge = 24 * time.Hour     // ≤24h  → Healthy
 	healthDelayedMaxAge = 3 * 24 * time.Hour // ≤72h → Delayed; beyond → Disconnected
 )
 
@@ -702,6 +749,39 @@ func userNameOf(resource map[string]any) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
+}
+
+// primaryEmailOf returns the SCIM resource's primary email, per RFC 7643 §4.1.2:
+// the "emails" multi-valued attribute, preferring the entry marked primary, and
+// falling back to userName (which providers conventionally format as an email).
+// Snapshot/context use only — identity is NEVER resolved by email (ADR-025 §4.1).
+func primaryEmailOf(resource map[string]any) string {
+	list, ok := resource["emails"].([]any)
+	if !ok {
+		return userNameOf(resource)
+	}
+	var first string
+	for _, e := range list {
+		m, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		val, _ := m["value"].(string)
+		val = strings.TrimSpace(val)
+		if val == "" {
+			continue
+		}
+		if p, _ := m["primary"].(bool); p {
+			return val
+		}
+		if first == "" {
+			first = val
+		}
+	}
+	if first != "" {
+		return first
+	}
+	return userNameOf(resource)
 }
 
 // displayNameOf returns a SCIM displayName if present (notification hint; not

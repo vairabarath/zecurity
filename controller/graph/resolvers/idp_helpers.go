@@ -35,6 +35,11 @@ func (r *Resolver) idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection 
 		Status:      c.Status,
 		Managed:     c.Managed,
 		LastSyncAt:  c.LastSyncAt,
+		// Identity mapping (ADR-025 §3). Non-null in the DB (migration 034
+		// defaults 'sub' / 'externalId'), so these are plain values.
+		SubjectClaim:   c.SubjectClaim,
+		ScimIdentifier: c.ScimIdentifier,
+		ScimEnabled:    c.ScimEnabled,
 	}
 	if c.ClientID != "" {
 		id := c.ClientID

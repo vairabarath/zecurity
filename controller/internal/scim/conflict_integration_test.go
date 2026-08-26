@@ -308,6 +308,57 @@ func TestConflict_Integration(t *testing.T) {
 		}
 	})
 
+	// The mandatory reason (ADR-025 §4.1) must survive on the row, not only in
+	// the audit log — ScimConflict.resolutionReason is exposed to the admin
+	// queue and was permanently null until migration 036 added the column.
+	t.Run("resolution reason round-trips through ListConflicts", func(t *testing.T) {
+		// Fresh JIT identity occupying a key, then a SCIM push that collides.
+		reasonJIT := uuid.NewString()
+		reasonKey := "okta-jit-conflict-reason"
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO users (id, tenant_id, email, provider, provider_sub, role, status, provisioned_by, provisioning_owner)
+			 VALUES ($1,$2,$3,$4,$5,'member','active','manual','manual')`,
+			reasonJIT, wsA, "reasonJIT@conf-a.example.com", "okta", reasonKey); err != nil {
+			t.Fatalf("seed reasonJIT: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO external_identities (tenant_id, user_id, connection_id, issuer, subject)
+			 VALUES ($1,$2,$3,$4,$5)`,
+			wsA, reasonJIT, connA, "https://okta.example.com", reasonKey); err != nil {
+			t.Fatalf("seed reasonJIT link: %v", err)
+		}
+		_, _ = ds.Provision(ctx, scA, map[string]any{"userName": "reasonJIT@conf-a.example.com", "externalId": reasonKey}, "")
+
+		const why = "duplicate hire record; directory claim is authoritative"
+		if serr := ds.Reject(ctx, wsA, connA, adminActor, "actor@conf-a.example.com", reasonKey, why); serr != nil {
+			t.Fatalf("reject: %v", serr)
+		}
+
+		got := conflictByKey(ctx, t, ds, wsA, connA, reasonKey)
+		if got.Status != conflictRejected {
+			t.Fatalf("status = %q, want rejected", got.Status)
+		}
+		if got.ResolutionReason != why {
+			t.Fatalf("resolution reason did not persist: got %q, want %q", got.ResolutionReason, why)
+		}
+
+		// Reopen returns the row to pending, which has no resolution — the
+		// triple is cleared rather than left describing a resolved state.
+		if serr := ds.Reopen(ctx, wsA, connA, adminActor, "actor@conf-a.example.com", reasonKey, "new information"); serr != nil {
+			t.Fatalf("reopen: %v", serr)
+		}
+		got = conflictByKey(ctx, t, ds, wsA, connA, reasonKey)
+		if got.Status != conflictPending {
+			t.Fatalf("status = %q, want pending", got.Status)
+		}
+		if got.ResolutionReason != "" {
+			t.Fatalf("reopen must clear resolution_reason, got %q", got.ResolutionReason)
+		}
+		if got.ResolvedAt != "" {
+			t.Fatalf("reopen must clear resolved_at, got %q", got.ResolvedAt)
+		}
+	})
+
 	t.Run("invalid transition fails safely (reject a linked/rejected again)", func(t *testing.T) {
 		// jitKey is linked; rejecting a linked conflict is invalid.
 		serr := ds.Reject(ctx, wsA, connA, adminActor, "actor@conf-a.example.com", jitKey, "nope")
@@ -423,4 +474,22 @@ func jitUserByKey(ctx context.Context, t *testing.T, pool *pgxpool.Pool, ws, con
 		t.Fatalf("lookup jit user by key %s: %v", key, err)
 	}
 	return uid
+}
+
+// conflictByKey returns the conflict for a canonical key via the same
+// ListConflicts path the GraphQL queue uses, so the assertion covers the read
+// path (SELECT column list) and not just the write.
+func conflictByKey(ctx context.Context, t *testing.T, ds *DirectoryService, ws, conn, key string) ConflictRecord {
+	t.Helper()
+	list, err := ds.ListConflicts(ctx, ws, conn)
+	if err != nil {
+		t.Fatalf("list conflicts: %v", err)
+	}
+	for _, c := range list {
+		if c.CanonicalKey == key {
+			return c
+		}
+	}
+	t.Fatalf("no conflict for canonical key %q", key)
+	return ConflictRecord{}
 }

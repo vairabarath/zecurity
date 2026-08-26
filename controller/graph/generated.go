@@ -133,13 +133,16 @@ type ComplexityRoot struct {
 	}
 
 	Group struct {
-		CreatedAt   func(childComplexity int) int
-		Description func(childComplexity int) int
-		ID          func(childComplexity int) int
-		Members     func(childComplexity int) int
-		Name        func(childComplexity int) int
-		Resources   func(childComplexity int) int
-		UpdatedAt   func(childComplexity int) int
+		ConnectionID func(childComplexity int) int
+		CreatedAt    func(childComplexity int) int
+		Description  func(childComplexity int) int
+		ExternalID   func(childComplexity int) int
+		ID           func(childComplexity int) int
+		Members      func(childComplexity int) int
+		Name         func(childComplexity int) int
+		Origin       func(childComplexity int) int
+		Resources    func(childComplexity int) int
+		UpdatedAt    func(childComplexity int) int
 	}
 
 	IdpTestResult struct {
@@ -208,6 +211,7 @@ type ComplexityRoot struct {
 		UpdateGroup                    func(childComplexity int, id string, name *string, description *string) int
 		UpdateIdpConnection            func(childComplexity int, id string, input UpdateIdpConnectionInput) int
 		UpdateResource                 func(childComplexity int, id string, input UpdateResourceInput) int
+		UpdateScimConfig               func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
 	}
 
 	PostureCheckDescriptor struct {
@@ -240,6 +244,7 @@ type ComplexityRoot struct {
 		RemoteNetworks          func(childComplexity int) int
 		Resources               func(childComplexity int, remoteNetworkID string) int
 		ScimConflicts           func(childComplexity int, connectionID string) int
+		ScimProviderProfiles    func(childComplexity int) int
 		ScimTokens              func(childComplexity int, connectionID string) int
 		Shield                  func(childComplexity int, id string) int
 		Shields                 func(childComplexity int, remoteNetworkID string) int
@@ -288,16 +293,31 @@ type ComplexityRoot struct {
 	}
 
 	ScimConflict struct {
-		CanonicalKey     func(childComplexity int) int
-		ConnectionID     func(childComplexity int) int
-		CreatedAt        func(childComplexity int) int
-		ID               func(childComplexity int) int
-		ResolutionReason func(childComplexity int) int
-		ResolvedAt       func(childComplexity int) int
-		ScimExternalID   func(childComplexity int) int
-		Status           func(childComplexity int) int
-		UserID           func(childComplexity int) int
-		WorkspaceID      func(childComplexity int) int
+		CanonicalKey         func(childComplexity int) int
+		ConnectionID         func(childComplexity int) int
+		CreatedAt            func(childComplexity int) int
+		ID                   func(childComplexity int) int
+		ResolutionReason     func(childComplexity int) int
+		ResolvedAt           func(childComplexity int) int
+		ScimEmailSnapshot    func(childComplexity int) int
+		ScimExternalID       func(childComplexity int) int
+		ScimUsernameSnapshot func(childComplexity int) int
+		Status               func(childComplexity int) int
+		UserID               func(childComplexity int) int
+		WorkspaceID          func(childComplexity int) int
+	}
+
+	ScimProviderProfile struct {
+		DefaultScimIdentifier  func(childComplexity int) int
+		DefaultSubjectClaim    func(childComplexity int) int
+		DisplayName            func(childComplexity int) int
+		Key                    func(childComplexity int) int
+		PaginationOk           func(childComplexity int) int
+		Quirks                 func(childComplexity int) int
+		SupportsCreate         func(childComplexity int) int
+		SupportsDelete         func(childComplexity int) int
+		SupportsPatch          func(childComplexity int) int
+		SupportsProbeLifecycle func(childComplexity int) int
 	}
 
 	ScimToken struct {
@@ -337,11 +357,13 @@ type ComplexityRoot struct {
 	}
 
 	User struct {
-		CreatedAt func(childComplexity int) int
-		Email     func(childComplexity int) int
-		ID        func(childComplexity int) int
-		Provider  func(childComplexity int) int
-		Role      func(childComplexity int) int
+		CreatedAt         func(childComplexity int) int
+		Email             func(childComplexity int) int
+		ID                func(childComplexity int) int
+		Provider          func(childComplexity int) int
+		ProvisionedBy     func(childComplexity int) int
+		ProvisioningOwner func(childComplexity int) int
+		Role              func(childComplexity int) int
 	}
 
 	Workspace struct {
@@ -364,8 +386,11 @@ type ComplexityRoot struct {
 		Managed        func(childComplexity int) int
 		Protocol       func(childComplexity int) int
 		Provider       func(childComplexity int) int
+		ScimEnabled    func(childComplexity int) int
+		ScimIdentifier func(childComplexity int) int
 		Scopes         func(childComplexity int) int
 		Status         func(childComplexity int) int
+		SubjectClaim   func(childComplexity int) int
 	}
 
 	WorkspaceListResult struct {
@@ -435,6 +460,7 @@ type MutationResolver interface {
 	SetIdpConnectionStatus(ctx context.Context, id string, status string) (*WorkspaceIdpConnection, error)
 	DeleteIdpConnection(ctx context.Context, id string, force bool) (bool, error)
 	TestIdpConnection(ctx context.Context, id string) (*IdpTestResult, error)
+	UpdateScimConfig(ctx context.Context, connectionID string, input UpdateScimConfigInput) (*WorkspaceIdpConnection, error)
 	SetPlatformLoginEnabled(ctx context.Context, enabled bool) (bool, error)
 	MintScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
 	RotateScimToken(ctx context.Context, connectionID string, label *string, expiresAt *time.Time) (*ScimTokenMintResult, error)
@@ -474,6 +500,7 @@ type QueryResolver interface {
 	PlatformLoginEnabled(ctx context.Context) (bool, error)
 	ScimTokens(ctx context.Context, connectionID string) ([]*ScimToken, error)
 	ScimConflicts(ctx context.Context, connectionID string) ([]*ScimConflict, error)
+	ScimProviderProfiles(ctx context.Context) ([]*ScimProviderProfile, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -863,6 +890,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.DiscoveredService.ShieldID(childComplexity), true
 
+	case "Group.connectionId":
+		if e.ComplexityRoot.Group.ConnectionID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.ConnectionID(childComplexity), true
 	case "Group.createdAt":
 		if e.ComplexityRoot.Group.CreatedAt == nil {
 			break
@@ -875,6 +908,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Group.Description(childComplexity), true
+	case "Group.externalId":
+		if e.ComplexityRoot.Group.ExternalID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.ExternalID(childComplexity), true
 	case "Group.id":
 		if e.ComplexityRoot.Group.ID == nil {
 			break
@@ -893,6 +932,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Group.Name(childComplexity), true
+	case "Group.origin":
+		if e.ComplexityRoot.Group.Origin == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Group.Origin(childComplexity), true
 	case "Group.resources":
 		if e.ComplexityRoot.Group.Resources == nil {
 			break
@@ -1502,6 +1547,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateResource(childComplexity, args["id"].(string), args["input"].(UpdateResourceInput)), true
+	case "Mutation.updateScimConfig":
+		if e.ComplexityRoot.Mutation.UpdateScimConfig == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateScimConfig_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateScimConfig(childComplexity, args["connectionId"].(string), args["input"].(UpdateScimConfigInput)), true
 
 	case "PostureCheckDescriptor.allowUnsupportedMeaningful":
 		if e.ComplexityRoot.PostureCheckDescriptor.AllowUnsupportedMeaningful == nil {
@@ -1726,6 +1782,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.ScimConflicts(childComplexity, args["connectionId"].(string)), true
+	case "Query.scimProviderProfiles":
+		if e.ComplexityRoot.Query.ScimProviderProfiles == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.ScimProviderProfiles(childComplexity), true
 	case "Query.scimTokens":
 		if e.ComplexityRoot.Query.ScimTokens == nil {
 			break
@@ -1997,12 +2059,24 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ScimConflict.ResolvedAt(childComplexity), true
+	case "ScimConflict.scimEmailSnapshot":
+		if e.ComplexityRoot.ScimConflict.ScimEmailSnapshot == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimConflict.ScimEmailSnapshot(childComplexity), true
 	case "ScimConflict.scimExternalId":
 		if e.ComplexityRoot.ScimConflict.ScimExternalID == nil {
 			break
 		}
 
 		return e.ComplexityRoot.ScimConflict.ScimExternalID(childComplexity), true
+	case "ScimConflict.scimUsernameSnapshot":
+		if e.ComplexityRoot.ScimConflict.ScimUsernameSnapshot == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimConflict.ScimUsernameSnapshot(childComplexity), true
 	case "ScimConflict.status":
 		if e.ComplexityRoot.ScimConflict.Status == nil {
 			break
@@ -2021,6 +2095,67 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.ScimConflict.WorkspaceID(childComplexity), true
+
+	case "ScimProviderProfile.defaultScimIdentifier":
+		if e.ComplexityRoot.ScimProviderProfile.DefaultScimIdentifier == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.DefaultScimIdentifier(childComplexity), true
+	case "ScimProviderProfile.defaultSubjectClaim":
+		if e.ComplexityRoot.ScimProviderProfile.DefaultSubjectClaim == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.DefaultSubjectClaim(childComplexity), true
+	case "ScimProviderProfile.displayName":
+		if e.ComplexityRoot.ScimProviderProfile.DisplayName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.DisplayName(childComplexity), true
+	case "ScimProviderProfile.key":
+		if e.ComplexityRoot.ScimProviderProfile.Key == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.Key(childComplexity), true
+	case "ScimProviderProfile.paginationOk":
+		if e.ComplexityRoot.ScimProviderProfile.PaginationOk == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.PaginationOk(childComplexity), true
+	case "ScimProviderProfile.quirks":
+		if e.ComplexityRoot.ScimProviderProfile.Quirks == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.Quirks(childComplexity), true
+	case "ScimProviderProfile.supportsCreate":
+		if e.ComplexityRoot.ScimProviderProfile.SupportsCreate == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.SupportsCreate(childComplexity), true
+	case "ScimProviderProfile.supportsDelete":
+		if e.ComplexityRoot.ScimProviderProfile.SupportsDelete == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.SupportsDelete(childComplexity), true
+	case "ScimProviderProfile.supportsPatch":
+		if e.ComplexityRoot.ScimProviderProfile.SupportsPatch == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.SupportsPatch(childComplexity), true
+	case "ScimProviderProfile.supportsProbeLifecycle":
+		if e.ComplexityRoot.ScimProviderProfile.SupportsProbeLifecycle == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ScimProviderProfile.SupportsProbeLifecycle(childComplexity), true
 
 	case "ScimToken.connectionId":
 		if e.ComplexityRoot.ScimToken.ConnectionID == nil {
@@ -2194,6 +2329,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.User.Provider(childComplexity), true
+	case "User.provisionedBy":
+		if e.ComplexityRoot.User.ProvisionedBy == nil {
+			break
+		}
+
+		return e.ComplexityRoot.User.ProvisionedBy(childComplexity), true
+	case "User.provisioningOwner":
+		if e.ComplexityRoot.User.ProvisioningOwner == nil {
+			break
+		}
+
+		return e.ComplexityRoot.User.ProvisioningOwner(childComplexity), true
 	case "User.role":
 		if e.ComplexityRoot.User.Role == nil {
 			break
@@ -2298,6 +2445,18 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.WorkspaceIdpConnection.Provider(childComplexity), true
+	case "WorkspaceIdpConnection.scimEnabled":
+		if e.ComplexityRoot.WorkspaceIdpConnection.ScimEnabled == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.ScimEnabled(childComplexity), true
+	case "WorkspaceIdpConnection.scimIdentifier":
+		if e.ComplexityRoot.WorkspaceIdpConnection.ScimIdentifier == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.ScimIdentifier(childComplexity), true
 	case "WorkspaceIdpConnection.scopes":
 		if e.ComplexityRoot.WorkspaceIdpConnection.Scopes == nil {
 			break
@@ -2310,6 +2469,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.WorkspaceIdpConnection.Status(childComplexity), true
+	case "WorkspaceIdpConnection.subjectClaim":
+		if e.ComplexityRoot.WorkspaceIdpConnection.SubjectClaim == nil {
+			break
+		}
+
+		return e.ComplexityRoot.WorkspaceIdpConnection.SubjectClaim(childComplexity), true
 
 	case "WorkspaceListResult.workspaces":
 		if e.ComplexityRoot.WorkspaceListResult.Workspaces == nil {
@@ -2387,6 +2552,7 @@ func (e *executableSchema) Exec(ctx context.Context) graphql.ResponseHandler {
 		ec.unmarshalInputCreateResourceInput,
 		ec.unmarshalInputUpdateIdpConnectionInput,
 		ec.unmarshalInputUpdateResourceInput,
+		ec.unmarshalInputUpdateScimConfigInput,
 	)
 	first := true
 
@@ -2684,6 +2850,12 @@ func (ec *executionContext) childFields_Group(ctx context.Context, field graphql
 		return ec.fieldContext_Group_createdAt(ctx, field)
 	case "updatedAt":
 		return ec.fieldContext_Group_updatedAt(ctx, field)
+	case "origin":
+		return ec.fieldContext_Group_origin(ctx, field)
+	case "externalId":
+		return ec.fieldContext_Group_externalId(ctx, field)
+	case "connectionId":
+		return ec.fieldContext_Group_connectionId(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Group", field.Name)
 }
@@ -2828,6 +3000,10 @@ func (ec *executionContext) childFields_ScimConflict(ctx context.Context, field 
 		return ec.fieldContext_ScimConflict_canonicalKey(ctx, field)
 	case "scimExternalId":
 		return ec.fieldContext_ScimConflict_scimExternalId(ctx, field)
+	case "scimUsernameSnapshot":
+		return ec.fieldContext_ScimConflict_scimUsernameSnapshot(ctx, field)
+	case "scimEmailSnapshot":
+		return ec.fieldContext_ScimConflict_scimEmailSnapshot(ctx, field)
 	case "status":
 		return ec.fieldContext_ScimConflict_status(ctx, field)
 	case "resolutionReason":
@@ -2838,6 +3014,32 @@ func (ec *executionContext) childFields_ScimConflict(ctx context.Context, field 
 		return ec.fieldContext_ScimConflict_resolvedAt(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type ScimConflict", field.Name)
+}
+
+func (ec *executionContext) childFields_ScimProviderProfile(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "key":
+		return ec.fieldContext_ScimProviderProfile_key(ctx, field)
+	case "displayName":
+		return ec.fieldContext_ScimProviderProfile_displayName(ctx, field)
+	case "defaultSubjectClaim":
+		return ec.fieldContext_ScimProviderProfile_defaultSubjectClaim(ctx, field)
+	case "defaultScimIdentifier":
+		return ec.fieldContext_ScimProviderProfile_defaultScimIdentifier(ctx, field)
+	case "supportsCreate":
+		return ec.fieldContext_ScimProviderProfile_supportsCreate(ctx, field)
+	case "supportsDelete":
+		return ec.fieldContext_ScimProviderProfile_supportsDelete(ctx, field)
+	case "supportsPatch":
+		return ec.fieldContext_ScimProviderProfile_supportsPatch(ctx, field)
+	case "paginationOk":
+		return ec.fieldContext_ScimProviderProfile_paginationOk(ctx, field)
+	case "supportsProbeLifecycle":
+		return ec.fieldContext_ScimProviderProfile_supportsProbeLifecycle(ctx, field)
+	case "quirks":
+		return ec.fieldContext_ScimProviderProfile_quirks(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type ScimProviderProfile", field.Name)
 }
 
 func (ec *executionContext) childFields_ScimToken(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -2924,6 +3126,10 @@ func (ec *executionContext) childFields_User(ctx context.Context, field graphql.
 		return ec.fieldContext_User_provider(ctx, field)
 	case "createdAt":
 		return ec.fieldContext_User_createdAt(ctx, field)
+	case "provisionedBy":
+		return ec.fieldContext_User_provisionedBy(ctx, field)
+	case "provisioningOwner":
+		return ec.fieldContext_User_provisioningOwner(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type User", field.Name)
 }
@@ -2972,6 +3178,12 @@ func (ec *executionContext) childFields_WorkspaceIdpConnection(ctx context.Conte
 		return ec.fieldContext_WorkspaceIdpConnection_lastSyncAt(ctx, field)
 	case "identityHealth":
 		return ec.fieldContext_WorkspaceIdpConnection_identityHealth(ctx, field)
+	case "subjectClaim":
+		return ec.fieldContext_WorkspaceIdpConnection_subjectClaim(ctx, field)
+	case "scimIdentifier":
+		return ec.fieldContext_WorkspaceIdpConnection_scimIdentifier(ctx, field)
+	case "scimEnabled":
+		return ec.fieldContext_WorkspaceIdpConnection_scimEnabled(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type WorkspaceIdpConnection", field.Name)
 }
@@ -4142,6 +4354,28 @@ func (ec *executionContext) field_Mutation_updateResource_args(ctx context.Conte
 	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "input",
 		func(ctx context.Context, v any) (UpdateResourceInput, error) {
 			return ec.unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["input"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateScimConfig_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "connectionId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["connectionId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "input",
+		func(ctx context.Context, v any) (UpdateScimConfigInput, error) {
+			return ec.unmarshalNUpdateScimConfigInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateScimConfigInput(ctx, v)
 		})
 	if err != nil {
 		return nil, err
@@ -6013,6 +6247,75 @@ func (ec *executionContext) _Group_updatedAt(ctx context.Context, field graphql.
 }
 func (ec *executionContext) fieldContext_Group_updatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("Group", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _Group_origin(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Group_origin(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Origin, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Group_origin(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Group", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _Group_externalId(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Group_externalId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ExternalID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Group_externalId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Group", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _Group_connectionId(ctx context.Context, field graphql.CollectedField, obj *Group) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Group_connectionId(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ConnectionID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOID2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Group_connectionId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("Group", field, false, false, errors.New("field of type ID does not have child fields"))
 }
 
 func (ec *executionContext) _IdpTestResult_ok(ctx context.Context, field graphql.CollectedField, obj *IdpTestResult) (ret graphql.Marshaler) {
@@ -8668,6 +8971,68 @@ func (ec *executionContext) fieldContext_Mutation_testIdpConnection(ctx context.
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_updateScimConfig(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateScimConfig(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateScimConfig(ctx, fc.Args["connectionId"].(string), fc.Args["input"].(UpdateScimConfigInput))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *WorkspaceIdpConnection
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *WorkspaceIdpConnection) graphql.Marshaler {
+			return ec.marshalNWorkspaceIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐWorkspaceIdpConnection(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateScimConfig(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_WorkspaceIdpConnection(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateScimConfig_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_setPlatformLoginEnabled(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -10793,6 +11158,56 @@ func (ec *executionContext) fieldContext_Query_scimConflicts(ctx context.Context
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_scimProviderProfiles(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_scimProviderProfiles(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().ScimProviderProfiles(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*ScimProviderProfile
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*ScimProviderProfile
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*ScimProviderProfile) graphql.Marshaler {
+			return ec.marshalNScimProviderProfile2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScimProviderProfileᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_scimProviderProfiles(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ScimProviderProfile(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query___type(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11742,6 +12157,52 @@ func (ec *executionContext) fieldContext_ScimConflict_scimExternalId(_ context.C
 	return graphql.NewScalarFieldContext("ScimConflict", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _ScimConflict_scimUsernameSnapshot(ctx context.Context, field graphql.CollectedField, obj *ScimConflict) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimConflict_scimUsernameSnapshot(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ScimUsernameSnapshot, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ScimConflict_scimUsernameSnapshot(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimConflict", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ScimConflict_scimEmailSnapshot(ctx context.Context, field graphql.CollectedField, obj *ScimConflict) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimConflict_scimEmailSnapshot(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ScimEmailSnapshot, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *string) graphql.Marshaler {
+			return ec.marshalOString2ᚖstring(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_ScimConflict_scimEmailSnapshot(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimConflict", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _ScimConflict_status(ctx context.Context, field graphql.CollectedField, obj *ScimConflict) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11832,6 +12293,236 @@ func (ec *executionContext) _ScimConflict_resolvedAt(ctx context.Context, field 
 }
 func (ec *executionContext) fieldContext_ScimConflict_resolvedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("ScimConflict", field, false, false, errors.New("field of type Time does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_key(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_key(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Key, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_key(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_displayName(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_displayName(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DisplayName, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_displayName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_defaultSubjectClaim(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_defaultSubjectClaim(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DefaultSubjectClaim, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_defaultSubjectClaim(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_defaultScimIdentifier(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_defaultScimIdentifier(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DefaultScimIdentifier, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_defaultScimIdentifier(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_supportsCreate(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_supportsCreate(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.SupportsCreate, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_supportsCreate(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_supportsDelete(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_supportsDelete(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.SupportsDelete, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_supportsDelete(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_supportsPatch(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_supportsPatch(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.SupportsPatch, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_supportsPatch(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_paginationOk(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_paginationOk(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.PaginationOk, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_paginationOk(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_supportsProbeLifecycle(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_supportsProbeLifecycle(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.SupportsProbeLifecycle, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_supportsProbeLifecycle(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type Boolean does not have child fields"))
+}
+
+func (ec *executionContext) _ScimProviderProfile_quirks(ctx context.Context, field graphql.CollectedField, obj *ScimProviderProfile) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ScimProviderProfile_quirks(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Quirks, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []string) graphql.Marshaler {
+			return ec.marshalNString2ᚕstringᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ScimProviderProfile_quirks(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ScimProviderProfile", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _ScimToken_id(ctx context.Context, field graphql.CollectedField, obj *ScimToken) (ret graphql.Marshaler) {
@@ -12510,6 +13201,52 @@ func (ec *executionContext) fieldContext_User_createdAt(_ context.Context, field
 	return graphql.NewScalarFieldContext("User", field, true, true, errors.New("field of type String does not have child fields"))
 }
 
+func (ec *executionContext) _User_provisionedBy(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_User_provisionedBy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ProvisionedBy, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_User_provisionedBy(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("User", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _User_provisioningOwner(ctx context.Context, field graphql.CollectedField, obj *models.User) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_User_provisioningOwner(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ProvisioningOwner, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_User_provisioningOwner(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("User", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _Workspace_id(ctx context.Context, field graphql.CollectedField, obj *models.Workspace) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -12922,6 +13659,75 @@ func (ec *executionContext) _WorkspaceIdpConnection_identityHealth(ctx context.C
 }
 func (ec *executionContext) fieldContext_WorkspaceIdpConnection_identityHealth(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
 	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_subjectClaim(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_subjectClaim(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.SubjectClaim, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_subjectClaim(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_scimIdentifier(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_scimIdentifier(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ScimIdentifier, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_scimIdentifier(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _WorkspaceIdpConnection_scimEnabled(ctx context.Context, field graphql.CollectedField, obj *WorkspaceIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_WorkspaceIdpConnection_scimEnabled(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ScimEnabled, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_WorkspaceIdpConnection_scimEnabled(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("WorkspaceIdpConnection", field, false, false, errors.New("field of type Boolean does not have child fields"))
 }
 
 func (ec *executionContext) _WorkspaceListResult_workspaces(ctx context.Context, field graphql.CollectedField, obj *WorkspaceListResult) (ret graphql.Marshaler) {
@@ -14512,6 +15318,50 @@ func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Contex
 	return it, nil
 }
 
+func (ec *executionContext) unmarshalInputUpdateScimConfigInput(ctx context.Context, obj any) (UpdateScimConfigInput, error) {
+	var it UpdateScimConfigInput
+	if obj == nil {
+		return it, nil
+	}
+
+	asMap := map[string]any{}
+	for k, v := range obj.(map[string]any) {
+		asMap[k] = v
+	}
+
+	fieldsInOrder := [...]string{"subjectClaim", "scimIdentifier", "scimEnabled"}
+	for _, k := range fieldsInOrder {
+		v, ok := asMap[k]
+		if !ok {
+			continue
+		}
+		switch k {
+		case "subjectClaim":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("subjectClaim"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.SubjectClaim = data
+		case "scimIdentifier":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("scimIdentifier"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ScimIdentifier = data
+		case "scimEnabled":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("scimEnabled"))
+			data, err := ec.unmarshalOBoolean2ᚖbool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.ScimEnabled = data
+		}
+	}
+	return it, nil
+}
+
 // endregion **************************** input.gotpl *****************************
 
 // region    ************************** interface.gotpl ***************************
@@ -15218,6 +16068,15 @@ func (ec *executionContext) _Group(ctx context.Context, sel ast.SelectionSet, ob
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "origin":
+			out.Values[i] = ec._Group_origin(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "externalId":
+			out.Values[i] = ec._Group_externalId(ctx, field, obj)
+		case "connectionId":
+			out.Values[i] = ec._Group_connectionId(ctx, field, obj)
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -15643,6 +16502,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "testIdpConnection":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_testIdpConnection(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateScimConfig":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateScimConfig(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
@@ -16407,6 +17273,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "scimProviderProfiles":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_scimProviderProfiles(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "__type":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Query___type(ctx, field)
@@ -16713,6 +17601,10 @@ func (ec *executionContext) _ScimConflict(ctx context.Context, sel ast.Selection
 			}
 		case "scimExternalId":
 			out.Values[i] = ec._ScimConflict_scimExternalId(ctx, field, obj)
+		case "scimUsernameSnapshot":
+			out.Values[i] = ec._ScimConflict_scimUsernameSnapshot(ctx, field, obj)
+		case "scimEmailSnapshot":
+			out.Values[i] = ec._ScimConflict_scimEmailSnapshot(ctx, field, obj)
 		case "status":
 			out.Values[i] = ec._ScimConflict_status(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
@@ -16727,6 +17619,90 @@ func (ec *executionContext) _ScimConflict(ctx context.Context, sel ast.Selection
 			}
 		case "resolvedAt":
 			out.Values[i] = ec._ScimConflict_resolvedAt(ctx, field, obj)
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var scimProviderProfileImplementors = []string{"ScimProviderProfile"}
+
+func (ec *executionContext) _ScimProviderProfile(ctx context.Context, sel ast.SelectionSet, obj *ScimProviderProfile) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, scimProviderProfileImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ScimProviderProfile")
+		case "key":
+			out.Values[i] = ec._ScimProviderProfile_key(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "displayName":
+			out.Values[i] = ec._ScimProviderProfile_displayName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "defaultSubjectClaim":
+			out.Values[i] = ec._ScimProviderProfile_defaultSubjectClaim(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "defaultScimIdentifier":
+			out.Values[i] = ec._ScimProviderProfile_defaultScimIdentifier(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "supportsCreate":
+			out.Values[i] = ec._ScimProviderProfile_supportsCreate(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "supportsDelete":
+			out.Values[i] = ec._ScimProviderProfile_supportsDelete(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "supportsPatch":
+			out.Values[i] = ec._ScimProviderProfile_supportsPatch(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "paginationOk":
+			out.Values[i] = ec._ScimProviderProfile_paginationOk(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "supportsProbeLifecycle":
+			out.Values[i] = ec._ScimProviderProfile_supportsProbeLifecycle(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "quirks":
+			out.Values[i] = ec._ScimProviderProfile_quirks(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -17071,6 +18047,16 @@ func (ec *executionContext) _User(ctx context.Context, sel ast.SelectionSet, obj
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "provisionedBy":
+			out.Values[i] = ec._User_provisionedBy(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "provisioningOwner":
+			out.Values[i] = ec._User_provisioningOwner(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
 		}
@@ -17276,6 +18262,21 @@ func (ec *executionContext) _WorkspaceIdpConnection(ctx context.Context, sel ast
 			out.Values[i] = ec._WorkspaceIdpConnection_lastSyncAt(ctx, field, obj)
 		case "identityHealth":
 			out.Values[i] = ec._WorkspaceIdpConnection_identityHealth(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "subjectClaim":
+			out.Values[i] = ec._WorkspaceIdpConnection_subjectClaim(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "scimIdentifier":
+			out.Values[i] = ec._WorkspaceIdpConnection_scimIdentifier(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "scimEnabled":
+			out.Values[i] = ec._WorkspaceIdpConnection_scimEnabled(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
@@ -18452,6 +19453,32 @@ func (ec *executionContext) marshalNScimConflict2ᚖgithubᚗcomᚋyourorgᚋztn
 	return ec._ScimConflict(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNScimProviderProfile2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScimProviderProfileᚄ(ctx context.Context, sel ast.SelectionSet, v []*ScimProviderProfile) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNScimProviderProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScimProviderProfile(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNScimProviderProfile2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScimProviderProfile(ctx context.Context, sel ast.SelectionSet, v *ScimProviderProfile) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ScimProviderProfile(ctx, sel, v)
+}
+
 func (ec *executionContext) marshalNScimToken2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐScimTokenᚄ(ctx context.Context, sel ast.SelectionSet, v []*ScimToken) graphql.Marshaler {
 	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
 		fc := graphql.GetFieldContext(ctx)
@@ -18611,6 +19638,11 @@ func (ec *executionContext) unmarshalNUpdateIdpConnectionInput2githubᚗcomᚋyo
 
 func (ec *executionContext) unmarshalNUpdateResourceInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateResourceInput(ctx context.Context, v any) (UpdateResourceInput, error) {
 	res, err := ec.unmarshalInputUpdateResourceInput(ctx, v)
+	return res, graphql.ErrorOnPath(ctx, err)
+}
+
+func (ec *executionContext) unmarshalNUpdateScimConfigInput2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐUpdateScimConfigInput(ctx context.Context, v any) (UpdateScimConfigInput, error) {
+	res, err := ec.unmarshalInputUpdateScimConfigInput(ctx, v)
 	return res, graphql.ErrorOnPath(ctx, err)
 }
 

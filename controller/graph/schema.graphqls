@@ -62,6 +62,23 @@ type User {
   role:        Role!
   provider:    String!
   createdAt:   String!
+
+  # --- Provisioning provenance (ADR-025 §4) --------------------------------
+  # Two distinct facts, deliberately not collapsed into one:
+  #
+  # provisionedBy      IMMUTABLE origin recorded at creation: jit | manual | scim
+  # provisioningOwner  MUTABLE current authority over directory-owned
+  #                    attributes: jit | manual | scim | unmanaged
+  #
+  # "unmanaged" is an explicit state, NOT inferred from scim_enabled=false — a
+  # user whose SCIM connection was removed is unmanaged, and removing a
+  # connection never deletes the user.
+  #
+  # The admin UI MUST derive "managed by the directory" from provisioningOwner
+  # == "scim" and disable directory-owned fields on that basis — never guess it
+  # from `provider`.
+  provisionedBy:     String!
+  provisioningOwner: String!
 }
 
 type Workspace {

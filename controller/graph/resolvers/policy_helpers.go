@@ -18,11 +18,13 @@ func loadUser(ctx context.Context, pool *pgxpool.Pool, userID string) (*models.U
 	var u models.User
 	var lastLoginAt *time.Time
 	err := pool.QueryRow(ctx,
-		`SELECT id, tenant_id, email, provider, provider_sub, role, status, last_login_at, created_at, updated_at
+		`SELECT id, tenant_id, email, provider, provider_sub, role, status, last_login_at, created_at, updated_at,
+		        provisioned_by, provisioning_owner
 		 FROM users WHERE id = $1`,
 		userID,
 	).Scan(&u.ID, &u.TenantID, &u.Email, &u.Provider, &u.ProviderSub,
-		&u.Role, &u.Status, &lastLoginAt, &u.CreatedAt, &u.UpdatedAt)
+		&u.Role, &u.Status, &lastLoginAt, &u.CreatedAt, &u.UpdatedAt,
+		&u.ProvisionedBy, &u.ProvisioningOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("user %s not found", userID)
 	}
@@ -90,6 +92,13 @@ func groupRowToGQL(row *policy.GroupRow, members []*models.User, resources []*gr
 		Resources:   resources,
 		CreatedAt:   fmtTime(row.CreatedAt),
 		UpdatedAt:   fmtTime(row.UpdatedAt),
+		// ADR-025 §7 provenance. Origin is NOT NULL in the DB, but default to
+		// "manual" rather than emitting "" if a row somehow predates the column
+		// — an empty origin would read as "unknown" in the UI and defeat the
+		// point of the label.
+		Origin:       originOrManual(row.Origin),
+		ExternalID:   row.ExternalID,
+		ConnectionID: row.ConnectionID,
 	}
 }
 
@@ -150,4 +159,14 @@ func (r *Resolver) loadResourceWithGroups(ctx context.Context, tenantID, resourc
 	}
 	res.Groups = groups
 	return res, nil
+}
+
+// originOrManual guarantees a non-empty group origin. The column is NOT NULL
+// with a 'manual' default (migration 034), so this only guards against a zero
+// value reaching the API from an unpopulated struct.
+func originOrManual(o string) string {
+	if o == "" {
+		return "manual"
+	}
+	return o
 }

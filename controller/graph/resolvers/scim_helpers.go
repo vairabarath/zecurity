@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/scim"
 )
@@ -47,13 +48,18 @@ func (r *Resolver) validateSCIMConnection(
 	conn, err := r.IdpStore.GetByID(ctx, connectionID)
 	if err != nil {
 		if errors.Is(err, idp.ErrConnectionNotFound) {
-			return fmt.Errorf("SCIM connection not found")
+			return apperr.UserErrorf("SCIM connection not found")
 		}
 		return fmt.Errorf("get SCIM connection: %w", err)
 	}
 
+	// A connection in ANOTHER workspace is reported as "not found", not as
+	// "not yours". These messages are now client-visible (the ErrorPresenter
+	// surfaces apperr verbatim), so distinguishing the two would confirm that a
+	// given connection id exists somewhere — an enumeration oracle. This also
+	// matches how idp.resolvers.go already reports tenant mismatches.
 	if conn.TenantID == nil || *conn.TenantID != workspaceID {
-		return fmt.Errorf("SCIM connection does not belong to this workspace")
+		return apperr.UserErrorf("SCIM connection not found")
 	}
 
 	return nil
@@ -70,16 +76,18 @@ func stringPtrOrNil(s string) *string {
 // representation, mapping the optional resolution fields and timestamps.
 func conflictToGQL(c *scim.ConflictRecord) *graph.ScimConflict {
 	return &graph.ScimConflict{
-		ID:               c.ID,
-		WorkspaceID:      c.WorkspaceID,
-		ConnectionID:     c.ConnectionID,
-		UserID:           c.UserID,
-		CanonicalKey:     c.CanonicalKey,
-		ScimExternalID:   stringPtrOrNil(c.ScimExternalID),
-		Status:           c.Status,
-		ResolutionReason: stringPtrOrNil(c.ResolutionReason),
-		CreatedAt:        parseConflictTime(c.CreatedAt),
-		ResolvedAt:       parseConflictOptTime(c.ResolvedAt),
+		ID:                   c.ID,
+		WorkspaceID:          c.WorkspaceID,
+		ConnectionID:         c.ConnectionID,
+		UserID:               c.UserID,
+		CanonicalKey:         c.CanonicalKey,
+		ScimExternalID:       stringPtrOrNil(c.ScimExternalID),
+		ScimUsernameSnapshot: stringPtrOrNil(c.ScimUsernameSnapshot),
+		ScimEmailSnapshot:    stringPtrOrNil(c.ScimEmailSnapshot),
+		Status:               c.Status,
+		ResolutionReason:     stringPtrOrNil(c.ResolutionReason),
+		CreatedAt:            parseConflictTime(c.CreatedAt),
+		ResolvedAt:           parseConflictOptTime(c.ResolvedAt),
 	}
 }
 

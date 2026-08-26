@@ -303,6 +303,32 @@ func (s *Store) SetSCIMEnabled(ctx context.Context, tenantID, id string, enabled
 	return nil
 }
 
+// SetScimMapping writes the per-connection identity-mapping config (ADR-025 §3)
+// and the scim_enabled flag in ONE statement, so a mapping edit and the
+// re-proof it forces can never be observed apart.
+//
+// Callers must have already decided `enabled` — this method does no gating. In
+// particular it does NOT decide whether enabling is permitted; the fail-closed
+// MappingGate (§3.1) and the break-glass permission (§3.2) live at the resolver
+// boundary, which is the layer that knows the actor.
+func (s *Store) SetScimMapping(ctx context.Context, tenantID, id, subjectClaim, scimIdentifier string, enabled bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE identity_connections
+		    SET subject_claim   = $3,
+		        scim_identifier = $4,
+		        scim_enabled    = $5,
+		        updated_at      = NOW()
+		  WHERE id = $1 AND tenant_id = $2`,
+		id, tenantID, subjectClaim, scimIdentifier, enabled)
+	if err != nil {
+		return fmt.Errorf("update scim mapping: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConnectionNotFound
+	}
+	return nil
+}
+
 // DeleteWorkspaceConnection removes a workspace connection. The tenant_id guard
 // prevents deleting a platform (tenant_id NULL) connection through this path.
 func (s *Store) DeleteWorkspaceConnection(ctx context.Context, tenantID, id string) error {

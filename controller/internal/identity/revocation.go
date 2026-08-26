@@ -75,8 +75,9 @@ func (r *Revoker) BumpGeneration(ctx context.Context, tenantID, userID, actorEma
 
 // BumpGenerationTx performs the generation bump inside the caller's transaction
 // (so it commits atomically with a sibling mutation, e.g. a SCIM deprovision +
-// outbox enqueue). The best-effort session invalidation + audit still happen via
-// afterBump on the Revoker's pool (post-commit, never failing the tx).
+// outbox enqueue). The caller MUST invoke AfterBump after tx.Commit to perform
+// best-effort session invalidation + audit on the Revoker's pool (post-commit,
+// never failing the tx).
 func (r *Revoker) BumpGenerationTx(ctx context.Context, tx pgx.Tx, tenantID, userID, actorEmail string) (int, error) {
 	return r.bump(ctx, tx, tenantID, userID, actorEmail)
 }
@@ -87,13 +88,21 @@ func (r *Revoker) bump(ctx context.Context, q interface {
 	var gen int
 	if err := q.QueryRow(ctx,
 		`UPDATE users SET identity_generation = identity_generation + 1, updated_at = NOW()
-		 WHERE id = $1
+		 WHERE id = $1 AND tenant_id = $2
 		 RETURNING identity_generation`,
-		userID,
+		userID, tenantID,
 	).Scan(&gen); err != nil {
 		return 0, fmt.Errorf("bump identity_generation: %w", err)
 	}
 	return gen, nil
+}
+
+// AfterBump performs the best-effort session invalidation + audit that
+// accompanies a generation bump. It is exported so transactional callers
+// (e.g. SCIM Deprovision) can invoke it post-commit; BumpGeneration calls it
+// inline.
+func (r *Revoker) AfterBump(ctx context.Context, tenantID, userID, actorEmail string, gen int) {
+	r.afterBump(ctx, tenantID, userID, actorEmail, gen)
 }
 
 // afterBump performs the best-effort session invalidation + audit publish that
