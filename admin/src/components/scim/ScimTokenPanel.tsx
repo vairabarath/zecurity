@@ -202,8 +202,21 @@ export function ScimTokenPanel({ connectionId }: { connectionId: string }) {
   })
   const tokens: ScimToken[] = (data?.scimTokens ?? []) as ScimToken[]
 
-  const [mintToken, { loading: minting }] = useMutation(MintScimTokenDocument)
-  const [rotateToken, { loading: rotating }] = useMutation(RotateScimTokenDocument)
+  // Mint and rotate return the token plaintext, which ADR-025 §7 shows exactly
+  // once. The component already keeps it in local state and drops it when the
+  // dialog closes, but by default Apollo also writes mutation results into the
+  // normalized cache under ROOT_MUTATION — a path outside this component's
+  // control. 'no-cache' keeps the secret out of the cache entirely.
+  //
+  // Safe here because neither result is read from the cache: the token list is
+  // refreshed by the explicit refetch() after each call.
+  const [mintToken, { loading: minting }] = useMutation(MintScimTokenDocument, {
+    fetchPolicy: 'no-cache',
+  })
+  const [rotateToken, { loading: rotating }] = useMutation(RotateScimTokenDocument, {
+    fetchPolicy: 'no-cache',
+  })
+  // revoke returns only a Boolean — no secret, so normal cache behaviour is fine.
   const [revokeToken, { loading: revoking }] = useMutation(RevokeScimTokenDocument)
 
   async function handleMint(label: string) {
