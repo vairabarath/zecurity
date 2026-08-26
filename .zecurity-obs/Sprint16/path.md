@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete · **Phase 8's wire hop VERIFIED on a live stack 2026-08-20** · Phase 10 code complete + pushed (`36fb39e`) · **outstanding: Gate 2** — the live E2E, which subsumes Phase 9's by-name run
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · Stage 3 (Phases 11–12) remains **deferred / sprint17-candidate**
 solo: true
 owner: M3
 tags:
@@ -566,7 +566,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ✅ done (148 + 4 tests green) |
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
-| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | 🟨 code complete (pushed `36fb39e`) — **Gate 2 outstanding**; resolver health deliberately not shipped |
+| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ✅ **done — GATE 2 CLOSED 5/5 (2026-08-26)**; resolver health deliberately not shipped |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
 
@@ -575,6 +575,14 @@ Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 202
 ## Post-Sprint Fixes
 
 Overview only — each fix is documented in full in its phase file.
+
+### Fix: shield dialed `resources.host` instead of `local_target` (version skew, not a code defect)
+**Gate 2 / Phase 8.** The installed shield was a **release** build with zero `local_target` support
+(`0` occurrences on `main`, `80` on this branch), so it dialed the resource host and the protected
+resource went `failed` with `Connection refused`. **Both builds report version `1.0.10`** — the skew is
+undetectable. Installing the branch shield fixed it immediately. No code change; recorded because it is
+the sharpest instance of the pre-release-verification gap documented in Phase 10's findings.
+→ [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]]
 
 ### Fix: the first synthetic binding collided with the TUN's own address
 **Phase 9.4b / live.** `next_fresh = cidr.first() + 1` handed the first name-addressed resource

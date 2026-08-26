@@ -2016,3 +2016,62 @@ machine (the server on `:6379` lacks `CLIENT TRACKING`/RESP3) — **pre-existing
   to 5s). Still to do: create the FQDN resource **through the UI**, redeploy the client binary, and run
   the flip.
 - Phase 10 stays `code-complete`, **not** `done`, until Gate 2 and the Verify (UI) checklist pass.
+
+## 2026-08-26 (cont.) — Claude (Sprint 16 · 🚩 GATE 2 CLOSED 5/5 — Stage 2 complete)
+
+Ran Gate 2 on a real two-host stack: controller + connector + shield on `Archer`, client on a **separate
+device** (`192.168.1.38`). **All five items pass.** Stage 2 is complete.
+
+**The headline criterion, verified twice.** Backend moved by **DNS only** — no resource edit, no
+mutation, no restart — and traffic followed while the ACL version did not move:
+
+| Run | DNS change | Client saw | ACL version |
+|-----|-----------|-----------|-------------|
+| 1 | `172.20.0.1` → `172.22.0.1` | `BACKEND-B` | 6 → **6** |
+| 2 | `172.22.0.1` → `172.20.0.1` | `BACKEND-A` | 9 → **9** |
+
+The connector's own record — `resolved=172.22.0.1 cache_hit=false resolve_us=718` — is the proof: a
+**fresh** sub-millisecond query per dial, entirely process-local. Same client, same tunnel, same synthetic
+IP, same hosts entry. Client and controller are now genuinely decoupled from backend addressing.
+
+**Also passed:** an FQDN resource created **through the UI** reachable end-to-end by name (closes the
+Phase 5 gap); an IP-pinned resource dialing with `hostname=` empty and no resolver, i.e. byte-identical
+to pre-sprint; and a protected resource **shield**-delivered via Phase 8's `local_target` (`127.0.0.1`,
+not the host) that **fails closed** when the shield stops — `route` stayed `"shield"`, the tunnel was
+refused, and **connector-routed dials to that port: 0**. Protection cannot be bypassed by stopping a
+shield.
+
+**One real bug found and fixed** (`9b04cb9`): the first synthetic binding collided with the TUN's own
+address, making every workspace's first FQDN resource unreachable by construction. See the Phase 9
+post-phase fixes.
+
+**Corrections to claims I made during the session, recorded so they are not re-derived:**
+- I reported the convergence failure as a "confirmed bug." **It was not.** The resolver works
+  (`cache_hit=false` every dial). The 25-dial failure was the deployment underneath it — the host was
+  losing its DHCP lease and `/etc/hosts` pointed at *its own* disappearing address.
+- My `TTL_MAX`-clamp hypothesis was **wrong**; the cache was never the issue.
+- I called item 5 "blocked by an orphaned shield". It was **not** — temporarily re-adding the old IP let
+  the shield reconnect once and self-heal permanently. I was too pessimistic and the user was right to
+  push back.
+
+**Seven deployment/operability findings** are written up in full in the Phase 10 file. The dominant one:
+**there is no supported way to run or identify pre-release code.** The install script only fetches
+releases, the auto-updaters actively revert local builds (one did, at boot, mid-session), there is no
+`--version`, and branch/release shields **both report `1.0.10`** — so a shield with zero `local_target`
+support is indistinguishable from one that has it. Two of this session's dead ends were the wrong binary.
+Runner-up: **a connector IP change permanently orphans its shields**, because a shield's only channel for
+new peer coordinates is the peer whose address changed.
+
+**Known gaps.** Resolver health (10.2 bullet 3) deliberately not shipped, per the task's own scope check.
+`ip-control` and `prot-test` were created by direct SQL insert, not the UI — fine for their items (only
+item 1 requires the UI path, and it passed), but **the UI resource-creation question is still open**: the
+form did not complete three attempts late in the session, most likely the `ALLOWED_ORIGIN`/session issue
+rather than a form defect, but unconfirmed.
+
+**What's next:**
+- Stage 3 (Phases 11–12) is **deferred / sprint17-candidate** by the plan's own recommendation — it buys
+  UX, not capability. Decide deliberately rather than by momentum.
+- Confirm whether admin-UI resource creation works from the correct origin. If it does not, that is a
+  Phase 10 defect and outranks Stage 3.
+- Consider promoting `resolved resource endpoint` to `info` (finding #3) — today the sprint's central
+  claim is unobservable in a default deployment.
