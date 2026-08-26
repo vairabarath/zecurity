@@ -331,8 +331,13 @@ func (r *mutationResolver) UpdateScimConfig(ctx context.Context, connectionID st
 			if reason == "" {
 				reason = "the identity mapping is not proven"
 			}
-			return nil, fmt.Errorf(
-				"updateScimConfig: cannot enable SCIM — %s. Enabling despite an unproven mapping "+
+			// User-actionable and DB-free: `reason` comes from the gate's own
+			// config validation, never from a store error. It must reach the
+			// client — this is the message that tells an admin the enable was
+			// refused and points at the break-glass path, so the UI can branch
+			// on extensions.code rather than guessing from a generic failure.
+			return nil, apperr.UserErrorf(
+				"cannot enable SCIM — %s. Enabling despite an unproven mapping "+
 					"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
 				reason, permission.BreakGlassMapping)
 		}
