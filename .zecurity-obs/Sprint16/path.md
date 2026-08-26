@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete · **Phase 8's wire hop VERIFIED on a live stack 2026-08-20** · outstanding: Phase 9's by-name run, which Gate 2 subsumes · next = Phase 10 (closes Gate 2)
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · Stage 2 phases 4–9 complete · **Phase 8's wire hop VERIFIED on a live stack 2026-08-20** · Phase 10 code complete + pushed (`36fb39e`) · **outstanding: Gate 2** — the live E2E, which subsumes Phase 9's by-name run
 solo: true
 owner: M3
 tags:
@@ -566,7 +566,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 7 | [[Sprint16/Member3-Go-Rust/Phase7-Connector-Delivery-Branch]] | ✅ done (148 + 4 tests green) |
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
-| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ⬜ **next** — closes **Gate 2** |
+| 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | 🟨 code complete (pushed `36fb39e`) — **Gate 2 outstanding**; resolver health deliberately not shipped |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
 
@@ -575,6 +575,15 @@ Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 202
 ## Post-Sprint Fixes
 
 Overview only — each fix is documented in full in its phase file.
+
+### Fix: the first synthetic binding collided with the TUN's own address
+**Phase 9.4b / live.** `next_fresh = cidr.first() + 1` handed the first name-addressed resource
+`100.64.0.1` — the address `zecurity0` itself owns. `ip rule 0 (local)` precedes `rule 49 (fwmark)`, so
+that resource was delivered locally and never entered the tunnel: **every workspace's first FQDN resource
+was unreachable by construction.** Invisible to 84 unit tests because each module was individually
+correct. Fixed by reserving `gateway_addr(cidr)` in `allocate()` and discarding stored bindings on it.
+Latent sibling left documented: `tun.rs`/`net_stack.rs` hardcode `100.64.0.1` rather than deriving it.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
 
 ### Fix: the synthetic IP was not discoverable, and `resources` showed a blank address
 **Phase 9.5.** Step 9.5 instructs *"add a `hosts` entry `<synthetic IP>  <hostname>`"*, but nothing in

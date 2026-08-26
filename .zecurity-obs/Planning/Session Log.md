@@ -1959,3 +1959,60 @@ sets a socket's local endpoint from the SYN's destination and sources replies fr
   run via a `hosts` entry (preserves TLS SNI, which a raw synthetic IP does not). 7 of 9 Phase 9 verify
   items need it. Also the first real exercise of Phases 6–7.
 - Phase 10 (Admin UI) — closes **Gate 2**.
+
+## 2026-08-22 — Claude (Sprint 16 Phase 10 — Admin UI: FQDN Resources)
+
+**Shipped** as `36fb39e` on `feat/pending-14-fqdn-resource-access` (21 files, +1058/−78): Phase 10 in
+full except resolver health, plus a Phase 9.5 post-phase fix.
+
+**Phase 10.** `admin/src/lib/resourceAddressing.ts` (new) holds the whole addressing contract; every page
+and both modals go through it. `Addressing` is a discriminated union, so a draft carrying **both** a host
+and a hostname is not constructible — the server's `validateAddressing` rule is unrepresentable in the UI
+rather than reported after a failed submit. `ResolverDraft` is `dns | static | raw`; **`shield` is
+deliberately absent** (delivery and resolution are orthogonal — a `shield` option would encode the
+conflation Phase 7 warns about), with the reason written into the type's doc comment. Delivery is derived
+exactly as the server derives it, never inferred from `resolver`. New **Delivery** column, `Host`→
+`Address`.
+
+**A blank-address bug fixed in 4 places.** `host` is `""` (never null) for name-addressed resources, so
+pages rendering it raw showed an empty cell: `Resources.tsx`, `GroupDetail.tsx` (×2), `ShieldDetail.tsx`
+— and the client CLI, which had the identical bug (below).
+
+**Phase 9.5 post-phase fix — the synthetic IP was not discoverable.** Step 9.5 says *"add a `hosts` entry
+`<synthetic IP>  <hostname>`"*, but **nothing in the client ever printed that IP**, so its own
+instruction could not be followed. Two causes: `zecurity-client resources` rendered the ACL entry's
+`address`, which is empty by design for name-addressed entries; and `RuntimeState` had no registry field,
+so the `BindingRegistry` lived only in `sync_registry`'s return value and the encrypted state file.
+Published `synthetic_bindings` on `RuntimeState` (set with `tun_handle`, cleared with it, and cleared on
+entry to `handle_up` so no early return can strand it) and added a pure, tested `display_address` with
+precedence **pinned → synthetic → hostname, never a fabricated IP**. 6 tests; revert-tested — the old
+behaviour fails exactly the three name-addressed cases. Client suite 78 → **84**.
+
+**Decisions settled.** `resolver.config["server"]` is **not** offered: `dns_query_name` rejects it
+outright, so the `graphqls` example advertising it was a doc bug, not a missing feature — fixed the docs.
+
+**Corrections to my own earlier claims, recorded so they are not re-derived:**
+- Editing `resolver` **does** bump the ACL version (`ACLRelevantUpdate` returns true for it) — by design,
+  since the connector must be told *how* to resolve. So Gate 2's *"backend IP change bumps no ACL
+  version"* cannot mean "edit the resolver in the UI"; it means **DNS answers differently** and the
+  connector re-resolves locally. Both halves together are the orthogonality claim.
+- The ACL version is an **in-memory monotonic counter** (`atomic.Uint64` per workspace, reset on
+  controller restart), *not* a content hash. "Unchanged" therefore needs a **positive read**
+  (`zecurity-client status` prints it) — absence of an `acl push` log line is not evidence.
+- Admin lint is **19 problems project-wide, unchanged**. An earlier "4 at HEAD, 4 now" was a narrower
+  per-file check misreported as project-wide.
+
+**Known gaps.** Resolver health (10.2 bullet 3) is **not** shipped — no connector→controller transport
+exists and inventing one would breach the no-new-RPCs rule; this is what the task's own scope check
+prescribes. `handle_up` still has no unit coverage. Controller `TestNewValkeyClient_Success` fails on this
+machine (the server on `:6379` lacks `CLIENT TRACKING`/RESP3) — **pre-existing, identical at HEAD**.
+
+**What's next:**
+- 🚩 **Gate 2** — the only thing between Stage 2 and its merge point. Prepared: group `cults` with the
+  client device's user as a member, two distinguishable backends (`BACKEND-A` on `127.0.0.1:8082`,
+  `BACKEND-B` on `192.168.1.87:8082`), and a verified DNS mechanism — systemd-resolved serves
+  `/etc/hosts` at **TTL 0** and `fqdn-test.internal` is absent from the connector's startup snapshot, so
+  the backend can move with **no restart and zero controller involvement** (`TTL_MIN` clamps re-resolution
+  to 5s). Still to do: create the FQDN resource **through the UI**, redeploy the client binary, and run
+  the flip.
+- Phase 10 stays `code-complete`, **not** `done`, until Gate 2 and the Verify (UI) checklist pass.

@@ -293,9 +293,16 @@ impl BindingRegistry {
     /// the pristine range is exhausted AND its quarantine has expired.
     fn allocate(&mut self, now: i64) -> Result<Ipv4Addr, RegistryError> {
         let last = self.cidr.last();
+        let gw = gateway_addr(self.cidr);
         while self.next_fresh <= last {
             let candidate = Ipv4Addr::from(self.next_fresh);
             self.next_fresh += 1;
+            // The gateway is the TUN's own address — see `gateway_addr`. Skipping
+            // it HERE rather than by starting `next_fresh` higher states the
+            // invariant, and survives `from_stored` recomputing the counter.
+            if candidate == gw {
+                continue;
+            }
             if !self.live.contains_key(&candidate) && !self.quarantined.contains_key(&candidate) {
                 return Ok(candidate);
             }
@@ -305,7 +312,7 @@ impl BindingRegistry {
         let reusable = self
             .quarantined
             .iter()
-            .find(|(_, &until)| now >= until)
+            .find(|(ip, &until)| now >= until && **ip != gw)
             .map(|(ip, _)| *ip);
         match reusable {
             Some(ip) => {
@@ -364,6 +371,15 @@ impl BindingRegistry {
                 reg.quarantined.insert(ip, now + QUARANTINE_SECS);
                 continue;
             }
+            // A binding written by a build that allocated the gateway. Drop it so
+            // the hostname is rebound to a routable address on the next sync;
+            // without this, an already-deployed client keeps an unreachable
+            // address forever and self-heals only on `logout`. Deliberately NOT
+            // quarantined — the gateway is permanently reserved, and quarantine
+            // would advertise it as reusable later.
+            if ip == gateway_addr(expected_cidr) {
+                continue;
+            }
             // Duplicate address in the file: keep the first, quarantine the rest.
             if reg.live.contains_key(&ip) {
                 reg.quarantined.insert(ip, now + QUARANTINE_SECS);
@@ -405,6 +421,26 @@ impl BindingRegistry {
         }
         reg
     }
+}
+
+/// The TUN's own address inside a synthetic CIDR: the first host address.
+///
+/// `tun.rs` assigns this to `zecurity0` and `net_stack` uses it as smoltcp's
+/// address and its AnyIP default-route gateway. Because the interface owns it,
+/// the kernel installs `local <gw> dev zecurity0 table local`, and rule
+/// `0: from all lookup local` is consulted BEFORE `49: from all fwmark 0x5a
+/// lookup 105`. A binding on this address is therefore delivered to the local
+/// host and never enters the tunnel — unreachable by construction.
+///
+/// It must never be handed out as a binding. Note this is *reserved*, not
+/// *quarantined*: quarantine means "reusable after QUARANTINE_SECS", which is
+/// exactly wrong here.
+///
+/// ⚠️ `tun.rs` and `net_stack.rs` currently hardcode `100.64.0.1` rather than
+/// deriving it from the chosen CIDR. That is correct only while `select_cidr`
+/// returns `100.64.0.0/22`; see the Phase 9 post-phase notes.
+pub fn gateway_addr(cidr: Net) -> Ipv4Addr {
+    Ipv4Addr::from(cidr.first() + 1)
 }
 
 /// Choose a synthetic /22 inside 100.64.0.0/10 that does not overlap anything
@@ -598,14 +634,15 @@ mod tests {
     /// means failing the allocation.
     #[test]
     fn exhaustion_respects_quarantine_then_recycles_after_it_expires() {
-        // A /30 gives 4 addresses; we skip the network address, so 3 usable.
+        // A /30 gives 4 addresses; we skip BOTH the network address and the
+        // reserved gateway (`gateway_addr`), leaving 2 usable — .2 and .3.
         let small = Net::new(Ipv4Addr::new(100, 64, 0, 0), 30);
         let mut r = BindingRegistry::new(small);
-        for i in 0..3 {
+        for i in 0..2 {
             r.bind(&format!("h{i}"), &format!("res-{i}"), T0).unwrap();
         }
         // Free one; it is quarantined.
-        let keep: HashSet<String> = ["res-1".into(), "res-2".into()].into_iter().collect();
+        let keep: HashSet<String> = ["res-1".into()].into_iter().collect();
         r.retain_resources(&keep, T0);
 
         assert_eq!(
@@ -617,6 +654,74 @@ mod tests {
         // Once quarantine expires it becomes available again.
         let ip = r.bind("new", "res-new", T0 + QUARANTINE_SECS + 1).unwrap();
         assert!(small.contains(ip));
+    }
+
+    // ── the reserved gateway (Phase 9 post-phase fix) ───────────────────────
+    //
+    // The TUN owns `gateway_addr(cidr)`, so the kernel routes it via the `local`
+    // table (rule 0) BEFORE the fwmark rule (49). A binding there is delivered to
+    // the local host and never enters the tunnel. This was live-only: the whole
+    // data plane was installed correctly and the resource was still unreachable.
+
+    #[test]
+    fn the_first_binding_is_never_the_tunnel_gateway() {
+        let mut r = reg();
+        let ip = r.bind("app.internal", "res-a", T0).unwrap();
+        assert_ne!(
+            ip,
+            gateway_addr(cidr()),
+            "the first binding took the TUN's own address — unreachable by construction"
+        );
+        assert_eq!(ip, "100.64.0.2".parse::<Ipv4Addr>().unwrap());
+    }
+
+    #[test]
+    fn no_allocation_ever_returns_the_gateway() {
+        let mut r = reg();
+        let gw = gateway_addr(cidr());
+        for i in 0..64 {
+            let ip = r.bind(&format!("h{i}.internal"), &format!("res-{i}"), T0).unwrap();
+            assert_ne!(ip, gw, "allocation {i} handed out the gateway");
+        }
+    }
+
+    /// Recycling under pressure must not reach the gateway either.
+    #[test]
+    fn the_gateway_is_not_recycled_under_pressure() {
+        let small = Net::new(Ipv4Addr::new(100, 64, 0, 0), 30);
+        let mut r = BindingRegistry::new(small);
+        // Pretend a previous build quarantined the gateway.
+        r.quarantined.insert(gateway_addr(small), T0);
+        let ip = r.bind("a.internal", "res-a", T0 + QUARANTINE_SECS + 1).unwrap();
+        assert_ne!(ip, gateway_addr(small));
+    }
+
+    /// An already-deployed client carries a stored binding on the gateway. It must
+    /// be discarded so the hostname is rebound to a routable address, rather than
+    /// self-healing only on `logout`.
+    #[test]
+    fn a_stored_binding_on_the_gateway_is_discarded_and_rebound() {
+        let c = cidr();
+        let gw = gateway_addr(c);
+        let stored = StoredRegistry {
+            cidr_base: c.base.to_string(),
+            cidr_prefix_len: c.prefix_len,
+            bindings: vec![Binding {
+                hostname: "app.internal".into(),
+                synthetic_ip: gw.to_string(),
+                resource_id: "res-a".into(),
+                allocated_at: T0,
+            }],
+            quarantined: Default::default(),
+        };
+        let mut r = BindingRegistry::from_stored(&stored, c, T0);
+        assert!(r.resolve(gw).is_none(), "the gateway binding must not be restored");
+        // And the hostname gets a routable address on the next sync.
+        let ip = r.bind("app.internal", "res-a", T0).unwrap();
+        assert_ne!(ip, gw);
+        assert!(c.contains(ip));
+        // Reserved, NOT quarantined — quarantine would advertise it as reusable.
+        assert!(!r.quarantined.contains_key(&gw));
     }
 
     #[test]

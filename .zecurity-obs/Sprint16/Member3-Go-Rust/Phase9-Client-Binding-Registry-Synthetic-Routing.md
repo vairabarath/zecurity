@@ -262,6 +262,54 @@ applies equally to pinned IPs outside any local subnet), not something this phas
 
 ## Post-Phase Fixes
 
+### Fix: the first synthetic binding collided with the TUN's own address
+**9.4b / live.** `BindingRegistry::new` set `next_fresh = cidr.first() + 1`, so the **first** name-addressed
+resource was allocated `100.64.0.1` — which is exactly the address `tun.rs` assigns to `zecurity0` and
+`net_stack` uses as smoltcp's address and AnyIP default-route gateway.
+
+Because the interface owns that /32, the kernel installs
+
+```text
+local 100.64.0.1 dev zecurity0 table local proto kernel scope host
+```
+
+and `ip rule` consults `0: from all lookup local` **before** `49: from all fwmark 0x5a lookup 105`. The
+packet is therefore classified as a local delivery and never enters the tunnel. **Every workspace's first
+name-addressed resource was unreachable by construction.**
+
+**Why nothing caught it.** The entire data plane was installed *correctly* — nft rule ordering, the
+fwmark rule, the `table 105` route, the registry, the smoltcp loop all verified good by inspection and by
+84 unit tests. The defect was the *interaction* between two independently-correct constants in different
+modules. `curl` failed in 53 ms and the connector logged nothing at all, because no packet ever left the
+client. Same family as 9.4a/9.4b: routing installed correctly, then defeated from outside the tested
+unit — and it converts the standing *"`handle_up` has no unit coverage"* note from a theoretical gap into
+a demonstrated one.
+
+**Fix** (`registry.rs` only):
+
+- New `gateway_addr(cidr)` naming the invariant, carrying the rule-priority reasoning so the next reader
+  does not have to rediscover it.
+- `allocate()` skips it on **both** the pristine and the recycle-under-pressure paths. Expressed in
+  `allocate` rather than as arithmetic in `new()`, so it states the invariant and survives `from_stored`
+  recomputing `next_fresh`.
+- `from_stored()` **discards** a stored binding sitting on the gateway, so an already-deployed client
+  self-heals on its next sync instead of only on `logout`. Deliberately **not** quarantined — quarantine
+  means "reusable after QUARANTINE_SECS", which is exactly wrong for a permanently reserved address.
+
+**4 new tests**; client suite 84 → **88**. Revert-tested: dropping the one-line guard fails exactly the
+five gateway-related cases. One existing test's arithmetic was corrected — a `/30` now yields **2** usable
+addresses, not 3, which is a real and intended capacity change, not a test workaround.
+
+**⚠️ Related latent defect, deliberately NOT fixed here.** `tun.rs:37` and `net_stack.rs:281,287` hardcode
+`100.64.0.1` instead of deriving it from the chosen CIDR. That is correct only while `select_cidr` returns
+`100.64.0.0/22`; if the lowest block is contested and it picks e.g. `100.64.4.0/22`, the interface still
+claims `100.64.0.1` — an address inside another network's range, which is precisely what `select_cidr`
+exists to avoid. Fixing it means plumbing the CIDR through `tun.rs` and `net_stack.rs`: a multi-file
+data-plane change needing its own verification pass, not something to land mid-Gate-2. `gateway_addr`
+exists partly so that change has one obvious call site.
+
+---
+
 ### Fix: the synthetic IP was not discoverable, and `resources` rendered a blank address
 **9.5.** Step 9.5 says *"Add a `hosts` entry `<synthetic IP>  <hostname>`"* — but nothing in the client
 ever printed that IP, so its own instruction could not be followed.
