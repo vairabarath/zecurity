@@ -6,4 +6,8 @@
 // near it. The binary is a shell that reads a request, calls `validate`, and — only
 // if that succeeds — talks to systemd-resolved.
 
+pub mod peer;
+pub mod protocol;
+pub mod resolved;
+pub mod server;
 pub mod validate;

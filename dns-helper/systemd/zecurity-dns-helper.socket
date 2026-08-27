@@ -1,0 +1,23 @@
+# zecurity-dns-helper.socket — ADR-023 option C
+#
+# Socket activation means root runs only while a DNS change is being applied.
+#
+# SocketGroup is defence in depth, NOT the authorization check: group membership is
+# administered elsewhere and would authorize every member. The helper additionally
+# verifies the caller with SO_PEERCRED and serves only the uid passed via
+# --allow-uid. See src/peer.rs.
+
+[Unit]
+Description=Zecurity DNS helper socket
+Documentation=https://github.com/vairabarath/zecurity
+
+[Socket]
+ListenStream=/run/zecurity-dns-helper.sock
+SocketUser=root
+SocketGroup=zecurity
+SocketMode=0660
+# One long-lived service handles every connection from its own accept loop.
+Accept=no
+
+[Install]
+WantedBy=sockets.target
