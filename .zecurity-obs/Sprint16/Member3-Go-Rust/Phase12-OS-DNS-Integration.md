@@ -43,7 +43,27 @@ policy routes, but cannot tell the OS to use its own resolver.
 This is why the task list below could not simply be executed: 12.1's first bullet assumes
 `resolvectl domain`/`dns` is callable, and for a non-root daemon it is not.
 
-### Options (full analysis in ADR-023)
+### ✅ Design approved 2026-08-27 — option C, implementation not started
+
+Task 1 (does `systemd-resolved` accept a loopback per-link server?) came back **positive**, so the design
+was settled rather than left open. Full detail in
+[[Decisions/ADR-023-Privileged-OS-DNS-Integration]]; the short version:
+
+- **`zecurity-dns-helper`** — a separate root binary, **socket-activated**, main daemon stays unprivileged
+- **API is two verbs**: `apply { iface, server, domains[] }` and `revert { iface }`
+- **The helper validates**: `iface` is a Zecurity TUN · `server` is loopback or inside `100.64.0.0/10` ·
+  every domain is routing-only (`~`-prefixed). Everything else is rejected and logged.
+- **Invariants**: never touch global DNS · never touch another interface · only configure our own TUN ·
+  route managed FQDNs **individually** (`~fqdn`), never parent domains · the resolver keeps exact-match +
+  `REFUSED`
+- Phase 11's `BIND_ADDR = 127.0.0.1:53` **stands** — no change to shipped code
+
+Two Task 1 findings that shaped it: `~domain` captures the whole **subtree** (so routing a shared suffix
+would break sibling names we do not manage), and because we only ever configure a TUN we create and
+destroy, **there is nothing of the user's to back up** — which removes most of 12.1's capture/restore
+machinery and the crash-safety risk with it.
+
+### Options as first analysed (superseded — full analysis in ADR-023)
 
 | | |
 |---|---|
