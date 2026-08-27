@@ -77,11 +77,20 @@ cd client && cargo build && cargo test
 - [x] An unmanaged name → `REFUSED`.
 - [x] A query from another host on the LAN → dropped.
 - [x] Case variations of a managed name all resolve.
-- [~] The answer matches Phase 9's registry after a resource is added and after one is deleted.
-      **Verified by construction + unit test, NOT by a live add/delete.** The responder holds no
-      state and re-reads `synthetic_bindings` per query (`bindings()`), so there is no cache that
-      could diverge; `with_no_bindings_everything_is_refused` pins the empty case. A live
-      `zecurity-client down` → `REFUSED` → `up` → `NOERROR` run would close it fully.
+- [x] The answer matches Phase 9's registry after a resource is added and after one is deleted.
+      **Verified live 2026-08-27** by taking the bindings away and putting them back:
+
+      ```text
+      --- tunnel DOWN ---
+      fqdn-test.internal   A  UDP  REFUSED  aa=1 ra=0  (no answers)
+      --- tunnel UP ---
+      fqdn-test.internal   A  UDP  NOERROR  aa=1 ra=0  A=100.64.0.2 ttl=30
+      ```
+
+      `handle_down` clears `synthetic_bindings`, so the name genuinely stops being managed and is
+      REFUSED rather than answered from a stale copy; `handle_up` restores it. Together with
+      `bindings()` snapshotting per query, this closes the "registry is the single source of truth"
+      requirement — the responder demonstrably has no cache of its own.
 
 ## Notes
 

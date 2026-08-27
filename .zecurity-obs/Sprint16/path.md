@@ -567,7 +567,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ✅ **done — GATE 2 CLOSED 5/5 (2026-08-26)**; resolver health deliberately not shipped |
-| 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ✅ **done — verified live 2026-08-27** (6/7 verify items live; the registry add/delete item holds by construction — no cache) |
+| 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ✅ **done — 7/7 verify items live 2026-08-27** |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
 
 Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 2026-08-06).
