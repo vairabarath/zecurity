@@ -1,5 +1,16 @@
 # Findings: Twingate + Okta Setup, and Its Implications for Zecurity
 
+> **Correction (post-publication, verified against source):** every "Finding A" reference below was
+> written from `path.md`'s notes without independently re-checking current source, and hedged
+> accordingly at the time ("not independently re-verified... treat as still open unless re-confirmed").
+> Finding A has since been directly re-checked against `controller/internal/scim/directory_service.go`
+> and `controller/internal/identity/revocation.go` and is **already fixed** (commit `b5c1bce`, with a
+> passing regression test) — `path.md`'s checklist was simply never updated after the fix landed. Only
+> Finding C (the mapping round-trip probe) is still genuinely open. See
+> `.zecurity-obs/Sprint17/Member1-Go/Phase10-Reference-Integration-Hardening.md`, "Verified status,"
+> for the full evidence trail. Left uncorrected below to preserve the record of what was actually
+> checked when this document was written.
+
 **Status:** Reference / investigation document only. **Nothing described in §9–§13 has been
 implemented.** No Zecurity source, migrations, GraphQL schema, or configuration was modified while
 producing this document.
