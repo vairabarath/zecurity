@@ -525,6 +525,24 @@ func main() {
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
 
+	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM
+	// deprovision/reactivate (PENDING-05) enqueues device.trust.* events; these
+	// handlers execute them — revoking the user's device certs (→ workspace CRL)
+	// and recording re-enrollment requirements. Fail-fast at startup so a missing
+	// registration is caught immediately rather than letting events dead-letter.
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustRevokeRequested,
+		clientsvc.NewDeviceTrustRevokeHandler(db.Pool, policyNotifier),
+	); err != nil {
+		log.Fatalf("register device.trust.revoke.requested handler: %v", err)
+	}
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustReEnrollmentRequired,
+		clientsvc.NewDeviceTrustReEnrollHandler(db.Pool),
+	); err != nil {
+		log.Fatalf("register device.trust.re_enrollment_required handler: %v", err)
+	}
+
 	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
 	// Google redirects here after user consent; controller exchanges the code
 	// server-side and redirects the browser to the CLI's local loopback server.

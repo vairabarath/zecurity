@@ -150,8 +150,23 @@ message GetACLSnapshotRequest {
 }
 
 message GetACLSnapshotResponse {
-  ACLSnapshot snapshot   = 1; // omitted when up_to_date
-  bool        up_to_date = 2; // true when known_version == current version
+  ACLSnapshot     snapshot         = 1; // omitted when up_to_date OR device_directive != DIRECTIVE_NONE
+  bool            up_to_date       = 2; // true when known_version == current version; always false when device_directive != DIRECTIVE_NONE
+  DeviceDirective device_directive = 3; // Sprint 19 Track 2 (PENDING-13) — server->client device trust signal
+  string          directive_reason = 4; // human-readable, e.g. "user suspended"; empty for DIRECTIVE_NONE
+}
+
+// DeviceDirective — server->client device trust signal, piggybacked on the
+// 60s ACL poll (Sprint 19 Track 2 / PENDING-13, ADR-028). REVOKED and
+// RE_ENROLL_REQUIRED are derived server-side from client_devices.revoked_at /
+// status (single source of truth, see device_trust_handler.go); the client
+// never infers them from an error string. RENEW_SOON is reserved for Track 3
+// (RenewCert RPC + renewal scheduler) — not populated yet.
+enum DeviceDirective {
+  DIRECTIVE_NONE               = 0;
+  DIRECTIVE_REVOKED            = 1; // device offboarded — wipe key, stop tunnels, exit daemon
+  DIRECTIVE_RE_ENROLL_REQUIRED = 2; // device recoverable — wipe cert, stop tunnels, stay alive disabled
+  DIRECTIVE_RENEW_SOON         = 3; // reserved for Track 3
 }
 
 // ACLConnector holds the tunnel endpoint for one Connector instance.
@@ -216,8 +231,10 @@ message GetTransportSnapshotRequest {
 }
 
 message GetTransportSnapshotResponse {
-  TransportSnapshot snapshot   = 1; // omitted when up_to_date
-  bool              up_to_date = 2; // true when known_version == current version
+  TransportSnapshot snapshot         = 1; // omitted when up_to_date OR device_directive != DIRECTIVE_NONE
+  bool              up_to_date       = 2; // true when known_version == current version; always false when device_directive != DIRECTIVE_NONE
+  DeviceDirective   device_directive = 3; // same signal as GetACLSnapshotResponse; the ACL poll is the authoritative reaction path (see DeviceDirective doc)
+  string            directive_reason = 4;
 }
 
 // TransportConnector mirrors ACLConnector's tunnel/relay coordinates.
