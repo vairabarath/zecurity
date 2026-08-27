@@ -1,17 +1,44 @@
 ---
 type: adr
-status: pending
+status: implemented
 id: PENDING-14
 domain: data-plane
 priority: P2
 created: 2026-07-03
-related: []
+related:
+  - "[[Decisions/ADR-022-Shield-LAN-IP-Resource-Host-Sync]]"
+  - "[[Decisions/ADR-023-Privileged-OS-DNS-Integration]]"
+  - "[[Sprint16/path]]"
 tags: [pending, adr, data-plane, dns, resources]
 ---
 
 # Pending ADR 14 — DNS / FQDN-Based Resource Access
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: IMPLEMENTED in Sprint 16** (Stages 1–2 + Phase 11), verified end-to-end on a two-host
+> stack. Following the precedent of PENDING-02 and PENDING-03, this stays in `pending/` marked
+> `implemented`; the design decisions taken along the way live in
+> [[Decisions/ADR-022-Shield-LAN-IP-Resource-Host-Sync]] and
+> [[Decisions/ADR-023-Privileged-OS-DNS-Integration]].
+>
+> **What shipped.** The acceptance criterion below is met and proven: a resource's backend IP can change
+> with **no controller action, no ACL version bump and no tunnel restart**. Mechanism: `resource_id` on
+> the wire (the connector authorizes by identity, not address) · connector-side resolution at dial time
+> with a TTL-bounded, process-local cache that never touches controller state · client-side synthetic IPs
+> from `100.64.0.0/10`, allocated locally and never seen by the controller · a client DNS responder on
+> `127.0.0.1:53` answering managed names with those synthetic IPs.
+>
+> Gate 2 (5/5) verified the headline claim twice on independent runs — DNS moved the backend, traffic
+> followed, ACL version unchanged both times (`cache_hit=false`, sub-millisecond re-resolution).
+>
+> **What is deferred.** Automatic OS DNS integration (Sprint 16 Phase 12). It is blocked on a *privilege*
+> decision, not on DNS: per-link `systemd-resolved` configuration is polkit-gated behind `auth_admin`, and
+> the client daemon runs as the enrolling user — capabilities do not help, because polkit authorizes on
+> uid. Until that is decided, a managed name is reached via the responder explicitly (`dig @127.0.0.1`,
+> `curl --resolve`) or a `hosts` entry. See [[Decisions/ADR-023-Privileged-OS-DNS-Integration]].
+>
+> **Out of scope, still.** Wildcard/pattern matching (`ACLEntry.pattern` is `reserved 14`; invariant #4
+> requires wire-level validation before any wildcard is honoured) and IPv6 (`AAAA` deliberately answers
+> NODATA, matching the connector's v4-only resolver).
 
 ## Context / Current State
 
