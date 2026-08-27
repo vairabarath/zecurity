@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -471,6 +472,60 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}, nil
 }
 
+// deviceGate confirms a device belongs to claims' user + workspace and derives
+// the DeviceDirective to report to the client (Sprint 19 Track 2 / PENDING-13,
+// see Track2-Device-Trust-Directive.md D-C). Priority: re_enroll_required (the
+// status column) beats revoked (derived from revoked_at — never duplicated
+// into status, so there is exactly one writer of "revoked-ness") beats
+// renew_pending (status column; Track 3 populates this), else none.
+//
+// Used by BOTH GetACLSnapshot and GetTransportSnapshot so the two RPCs can
+// never disagree about a device's trust state. A non-nil error means the
+// device wasn't found or belongs to someone else; callers translate that into
+// PermissionDenied exactly as before — it carries no directive information.
+// On a successful lookup, last_seen_at is stamped (throttled to once per 5
+// minutes, D-E) regardless of directive — the server heard from the device
+// either way. The stamp is best-effort and must never fail the RPC.
+func deviceGate(ctx context.Context, db *pgxpool.Pool, deviceID string, claims *auth.AccessTokenClaims) (directive clientv1.DeviceDirective, reason string, err error) {
+	var deviceWorkspaceID, deviceStatus string
+	var revokedAt *time.Time
+	err = db.QueryRow(ctx,
+		`SELECT workspace_id, status, revoked_at FROM client_devices
+		 WHERE id = $1 AND user_id = $2`,
+		deviceID, claims.UserID,
+	).Scan(&deviceWorkspaceID, &deviceStatus, &revokedAt)
+	if err != nil {
+		return clientv1.DeviceDirective_DIRECTIVE_NONE, "", fmt.Errorf("device not found: %w", err)
+	}
+	if deviceWorkspaceID != claims.TenantID {
+		return clientv1.DeviceDirective_DIRECTIVE_NONE, "", fmt.Errorf("device does not belong to this user")
+	}
+
+	switch {
+	case deviceStatus == "re_enroll_required":
+		directive = clientv1.DeviceDirective_DIRECTIVE_RE_ENROLL_REQUIRED
+		reason = "sign in again to re-register this device"
+	case revokedAt != nil:
+		directive = clientv1.DeviceDirective_DIRECTIVE_REVOKED
+		reason = "device access revoked — contact your admin"
+	case deviceStatus == "renew_pending":
+		directive = clientv1.DeviceDirective_DIRECTIVE_RENEW_SOON
+		reason = "certificate renewal due soon"
+	default:
+		directive = clientv1.DeviceDirective_DIRECTIVE_NONE
+	}
+
+	if _, stampErr := db.Exec(ctx,
+		`UPDATE client_devices SET last_seen_at = NOW()
+		  WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '5 minutes')`,
+		deviceID,
+	); stampErr != nil {
+		log.Printf("deviceGate: stamp last_seen_at for device %s: %v", deviceID, stampErr)
+	}
+
+	return directive, reason, nil
+}
+
 // GetACLSnapshot returns the current workspace ACL snapshot for the calling device.
 // Validates the access token and confirms the device belongs to the token's user/workspace.
 // Default-deny: returns an empty snapshot on any validation or compile failure.
@@ -484,23 +539,15 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace, and is not revoked.
-	// The access token is user-scoped (not device-scoped), so a revoked device
-	// with a still-valid token would otherwise keep pulling ACL snapshots — a
-	// control-plane leak. Gate on revoked_at here; cert revocation (CRL) handles
-	// the data plane separately.
-	var deviceWorkspaceID string
-	var revokedAt *time.Time
-	err = s.pool.QueryRow(ctx,
-		`SELECT workspace_id, revoked_at FROM client_devices
-		 WHERE id = $1 AND user_id = $2`,
-		req.GetDeviceId(), claims.UserID,
-	).Scan(&deviceWorkspaceID, &revokedAt)
-	if err != nil || deviceWorkspaceID != claims.TenantID {
+	directive, reason, err := deviceGate(ctx, s.pool, req.GetDeviceId(), claims)
+	if err != nil {
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
 	}
-	if revokedAt != nil {
-		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	if directive != clientv1.DeviceDirective_DIRECTIVE_NONE {
+		// Directive-in-response, not error (D-B): gRPC OK, no ACL payload
+		// regardless of directive — fail-closed even for a directive-ignoring
+		// client, since up_to_date also stays false so it drops its cached ACL.
+		return &clientv1.GetACLSnapshotResponse{DeviceDirective: directive, DirectiveReason: reason}, nil
 	}
 
 	workspaceID := claims.TenantID
@@ -551,21 +598,16 @@ func (s *Service) GetTransportSnapshot(ctx context.Context, req *clientv1.GetTra
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace, and is not revoked
-	// — identical gate to GetACLSnapshot so a revoked device cannot pull
-	// transport topology either.
-	var deviceWorkspaceID string
-	var revokedAt *time.Time
-	err = s.pool.QueryRow(ctx,
-		`SELECT workspace_id, revoked_at FROM client_devices
-		 WHERE id = $1 AND user_id = $2`,
-		req.GetDeviceId(), claims.UserID,
-	).Scan(&deviceWorkspaceID, &revokedAt)
-	if err != nil || deviceWorkspaceID != claims.TenantID {
+	// Same gate as GetACLSnapshot (deviceGate) so the two RPCs never disagree
+	// about a device's trust state. The ACL poll is the authoritative reaction
+	// path (Track2-Device-Trust-Directive.md D-A) — this just returns a clean
+	// directive instead of spamming PermissionDenied post-revoke.
+	directive, reason, err := deviceGate(ctx, s.pool, req.GetDeviceId(), claims)
+	if err != nil {
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
 	}
-	if revokedAt != nil {
-		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	if directive != clientv1.DeviceDirective_DIRECTIVE_NONE {
+		return &clientv1.GetTransportSnapshotResponse{DeviceDirective: directive, DirectiveReason: reason}, nil
 	}
 
 	workspaceID := claims.TenantID

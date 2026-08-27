@@ -86,6 +86,11 @@ pub struct StoredDevice {
     pub hostname: String,
     #[serde(default)]
     pub os: String,
+    /// Sprint 19 Track 2 (PENDING-13): "" (active) / "re_enroll_required" /
+    /// "revoked" — mirrors runtime::DeviceState. Set only via mark_device_state,
+    /// which also wipes certificate_pem/private_key_pem in the same write.
+    #[serde(default)]
+    pub device_state: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -147,6 +152,9 @@ impl StoredWorkspaceState {
                 private_key_pem: result.device.private_key_pem,
                 hostname: result.device.hostname,
                 os: result.device.os,
+                // A fresh login always re-enrolls; any prior revoke/re-enroll
+                // marker is stale.
+                device_state: String::new(),
             },
             session: StoredSession {
                 access_token: result.session.access_token,
@@ -205,6 +213,11 @@ impl From<&StoredWorkspaceState> for SessionInfo {
     }
 }
 pub fn state_dir() -> PathBuf {
+    // Override for tests — mirrors ipc::ipc_socket_path's ZECURITY_DAEMON_SOCKET
+    // pattern, so tests never touch the real user's XDG state directory.
+    if let Ok(p) = std::env::var("ZECURITY_STATE_DIR") {
+        return PathBuf::from(p);
+    }
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -274,6 +287,25 @@ pub fn save_rotated_tokens(
     state.session.access_token = new_access;
     state.session.refresh_token = new_refresh;
     state.session.expires_at = expires_at;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
+/// Sets the device_state marker (Sprint 19 Track 2 / PENDING-13) and wipes the
+/// on-disk cert + key material — both REVOKED and RE_ENROLL_REQUIRED mean the
+/// cert is dead server-side, so there is nothing to gain by keeping it on disk
+/// and real security value in not doing so. id/spiffe_id are preserved:
+/// RE_ENROLL_REQUIRED reuses the same device row on recovery (D-C).
+///
+/// Load -> mutate -> save, mirroring save_rotated_tokens. Same known failure
+/// window: a crash between the server-side change and this save leaves a
+/// stale marker on disk until the next successful poll.
+pub fn mark_device_state(workspace_slug: &str, device_state: &str) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.device.device_state = device_state.to_string();
+    state.device.certificate_pem.clear();
+    state.device.private_key_pem.clear();
+    state.device.cert_expires_at = 0;
     save_workspace_state(workspace_slug, &state)?;
     Ok(())
 }

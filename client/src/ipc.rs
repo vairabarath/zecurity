@@ -81,6 +81,14 @@ pub struct IpcResponse {
     pub synced_resources: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resources: Option<Vec<IpcResource>>,
+    /// Sprint 19 Track 2 (PENDING-13): "re_enroll_required" / "revoked" when
+    /// the controller has sent a device directive. None when active.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_state: Option<String>,
+    /// Human-readable reason accompanying device_state. Present whenever
+    /// device_state is present (may be an empty string).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
 }
 
 // ── Socket path ──────────────────────────────────────────────────────────────

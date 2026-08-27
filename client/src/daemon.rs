@@ -14,9 +14,9 @@ use crate::config;
 use crate::grpc::{
     self,
     client_v1::{
-        AclConnector, AclEntry, AclRemoteNetwork, DevicePostureReport, GetAclSnapshotRequest,
-        GetTransportSnapshotRequest, ReportDevicePostureRequest, TransportConnector,
-        TransportRemoteNetwork, TransportSnapshot,
+        AclConnector, AclEntry, AclRemoteNetwork, DeviceDirective, DevicePostureReport,
+        GetAclSnapshotRequest, GetTransportSnapshotRequest, ReportDevicePostureRequest,
+        TransportConnector, TransportRemoteNetwork, TransportSnapshot,
     },
 };
 use crate::posture;
@@ -26,8 +26,8 @@ use crate::login::LoginResult;
 use crate::net_stack;
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
-    self, DeviceInfo, SessionInfo, SharedState, TunHandle, TunnelRestartCoordinator, UserInfo,
-    WorkspaceInfo,
+    self, DeviceInfo, DeviceState, SessionInfo, SharedState, TunHandle, TunnelRestartCoordinator,
+    UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
@@ -72,6 +72,12 @@ pub async fn run() -> Result<()> {
 
     let state = runtime::new_shared();
 
+    // Created here (rather than just before the acl-sync-scheduler spawn
+    // below) so the startup ACL fetch can react to a device directive by
+    // stopping a tunnel — moot on a fresh daemon (nothing is up yet), but
+    // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
+    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
     // Load encrypted durable state on startup if present.
     if let Ok(stored) = state_store::load_workspace_state(&conf.workspace) {
         let mut s = state.write().await;
@@ -82,10 +88,12 @@ pub async fn run() -> Result<()> {
         // Fetch ACL snapshot in background — stale token will just log a warning.
         let state_clone = Arc::clone(&state);
         let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
         let ca_pem = stored.device.ca_cert_pem.clone();
         let device_id = stored.device.id.clone();
         tokio::spawn(async move {
-            fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, device_id).await;
+            fetch_and_store_acl(&state_clone, &conf_clone, &tun_slot_clone, ca_pem, device_id)
+                .await;
         });
 
         // Fetch the transport snapshot too, so relay routing is available before
@@ -145,8 +153,6 @@ pub async fn run() -> Result<()> {
     // pings every half-interval so a transient slow tick never trips the timeout.
     sd_spawn_watchdog();
 
-    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
-
     // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
     // and restarts the tunnel when the version changes — the timer counterpart
     // to the action-triggered sync in handle_request. See run_acl_sync_scheduler.
@@ -193,9 +199,16 @@ async fn handle_connection(
 
     let (response, shutdown) = match serde_json::from_str::<IpcRequest>(line.trim()) {
         Ok(req) => {
-            let is_shutdown = matches!(req, IpcRequest::Shutdown);
+            let is_shutdown_req = matches!(req, IpcRequest::Shutdown);
             let resp = handle_request(req, &state, &conf, &tun_slot).await;
-            (resp, is_shutdown)
+            // A device directive reaction may have set Revoked while handling
+            // this request (Sprint 19 Track 2 / PENDING-13, react_to_device_
+            // directive) — exit after the response is flushed below, same as
+            // an explicit Shutdown request. Checked generically (not tied to
+            // one IpcRequest variant) so any future call path that can trigger
+            // a directive reaction is covered automatically.
+            let revoked = state.read().await.device_state == DeviceState::Revoked;
+            (resp, is_shutdown_req || revoked)
         }
         Err(_) => (
             IpcResponse {
@@ -242,11 +255,20 @@ async fn handle_request(
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                device_state: match s.device_state {
+                    DeviceState::Active => None,
+                    other => Some(other.as_marker().to_string()),
+                },
+                revoked_reason: if s.device_state == DeviceState::Active {
+                    None
+                } else {
+                    Some(s.device_state_reason.clone())
+                },
                 ..Default::default()
             }
         }
 
-        IpcRequest::Sync => match sync_acl_now(state, conf).await {
+        IpcRequest::Sync => match sync_acl_now(state, conf, tun_slot).await {
             Ok(result) => {
                 if result.changed {
                     info!(
@@ -287,7 +309,7 @@ async fn handle_request(
         },
 
         IpcRequest::Resources => {
-            match refresh_acl_if_needed(state, conf).await {
+            match refresh_acl_if_needed(state, conf, tun_slot).await {
                 Ok(Some(result)) if result.changed => {
                     if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
                         return IpcResponse {
@@ -445,7 +467,7 @@ async fn handle_request(
                         let s = state.read().await;
                         s.posture_resync.notify_one();
                     }
-                    let result = match sync_acl_now(state, conf).await {
+                    let result = match sync_acl_now(state, conf, tun_slot).await {
                         Ok(r) => r,
                         Err(e) => {
                             return IpcResponse {
@@ -536,7 +558,7 @@ async fn handle_up(
         };
     }
 
-    if let Err(e) = refresh_acl_if_needed(state, conf).await {
+    if let Err(e) = refresh_acl_if_needed(state, conf, tun_slot).await {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
@@ -1218,6 +1240,11 @@ fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState
     s.user = Some(UserInfo::from(stored));
     s.device = Some(DeviceInfo::from(stored));
     s.session = Some(SessionInfo::from(stored));
+    // Restores the device directive across a daemon restart (e.g. the
+    // service manager relaunching after a RE_ENROLL_REQUIRED disable, which
+    // — unlike REVOKED — does not exit the process, so a restart mid-disable
+    // shouldn't be the common case, but must still recover correctly).
+    s.device_state = DeviceState::from_marker(&stored.device.device_state);
 }
 
 fn sd_notify_ready() {
@@ -1249,15 +1276,26 @@ fn sd_spawn_watchdog() {
     });
 }
 
-/// Raw GetACLSnapshot RPC. Returns Ok(None) when the controller reports
-/// up_to_date (client's known_version matches — keep the cached snapshot).
+/// Outcome of an ACL-plane fetch: a fresh snapshot, confirmation the cached
+/// one is current, or a device directive (Sprint 19 Track 2 / PENDING-13).
+/// Directive always means no snapshot — REVOKED/RE_ENROLL_REQUIRED gate the
+/// controller's ACL response entirely (D-B: empty payload, up_to_date=false).
+enum AclFetchOutcome {
+    Snapshot(crate::grpc::client_v1::AclSnapshot),
+    UpToDate,
+    Directive(DeviceDirective, String),
+}
+
+/// Raw GetACLSnapshot RPC. Returns AclFetchOutcome::UpToDate when the
+/// controller reports up_to_date (client's known_version matches — keep the
+/// cached snapshot).
 async fn fetch_acl_snapshot(
     conf: &config::ClientConf,
     ca_pem: &str,
     access_token: &str,
     device_id: &str,
     known_version: u64,
-) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+) -> Result<AclFetchOutcome> {
     let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
     let resp = client
         .get_acl_snapshot(GetAclSnapshotRequest {
@@ -1267,12 +1305,18 @@ async fn fetch_acl_snapshot(
         })
         .await?
         .into_inner();
+
+    let directive = DeviceDirective::try_from(resp.device_directive)
+        .unwrap_or(DeviceDirective::DirectiveNone);
+    if directive != DeviceDirective::DirectiveNone {
+        return Ok(AclFetchOutcome::Directive(directive, resp.directive_reason));
+    }
     if resp.up_to_date {
-        return Ok(None);
+        return Ok(AclFetchOutcome::UpToDate);
     }
     resp.snapshot
         .ok_or_else(|| anyhow::anyhow!("controller returned empty ACL snapshot"))
-        .map(Some)
+        .map(AclFetchOutcome::Snapshot)
 }
 
 /// Fetch the ACL snapshot, transparently refreshing the access token on 401.
@@ -1300,7 +1344,7 @@ async fn fetch_acl_snapshot_with_refresh(
     state: &SharedState,
     device_id: &str,
     known_version: u64,
-) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+) -> Result<AclFetchOutcome> {
     let refresh_lock = {
         let s = state.read().await;
         s.refresh_lock.clone()
@@ -1383,6 +1427,57 @@ async fn fetch_acl_snapshot_with_refresh(
                 .await
         }
     }
+}
+
+/// Reacts to a device directive from deviceGate (Sprint 19 Track 2 /
+/// PENDING-13, ADR-028): wipes the cert/key in memory and on disk, stops any
+/// running tunnel, clears the cached ACL, and records the new DeviceState —
+/// both in memory and via the on-disk marker (state_store::mark_device_state)
+/// so a daemon restart while still revoked/re-enroll-required picks the
+/// state back up (see populate_runtime).
+///
+/// Deliberately does NOT exit the process for REVOKED — that decision
+/// belongs to the caller, which may have a pending IPC response to write
+/// first (see fetch_and_store_acl and the IpcRequest::Sync arm in
+/// handle_request, which differ in whether a response is in flight).
+async fn react_to_device_directive(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    directive: DeviceDirective,
+    reason: String,
+) -> Result<()> {
+    let new_state = match directive {
+        DeviceDirective::DirectiveRevoked => DeviceState::Revoked,
+        DeviceDirective::DirectiveReEnrollRequired => DeviceState::ReEnrollRequired,
+        // RENEW_SOON (Track 3) and NONE are not reactions this function handles.
+        _ => return Ok(()),
+    };
+
+    warn!(
+        directive = ?directive,
+        reason = %reason,
+        "device directive received — wiping credentials"
+    );
+
+    handle_down(state, tun_slot).await;
+
+    {
+        let mut s = state.write().await;
+        if let Some(device) = s.device.as_mut() {
+            device.certificate_pem.clear();
+            device.private_key_pem.clear();
+            device.cert_expires_at = 0;
+        }
+        s.acl_snapshot = None;
+        s.device_state = new_state;
+        s.device_state_reason = reason;
+    }
+
+    state_store::mark_device_state(&conf.workspace, new_state.as_marker())
+        .context("persist device directive marker")?;
+
+    Ok(())
 }
 
 /// True when an error surfaced from a gRPC control-plane call is the
@@ -1874,10 +1969,16 @@ async fn sync_and_restart_if_changed(
         return;
     }
 
-    let acl_changed = match sync_acl_now(state, conf).await {
+    let acl_changed = match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => result.changed,
         Err(e) => {
             warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+            // No IPC response is in flight on this scheduler task, so REVOKED
+            // can exit immediately (Sprint 19 Track 2 / PENDING-13).
+            if state.read().await.device_state == DeviceState::Revoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
             false
         }
     };
@@ -1906,13 +2007,14 @@ async fn sync_and_restart_if_changed(
 async fn fetch_and_store_acl(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
     ca_pem: String,
     device_id: String,
 ) {
     // known_version = 0: startup has no cached snapshot, so always request the
     // full ACL (the controller never reports up_to_date for known_version == 0).
     match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id, 0).await {
-        Ok(Some(snapshot)) => {
+        Ok(AclFetchOutcome::Snapshot(snapshot)) => {
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
@@ -1920,10 +2022,25 @@ async fn fetch_and_store_acl(
             s.acl_last_sync_at = Some(synced_at);
             info!(version, "ACL snapshot stored");
         }
-        Ok(None) => {
+        Ok(AclFetchOutcome::UpToDate) => {
             // Contract violation: up_to_date for known_version == 0. Keep whatever
             // we have rather than acting on an empty response.
             warn!("ACL fetch reported up_to_date for known_version=0 — unexpected; keeping cached snapshot");
+        }
+        Ok(AclFetchOutcome::Directive(directive, reason)) => {
+            if let Err(e) =
+                react_to_device_directive(state, conf, tun_slot, directive, reason).await
+            {
+                warn!(error = %e, "failed to react to device directive at startup");
+                return;
+            }
+            // No IPC response is in flight at startup (this runs in a
+            // detached tokio::spawn), so REVOKED can exit immediately —
+            // mirrors the shutdown precedent in handle_connection.
+            if directive == DeviceDirective::DirectiveRevoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
@@ -2133,6 +2250,7 @@ async fn fetch_and_store_transport_with(
 async fn refresh_acl_if_needed(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
 ) -> Result<Option<AclSyncResult>> {
     let should_refresh = {
         let s = state.read().await;
@@ -2148,7 +2266,7 @@ async fn refresh_acl_if_needed(
         return Ok(None);
     }
 
-    match sync_acl_now(state, conf).await {
+    match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => Ok(Some(result)),
         Err(e) => {
             if state.read().await.acl_snapshot.is_some() {
@@ -2163,10 +2281,10 @@ async fn refresh_acl_if_needed(
 
 /// Abstracts the ACL-snapshot fetch (given the client's known_version) so the
 /// version-comparison / up_to_date logic in sync_acl_now_with can be unit-tested
-/// without a live controller. Ok(None) means up_to_date.
+/// without a live controller.
 #[async_trait::async_trait]
 trait AclFetcher {
-    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>>;
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome>;
 }
 
 /// Real fetcher: reads the device identity from state and calls the gRPC RPC.
@@ -2177,7 +2295,7 @@ struct GrpcAclFetcher<'a> {
 
 #[async_trait::async_trait]
 impl AclFetcher for GrpcAclFetcher<'_> {
-    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome> {
         let (ca_pem, device_id) = {
             let s = self.state.read().await;
             let device = s.device.as_ref().ok_or_else(|| {
@@ -2190,28 +2308,35 @@ impl AclFetcher for GrpcAclFetcher<'_> {
     }
 }
 
-async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
-    sync_acl_now_with(state, &GrpcAclFetcher { state, conf }).await
+async fn sync_acl_now(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<AclSyncResult> {
+    sync_acl_now_with(state, conf, tun_slot, &GrpcAclFetcher { state, conf }).await
 }
 
 /// Inner: reads the cached version, fetches, and applies the result. Split out so
 /// tests can drive the up_to_date (keep cached, changed=false) and changed paths
-/// without a controller.
+/// without a controller. conf/tun_slot are only used on the Directive arm (Sprint
+/// 19 Track 2 / PENDING-13) — the up_to_date/snapshot arms are unchanged.
 async fn sync_acl_now_with(
     state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
     fetcher: &impl AclFetcher,
 ) -> Result<AclSyncResult> {
     let old_version = {
         let s = state.read().await;
         s.acl_snapshot.as_ref().map(|a| a.version)
     };
-    let snapshot = fetcher.fetch(old_version.unwrap_or(0)).await?;
+    let outcome = fetcher.fetch(old_version.unwrap_or(0)).await?;
 
-    match snapshot {
+    match outcome {
         // up_to_date — the controller confirms our cached version is current.
         // This branch is only reachable when we sent a non-zero known_version,
         // which requires a cached snapshot, so acl_snapshot is guaranteed Some.
-        None => {
+        AclFetchOutcome::UpToDate => {
             let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_last_sync_at = Some(synced_at);
@@ -2227,7 +2352,7 @@ async fn sync_acl_now_with(
             info!(version = result.version, "ACL up_to_date — kept cached snapshot");
             Ok(result)
         }
-        Some(snapshot) => {
+        AclFetchOutcome::Snapshot(snapshot) => {
             let changed = match old_version {
                 Some(v) => v != snapshot.version,
                 None => true,
@@ -2248,6 +2373,19 @@ async fn sync_acl_now_with(
                 "ACL snapshot synced"
             );
             Ok(result)
+        }
+        // No AclSyncResult makes sense here — there is no ACL. react_to_device_
+        // directive wipes credentials/tunnel and records DeviceState; returning
+        // Err fits the existing default-deny contract every caller already has
+        // for a failed fetch. Callers that can safely exit (no pending IPC
+        // response) check state.device_state after this Err to decide whether
+        // to terminate the process.
+        AclFetchOutcome::Directive(directive, reason) => {
+            react_to_device_directive(state, conf, tun_slot, directive, reason.clone()).await?;
+            Err(anyhow::anyhow!(
+                "device directive received: {} ({reason})",
+                directive.as_str_name()
+            ))
         }
     }
 }
@@ -2644,8 +2782,8 @@ mod fetch_tests {
     struct UpToDateAcl;
     #[async_trait::async_trait]
     impl AclFetcher for UpToDateAcl {
-        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
-            Ok(None)
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::UpToDate)
         }
     }
 
@@ -2657,8 +2795,12 @@ mod fetch_tests {
             entries: vec![AclEntry::default(), AclEntry::default(), AclEntry::default()],
             ..Default::default()
         });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
-        let result = sync_acl_now_with(&state, &UpToDateAcl).await.unwrap();
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &UpToDateAcl)
+            .await
+            .unwrap();
 
         assert!(!result.changed, "up_to_date must report unchanged");
         assert_eq!(result.version, 7, "result reflects the cached version");
@@ -2674,8 +2816,8 @@ mod fetch_tests {
     struct NewAcl;
     #[async_trait::async_trait]
     impl AclFetcher for NewAcl {
-        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
-            Ok(Some(AclSnapshot {
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
                 version: 8,
                 entries: vec![AclEntry::default()],
                 ..Default::default()
@@ -2690,8 +2832,12 @@ mod fetch_tests {
             version: 7,
             ..Default::default()
         });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
-        let result = sync_acl_now_with(&state, &NewAcl).await.unwrap();
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &NewAcl)
+            .await
+            .unwrap();
 
         assert!(result.changed, "a new version must report changed");
         assert_eq!(result.version, 8);
@@ -2789,5 +2935,161 @@ mod posture_scheduler_tests {
             2,
             "must attempt exactly once plus one retry, then give up — not loop forever"
         );
+    }
+}
+
+/// react_to_device_directive tests (Sprint 19 Track 2 / PENDING-13). Uses a
+/// real state_store round-trip (not a mock) so the on-disk marker is actually
+/// verified — redirected to a tempdir via ZECURITY_STATE_DIR (state_store.rs)
+/// so tests never touch the real user's XDG state directory.
+#[cfg(test)]
+mod directive_tests {
+    use super::*;
+    use crate::grpc::client_v1::AclSnapshot;
+    use crate::state_store::{self, StoredDevice, StoredWorkspaceState};
+    use std::sync::Mutex as StdMutex;
+    use tempfile::TempDir;
+
+    // ZECURITY_STATE_DIR is a process-global env var; serialize the tests
+    // that set it so parallel test threads (cargo test's default) never race.
+    static STATE_DIR_GUARD: StdMutex<()> = StdMutex::new(());
+
+    /// Points state_store at a fresh tempdir and seeds a state file for
+    /// `workspace` with placeholder cert/key material, so mark_device_state's
+    /// load->mutate->save has something to load.
+    fn seed_state_file(dir: &TempDir, workspace: &str) -> config::ClientConf {
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let stored = StoredWorkspaceState {
+            device: StoredDevice {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                cert_expires_at: 1_700_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(workspace, &stored).expect("seed state file");
+        config::ClientConf {
+            workspace: workspace.to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn state_with_live_device() -> SharedState {
+        let state = crate::runtime::new_shared();
+        let mut s = state.write().await;
+        s.device = Some(DeviceInfo {
+            id: "device-1".into(),
+            spiffe_id: "spiffe://example.test/device-1".into(),
+            certificate_pem: "CERT".into(),
+            private_key_pem: "KEY".into(),
+            ca_cert_pem: "CA".into(),
+            cert_expires_at: 1_700_000_000,
+            hostname: "host".into(),
+            os: "linux".into(),
+        });
+        s.acl_snapshot = Some(AclSnapshot {
+            version: 3,
+            ..Default::default()
+        });
+        drop(s);
+        state
+    }
+
+    #[tokio::test]
+    async fn revoked_wipes_credentials_stops_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-revoked");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "user suspended".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert!(device.private_key_pem.is_empty(), "key must be wiped");
+        assert_eq!(device.cert_expires_at, 0);
+        assert!(s.acl_snapshot.is_none(), "cached ACL must be cleared");
+        assert_eq!(s.device_state, DeviceState::Revoked);
+        assert_eq!(s.device_state_reason, "user suspended");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-revoked").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "revoked");
+        assert!(on_disk.device.certificate_pem.is_empty());
+        assert!(on_disk.device.private_key_pem.is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_enroll_required_wipes_credentials_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-re-enroll");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveReEnrollRequired,
+            "sign in again".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert_eq!(s.device_state, DeviceState::ReEnrollRequired);
+        assert_eq!(s.device_state_reason, "sign in again");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-re-enroll").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "re_enroll_required");
+    }
+
+    #[tokio::test]
+    async fn none_directive_is_a_no_op() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        // No seeded state file: a no-op must never touch disk, so
+        // mark_device_state (which would fail to load a nonexistent file)
+        // must never be reached.
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let conf = config::ClientConf {
+            workspace: "ws-none".into(),
+            ..Default::default()
+        };
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveNone,
+            String::new(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert_eq!(device.certificate_pem, "CERT", "NONE must not wipe credentials");
+        assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
+        assert_eq!(s.device_state, DeviceState::Active);
     }
 }
