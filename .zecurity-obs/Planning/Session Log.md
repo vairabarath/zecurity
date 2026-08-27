@@ -2075,3 +2075,75 @@ rather than a form defect, but unconfirmed.
   Phase 10 defect and outranks Stage 3.
 - Consider promoting `resolved resource endpoint` to `info` (finding #3) — today the sprint's central
   claim is unobservable in a default deployment.
+
+## 2026-08-27 — Claude (Sprint 16 · Phase 11 done · Phase 12 deferred · SPRINT COMPLETE)
+
+**Phase 11 (Client DNS Responder) — done, 7/7 verify items live.** `client/src/dns.rs` (new) answers
+managed names with their synthetic IPs on `127.0.0.1:53`, UDP **and** TCP. 7 files, client suite 88 → 102.
+Verified on the client device (a separate machine): `A` → `100.64.0.2 ttl=30`; `AAAA` → NOERROR with zero
+answers (NODATA, never NXDOMAIN); TCP identical to UDP; case-insensitive with the queried case echoed;
+`example.com` and `sub.fqdn-test.internal` → `REFUSED`; `aa=1 ra=0` throughout; and **not** reachable
+off-host (probed from the other machine: UDP timeout, TCP refused). The registry-coupling item was closed
+live too — tunnel down → `REFUSED`, up → `NOERROR`, proving the responder has no cache of its own.
+
+**Design choices:** the responder runs for the daemon's whole lifetime rather than with the tunnel, reading
+`synthetic_bindings` per query — so a released binding stops being answered immediately and no second
+piece of state can drift. It **fails soft** if `:53` cannot be bound, because a DNS bind failure must not
+take the tunnel down. `hickory-proto` only (no server framework), matching the connector's version family.
+
+**`CAP_NET_BIND_SERVICE` had to be added** to `AmbientCapabilities` *and* `CapabilityBoundingSet`, in
+**both** copies of the unit — not in the task list. ⚠️ Upgrading an existing install therefore needs the
+**unit** reinstalled, not just the binary.
+
+**Two bugs found by verifying rather than by building:**
+- A test of mine was wrong before the code was. The case-echo check appeared to fail; `Name::from_str`
+  runs IDNA normalisation ("a side-effect of lowercasing the name"), so the test lowercased its own query
+  before the wire. `Name::from_ascii` preserves case and the round-trip passes. Had I trusted the failure
+  I would have "fixed" working code. The property is not cosmetic — DNS 0x20 case randomisation is an
+  anti-spoofing technique.
+- `MAX_UDP` was 512, the *non-EDNS* limit. `recv_from` into a short buffer silently truncates, so an EDNS0
+  query >512 bytes would have arrived unparseable and been dropped with only a `debug!` line. Now 1232.
+
+**Phase 12 (OS DNS Integration) — DEFERRED, and the reason is privilege, not DNS.** Per-domain routing
+needs `systemd-resolved`'s per-link API, which polkit gates behind `auth_admin`:
+`pkcheck --action-id org.freedesktop.resolve1.set-domains` → `rc=2 auth_admin_keep`. The daemon runs as
+the enrolling user; **capabilities do not help, because polkit authorizes on uid**. Twingate/Tailscale/
+NetworkManager all solve this by running the daemon as root — Twingate additionally delegates DNS to
+resolved or NetworkManager and listens inside the CGNAT range rather than on loopback.
+
+Recorded as **[[Decisions/ADR-023-Privileged-OS-DNS-Integration]]** (proposed): option A root daemon
+(recommended — but the *first* work item is the IPC socket becoming a privilege boundary, not the DNS
+code), B scoped polkit rule (rejected — resolve1 actions do not carry the link, so the grant is
+effectively all links: **broader** privilege while looking narrower), C privileged helper, D manual path
+(current).
+
+**No `os_dns.rs` was written** — a detect-and-refuse module would have had no caller while the phase is
+deferred. "Manual onboarding" is documentation, and the client already prints it: `resources` shows the
+synthetic IP plus *"Map the hostname to it locally, e.g. in /etc/hosts."*
+
+**Phase 12's prerequisite is already satisfied** — Phase 9.3's split-tunnelling item is closed with an
+explicit ADR-009 verdict. Whoever picks Stage 3 up need not revisit it.
+
+**Gate 2's last open question is closed, and it was not a bug.** Admin resource creation appeared broken
+because `APP_BASE_URL` is the post-login **redirect target** (there is no CORS middleware at all, and
+`ALLOWED_ORIGIN` is never read by the Go code). Opening the LAN-IP origin works, but logging in redirects
+to `localhost:5173`, so the token lands in a different origin and mutations 401 silently. Recorded as
+Phase 10 finding #8. **Phase 10's `done` status stands.**
+
+## 🏁 SPRINT 16 COMPLETE
+
+Stage 1 ✅ (Gate 1) · Stage 2 ✅ (Gate 2, 5/5) · Phase 11 ✅ · Phase 12 🛑 deferred by decision.
+
+The capability goal is delivered and verified end-to-end: **a resource's backend IP can change with no
+controller action, no ACL version bump and no tunnel restart** — `resource_id` on the wire, synthetic-IP
+routing on the client, connector-side resolution at dial time. What remains deferred is only automatic OS
+DNS integration, which is a privilege-management problem rather than a capability gap.
+
+**Still open, in priority order:**
+- ADR-023 needs a decision before Stage 3 is attempted.
+- The eight deployment/operability findings in the Phase 10 file. The dominant one — **no supported way to
+  run or identify pre-release code** (install script fetches releases only; both auto-updaters revert local
+  builds, one did mid-session; no `--version`; branch and release shields **both** report `1.0.10`) — cost
+  more time this week than any code defect.
+- This host's IP moved twice via duelling NetworkManager + systemd-networkd on `enp2s0`. A DHCP
+  reservation would prevent a repeat.

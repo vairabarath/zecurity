@@ -376,6 +376,35 @@ controller then redirects the browser to the CLI's own `http://127.0.0.1:<port>/
 must reach **both** — impossible across hosts. A client on a separate machine cannot enrol without an SSH
 port-forward or hand-relaying the `ctrl_code`. That is the normal ZTNA deployment shape.
 
+### 8. The admin UI is pinned to one origin, and using another leaves you silently unauthenticated
+
+`APP_BASE_URL` is the **post-login redirect target**, not a CORS setting (there is no CORS middleware in
+the controller at all, and `ALLOWED_ORIGIN` in `.env` is never read by the Go code):
+
+```go
+// internal/auth/callback.go:156
+http.Redirect(w, r, s.cfg.AllowedOrigin+"/auth/callback#token="+accessToken, http.StatusFound)
+```
+
+So opening `http://<lan-ip>:5173` works, but logging in redirects you to `http://localhost:5173` — the
+token arrives in *that* origin's fragment, and the LAN origin stays unauthenticated. Mutations then fail
+with a bare **401**; the form appears to work and simply does nothing. This is what made resource
+creation appear broken during Gate 2, and it is why `ip-control`/`prot-test` were created by direct
+insert.
+
+**There is no admin-UI defect.** Phase 10's `done` status stands.
+
+Compounding it, the refresh cookie (`callback.go:141-149`) sets no `Domain`, so it is host-scoped to
+`localhost` (the callback is served at `localhost:8080`). Cookies ignore port, so it reaches
+`localhost:5173` — but never a LAN-IP origin. And `Secure: true` is accepted over plain HTTP only because
+browsers treat `localhost` as a secure context; on `http://<lan-ip>` such a cookie is rejected outright.
+**Full LAN-origin support therefore needs `APP_BASE_URL`, `GOOGLE_REDIRECT_URI` (re-registered with
+Google) and `CONTROLLER_HTTP_URL` changed together, plus TLS** — changing `APP_BASE_URL` alone moves the
+redirect but leaves refresh broken, which fails later and less visibly.
+
+**Use `http://localhost:5173` on the controller host.** Not a workaround — it is the only origin this
+configuration fully supports.
+
 ### 7. Minor, but each cost a cycle
 
 - `zecurity-client status` reports session/cert state but **not whether the tunnel is up** — a down

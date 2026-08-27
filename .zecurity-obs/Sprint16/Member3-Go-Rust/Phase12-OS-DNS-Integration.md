@@ -7,7 +7,7 @@ title: OS DNS Integration
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder
-status: not-started
+status: deferred — blocked on a privilege decision, see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
 tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009, stage3, deferred, gate3]
 ---
 
@@ -17,6 +17,67 @@ tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009,
 > configuration cleanly on daemon stop.
 > Depends on **Phase 11**. **Highest-risk phase in the sprint** — it is the only one that mutates
 > host-wide state outside our own interface.
+
+## 🛑 DEFERRED 2026-08-27 — blocked on privilege, not on DNS
+
+**Decision: deferred. Sprint 16 is complete without this phase.** The sprint's capability goal —
+dynamic-IP resources without ACL churn — is delivered and verified (Gate 2, 5/5): `resource_id` on the
+wire, synthetic-IP routing, connector-side resolution at dial time. This phase only ever bought UX.
+
+### The blocker
+
+Per-domain routing means `systemd-resolved`'s per-link API, and it is polkit-gated:
+
+```text
+$ pkcheck --action-id org.freedesktop.resolve1.set-domains     --process $$
+rc=2  polkit.result=auth_admin_keep
+$ pkcheck --action-id org.freedesktop.resolve1.set-dns-servers --process $$
+rc=2  polkit.result=auth_admin_keep
+```
+
+The daemon runs as `User=<enrolling user>` with `CAP_NET_ADMIN CAP_NET_BIND_SERVICE`.
+**Capabilities do not help — polkit authorizes on uid, not capabilities**, and a headless service has no
+session in which to answer an `auth_admin` prompt. So the daemon can build a TUN, nftables rules and
+policy routes, but cannot tell the OS to use its own resolver.
+
+This is why the task list below could not simply be executed: 12.1's first bullet assumes
+`resolvectl domain`/`dns` is callable, and for a non-root daemon it is not.
+
+### Options (full analysis in ADR-023)
+
+| | |
+|---|---|
+| **A — root daemon** | Twingate/Tailscale/NetworkManager model. Recommended. Amends ADR-002; the IPC socket becomes a privilege boundary and that is the first work item, not the DNS code. |
+| **B — scoped polkit rule** | resolve1 actions do not reliably carry the link, so the grant is effectively *all links* — **broader** privilege than A while looking narrower. Rejected unless per-link scoping is demonstrated. |
+| **C — privileged helper** | Best scoping, new component and new attack surface. Not justified before A is shown inadequate. |
+| **D — manual path (current)** | `dig @127.0.0.1`, `curl --resolve`, or a `hosts` entry. Zero risk, ships today, no UX gain. |
+
+### What "manual onboarding" means concretely
+
+**No `os_dns.rs` was written.** A detect-and-refuse module would have had no caller while this phase is
+deferred — speculative code with a maintenance cost and no behaviour. The manual path is documentation,
+and it is already surfaced by the client: `zecurity-client resources` prints the synthetic IP together
+with *"Map the hostname to it locally, e.g. in /etc/hosts."* (added by the Phase 9.5 fix).
+
+An admin who wants the full UX today can configure the link themselves with sudo —
+`resolvectl dns zecurity0 127.0.0.1` and `resolvectl domain zecurity0 '~<domain>'` — but ⚠️ **we have not
+tested this**, and it will not survive a daemon restart or TUN recreation.
+
+### ✅ The prerequisite is already satisfied
+
+12.2 warns that this phase pairs with Phase 9.3's open split-tunnelling item. **That item is closed**
+(`[x]` in the Phase 9 file, with an explicit ADR-009 verdict: the whole-CIDR rule relaxes ADR-009's
+invariant deliberately and only inside the synthetic CIDR, proven live in both directions). Whoever picks
+this up does not need to revisit it.
+
+### Still required whenever this is picked up
+
+The parts of 12.1 that are **not** about privilege remain unimplemented and still matter — reliable
+teardown on every exit path, startup reconciliation, and refusing to overwrite another VPN's per-domain
+claim. Their failure mode is *"the user's DNS is broken after our daemon exits"*, which is materially
+worse than needing a hosts entry. Do not implement the happy path without them.
+
+---
 
 ## ⚠️ Deferral candidate (Sprint 17)
 
