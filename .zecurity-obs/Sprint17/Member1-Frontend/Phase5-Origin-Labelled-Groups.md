@@ -4,7 +4,7 @@ member: M1-Frontend
 sprint: 17
 phase: 5
 title: Origin-Labelled Groups
-status: pending
+status: implemented-unverified
 depends_on: [M1-7]
 tags: [react, admin, scim, frontend, groups, pending-05]
 ---
@@ -48,7 +48,8 @@ Resolved in `controller/graph/resolvers/policy_helpers.go:99` via `originOrManua
 
 ## Audit notes
 - **2026-08-26 — backend gap CLOSED by b5c1bce.** Verified in `controller/graph/policy.graphqls` (`origin: String!`, `externalId: String`, `connectionId: String` on `Group`), `controller/graph/models_gen.go:120-131`, and the resolver `controller/graph/resolvers/policy_helpers.go:99`. The "exposes only id/name/description/members/resources/createdAt/updatedAt" finding is stale — do not re-raise it.
-- `connectionId` is exposed too, so the optional `Engineering · SCIM (Okta)` form is buildable without further backend work.
+- **2026-08-26 — implemented (unverified).** Added `admin/src/components/groups/GroupOriginLabel.tsx` (pure presentational: `name · Local|System|SCIM`, plus `(connectionName)` for scim-origin when a resolved name is supplied — no Apollo query inside, so it stays testable) and `GroupOriginLabel.test.tsx` (6 tests). Wrapped every group-name render site: `Groups.tsx` (list row + delete-dialog confirm), `GroupDetail.tsx` (breadcrumb + title), `Resources.tsx` (protected-resource group pills, gated via `GetAllResources.groups` now selecting `origin`/`connectionId`). Each consumer fetches `GetIdpConnections` once (cache-and-network) and passes `connectionName` into the label — no redundant per-row lookups. `GetGroups` / `GetGroup` / `GetAllResources.groups` now select `origin` + `connectionId`; codegen regenerated. Gates: `codegen` + `build` (tsc -b) green, `test` **9 files / 46 tests** (FE-5 delta = **+1 file / +6 tests** — prior was 8/40 from FE-4), `lint` delta = 0. No secrets, no mutations, no backend changes — FE-1 `no-cache` rule does not apply (read-only display).
+- **Manual gate NOT run.** Per the build-gate, acceptance needs a visual pass: SCIM/Local/System groups each labelled with no bare display names, and `Engineering · SCIM (Okta)` resolving when a SCIM group's `connectionId` matches an `idpConnections` entry. Marked `implemented-unverified` (not `done`) until that visual pass runs.
 
 ## Build gate
 `cd admin && npm run codegen && npm run build` green; visual: SCIM/Local/System groups each labelled; no bare display names.

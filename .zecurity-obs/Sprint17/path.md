@@ -204,6 +204,7 @@ which registers the handler that executes device/cert revocation.
 > **Suggested order:** FE-1 (unblocked half) → FE-2 + FE-4 → [backend gap closure] → FE-1 (mapping/
 > enable half), FE-3, FE-5.
 
+- [ ] **FE-0** Enterprise IdP Connection Onboarding (Create OIDC connection dialog, `CreateIdpConnection` mutation, empty state replacement) — [[Sprint17/Member1-Frontend/Phase0-Enterprise-Idp-Onboarding]]
 - [ ] **FE-1** SCIM config on a connection (provider preset, mapping fields, enable-SCIM, mint token shown-once, SCIM base URL) — [[Sprint17/Member1-Frontend/Phase1-SCIM-Connection-Config]] · *split: **base-URL box + token panel + host pages/queries buildable now**; mapping fields + enable/disable toggle blocked on backend config-surface gap*. **Ships the `IdpConnections.tsx` / `IdpConnectionDetail.tsx` shells that FE-2 needs.**
 - [ ] **FE-2** Identity Health indicator (Healthy / Delayed / Disconnected) — [[Sprint17/Member1-Frontend/Phase2-Identity-Health-Indicator]] · *backend surface complete (`identityHealth` + `lastSyncAt`), but **blocked on FE-1** — both files it edits are created by FE-1 and do not exist yet. The badge component alone can be built and unit-tested in isolation.*
 - [ ] **FE-3** Directory-owned fields read-only ("Managed by Google Workspace / Microsoft Entra") — [[Sprint17/Member1-Frontend/Phase3-Directory-Owned-Readonly]] · *blocked: backend `User` provisioning-source gap*.

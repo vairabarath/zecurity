@@ -6,6 +6,7 @@ import {
   CreateGroupDocument,
   DeleteGroupDocument,
   GetGroupsDocument,
+  GetIdpConnectionsDocument,
   UpdateGroupDocument,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -21,11 +22,14 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { EmptyState, relativeTime } from '@/lib/console'
 import { cn } from '@/lib/utils'
+import { GroupOriginLabel } from '@/components/groups/GroupOriginLabel'
 
 type Group = {
   id: string
   name: string
   description?: string | null
+  origin: string
+  connectionId?: string | null
   createdAt: string
   updatedAt: string
   members: { id: string }[]
@@ -114,11 +118,13 @@ function DeleteDialog({
   onClose,
   onConfirm,
   loading,
+  connectionName,
 }: {
   group: Group | null
   onClose: () => void
   onConfirm: () => void
   loading: boolean
+  connectionName?: string | null
 }) {
   return (
     <Dialog open={!!group} onOpenChange={(open) => { if (!open) onClose() }}>
@@ -127,7 +133,16 @@ function DeleteDialog({
           <DialogTitle>Delete group</DialogTitle>
         </DialogHeader>
         <p className="text-sm text-muted-foreground">
-          Are you sure you want to delete <span className="font-semibold text-foreground">{group?.name}</span>? This will remove all member assignments and access rules.
+          Are you sure you want to delete{' '}
+          <span className="font-semibold text-foreground">
+            {group && (
+              <GroupOriginLabel
+                group={group}
+                connectionName={connectionName}
+              />
+            )}
+          </span>
+          ? This will remove all member assignments and access rules.
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={loading}>Cancel</Button>
@@ -151,6 +166,16 @@ export default function Groups() {
     fetchPolicy: 'cache-and-network',
   })
   const groups: Group[] = (data?.groups ?? []) as Group[]
+
+  // Resolve SCIM connectionIds → display names so SCIM-origin groups can render
+  // "Engineering · SCIM (Okta)". GetIdpConnections is already used across the
+  // SCIM pages; reusing it here avoids a dedicated backend call.
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: 'cache-and-network',
+  })
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
+  )
 
   const [createGroup, { loading: creating }] = useMutation(CreateGroupDocument, {
     onCompleted: () => { setShowCreate(false); refetch() },
@@ -213,7 +238,12 @@ export default function Groups() {
                   <div className="flex min-w-0 items-center gap-3">
                     <GroupIcon />
                     <div className="min-w-0">
-                      <div className="truncate text-[15px] font-bold leading-tight">{group.name}</div>
+                      <div className="truncate text-[15px] font-bold leading-tight">
+                        <GroupOriginLabel
+                          group={group}
+                          connectionName={connectionNameById.get(group.connectionId ?? '')}
+                        />
+                      </div>
                     </div>
                   </div>
 
@@ -289,6 +319,11 @@ export default function Groups() {
       <DeleteDialog
         group={deleteTarget}
         loading={deleting}
+        connectionName={
+          deleteTarget?.connectionId
+            ? connectionNameById.get(deleteTarget.connectionId)
+            : undefined
+        }
         onClose={() => setDeleteTarget(null)}
         onConfirm={() => deleteTarget && deleteGroup({ variables: { id: deleteTarget.id } })}
       />

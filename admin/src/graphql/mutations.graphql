@@ -275,6 +275,30 @@ mutation DeleteDeviceProfile($id: ID!) {
   deleteDeviceProfile(id: $id)
 }
 
+# --- Enterprise IdP Connection Onboarding (ADR-024 §0, Sprint 17 FE-0) -----
+# Creates a workspace-owned BYO OIDC connection. The client secret is write-only
+# and is never returned in any query or mutation response.
+mutation CreateIdpConnection($input: CreateIdpConnectionInput!) {
+  createIdpConnection(input: $input) {
+    id
+    protocol
+    provider
+    displayName
+    issuer
+    clientId
+    discoveryUrl
+    scopes
+    domainHint
+    status
+    managed
+    lastSyncAt
+    identityHealth
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+  }
+}
+
 # --- SCIM configuration + token lifecycle (ADR-025 §3, Sprint 17 FE-1) ------
 # SAFETY: editing subjectClaim/scimIdentifier on a SCIM-enabled connection
 # force-disables SCIM in the same server-side write — re-enabling is deliberate.

@@ -7,6 +7,7 @@ import {
   AssignResourceToGroupDocument,
   GetAllResourcesDocument,
   GetGroupDocument,
+  GetIdpConnectionsDocument,
   GetUsersDocument,
   RemoveGroupMemberDocument,
   UnassignResourceFromGroupDocument,
@@ -21,6 +22,7 @@ import {
 } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
 import { cn } from '@/lib/utils'
+import { GroupOriginLabel } from '@/components/groups/GroupOriginLabel'
 
 type Tab = 'members' | 'resources'
 
@@ -74,6 +76,15 @@ export default function GroupDetail() {
   const { data: usersData } = useQuery(GetUsersDocument, {
     fetchPolicy: 'cache-and-network',
   })
+
+  // Resolve this group's SCIM connectionId → display name for the
+  // "Engineering · SCIM (Okta)" form (reuses the existing GetIdpConnections).
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: 'cache-and-network',
+  })
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
+  )
 
   const group = data?.group
   const allResources = resourcesData?.allResources ?? []
@@ -135,7 +146,18 @@ export default function GroupDetail() {
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Link to="/groups" className="transition hover:text-foreground">Groups</Link>
         <span>/</span>
-        <span className="text-foreground">{group.name}</span>
+        <span className="text-foreground">
+          {group && (
+            <GroupOriginLabel
+              group={group}
+              connectionName={
+                group.connectionId
+                  ? connectionNameById.get(group.connectionId)
+                  : undefined
+              }
+            />
+          )}
+        </span>
       </div>
 
       <Link to="/groups" className="inline-flex items-center gap-2 text-sm text-muted-foreground transition hover:text-foreground">
@@ -149,7 +171,18 @@ export default function GroupDetail() {
           <Users className="h-7 w-7" />
         </div>
         <div className="min-w-0">
-          <h1 className="text-[2.2rem] font-bold tracking-[-0.03em]">{group.name}</h1>
+          <h1 className="text-[2.2rem] font-bold tracking-[-0.03em]">
+            {group && (
+              <GroupOriginLabel
+                group={group}
+                connectionName={
+                  group.connectionId
+                    ? connectionNameById.get(group.connectionId)
+                    : undefined
+                }
+              />
+            )}
+          </h1>
           {group.description && (
             <p className="mt-1 text-sm text-muted-foreground">{group.description}</p>
           )}

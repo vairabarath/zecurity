@@ -168,6 +168,8 @@ query GetAllResources {
     groups {
       id
       name
+      origin
+      connectionId
     }
   }
 }
@@ -257,6 +259,8 @@ query GetGroups {
     id
     name
     description
+    origin
+    connectionId
     createdAt
     updatedAt
     members {
@@ -280,6 +284,8 @@ query GetGroup($id: ID!) {
     id
     name
     description
+    origin
+    connectionId
     createdAt
     updatedAt
     members {
