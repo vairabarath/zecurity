@@ -8,9 +8,9 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::dns;
 use crate::auth;
 use crate::config;
+use crate::dns;
 use crate::grpc::{
     self,
     client_v1::{
@@ -21,6 +21,7 @@ use crate::grpc::{
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
+use crate::os_dns;
 use crate::registry::{select_cidr, BindingRegistry, Net};
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
@@ -118,6 +119,20 @@ pub async fn run() -> Result<()> {
                      needs CAP_NET_BIND_SERVICE (added in Phase 11)."
                 );
             }
+        });
+    }
+
+    // Reconcile any DNS configuration stranded by a previous run, before applying
+    // new state — the same order `tun.rs::cleanup_policy_routes()` uses.
+    //
+    // Nearly always a no-op: our configuration lives on `zecurity0`, and a
+    // non-persistent TUN disappears with the process, taking resolved's per-link state
+    // with it. Done anyway for the one case that CAN strand it — a TUN that outlived
+    // its creator — because the cost is one socket call and the failure it prevents is
+    // silent.
+    {
+        tokio::spawn(async move {
+            os_dns::revert().await;
         });
     }
 
@@ -333,11 +348,7 @@ async fn handle_request(
                     .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe))
                     .map(|e| IpcResource {
                         name: e.name.clone(),
-                        address: display_address(
-                            &e.address,
-                            &e.hostname,
-                            &s.synthetic_bindings,
-                        ),
+                        address: display_address(&e.address, &e.hostname, &s.synthetic_bindings),
                         port: e.port,
                         protocol: e.protocol.clone(),
                         hostname: e.hostname.clone(),
@@ -777,6 +788,19 @@ async fn handle_up(
         s.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
     }
 
+    // Ask the privileged helper to route the managed names at our responder.
+    //
+    // Deliberately AFTER the write lock above is released: this is a socket
+    // round-trip, and holding a write lock across it would stall every reader for the
+    // duration (and deadlock anything that needs the lock to answer).
+    //
+    // Best-effort by design — see `os_dns`. If the helper is absent the tunnel is
+    // unaffected and names stay reachable by synthetic IP or a hosts entry.
+    {
+        let bindings = state.read().await.synthetic_bindings.clone();
+        os_dns::apply(&bindings, dns::BIND_IP).await;
+    }
+
     info!(routes = route_count, "zecurity0 up");
     IpcResponse {
         ok: true,
@@ -796,6 +820,11 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     if let Some(h) = handle {
         h.abort.abort();
     }
+
+    // Drop the per-link DNS configuration before the interface goes away. Doing it
+    // here rather than relying on the link's removal means the ordering is explicit,
+    // and it is idempotent so a double `down` is harmless.
+    os_dns::revert().await;
 
     let mgr = tun_slot.lock().await.take();
     if let Some(m) = mgr {
@@ -1018,8 +1047,14 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            fetch_acl_snapshot(conf, ca_pem, &new_tokens.access_token, device_id, known_version)
-                .await
+            fetch_acl_snapshot(
+                conf,
+                ca_pem,
+                &new_tokens.access_token,
+                device_id,
+                known_version,
+            )
+            .await
         }
     }
 }
@@ -1533,7 +1568,10 @@ async fn fetch_and_store_transport_with(
 
     let known_version = {
         let s = state.read().await;
-        s.transport_snapshot.as_ref().map(|t| t.version).unwrap_or(0)
+        s.transport_snapshot
+            .as_ref()
+            .map(|t| t.version)
+            .unwrap_or(0)
     };
 
     match fetcher.fetch(known_version).await? {
@@ -1591,7 +1629,10 @@ async fn refresh_acl_if_needed(
 /// without a live controller. Ok(None) means up_to_date.
 #[async_trait::async_trait]
 trait AclFetcher {
-    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>>;
+    async fn fetch(
+        &self,
+        known_version: u64,
+    ) -> Result<Option<crate::grpc::client_v1::AclSnapshot>>;
 }
 
 /// Real fetcher: reads the device identity from state and calls the gRPC RPC.
@@ -1602,7 +1643,10 @@ struct GrpcAclFetcher<'a> {
 
 #[async_trait::async_trait]
 impl AclFetcher for GrpcAclFetcher<'_> {
-    async fn fetch(&self, known_version: u64) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+    async fn fetch(
+        &self,
+        known_version: u64,
+    ) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
         let (ca_pem, device_id) = {
             let s = self.state.read().await;
             let device = s.device.as_ref().ok_or_else(|| {
@@ -1649,7 +1693,10 @@ async fn sync_acl_now_with(
                 synced_at,
                 changed: false,
             };
-            info!(version = result.version, "ACL up_to_date — kept cached snapshot");
+            info!(
+                version = result.version,
+                "ACL up_to_date — kept cached snapshot"
+            );
             Ok(result)
         }
         Some(snapshot) => {
@@ -2172,7 +2219,10 @@ mod fetch_tests {
             5,
             "cached snapshot must be kept"
         );
-        assert!(s.transport_last_sync_at.is_some(), "sync timestamp refreshed");
+        assert!(
+            s.transport_last_sync_at.is_some(),
+            "sync timestamp refreshed"
+        );
     }
 
     // --- Transport: concurrent fetches are serialized (Fix 1 regression guard) ---
@@ -2218,7 +2268,13 @@ mod fetch_tests {
             "each fetch must observe the prior fetch's stored version (serialized)"
         );
         assert_eq!(
-            state.read().await.transport_snapshot.as_ref().unwrap().version,
+            state
+                .read()
+                .await
+                .transport_snapshot
+                .as_ref()
+                .unwrap()
+                .version,
             2,
             "final stored version must be the newest — no stale overwrite"
         );
@@ -2238,7 +2294,11 @@ mod fetch_tests {
         let state = crate::runtime::new_shared();
         state.write().await.acl_snapshot = Some(AclSnapshot {
             version: 7,
-            entries: vec![AclEntry::default(), AclEntry::default(), AclEntry::default()],
+            entries: vec![
+                AclEntry::default(),
+                AclEntry::default(),
+                AclEntry::default(),
+            ],
             ..Default::default()
         });
 
@@ -2246,7 +2306,10 @@ mod fetch_tests {
 
         assert!(!result.changed, "up_to_date must report unchanged");
         assert_eq!(result.version, 7, "result reflects the cached version");
-        assert_eq!(result.entry_count, 3, "result reflects the cached entry count");
+        assert_eq!(
+            result.entry_count, 3,
+            "result reflects the cached entry count"
+        );
         assert_eq!(
             state.read().await.acl_snapshot.as_ref().unwrap().version,
             7,

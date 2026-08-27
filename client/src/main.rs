@@ -11,6 +11,7 @@ mod grpc;
 mod ipc;
 mod login;
 mod net_stack;
+mod os_dns;
 mod registry;
 mod relay_pool;
 mod runtime;

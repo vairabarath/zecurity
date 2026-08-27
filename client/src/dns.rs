@@ -34,6 +34,13 @@ use crate::runtime::SharedState;
 /// Loopback only. Binding elsewhere would make this an open resolver.
 pub const BIND_ADDR: &str = "127.0.0.1:53";
 
+/// The address alone, without the port.
+///
+/// Split out so `os_dns` can tell systemd-resolved where this responder listens
+/// without a second literal that could drift from `BIND_ADDR`. Task 1 (ADR-023)
+/// verified resolved accepts a loopback address as a per-link DNS server.
+pub const BIND_IP: &str = "127.0.0.1";
+
 /// Answer TTL. Short enough that a binding change propagates without a stale answer
 /// pinning traffic to a released address, long enough to avoid a query per
 /// connection.
