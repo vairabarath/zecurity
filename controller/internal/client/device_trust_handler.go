@@ -102,12 +102,13 @@ func (h *DeviceTrustRevokeHandler) Handle(ctx context.Context, evt outbox.Outbox
 }
 
 // DeviceTrustReEnrollHandler consumes device.trust.re_enrollment_required
-// (emitted on SCIM reactivation). It is honest-minimal: the user's devices were
-// already cert-revoked on the prior suspend, so they cannot connect and must
-// re-enroll (which already works via interactive login). This handler records
-// the requirement to audit and returns nil. It does NOT fake a client prompt or
-// mutate any device — the proactive client directive is Track 2. Registering it
-// now prevents reactivation events from dead-lettering.
+// (emitted on SCIM reactivation). The user's devices were already cert-revoked
+// on the prior suspend (revoked_at is terminal — Track 1 never un-revokes it),
+// so they still cannot connect. What this handler now does (Sprint 19 Track 2,
+// upgrading Track 1's honest-minimal stub) is set status='re_enroll_required'
+// on every one of the user's devices, so the next 60s ACL poll's deviceGate
+// (service.go) reports RE_ENROLL_REQUIRED instead of the terminal REVOKED —
+// letting the daemon show "sign in again" instead of "contact your admin".
 type DeviceTrustReEnrollHandler struct {
 	pool *pgxpool.Pool
 }
@@ -117,8 +118,12 @@ func NewDeviceTrustReEnrollHandler(pool *pgxpool.Pool) *DeviceTrustReEnrollHandl
 	return &DeviceTrustReEnrollHandler{pool: pool}
 }
 
-// Handle implements outbox.EventHandler. Records the re-enrollment requirement
-// to audit and returns nil. It performs no device mutation.
+// Handle implements outbox.EventHandler. Sets status='re_enroll_required' on
+// every one of the user's devices (durable — deviceGate reads it on the next
+// poll), then best-effort audits. Unlike the revoke handler, a 0-row update
+// is not special-cased: the audit row still records the reactivation event
+// even when every device was already marked (idempotent replay) or the user
+// has no devices, since the event itself is meaningful either way.
 func (h *DeviceTrustReEnrollHandler) Handle(ctx context.Context, evt outbox.OutboxEvent) error {
 	if evt.UserID == nil {
 		return fmt.Errorf("device.trust.re_enrollment_required: missing typed UserID column")
@@ -126,6 +131,11 @@ func (h *DeviceTrustReEnrollHandler) Handle(ctx context.Context, evt outbox.Outb
 
 	userID := evt.UserID.String()
 	workspaceID := evt.WorkspaceID.String()
+
+	count, err := markUserDevicesReEnrollRequired(ctx, h.pool, userID, workspaceID)
+	if err != nil {
+		return fmt.Errorf("device.trust.re_enrollment_required: %w", err)
+	}
 
 	_ = audit.Record(ctx, h.pool, audit.Entry{
 		TenantID:    workspaceID,
@@ -135,6 +145,7 @@ func (h *DeviceTrustReEnrollHandler) Handle(ctx context.Context, evt outbox.Outb
 		TargetID:    userID,
 		Details: map[string]any{
 			"source":         "scim",
+			"device_count":   count,
 			"correlation_id": evt.CorrelationID.String(),
 		},
 	})

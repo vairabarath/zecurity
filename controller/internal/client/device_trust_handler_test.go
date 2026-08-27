@@ -372,8 +372,9 @@ func TestDeviceTrustRevokeMalformed(t *testing.T) {
 	}
 }
 
-// TestDeviceTrustReEnrollRequired ensures the reactivation event records an
-// audit row and returns nil without mutating any device.
+// TestDeviceTrustReEnrollRequired ensures the reactivation event sets
+// status='re_enroll_required' on the user's devices (Sprint 19 Track 2),
+// without un-revoking them, and records an audit row.
 func TestDeviceTrustReEnrollRequired(t *testing.T) {
 	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
 	if adminDSN == "" {
@@ -423,7 +424,7 @@ func TestDeviceTrustReEnrollRequired(t *testing.T) {
 		t.Fatalf("Handle: %v", err)
 	}
 
-	// No device changes — still revoked (the handler must not un-revoke).
+	// Still revoked — the handler must not un-revoke (revoked_at is terminal).
 	var stillRevoked int
 	if err := pool.QueryRow(ctx,
 		`SELECT count(*) FROM client_devices WHERE user_id = $1 AND revoked_at IS NOT NULL`,
@@ -432,7 +433,20 @@ func TestDeviceTrustReEnrollRequired(t *testing.T) {
 		t.Fatalf("count: %v", err)
 	}
 	if stillRevoked != 1 {
-		t.Fatalf("re-enroll handler must not mutate devices; revoked count = %d", stillRevoked)
+		t.Fatalf("re-enroll handler must not un-revoke devices; revoked count = %d", stillRevoked)
+	}
+
+	// But status is now re_enroll_required, so deviceGate reports the
+	// recoverable directive instead of the terminal REVOKED one.
+	var reEnrollRequired int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM client_devices WHERE user_id = $1 AND status = 're_enroll_required'`,
+		user1,
+	).Scan(&reEnrollRequired); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if reEnrollRequired != 1 {
+		t.Fatalf("re-enroll handler must set status = 're_enroll_required'; count = %d", reEnrollRequired)
 	}
 
 	assertAuditRow(t, ctx, pool, wsID, "device.re_enroll_required", user1, corr)

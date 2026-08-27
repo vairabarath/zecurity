@@ -21,10 +21,10 @@ tags:
 - Track 1 (DONE, merged contract + handler branch `feat/pending-13-device-revoke-handler`):
   first outbox consumers revoke a user's devices on `device.trust.revoke.requested`,
   and record `device.trust.re_enrollment_required`.
-- Track 2 (this sprint): server→client **device directive** on the 60s ACL poll —
+- Track 2 (DONE): server→client **device directive** on the 60s ACL poll —
   `REVOKED` / `RE_ENROLL_REQUIRED` / `RENEW_SOON` / `NONE`, with the client daemon
   reacting (wipe key, stop tunnels, surface the right message). See
-  `Member2-Go/Track2-Device-Trust-Directive.md`.
+  `Member2-Go/Track2-Device-Trust-Directive.md` (all acceptance criteria checked).
 - Track 3 (later): `RenewCert` RPC + daemon renewal scheduler, riding the
   `RENEW_SOON` channel defined in Track 2.
 

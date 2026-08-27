@@ -167,17 +167,25 @@ cd ../client && cargo build && cargo test -p zecurity-client daemon::directive
 ```
 
 ## Acceptance criteria
-- [ ] `device_directive` reachable on `GetACLSnapshot`; REVOKED/RE_ENROLL returned as
+- [x] `device_directive` reachable on `GetACLSnapshot`; REVOKED/RE_ENROLL returned as
       OK responses with no ACL payload (control-plane gate preserved).
-- [ ] `status` column exists, carries only {active, re_enroll_required, renew_pending};
+- [x] `status` column exists, carries only {active, re_enroll_required, renew_pending};
       `revoked` derived from `revoked_at` (no dual-write).
-- [ ] Track 1 `ReEnrollHandler` sets `status='re_enroll_required'`.
-- [ ] Daemon acts: REVOKED → wipe key + stop tunnels + persist marker + exit;
+- [x] Track 1 `ReEnrollHandler` sets `status='re_enroll_required'`.
+- [x] Daemon acts: REVOKED → wipe key + stop tunnels + persist marker + exit;
       RE_ENROLL_REQUIRED → wipe cert + stop tunnels + disabled w/ re-login prompt.
-- [ ] `last_seen_at` stamped (throttled) each poll.
-- [ ] `GetTransportSnapshot` returns clean directive (no PermissionDenied spam).
-- [ ] `RENEW_SOON` enum reserved for Track 3.
-- [ ] `go build ./...` + `go vet ./...` + `cargo build` green; tests pass.
+- [x] `last_seen_at` stamped (throttled) each poll.
+- [x] `GetTransportSnapshot` returns clean directive (no PermissionDenied spam).
+- [x] `RENEW_SOON` enum reserved for Track 3.
+- [x] `go build ./...` + `go vet ./...` + `cargo build` green; tests pass.
+
+Verified: `deviceGate` unit tests (`internal/client/device_gate_test.go`) cover the
+full status/revoked_at priority matrix + the not-found/wrong-workspace error path +
+the last_seen_at throttle; `daemon::directive_tests` (daemon.rs) covers REVOKED/
+RE_ENROLL_REQUIRED/NONE end-to-end (in-memory state + real on-disk state_store
+round-trip via a `ZECURITY_STATE_DIR`-redirected tempdir). Full `internal/client`
+Go suite (against a real Postgres test DB) and the full 76-test Rust suite both
+green, clippy/go vet clean on every touched file.
 
 ## Coordination
 - Track 2 stacks on `feat/pending-13-device-revoke-handler` (upgrades its

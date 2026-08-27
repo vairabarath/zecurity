@@ -285,3 +285,33 @@ func revokeUserDevices(
 	}
 	return tag.RowsAffected(), nil
 }
+
+// markUserDevicesReEnrollRequired sets status = 're_enroll_required' on every
+// one of a user's devices within a workspace. Unlike revokeUserDevices, this
+// does NOT filter on revoked_at — a reactivated user's devices are typically
+// already revoked (from the prior suspend's revokeUserDevices call), and
+// re_enroll_required must still be set so deviceGate reports the recoverable
+// RE_ENROLL_REQUIRED directive instead of the terminal REVOKED one (status
+// takes priority over revoked_at — see Track2-Device-Trust-Directive.md D-C).
+//
+// Idempotent on replay: gated on status <> 're_enroll_required', so
+// re-running against already-marked rows affects 0 rows. Returns the number
+// of rows actually affected.
+func markUserDevicesReEnrollRequired(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET status = 're_enroll_required'
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND status      <> 're_enroll_required'`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark user devices re-enroll required: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
