@@ -141,6 +141,66 @@ func TestDeprovision_Integration(t *testing.T) {
 		}
 	})
 
+	// Regression guard for ADR-025 §5's group_members purge requirement on
+	// hard-delete. This is a coverage gap fix only — Deprovision already
+	// performs the purge (directory_service.go, the DELETE FROM group_members
+	// statement scoped to sc.workspaceID); this subtest did not previously
+	// exist to prove it. No production code changed for this behavior.
+	t.Run("hard-delete removes the user's group_members", func(t *testing.T) {
+		sc := scopeFor(t, ctx, ds, ws, conn)
+		fakeSink.events = nil
+		fakeSink.arm(nil)
+		fakeInvalidator.arm(nil)
+
+		// Uses a canonical key distinct from every other subtest in this file
+		// (deliberately NOT "okta-finn-1" — that key is reused by the
+		// "forced enqueue failure" subtest below; Provision is idempotent on
+		// canonical key, so colliding here would hand that subtest back this
+		// subtest's already-tombstoned user instead of a fresh one).
+		res, serr := ds.Provision(ctx, sc, map[string]any{
+			"userName":   "hollis@phase6.example.com",
+			"externalId": "okta-hollis-1",
+		}, "")
+		if serr != nil {
+			t.Fatalf("provision hollis: %v", serr)
+		}
+		hollisID := res.user.ID
+
+		g, serr := ds.CreateGroup(ctx, sc, "grp-hollis", "Hollis's Group")
+		if serr != nil {
+			t.Fatalf("create group: %v", serr)
+		}
+		if _, serr := ds.PatchGroup(ctx, sc, g.ID, &groupPatch{Ops: []patchOp{
+			{Op: "add", Values: []string{"okta-hollis-1"}},
+		}}); serr != nil {
+			t.Fatalf("add hollis to group: %v", serr)
+		}
+
+		var memberCountBefore int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM group_members WHERE user_id = $1`, hollisID,
+		).Scan(&memberCountBefore); err != nil {
+			t.Fatalf("count memberships before delete: %v", err)
+		}
+		if memberCountBefore != 1 {
+			t.Fatalf("expected hollis to have exactly 1 group membership before delete, got %d", memberCountBefore)
+		}
+
+		if serr := ds.Deprovision(ctx, sc, hollisID, true, ""); serr != nil {
+			t.Fatalf("hard-delete hollis: %v", serr)
+		}
+
+		var memberCountAfter int
+		if err := pool.QueryRow(ctx,
+			`SELECT count(*) FROM group_members WHERE user_id = $1`, hollisID,
+		).Scan(&memberCountAfter); err != nil {
+			t.Fatalf("count memberships after delete: %v", err)
+		}
+		if memberCountAfter != 0 {
+			t.Fatalf("expected group_members purged on hard-delete, still found %d row(s)", memberCountAfter)
+		}
+	})
+
 	// Regression: a token scoped to one workspace must not be able to touch a
 	// user in another by supplying that user's UUID. Before the fix the ownership
 	// guard was an unscoped `SELECT provisioning_owner FROM users WHERE id = $1`,

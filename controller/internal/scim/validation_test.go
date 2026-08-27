@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -94,6 +95,13 @@ func TestResult_WithRoundTripSeam(t *testing.T) {
 	}
 	if !proven.RoundTripVerified {
 		t.Fatalf("proven result must carry RoundTripVerified=true")
+	}
+	// Regression guard: a proven result must never claim subjectClaim was
+	// verified — scope.subjectClaim is not read by Provision/Get/Deprovision,
+	// and ExtractSubjectClaim has no production caller. Only scimIdentifier
+	// is genuinely provable by the SCIM engine round trip.
+	if strings.Contains(proven.Reason, "subjectClaim and SCIM scimIdentifier resolve to the same logical user") {
+		t.Fatalf("proven Reason must not claim subjectClaim was verified, got: %s", proven.Reason)
 	}
 
 	// A FALSE verification must not change the (fail-closed) base result.

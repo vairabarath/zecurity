@@ -241,10 +241,33 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 		return nil, fmt.Errorf("testIdpConnection mapping gate: %w", err)
 	}
 
-	// Keep SCIM disabled (fail-closed): the gate's evaluation never enables
-	// SCIM without proof or an override. We persist the disabled state so a
-	// re-enable can only follow a proven mapping or a break-glass override.
-	if err := r.IdpStore.SetSCIMEnabled(ctx, tc.TenantID, id, res.ScimEnabledAllowed); err != nil {
+	// 3. Active mapping round-trip probe (ADR-025 §3.1, Phase 5's deferred
+	// POST→GET→verify→DELETE check). Only run when the mapping config itself
+	// is valid — a malformed config has nothing to probe and the gate's own
+	// config-invalid Reason from step 2 should stand. Proves scimIdentifier
+	// only; see ProbeMapping's doc comment for why subjectClaim cannot be
+	// verified this way. Never mints a SCIM token, never touches scim_tokens,
+	// never drives the public /scim/v2 endpoint.
+	if cfgErr := scim.ValidateMappingConfig(conn.SubjectClaim, conn.ScimIdentifier); cfgErr == nil {
+		ds := r.ScimStore.DirectoryService()
+		probe := ds.ProbeMapping(ctx, conn)
+		res = res.WithRoundTrip(probe.Verified, conn.SubjectClaim, conn.ScimIdentifier)
+		if !probe.Verified {
+			res.Reason = probe.Reason
+		}
+	}
+
+	// TestIdpConnection PROVES the mapping; it must never ENABLE SCIM itself.
+	// ADR-025 §3.2 makes UpdateScimConfig the one dedicated path for turning
+	// scim_enabled on — TestIdpConnection is a verification/test operation
+	// only. Always persist false here, regardless of res.ScimEnabledAllowed
+	// (which the GraphQL response below still reports truthfully — a
+	// verified round-trip is real proof the admin can act on). The database
+	// stays fail-closed after this call in every case; the admin's next step
+	// is an explicit UpdateScimConfig(scimEnabled: true), which re-runs its
+	// own MappingGate check independently before it will actually flip the
+	// column.
+	if err := r.IdpStore.SetSCIMEnabled(ctx, tc.TenantID, id, false); err != nil {
 		return nil, fmt.Errorf("testIdpConnection set scim_enabled: %w", err)
 	}
 
