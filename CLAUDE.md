@@ -88,6 +88,7 @@ cd controller && go build ./...                              # Go controller
 cd connector && cargo build                                  # Rust connector
 cargo build --manifest-path shield/Cargo.toml               # Rust shield
 cd client && cargo build                                   # Rust client CLI
+cargo build --manifest-path dns-helper/Cargo.toml           # Rust DNS helper (ADR-023)
 buf generate                                                 # Proto → Go stubs (from repo root)
 make gqlgen                                                  # GraphQL codegen (from repo root)
 cd admin && npm run codegen                                  # Frontend TS hooks

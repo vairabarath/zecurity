@@ -1,0 +1,23 @@
+[package]
+name = "zecurity-dns-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal privileged helper that applies per-link DNS routing for the Zecurity TUN (ADR-023)"
+
+[lib]
+name = "zecurity_dns_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "zecurity-dns-helper"
+path = "src/main.rs"
+
+# Deliberately almost dependency-free: this binary runs as root, so every crate
+# here is attack surface. `validate.rs` needs nothing at all.
+#
+# `libc` is required only for SO_PEERCRED — std's `UnixStream::peer_cred()` is
+# still unstable (`peer_credentials_unix_socket`, rust-lang/rust#42839).
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

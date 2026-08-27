@@ -144,6 +144,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 - Connector: `cargo build` must pass (warnings OK, errors not)
 - Shield: `cargo build --manifest-path shield/Cargo.toml` must pass
 - Client: `cargo build --manifest-path client/Cargo.toml` must pass
+- DNS helper: `cargo build --manifest-path dns-helper/Cargo.toml` must pass (ADR-023, privileged helper)
 - **Sprint 8:** After completing a phase, check its box in `Sprint8/path.md` and update the phase file `status:` frontmatter to `done`
 - If making an architecture decision, document it or flag it for Claude Code
 - Do not touch files owned by other members — see conflict zone table in `Sprint6/path.md`
