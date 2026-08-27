@@ -21,8 +21,14 @@ Restart=on-failure
 RestartSec=5
 WatchdogSec=90
 
-AmbientCapabilities=CAP_NET_ADMIN
-CapabilityBoundingSet=CAP_NET_ADMIN
+# CAP_NET_ADMIN: create the TUN interface and install nftables/policy routes.
+# CAP_NET_BIND_SERVICE: bind the Phase 11 DNS responder on 127.0.0.1:53.
+#   A privileged port needs this even on loopback; without it the daemon still
+#   starts and the tunnel works, but name resolution falls back to a manual
+#   hosts entry. NOTE: upgrading an existing install therefore needs the UNIT
+#   reinstalled, not just the binary.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 
 StandardOutput=journal

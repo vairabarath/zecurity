@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · Stage 3 (Phases 11–12) remains **deferred / sprint17-candidate**
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · **Phase 11 (client DNS responder) done + verified live 2026-08-27** — managed names now resolve on `127.0.0.1:53` without a `hosts` entry · Phase 12 (OS DNS integration) remains **deferred / sprint17-candidate**; until it lands `curl http://<name>` still needs `--resolve` or a `hosts` entry, by design
 solo: true
 owner: M3
 tags:
@@ -467,7 +467,7 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 | 8 | **Actual: 13 files, not the 5 listed here.** `proto/shield/v1/shield.proto` (2 messages), `internal/resource/store.go`, `internal/connector/control_stream.go`, `internal/connector/instruction.go` **(new)** + `instruction_test.go` **(new)**, `internal/resource/snapshot_integration_test.go`, `graph/resolvers/resource.resolvers.go` + `resource_acl_coherence_test.go`, `shield/src/resources.rs`, `shield/src/tunnel.rs`, `shield/src/control_stream.rs`, `connector/src/agent_tunnel.rs`, `connector/src/device_tunnel.rs`, `connector/src/agent_server.rs` |
 | 9 | `client/src/registry.rs` **(new)**, `state_store.rs`, `tun.rs`, `net_stack.rs`, `runtime.rs` |
 | 10 | `admin/src/pages/Resource*.tsx` + gql |
-| 11 | `client/src/dns.rs` **(new)**, `Cargo.toml` |
+| 11 | `client/src/dns.rs` **(new)**, `main.rs`, `Cargo.toml`, `daemon.rs`, **both** copies of `zecurity-client.service` (needs `CAP_NET_BIND_SERVICE`) |
 | 12 | `client/src/os_dns.rs` **(new)**, `daemon.rs`, `main.rs` |
 
 **Do not touch:** `relay/**`, `client/src/relay_pool.rs`, `client/src/transport.rs` — the relay sits
@@ -567,7 +567,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 8 | [[Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target]] | ✅ done (31 + 4 gated tests green; wire-hop E2E outstanding) |
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ✅ **done — GATE 2 CLOSED 5/5 (2026-08-26)**; resolver health deliberately not shipped |
-| 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ⬜ Stage 3 — deferral candidate |
+| 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ✅ **done — verified live 2026-08-27** (6/7 verify items live; the registry add/delete item holds by construction — no cache) |
 | 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ⬜ Stage 3 — deferral candidate |
 
 Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 2026-08-06).
@@ -575,6 +575,15 @@ Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 202
 ## Post-Sprint Fixes
 
 Overview only — each fix is documented in full in its phase file.
+
+### Fix: `CAP_NET_BIND_SERVICE` missing from the client unit (Phase 11 prerequisite)
+**Phase 11.** The DNS responder binds `127.0.0.1:53`, a privileged port, but the unit granted only
+`CAP_NET_ADMIN` **and** bounded the capability set to it — so an ambient grant alone would have been
+dropped. Added to both `AmbientCapabilities` and `CapabilityBoundingSet`, in **both** copies of the unit
+file. ⚠️ **Upgrading an existing install therefore needs the unit reinstalled, not just the binary.** The
+daemon fails soft if the bind fails, so the tunnel keeps working and resources stay reachable by synthetic
+IP or a `hosts` entry.
+→ [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]]
 
 ### Fix: shield dialed `resources.host` instead of `local_target` (version skew, not a code defect)
 **Gate 2 / Phase 8.** The installed shield was a **release** build with zero `local_target` support

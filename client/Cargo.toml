@@ -8,6 +8,10 @@ name = "zecurity-client"
 path = "src/main.rs"
 
 [dependencies]
+# Phase 11 DNS responder. `-proto` only: we need message parse/serialise, not a
+# server framework. Same version family as the connector's hickory-resolver so the
+# two stay in step (Phase 11 note: "share it if possible").
+hickory-proto = { version = "0.26.1", features = ["std"] }
 clap       = { version = "4", features = ["derive"] }
 serde      = { version = "1", features = ["derive"] }
 toml       = "0.8"

@@ -8,6 +8,7 @@ use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
+use crate::dns;
 use crate::auth;
 use crate::config;
 use crate::grpc::{
@@ -91,6 +92,31 @@ pub async fn run() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = fetch_and_store_transport(&state_clone, &conf_clone).await {
                 warn!(error = %e, "startup transport snapshot fetch failed");
+            }
+        });
+    }
+
+    // DNS responder (Phase 11). Runs for the daemon's whole lifetime rather than
+    // being tied to tunnel up/down: it answers from `synthetic_bindings`, which
+    // `handle_up`/`handle_down` already keep lifecycle-correct, so a down tunnel
+    // means no live bindings and every name is REFUSED — honest, and no second piece
+    // of state to keep in step.
+    //
+    // FAIL SOFT: binding :53 needs CAP_NET_BIND_SERVICE, which an older installed
+    // unit will not grant. A failure here must not take the tunnel down with it —
+    // without DNS the Phase 9.5 `hosts`-entry path still works, so we log loudly and
+    // carry on rather than refusing to start.
+    {
+        let state_clone = Arc::clone(&state);
+        tokio::spawn(async move {
+            if let Err(e) = dns::serve(state_clone).await {
+                warn!(
+                    error = %e,
+                    addr = dns::BIND_ADDR,
+                    "DNS responder unavailable — resources stay reachable by synthetic IP \
+                     or a hosts entry. If this is a permission error, the systemd unit \
+                     needs CAP_NET_BIND_SERVICE (added in Phase 11)."
+                );
             }
         });
     }

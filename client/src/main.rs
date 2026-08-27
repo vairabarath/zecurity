@@ -3,6 +3,7 @@ mod auth;
 mod config;
 mod crl;
 mod daemon;
+mod dns;
 #[cfg(test)]
 mod daemon_tests;
 mod error;
