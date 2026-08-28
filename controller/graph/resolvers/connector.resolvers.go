@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	pgx "github.com/jackc/pgx/v5"
@@ -158,8 +159,23 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	tx, err := r.TenantDB.BeginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("delete connector: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Demote BEFORE the delete: `shields.connector_id` cascades, and
+	// `resources.shield_id` is ON DELETE SET NULL, which nulls the FK but leaves
+	// `status` at 'protected' — a resource claiming shield delivery with no shield.
+	// See demoteOrphanedResources.
+	demoted, err := demoteResourcesForConnectorShields(ctx, tx, tc.TenantID, id)
+	if err != nil {
+		return false, fmt.Errorf("delete connector: demote shield-bound resources: %w", err)
+	}
+
 	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`DELETE FROM connectors
 		  WHERE id = $1
 		    AND tenant_id = $2
@@ -174,7 +190,56 @@ func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool
 		return false, fmt.Errorf("delete connector: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("delete connector: commit: %w", err)
+	}
+	if demoted > 0 {
+		log.Printf("delete connector %s: demoted %d shield-bound resource(s) to unprotected", id, demoted)
+	}
+
+	// Deleting a connector changes the compiled ACL (its shields and their
+	// resources are gone). RevokeConnector already notified; this path did not, so
+	// the cached snapshot kept referencing a connector that no longer exists.
+	if r.PolicyNotifier != nil {
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("delete connector: notify policy change: %w", err)
+		}
+	}
+
 	return true, nil
+}
+
+// demoteOrphanedResources clears the shield-delivered status of resources whose
+// shield is about to disappear.
+//
+// WHY THIS IS NEEDED. `shields.connector_id` cascades on connector delete, and
+// `resources.shield_id` is `ON DELETE SET NULL`. So deleting a connector — or a
+// shield directly — nulls the FK but leaves `status` at 'protected'. An FK action
+// cannot touch another column, so nothing demotes the status, and the result is a
+// resource that claims to be shield-delivered with no shield.
+//
+// That row is not merely untidy: until the compiler was made resilient it failed
+// the ENTIRE workspace ACL compile, so a single connector deletion took every
+// resource in the workspace offline. The compiler now skips such a resource, but
+// this stops it being created in the first place — the two fixes are cause and
+// safety net, and both are wanted.
+//
+// Runs inside the caller's transaction so a failed delete cannot leave resources
+// silently demoted for a shield that still exists.
+func demoteResourcesForConnectorShields(ctx context.Context, tx pgx.Tx, tenantID, connectorID string) (int64, error) {
+	res, err := tx.Exec(ctx,
+		`UPDATE resources
+		    SET status     = 'unprotected',
+		        shield_id  = NULL,
+		        updated_at = NOW()
+		  WHERE tenant_id = $1
+		    AND shield_id IN (SELECT id FROM shields WHERE connector_id = $2 AND tenant_id = $1)`,
+		tenantID, connectorID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
 }
 
 // RemoteNetworks is the resolver for the remoteNetworks field.

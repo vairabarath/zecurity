@@ -10,6 +10,7 @@ import (
 
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/tenant"
@@ -57,7 +58,11 @@ func newACLCoherenceFixture(t *testing.T) *aclCoherenceFixture {
 	n.RegisterPushHook(func(string) { fires.Add(1) })
 
 	r := &Resolver{
-		Pool:              pool,
+		Pool: pool,
+		// TenantDB was absent until the shield/connector delete tests needed it —
+		// which is itself telling: no resolver test had ever exercised a TenantDB
+		// path, and DeleteShield/DeleteConnector go through it.
+		TenantDB:          db.NewTenantDB(pool),
 		ResourceCfg:       resource.Config{DB: pool},
 		PolicyStore:       policy.NewStore(pool),
 		PolicyNotifier:    n,

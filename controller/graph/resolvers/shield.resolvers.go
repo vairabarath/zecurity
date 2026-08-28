@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 
 	pgx "github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -97,8 +98,22 @@ func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, e
 func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	tx, err := r.TenantDB.BeginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("delete shield: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Same reason as DeleteConnector: ON DELETE SET NULL clears the FK but leaves
+	// `status` at 'protected'. Demote inside the transaction so a delete that is
+	// refused (shield not revoked) cannot leave resources demoted anyway.
+	demoted, err := demoteResourcesForShield(ctx, tx, tc.TenantID, id)
+	if err != nil {
+		return false, fmt.Errorf("delete shield: demote bound resources: %w", err)
+	}
+
 	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`DELETE FROM shields
 		  WHERE id = $1
 		    AND tenant_id = $2
@@ -113,7 +128,38 @@ func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, e
 		return false, fmt.Errorf("delete shield: %w", err)
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("delete shield: commit: %w", err)
+	}
+	if demoted > 0 {
+		log.Printf("delete shield %s: demoted %d bound resource(s) to unprotected", id, demoted)
+	}
+
+	if r.PolicyNotifier != nil {
+		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+			return false, fmt.Errorf("delete shield: notify policy change: %w", err)
+		}
+	}
+
 	return true, nil
+}
+
+// demoteResourcesForShield is the single-shield counterpart of
+// demoteResourcesForConnectorShields; see that function for why this is needed.
+func demoteResourcesForShield(ctx context.Context, tx pgx.Tx, tenantID, shieldID string) (int64, error) {
+	res, err := tx.Exec(ctx,
+		`UPDATE resources
+		    SET status     = 'unprotected',
+		        shield_id  = NULL,
+		        updated_at = NOW()
+		  WHERE tenant_id = $1
+		    AND shield_id = $2`,
+		tenantID, shieldID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected(), nil
 }
 
 // Shields is the resolver for the shields field.
