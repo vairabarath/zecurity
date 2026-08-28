@@ -53,6 +53,11 @@ client/target/
 connector/target/
 shield/target/
 relay/target/
+dns-helper/target/
+# Catch-all so a NEW crate is covered from its first build. The per-crate lines above
+# are kept for clarity, but they are a trap on their own: dns-helper/ was added without
+# one and 1070 build-artifact files were committed before anyone noticed.
+**/target/
 relay/pki/*.key
 relay/pki/*.csr
 relay/pki/*.der

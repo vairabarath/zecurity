@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed — design approved 2026-08-27, implementation not started
+status: accepted — implemented 2026-08-27, Gate 3 outstanding
 date: 2026-08-27
 amended: 2026-08-27
 related:
@@ -22,9 +22,19 @@ tags:
 
 ## Status
 
-**Design approved 2026-08-27; implementation not started.** Raised by Sprint 16 Phase 12, which ships
-deferred. The **approved direction is option C** (a minimal privileged helper) — see the Amendment, which
-supersedes the recommendation in the Options section below. Option A is withdrawn, option B rejected.
+**Accepted. Option C implemented 2026-08-27; Gate 3 (live verification) outstanding.** Option A is
+withdrawn, option B rejected — see the Amendment, which supersedes the recommendation in the Options
+section below.
+
+Shipped in four slices: `dns-helper/` crate (whitelist · `SO_PEERCRED` · two-verb protocol · `resolvectl`
+backend · request path · socket-activated binary · units), `client/src/os_dns.rs` (daemon-side client,
+fail-soft) wired into `handle_up`/`handle_down`/startup-reconcile, and an **opt-in** installer.
+**42 helper tests + 9 client tests**, revert-tested.
+
+⚠️ **The helper is opt-in, deliberately.** It installs a *root* service, and the client works without it
+— names stay reachable by synthetic IP or a hosts entry, and the daemon fails soft. Adding a root service
+to every client install would raise the product's default privilege for a convenience, so
+`dns-helper/scripts/dns-helper-install.sh` is a separate step.
 
 ⚠️ **Read the Amendment before the Options.** The Options section records the analysis as it stood *before*
 Task 1 was run; Task 1's result changed the conclusion.
@@ -233,8 +243,9 @@ entire IPC surface, including `GetToken`, which hands out an access token. Optio
 **rejected**: the resolve1 actions do not carry the link as a detail, so the grant is effectively all
 links — broader privilege while appearing narrower.
 
-**Implementation has not started.** The first work item is the helper's validation and peer-authentication
-model, not the DNS calls.
+**Implemented; Gate 3 outstanding.** The work was sequenced deliberately — the whitelist and
+peer-authentication model first, the DNS calls last — so the security surface was settled before anything
+could act on the host.
 
 ## Consequences
 
