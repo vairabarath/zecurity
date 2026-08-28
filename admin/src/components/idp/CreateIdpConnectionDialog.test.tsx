@@ -20,7 +20,11 @@ describe('CreateIdpConnectionDialog', () => {
     expect(screen.getByText('Add Identity Provider')).toBeInTheDocument()
     expect(screen.getByLabelText('Provider')).toBeInTheDocument()
     expect(screen.getByLabelText('Display Name')).toBeInTheDocument()
-    expect(screen.getByLabelText('OIDC Issuer URL')).toBeInTheDocument()
+    // Default provider is Okta, so the issuer field is labelled "Okta Domain"
+    // (Twingate-mirror) and the Advanced settings block is hidden.
+    expect(screen.getByLabelText('Okta Domain')).toBeInTheDocument()
+    expect(screen.queryByLabelText('OIDC Issuer URL')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Advanced settings/i })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Client ID')).toBeInTheDocument()
 
     const secretInput = screen.getByLabelText('Client Secret')
@@ -44,7 +48,7 @@ describe('CreateIdpConnectionDialog', () => {
     await user.type(screen.getByLabelText('Display Name'), 'Corporate Okta')
     expect(submitBtn).toBeDisabled()
 
-    await user.type(screen.getByLabelText('OIDC Issuer URL'), 'https://acme.okta.com')
+    await user.type(screen.getByLabelText('Okta Domain'), 'https://acme.okta.com')
     expect(submitBtn).toBeDisabled()
 
     await user.type(screen.getByLabelText('Client ID'), 'client-123')
@@ -54,16 +58,20 @@ describe('CreateIdpConnectionDialog', () => {
     await waitFor(() => expect(submitBtn).toBeEnabled())
   })
 
-  it('toggles optional advanced settings', async () => {
+  it('toggles optional advanced settings for a non-Okta provider (entra)', async () => {
     const user = userEvent.setup()
     render(
       <CreateIdpConnectionDialog
         open={true}
+        initialProvider="entra"
         onClose={vi.fn()}
         onSuccess={vi.fn()}
       />,
     )
 
+    // Non-Okta providers keep the generic OIDC form: issuer labelled normally
+    // and the Advanced settings block is available.
+    expect(screen.getByLabelText('OIDC Issuer URL')).toBeInTheDocument()
     expect(screen.queryByLabelText('Discovery URL (optional)')).not.toBeInTheDocument()
 
     const toggle = screen.getByRole('button', { name: /Advanced settings/i })
@@ -72,6 +80,26 @@ describe('CreateIdpConnectionDialog', () => {
     expect(screen.getByLabelText('Discovery URL (optional)')).toBeInTheDocument()
     expect(screen.getByLabelText('Scopes')).toHaveValue('openid email profile')
     expect(screen.getByLabelText('Domain Hint (optional)')).toBeInTheDocument()
+  })
+
+  // Twingate-mirror: the Okta "Connect Okta" step must NOT surface Advanced
+  // settings, matching Twingate's own three-field (Okta Domain / Client ID /
+  // Client Secret) dialog.
+  it('hides advanced settings on the Okta "Connect Okta" step', () => {
+    render(
+      <CreateIdpConnectionDialog
+        open={true}
+        initialProvider="okta"
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByLabelText('Okta Domain')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Advanced settings/i })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Discovery URL (optional)')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Scopes')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Domain Hint (optional)')).not.toBeInTheDocument()
   })
 
   it('calls onClose when Cancel button is clicked', async () => {
@@ -88,5 +116,36 @@ describe('CreateIdpConnectionDialog', () => {
     const cancelBtn = screen.getByRole('button', { name: 'Cancel' })
     await user.click(cancelBtn)
     expect(onClose).toHaveBeenCalled()
+  })
+
+  // Twingate-style "picker step already chose the provider" behavior: when
+  // initialProvider is set, the dialog behaves like a per-provider "Connect
+  // Okta" step, not a generic form with an editable provider select.
+  it('shows a provider-specific title and a static (non-editable) provider label when initialProvider is set', () => {
+    render(
+      <CreateIdpConnectionDialog
+        open={true}
+        initialProvider="okta"
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Connect Okta')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Provider')).not.toBeInTheDocument()
+    expect(screen.getByText('Okta', { selector: 'div' })).toBeInTheDocument()
+  })
+
+  it('still shows the generic title and editable Provider select when initialProvider is omitted', () => {
+    render(
+      <CreateIdpConnectionDialog
+        open={true}
+        onClose={vi.fn()}
+        onSuccess={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByText('Add Identity Provider')).toBeInTheDocument()
+    expect(screen.getByLabelText('Provider')).toBeInTheDocument()
   })
 })

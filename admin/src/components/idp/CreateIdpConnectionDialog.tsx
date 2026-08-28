@@ -19,27 +19,34 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-
-const PROVIDER_OPTIONS = [
-  { value: 'okta', label: 'Okta' },
-  { value: 'entra', label: 'Microsoft Entra ID' },
-  { value: 'jumpcloud', label: 'JumpCloud' },
-  { value: 'keycloak', label: 'Keycloak' },
-  { value: 'oidc', label: 'Generic OIDC' },
-] as const
-
-type ProviderKey = (typeof PROVIDER_OPTIONS)[number]['value']
+import { PROVIDER_OPTIONS, providerLabel, type ProviderKey } from '@/components/idp/providers'
 
 export function CreateIdpConnectionDialog({
   open,
   onClose,
   onSuccess,
+  initialProvider,
 }: {
   open: boolean
   onClose: () => void
   onSuccess: (createdId: string) => void
+  /**
+   * When set, this dialog behaves like Twingate's "Connect Okta" step: the
+   * provider was already chosen in a prior picker step, so the provider
+   * selector is not shown here — the dialog title and a static label reflect
+   * the choice instead. When omitted, the provider selector is shown inline
+   * (kept for robustness / direct usage without a picker step).
+   */
+  initialProvider?: ProviderKey
 }) {
-  const [provider, setProvider] = useState<ProviderKey>('okta')
+  // Only used as the editable dropdown's own state when initialProvider is
+  // NOT set (direct-usage fallback). When initialProvider IS set, the
+  // effective provider is derived from the prop on every render below
+  // instead of being synced into state via an effect — the prop is already
+  // the single source of truth in that case, so there is nothing to
+  // synchronize and no cascading-render risk.
+  const [provider, setProvider] = useState<ProviderKey>(initialProvider ?? 'okta')
+  const effectiveProvider = initialProvider ?? provider
   const [displayName, setDisplayName] = useState('')
   const [issuer, setIssuer] = useState('')
   const [clientId, setClientId] = useState('')
@@ -58,7 +65,7 @@ export function CreateIdpConnectionDialog({
   )
 
   function resetForm() {
-    setProvider('okta')
+    setProvider(initialProvider ?? 'okta')
     setDisplayName('')
     setIssuer('')
     setClientId('')
@@ -95,7 +102,7 @@ export function CreateIdpConnectionDialog({
       const res = await createConnection({
         variables: {
           input: {
-            provider,
+            provider: effectiveProvider,
             displayName: trimmedName,
             issuer: trimmedIssuer,
             clientId: trimmedClientId,
@@ -139,10 +146,14 @@ export function CreateIdpConnectionDialog({
             <span className="grid h-8 w-8 place-items-center rounded-lg border border-primary/25 bg-primary/10 text-primary">
               <KeyRound className="h-4 w-4" />
             </span>
-            <DialogTitle>Add Identity Provider</DialogTitle>
+            <DialogTitle>
+              {initialProvider ? `Connect ${providerLabel(initialProvider)}` : 'Add Identity Provider'}
+            </DialogTitle>
           </div>
           <DialogDescription>
-            Configure an Enterprise OIDC identity provider connection for your workspace.
+            {initialProvider
+              ? `Enter the ${providerLabel(initialProvider)} connection details below.`
+              : 'Configure an Enterprise OIDC identity provider connection for your workspace.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -155,22 +166,31 @@ export function CreateIdpConnectionDialog({
           ) : null}
 
           <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="idp-provider">Provider</Label>
-              <select
-                id="idp-provider"
-                value={provider}
-                onChange={(e) => setProvider(e.target.value as ProviderKey)}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
-                disabled={loading}
-              >
-                {PROVIDER_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {initialProvider ? (
+              <div className="space-y-1.5">
+                <Label>Provider</Label>
+                <div className="flex h-9 items-center rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground">
+                  {providerLabel(initialProvider)}
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label htmlFor="idp-provider">Provider</Label>
+                <select
+                  id="idp-provider"
+                  value={provider}
+                  onChange={(e) => setProvider(e.target.value as ProviderKey)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30"
+                  disabled={loading}
+                >
+                  {PROVIDER_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <div className="space-y-1.5">
               <Label htmlFor="idp-display-name">Display Name</Label>
@@ -186,7 +206,14 @@ export function CreateIdpConnectionDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="idp-issuer">OIDC Issuer URL</Label>
+            {/* Twingate-mirror: when the provider is Okta (the per-provider
+              "Connect Okta" step), the field is labelled "Okta Domain" and the
+              Advanced settings block is hidden — exactly matching Twingate's
+              own dialog (Okta Domain / Client ID / Client Secret only). For
+              every other provider the generic OIDC form is unchanged. */}
+            <Label htmlFor="idp-issuer">
+              {effectiveProvider === 'okta' ? 'Okta Domain' : 'OIDC Issuer URL'}
+            </Label>
             <Input
               id="idp-issuer"
               type="url"
@@ -196,9 +223,11 @@ export function CreateIdpConnectionDialog({
               disabled={loading}
               required
             />
-            <p className="text-[11px] text-muted-foreground">
-              The canonical base URL of your identity provider.
-            </p>
+            {effectiveProvider !== 'okta' ? (
+              <p className="text-[11px] text-muted-foreground">
+                The canonical base URL of your identity provider.
+              </p>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -232,60 +261,67 @@ export function CreateIdpConnectionDialog({
             Client secret is write-only and encrypted at rest. It will never be displayed again.
           </p>
 
-          <div className="border-t border-border/60 pt-2">
-            <button
-              type="button"
-              onClick={() => setShowAdvanced(!showAdvanced)}
-              className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
-            >
+          {/* Twingate-mirror: the Advanced settings block (Discovery URL,
+            Scopes, Domain Hint) is hidden for the Okta "Connect Okta" step,
+            because Twingate's own Okta dialog shows only Okta Domain / Client
+            ID / Client Secret. For every other provider the block stays, so
+            those connections can still be tuned. */}
+          {effectiveProvider !== 'okta' ? (
+            <div className="border-t border-border/60 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+              >
+                {showAdvanced ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
+                Advanced settings
+              </button>
+
               {showAdvanced ? (
-                <ChevronDown className="h-3.5 w-3.5" />
-              ) : (
-                <ChevronRight className="h-3.5 w-3.5" />
-              )}
-              Advanced settings
-            </button>
-
-            {showAdvanced ? (
-              <div className="space-y-3 pt-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="idp-discovery-url">Discovery URL (optional)</Label>
-                  <Input
-                    id="idp-discovery-url"
-                    type="url"
-                    placeholder="https://acme.okta.com/.well-known/openid-configuration"
-                    value={discoveryUrl}
-                    onChange={(e) => setDiscoveryUrl(e.target.value)}
-                    disabled={loading}
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-3 pt-3">
                   <div className="space-y-1.5">
-                    <Label htmlFor="idp-scopes">Scopes</Label>
+                    <Label htmlFor="idp-discovery-url">Discovery URL (optional)</Label>
                     <Input
-                      id="idp-scopes"
-                      placeholder="openid email profile"
-                      value={scopes}
-                      onChange={(e) => setScopes(e.target.value)}
+                      id="idp-discovery-url"
+                      type="url"
+                      placeholder="https://acme.okta.com/.well-known/openid-configuration"
+                      value={discoveryUrl}
+                      onChange={(e) => setDiscoveryUrl(e.target.value)}
                       disabled={loading}
                     />
                   </div>
 
-                  <div className="space-y-1.5">
-                    <Label htmlFor="idp-domain-hint">Domain Hint (optional)</Label>
-                    <Input
-                      id="idp-domain-hint"
-                      placeholder="e.g. acme.com"
-                      value={domainHint}
-                      onChange={(e) => setDomainHint(e.target.value)}
-                      disabled={loading}
-                    />
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="idp-scopes">Scopes</Label>
+                      <Input
+                        id="idp-scopes"
+                        placeholder="openid email profile"
+                        value={scopes}
+                        onChange={(e) => setScopes(e.target.value)}
+                        disabled={loading}
+                      />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Label htmlFor="idp-domain-hint">Domain Hint (optional)</Label>
+                      <Input
+                        id="idp-domain-hint"
+                        placeholder="e.g. acme.com"
+                        value={domainHint}
+                        onChange={(e) => setDomainHint(e.target.value)}
+                        disabled={loading}
+                      />
+                    </div>
                   </div>
                 </div>
-              </div>
-            ) : null}
-          </div>
+              ) : null}
+            </div>
+          ) : null}
 
           <DialogFooter className="pt-2">
             <Button

@@ -1,14 +1,16 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@apollo/client/react'
-import { ChevronRight, KeyRound, Plus } from 'lucide-react'
+import { ChevronRight, KeyRound } from 'lucide-react'
 import { GetIdpConnectionsDocument } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState, StatusPill } from '@/lib/console'
 import { cn } from '@/lib/utils'
 import { IdentityHealthBadge } from '@/components/scim/IdentityHealthBadge'
-import { CreateIdpConnectionDialog } from '@/components/idp/CreateIdpConnectionDialog'
+import { AddIdentityProviderMenu } from '@/components/idp/AddIdentityProviderMenu'
+import type { ProviderKey } from '@/components/idp/providers'
+import { GuidedIdpSetupWizard } from '@/components/idp/GuidedIdpSetupWizard'
 
 type IdpConnection = {
   id: string
@@ -38,7 +40,19 @@ function IdpIcon() {
 
 export default function IdpConnections() {
   const navigate = useNavigate()
-  const [createOpen, setCreateOpen] = useState(false)
+  const [selectedProvider, setSelectedProvider] = useState<ProviderKey>('okta')
+  const [wizardOpen, setWizardOpen] = useState(false)
+
+  // Twingate-parity entry point: one button → popup provider picker → the
+  // chosen provider's "Connect <Provider>" step → automatically continues
+  // into SCIM mapping + token minting, all in one guided flow. There is
+  // deliberately only one entry point now, matching how Twingate's own
+  // "Add Identity Provider" behaves (no separate plain-create vs.
+  // guided-with-SCIM choice for the admin to make up front).
+  function openWizardFor(provider: ProviderKey) {
+    setSelectedProvider(provider)
+    setWizardOpen(true)
+  }
 
   const { data, loading, error, refetch } = useQuery(GetIdpConnectionsDocument, {
     fetchPolicy: 'cache-and-network',
@@ -55,10 +69,7 @@ export default function IdpConnections() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="mr-1.5 h-4 w-4" />
-            Add Identity Provider
-          </Button>
+          <AddIdentityProviderMenu onSelect={openWizardFor} />
           <span className="status-pill border-border bg-secondary text-muted-foreground">
             <span className="font-bold text-foreground">{connections.length}</span> connections
           </span>
@@ -87,12 +98,7 @@ export default function IdpConnections() {
             icon={<KeyRound className="h-6 w-6" />}
             title="No identity providers"
             description="This workspace has no identity-provider connections yet. Add an enterprise identity provider to begin configuring SCIM directory synchronization."
-            action={
-              <Button onClick={() => setCreateOpen(true)}>
-                <Plus className="mr-1.5 h-4 w-4" />
-                Add Identity Provider
-              </Button>
-            }
+            action={<AddIdentityProviderMenu onSelect={openWizardFor} />}
           />
         ) : (
           <div className="divide-y divide-border/40">
@@ -136,11 +142,11 @@ export default function IdpConnections() {
         )}
       </div>
 
-      <CreateIdpConnectionDialog
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
-        onSuccess={() => {
-          setCreateOpen(false)
+      <GuidedIdpSetupWizard
+        open={wizardOpen}
+        initialProvider={selectedProvider}
+        onClose={() => {
+          setWizardOpen(false)
           void refetch()
         }}
       />
