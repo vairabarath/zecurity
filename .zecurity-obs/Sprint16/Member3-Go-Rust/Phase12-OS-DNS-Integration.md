@@ -7,7 +7,7 @@ title: OS DNS Integration
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder
-status: implemented 2026-08-28 — Gate 3 6/8 verified live; see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
+status: done — Gate 3 closed 2026-08-28 (7 pass, 1 design-incompatible); see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
 tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009, stage3, deferred, gate3]
 ---
 
@@ -18,7 +18,7 @@ tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009,
 > Depends on **Phase 11**. **Highest-risk phase in the sprint** — it is the only one that mutates
 > host-wide state outside our own interface.
 
-## ✅ IMPLEMENTED 2026-08-28 — Gate 3 6/8 verified live
+## ✅ DONE — GATE 3 CLOSED 2026-08-28
 
 Reversed the 2026-08-27 deferral after ADR-023's Task 1 came back positive and the privilege question was
 settled (option C, a minimal privileged helper). **Managed names now resolve through the OS with no
@@ -57,9 +57,59 @@ tunnel → connector → dial-time resolution → backend.
 | Unmanaged names resolve normally | ✅ `github.com` via `enp2s0` throughout |
 | `down` → DNS fully restored | ✅ link gone, managed name stops resolving, unmanaged unaffected |
 | `SIGKILL` → next start reconciles | ✅ DNS never broken; config reapplied on the next `up` |
-| Rival claim on the same domain | ✅ **with a caveat, below** |
-| TLS/SNI validation against a real certificate | ⚠️ **not tested** — both backends are plain HTTP |
-| Split-tunnel consistency | ⬜ not tested |
+| Rival claim on the same domain | ⚠️ **design-incompatible — see below** |
+| TLS/SNI validation against a real certificate | ✅ |
+| Split-tunnel consistency | ✅ — no mode toggle exists; both planes verified together |
+
+### TLS/SNI — the strongest form of the claim
+
+A second resource, `tls-test` (`hostname=tls-test.internal`, `tcp/5443`), pointed at a self-signed
+certificate whose only SAN is `DNS:tls-test.internal`:
+
+```text
+$ curl --cacert ca.pem https://tls-test.internal:5443/
+TLS-BACKEND (172.20.0.1:5443, SNI-validated)
+
+$ curl --cacert ca.pem https://fqdn-test.internal:5443/      # negative control
+curl: (60) SSL: no alternative certificate subject name matches target hostname
+```
+
+The negative control is what makes the positive meaningful: validation is genuinely enforced, so the
+success requires **SNI, the `Host:` header and the certificate SAN to all agree** — which is only possible
+if the name survives the entire path. A raw synthetic IP could never demonstrate this, which is exactly
+why the task singled it out.
+
+### Two managed names at once, and the `static` resolver
+
+The same run covered two paths nothing had exercised:
+
+```text
+Resources (3):
+  fqdn-test    100.64.0.2   fqdn-test.internal   5174   ← resolver: dns
+  ip-control   172.20.0.1   —                    8085   ← pinned IP
+  tls-test     100.64.0.3   tls-test.internal    5443   ← resolver: static
+
+DNS Domain: ~fqdn-test.internal ~tls-test.internal
+```
+
+- **`resolver.type = "static"`** end to end for the first time — every earlier test used `dns`. The
+  connector dialled from the ACL with no DNS lookup at all:
+  `hostname=tls-test.internal dest=172.20.0.1 stale=false route="connector"`.
+- **Two managed names simultaneously** — two entries in the helper's domain list, two synthetic IPs from
+  the registry, each routed **individually** (invariant 4 in practice, not just in the whitelist).
+- All three addressing shapes coexisting in one workspace: `dns`, `static`, and pinned-IP.
+
+### Split-tunnel consistency
+
+12.2 asks this be tested rather than reasoned about, and warns of a name that resolves to a synthetic IP
+whose CIDR is **not** routed into the TUN — resolving fine and then blackholing.
+
+**There is no full-tunnel mode in this client.** Only ACL'd destinations are ever routed, so
+split-tunnelling is not a mode to toggle — it is the only behaviour, and the warned-of failure cannot
+arise. Both planes were verified simultaneously throughout: `resolvectl query github.com` answered
+`-- link: enp2s0` (unmanaged, straight out the LAN) while managed names resolved to synthetic IPs and
+carried traffic over `zecurity0`. Phase 9.3 had already closed the synthetic-CIDR-vs-ADR-009 question with
+an explicit verdict.
 
 `dig` was unavailable on the client host; `resolvectl query` was used instead, which is arguably better —
 it goes through the system resolver *and* names the link that answered.

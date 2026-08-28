@@ -2147,3 +2147,88 @@ DNS integration, which is a privilege-management problem rather than a capabilit
   more time this week than any code defect.
 - This host's IP moved twice via duelling NetworkManager + systemd-networkd on `enp2s0`. A DHCP
   reservation would prevent a repeat.
+
+## 2026-08-28 — Claude (Sprint 16 · Phase 12 · 🚩 GATE 3 CLOSED · SPRINT 16 COMPLETE — all 12 phases)
+
+**Reversed yesterday's Phase 12 deferral** after ADR-023's Task 1 came back positive and the privilege
+question was settled. Implemented as **option C — a minimal privileged helper** — in four slices, then
+closed Gate 3 on a real two-host stack.
+
+**The result.** Managed names now resolve through the OS with no `hosts` entry:
+
+```text
+DNS Server: 127.0.0.1   DNS Domain: ~fqdn-test.internal ~tls-test.internal   Default Route: no
+curl http://fqdn-test.internal:5174/     -> BACKEND-A (172.20.0.1)
+curl --cacert ca.pem https://tls-test.internal:5443/ -> TLS-BACKEND (SNI-validated)
+```
+
+**Gate 3 — 7 pass, 1 recorded as design-incompatible.** Resolution via the system resolver · app by name
+with no hosts entry · **TLS/SNI validated against a real certificate, with a negative control** ·
+unmanaged names unaffected · `down` fully restores DNS · `SIGKILL` leaves DNS intact and the next `up`
+reconciles · split-tunnel consistent (no full-tunnel mode exists in this client, and both planes were
+verified together). The eighth — *"refuse a rival per-domain claim"* — **cannot be implemented in this
+design**: invariants 2–3 mean the helper only ever touches its own link, so it cannot see another's claim.
+What holds instead, and was verified, is that a rival claim does not hijack a managed name.
+
+**Also covered for the first time:** `resolver.type = "static"` end to end (every earlier test used
+`dns`); **two managed names simultaneously** — two domain-list entries, two synthetic IPs, each routed
+individually; and all three addressing shapes coexisting in one workspace.
+
+### 🔴 Three CONTROLLER defects surfaced by running Gate 3 — worth more than the feature
+
+1. **One inconsistent resource row fails the ENTIRE workspace ACL compile.** Every resource became
+   `unknown_resource`; the cause was a single row —
+   `compile acl: resource ada3a5a5: status "protected" requires a shield`. `CompileACLSnapshot` aborts on
+   the first bad resource, so no snapshot is produced and every *other* resource loses access. Failing
+   closed for that resource is right; failing the workspace is a blast radius nobody would choose.
+2. **Revoking a connector cascade-deletes its shields without demoting their resources**, creating exactly
+   the row defect 1 treats as fatal. Together, a routine revoke becomes a total workspace outage with a
+   diagnostic that names the wrong thing.
+3. **Certificate expiry is unrecoverable without manual re-enrolment.** `renewal.rs` calls the `RenewCert`
+   RPC, which needs the authenticated channel that expiry removes. **Second instance of the pattern**
+   behind Gate 2's orphaned-shield finding: *the only path to recovery runs through the thing that is
+   broken.* Two independent instances make it a design gap — it deserves its own ADR.
+
+### Fixes to my own work
+
+- **`RestrictAddressFamilies=AF_UNIX` broke every helper call.** `resolvectl` resolves an interface name
+  via `if_nametoindex()`, which needs a netlink/inet socket, and a blocked family makes `socket()` return
+  `EAFNOSUPPORT`. The helper looked broken; the sandbox was. One command settled it — the same
+  `resolvectl` by hand as root returned `rc=0`. **Lesson: sandbox hardening needs the same revert-test
+  discipline as code.**
+- **A socket-activated service keeps its old unit until the process exits.** `daemon-reload` plus a
+  reinstall still ran the old sandbox. The installer had the same gap on upgrade; it now stops a running
+  helper first. Same family as this sprint's stale-binary findings: the artifact changed, the running
+  thing did not.
+- My install script lacked `set -e` and printed later steps after step 1 failed, exiting `0`. Fixed.
+- I mis-used `cmd | sed || echo` **four times**, reporting `sed`'s exit status instead of the command's —
+  which twice led me to state something worked when it had not. Checking exit codes explicitly now.
+
+### Corrections to claims I made
+
+- I called the orphaned `prot-test` row *"cosmetic, not the cause"* of the ACL failure. **It was the
+  cause.** I checked whether its data was in the failing resource's path and never asked whether it could
+  break the compile that produces that path. The user pointed at the row twice before I looked properly.
+- I said Phase 12 should be deferred partly because it needed a privilege decision. True, but I
+  over-weighted the plan's advisory — the user was right that it was feasible now, and it was.
+
+### Known gaps
+
+Two resources sharing a hostname would **thrash**: `bind()` releases and reissues whenever the stored
+`resource_id` differs, so they would fight over one binding on every sync. Same hostname on different
+ports is a natural thing to want (`app.internal:80` and `:443`) and would fail intermittently.
+
+## 🏁 SPRINT 16 COMPLETE — all 12 phases, all three gates
+
+Gate 1 ✅ · Gate 2 ✅ 5/5 · Gate 3 ✅. The capability goal is delivered and verified end to end: **a
+resource's backend IP can change with no controller action, no ACL version bump and no tunnel restart** —
+and managed names now resolve through the OS without a hosts entry.
+
+**Open, in priority order:**
+- The three controller defects above. Defects 1+2 together turn a revoke into an outage; that is the most
+  serious thing found this sprint.
+- An ADR for the recovery-path pattern (cert expiry + orphaned shield).
+- The eight deployment/operability findings in the Phase 10 file, dominated by **no supported way to run or
+  identify pre-release code** — which cost more time this week than any code defect.
+- This host's IP moved **three times** (`.87 → .33 → .34`) via duelling NetworkManager + systemd-networkd.
+  A DHCP reservation would end it.

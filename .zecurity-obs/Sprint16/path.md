@@ -2,7 +2,7 @@
 type: planning
 status: in-progress
 sprint: 16
-progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · **Phase 11 (client DNS responder) done + verified live 2026-08-27** — managed names now resolve on `127.0.0.1:53` without a `hosts` entry · **Phase 12 IMPLEMENTED + Gate 3 6/8 live 2026-08-28** via a minimal privileged helper (ADR-023 option C) — the daemon stays unprivileged; managed names now resolve through the OS with no hosts entry · **SPRINT 16 IS COMPLETE**: the capability goal (dynamic-IP resources without ACL churn) is delivered and verified; until Phase 12 lands, `curl http://<name>` needs `--resolve` or a `hosts` entry, **by design**
+progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · **Phase 11 (client DNS responder) done + verified live 2026-08-27** — managed names now resolve on `127.0.0.1:53` without a `hosts` entry · **Phase 12 DONE — GATE 3 CLOSED 2026-08-28** via a minimal privileged helper (ADR-023 option C), daemon stays unprivileged. Managed names resolve through the OS with no hosts entry, TLS/SNI validates against a real certificate, and `down`/`SIGKILL` both leave the user's DNS intact. **SPRINT 16 COMPLETE — all 12 phases.** · **SPRINT 16 IS COMPLETE**: the capability goal (dynamic-IP resources without ACL churn) is delivered and verified; until Phase 12 lands, `curl http://<name>` needs `--resolve` or a `hosts` entry, **by design**
 solo: true
 owner: M3
 tags:
@@ -568,7 +568,7 @@ Decisions 1, 2 and 6 were **taken in code** during Phases 4–5; recorded here s
 | 9 | [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]] | ✅ done (78 + 4 gated; by-name E2E outstanding) |
 | 10 | [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]] | ✅ **done — GATE 2 CLOSED 5/5 (2026-08-26)**; resolver health deliberately not shipped |
 | 11 | [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]] | ✅ **done — 7/7 verify items live 2026-08-27** |
-| 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ✅ **implemented + Gate 3 6/8 live 2026-08-28** — names resolve via the OS, no hosts entry; open: TLS/SNI, split-tunnel |
+| 12 | [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]] | ✅ **done — GATE 3 CLOSED 2026-08-28** (7 pass; "refuse a rival claim" is design-incompatible, recorded not passed) |
 
 Bug record: [[Sprint16/KNOWN-BUG-Tunnel-Data-Plane-Stall]] (P0, **resolved** 2026-08-06).
 
