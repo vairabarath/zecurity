@@ -8,6 +8,7 @@ package scim
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,8 +84,8 @@ func TestProbeMapping_Integration(t *testing.T) {
 		if result.Reason == "" {
 			t.Fatalf("expected a non-empty reason on success")
 		}
-		if containsSubjectClaimProvenClaim(result.Reason) {
-			t.Fatalf("probe must never claim subjectClaim was proven, got reason: %s", result.Reason)
+		if containsLiveLoginClaim(result.Reason) {
+			t.Fatalf("probe must never claim a live OIDC login was performed, got reason: %s", result.Reason)
 		}
 
 		// No probe user left behind: the only rows in `users` for this
@@ -237,15 +238,118 @@ func TestProbeMapping_Integration(t *testing.T) {
 			t.Fatalf("expected the existing config validator to reject subjectClaim == scimIdentifier (degenerate mapping)")
 		}
 	})
+
+	// ---- Phase 12: OIDC↔SCIM canonical-key equivalence ----
+	// These subtests assert that ProbeMapping now verifies the two configured
+	// extractors resolve the SAME Canonical Identity Key for the same probe
+	// person (no live OIDC login is performed).
+
+	t.Run("matching subjectClaim and scimIdentifier prove equivalence (T1)", func(t *testing.T) {
+		// subjectClaim="email" and scimIdentifier="externalId"; both resolve
+		// the probe person to the same value → proven.
+		connID := seedDisabledSCIMConnection(t, "okta", "email", "externalId")
+		conn, err := idpStore.GetByID(ctx, connID)
+		if err != nil {
+			t.Fatalf("load connection: %v", err)
+		}
+		result := ds.ProbeMapping(ctx, conn)
+		if !result.Verified {
+			t.Fatalf("expected proven equivalence for matching subjectClaim/scimIdentifier, got: %s", result.Reason)
+		}
+		if containsLiveLoginClaim(result.Reason) {
+			t.Fatalf("probe must never claim a live OIDC login, got: %s", result.Reason)
+		}
+		if !containsCanonicalKeyEquivalenceClaim(result.Reason) {
+			t.Fatalf("expected canonical-key equivalence phrasing, got: %s", result.Reason)
+		}
+	})
+
+	t.Run("configured subjectClaim missing yields unproven (T2)", func(t *testing.T) {
+		// subjectClaim="email" but the probe's synthetic claims deliberately
+		// omit "email" → ExtractSubjectClaim returns "" → fail closed.
+		connID := seedDisabledSCIMConnection(t, "okta", "email", "externalId")
+		conn, err := idpStore.GetByID(ctx, connID)
+		if err != nil {
+			t.Fatalf("load connection: %v", err)
+		}
+		// Build a probe person whose claims do NOT carry the configured claim.
+		result := ds.probeMappingWithClaims(ctx, conn, "t2", "mapping-probe-t2", map[string]any{
+			"sub":   "mapping-probe-missing@probe.internal",
+			"oid":   "mapping-probe-missing@probe.internal",
+			"email": "mapping-probe-missing@probe.internal",
+		}, false /* autoAdd=false: do NOT add the configured claim; prove fail-closed */)
+		if result.Verified {
+			t.Fatalf("expected unproven when configured subjectClaim is missing, got: %s", result.Reason)
+		}
+	})
+
+	t.Run("configured subjectClaim resolves empty yields unproven (T3)", func(t *testing.T) {
+		// subjectClaim="email" present but empty string → ExtractSubjectClaim
+		// trims to "" → fail closed.
+		connID := seedDisabledSCIMConnection(t, "okta", "email", "externalId")
+		conn, err := idpStore.GetByID(ctx, connID)
+		if err != nil {
+			t.Fatalf("load connection: %v", err)
+		}
+		result := ds.probeMappingWithClaims(ctx, conn, "t3", "mapping-probe-t3", map[string]any{
+			"sub":   "mapping-probe-empty@probe.internal",
+			"email": "", // configured claim present but empty
+		}, false /* autoAdd=false: claim stays empty; prove fail-closed */)
+		if result.Verified {
+			t.Fatalf("expected unproven when configured subjectClaim resolves empty, got: %s", result.Reason)
+		}
+	})
+
+	t.Run("empty subjectClaim defaults to sub and proves equivalence (T4)", func(t *testing.T) {
+		// subjectClaim="" → ExtractSubjectClaim defaults to "sub"; the probe's
+		// synthetic claims carry sub == probeExternalID, and the SCIM side
+		// carries externalId == probeExternalID → both resolve equal → proven.
+		connID := seedDisabledSCIMConnection(t, "okta", "", "externalId")
+		conn, err := idpStore.GetByID(ctx, connID)
+		if err != nil {
+			t.Fatalf("load connection: %v", err)
+		}
+		result := ds.ProbeMapping(ctx, conn)
+		if !result.Verified {
+			t.Fatalf("expected proven equivalence for default-sub mapping, got: %s", result.Reason)
+		}
+		if containsLiveLoginClaim(result.Reason) {
+			t.Fatalf("probe must never claim a live OIDC login, got: %s", result.Reason)
+		}
+	})
 }
 
-func containsSubjectClaimProvenClaim(reason string) bool {
-	// Guards against ever re-introducing language claiming subjectClaim was
-	// proven by this probe (it never reads sc.subjectClaim).
-	needle := "subjectClaim and SCIM scimIdentifier resolve to the same logical user"
-	for i := 0; i+len(needle) <= len(reason); i++ {
-		if reason[i:i+len(needle)] == needle {
-			return true
+// containsCanonicalKeyEquivalenceClaim reports whether the probe Reason states
+// the legitimate OIDC↔SCIM canonical-key equivalence (without claiming a live
+// login). Used by the Phase 12 equivalence subtests.
+func containsCanonicalKeyEquivalenceClaim(reason string) bool {
+	needle := "OIDC subjectClaim and SCIM scimIdentifier resolve to the same Canonical Identity Key"
+	return strings.Contains(reason, needle)
+}
+
+func containsLiveLoginClaim(reason string) bool {
+	// Guards against ever claiming a LIVE OIDC login / JWT / IdP / session was
+	// performed by this probe. Phase 12 proves canonical-key equivalence using
+	// the REAL production extractor on a synthetic claims sample — it does NOT
+	// perform an OIDC login. The legitimate success phrasing ("OIDC subjectClaim
+	// and SCIM scimIdentifier resolve to the same Canonical Identity Key... no
+	// live OIDC login performed") truthfully DENIES a live login and must be
+	// allowed; only an affirmative live-login claim is forbidden. "live OIDC
+	// login" was previously in this list and matched that truthful denial as a
+	// false positive — removed. "live login" alone (without "OIDC" in between)
+	// does not appear in the legitimate phrasing, so it stays as a real guard.
+	needles := []string{
+		"OIDC login verified",
+		"live login",
+		"OIDC authentication verified",
+		"verified an OIDC login",
+		"JWT validated",
+	}
+	for _, needle := range needles {
+		for i := 0; i+len(needle) <= len(reason); i++ {
+			if reason[i:i+len(needle)] == needle {
+				return true
+			}
 		}
 	}
 	return false

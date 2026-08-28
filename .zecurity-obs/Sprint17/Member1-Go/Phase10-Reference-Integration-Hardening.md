@@ -245,6 +245,12 @@ question outside Finding C's scope and was not touched here, per explicit instru
 so it isn't lost: proving the *full* ADR-025 §3.1 mapping equivalence (both subjectClaim AND
 scimIdentifier resolve to the same person) is not possible until that gap is closed.
 
+> **Clarification (2026-08-28, Phase 12):** this gap was subsequently closed.
+> Phase 11 wired `conn.SubjectClaim` into the OIDC login path (making `ExtractSubjectClaim`
+> production code), and Phase 12 extended `ProbeMapping` to assert OIDC↔SCIM canonical-key
+> equivalence. Phase 10 itself remains complete and correct per its original SCIM-side scope;
+> the note above is retained as accurate historical context, not as an open defect.
+
 ## Rules
 - The mapping round-trip probe must be a real write/read/delete against the connection's SCIM
   endpoint — not a discovery-only check (that's already covered by `OIDCProvider.Probe()` and is

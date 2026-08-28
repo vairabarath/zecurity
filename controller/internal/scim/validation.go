@@ -142,7 +142,7 @@ func (r MappingGateResult) WithRoundTrip(verified bool, subjectClaim, scimIdenti
 		MappingState:       MappingProven,
 		ScimEnabledAllowed: true,
 		RoundTripVerified:  true,
-		Reason: "mapping proven: scimIdentifier round-trips correctly through the SCIM engine " +
-			"(subjectClaim is an OIDC login-side contract not exercised by this probe)",
+		Reason: "mapping proven: OIDC subjectClaim and SCIM scimIdentifier resolve to the same " +
+			"Canonical Identity Key for the probe user (no live OIDC login performed)",
 	}
 }

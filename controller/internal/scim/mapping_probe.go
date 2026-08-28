@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/yourorg/ztna/controller/internal/auth/mapping"
 	"github.com/yourorg/ztna/controller/internal/idp"
 )
 
@@ -13,14 +14,21 @@ import (
 // probe (ADR-025 §3.1 — the POST→GET→verify→DELETE check Phase 4 deferred to
 // Phase 5, and Phase 5 never wired).
 //
-// It proves ONLY that the connection's configured scimIdentifier attribute
-// round-trips correctly through the real SCIM Provision→Get path. It does
-// NOT, and cannot, prove subjectClaim correctness: scope.subjectClaim is not
-// read anywhere by Provision, Get, or Deprovision, and ExtractSubjectClaim
-// (mapping.go) has no production caller anywhere in this codebase today —
-// subjectClaim resolution is an OIDC login-side contract (internal/auth) this
-// probe does not exercise. Callers MUST NOT treat Verified==true as proof
-// that subjectClaim is correct; Reason says so explicitly.
+// Phase 10 proved the SCIM-side half: the connection's configured scimIdentifier
+// attribute round-trips correctly through the real SCIM Provision→Get path.
+//
+// Phase 12 extends the probe (Finding C, second half) to also prove the
+// OIDC↔SCIM canonical-key equivalence: it derives the OIDC canonical key the
+// SAME synthetic probe person would present at login, using the REAL production
+// extractor (auth/mapping.ExtractSubjectClaim, the one Phase 11 wired into the
+// login path), and asserts it equals the SCIM-derived canonical key. Both
+// extractors resolve the same connection_id, so equal keys ⇒ the same
+// external_identities row ⇒ ADR-025 §3.1 "converge on the same logical user".
+//
+// This is a mapping/configuration proof. The probe does NOT perform a live OIDC
+// login, JWT validation, IdP authentication, or session creation — it feeds the
+// production extractor a synthetic claims sample for the probe person. See the
+// Phase 12 doc for the honesty boundary.
 type MappingProbeResult struct {
 	Verified bool
 	Reason   string
@@ -55,6 +63,35 @@ type MappingProbeResult struct {
 // exist specifically to block writes before the mapping is proven — the
 // state this probe is invoked to resolve.
 func (s *DirectoryService) ProbeMapping(ctx context.Context, conn *idp.Connection) MappingProbeResult {
+	// Default synthetic claims for the probe person (Phase 12 equivalence).
+	// Every default claim here is set to the SAME value as probeExternalID
+	// (the SCIM-side canonical key), so that whichever one the connection
+	// configures as subjectClaim, the two extractors are fed a genuinely
+	// matching value and the equivalence check is meaningful rather than a
+	// guaranteed mismatch. "email" previously used an email-formatted value
+	// distinct from probeExternalID, which meant any real connection
+	// configured with subjectClaim="email" — one of the most common
+	// configurations — always failed this check, even for a valid mapping;
+	// fixed by matching it to probeExternalID like every other default claim.
+	probeID := uuid.New().String()
+	probeExternalID := "mapping-probe-" + probeID
+	probeClaims := map[string]any{
+		"sub":   probeExternalID,
+		"email": probeExternalID,
+		"oid":   probeExternalID,
+	}
+	return s.probeMappingWithClaims(ctx, conn, probeID, probeExternalID, probeClaims, true)
+}
+
+// ProbeMappingWithClaims runs the same SCIM round-trip + OIDC↔SCIM equivalence
+// probe as ProbeMapping but with caller-supplied OIDC claims. It exists so tests
+// can exercise the fail-closed paths (configured claim missing/empty). When
+// autoAdd is true, a non-default configured subjectClaim missing from the claims
+// is set to probeExternalID (the production default behavior); when false, the
+// claims are used exactly as given (so a test can omit the configured claim to
+// prove fail-closed). Production callers use ProbeMapping, which builds the
+// canonical default claims and passes autoAdd=true.
+func (s *DirectoryService) probeMappingWithClaims(ctx context.Context, conn *idp.Connection, probeID, probeExternalID string, probeClaims map[string]any, autoAdd bool) MappingProbeResult {
 	workspaceID := conn.TenantIDOrEmpty()
 	if workspaceID == "" {
 		return MappingProbeResult{
@@ -78,11 +115,20 @@ func (s *DirectoryService) ProbeMapping(ctx context.Context, conn *idp.Connectio
 		scimIdentAttr = DefaultScimIdentifier
 	}
 
-	probeID := uuid.New().String()
-	probeExternalID := "mapping-probe-" + probeID
 	resource := map[string]any{
 		"userName":    fmt.Sprintf("mapping-probe-%s@probe.internal", probeID),
 		scimIdentAttr: probeExternalID,
+	}
+
+	// Phase 12 (Finding C, second half): ensure the configured non-default
+	// subjectClaim is represented on the probe person's claims so a custom
+	// mapping is genuinely exercised (when autoAdd and not already supplied by
+	// the caller). Tests pass autoAdd=false to omit the configured claim and
+	// prove the fail-closed path.
+	if autoAdd && conn.SubjectClaim != "" && conn.SubjectClaim != "sub" {
+		if _, ok := probeClaims[conn.SubjectClaim]; !ok {
+			probeClaims[conn.SubjectClaim] = probeExternalID
+		}
 	}
 
 	syncInst, err := s.EnsureSyncInstance(ctx, sc)
@@ -136,9 +182,30 @@ func (s *DirectoryService) ProbeMapping(ctx context.Context, conn *idp.Connectio
 		}
 	}
 
+	oidcKey := mapping.ExtractSubjectClaim(probeClaims, conn.SubjectClaim)
+	if oidcKey == "" {
+		return MappingProbeResult{
+			Verified: false,
+			Reason: fmt.Sprintf(
+				"mapping equivalence failed: OIDC subjectClaim %q did not resolve for the probe user "+
+					"(configured claim missing or empty); mapping cannot be proven",
+				conn.SubjectClaim,
+			),
+		}
+	}
+	if oidcKey != probeExternalID {
+		return MappingProbeResult{
+			Verified: false,
+			Reason: fmt.Sprintf(
+				"mapping equivalence mismatch: OIDC subjectClaim resolves to %q but SCIM scimIdentifier resolves to %q for the same probe user",
+				oidcKey, probeExternalID,
+			),
+		}
+	}
+
 	return MappingProbeResult{
 		Verified: true,
-		Reason: "scimIdentifier round-trip verified via SCIM Provision→Get " +
-			"(subjectClaim is an OIDC login-side contract not exercised by this probe)",
+		Reason: "mapping proven: OIDC subjectClaim and SCIM scimIdentifier resolve to the same " +
+			"Canonical Identity Key for the probe user (no live OIDC login performed)",
 	}
 }
