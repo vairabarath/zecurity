@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/yourorg/ztna/controller/internal/auth/mapping"
 )
 
 // OIDCProvider is the generic OpenID Connect adapter (PENDING-04 `manual_oidc`).
@@ -28,6 +30,12 @@ type OIDCProvider struct {
 	clientSecret  string
 	discoveryURL  string // optional override; else <issuer>/.well-known/openid-configuration
 	scopes        string // space-delimited; defaults to "openid email profile"
+	// subjectClaim is the OIDC claim (e.g. "sub", "email", "oid") the login
+	// adapter reads to produce AuthenticationContext.Subject. Empty ⇒ legacy
+	// default "sub" (ADR-025 §3.1). Set via SetSubjectClaim; not part of the
+	// constructor signature so the discovery-only callers (TestIdpConnection)
+	// are untouched.
+	subjectClaim string
 
 	http *http.Client
 }
@@ -49,6 +57,15 @@ func NewOIDCProvider(providerLabel, issuer, clientID, clientSecret, discoveryURL
 		scopes:        scopes,
 		http:          &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+// SetSubjectClaim configures the OIDC claim read at login to derive the
+// canonical identity subject (ADR-025 §3.1). An empty value leaves the
+// legacy default ("sub"). It is a post-construction setter so the
+// discovery-only callers that build an OIDCProvider without a connection
+// (e.g. the admin testIdpConnection OIDC probe) are unaffected.
+func (p *OIDCProvider) SetSubjectClaim(claim string) {
+	p.subjectClaim = claim
 }
 
 // oidcDiscovery is the subset of the discovery document we use.
@@ -159,7 +176,7 @@ func (p *OIDCProvider) Authenticate(ctx context.Context, code, codeVerifier, red
 		return nil, err
 	}
 
-	claims, err := p.verify(ctx, d.JWKSURI, idToken)
+	claims, rawClaims, err := p.verify(ctx, d.JWKSURI, idToken)
 	if err != nil {
 		return nil, err
 	}
@@ -172,17 +189,39 @@ func (p *OIDCProvider) Authenticate(ctx context.Context, code, codeVerifier, red
 		return nil, fmt.Errorf("id_token missing sub claim")
 	}
 
+	// Derive the canonical identity subject from the configured subjectClaim
+	// (ADR-025 §3.1). The raw, verified claims map is used ONLY as an
+	// additional representation of an already-validated token — the security
+	// validation above (signature, issuer, audience, expiry, nbf, nonce,
+	// email_verified) is the authoritative gate and is never bypassed by a
+	// custom claim. mapping.ExtractSubjectClaim returns "" when the configured
+	// claim is missing/empty, and we fail closed rather than falling back to
+	// raw `sub`. Empty subjectClaim ⇒ legacy default "sub".
+	subject := mapping.ExtractSubjectClaim(rawClaims, p.subjectClaim)
+	if subject == "" {
+		return nil, fmt.Errorf("id_token missing configured subject claim %q", subjectClaimName(p.subjectClaim))
+	}
+
 	return &AuthenticationContext{
 		Provider:      p.providerLabel,
 		Issuer:        claims.Issuer,
-		Subject:       claims.Subject,
+		Subject:       subject,
 		Email:         claims.Email,
 		Name:          claims.Name,
 		EmailVerified: claims.EmailVerified,
 		ACR:           claims.ACR,
 		AMR:           claims.AMR,
 		AuthTime:      claims.AuthTime,
+		RawClaims:     rawClaims,
 	}, nil
+}
+
+// subjectClaimName returns the effective claim name for error messages.
+func subjectClaimName(claim string) string {
+	if claim == "" {
+		return "sub"
+	}
+	return claim
 }
 
 func (p *OIDCProvider) exchange(ctx context.Context, tokenEndpoint, code, codeVerifier, redirectURI string) (string, error) {
@@ -220,7 +259,10 @@ func (p *OIDCProvider) exchange(ctx context.Context, tokenEndpoint, code, codeVe
 	return tr.IDToken, nil
 }
 
-func (p *OIDCProvider) verify(ctx context.Context, jwksURI, idToken string) (*oidcClaims, error) {
+func (p *OIDCProvider) verify(ctx context.Context, jwksURI, idToken string) (*oidcClaims, map[string]any, error) {
+	// Typed parse: the authoritative security gate. All existing validation
+	// (signature/JWKS, issuer, audience, expiry, not-before) runs here and
+	// MUST remain the only path that decides a token is valid.
 	claims := &oidcClaims{}
 	_, err := jwt.ParseWithClaims(idToken, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
@@ -233,13 +275,27 @@ func (p *OIDCProvider) verify(ctx context.Context, jwksURI, idToken string) (*oi
 		return jwksForIssuer(ctx, p.http, p.issuer, jwksURI, kid)
 	}, jwt.WithExpirationRequired(), jwt.WithAudience(p.clientID), jwt.WithIssuer(p.issuer))
 	if err != nil {
-		return nil, fmt.Errorf("id_token verification failed: %w", err)
+		return nil, nil, fmt.Errorf("id_token verification failed: %w", err)
 	}
+	// Unverified emails must never be trusted for identity.
 	if !claims.EmailVerified {
-		// Unverified emails must never be trusted for identity.
-		return nil, fmt.Errorf("id_token email not verified")
+		return nil, nil, fmt.Errorf("id_token email not verified")
 	}
-	return claims, nil
+
+	// Raw claims map: an ADDITIONAL representation of the SAME already-validated
+	// token (no re-validation, no re-parse of the signature path). Used only so
+	// a configured non-default subjectClaim (e.g. "email", "oid") can be read.
+	// It is never consulted for issuer/aud/exp/nonce/email_verified — those
+	// were already enforced on the typed claims above. A parse failure here is
+	// non-fatal: it only means custom claims are unavailable, and the subject
+	// derivation below will then fail closed if a non-default claim was needed.
+	raw := map[string]any{}
+	if mt, _, perr := jwt.NewParser().ParseUnverified(idToken, jwt.MapClaims(raw)); perr != nil {
+		_ = mt
+		raw = nil
+	}
+
+	return claims, raw, nil
 }
 
 // ── per-issuer discovery + JWKS caches (shared across adapter instances) ──────

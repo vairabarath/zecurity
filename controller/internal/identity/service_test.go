@@ -154,3 +154,32 @@ func TestAuthenticate_ResolverErrorSurfaces(t *testing.T) {
 		t.Fatal("must not provision when resolution errored")
 	}
 }
+
+// TestAuthenticate_SubjectIsCanonicalAnchor proves the identity pipeline keys
+// resolution on AuthenticationContext.Subject verbatim — i.e. whatever the OIDC
+// login path derived from the configured subjectClaim becomes the canonical
+// identity anchor used by resolver.Resolve (ADR-025 §3.1). Here the subject is
+// an email-style claim value (as a configured subjectClaim=email would
+// produce); the resolver must see exactly that value, never the raw `sub`.
+func TestAuthenticate_SubjectIsCanonicalAnchor(t *testing.T) {
+	res := &fakeResolver{found: true, core: &PrincipalCore{UserID: "u9", TenantID: "t9", Role: "member", Email: "alice@example.com", Status: "active", Generation: 3}}
+	prov := &fakeProvisioner{}
+	svc := newTestService(res, prov, nil)
+
+	ac := &providers.AuthenticationContext{
+		Provider: "okta",
+		Issuer:   "https://acme.okta.com",
+		Subject:  "alice@example.com", // what subjectClaim=email would yield
+		Email:    "alice@example.com",
+		Name:     "Alice",
+	}
+	if _, err := svc.Authenticate(context.Background(), ac, "conn-1", ""); err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if res.gotSubject != "alice@example.com" {
+		t.Fatalf("resolver must be keyed on the derived subject, got %q", res.gotSubject)
+	}
+	if res.gotConn != "conn-1" {
+		t.Fatalf("resolver connection wrong: %q", res.gotConn)
+	}
+}

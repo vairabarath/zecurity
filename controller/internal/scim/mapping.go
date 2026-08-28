@@ -3,6 +3,8 @@ package scim
 import (
 	"fmt"
 	"strings"
+
+	"github.com/yourorg/ztna/controller/internal/auth/mapping"
 )
 
 // Canonical Identity Key extraction (ADR-025 §3.1).
@@ -40,13 +42,13 @@ func asString(v any) string {
 }
 
 // ExtractSubjectClaim returns the Canonical Identity Key from the OIDC claims
-// map using the configured claim name. An empty claimName falls back to the
-// default ("sub"). Missing or empty values yield "".
+// map using the configured claim name. It delegates to the shared
+// auth/mapping.ExtractSubjectClaim so the OIDC login path and the SCIM
+// provisioning path use one identical implementation (ADR-025 §3.1). An empty
+// claimName falls back to the default ("sub"); a configured-but-missing claim
+// yields "" (caller fails closed). See internal/auth/mapping.
 func ExtractSubjectClaim(claims map[string]any, claimName string) string {
-	if claimName == "" {
-		claimName = DefaultSubjectClaim
-	}
-	return strings.TrimSpace(asString(claims[claimName]))
+	return mapping.ExtractSubjectClaim(claims, claimName)
 }
 
 // ExtractScimIdentifier returns the Canonical Identity Key from a SCIM User
