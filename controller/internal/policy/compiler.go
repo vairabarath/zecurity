@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"time"
 
@@ -48,13 +49,29 @@ func CompileACLSnapshot(ctx context.Context, store *Store, notifier *Notifier, w
 	groupIDSet := make(map[string]struct{})
 	rnNames := make(map[string]string) // remote_network_id → name (authoritative set)
 
+	// Drop rules whose resource cannot be routed BEFORE building any entry.
+	//
+	// This used to `return nil, err` on the first such resource, which took the
+	// ENTIRE workspace offline: no snapshot was produced, so every other resource
+	// was reported by connectors as `unknown_resource`. Failing closed for the
+	// offending resource is correct; failing closed for its neighbours is a blast
+	// radius nobody would choose — and the diagnostic named the wrong thing, since
+	// the error mentions a resource that is not the one the user cannot reach.
+	//
+	// The same principle is already documented for `parseResolver`: "a single
+	// malformed resolver must degrade one resource, not take every user offline."
+	// `routeTypeForResource` simply did not follow it.
+	rules, skipped := partitionRoutable(rules)
+	for resourceID, reason := range skipped {
+		log.Printf("acl compile: workspace %s: SKIPPING resource %s: %s — that resource is unreachable until it is fixed; all others are unaffected", workspaceID, resourceID, reason)
+	}
+
 	for _, rule := range rules {
 		key := entryKey{rule.ResourceID, rule.Address, rule.Port, rule.Protocol}
 		if _, ok := names[key]; !ok {
-			routeType, err := routeTypeForResource(rule.Status, rule.ShieldID)
-			if err != nil {
-				return nil, fmt.Errorf("compile acl: resource %s: %w", rule.ResourceID, err)
-			}
+			// Cannot fail: partitionRoutable has already removed every rule whose
+			// status/shield pair is unroutable.
+			routeType, _ := routeTypeForResource(rule.Status, rule.ShieldID)
 			names[key] = rule.Name
 			shieldIDs[key] = rule.ShieldID
 			preferredConnectorIDs[key] = rule.ShieldConnectorID
@@ -233,6 +250,40 @@ func parseResolver(raw string) *clientv1.ACLResolver {
 		return nil
 	}
 	return &clientv1.ACLResolver{Type: v.Type, Config: v.Config}
+}
+
+// partitionRoutable splits rules into those that can be compiled and those that
+// must be skipped, keyed by resource ID with a human-readable reason.
+//
+// Pure and self-contained on purpose: `Store` wraps a *pgxpool.Pool, so anything
+// that touches it is DB-gated. The decision that determines whether a workspace
+// stays online should not be.
+//
+// A resource may appear on several rules (one per group). All of its rules are
+// dropped together — keeping some would leave `keyGroups` holding a key that has
+// no corresponding entry.
+func partitionRoutable(rules []*CompilerResourceRow) ([]*CompilerResourceRow, map[string]string) {
+	skipped := make(map[string]string)
+	// First pass: decide per resource, so the reason is recorded once even when the
+	// resource has many rules.
+	for _, rule := range rules {
+		if _, seen := skipped[rule.ResourceID]; seen {
+			continue
+		}
+		if _, err := routeTypeForResource(rule.Status, rule.ShieldID); err != nil {
+			skipped[rule.ResourceID] = err.Error()
+		}
+	}
+	if len(skipped) == 0 {
+		return rules, skipped
+	}
+	kept := make([]*CompilerResourceRow, 0, len(rules))
+	for _, rule := range rules {
+		if _, bad := skipped[rule.ResourceID]; !bad {
+			kept = append(kept, rule)
+		}
+	}
+	return kept, skipped
 }
 
 func routeTypeForResource(status, shieldID string) (string, error) {
