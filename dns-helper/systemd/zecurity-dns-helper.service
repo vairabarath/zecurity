@@ -28,7 +28,15 @@ PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-RestrictAddressFamilies=AF_UNIX
+# AF_UNIX  — D-Bus, to reach systemd-resolved
+# AF_NETLINK — if_nametoindex(): resolving "zecurity0" to an ifindex needs a socket
+# AF_INET/6  — glibc's older if_nametoindex path opens an inet socket for SIOCGIFINDEX
+#
+# ⚠️ Do NOT narrow this to AF_UNIX alone. It was, and resolvectl failed at interface
+# lookup with "Address family not supported by protocol" (EAFNOSUPPORT — precisely
+# what a blocked family makes socket() return) on every apply and revert, while the
+# same command succeeded by hand as root. The helper looked broken; the sandbox was.
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 MemoryDenyWriteExecute=yes
 LockPersonality=yes
 # It writes no files at all — it only talks to resolved over D-Bus via resolvectl.

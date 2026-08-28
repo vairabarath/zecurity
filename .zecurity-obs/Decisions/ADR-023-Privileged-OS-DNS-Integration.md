@@ -1,6 +1,6 @@
 ---
 type: decision
-status: accepted — implemented 2026-08-27, Gate 3 outstanding
+status: accepted — implemented and verified live 2026-08-28 (Gate 3 6/8)
 date: 2026-08-27
 amended: 2026-08-27
 related:
@@ -22,7 +22,12 @@ tags:
 
 ## Status
 
-**Accepted. Option C implemented 2026-08-27; Gate 3 (live verification) outstanding.** Option A is
+**Accepted. Option C implemented and verified live 2026-08-28 — Gate 3 6 of 8.** Managed names resolve
+through the OS with no `hosts` entry; `down` and `SIGKILL` both leave the user's DNS intact. Two items are
+open: TLS/SNI (untested — the test backends are plain HTTP) and split-tunnel consistency. One item,
+"refuse a rival per-domain claim", is **incompatible with this design** — the helper only ever touches its
+own link, so it cannot see another's claim; what holds instead is that a rival claim does not hijack a
+managed name (verified). Option A is
 withdrawn, option B rejected — see the Amendment, which supersedes the recommendation in the Options
 section below.
 

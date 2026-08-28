@@ -7,7 +7,7 @@ title: OS DNS Integration
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder
-status: deferred — blocked on a privilege decision, see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
+status: implemented 2026-08-28 — Gate 3 6/8 verified live; see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
 tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009, stage3, deferred, gate3]
 ---
 
@@ -18,7 +18,77 @@ tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009,
 > Depends on **Phase 11**. **Highest-risk phase in the sprint** — it is the only one that mutates
 > host-wide state outside our own interface.
 
-## 🛑 DEFERRED 2026-08-27 — blocked on privilege, not on DNS
+## ✅ IMPLEMENTED 2026-08-28 — Gate 3 6/8 verified live
+
+Reversed the 2026-08-27 deferral after ADR-023's Task 1 came back positive and the privilege question was
+settled (option C, a minimal privileged helper). **Managed names now resolve through the OS with no
+`hosts` entry.** Verified on a real two-host stack — controller/connector on `Archer`, client on
+`brucewayne`.
+
+### The result
+
+```text
+Current DNS Server: 127.0.0.1
+       DNS Servers: 127.0.0.1
+        DNS Domain: ~fqdn-test.internal
+     Default Route: no
+fqdn-test.internal: 100.64.0.2
+$ curl http://fqdn-test.internal:5174/
+BACKEND-A (172.20.0.1)
+```
+
+Connector side, same request:
+
+```text
+access allowed spiffe_id=…/client/0c9f025d-…  resource_id=86f515d9-…
+  hostname=fqdn-test.internal  dest=172.20.0.1  stale=false  route="connector"
+tunnel_opened ok dest=172.20.0.1:5174
+```
+
+The whole chain: OS resolver → helper-configured per-link DNS → Phase 11's responder → synthetic IP →
+tunnel → connector → dial-time resolution → backend.
+
+### Gate 3 — 6 of 8
+
+| Item | Result |
+|------|--------|
+| `resolvectl query <managed>` (no explicit server) → synthetic IP | ✅ |
+| App connects **by name**, no `hosts` entry | ✅ |
+| Unmanaged names resolve normally | ✅ `github.com` via `enp2s0` throughout |
+| `down` → DNS fully restored | ✅ link gone, managed name stops resolving, unmanaged unaffected |
+| `SIGKILL` → next start reconciles | ✅ DNS never broken; config reapplied on the next `up` |
+| Rival claim on the same domain | ✅ **with a caveat, below** |
+| TLS/SNI validation against a real certificate | ⚠️ **not tested** — both backends are plain HTTP |
+| Split-tunnel consistency | ⬜ not tested |
+
+`dig` was unavailable on the client host; `resolvectl query` was used instead, which is arguably better —
+it goes through the system resolver *and* names the link that answered.
+
+### ⚠️ "Conflict handling" is not what 12.1 asked for
+
+12.1 wanted the helper to **detect a rival per-domain claim and refuse**. It cannot, and not by oversight:
+invariants 2–3 mean the helper only ever touches `zecurity0`, so it has no visibility of another link's
+configuration. What was actually tested is **systemd-resolved's precedence**:
+
+```text
+rival0 (dummy) configured with 1.1.1.1 + ~fqdn-test.internal
+fqdn-test.internal: 100.64.0.2      ← our answer still won
+```
+
+So the safety property holds — a rival claim does not hijack a managed name, and unmanaged DNS survives —
+but **"clear refusal on conflict" is not implemented and is incompatible with the current design.** Record
+it as a limitation, not a pass. Closing it properly would mean reading other links' configuration, which
+widens the helper's remit considerably.
+
+### Incidental confirmation
+
+`resolvectl` **refuses `127.0.0.53`** as a per-link server ("Invalid DNS server address" — its own stub
+address, loop protection) while accepting `127.0.0.1`. Phase 11's choice of `127.0.0.1` was correct for a
+reason that had not been verified until now.
+
+---
+
+## 🛑 Original deferral (2026-08-27) — superseded by the above
 
 **Decision: deferred. Sprint 16 is complete without this phase.** The sprint's capability goal —
 dynamic-IP resources without ACL churn — is delivered and verified (Gate 2, 5/5): `resource_id` on the
@@ -176,6 +246,88 @@ cd client && cargo build && cargo test
   happily send `*.internal` to us; the responder must still exact-match and `REFUSE` the rest, per
   Phase 11.
 
+## 🔴 Controller defects found by running Gate 3 (NOT DNS bugs)
+
+Gate 3 spent most of its time blocked by three pre-existing defects that had nothing to do with DNS. They
+are the most valuable output of this phase.
+
+### 1. One inconsistent resource row fails the ENTIRE workspace ACL compile
+
+The blocker that cost the most. Every resource became unreachable with `reason="unknown_resource"`, and the
+cause was a single row:
+
+```text
+push ACL snapshot to connector cf39b80a-…:
+  compile ACL snapshot: compile acl: resource ada3a5a5-…: status "protected" requires a shield
+```
+
+`CompileACLSnapshot` aborts on the first bad resource, so **no snapshot is produced at all** and every
+*other* resource in the workspace loses access. Failing closed for that one resource is right; failing the
+workspace is a blast radius nobody would choose. Skipping the offending entry and logging it would have
+left the other two resources working and made the symptom legible instead of universal.
+
+**The row was created by the system itself** — see defect 2.
+
+### 2. Revoking a connector cascade-deletes its shields without reconciling their resources
+
+Revoking connector `e2061d99` deleted shield `s1`, but left `prot-test` with `status='protected'` and a
+`shield_id` pointing at a shield that no longer existed. That state is unreachable by any UI action and is
+exactly what defect 1 treats as fatal. A shield-bound resource must be demoted when its shield disappears.
+
+Together these two turn a routine revoke into a total workspace outage, with a diagnostic that names the
+wrong thing (`unknown_resource` on a resource that is perfectly fine).
+
+### 3. Certificate expiry is unrecoverable without manual re-enrolment
+
+The connector's cert expired 24h before Gate 3 and it could not recover:
+
+```text
+controller SPIFFE identity verified — opening Control stream
+received frame=Reset { stream_id: 1, error_code: NO_ERROR }
+ERROR failed to open Control stream  backoff_secs=60      (424 restarts)
+```
+
+`renewal.rs` calls the **`RenewCert` RPC**, which needs the authenticated channel that expiry removes. So
+renewal is only possible *before* expiry — and this connector spent that window crash-looping through
+reboots, a downed controller and three DHCP address changes.
+
+**This is the second instance of the same pattern.** The orphaned-shield finding (Gate 2) was identical in
+shape: *the only path to recovery runs through the thing that is broken.* Two independent instances make it
+a design gap rather than two accidents, and it deserves an ADR of its own.
+
+---
+
 ## Post-Phase Fixes
+
+### Fix: `RestrictAddressFamilies=AF_UNIX` broke every helper call
+**12.1.** The service unit restricted socket families to `AF_UNIX` alone. `resolvectl` resolves an
+interface *name* to an ifindex via `if_nametoindex()`, which needs a netlink or inet socket — and a blocked
+family makes `socket()` return `EAFNOSUPPORT`. Every `apply` and `revert` failed at interface lookup:
+
+```text
+apply FAILED iface=zecurity0: resolvectl dns zecurity0 127.0.0.1 failed:
+  Failed to resolve interface "zecurity0": Address family not supported by protocol
+```
+
+The helper looked broken; the **sandbox** was. What settled it in one command was running the identical
+`resolvectl` by hand as root — `rc=0`. Same command, same interface, same resolved; only the sandbox
+differed. **Fix:** `RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6`.
+
+**Lesson worth keeping:** sandbox hardening needs the same revert-test discipline as code. Six
+`Protect*`/`Restrict*` directives were added without exercising the code path through them, and this one
+fails only at runtime, in a subprocess, with an errno that looks like a bug in something else.
+
+### Fix: a socket-activated service keeps its old unit until it exits
+**12.1 / installer.** After correcting the unit above, `daemon-reload` + reinstall still failed
+*identically*, because the running helper was still serving with the previous sandbox. `daemon-reload` does
+not restart a running service. The installer had the same gap — it enabled the socket but never stopped a
+running instance, so an **upgrade** would silently keep the old unit. Now it stops the service first.
+
+Same family as this sprint's stale-binary findings: the artifact changed, the running thing did not.
+
+### Note: group membership does not reach an existing shell
+**Installer.** `usermod -aG zecurity <user>` is picked up by *new* processes only. The daemon gets it via
+the restart the installer performs, but an interactive shell does not until re-login — so poking the socket
+by hand fails with `EACCES` and looks like a permissions bug in the helper. The installer now says so.
 
 _(none yet)_

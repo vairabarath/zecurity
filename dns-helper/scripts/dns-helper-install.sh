@@ -96,7 +96,9 @@ else
   usermod -aG "$GROUP" "$DAEMON_USER"
   log "added ${DAEMON_USER} to ${GROUP}"
   warn "group membership is picked up by NEW processes only — the client daemon is"
-  warn "restarted below so it takes effect without a logout."
+  warn "restarted below so it takes effect without a logout. NOTE: an interactive"
+  warn "shell does NOT get it until re-login, so poking the socket by hand needs"
+  warn "sudo (root is permitted) or: sg $GROUP -c ..."
 fi
 
 # ── 3. binary ───────────────────────────────────────────────────────────────
@@ -123,6 +125,16 @@ log "installed both units (--allow-uid ${ALLOW_UID})"
 
 # ── 5. enable ───────────────────────────────────────────────────────────────
 systemctl daemon-reload
+# WARNING: a socket-activated service keeps its OLD unit — including its sandbox —
+# until the process exits. `daemon-reload` alone is NOT enough on an upgrade: the
+# corrected unit sits on disk while the running instance carries on with the old
+# settings. This cost a debugging cycle — RestrictAddressFamilies was fixed and
+# reinstalled, and the helper still failed identically because the old process was
+# still serving.
+if systemctl is-active --quiet zecurity-dns-helper.service; then
+  systemctl stop zecurity-dns-helper.service
+  log "stopped the running helper so the next call picks up this unit"
+fi
 systemctl enable --now zecurity-dns-helper.socket
 log "enabled zecurity-dns-helper.socket"
 
