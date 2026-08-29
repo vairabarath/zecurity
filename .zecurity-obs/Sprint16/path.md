@@ -418,11 +418,11 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
       violating exactly-one unrepresentable) + resolver **type dropdown** (`dns`|`static`) with
       type-specific config serialized to JSON. ⚠️ **Do not offer `shield` as a resolver type.**
       `localTarget` editable only for shield-delivered resources.
-- [x] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error, with **⚠️ delivery type shipped; resolver health/last error deliberately NOT shipped** — see Phase 10, task marked ⛔.
+- [ ] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error, with **⚠️ PARTIAL** — delivery type shipped; resolver health / last error deliberately **not** shipped. Matches Phase 10's ⛔ on the same task.
       Phase 6's failure classes kept distinct. ⚠️ **Scope check:** there is no connector→controller
       transport for resolver health today; inventing one would breach the no-new-RPCs rule. Ship without
       live health and record the gap.
-- [x] **Gate:** `cd admin && npm run codegen && npx tsc --noEmit`
+- [x] **Gate:** `cd admin && npm run codegen && npx tsc --noEmit` **✅ re-run 2026-08-29** — `npm run codegen` exit 0 and left no diff; `npx tsc --noEmit` exit 0.
 - [x] **🚩 GATE 2 (E2E, merge point):** an FQDN resource created **through the UI** is reachable by name;
       **changing the backend IP requires no controller action, bumps no ACL version, and restarts no
       tunnel** (verify `acl_snapshot_version` is unchanged across a DNS change). Closes Phase 5's known
@@ -496,7 +496,7 @@ cd admin && npm run codegen && npx tsc --noEmit
       tunnel restart** — verified by watching the ACL version across a DNS change.
 - [x] Protected resources are delivered via the Shield session and **never** fall back to direct dial,
       including when every shield is offline (fails closed).
-- [x] Resolver failures are typed (NXDOMAIN vs timeout vs no-A vs dial-fail) and **do not poison ACL
+- [x] Resolver failures are typed (NXDOMAIN vs timeout vs no-A vs dial-fail) and **do not poison ACL **✅** — `connector/src/resolver.rs`: `classify_nxdomain_invalidates_and_never_serves_stale`, `classify_nodata_is_no_address_record_not_nxdomain`, `classify_timeout_is_resolver_unavailable`, `nxdomain_does_not_serve_stale`.
       state**; last-known-good is served on transient failure.
 - [x] The client binding registry survives a daemon restart with **stable** bindings; a recycled
       synthetic IP is quarantined first. **Regression test: a restart must not remap an IP to a
@@ -504,7 +504,7 @@ cd admin && npm run codegen && npx tsc --noEmit
 - [x] The response path performs **no** re-authorization and **no** re-resolution, and returns over the
       same transport (direct or the same relay session).
 - [x] The client presents responses as originating from the **synthetic IP**.
-- [x] No relay file changed; `cd relay && cargo build` still green.
+- [x] No relay file changed; `cd relay && cargo build` still green. **✅ re-run 2026-08-29** — `git diff --name-only <branch-point>...HEAD -- relay/` is empty; `cd relay && cargo build` green.
 - [x] Stage 3 only: managed names → synthetic IPs, unmanaged names unaffected, OS DNS config fully **⚠️ verified only on a `systemd-resolved` host; teardown proven for `down` and `SIGKILL`, not logout/reboot.**
       restored on daemon stop.
 
