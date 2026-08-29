@@ -10,7 +10,7 @@ use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpListenEndpoint, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Notify};
 use tokio::time::timeout;
@@ -294,7 +294,7 @@ pub async fn run(
     // listening socket to established, so a fresh one is needed immediately).
     let mut listen_handles: HashMap<(Ipv4Addr, u16), SocketHandle> = HashMap::new();
     for (ip, port) in &resource_entries {
-        let handle = new_listen_socket(&mut sockets, *port);
+        let handle = new_listen_socket(&mut sockets, *ip, *port);
         listen_handles.insert((*ip, *port), handle);
     }
 
@@ -319,7 +319,7 @@ pub async fn run(
             let established = sockets.get_mut::<tcp::Socket>(handle).is_active();
             if established {
                 // Fresh listener for the next connection.
-                let new_handle = new_listen_socket(&mut sockets, port);
+                let new_handle = new_listen_socket(&mut sockets, ip, port);
                 listen_handles.insert((ip, port), new_handle);
 
                 // Channel pair that bridges the synchronous smoltcp poll loop
@@ -479,11 +479,36 @@ pub async fn run(
     }
 }
 
-fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
+/// A listener bound to ONE synthetic address and port.
+///
+/// ⚠️ The address is not optional. `socket.listen(port)` — a bare `u16` — produces
+/// `IpListenEndpoint { addr: None, .. }`, and smoltcp treats `None` as *any*
+/// destination address:
+///
+/// ```text
+/// let addr_ok = match self.listen_endpoint.addr {
+///     Some(addr) => ip_repr.dst_addr() == addr,
+///     None       => true,          // accepts ANY destination
+/// };
+/// ```
+///
+/// With `None`, two resources sharing a port are conflated: a connection to
+/// resource A's synthetic IP is accepted by resource B's listener, and the client
+/// then asserts B's `resource_id` on the wire. Observed live — a request to
+/// `100.64.0.2:5443` was served by the listener for `100.64.0.3:5443`, reached the
+/// wrong backend, and left one of the two resources unreachable.
+///
+/// Authorization still held (the connector checks the asserted `resource_id`
+/// against the ACL), so this was mis-routing rather than escalation — but the
+/// `(ip, port)` key in `listen_handles` was a fiction until this bound the address.
+fn new_listen_socket(sockets: &mut SocketSet<'_>, ip: Ipv4Addr, port: u16) -> SocketHandle {
     let rx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let tx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-    let _ = socket.listen(port);
+    let _ = socket.listen(IpListenEndpoint {
+        addr: Some(IpAddress::Ipv4(Ipv4Address::from(ip))),
+        port,
+    });
     sockets.add(socket)
 }
 
@@ -1062,5 +1087,77 @@ mod tests {
         // The router address the default route points at must be one we own, or
         // AnyIP's own check rejects the packet.
         assert!(iface.has_ip_addr(IpAddress::v4(100, 64, 0, 1)));
+    }
+
+    /// A listening socket MUST be bound to the ONE synthetic address it was
+    /// created for. `tcp::Socket::listen(port)` — the `u16` overload — produces
+    /// `IpListenEndpoint { addr: None }`, and smoltcp reads `None` as "accept ANY
+    /// destination" (`socket/tcp.rs`: `match self.listen_endpoint.addr { .. None
+    /// => true }`). With one listener per (synthetic IP, port) that is a
+    /// cross-resource leak: two resources sharing a port get whichever socket the
+    /// SocketSet happens to visit first, so a connection to resource A is relayed
+    /// down resource B's tunnel — wrong backend, wrong authorization.
+    ///
+    /// The wrongly-addressed socket is added FIRST on purpose. Under the bug it is
+    /// the one that wins the SYN, so this test fails; under the fix it must still
+    /// be sitting in Listen while the correctly-addressed socket is Established.
+    #[test]
+    fn a_listener_only_accepts_its_own_synthetic_address() {
+        let owned = Ipv4Address::new(100, 64, 0, 1);
+        let wrong_ip: Ipv4Addr = "100.64.0.3".parse().unwrap();
+        let right_ip: Ipv4Addr = "100.64.0.2".parse().unwrap();
+        const PORT: u16 = 5443;
+
+        let mut dev = Loopback::new(Medium::Ip);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 1;
+        let mut iface = Interface::new(config, &mut dev, smoltcp_now());
+        iface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(IpCidr::new(IpAddress::Ipv4(owned), 32));
+        });
+        iface.set_any_ip(true);
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(owned)
+            .expect("one default route must fit");
+
+        let mut sockets = SocketSet::new(Vec::new());
+        let wrong = new_listen_socket(&mut sockets, wrong_ip, PORT);
+        let right = new_listen_socket(&mut sockets, right_ip, PORT);
+
+        let client = sockets.add(tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 1024]),
+            tcp::SocketBuffer::new(vec![0u8; 1024]),
+        ));
+        sockets
+            .get_mut::<tcp::Socket>(client)
+            .connect(
+                iface.context(),
+                (IpAddress::Ipv4(Ipv4Address::from(right_ip)), PORT),
+                49152u16,
+            )
+            .expect("connect to the synthetic address");
+
+        let mut now = smoltcp_now();
+        for _ in 0..64 {
+            iface.poll(now, &mut dev, &mut sockets);
+            if sockets.get::<tcp::Socket>(client).may_send() {
+                break;
+            }
+            now += smoltcp::time::Duration::from_millis(10);
+        }
+
+        assert_eq!(
+            sockets.get::<tcp::Socket>(right).state(),
+            tcp::State::Established,
+            "the listener bound to {right_ip} did not take its own connection"
+        );
+        assert_eq!(
+            sockets.get::<tcp::Socket>(wrong).state(),
+            tcp::State::Listen,
+            "the listener bound to {wrong_ip} answered a SYN addressed to \
+             {right_ip} — listen() was given a bare port, so it matches any \
+             destination and resources sharing a port cross over"
+        );
     }
 }

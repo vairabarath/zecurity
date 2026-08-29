@@ -439,3 +439,58 @@ red for the right reason.
   identity: the daemon does the synthetic→`resource_id` lookup once at map-build time. `resolve` is the
   entry point Stage 3's DNS responder will need. `quarantined_rebuild` likewise has no caller, because
   9.2 handles corruption by salvaging addresses during deserialization instead.
+
+### Fix: every listener accepted every synthetic address
+**Found during the Sprint 16 end-of-sprint audit**, re-reading the Phase 9 verify item
+*"Exactly one tunnel per app connection."* It does not hold when two resources share a port.
+
+**Issue:** `curl` to `fqdn-test.internal:5443` (synthetic `100.64.0.2`) was served by the
+**tls-test** listener bound to `100.64.0.3:5443` — the relay logged
+`resource_id=48c97664 hostname=tls-test.internal dest=172.20.0.1 port=5443`. Traffic for
+resource A was relayed down resource B's tunnel: wrong backend, and authorization decided
+against the wrong `resource_id`.
+
+**Root cause:** `new_listen_socket` called `socket.listen(port)`. The `u16` overload of
+smoltcp's `listen` builds `IpListenEndpoint { addr: None, port }`, and `None` means *accept
+any destination* — smoltcp 0.11.0 `src/socket/tcp.rs:1357`:
+
+```rust
+let addr_ok = match self.listen_endpoint.addr {
+    Some(addr) => ip_repr.dst_addr() == addr,
+    None       => true,          // accepts ANY destination
+};
+```
+
+So the port was the only match criterion, and the SYN went to whichever socket the
+`SocketSet` iteration reached first. With one listener per `(synthetic IP, port)` — which is
+exactly what Phase 9 creates — any shared port cross-connects.
+
+**Fix Applied** (`client/src/net_stack.rs`, `new_listen_socket` ~line 504) — the function now
+takes the synthetic IP and binds to it:
+
+```rust
+// BEFORE:
+fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
+    ...
+    let _ = socket.listen(port);
+
+// AFTER:
+fn new_listen_socket(sockets: &mut SocketSet<'_>, ip: Ipv4Addr, port: u16) -> SocketHandle {
+    ...
+    let _ = socket.listen(IpListenEndpoint {
+        addr: Some(IpAddress::Ipv4(Ipv4Address::from(ip))),
+        port,
+    });
+```
+
+Both call sites pass the IP they already key the transport map on. A doc comment on the
+function records the `None` trap so the bare-port overload is not reintroduced.
+
+**Test:** `a_listener_only_accepts_its_own_synthetic_address` (`net_stack.rs` test module) —
+a `Loopback` interface with AnyIP, two listeners on port 5443 bound to `100.64.0.3` and
+`100.64.0.2`, and a client connecting to `.2`. The wrongly-addressed listener is added
+**first** on purpose, so under the bug it wins the SYN. Revert-tested: with `listen(port)`
+restored the test fails (`.2`'s socket stays in `Listen`); with the fix it passes.
+
+**Note:** none of the 111 pre-existing client tests caught this — they exercise one resource
+at a time, and a single listener with `addr: None` behaves correctly.
