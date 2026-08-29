@@ -391,9 +391,38 @@ them.
 stream plus a database and has no test harness today — and "the function exists, nothing calls it" is
 precisely the shape of the bug being fixed here. Verifying it needs a live stack.
 
+**The newly-activated path, now actually executed.** Sending the signal switches on two code paths that
+had never run once: `connector/src/renewal.rs` (its only caller is the `ReEnroll` handler) and
+`RenewCert` → `RenewConnectorCert`, which had **zero** test coverage. A latent bug in either would have
+turned "expires silently at day 7" into "expires at day 7 after a failed renewal every heartbeat for 48h".
+
+Static review first — `RenewConnectorCert` and the known-working `RenewShieldCert` parse the CSR
+identically (`ParseCertificateRequest` + `CheckSignature`), and the renewal template matches
+`SignConnectorCert` field for field: same `ConnectorSPIFFEID`, same CN prefix, same `KeyUsage`, same
+`ExtKeyUsage`, `IsCA: false`. The proto field is called `public_key_der` but both Rust sides put **CSR**
+bytes in it, and the Go side parses it as a CSR — misleading name, consistent encoding.
+
+Then executed: `internal/pki/connector_renewal_integration_test.go` (DB-gated on
+`PKI_TEST_DATABASE_URL`) runs the real renewal against a real workspace CA and asserts the renewed cert
+carries **the CSR's public key** — renewal reuses the connector's existing private key and ships only a
+certificate, so a mismatch would mean every connector renews "successfully" then fails mTLS on
+reconnect. Plus SPIFFE URI, CN, `ClientAuth`, leaf-not-CA, a full TTL, `result.NotAfter` agreeing with
+the certificate, and a chain to the workspace CA. Revert-verified: signing with a foreign key fails it
+with exactly that message.
+
 **Still open:** an expired cert remains unrecoverable. Renewing 48h early keeps a connector out of that
 state, but does not provide a way back once it is in one — that needs a bounded grace window for the
 `RenewCert` RPC, which is a trust-model change and belongs in the recovery-path ADR.
+
+**Two smaller things left as-is, deliberately:**
+
+- `control_stream.rs:350` logs a failed renewal and continues rather than breaking the loop, so a
+  persistently-failing renewal retries **every heartbeat for the whole 48h window**, each attempt a CSR
+  plus a cert signing on the controller. Pre-existing, and correct-ish (retry is what makes a dropped
+  renewal self-healing), but it wants a backoff.
+- `internal/shield/config.go`'s `RenewalWindow` stays dead: shields are prompted by their connector using
+  the connector's own hardcoded `DEFAULT_RENEWAL_WINDOW_SECS`, so `SHIELD_RENEWAL_WINDOW` does nothing.
+  Behaviour is correct; the env var is a trap for whoever next tries to tune it.
 
 ---
 
