@@ -80,6 +80,12 @@ type connectorStreamClient struct {
 	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
+
+	// certNotAfter is the expiry of the leaf certificate the connector actually
+	// PRESENTED on this stream — deliberately not the DB's cert_not_after, which
+	// can disagree with it. The presented cert is the one that expires and takes
+	// the stream down with it.
+	certNotAfter time.Time
 }
 
 // send enqueues a message for the writer goroutine. It never blocks the caller: if
@@ -305,11 +311,24 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
+	// Capture the presented leaf's expiry once, here. It is not reachable from
+	// handleConnectorHealth: StreamSPIFFEInterceptor puts SPIFFE strings in the
+	// context, not the certificate.
+	var certNotAfter time.Time
+	if certs, err := peerFromContext(ctx); err == nil && len(certs) > 0 {
+		certNotAfter = certs[0].NotAfter
+	} else {
+		// Zero disables the renewal prompt rather than triggering it on every
+		// health report — see maybeRequestRenewal.
+		log.Printf("control stream: connector %s: no peer certificate, renewal prompting disabled for this stream", connectorID)
+	}
+
 	client := &connectorStreamClient{
-		stream:      stream,
-		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
-		connectorID: connectorID,
-		tenantID:    tenantID,
+		stream:       stream,
+		outbound:     make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID:  connectorID,
+		tenantID:     tenantID,
+		certNotAfter: certNotAfter,
 	}
 	h.Registry.add(connectorID, client)
 	defer h.Registry.remove(connectorID)
@@ -450,6 +469,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 				// Connector was revoked/deleted — tear down the control stream.
 				return status.Error(codes.PermissionDenied, "connector revoked")
 			}
+			h.maybeRequestRenewal(client, time.Now())
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
 		case *pb.ConnectorControlMessage_ResourceAcks:
@@ -553,6 +573,54 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 // The UPDATE is guarded (status NOT IN revoked/deleted) so a revoked connector's
 // heartbeat can never resurrect it to 'active'; that guard makes `updated` empty,
 // so the query returns no rows (ErrNoRows) — our signal to tear the stream down.
+// maybeRequestRenewal asks a connector to renew when its presented certificate is
+// inside Cfg.RenewalWindow, and reports whether the signal was sent.
+//
+// WHY THIS EXISTS. Connector certificates have a 7-day TTL (CONNECTOR_CERT_TTL) and
+// nothing ever asked a connector to renew one. The connector side was complete —
+// control_stream.rs handles ReEnrollSignal and renewal.rs calls the RenewCert RPC,
+// which enrollment.go implements — and CONNECTOR_RENEWAL_WINDOW was already parsed
+// into Cfg.RenewalWindow. Only the code that reads that field was missing, so
+// ReEnrollSignal was never constructed anywhere in the controller and every
+// connector expired after 7 days.
+//
+// The failure is unrecoverable rather than merely disruptive: RenewCert travels over
+// the authenticated channel that expiry removes, so once the cert is dead the only
+// route back is manual re-enrolment. Renewing 48h early is what keeps a connector
+// out of that state.
+//
+// This mirrors the connector's own prompting of its shields
+// (connector/src/agent_server.rs: cert_needs_renewal on each shield health report),
+// deliberately, so both hops in the chain use the same trigger and the same window.
+//
+// Prompting is idempotent by design: it repeats on every health report until the
+// connector reconnects with a fresh certificate. A dropped or failed renewal is
+// therefore retried by the next heartbeat rather than needing its own retry path.
+func (h *EnrollmentHandler) maybeRequestRenewal(client *connectorStreamClient, now time.Time) bool {
+	// No presented cert (zero) means we cannot know the expiry. Do NOT prompt:
+	// a zero time is always "inside the window", which would turn an unknown into
+	// a renewal request on every single health report.
+	if client.certNotAfter.IsZero() {
+		return false
+	}
+	window := h.Cfg.RenewalWindow
+	if window <= 0 {
+		return false
+	}
+	if client.certNotAfter.Sub(now) > window {
+		return false
+	}
+	if err := client.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_ReEnroll{ReEnroll: &shieldpb.ReEnrollSignal{}},
+	}); err != nil {
+		log.Printf("control stream: connector %s: send re-enroll: %v", client.connectorID, err)
+		return false
+	}
+	log.Printf("control stream: connector %s: cert expires %v (within %v) — requested renewal",
+		client.connectorID, client.certNotAfter.UTC(), window)
+	return true
+}
+
 func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) bool {
 	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)

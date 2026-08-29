@@ -347,6 +347,54 @@ reboots, a downed controller and three DHCP address changes.
 shape: *the only path to recovery runs through the thing that is broken.* Two independent instances make it
 a design gap rather than two accidents, and it deserves an ADR of its own.
 
+#### Root cause, found 2026-08-29 — worse than "unrecoverable after expiry": **renewal never fired at all**
+
+`ReEnrollSignal` was constructed **nowhere in the controller** outside generated protobuf. Every other
+piece was already built:
+
+| Piece | State |
+|---|---|
+| `control_stream.rs` handles `ReEnrollSignal` | ✅ present |
+| `renewal.rs::renew_cert` calls the `RenewCert` RPC | ✅ present |
+| `enrollment.go:228` implements `RenewCert` | ✅ present |
+| `CONNECTOR_RENEWAL_WINDOW` → `Cfg.RenewalWindow` (48h) | ✅ parsed in `main.go:103` |
+| **anything that reads `Cfg.RenewalWindow` and sends the signal** | ❌ **missing** |
+
+`grep -rn 'RenewalWindow'` returns four hits: two struct fields and two `main.go` assignments. **No
+reader.** So with `CONNECTOR_CERT_TTL` at 7 days, *every* connector expires after 7 days and lands in the
+unrecoverable state above. This connector was not unlucky — it hit the deadline every connector hits.
+
+The precedent for the missing code was already in the tree, one hop down: the connector prompts **its own
+shields** on each health report (`connector/src/agent_server.rs:627`, gated on `cert_needs_renewal`, same
+48h window). Only the controller→connector hop was never written. And because shields renew *through*
+their connector, a dead connector cert takes its shields' renewal path down with it.
+
+**Fix applied** — `controller/internal/connector/control_stream.go`:
+
+- `connectorStreamClient` gained `certNotAfter`, captured once in `Control()` from the leaf the connector
+  actually **presented**. Deliberately not the DB's `cert_not_after`: the two can disagree, and the
+  presented cert is the one that expires. It is captured in `Control()` because it is not reachable from
+  `handleConnectorHealth` — `StreamSPIFFEInterceptor` puts SPIFFE strings in the context, not the cert.
+- New `maybeRequestRenewal(client, now)`, called on every health report, mirroring the Rust precedent.
+  Prompting repeats until the connector reconnects with a fresh cert, so a dropped or failed renewal is
+  retried by the next heartbeat instead of needing its own retry path.
+- Two guards that matter: a **zero** `certNotAfter` (no peer cert) does **not** prompt — zero is inside
+  every window, so treating "unknown" as "expiring" would prompt forever — and a **non-positive window**
+  disables prompting rather than meaning "always".
+
+**Tests** — `cert_renewal_prompt_test.go`, 9 assertions, no database needed. They assert on the **outbound
+mailbox**, not on the threshold arithmetic: the arithmetic was never wrong, the send never happened, so a
+threshold-only test would have passed against the bug. Revert-verified — suppressing the send fails 4 of
+them.
+
+**Known gap:** the *call site* in `Control()`'s dispatch loop is not covered. That loop needs a real gRPC
+stream plus a database and has no test harness today — and "the function exists, nothing calls it" is
+precisely the shape of the bug being fixed here. Verifying it needs a live stack.
+
+**Still open:** an expired cert remains unrecoverable. Renewing 48h early keeps a connector out of that
+state, but does not provide a way back once it is in one — that needs a bounded grace window for the
+`RenewCert` RPC, which is a trust-model change and belongs in the recovery-path ADR.
+
 ---
 
 ## Post-Phase Fixes
