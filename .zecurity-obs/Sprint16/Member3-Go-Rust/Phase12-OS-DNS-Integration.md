@@ -7,7 +7,7 @@ title: OS DNS Integration
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder
-status: done — Gate 3 closed 2026-08-28 (7 pass, 1 design-incompatible); see [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
+status: done (with stated gaps) — Gate 3 closed 2026-08-28: 7 pass, 1 design-incompatible (rival-domain refusal). NOT tested: non-systemd-resolved host, teardown on logout/reboot. See [[Decisions/ADR-023-Privileged-OS-DNS-Integration]]
 tags: [sprint16, sprint17-candidate, client, rust, dns, os-integration, adr-009, stage3, deferred, gate3]
 ---
 
@@ -228,19 +228,19 @@ need a hosts entry". Do not ship it under time pressure.
 ## Tasks
 
 ### 12.1 — `client/src/os_dns.rs` (new)
-- [ ] **Per-domain DNS configuration — never hijack all DNS** (decision #4). Only the managed
+- [x] **Per-domain DNS configuration — never hijack all DNS** (decision #4). Only the managed **✅ verified** — only `~fqdn` entries; `github.com` answered via `enp2s0` throughout.
       domains/suffixes route to `127.0.0.1`; everything else keeps the user's existing resolvers,
       untouched.
       ⚠️ Taking over the default resolver would mean every DNS query on the machine depends on our
       daemon, and every bug in Phase 11 becomes a total-connectivity bug.
-- [ ] Platform mechanism, stated explicitly rather than assumed:
+- [x] Platform mechanism, stated explicitly rather than assumed: **✅ decided (b)** — `resolvectl` per-link when resolved is present, refuse otherwise. The refusal path has NOT been exercised on a real non-`systemd-resolved` host.
       - `systemd-resolved` present → per-link domain routing (`resolvectl domain`/`dns`) scoped to
         `zecurity0`. This is the clean path and the only one that supports per-domain routing natively.
       - No `systemd-resolved` → decide **now** whether to (a) edit `/etc/resolv.conf` with a backup and
         restore, or (b) **refuse to enable** OS DNS and fall back to the documented `hosts` workflow.
         **Recommend (b).** Rewriting `resolv.conf` races with NetworkManager/dhcpcd and is the classic
         source of "my DNS broke after uninstalling a VPN".
-- [ ] **Reliable teardown on every exit path** — `zecurity-client down`, logout, daemon crash, host
+- [x] **Reliable teardown on every exit path** — `zecurity-client down`, logout, daemon crash, host **⚠️ partial** — `down` and `SIGKILL`+restart both verified. Logout and host reboot were NOT tested.
       reboot. Not just the happy path.
       - Capture the prior configuration before changing it, and persist it (a crash must not lose the
         thing needed to restore).
@@ -252,11 +252,12 @@ need a hosts entry". Do not ship it under time pressure.
       **refuse with a clear error** rather than silently overwriting someone else's DNS configuration.
       Log what was found.
 
+      **❌ NOT IMPLEMENTED — design-incompatible with invariants 2–3.** See "⚠️ 'Conflict handling' is not what 12.1 asked for" above.
 ### 12.2 — Verify the split-tunnelling interaction (ADR-009)
-- [ ] Explicitly test, don't reason about it: split-tunnel mode changes which traffic enters the TUN, and
+- [x] Explicitly test, don't reason about it: split-tunnel mode changes which traffic enters the TUN, and **✅ verified** — no full-tunnel mode exists, so the warned-of failure cannot arise; both planes checked in the same run.
       a name that resolves to a synthetic IP whose CIDR is **not** routed into the TUN in that mode
       resolves fine and then blackholes.
-- [ ] ⚠️ Pairs with Phase 9.3's open item — the synthetic-CIDR route vs split-tunnelling. If 9.3 left
+- [x] ⚠️ Pairs with Phase 9.3's open item — the synthetic-CIDR route vs split-tunnelling. If 9.3 left **✅** — Phase 9.3 closed the synthetic-CIDR/ADR-009 question with an explicit verdict.
       that unresolved, resolve it here before enabling OS DNS, because DNS makes the failure silent
       (the name works, the connection just hangs).
 
@@ -268,22 +269,23 @@ cd client && cargo build && cargo test
 
 ## 🚩 GATE 3 — E2E (Stage 3)
 
-- [ ] `dig managed.name` (no explicit `@server`) → the synthetic IP.
-- [ ] An app connects **by name** through the tunnel, with no `hosts` entry present.
-- [ ] TLS/SNI validation succeeds against the real certificate (this is why name access matters and raw
+- [x] `dig managed.name` (no explicit `@server`) → the synthetic IP. **✅** via `resolvectl query` (`dig` absent on the client host).
+- [x] An app connects **by name** through the tunnel, with no `hosts` entry present. **✅**
+- [x] TLS/SNI validation succeeds against the real certificate (this is why name access matters and raw **✅** — `tls-test.internal` SAN validated, with a negative control.
       synthetic-IP access never did).
-- [ ] Unmanaged names resolve normally, with unchanged latency — verify against a name that resolved
+- [x] Unmanaged names resolve normally, with unchanged latency — verify against a name that resolved **✅**
       before the daemon started.
-- [ ] `zecurity-client down` → DNS settings **fully restored**; `resolvectl status` / `resolv.conf`
+- [x] `zecurity-client down` → DNS settings **fully restored**; `resolvectl status` / `resolv.conf` **✅**
       byte-identical to the pre-start state.
-- [ ] Kill the daemon with `SIGKILL` → the next start reconciles and the user's DNS is not left broken.
-- [ ] Another VPN holding the same domain → clear refusal, no silent overwrite.
-- [ ] Split-tunnel mode: name access behaves consistently with 12.2's decision.
+- [x] Kill the daemon with `SIGKILL` → the next start reconciles and the user's DNS is not left broken. **✅**
+- [ ] Another VPN holding the same domain → clear refusal, no silent overwrite. **❌ NOT IMPLEMENTED — design-incompatible.** Invariants 2–3 keep the helper blind to other links. Tested instead: resolved's precedence (our answer wins, unmanaged DNS survives), so the safety property holds without the refusal.
+- [x] Split-tunnel mode: name access behaves consistently with 12.2's decision. **✅**
 
 ## Verify (manual, on each supported platform)
 
-- [ ] `systemd-resolved` host: full pass.
+- [x] `systemd-resolved` host: full pass. **✅ 7 of 8** — the rival-claim item is design-incompatible, recorded as a limitation.
 - [ ] Non-`systemd-resolved` host: behaves per the 12.1 decision — either a correct backup/restore cycle,
+      **❌ NOT TESTED.** No non-`systemd-resolved` host was available. The code path (refuse + `hosts` fallback) exists and is unit-tested, but has never run on such a host.
       or a clean refusal with the `hosts` fallback documented.
 
 ## Notes

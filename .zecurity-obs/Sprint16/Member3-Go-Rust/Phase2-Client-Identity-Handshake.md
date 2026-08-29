@@ -100,12 +100,12 @@ don't weaken the assertion.
       (proves the new field is being read, not the legacy fallback).
 - [x] A shield-routed resource still goes via the shield.
       *(`shield_route_is_never_resolved_and_fails_closed`, connector-side, added during Phase 7.)*
-- [ ] Connector-offline case still **fails closed** (empty transports), not passthrough.
+- [x] Connector-offline case still **fails closed** (empty transports), not passthrough. **✅ proven live in Phase 9** — `live_synthetic_ip_reaches_the_smoltcp_stack` uses a `Some(None)` transports slot (managed, connector offline) and the client fails closed after accepting.
       ⚠️ **Client-side, still unverified.** `client/src/daemon_tests.rs` covers `build_transports_*`
       map shape but not the `Some(empty)` = fail-closed vs `None` = unmanaged distinction. Losing it
       converts a fail-closed case into a passthrough — a security regression. **Phase 9.1 must assert
       it**, since Phase 9 rewrites this exact code.
-- [ ] Unmanaged traffic is still untunnelled. ⚠️ Same gap, same owner: Phase 9.1.
+- [x] Unmanaged traffic is still untunnelled. ⚠️ Same gap, same owner: Phase 9.1. **✅ gap closed by Phase 9.1** — `live_unmanaged_destination_is_not_captured`: an unmanaged destination must NOT be answered by our stack.
 
 ## Then
 

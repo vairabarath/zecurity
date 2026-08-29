@@ -7,7 +7,7 @@ title: Client Binding Registry + Synthetic Routing
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target
-status: done
+status: done — one verify item ("exactly one tunnel per app connection") failed on its first live run and exposed the listener-address bug; fixed + regression-tested, live re-run outstanding
 completed: 2026-08-18
 tags: [sprint16, client, rust, synthetic-ip, registry, smoltcp, nftables, routing, security, adr-002]
 ---
@@ -161,12 +161,12 @@ reintroduces the routing loop that cost a day in Gate 1.
 - [x] The client **never learns the real backend IP**, and must not need to. If the design starts wanting
       it, the resolution boundary has leaked.
 
-### 9.5 — Testable without DNS ⬜ (client-side proven live; by-name run outstanding)
-- [ ] Add a `hosts` entry `<synthetic IP>  <hostname>` and connect by **name**.
-- [ ] ⚠️ Test by **name**, not by raw synthetic IP: a `hosts` entry preserves TLS SNI and certificate
+### 9.5 — Testable without DNS ✅ (closed by Gate 2/3, which went further than a `hosts` entry)
+- [x] Add a `hosts` entry `<synthetic IP>  <hostname>` and connect by **name**. **✅ superseded and exceeded** — Gate 3 connected by name with **no** `hosts` entry at all, through the OS resolver.
+- [x] ⚠️ Test by **name**, not by raw synthetic IP: a `hosts` entry preserves TLS SNI and certificate **✅** — Gate 3 validated TLS/SNI against a real certificate (`tls-test.internal` SAN), with a negative control that correctly failed.
       validation, while connecting to a bare synthetic IP does not — an HTTPS resource would fail for
       reasons unrelated to this sprint.
-- [ ] ⚠️ **Testing trap** (cost significant time in Gate 1): the resource must **not** be on the same host
+- [x] ⚠️ **Testing trap** (cost significant time in Gate 1): the resource must **not** be on the same host **✅ avoided** — Gate 2 and Gate 3 both ran on a two-host stack, backends on docker bridge IPs.
       as the client. Linux routes local addresses via the `local` table (`dev lo`), which always beats any
       TUN route — curl connects directly and produces a misleading "it works".
 
@@ -223,7 +223,7 @@ applies equally to pinned IPs outside any local subnet), not something this phas
 - [x] A pinned IP resource behaves **identically** — same routes, same handshake, same logs (regression).
       Live (`live_pinned_resource_is_still_captured`); the nft rule also matches ADR-009's documented
       form byte-for-byte.
-- [ ] ⬜ An FQDN resource is reachable by name via a `hosts` entry; the connector logs `resource_id` +
+- [x] ⬜ An FQDN resource is reachable by name via a `hosts` entry; the connector logs `resource_id` + **✅** — Gate 2 (2026-08-26). Connector logs carry `resource_id` + `hostname` + resolved address.
       `hostname` + the resolved address. **Needs a live stack** — the client-side path is proven live
       (row 3 above) but no connection has crossed a real controller + connector.
 - [x] Responses arrive at the app (proves the source rewrite) — not just "the tunnel opened".
@@ -244,9 +244,9 @@ applies equally to pinned IPs outside any local subnet), not something this phas
       Live: rows 2 and 4 above.
 - [x] `down` removes the CIDR route, the `ip rule`, and the nft table completely (`ip route show table
       105` empty, `nft list table inet <ZECURITY_TABLE>` gone). Verified live in a namespace.
-- [ ] ⬜ Exactly **one** tunnel per app connection (the Gate 1 loop regression check). **Needs a live
+- [ ] ⬜ Exactly **one** tunnel per app connection (the Gate 1 loop regression check). **Needs a live **❌ FAILED when finally run, and it found a real bug.** Gate 3 showed a connection to `fqdn-test.internal:5443` served by the **tls-test** listener: every smoltcp listener was bound with `listen(port)` (`addr: None` = any destination), so two resources sharing a port cross over. Fixed and regression-tested — see *Post-Phase Fixes* below. **The live re-run of this item is still outstanding.**
       stack** — requires a real connector to count tunnels against.
-- [ ] ⬜ 🚩 **This is the first end-to-end exercise of Phases 6 and 7.** Expect to find bugs there, not
+- [x] ⬜ 🚩 **This is the first end-to-end exercise of Phases 6 and 7.** Expect to find bugs there, not **✅ and it did find bugs** — Gate 2 exercised Phases 6–7 end to end (5/5). The bugs surfaced were in the controller ACL compiler, not here; see Phase 12's "🔴 Controller defects found by running Gate 3".
       here. **Still pending** — the client half is proven, the wire half is not, so Phases 6–7 remain
       unexercised end to end (as they have been since they landed).
 

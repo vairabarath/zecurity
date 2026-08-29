@@ -7,7 +7,7 @@ title: Admin UI — FQDN Resources
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing
-status: done — Gate 2 closed 2026-08-26 (5/5)
+status: done (with stated gaps) — Gate 2 closed 2026-08-26 (5/5). Four UI verify items were never run; one task deliberately not shipped (resolver health).
 tags: [sprint16, admin, frontend, react, graphql, fqdn, gate2]
 ---
 
@@ -112,12 +112,12 @@ cd admin && npm run codegen && npx tsc --noEmit
 ## Verify (UI)
 
 - [x] Creating a resource with both an IP and a hostname is not expressible in the form.
-- [ ] Creating with neither is blocked client-side, and the server error is still handled gracefully.
-- [ ] A malformed resolver JSON (via the raw escape hatch) shows the server's readable message, not a
+- [ ] Creating with neither is blocked client-side, and the server error is still handled gracefully. **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
+- [ ] A malformed resolver JSON (via the raw escape hatch) shows the server's readable message, not a **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
       raw constraint violation.
-- [ ] Editing `hostname` or `resolver` bumps the ACL version (they *are* ACL-relevant); editing
+- [ ] Editing `hostname` or `resolver` bumps the ACL version (they *are* ACL-relevant); editing **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
       `localTarget` does **not** (Shield-only) — the UI should not imply otherwise.
-- [ ] Existing IP resources render exactly as before.
+- [ ] Existing IP resources render exactly as before. **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
 
 ## Notes
 

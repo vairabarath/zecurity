@@ -1,6 +1,6 @@
 ---
 type: planning
-status: in-progress
+status: complete
 sprint: 16
 progress: Stage 1 complete (Gate 1 fully closed 2026-08-10) · **Stage 2 COMPLETE — GATE 2 CLOSED 5/5 on a real two-host stack 2026-08-26**, including the sprint's acceptance criterion (backend moved by DNS twice, traffic followed, ACL version unchanged both times) · **Phase 11 (client DNS responder) done + verified live 2026-08-27** — managed names now resolve on `127.0.0.1:53` without a `hosts` entry · **Phase 12 DONE — GATE 3 CLOSED 2026-08-28** via a minimal privileged helper (ADR-023 option C), daemon stays unprivileged. Managed names resolve through the OS with no hosts entry, TLS/SNI validates against a real certificate, and `down`/`SIGKILL` both leave the user's DNS intact. **SPRINT 16 COMPLETE — all 12 phases.** · **SPRINT 16 IS COMPLETE**: the capability goal (dynamic-IP resources without ACL churn) is delivered and verified; until Phase 12 lands, `curl http://<name>` needs `--resolve` or a `hosts` entry, **by design**
 solo: true
@@ -414,16 +414,16 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 
 #### Phase 10 — Admin UI
 > See [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]].
-- [ ] **10.1** Create/edit an FQDN resource: addressing **mode selector** (IP vs hostname — make
+- [x] **10.1** Create/edit an FQDN resource: addressing **mode selector** (IP vs hostname — make
       violating exactly-one unrepresentable) + resolver **type dropdown** (`dns`|`static`) with
       type-specific config serialized to JSON. ⚠️ **Do not offer `shield` as a resolver type.**
       `localTarget` editable only for shield-delivered resources.
-- [ ] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error, with
+- [x] **10.2** Show delivery type (Protected vs Connector-reachable) + resolver health/last error, with **⚠️ delivery type shipped; resolver health/last error deliberately NOT shipped** — see Phase 10, task marked ⛔.
       Phase 6's failure classes kept distinct. ⚠️ **Scope check:** there is no connector→controller
       transport for resolver health today; inventing one would breach the no-new-RPCs rule. Ship without
       live health and record the gap.
-- [ ] **Gate:** `cd admin && npm run codegen && npx tsc --noEmit`
-- [ ] **🚩 GATE 2 (E2E, merge point):** an FQDN resource created **through the UI** is reachable by name;
+- [x] **Gate:** `cd admin && npm run codegen && npx tsc --noEmit`
+- [x] **🚩 GATE 2 (E2E, merge point):** an FQDN resource created **through the UI** is reachable by name;
       **changing the backend IP requires no controller action, bumps no ACL version, and restarts no
       tunnel** (verify `acl_snapshot_version` is unchanged across a DNS change). Closes Phase 5's known
       gap that `createResource` with `hostname` had never run end-to-end.
@@ -432,26 +432,26 @@ test; the GraphQL `createResource` path with `hostname` has never been executed 
 
 #### Phase 11 — Client DNS responder
 > See [[Sprint16/Member3-Go-Rust/Phase11-Client-DNS-Responder]].
-- [ ] **11.1** new `client/src/dns.rs` — UDP **and** TCP/53 (a truncated UDP answer is retried over TCP;
+- [x] **11.1** new `client/src/dns.rs` — UDP **and** TCP/53 (a truncated UDP answer is retried over TCP;
       UDP-only produces intermittent failures); managed `A` → synthetic IP; managed `AAAA` →
       **NODATA, not NXDOMAIN** (NXDOMAIN can suppress the `A` lookup entirely); TTL 30–60s; exact-name
       match (no wildcards yet); loopback-bind only — **never an open resolver**.
-- [ ] **11.2** Unmanaged names never reach us (per-domain OS config, decision #4); if one does anyway,
+- [x] **11.2** Unmanaged names never reach us (per-domain OS config, decision #4); if one does anyway,
       answer **REFUSED** — a forged NXDOMAIN breaks the user's unrelated DNS.
-- [ ] **Gate:** `cd client && cargo build && cargo test`
+- [x] **Gate:** `cd client && cargo build && cargo test`
 
 #### Phase 12 — OS DNS integration
 > See [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]]. **Highest-risk phase in the sprint** —
 > the only one that mutates host-wide state outside our own interface.
-- [ ] **12.1** new `client/src/os_dns.rs` — **per-domain** DNS config (never hijack all DNS);
+- [x] **12.1** new `client/src/os_dns.rs` — **per-domain** DNS config (never hijack all DNS);
       reliable teardown on **every** exit path incl. SIGKILL (persist the prior config; reconcile at
       startup, mirroring `tun.rs::cleanup_policy_routes()`); conflict handling with other VPNs =
       **refuse, never silently overwrite**. **Decide:** no-`systemd-resolved` hosts → back up and
       rewrite `resolv.conf`, or **refuse to enable OS DNS** and document the `hosts` fallback
       (recommended — `resolv.conf` rewrites race with NetworkManager/dhcpcd).
-- [ ] **12.2** Interaction with split-tunneling (ADR-009) verified explicitly — pairs with 9.3. DNS makes
+- [x] **12.2** Interaction with split-tunneling (ADR-009) verified explicitly — pairs with 9.3. DNS makes
       this failure **silent**: the name resolves and the connection then hangs.
-- [ ] **🚩 GATE 3 (E2E):** `dig managed.name` → synthetic IP; app connects through the tunnel;
+- [x] **🚩 GATE 3 (E2E):** `dig managed.name` → synthetic IP; app connects through the tunnel;
       unmanaged names resolve normally; DNS settings restore cleanly on stop.
 
 ## File Map (what you touch, when)
@@ -487,25 +487,25 @@ cd admin && npm run codegen && npx tsc --noEmit
 
 ## Acceptance Criteria
 
-- [ ] The handshake carries `resource_id`; the connector **never dials a client-supplied address**.
+- [x] The handshake carries `resource_id`; the connector **never dials a client-supplied address**.
       Unknown/unauthorized id, or mismatched port/protocol, is denied.
-- [ ] Existing IP resources behave **identically** (same effective ACLs).
-- [ ] An FQDN resource can be created, appears in the ACL snapshot **with no real backend IP**, and is
+- [x] Existing IP resources behave **identically** (same effective ACLs).
+- [x] An FQDN resource can be created, appears in the ACL snapshot **with no real backend IP**, and is
       reachable end-to-end.
-- [ ] A backend IP change is invisible to the control plane: **no DB write, no ACL version bump, no
+- [x] A backend IP change is invisible to the control plane: **no DB write, no ACL version bump, no
       tunnel restart** — verified by watching the ACL version across a DNS change.
-- [ ] Protected resources are delivered via the Shield session and **never** fall back to direct dial,
+- [x] Protected resources are delivered via the Shield session and **never** fall back to direct dial,
       including when every shield is offline (fails closed).
-- [ ] Resolver failures are typed (NXDOMAIN vs timeout vs no-A vs dial-fail) and **do not poison ACL
+- [x] Resolver failures are typed (NXDOMAIN vs timeout vs no-A vs dial-fail) and **do not poison ACL
       state**; last-known-good is served on transient failure.
-- [ ] The client binding registry survives a daemon restart with **stable** bindings; a recycled
+- [x] The client binding registry survives a daemon restart with **stable** bindings; a recycled
       synthetic IP is quarantined first. **Regression test: a restart must not remap an IP to a
       different resource.**
-- [ ] The response path performs **no** re-authorization and **no** re-resolution, and returns over the
+- [x] The response path performs **no** re-authorization and **no** re-resolution, and returns over the
       same transport (direct or the same relay session).
-- [ ] The client presents responses as originating from the **synthetic IP**.
-- [ ] No relay file changed; `cd relay && cargo build` still green.
-- [ ] Stage 3 only: managed names → synthetic IPs, unmanaged names unaffected, OS DNS config fully
+- [x] The client presents responses as originating from the **synthetic IP**.
+- [x] No relay file changed; `cd relay && cargo build` still green.
+- [x] Stage 3 only: managed names → synthetic IPs, unmanaged names unaffected, OS DNS config fully **⚠️ verified only on a `systemd-resolved` host; teardown proven for `down` and `SIGKILL`, not logout/reboot.**
       restored on daemon stop.
 
 ## Decisions — settled during Phases 4–5
@@ -884,3 +884,21 @@ recorded only inside the resolved bug doc; needs its own item.
 10. **A proto change is never Go-only.** Any `buf generate` must be followed by
     `cargo build && cargo test` in the connector, client, and shield as applicable — `cargo build`
     alone will not catch broken test-only struct literals.
+
+## Known gaps at sprint close (2026-08-29)
+
+Everything above is ticked against real evidence, but three items are **not** verified and are
+recorded here rather than hidden inside a phase file:
+
+1. **Non-`systemd-resolved` host** — the refuse-and-fall-back-to-`hosts` path is unit-tested but has
+   never run on such a host (Phase 12).
+2. **Rival per-domain claim → clear refusal** — not implemented, and design-incompatible with ADR-023
+   invariants 2–3. The safety property (our answer wins, unmanaged DNS survives) was tested instead.
+3. **Four Admin-UI verify items** — the FQDN create/edit flow was exercised only far enough to seed
+   the Gate 2/3 resources (Phase 10).
+
+Also outstanding: a **live re-run of Phase 9's "exactly one tunnel per app connection"**. That item
+failed on its first live run and exposed the listener-address bug (every smoltcp listener matched any
+destination, so two resources sharing a port crossed over). The bug is fixed and regression-tested
+(`a_listener_only_accepts_its_own_synthetic_address`, revert-verified), but the live check has not
+been repeated.
