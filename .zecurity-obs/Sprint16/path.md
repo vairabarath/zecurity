@@ -913,6 +913,11 @@ recorded only inside the resolved bug doc; needs its own item.
     `cargo build && cargo test` in the connector, client, and shield as applicable — `cargo build`
     alone will not catch broken test-only struct literals.
 
+> **Pattern found by this sprint's verification:** three independent failures shared one shape — *the
+> only path to recovery runs through the thing that is broken.* Written up as
+> [[Decisions/ADR-024-Recovery-Paths-Must-Not-Depend-On-The-Broken-Component]], which also carries the
+> undecided `RenewCert` grace-window question that instances 2 and 3 both wait on.
+
 ## Known gaps at sprint close (2026-08-29)
 
 Everything above is ticked against real evidence, but three items are **not** verified and are
