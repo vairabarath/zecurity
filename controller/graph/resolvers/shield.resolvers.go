@@ -70,6 +70,54 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 	return &graph.ShieldToken{ShieldID: shieldID}, nil
 }
 
+// ReenrollShield is the resolver for the reenrollShield field.
+func (r *mutationResolver) ReenrollShield(ctx context.Context, id string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	// Mirror of ReenrollConnector — see the reasoning there and ADR-024. A shield
+	// reaches this state the same way: shields are prompted for renewal by their
+	// connector, so a connector down longer than the cert TTL leaves its shields
+	// expired and unable to renew.
+	//
+	// Keeping the shield id preserves resources.shield_id, so protected resources
+	// stay bound instead of being demoted — which is what revoke + create-new does.
+	var newStatus string
+	err := r.TenantDB.QueryRow(ctx,
+		`UPDATE shields
+		    SET status               = 'pending',
+		        cert_serial          = NULL,
+		        cert_not_after       = NULL,
+		        enrollment_token_jti = NULL,
+		        updated_at           = NOW()
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status IN ('disconnected', 'pending')
+		 RETURNING status`,
+		id, tc.TenantID,
+	).Scan(&newStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var current string
+		if qErr := r.TenantDB.QueryRow(ctx,
+			`SELECT status FROM shields WHERE id = $1 AND tenant_id = $2`,
+			id, tc.TenantID,
+		).Scan(&current); qErr != nil {
+			return false, apperr.UserErrorf("shield not found")
+		}
+		switch current {
+		case "revoked":
+			return false, apperr.UserErrorf("shield is revoked; revocation cannot be undone — create a new shield instead")
+		case "active":
+			return false, apperr.UserErrorf("shield is active; revoke it first if you intend to replace it")
+		default:
+			return false, apperr.UserErrorf("shield status is %q, expected disconnected or pending", current)
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("reenroll shield: %w", err)
+	}
+	return true, nil
+}
+
 // RevokeShield is the resolver for the revokeShield field.
 func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
@@ -142,24 +190,6 @@ func (r *mutationResolver) DeleteShield(ctx context.Context, id string) (bool, e
 	}
 
 	return true, nil
-}
-
-// demoteResourcesForShield is the single-shield counterpart of
-// demoteResourcesForConnectorShields; see that function for why this is needed.
-func demoteResourcesForShield(ctx context.Context, tx pgx.Tx, tenantID, shieldID string) (int64, error) {
-	res, err := tx.Exec(ctx,
-		`UPDATE resources
-		    SET status     = 'unprotected',
-		        shield_id  = NULL,
-		        updated_at = NOW()
-		  WHERE tenant_id = $1
-		    AND shield_id = $2`,
-		tenantID, shieldID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected(), nil
 }
 
 // Shields is the resolver for the shields field.

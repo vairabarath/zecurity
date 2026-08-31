@@ -110,6 +110,79 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 	return &graph.ConnectorToken{ConnectorID: connectorID}, nil
 }
 
+// ReenrollConnector is the resolver for the reenrollConnector field.
+func (r *mutationResolver) ReenrollConnector(ctx context.Context, id string) (bool, error) {
+	tc := tenant.MustGet(ctx)
+
+	// ADR-024: certificate expiry is a HARD trust boundary. Renewal always
+	// requires a currently-valid certificate, and an expired one must re-enrol.
+	// Nothing here relaxes that — `Enroll` still accepts only a pending connector
+	// and RegenerateTokenHandler still issues a token only for a pending one.
+	// What was missing was a supported way to REACH pending without destroying the
+	// connector's identity: the only route was revoke + create-new, which mints a
+	// new connector id and so orphans every shield bound to the old one (the exact
+	// cascade ADR-024 records as instance 1). Keeping the id is the whole point.
+	//
+	// The status gate is load-bearing, not defensive:
+	//   - 'revoked'      → refused. Revocation is absolute; this must never
+	//                      become a way to un-revoke.
+	//   - 'active'       → refused. A pending connector is excluded from ACL
+	//                      snapshots (policy/store.go: `c.status = 'active'`), so
+	//                      flipping a WORKING connector would take its resources
+	//                      offline. That is an outage disguised as a repair.
+	//   - 'disconnected' → allowed. This is the expired-cert case: the connector
+	//                      cannot heartbeat, so the disconnect watcher has already
+	//                      marked it, and it is already out of the ACL snapshots.
+	//   - 'pending'      → allowed, so the action is idempotent and a second click
+	//                      just yields a fresh token.
+	//
+	// Cleared columns are exactly the credential-bearing ones that Enroll rewrites
+	// (enrollment.go: status, cert_serial, cert_not_after, enrollment_token_jti).
+	// trust_domain, hostname and version are left alone — Enroll overwrites them —
+	// and remote_network_id and the id itself are never touched.
+	var newStatus string
+	err := r.TenantDB.QueryRow(ctx,
+		`UPDATE connectors
+		    SET status               = 'pending',
+		        cert_serial          = NULL,
+		        cert_not_after       = NULL,
+		        enrollment_token_jti = NULL,
+		        updated_at           = NOW()
+		  WHERE id = $1
+		    AND tenant_id = $2
+		    AND status IN ('disconnected', 'pending')
+		 RETURNING status`,
+		id, tc.TenantID,
+	).Scan(&newStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Distinguish the three no-op cases, because "nothing happened" is the
+		// least useful thing to tell an operator mid-recovery.
+		var current string
+		if qErr := r.TenantDB.QueryRow(ctx,
+			`SELECT status FROM connectors WHERE id = $1 AND tenant_id = $2`,
+			id, tc.TenantID,
+		).Scan(&current); qErr != nil {
+			return false, apperr.UserErrorf("connector not found")
+		}
+		switch current {
+		case "revoked":
+			return false, apperr.UserErrorf("connector is revoked; revocation cannot be undone — create a new connector instead")
+		case "active":
+			return false, apperr.UserErrorf("connector is active; re-enrolling it would remove it from ACL snapshots and take its resources offline. Revoke it first if you intend to replace it")
+		default:
+			return false, apperr.UserErrorf("connector status is %q, expected disconnected or pending", current)
+		}
+	}
+	if err != nil {
+		return false, fmt.Errorf("reenroll connector: %w", err)
+	}
+
+	// The connector's shields and their resources are deliberately NOT touched:
+	// keeping the connector id is what preserves them, and that is the difference
+	// between this and revoke + create-new.
+	return true, nil
+}
+
 // RevokeConnector is the resolver for the revokeConnector field.
 func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
@@ -207,39 +280,6 @@ func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool
 	}
 
 	return true, nil
-}
-
-// demoteOrphanedResources clears the shield-delivered status of resources whose
-// shield is about to disappear.
-//
-// WHY THIS IS NEEDED. `shields.connector_id` cascades on connector delete, and
-// `resources.shield_id` is `ON DELETE SET NULL`. So deleting a connector — or a
-// shield directly — nulls the FK but leaves `status` at 'protected'. An FK action
-// cannot touch another column, so nothing demotes the status, and the result is a
-// resource that claims to be shield-delivered with no shield.
-//
-// That row is not merely untidy: until the compiler was made resilient it failed
-// the ENTIRE workspace ACL compile, so a single connector deletion took every
-// resource in the workspace offline. The compiler now skips such a resource, but
-// this stops it being created in the first place — the two fixes are cause and
-// safety net, and both are wanted.
-//
-// Runs inside the caller's transaction so a failed delete cannot leave resources
-// silently demoted for a shield that still exists.
-func demoteResourcesForConnectorShields(ctx context.Context, tx pgx.Tx, tenantID, connectorID string) (int64, error) {
-	res, err := tx.Exec(ctx,
-		`UPDATE resources
-		    SET status     = 'unprotected',
-		        shield_id  = NULL,
-		        updated_at = NOW()
-		  WHERE tenant_id = $1
-		    AND shield_id IN (SELECT id FROM shields WHERE connector_id = $2 AND tenant_id = $1)`,
-		tenantID, connectorID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected(), nil
 }
 
 // RemoteNetworks is the resolver for the remoteNetworks field.

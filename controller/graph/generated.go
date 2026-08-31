@@ -131,6 +131,8 @@ type ComplexityRoot struct {
 		InitiateAuth              func(childComplexity int, provider string, workspaceName *string) int
 		PromoteDiscoveredService  func(childComplexity int, shieldID string, protocol string, port int) int
 		ProtectResource           func(childComplexity int, id string) int
+		ReenrollConnector         func(childComplexity int, id string) int
+		ReenrollShield            func(childComplexity int, id string) int
 		RemoveGroupMember         func(childComplexity int, groupID string, userID string) int
 		RevokeConnector           func(childComplexity int, id string) int
 		RevokeDevice              func(childComplexity int, deviceID string) int
@@ -264,9 +266,11 @@ type MutationResolver interface {
 	CreateRemoteNetwork(ctx context.Context, name string, location NetworkLocation) (*RemoteNetwork, error)
 	DeleteRemoteNetwork(ctx context.Context, id string) (bool, error)
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
+	ReenrollConnector(ctx context.Context, id string) (bool, error)
 	RevokeConnector(ctx context.Context, id string) (bool, error)
 	DeleteConnector(ctx context.Context, id string) (bool, error)
 	GenerateShieldToken(ctx context.Context, remoteNetworkID string, shieldName string) (*ShieldToken, error)
+	ReenrollShield(ctx context.Context, id string) (bool, error)
 	RevokeShield(ctx context.Context, id string) (bool, error)
 	DeleteShield(ctx context.Context, id string) (bool, error)
 	CreateResource(ctx context.Context, input CreateResourceInput) (*Resource, error)
@@ -817,6 +821,28 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.ProtectResource(childComplexity, args["id"].(string)), true
+	case "Mutation.reenrollConnector":
+		if e.ComplexityRoot.Mutation.ReenrollConnector == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_reenrollConnector_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.ReenrollConnector(childComplexity, args["id"].(string)), true
+	case "Mutation.reenrollShield":
+		if e.ComplexityRoot.Mutation.ReenrollShield == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_reenrollShield_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.ReenrollShield(childComplexity, args["id"].(string)), true
 	case "Mutation.removeGroupMember":
 		if e.ComplexityRoot.Mutation.RemoveGroupMember == nil {
 			break
@@ -2358,6 +2384,34 @@ func (ec *executionContext) field_Mutation_promoteDiscoveredService_args(ctx con
 }
 
 func (ec *executionContext) field_Mutation_protectResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_reenrollConnector_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_reenrollShield_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
@@ -4165,6 +4219,68 @@ func (ec *executionContext) fieldContext_Mutation_generateConnectorToken(ctx con
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_reenrollConnector(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_reenrollConnector(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().ReenrollConnector(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_reenrollConnector(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_reenrollConnector_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_revokeConnector(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -4345,6 +4461,68 @@ func (ec *executionContext) fieldContext_Mutation_generateShieldToken(ctx contex
 	}()
 	ctx = graphql.WithFieldContext(ctx, fc)
 	if fc.Args, err = ec.field_Mutation_generateShieldToken_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_reenrollShield(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_reenrollShield(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().ReenrollShield(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_reenrollShield(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_reenrollShield_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
 		ec.Error(ctx, err)
 		return fc, err
 	}
@@ -9964,6 +10142,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "reenrollConnector":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_reenrollConnector(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "revokeConnector":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_revokeConnector(ctx, field)
@@ -9981,6 +10166,13 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 		case "generateShieldToken":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_generateShieldToken(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "reenrollShield":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_reenrollShield(ctx, field)
 			})
 			if out.Values[i] == graphql.Null {
 				out.Invalids++

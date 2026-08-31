@@ -1,6 +1,6 @@
 ---
 type: decision
-status: proposed
+status: accepted
 date: 2026-08-29
 related:
   - "[[Decisions/ADR-022-Shield-LAN-IP-Resource-Host-Sync]]"
@@ -111,32 +111,69 @@ covered by ordinary use, and a latent bug in it is invisible until the day it is
 | # | Instance | State |
 |---|---|---|
 | 1 | Orphaned shield / resource | **Fixed.** `DeleteConnector`/`DeleteShield` demote bound resources in the same transaction; the compiler skips a bad row instead of failing the workspace. |
-| 2 | Certificate expiry | **Partially fixed.** The controller now prompts renewal 48h before expiry, so a connector should never reach expiry. **An already-expired cert is still unrecoverable** — see Open Question. |
-| 3 | Shield stranded by an IP change | **Fixed, one level up.** `ShieldService.GetPeerConnectors` gives the shield an out-of-band path. It does not close the pattern: a shield whose **own certificate** has expired cannot open that channel either, and still needs manual re-enrolment. |
+| 2 | Certificate expiry | **Closed.** The controller now prompts renewal 48h before expiry, so a connector should not reach expiry; and an expired one re-enrols cheaply via `reenrollConnector`, keeping its identity. Expiry remains a hard boundary by decision — see below. |
+| 3 | Shield stranded by an IP change | **Closed.** `ShieldService.GetPeerConnectors` gives the shield an out-of-band path. A shield whose **own certificate** has expired cannot open that channel and re-enrols instead — which, after the decision below, is the intended behaviour rather than a residual gap. |
 
 Instance 3's fix is itself an example of the limit: **an out-of-band path authenticated by a credential
 that can also expire inherits the same shape one level up.** That is acceptable — the window shrinks by
 orders of magnitude — but it should be stated rather than claimed as closed.
 
-## Open Question — a grace window for `RenewCert`
+## Decided — expiry is a hard trust boundary; optimize re-enrolment instead
 
-Closing instance 2 properly means letting a component renew with an **expired but otherwise valid**
-certificate, inside a bounded window. That is a real trust-model change and is deliberately **not** decided
-here. The shape it would take:
+**Decision (2026-08-29): no grace window.** Renewal requires a **currently valid** certificate. An expired
+certificate requires re-enrolment. The trade was considered and rejected: an expired certificate is the one
+signal that a device has been out of contact, and honouring it — even briefly — weakens that signal for
+every device, to buy convenience in a case that good renewal timing should prevent.
 
-- Accept an expired leaf **only** for `RenewCert`, never for any other RPC.
-- Bound the window (e.g. cert TTL again, so a 7-day cert is renewable for 7 days past expiry) — long
-  enough to survive an outage, short enough that a long-dead device cannot resurrect itself.
-- Require everything else to still hold: chain to the workspace CA, correct SPIFFE role and entity, and
-  **not revoked** — revocation must continue to beat expiry, or this becomes a way to un-revoke.
-- Audit-log every renewal that used the grace window.
+Requirement 1 of this ADR is therefore satisfied the other way round: the answer to *"what repairs an
+expired component?"* is **"re-enrolment"**, and the obligation that follows is to make that answer *cheap*
+rather than to widen the boundary.
 
-The counter-argument is real: an expired certificate is the one signal that a device has been out of
-contact, and honouring it weakens that signal. The alternative — accept manual re-enrolment as the answer
-and make it *easy* (a one-click re-issue in the admin UI) — satisfies requirement 1 above without
-weakening the trust model, and may be the better trade.
+### Why re-enrolment was not cheap
 
-**This needs a decision before either instance 2 or instance 3 can be called closed.**
+Re-enrolment was the documented answer and a **destructive** one. Three gates all required
+`status = 'pending'`:
+
+- `Enroll` (`internal/connector/enrollment.go`) — correct, and unchanged.
+- `RegenerateTokenHandler` — issues a token only for a pending connector.
+- and **nothing could return an existing connector to pending.**
+
+So the only route was **revoke + create a new connector**, which mints a new `connector_id` — orphaning
+every shield bound to the old one and demoting their resources. *The recovery from instance 2 caused
+instance 1.* That is the pattern this ADR is about, closing on itself.
+
+### The fix: a supported transition, not an exception
+
+`reenrollConnector(id)` / `reenrollShield(id)` (admin-only) return an existing component to `pending`,
+clearing exactly the credential columns `Enroll` rewrites (`cert_serial`, `cert_not_after`,
+`enrollment_token_jti`) and **keeping the id** — so shields stay bound to their connector and resources
+stay bound to their shield.
+
+**No trust check changed.** `Enroll` still accepts only a pending component; the token endpoint still
+issues only for a pending one. What was added is a supported way to *reach* pending without destroying
+identity. Recovery becomes: re-enrol → fresh install command → paste on the host.
+
+The status gate is load-bearing:
+
+| Current status | Result | Why |
+|---|---|---|
+| `revoked` | **refused** | Revocation is absolute. This must never become a way to un-revoke. |
+| `active` | **refused** | A pending connector is excluded from ACL snapshots (`policy/store.go`: `c.status = 'active'`), so flipping a *working* connector takes its resources offline — an outage disguised as a repair. Revoke first if replacement is genuinely intended. |
+| `disconnected` | allowed | The expired-cert state: it cannot heartbeat, the watcher has marked it, and it is already out of the ACL snapshots — so this costs nothing. |
+| `pending` | allowed | Idempotent; a second call just yields a fresh token. |
+
+`active` being refused is the non-obvious half, and it is the reason this could not simply be "allow any
+non-revoked component."
+
+### What this does not do
+
+- **No certificate is retired early.** A component's old cert remains cryptographically valid until it
+  expires; re-enrolment issues a new one. Since re-enrolment is refused for an `active` component, the
+  realistic case is a cert that has already expired, where nothing is left to retire. To kill a live
+  identity immediately, revoke — that is what revocation is for.
+- **Instance 3 is unchanged.** A shield whose own certificate has expired still cannot open the
+  `GetPeerConnectors` channel, and re-enrols like any other expired component. That is now the *intended*
+  behaviour rather than a gap, given this decision.
 
 ## Consequences
 

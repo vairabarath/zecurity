@@ -29,6 +29,21 @@ extend type Mutation {
   # Creates the connector row in "pending" status and returns the install command.
   generateConnectorToken(remoteNetworkId: ID!, connectorName: String!): ConnectorToken! @hasRole(roles: [ADMIN])
 
+  # Return a connector to "pending" so it can enrol again with a fresh
+  # certificate, KEEPING its id — and therefore its shields and every resource
+  # bound to them. This is the supported recovery path for an expired
+  # certificate (ADR-024): certificate expiry stays a hard trust boundary, so
+  # renewal always requires a currently-valid cert and an expired one must
+  # re-enrol. Nothing about that boundary is relaxed here — `Enroll` still
+  # accepts only a pending connector; this is a supported way to get there
+  # without destroying the connector's identity.
+  #
+  # Refused for an ACTIVE connector: a pending connector is excluded from ACL
+  # snapshots (`c.status = 'active'`), so flipping a working one would take its
+  # resources offline. Revoke it first if you really mean to replace it.
+  # Refused for a revoked connector: revocation is absolute.
+  reenrollConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+
   # Revoke a connector (set status to "revoked").
   revokeConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])
 
