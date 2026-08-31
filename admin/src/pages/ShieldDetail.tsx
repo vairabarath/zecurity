@@ -5,6 +5,7 @@ import {
   GetShieldDocument,
   GetRemoteNetworkDocument,
   GetConnectorDocument,
+  ReenrollShieldDocument,
   RevokeShieldDocument,
   DeleteShieldDocument,
   ShieldStatus,
@@ -12,6 +13,7 @@ import {
   GetAllResourcesDocument,
 } from '@/generated/graphql'
 import type {
+  ReenrollShieldMutationVariables,
   RevokeShieldMutationVariables,
   DeleteShieldMutationVariables,
 } from '@/generated/graphql'
@@ -39,6 +41,7 @@ import {
   Zap,
   Lock,
   Plus,
+  RotateCcw,
 } from 'lucide-react'
 import { StatusPill, relativeTime } from '@/lib/console'
 
@@ -152,6 +155,12 @@ export default function ShieldDetail() {
     setTimeout(() => setCopied(false), 2000)
   }
 
+  // Keeps the shield's id, so resources.shield_id survives and protected resources
+  // stay bound — unlike revoke + create-new. See ADR-024.
+  const [reenrollShield, { loading: reenrolling }] = useMutation(ReenrollShieldDocument, {
+    refetchQueries: [{ query: GetShieldDocument, variables: { id: shieldId } }],
+  })
+
   const [revokeShield, { loading: revoking }] = useMutation(RevokeShieldDocument, {
     refetchQueries: [{ query: GetShieldDocument, variables: { id: shieldId } }],
   })
@@ -160,6 +169,18 @@ export default function ShieldDetail() {
     refetchQueries: [{ query: GetRemoteNetworksDocument }],
     onCompleted: () => navigate('/shields'),
   })
+
+  async function handleReenroll() {
+    if (!shieldId) return
+    if (
+      !window.confirm(
+        `Re-enrol shield "${shield?.name}"?\n\nIt keeps its identity, so protected resources stay ` +
+          'bound to it. You will get a fresh install command to run on the shield host.',
+      )
+    )
+      return
+    await reenrollShield({ variables: { id: shieldId } as ReenrollShieldMutationVariables })
+  }
 
   async function handleRevoke() {
     if (!shieldId) return
@@ -203,6 +224,10 @@ export default function ShieldDetail() {
   const isRevoked = shield.status === ShieldStatus.Revoked
   const canRevoke = shield.status === ShieldStatus.Active || shield.status === ShieldStatus.Disconnected
   const canDelete = pending || isRevoked
+  // Not offered for an active shield — the resolver refuses it, for the same
+  // reason as the connector: re-enrolment is a repair, not a way to cycle a
+  // working component.
+  const canReenroll = shield.status === ShieldStatus.Disconnected
 
   // Mock telemetry data
   const throughputInPoints = pending ? [0, 0, 0, 0, 0, 0, 0, 0] : [2.1, 3.4, 4.2, 3.8, 5.1, 4.2, 4.5, 3.9, 4.2, 4.0, 4.2]
@@ -247,6 +272,12 @@ export default function ShieldDetail() {
         </div>
 
         <div className="flex items-center gap-3">
+          {canReenroll && (
+            <Button variant="outline" size="sm" onClick={handleReenroll} disabled={reenrolling} className="gap-2">
+              {reenrolling ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+              Re-enrol
+            </Button>
+          )}
           {canRevoke && (
             <Button variant="outline" size="sm" onClick={handleRevoke} disabled={revoking} className="gap-2 text-destructive/80 hover:bg-destructive/5 hover:text-destructive">
               {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}

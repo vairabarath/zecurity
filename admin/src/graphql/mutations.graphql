@@ -43,6 +43,10 @@ mutation GenerateShieldToken($remoteNetworkId: ID!, $shieldName: String!) {
   }
 }
 
+mutation ReenrollShield($id: ID!) {
+  reenrollShield(id: $id)
+}
+
 mutation RevokeShield($id: ID!) {
   revokeShield(id: $id)
 }
