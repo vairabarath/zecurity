@@ -342,27 +342,38 @@ func (r *mutationResolver) UpdateScimConfig(ctx context.Context, connectionID st
 	case input.ScimEnabled != nil && !*input.ScimEnabled:
 		enabled = false // Rule 1
 	case input.ScimEnabled != nil && *input.ScimEnabled && !conn.ScimEnabled:
-		// Rule 2 — gate it. No break-glass override is passed here; that path
-		// is enableScimBreakGlass, which checks the dedicated permission.
+		// Rule 2 — gate it. The normal enable path runs its OWN fresh mapping
+		// proof: the same live ProbeMapping round-trip TestIdpConnection uses,
+		// so a mapping that was proven at test time is independently re-proven
+		// at the moment of enablement. No break-glass override is passed here;
+		// that path is enableScimBreakGlass, which checks the dedicated
+		// permission and records a mandatory reason.
 		gate := scim.NewMappingGate(conn.Provider)
 		res, gerr := gate.Evaluate(ctx, subjectClaim, scimIdentifier, scim.BreakGlassOverride{})
 		if gerr != nil {
 			return nil, fmt.Errorf("updateScimConfig: mapping validation: %w", gerr)
 		}
+		// The gate alone cannot perform the active round-trip; run it here.
+		// ProbeMapping is non-destructive (no SCIM token mint/revoke/rotate)
+		// and fails closed when a configured subjectClaim is missing/empty or
+		// the OIDC↔SCIM canonical keys diverge for the same probe person.
+		probe := r.ScimStore.DirectoryService().ProbeMapping(ctx, conn)
+		res = res.WithRoundTrip(probe.Verified, subjectClaim, scimIdentifier)
 		if !res.ScimEnabledAllowed {
 			reason := res.Reason
+			if probe.Reason != "" {
+				// The round-trip gives the precise failure (e.g. round-trip
+				// mismatch, missing configured claim); prefer it to the gate's
+				// generic "unproven" text.
+				reason = probe.Reason
+			}
 			if reason == "" {
 				reason = "the identity mapping is not proven"
 			}
-			// User-actionable and DB-free: `reason` comes from the gate's own
-			// config validation, never from a store error. It must reach the
-			// client — this is the message that tells an admin the enable was
-			// refused and points at the break-glass path, so the UI can branch
-			// on extensions.code rather than guessing from a generic failure.
-			return nil, apperr.UserErrorf(
-				"cannot enable SCIM — %s. Enabling despite an unproven mapping "+
-					"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
-				reason, permission.BreakGlassMapping)
+			// User-actionable and DB-free. Surfaced verbatim with a branchable
+			// code so the admin UI can offer the break-glass path instead of
+			// guessing from a generic failure.
+			return nil, scimEnableRefusedError(reason)
 		}
 		enabled = true
 	}

@@ -10,9 +10,11 @@ import (
 	"log"
 	"strings"
 
+	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -147,4 +149,26 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// scimEnableRefusedError builds the user-actionable error returned when
+// UpdateScimConfig(scimEnabled:true) cannot enable SCIM because the live
+// mapping round-trip proof failed (or was never run). It is returned as a
+// *gqlerror.Error so the fail-closed ErrorPresenter (graph/resolvers/presenter.go)
+// passes it through verbatim with a branchable extensions.code, letting the
+// admin UI offer the enableScimBreakGlass path instead of guessing from a
+// generic failure. The message points at the dedicated identity.mapping.break_glass
+// permission required to override.
+func scimEnableRefusedError(reason string) error {
+	gerr := gqlerror.Errorf("cannot enable SCIM — %s. Enabling despite an unproven mapping "+
+		"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
+		reason, permission.BreakGlassMapping)
+	if gerr.Extensions == nil {
+		gerr.Extensions = map[string]any{}
+	}
+	// Branchable code so the admin UI can offer the break-glass flow instead of
+	// guessing from a generic failure. SCIM mapping not proven is a client-side
+	// precondition failure, not a 409 identity_conflict, so it is not CONFLICT.
+	gerr.Extensions["code"] = "SCIM_MAPPING_UNPROVEN"
+	return gerr
 }
