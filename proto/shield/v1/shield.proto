@@ -22,6 +22,20 @@ service ShieldService {
 
   // Called by shield during best-effort graceful shutdown.
   rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
+
+  // Recovery path for a shield that can no longer reach ANY connector it knows.
+  //
+  // A shield learns peer coordinates only from PeerConnectorList pushes over the
+  // Control stream, so when its connector's address changes the only channel to
+  // the new address is the peer whose address just changed. It retries the dead
+  // address forever. This is the one call that breaks that loop.
+  //
+  // Uses mTLS — the shield presents its own cert, and the handler takes the
+  // shield's identity from that certificate ALONE. The request is deliberately
+  // empty: anything a caller could put in it would be attacker-controlled.
+  //
+  // Called only after every known peer has failed, never on the happy path.
+  rpc GetPeerConnectors(GetPeerConnectorsRequest) returns (PeerConnectorList);
 }
 
 message EnrollRequest {
@@ -147,6 +161,11 @@ message ShieldControlMessage {
 message PeerConnectorList {
   repeated PeerConnector peers = 1;
 }
+
+// Deliberately empty. The shield is identified by its client certificate, so
+// there is no field a caller could forge. Do NOT add a shield_id here: a handler
+// that reads one can be tricked into answering for another shield.
+message GetPeerConnectorsRequest {}
 
 message PeerConnector {
   string connector_id   = 1;

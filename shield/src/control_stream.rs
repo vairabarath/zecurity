@@ -62,9 +62,24 @@ async fn run_once(
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
 ) -> Result<()> {
-    let (mut client, selected_idx) = build_client(state, cfg)
-        .await
-        .context("failed to build mTLS client for Control stream")?;
+    // Try the peers we know. If EVERY one is unreachable, fall back to the
+    // controller for fresh coordinates and try once more — see recover_peers.
+    // The fallback lives here rather than inside build_client on purpose:
+    // renewal.rs calls build_client too, and a renewal attempt should not drag a
+    // controller round-trip along on every failure.
+    let (mut client, selected_idx) = match build_client(state, cfg).await {
+        Ok(v) => v,
+        Err(first_err) => {
+            warn!(
+                error = %first_err,
+                "every known peer Connector is unreachable — asking the controller for current coordinates"
+            );
+            recover_peers(state, cfg).await?;
+            build_client(state, cfg)
+                .await
+                .context("failed to build mTLS client for Control stream after peer recovery")?
+        }
+    };
 
     // If we failed over to a non-head Connector, rotate the list so the new
     // head is the surviving Connector and persist. Next reconnect prefers it.
@@ -292,6 +307,60 @@ async fn handle_connector_msg(
             None
         }
     }
+}
+
+/// Ask the CONTROLLER for this shield's current peer connectors, and adopt them.
+///
+/// This exists because of a specific unrecoverable state. A shield learns peer
+/// coordinates ONLY from `PeerConnectorList` pushes over the Control stream, so
+/// when its connector's address changes, the only channel carrying the new
+/// address is the peer whose address just changed. The shield retries the dead
+/// address forever, while `connectors.lan_addr` on the controller is already
+/// correct. Recovery used to mean re-adding the old IP to an interface so the
+/// shield could reconnect once and be told the truth.
+///
+/// It is deliberately NOT on the happy path: it runs only after every known peer
+/// has failed. Steady state remains "Shield talks to its Connector, never the
+/// Controller" — this is the escape hatch for when that rule strands the shield.
+///
+/// The controller identifies us from our client certificate alone; the request
+/// carries no fields, so there is nothing here for a caller to forge.
+///
+/// NOTE ON SCOPE: this does not close the recovery-path gap in general, it moves
+/// it up one level. A shield whose own certificate has expired cannot open this
+/// mTLS channel either, and still needs manual re-enrolment.
+async fn recover_peers(state: &mut ShieldState, cfg: &ShieldConfig) -> Result<()> {
+    let state_dir = Path::new(&cfg.state_dir);
+    let ca_pem = tokio::fs::read(state_dir.join("workspace_ca.crt")).await?;
+    let cert_pem = tokio::fs::read(state_dir.join("shield.crt")).await?;
+    let key_pem = tokio::fs::read(state_dir.join("shield.key")).await?;
+
+    let channel =
+        tls::build_controller_channel(&ca_pem, &cert_pem, &key_pem, &cfg.controller_addr)
+            .await
+            .context("peer recovery: could not reach the controller")?;
+
+    let peers = ShieldServiceClient::new(channel)
+        .get_peer_connectors(Request::new(crate::proto::GetPeerConnectorsRequest {}))
+        .await
+        .context("peer recovery: GetPeerConnectors failed")?
+        .into_inner()
+        .peers;
+
+    // The controller returns an error rather than an empty list precisely so this
+    // cannot silently no-op: apply_peer_connector_list IGNORES an empty list, so
+    // an empty success would leave us retrying the same dead addresses believing
+    // we had recovered.
+    if peers.is_empty() {
+        anyhow::bail!("peer recovery: controller returned no peer connectors");
+    }
+
+    info!(
+        peers = peers.len(),
+        "peer recovery: got current connector coordinates from the controller"
+    );
+    apply_peer_connector_list(state, cfg, peers);
+    Ok(())
 }
 
 /// Apply an incoming `PeerConnectorList` to the Shield's persistent state.

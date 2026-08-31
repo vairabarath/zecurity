@@ -299,3 +299,50 @@ pub async fn build_connector_channel(
         .await
         .context("failed to connect to connector :9091")
 }
+
+/// Build an mTLS channel to the CONTROLLER, presenting the shield's own cert.
+///
+/// This is the recovery path's transport (see `control_stream::recover_peers`):
+/// the shield uses it only when every connector it knows is unreachable, so it
+/// needs a channel that does not depend on any connector being up.
+///
+/// Two things differ from `build_connector_channel` and both are deliberate:
+///
+///  1. **Standard verification, not the SPIFFE verifier.** The controller
+///     presents an ordinary server certificate with DNS/IP SANs, signed by the
+///     intermediate CA — it carries no connector SPIFFE ID, so
+///     `SpiffeConnectorVerifier` would reject it. The hostname check does the
+///     work here instead.
+///  2. **`workspace_ca.crt` is the right trust anchor and already on disk.** It
+///     holds the workspace CA *and the intermediate CA*, and the intermediate is
+///     what signs the controller's server cert (`GenerateControllerServerTLS`).
+///     It is the same certificate `/ca.crt` serves at enrollment, so this adds no
+///     new trust — only a client identity to a channel the shield could already
+///     verify.
+pub async fn build_controller_channel(
+    ca_pem: &[u8],
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    controller_addr: &str,
+) -> Result<Channel> {
+    // Strip any port to get the name to match against the server cert's SANs.
+    // rsplit_once mirrors enrollment.rs so both paths agree on the host.
+    let host = controller_addr
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| controller_addr.to_string());
+
+    let tls = tonic::transport::ClientTlsConfig::new()
+        .ca_certificate(tonic::transport::Certificate::from_pem(ca_pem))
+        .identity(tonic::transport::Identity::from_pem(cert_pem, key_pem))
+        .domain_name(host);
+
+    let grpc_addr = format!("https://{}", controller_addr);
+    Endpoint::from_shared(grpc_addr.clone())
+        .with_context(|| format!("invalid controller gRPC address: {}", controller_addr))?
+        .tls_config(tls)
+        .context("failed to configure mTLS to the controller")?
+        .connect()
+        .await
+        .with_context(|| format!("failed to connect to controller at {}", controller_addr))
+}

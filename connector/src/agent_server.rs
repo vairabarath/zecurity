@@ -727,6 +727,29 @@ impl ShieldService for ShieldRegistry {
         })
     }
 
+    /// Answered by the CONTROLLER, never here.
+    ///
+    /// This is a shield's recovery path for when it can reach NO connector at
+    /// all, so serving it from a connector would be answering a question the
+    /// caller can only ask when this process is unreachable. Worse, a connector
+    /// would answer from its own ACL snapshot — the very view that strands the
+    /// shield when this connector's address has changed underneath it.
+    ///
+    /// A shield that CAN reach its connector needs nothing from this: it already
+    /// receives `PeerConnectorList` on every health report.
+    ///
+    /// Unimplemented here is therefore the correct answer, and it doubles as a
+    /// clear signal if a shield's `controller_addr` is ever misconfigured to
+    /// point at a connector.
+    async fn get_peer_connectors(
+        &self,
+        _request: Request<crate::shield_proto::GetPeerConnectorsRequest>,
+    ) -> Result<Response<crate::shield_proto::PeerConnectorList>, Status> {
+        Err(Status::unimplemented(
+            "GetPeerConnectors is served by the controller, not a connector",
+        ))
+    }
+
     async fn goodbye(
         &self,
         request: Request<GoodbyeRequest>,

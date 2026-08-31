@@ -369,6 +369,59 @@ once, whereupon the connector pushed the current list and it self-healed permane
 This is a direct consequence of the "Shield → Connector only, never Controller" rule. Worth an ADR note:
 a shield needs *some* out-of-band path to recover peer coordinates.
 
+#### ✅ Fixed 2026-08-29 — `ShieldService.GetPeerConnectors`
+
+The out-of-band path now exists. Chosen over three alternatives (re-read local config on failure; stable
+DNS names resolved at dial time; LAN announce/mDNS) because it needs no new infrastructure and no new
+discovery surface — the shield **already** speaks to the controller at enrollment, so this is not a new
+trust boundary.
+
+Two facts found while investigating made it small:
+
+- **`shields.remote_network_id` is on the shield row itself** (`003_shield_schema.sql:6`), so the peer
+  lookup does *not* go through the shield's connector. A shield whose connector row was deleted still
+  resolves its remote network — the recovery path survives exactly the cascade in finding #2.
+- **`workspace_ca.crt` already contains the intermediate CA**, which is what signs the controller's
+  server cert (`GenerateControllerServerTLS`) and is the same certificate `/ca.crt` serves at
+  enrollment. So the shield can verify the controller with what is already on disk; the new channel adds
+  a client identity, not new trust.
+
+**Trust model.** Unlike `RenewCert`, which the connector proxies (so the verified identity there is the
+*connector's*), this is called by the shield directly over its own mTLS channel. The shield is
+identified by its certificate and nothing else: **`GetPeerConnectorsRequest` is empty on purpose** —
+there is no caller-supplied field to forge, and none must ever be added. A shield receives only the
+connectors in its own remote network.
+
+**Files:**
+
+| File | Change |
+|---|---|
+| `proto/shield/v1/shield.proto` | `rpc GetPeerConnectors(GetPeerConnectorsRequest) returns (PeerConnectorList)` + empty request message |
+| `controller/internal/shield/peers.go` **(new)** | handler; identity from the cert, RN-scoped query, `lan_addr` as-is / `public_ip` + `:9091` (matching `selectConnector`) |
+| `shield/src/tls.rs` | `build_controller_channel` — standard verification (the controller has no connector SPIFFE ID, so `SpiffeConnectorVerifier` would reject it) |
+| `shield/src/control_stream.rs` | `recover_peers`, called from `run_once` **at the `build_client` call site** — not inside `build_client`, because `renewal.rs` calls that too and should not drag a controller round-trip along on every failure |
+| `connector/src/agent_server.rs` | returns `Unimplemented` — see below |
+
+**Why the connector returns `Unimplemented`.** It also implements `ShieldService`, so the trait forced a
+decision. Serving this from a connector would answer a question the caller can only ask when that
+connector is unreachable — and it would answer from its own ACL snapshot, the very view that strands the
+shield. A shield that *can* reach its connector already gets `PeerConnectorList` on every health report.
+
+**Empty is an error, not an empty success.** `apply_peer_connector_list`
+(`control_stream.rs:310`) **ignores** an empty list and keeps the existing one, so returning an empty
+success would leave the shield retrying the same dead addresses while believing it had recovered. The
+handler returns `FailedPrecondition` instead.
+
+**Tests** — `internal/shield/peers_test.go`, DB-gated on `SHIELD_TEST_DATABASE_URL`. Covers the actual
+stranding scenario (move `lan_addr`, assert the **new** address comes back), the `public_ip` address
+form, remote-network isolation, cert-only identity (no identity and a connector-role caller both
+refused), revoked shields, and empty-means-error. Revert-verified on the two that matter: dropping the
+remote-network filter leaks rn-b to a shield in rn-a, and making empty a success is silently ignored.
+
+**Scope honesty:** this does **not** close the recovery-path pattern, it moves it up one level. A shield
+whose own certificate has expired cannot open this mTLS channel either and still needs manual
+re-enrolment. That belongs in the recovery-path ADR alongside the `RenewCert` grace-window question.
+
 ### 6. Client OAuth assumes browser, CLI and controller share a host
 
 `redirect_uri` is `http://localhost:8080/api/clients/callback` (from `CONTROLLER_HTTP_URL`), and the
