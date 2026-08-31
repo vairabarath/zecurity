@@ -13,6 +13,7 @@ import {
   ShieldOff,
   Terminal,
   Trash2,
+  RotateCcw,
 } from 'lucide-react'
 import {
   ConnectorStatus,
@@ -22,6 +23,7 @@ import {
   GetRemoteNetworkDocument,
   GetRemoteNetworksDocument,
   GetShieldsDocument,
+  ReenrollConnectorDocument,
   RevokeConnectorDocument,
   RevokeShieldDocument,
   ShieldStatus,
@@ -29,6 +31,7 @@ import {
 import type {
   DeleteConnectorMutationVariables,
   DeleteShieldMutationVariables,
+  ReenrollConnectorMutationVariables,
   RevokeConnectorMutationVariables,
   RevokeShieldMutationVariables,
 } from '@/generated/graphql'
@@ -192,6 +195,16 @@ export default function ConnectorDetail() {
     setTimeout(() => setCopied(false), 1800)
   }
 
+  // Re-enrolment returns the connector to "pending" while KEEPING its id, so its
+  // shields and their resources survive — unlike revoke + create-new, which was
+  // the only route before (ADR-024). Refetching the by-id query flips this page to
+  // the pending branch, whose existing effect fetches a fresh install command.
+  const [reenrollConnector, { loading: reenrolling }] = useMutation(ReenrollConnectorDocument, {
+    refetchQueries: [
+      { query: GetConnectorDocument, variables: { id: connectorId } },
+      { query: GetRemoteNetworksDocument },
+    ],
+  })
   const [revokeConnector, { loading: revoking }] = useMutation(RevokeConnectorDocument, {
     // Refetch the by-id query so this page's status updates; refresh the list in
     // the background for when the user navigates back.
@@ -210,6 +223,18 @@ export default function ConnectorDetail() {
   const [deleteShield] = useMutation(DeleteShieldDocument, {
     refetchQueries: networkId ? [{ query: GetShieldsDocument, variables: { remoteNetworkId: networkId } }] : [],
   })
+
+  async function handleReenrollConnector() {
+    if (!connectorId) return
+    if (
+      !window.confirm(
+        'Re-enrol this connector?\n\nIt keeps its identity, so its shields and their resources stay ' +
+          'bound. You will get a fresh install command to run on the connector host.',
+      )
+    )
+      return
+    await reenrollConnector({ variables: { id: connectorId } as ReenrollConnectorMutationVariables })
+  }
 
   async function handleRevokeConnector() {
     if (!connectorId) return
@@ -262,6 +287,10 @@ export default function ConnectorDetail() {
 
   const canRevoke = c.status === ConnectorStatus.Active || c.status === ConnectorStatus.Disconnected
   const canDelete = pending || c.status === ConnectorStatus.Revoked
+  // Deliberately NOT offered for an active connector: the resolver refuses it,
+  // because a pending connector is excluded from ACL snapshots and flipping a
+  // working one would take its resources offline.
+  const canReenroll = c.status === ConnectorStatus.Disconnected
 
   const cpuPoints = pending ? [1, 1, 1, 1, 1, 1, 1, 1] : [2.3, 3.1, 2.8, 4.4, 3.2, 3.7, 2.6, 5.1, 4.0, 3.5, 4.3, 3.1]
   const memPoints = pending ? [110, 110, 110, 110, 110, 110, 110, 110] : [130, 138, 136, 144, 142, 145, 148, 149, 146, 147, 147, 142]
@@ -305,6 +334,12 @@ export default function ConnectorDetail() {
         </div>
 
         <div className="flex items-center gap-3">
+          {canReenroll ? (
+            <Button variant="outline" onClick={handleReenrollConnector} disabled={reenrolling} className="gap-2">
+              {reenrolling ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+              Re-enrol
+            </Button>
+          ) : null}
           {canRevoke ? (
             <Button variant="outline" onClick={handleRevokeConnector} disabled={revoking} className="gap-2 text-destructive">
               {revoking ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldOff className="h-4 w-4" />}

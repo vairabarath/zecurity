@@ -135,6 +135,8 @@ export type Mutation = {
   initiateAuth: AuthInitPayload;
   promoteDiscoveredService: Resource;
   protectResource: Resource;
+  reenrollConnector: Scalars['Boolean']['output'];
+  reenrollShield: Scalars['Boolean']['output'];
   removeGroupMember: Group;
   revokeConnector: Scalars['Boolean']['output'];
   revokeDevice: Scalars['Boolean']['output'];
@@ -237,6 +239,16 @@ export type MutationPromoteDiscoveredServiceArgs = {
 
 
 export type MutationProtectResourceArgs = {
+  id: Scalars['ID']['input'];
+};
+
+
+export type MutationReenrollConnectorArgs = {
+  id: Scalars['ID']['input'];
+};
+
+
+export type MutationReenrollShieldArgs = {
   id: Scalars['ID']['input'];
 };
 
@@ -567,6 +579,13 @@ export type GenerateConnectorTokenMutationVariables = Exact<{
 
 export type GenerateConnectorTokenMutation = { __typename?: 'Mutation', generateConnectorToken: { __typename?: 'ConnectorToken', connectorId: string } };
 
+export type ReenrollConnectorMutationVariables = Exact<{
+  id: Scalars['ID']['input'];
+}>;
+
+
+export type ReenrollConnectorMutation = { __typename?: 'Mutation', reenrollConnector: boolean };
+
 export type RevokeConnectorMutationVariables = Exact<{
   id: Scalars['ID']['input'];
 }>;
@@ -870,6 +889,7 @@ export const InitiateAuthDocument = {"kind":"Document","definitions":[{"kind":"O
 export const CreateRemoteNetworkDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"CreateRemoteNetwork"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"name"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"location"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"NetworkLocation"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"createRemoteNetwork"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"name"},"value":{"kind":"Variable","name":{"kind":"Name","value":"name"}}},{"kind":"Argument","name":{"kind":"Name","value":"location"},"value":{"kind":"Variable","name":{"kind":"Name","value":"location"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"id"}},{"kind":"Field","name":{"kind":"Name","value":"name"}},{"kind":"Field","name":{"kind":"Name","value":"location"}},{"kind":"Field","name":{"kind":"Name","value":"status"}},{"kind":"Field","name":{"kind":"Name","value":"createdAt"}}]}}]}}]} as unknown as DocumentNode<CreateRemoteNetworkMutation, CreateRemoteNetworkMutationVariables>;
 export const DeleteRemoteNetworkDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"DeleteRemoteNetwork"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"deleteRemoteNetwork"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<DeleteRemoteNetworkMutation, DeleteRemoteNetworkMutationVariables>;
 export const GenerateConnectorTokenDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"GenerateConnectorToken"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"connectorName"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"generateConnectorToken"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"remoteNetworkId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}}},{"kind":"Argument","name":{"kind":"Name","value":"connectorName"},"value":{"kind":"Variable","name":{"kind":"Name","value":"connectorName"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"connectorId"}}]}}]}}]} as unknown as DocumentNode<GenerateConnectorTokenMutation, GenerateConnectorTokenMutationVariables>;
+export const ReenrollConnectorDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"ReenrollConnector"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"reenrollConnector"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<ReenrollConnectorMutation, ReenrollConnectorMutationVariables>;
 export const RevokeConnectorDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"RevokeConnector"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"revokeConnector"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<RevokeConnectorMutation, RevokeConnectorMutationVariables>;
 export const DeleteConnectorDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"DeleteConnector"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"id"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"deleteConnector"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"id"},"value":{"kind":"Variable","name":{"kind":"Name","value":"id"}}}]}]}}]} as unknown as DocumentNode<DeleteConnectorMutation, DeleteConnectorMutationVariables>;
 export const GenerateShieldTokenDocument = {"kind":"Document","definitions":[{"kind":"OperationDefinition","operation":"mutation","name":{"kind":"Name","value":"GenerateShieldToken"},"variableDefinitions":[{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"ID"}}}},{"kind":"VariableDefinition","variable":{"kind":"Variable","name":{"kind":"Name","value":"shieldName"}},"type":{"kind":"NonNullType","type":{"kind":"NamedType","name":{"kind":"Name","value":"String"}}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"generateShieldToken"},"arguments":[{"kind":"Argument","name":{"kind":"Name","value":"remoteNetworkId"},"value":{"kind":"Variable","name":{"kind":"Name","value":"remoteNetworkId"}}},{"kind":"Argument","name":{"kind":"Name","value":"shieldName"},"value":{"kind":"Variable","name":{"kind":"Name","value":"shieldName"}}}],"selectionSet":{"kind":"SelectionSet","selections":[{"kind":"Field","name":{"kind":"Name","value":"shieldId"}}]}}]}}]} as unknown as DocumentNode<GenerateShieldTokenMutation, GenerateShieldTokenMutationVariables>;

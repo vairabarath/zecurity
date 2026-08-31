@@ -151,7 +151,12 @@ stay bound to their shield.
 
 **No trust check changed.** `Enroll` still accepts only a pending component; the token endpoint still
 issues only for a pending one. What was added is a supported way to *reach* pending without destroying
-identity. Recovery becomes: re-enrol → fresh install command → paste on the host.
+identity.
+
+**Recovery is now three steps, no hand-written GraphQL:** the connector detail page shows a **Re-enrol**
+button when the connector is `disconnected` → the page flips to its pending branch, whose existing effect
+already fetches a fresh install command (ADR-008's lazy token minting) → paste it on the connector host.
+The button is deliberately **not** offered for an `active` connector, mirroring the resolver's refusal.
 
 The status gate is load-bearing:
 

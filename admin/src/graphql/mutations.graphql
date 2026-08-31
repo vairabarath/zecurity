@@ -25,6 +25,10 @@ mutation GenerateConnectorToken($remoteNetworkId: ID!, $connectorName: String!) 
   }
 }
 
+mutation ReenrollConnector($id: ID!) {
+  reenrollConnector(id: $id)
+}
+
 mutation RevokeConnector($id: ID!) {
   revokeConnector(id: $id)
 }
