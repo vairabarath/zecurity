@@ -591,6 +591,34 @@ orphaned-shield finding in Gate 2 was the first): *the only path to recovery run
 broken.* Deserves its own ADR.
 → [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]]
 
+### 🔴 Fixed 2026-08-29: every smoltcp listener accepted every synthetic address
+**Phase 9 / client.** `new_listen_socket` called `socket.listen(port)`, whose `u16` overload builds
+`IpListenEndpoint { addr: None }` — which smoltcp reads as *accept any destination*. Phase 9 creates one
+listener per `(synthetic IP, port)`, so two resources sharing a port cross over: a `curl` to
+`fqdn-test.internal:5443` was relayed down the **tls-test** tunnel. Wrong backend, and authorization
+decided against the wrong `resource_id`. Found by auditing Phase 9's "exactly one tunnel per app
+connection", which had never been run live.
+→ [[Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing]]
+
+### 🔴 Fixed 2026-08-29: connector certificates were never renewed, so every one expired
+**Phase 12 / controller.** Root cause of the expiry finding above, and worse than recorded: renewal never
+fired *at all*. `ReEnrollSignal` was constructed nowhere in the controller outside generated protobuf, and
+`Cfg.RenewalWindow` — parsed from `CONNECTOR_RENEWAL_WINDOW` — was read by nothing. With a 7-day cert TTL
+*every* connector expired after 7 days. The missing code had a precedent one hop down: the connector
+already prompts its own shields on each health report. Shields renew *through* their connector, so a dead
+connector cert took its shields' renewal down too.
+→ [[Sprint16/Member3-Go-Rust/Phase12-OS-DNS-Integration]]
+
+### 🔴 Fixed 2026-08-29: a connector IP change permanently orphaned its shields
+**Phase 10 finding #5 / shield + controller.** A shield learns peer coordinates only from
+`PeerConnectorList` pushes over its Control stream, so when its connector's address changed the only
+channel carrying the new address was the peer whose address just changed. New
+`ShieldService.GetPeerConnectors`, called only after every known peer has failed — the shield is
+identified by its certificate alone and the request is deliberately empty. **Third instance of the
+recovery-path pattern**, and it does not close it: a shield whose own cert has expired cannot open that
+channel either.
+→ [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]]
+
 ### Fix: `CAP_NET_BIND_SERVICE` missing from the client unit (Phase 11 prerequisite)
 **Phase 11.** The DNS responder binds `127.0.0.1:53`, a privileged port, but the unit granted only
 `CAP_NET_ADMIN` **and** bounded the capability set to it — so an ambient grant alone would have been
