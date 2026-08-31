@@ -418,6 +418,30 @@ form, remote-network isolation, cert-only identity (no identity and a connector-
 refused), revoked shields, and empty-means-error. Revert-verified on the two that matter: dropping the
 remote-network filter leaks rn-b to a shield in rn-a, and making empty a success is silently ignored.
 
+**⚠️ The transport has never handshaked.** `build_controller_channel` is verified by construction, not by
+execution — the same class of never-run path as `RenewConnectorCert`, one layer down. What *is* confirmed
+by reading:
+
+- The controller's server cert carries **IP SANs**: `controllerCertHosts` (`main.go:764`) collects
+  `127.0.0.1`, `::1` and the detected LAN IP, and `GenerateControllerServerTLS` routes anything that
+  `net.ParseIP` accepts into `IPAddresses` rather than `DNSNames`. So `domain_name("192.168.1.33")` has a
+  SAN to match.
+- The construction is **identical to `enrollment.rs:163`**, which is proven working — every successful
+  shield enrolment in Gate 2/3 used the same `ca_certificate` + `domain_name(host)` pair. The only
+  addition here is `.identity(...)`.
+- The controller uses `ClientAuth: tls.RequestClientCert` (`main.go:355`) — it requests a client cert and
+  defers verification to the SPIFFE interceptor, so presenting the shield's cert cannot be rejected at
+  the handshake.
+
+That is a strong chain, but it is still reasoning. **The live pass must exercise this channel**, not just
+the handler.
+
+**Correlated failure costs an extra timeout per cycle.** The connector being unreachable and the
+controller being down happen together — that is precisely what Gate 3 hit. In that state each reconnect
+now pays two dial timeouts instead of one before the backoff sleep. Backoff still bounds it, so this is a
+slower recovery rather than a storm; a `recovered_this_cycle` guard would remove it if it proves
+annoying in practice.
+
 **Scope honesty:** this does **not** close the recovery-path pattern, it moves it up one level. A shield
 whose own certificate has expired cannot open this mTLS channel either and still needs manual
 re-enrolment. That belongs in the recovery-path ADR alongside the `RenewCert` grace-window question.
