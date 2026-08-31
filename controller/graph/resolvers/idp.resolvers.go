@@ -25,8 +25,25 @@ import (
 )
 
 // CreateIdpConnection is the resolver for the createIdpConnection field.
+//
+// The configuration is VALIDATED BEFORE IT IS PERSISTED: the issuer must serve a
+// valid OIDC discovery document (see validateOIDCDiscovery). A connection that
+// fails the check is not written at all, so the admin UI cannot present a
+// mistyped or unreachable domain as a saved, working provider. This mutation
+// only ever creates OIDC connections — CreateIdpConnectionInput carries no
+// protocol field and the store defaults it to "oidc" — so the check is
+// OIDC-generic and applies to every provider key, not just Okta.
+//
+// Deliberately NOT verified here: the client ID, the client secret, the
+// redirect URI, and whether a user can actually authenticate. Discovery is an
+// unauthenticated public endpoint; the first real proof of the OAuth
+// credentials is a login attempt.
 func (r *mutationResolver) CreateIdpConnection(ctx context.Context, input graph.CreateIdpConnectionInput) (*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
+
+	if err := validateOIDCDiscovery(ctx, input.Provider, input.Issuer, deref(input.DiscoveryURL), deref(input.Scopes)); err != nil {
+		return nil, err
+	}
 
 	created, err := r.IdpStore.CreateWorkspaceConnection(ctx, tc.TenantID, idp.CreateInput{
 		Provider:     input.Provider,
@@ -48,8 +65,39 @@ func (r *mutationResolver) CreateIdpConnection(ctx context.Context, input graph.
 }
 
 // UpdateIdpConnection is the resolver for the updateIdpConnection field.
+//
+// A change to discoveryUrl is validated before it is persisted, for the same
+// reason createIdpConnection validates: the override is what discovery is
+// actually fetched from, so accepting an unreachable one would re-create the
+// "saved, therefore verified" illusion on a connection that already passed the
+// check at create time. The issuer is immutable here, so discoveryUrl is the
+// only field that changes what gets fetched — every other field (displayName,
+// clientId, clientSecret, scopes, domainHint) is persisted without a probe,
+// exactly as before.
 func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, input graph.UpdateIdpConnectionInput) (*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
+
+	if input.DiscoveryURL != nil {
+		// Tenant-scoped read first: never probe (or reveal anything about) a
+		// connection outside the caller's workspace.
+		conn, gerr := r.IdpStore.GetByID(ctx, id)
+		if gerr != nil {
+			if errors.Is(gerr, idp.ErrConnectionNotFound) {
+				return nil, apperr.UserErrorf("updateIdpConnection: connection not found")
+			}
+			return nil, fmt.Errorf("updateIdpConnection: %w", gerr)
+		}
+		if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
+			return nil, apperr.UserErrorf("updateIdpConnection: connection not found")
+		}
+		scopes := conn.Scopes
+		if input.Scopes != nil {
+			scopes = *input.Scopes
+		}
+		if err := validateOIDCDiscovery(ctx, conn.Provider, conn.Issuer, *input.DiscoveryURL, scopes); err != nil {
+			return nil, err
+		}
+	}
 
 	updated, err := r.IdpStore.UpdateWorkspaceConnection(ctx, tc.TenantID, id, idp.UpdateInput{
 		DisplayName:  input.DisplayName,

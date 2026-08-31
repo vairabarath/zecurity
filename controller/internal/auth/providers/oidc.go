@@ -83,11 +83,31 @@ func (p *OIDCProvider) discoveryEndpoint() string {
 	return strings.TrimRight(p.issuer, "/") + "/.well-known/openid-configuration"
 }
 
-// discover fetches (and caches) the issuer's discovery document.
+// discover returns the issuer's discovery document, preferring the per-issuer
+// cache. This is the hot path (login: AuthURL/Authenticate) and its behavior is
+// deliberately unchanged: a warm cache entry short-circuits the network.
 func (p *OIDCProvider) discover(ctx context.Context) (*oidcDiscovery, error) {
 	if d, ok := discoveryCache.get(p.issuer); ok {
 		return d, nil
 	}
+	return p.fetchDiscovery(ctx, true)
+}
+
+// fetchDiscovery performs the real network fetch and the full validation of the
+// discovery document, ALWAYS bypassing the read cache. It is the single place
+// the document is parsed and checked (issuer match + required endpoints).
+// cacheResult controls whether a successful document is written to the cache.
+//
+// It exists as a separate entry point because discoveryCache is keyed on the
+// issuer ALONE (global, 1h TTL) while discoveryEndpoint() prefers an explicit
+// discoveryURL override. A cache-consulting check is therefore not a validation:
+// a warm entry — from a login, an earlier probe, or ANOTHER workspace's
+// connection to the same issuer — would return success without a request, and
+// would never fetch a bogus discoveryURL override at all. Callers that must
+// genuinely verify an operator-supplied configuration (ProbeFresh, used by
+// createIdpConnection) come through here with cacheResult=false, so an admin
+// action can never seed or refresh the cache the login path reads.
+func (p *OIDCProvider) fetchDiscovery(ctx context.Context, cacheResult bool) (*oidcDiscovery, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.discoveryEndpoint(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build discovery request: %w", err)
@@ -111,7 +131,9 @@ func (p *OIDCProvider) discover(ctx context.Context) (*oidcDiscovery, error) {
 	if d.AuthorizationEndpoint == "" || d.TokenEndpoint == "" || d.JWKSURI == "" {
 		return nil, fmt.Errorf("discovery document missing required endpoints")
 	}
-	discoveryCache.set(p.issuer, &d)
+	if cacheResult {
+		discoveryCache.set(p.issuer, &d)
+	}
 	return &d, nil
 }
 
@@ -119,8 +141,39 @@ func (p *OIDCProvider) discover(ctx context.Context) (*oidcDiscovery, error) {
 // advertises. Used by the admin testIdpConnection mutation to verify a
 // connection's issuer/discovery URL is reachable and well-formed (matching
 // issuer, required endpoints present) without running a full login.
+//
+// It is cache-consulting: a warm per-issuer entry answers without a network
+// request. Use ProbeFresh where the point is to validate a configuration the
+// operator just supplied.
 func (p *OIDCProvider) Probe(ctx context.Context) (string, error) {
 	d, err := p.discover(ctx)
+	if err != nil {
+		return "", err
+	}
+	return d.Issuer, nil
+}
+
+// ProbeFresh is Probe with the discovery cache bypassed on read: it always
+// performs the network fetch and re-runs the full document validation.
+//
+// This is what a create/update-time configuration check needs. It proves
+// exactly two things and nothing more:
+//
+//  1. the configured issuer (or explicit discoveryURL) is reachable, and
+//  2. it serves a valid OIDC discovery document whose `issuer` matches the
+//     configured issuer and which advertises the endpoints we require.
+//
+// It does NOT validate the OAuth client_id or client_secret, the redirect URI,
+// or that any user can actually log in — discovery is an unauthenticated,
+// public endpoint and no credential is sent. Callers must not describe a
+// successful ProbeFresh as verified credentials.
+//
+// It is also cache-NEUTRAL: it neither reads nor writes discoveryCache, so an
+// admin probe cannot seed or refresh the entry the login path consults. Login
+// caching behavior is therefore exactly as it was before this entry point
+// existed.
+func (p *OIDCProvider) ProbeFresh(ctx context.Context) (string, error) {
+	d, err := p.fetchDiscovery(ctx, false)
 	if err != nil {
 		return "", err
 	}

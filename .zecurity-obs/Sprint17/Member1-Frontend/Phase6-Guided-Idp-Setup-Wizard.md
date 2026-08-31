@@ -172,3 +172,43 @@ Provider" doing a plain create, "Set up with SCIM" opening the 3-step wizard) �
 - Per the spec's own note, this phase is a UX nice-to-have, not a required
   acceptance criterion; the wizard is optional and does not become the sole or
   mandatory configuration path.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: the wizard presented an unverified connection as a completed setup step (2026-08-31)
+
+**Issue:** This phase made the guided wizard the **single entry point** for IdP setup
+(`AddIdentityProviderMenu` → `GuidedIdpSetupWizard` → `CreateIdpConnectionDialog`), which raised the
+stakes on a pre-existing gap: Step 1 never contacted the IdP. `createIdpConnection` only persisted the
+row, so Step 1 could "succeed" against a mistyped Okta domain and the wizard would advance to Step 2
+(SCIM mapping) and Step 3 (token mint) on top of a connection that had never been reached.
+
+Note this phase's own **Context & Problem** section describes the reference flow as "filling in an
+OIDC issuer/client id/secret, **verifying the login works**, and only then generating … a SCIM
+endpoint + token" — the verification beat was specified here but was never actually implemented on
+either side.
+
+**Root cause:** see FE Phase 0's Post-Phase Fixes — `createIdpConnection` performed no network call,
+and the existing `OIDCProvider.Probe` was unreachable from the UI.
+
+**Fix applied:** Step 1 now genuinely gates the wizard. `createIdpConnection` validates the issuer's
+OIDC discovery document before persisting and refuses to save an unreachable/invalid one, so the
+wizard cannot advance past Step 1 on an unverified issuer. Implemented entirely in the reused FE-0
+dialog + backend — **no wizard-shell logic changed** and the step sequence is unchanged.
+
+**Do not confuse the two probes in this wizard:**
+
+| Step | Probe | Contacts the IdP? |
+|------|-------|-------------------|
+| 1 (create) | `validateOIDCDiscovery` → `OIDCProvider.ProbeFresh` | **Yes** — fetches `.well-known/openid-configuration` |
+| 2 (SCIM enable) | `ScimStore.DirectoryService().ProbeMapping` | **No** — internal Zecurity mapping-consistency round-trip through our own SCIM engine, using a synthetic probe person |
+
+Step 2's probe proves the OIDC↔SCIM canonical keys agree; it is **not** an Okta connectivity test and
+must never be described as one.
+
+**Still not verified anywhere in this wizard:** OAuth client ID, client secret, redirect URI, and
+whether a user can actually sign in. The wizard finishes without ever having proven those; the first
+real proof is a sign-in. Full write-up: `Sprint17/path.md` → **Finding D** (including why
+`testIdpConnection` must not be wired to a "Test Connection" button as-is).

@@ -179,6 +179,13 @@ M1-1 Schema (Day 1, independent)          [outbox already merged — no parallel
 - [x] **Build gate:** `go build ./...` + `go vet ./...` + `lifecycle_integration_test.go` (10 subtests) + full `go test ./internal/scim/... ./internal/idp/... ./graph/...` green on live Postgres.
 - [!] **Deferred (out of scope per ADR §12 re-enable flow):** the explicit authorized admin action that re-enrolls `unmanaged` users back to `scim` ownership after a re-enable. Phase 9 guarantees ownership is NOT auto-restored on re-enable; the re-enroll verb is a separate future action. The backend Identity Health surface (`identityHealth` + `lastSyncAt`) delivered here is consumed by **FE Phase 2** (the health badge).
 
+#### Phase 13 — Consume the proven mapping in `UpdateScimConfig` (close residual Finding C)  `[I]` `[done]`
+> See [[Sprint17/Member1-Go/Phase13-UpdateScimConfig-Proven-Mapping]]. Depends on Phase 10, 11, 12.
+> Closes path.md acceptance criterion 5 / Finding C.
+- [x] **M1-13a** `UpdateScimConfig(scimEnabled:true)` runs its OWN fresh `ProbeMapping` round-trip (`graph/resolvers/idp.resolvers.go` enable branch, Rule 2) and flips `identity_connections.scim_enabled=true` only when `WithRoundTrip` reports `Verified` — no persisted proof flag, no migration (Option B). Unproven fails closed with `extensions.code="SCIM_MAPPING_UNPROVEN"` pointing at `enableScimBreakGlass`. **`TestIdpConnection` (C1) still never persists `scim_enabled=true`; break-glass semantics unchanged.**
+- [x] **Build gate:** `go build ./...` + `go vet ./...` + live-Postgres resolver integration (`TestUpdateScimConfig_EnableAfterProvenMapping`, `_UnprovenMappingRefused`, `_NonDefaultSubjectClaimEnables`, `_NoCrossConnectionProofReuse`, `_DisableUnchanged`, `_BreakGlassFallbackUnchanged`; `_CanonicalKeyMismatchFailsClosed` SKIP→engine-level coverage) + `TestIdpConnection_DoesNotPersistScimEnabled` regression — all PASS on live Postgres. Full `go test ./internal/scim/... ./internal/auth/... ./internal/identity/... ./graph/...` green.
+- [!] **Scope discipline:** the ONLY prod file changed is `controller/graph/resolvers/idp.resolvers.go` (enable branch) + a `scimEnableRefusedError` helper in `idp_helpers.go`. `ProbeMapping`/`mapping_probe.go`, `TestIdpConnection`, break-glass, migrations, frontend, outbox/PENDING-13, `directory_service.go`, Phase 11 OIDC wiring: all untouched.
+
 ### Outbox — already merged (Sprint 18)
 
 The durable outbox is **not implemented in this sprint** — it is `controller/internal/outbox/*` on
@@ -256,14 +263,16 @@ cd admin && npm run codegen && npm run build                                    
 
 > **Verification pass 2026-08-26** — all ten criteria checked against code (graph + source reads).
 > Result at audit time: **5 met, 1 partially met, 3 not met, 1 not run.** Criterion 9 has since
-> been **fixed and is now met** (Finding B, below); criteria 2 and 5 remain open. Details inline below; the three defects
-> found are written up in full under "Verification findings" after the list.
+> been **fixed and is now met** (Finding B, below); criterion 2 remains open, **criterion 5 closed 2026-08-29 by Phase 13** (Finding C below).
+> Details inline below; the three defects found are written up in full under "Verification findings" after the list.
 
 - [~] SCIM provisions/updates users; directory-owned attrs read-only (mutation-layer enforced); Zecurity-owned editable. — **PARTIAL.** Backend half met: `DirectoryService.Update` rejects non-directory attrs via `supportedDirectoryAttr` → `400 invalidValue`, and a non-`scim` `provisioning_owner` → `409 identity_conflict`. The **admin-UI read-only half is FE-3**, which is unbuilt and blocked on `User` provisioning-source exposure.
 - [ ] Deprovision (`active=false`/`DELETE`) **suspends/deletes + bumps generation + kills sessions + invalidates ACL**, atomically. — **NOT MET — see Finding A.** Status change + generation bump + outbox enqueue are correctly atomic, but **sessions are never proactively killed and no audit event is emitted** on the SCIM path. Also, `DELETE` does **not** remove `group_members`, which ADR-025 §5 explicitly requires.
 - [x] Deprovision enqueues `device.trust.revoke.requested` via `SideEffectSink` → the **durable outbox**, committed in the same tx as the identity mutation; a downstream (device) failure never rolls back identity. — **MET.** `sink.Enqueue(ctx, tx, evt)` runs inside the deprovision tx (`directory_service.go` ~L385); downstream consumption is decoupled through the outbox (PENDING-13), so a device failure cannot roll identity back.
 - [x] `identity.mapping.break_glass` is a dedicated permission (ADMIN alone is denied); overrides require reason + audit. — **MET.** `DirectoryService.AcceptLink` performs an explicit `perm.HasPermission(..., permission.BreakGlassMapping)` and returns `403` when absent; possession is row-based in `workspace_permissions` with no role implication; `enableScimBreakGlass` rejects an empty reason.
-- [ ] Mapping validation is an **active probe-user round-trip**; unproven mapping keeps SCIM disabled. — **VERIFIED NOT MET (2026-08-26).** `MappingGateResult.WithRoundTrip` (`internal/scim/validation.go:137`) has **no production caller** — only comments and its own definition reference it. There is exactly one non-test `MappingGate.Evaluate` call site, inside **`mutationResolver.TestIdpConnection`** (`graph/resolvers/idp.resolvers.go:236`), and it passes a bare `scim.BreakGlassOverride{}` without ever attaching a round-trip result. `TestIdpConnection` is precisely where ADR-025 §3.1 places the probe, so the validation entry point exists and runs the gate but **never performs the `POST→GET→verify→DELETE` probe**. M1-4b deferred the literal `POST→GET→verify→DELETE` probe to Phase 5, but **Phase 5 never wired it**. Consequence: `MappingState` can never become `proven`, so `scimEnabledAllowed` is permanently `false` and **SCIM is only enablable via `enableScimBreakGlass`** — break-glass is the sole path, not the exception. ADR-025 §3.1 requires the active probe. This is a **sprint-completion blocker**, not a frontend gap.
+- [x] Mapping validation is an **active probe-user round-trip**; unproven mapping keeps SCIM disabled. — **MET (2026-08-29, Phase 13).** `MappingGateResult.WithRoundTrip` now has a production caller on the normal enable path: `UpdateScimConfig(scimEnabled:true)` runs its own fresh `ProbeMapping` round-trip (`graph/resolvers/idp.resolvers.go` enable branch, Rule 2) and flips `scim_enabled=true` only when `WithRoundTrip` reports `Verified`. Unproven mapping fails closed with `extensions.code="SCIM_MAPPING_UNPROVEN"` pointing at `enableScimBreakGlass`. `TestIdpConnection` (C1) still never persists `scim_enabled=true`; break-glass remains the exception when the probe cannot run.
+  - **STATUS NOTE on the 2026-08-26 audit:** the "VERIFIED NOT MET" claim was accurate *at that time* — `WithRoundTrip` had no production caller and the normal enable path could only refuse. Phase 13 (2026-08-29) closed exactly this gap with **Option B** (run the probe at enable time, no persisted proof flag, no migration) and is **verified against live Postgres** (6 resolver subtests pass; `TestIdpConnection_DoesNotPersistScimEnabled` regression green). The original finding text (no caller / sole break-glass path) is preserved above as the historical record; it is no longer true post-Phase-13.
+  - **STATUS NOTE (autoAdd=true probe boundary, 2026-08-29):** `UpdateScimConfig` *does* invoke the real `ProbeMapping` and a `Verified` result enables SCIM without break-glass; unproven *configuration* still fails closed. However the production probe runs with `autoAdd=true`, which fabricates the configured non-default `subjectClaim` onto the synthetic probe person's claims. The probe therefore genuinely exercises the SCIM `Provision→Get` round-trip and the canonical-key equivalence machinery, but it does **not** independently validate a real customer's independently-supplied OIDC claim against SCIM data — a live customer claim mismatch is not detectable by this probe. `TestUpdateScimConfig_UnprovenMappingRefused` reaches the unproven gate via mapping *configuration* rejection (e.g. `subjectClaim==scimIdentifier`), not via `ProbeMapping` returning `Verified=false` from an actual live claim mismatch. This caveat does **not** invalidate Phase 13's implementation acceptance; it scopes the remaining verification boundary (live-claim equivalence remains the Phase 12 configuration-proof, engine-level `autoAdd=false` T2/T3).
 - [x] Groups sync with `origin`/`external_id`; out-of-order member → `404`; policy snapshot invalidated. — **MET.** All group reads/writes filter `origin = 'scim'` and are connection-scoped; `userIDsByExternalOrUUID` resolves members only within the token's connection and excludes tombstones; unknown members are collected and returned as `404` **before any mutation** (`groups.go:212`, `:323`); `NotifyPolicyChange` fires on membership change and delete.
 - [x] JIT/manual collision → `409 identity_conflict` + pending record; Accept-Link is admin-authorized, atomic, audited, never email-based. — **MET** on the backend. Keyed on the canonical identity key, never email; `AcceptLink` is a single tx (verify pending → permission → link → ownership flip → audit). *Caveat:* the `reason` is audit-only (no `resolution_reason` column), and the admin queue that consumes this is **FE-4, unbuilt**.
 - [x] Connection DISABLE suspends users reversibly; DELETE guarded; Identity Health surfaces sync staleness. — **MET** (fully verified). `DeleteIdpConnection` refuses when `linked > 0 && !force`; with `force` it soft-deletes, preserves users, flips ownership to `unmanaged`, audits, and bumps sessions. `resolveScope` refuses all SCIM writes with `403` when `conn.Status != "active"` or `!conn.ScimEnabled`; the resolver-side lifecycle path (`bumpUsers` / `revokeConnectionSessions` / `DeleteIdpConnection`) reaches `Revoker.afterBump`, so **this path does really kill sessions** — unlike the SCIM deprovision path (Finding A). `IdentityHealth` is derived server-side.
@@ -361,15 +370,113 @@ generation and outbox assertions pass vacuously. Verified by reintroducing the f
 the cross-tenant call then returns **success (`<nil>`, HTTP 204)** and the test fails. It also carries
 a positive control asserting the in-scope path still bumps, tombstones, and enqueues.
 
-#### Finding C — the mapping probe was never wired  *(criterion 5)*
+#### Finding C — the mapping probe was never wired  *(criterion 5)*  — RESOLVED 2026-08-29 (Phase 13, Option B)
 
-Detailed inline at criterion 5 above. `MappingGateResult.WithRoundTrip` has no production caller, so
-`scimEnabledAllowed` is permanently `false` and break-glass is the only route to enabling SCIM.
+Originally: `MappingGateResult.WithRoundTrip` had no production caller, so `scimEnabledAllowed` was
+permanently `false` and break-glass was the only route to enabling SCIM. That was accurate at the
+2026-08-26 audit. **Closed by Phase 13:** `UpdateScimConfig(scimEnabled:true)` now runs its own fresh
+`ProbeMapping` round-trip and flips `scim_enabled=true` only when it reports `Verified` — no persisted
+proof flag, no migration (Option B). Verified against live Postgres (6 resolver subtests pass;
+`TestIdpConnection_DoesNotPersistScimEnabled` regression green). Criterion 5 is now MET. The
+Phase 13 phase file carries the full recipe + evidence:
+`Sprint17/Member1-Go/Phase13-UpdateScimConfig-Proven-Mapping.md`.
 
 > **Method note:** findings A and B were reached via the code graph (`trace_path` on `afterBump`
 > confirming a single reachable caller) and confirmed by reading source. Criteria 3, 4, 6, 7, 8 were
 > verified positively against source. Not independently re-run: the phase build gates themselves —
 > these findings are behavioral, and the existing tests pass.
+
+#### Finding D — `createIdpConnection` never contacted the IdP; the setup UI implied it had  *(FE-0 / FE-6)*  — RESOLVED 2026-08-31
+
+**Gap.** The single entry point for IdP setup (`AddIdentityProviderMenu` → `GuidedIdpSetupWizard` →
+`CreateIdpConnectionDialog`, FE Phase 6) presented itself as a *connection* flow, but
+`createIdpConnection` (`graph/resolvers/idp.resolvers.go`) went straight to
+`IdpStore.CreateWorkspaceConnection` — encrypt secret, `INSERT`, audit. **Zero network calls.** A
+mistyped Okta domain, a wrong Client ID or a revoked secret all saved successfully and the dialog
+reported "Identity provider connection created.", after which the wizard advanced to SCIM. Operators
+had no way to distinguish *configuration saved* from *IdP reachable*.
+
+A correct discovery client already existed and was **unreachable from the UI**:
+`OIDCProvider.Probe` (`internal/auth/providers/oidc.go`), whose only caller was the
+`testIdpConnection` resolver — which has no GraphQL document in `admin/src/graphql/` and no UI
+affordance anywhere.
+
+**Two traps found while fixing it (both matter to anyone touching this next):**
+
+1. **`testIdpConnection` must NOT be wired to a "Test Connection" button as-is.** It does more than
+   probe: it also runs `ProbeMapping` and then unconditionally calls
+   `SetSCIMEnabled(ctx, tenantID, id, false)` (the deliberate C1 invariant, see Phase 13). Exposing
+   it as a post-create test would mean an operator clicking "Test" on a healthy, SCIM-enabled
+   connection **silently force-disables SCIM**. A real Test Connection button needs a new
+   discovery-only resolver.
+2. **`Probe` is the wrong primitive for validating operator input.** `discoveryCache` is keyed on the
+   **issuer alone**, process-global, 1h TTL — while `discoveryEndpoint()` *prefers* an explicit
+   `discoveryUrl` override. So a cache-consulting check can pass with **no request at all** on a warm
+   issuer (warmed by a login, an earlier probe, or *another workspace's* connection to the same Okta
+   org), and never fetches a bogus override. That is a stale-success hole, not a validation.
+
+**Fix applied.** Option A — validate before persisting, reusing the existing discovery client rather
+than adding a second one:
+
+- `internal/auth/providers/oidc.go` — split `discover` into a cache-consulting wrapper +
+  `fetchDiscovery(ctx, cacheResult bool)` holding the existing validation verbatim; added
+  `ProbeFresh`, which is cache-**neutral** (neither reads nor writes `discoveryCache`, so login
+  caching is unchanged and an admin action can never seed the entry the login path reads).
+- `graph/resolvers/idp_helpers.go` — `validateOIDCDiscovery`, constructed with **empty client ID and
+  secret** (discovery is unauthenticated, so no credential can be sent, logged, or embedded in an
+  error — structural, not a logging convention). 5s timeout so a dead host cannot hold the dialog for
+  the HTTP client's full 10s. Returns `apperr.UserErrorf` because `ErrorPresenter` is fail-closed: a
+  bare `fmt.Errorf` would reach the operator as "an unexpected error occurred".
+- `graph/resolvers/idp.resolvers.go` — `CreateIdpConnection` validates before the store call and
+  writes nothing on failure. `UpdateIdpConnection` validates **only when `discoveryUrl` is supplied**
+  (issuer is immutable, so that override is the only field that changes what gets fetched) — closing
+  the same hole via the sibling mutation, without making routine edits depend on the IdP being up.
+- `admin/src/components/idp/CreateIdpConnectionDialog.tsx` — honest wording only.
+
+**No schema change and no migration** — nothing in the existing schema was insufficient. No GraphQL
+schema change, so no codegen run.
+
+**What is now verified vs. what is NOT** — keep this distinction in any copy written about this flow:
+
+| # | Concern | Verified at create? |
+|---|---------|---------------------|
+| 1 | Issuer/domain reachability | **Yes** |
+| 2 | OIDC discovery validity (200, `issuer` match, required endpoints) | **Yes** |
+| 3 | OAuth client ID validity | No |
+| 4 | OAuth client secret validity | No |
+| 5 | Redirect URI correctness | No |
+| 6 | Actual user authentication | No |
+| 7 | SCIM connectivity / provisioning | No (separate; the wizard's Step 2 probe is an **internal** Zecurity mapping-consistency check and never contacts the IdP) |
+
+Report it as **"OIDC discovery successful"**, never "Okta credentials verified". There is no safe
+pre-login credential check here: the flow is authorization-code + PKCE with no client_credentials
+grant, so one was deliberately not invented.
+
+**Tests (25 added).** `internal/auth/providers/oidc_probe_fresh_test.go` (9, DB-free) — the
+reachability/validity matrix plus the **warm-cache bypass** proof (prime cache, break the issuer,
+assert `ProbeFresh` still fails while `Probe` still returns the stale success) and a
+no-credential-material-on-the-wire assertion. `graph/resolvers/idp_create_discovery_validation_test.go`
+(11; 6 DB-free + 5 live-Postgres) — refusal + **row absent**, success + row present, update-override
+refused + not persisted, displayName-only update **skips** the probe (anti-over-validation),
+cross-workspace rejected as not-found. `CreateIdpConnectionDialog.verification.test.tsx` (5) — copy
+honesty, refusal surfacing, plus a meta-test proving the overclaim guard actually fires.
+*Caveat:* `TestCreateIdpConnection_PersistsWhenDiscoverySucceeds` passes an **empty** client secret
+(the shared harness builds its `idp.Store` with a nil encryptor), so it does not cover secret
+encryption.
+
+**Verified:** `go build ./...`, `go vet ./...`, `go test ./...` clean; 11 resolver tests green against
+live Postgres; admin `pnpm test` 69 passed, `pnpm build` clean.
+
+#### Finding E — `policy_group_origin_test.go` fixture violates the workspace status constraint  *(OPEN, not mine to fix)*
+
+Seven `TestGroupOrigin_*` tests fail whenever `PKI_TEST_DATABASE_URL` is set. Cause is in the test
+fixture, not the code under test: it inserts `INSERT INTO workspaces (... status ...) VALUES (...,
+'ACTIVE', ...)` (uppercase, lines ~79 and ~407) while `migrations/001_schema.sql` constrains
+`status IN ('active','suspended','deleted')`. Every one of the seven fails in its own workspace
+`INSERT` with SQLSTATE 23503/23514 **before any resolver runs**, so the group-origin behaviour they
+are meant to prove is currently **unverified**. One-character fix (`'ACTIVE'` → `'active'`), left to
+the owner of that in-flight file. Flagged because the failures are easy to misread as a regression
+from unrelated work.
 
 ## Deferred (out of scope this sprint)
 - Contractor→employee explicit **identity linking / conversion** → Stage 4 Governance, reserved [[ADR-026-Identity-Governance-and-Identity-Linking]].

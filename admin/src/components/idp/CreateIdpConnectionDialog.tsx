@@ -119,7 +119,12 @@ export function CreateIdpConnectionDialog({
         throw new Error('Connection could not be created.')
       }
 
-      toast.success('Identity provider connection created.')
+      // Say exactly what the server proved. createIdpConnection validates the
+      // issuer's OIDC discovery document BEFORE persisting (it refuses to save
+      // an unreachable/invalid issuer), so "discovery verified" is accurate.
+      // It does NOT validate the client ID, client secret or redirect URI —
+      // never word this as "credentials verified".
+      toast.success('Connection created — OIDC discovery verified.')
       const newId = created.id
       resetForm()
       onSuccess(newId)
@@ -260,6 +265,19 @@ export function CreateIdpConnectionDialog({
           <p className="text-[11px] text-muted-foreground">
             Client secret is write-only and encrypted at rest. It will never be displayed again.
           </p>
+          {/* Honesty about the scope of the create-time check (ADR-025 / OIDC
+            distinction): the server validates issuer reachability + the OIDC
+            discovery document and refuses to save a bad one, but discovery is
+            an unauthenticated endpoint — no credential is sent, so nothing here
+            proves the client ID/secret or the redirect URI. The first real
+            proof of those is a sign-in. This must not be softened into
+            "credentials verified". */}
+          <p className="text-[11px] text-muted-foreground">
+            On save, Zecurity verifies that the{' '}
+            {effectiveProvider === 'okta' ? 'domain' : 'issuer'} serves a valid OpenID Connect
+            discovery document, and will not create the connection if it does not. The client ID,
+            client secret and redirect URI are not verified until the first sign-in.
+          </p>
 
           {/* Twingate-mirror: the Advanced settings block (Discovery URL,
             Scopes, Domain Hint) is hidden for the Okta "Connect Okta" step,
@@ -333,7 +351,10 @@ export function CreateIdpConnectionDialog({
               Cancel
             </Button>
             <Button type="submit" disabled={loading || !isValid}>
-              {loading ? 'Creating…' : 'Create Connection'}
+              {/* The mutation performs a live OIDC discovery request before it
+                saves, so the pending label names that step rather than
+                implying the row is already being written. */}
+              {loading ? 'Verifying…' : 'Create Connection'}
             </Button>
           </DialogFooter>
         </form>

@@ -139,3 +139,73 @@ FE-3 / FE-4 / FE-5 (Read-only User fields, Conflict queue, Group origin labels)
   - Automated gates: `npm run codegen` generated, `npm run build` (`tsc -b && vite build`) green, `npm test` **10 files / 50 tests pass** (FE-0 delta = **+1 file / +4 tests**), `npx eslint` on touched files exited 0.
 - **Manual Gate NOT Run:** Verification requires creating a connection against a running backend instance in the browser and confirming that navigation into `/idp-connections/:id` exposes FE-1 SCIM configuration as expected. Status marked `implemented-unverified` per project conventions.
 
+---
+
+## Post-Phase Fixes
+
+### Fix: "Create Connection" saved an unverified configuration and reported success (2026-08-31)
+
+**Issue:** This phase's `CreateIdpConnectionDialog` collected Okta/OIDC details and, on submit,
+reported `"Identity provider connection created."` — but `createIdpConnection` performed **no network
+call of any kind**. `IdpStore.CreateWorkspaceConnection` encrypted the secret, inserted the row and
+wrote an audit entry, nothing more. A mistyped domain or a revoked secret saved cleanly, and the
+guided wizard (FE Phase 6) advanced straight into SCIM on top of a connection that had never been
+contacted. The operator could not tell *configuration saved* from *IdP reachable*.
+
+**Root cause:** A correct discovery client existed (`OIDCProvider.Probe`,
+`internal/auth/providers/oidc.go`) but its only caller was the `testIdpConnection` resolver, which
+has no GraphQL document in `admin/src/graphql/` and no UI affordance — so no create-time or
+post-create verification was reachable from the admin UI at all.
+
+**Fix applied — backend validates before persisting (Option A):**
+
+```go
+// graph/resolvers/idp.resolvers.go — CreateIdpConnection
+// BEFORE:
+tc := tenant.MustGet(ctx)
+created, err := r.IdpStore.CreateWorkspaceConnection(ctx, tc.TenantID, idp.CreateInput{...})
+
+// AFTER:
+tc := tenant.MustGet(ctx)
+if err := validateOIDCDiscovery(ctx, input.Provider, input.Issuer,
+    deref(input.DiscoveryURL), deref(input.Scopes)); err != nil {
+    return nil, err // nothing is persisted
+}
+created, err := r.IdpStore.CreateWorkspaceConnection(ctx, tc.TenantID, idp.CreateInput{...})
+```
+
+**Two traps, both load-bearing — do not undo them:**
+
+1. **Do not wire `testIdpConnection` to a "Test Connection" button.** It also runs `ProbeMapping` and
+   then unconditionally calls `SetSCIMEnabled(..., false)` (the Phase 13 / C1 invariant), so clicking
+   "Test" on a healthy SCIM-enabled connection would **silently force-disable SCIM**. A real Test
+   Connection button needs a new discovery-only resolver.
+2. **`ProbeFresh`, not `Probe`.** `discoveryCache` is keyed on the **issuer alone**, process-global,
+   1h TTL, while `discoveryEndpoint()` prefers an explicit `discoveryUrl` override — so a
+   cache-consulting check can pass with no request at all on an issuer already warmed by a login or by
+   *another workspace's* connection, and never fetches a bogus override.
+
+**UI wording (this phase's dialog) — honest scope only:**
+
+```tsx
+// BEFORE:
+toast.success('Identity provider connection created.')
+{loading ? 'Creating…' : 'Create Connection'}
+
+// AFTER:
+toast.success('Connection created — OIDC discovery verified.')
+{loading ? 'Verifying…' : 'Create Connection'}
+// plus a note: on save Zecurity verifies the domain serves a valid OpenID Connect
+// discovery document and will not create the connection otherwise; the client ID,
+// client secret and redirect URI are NOT verified until the first sign-in.
+```
+
+**Verified at create:** issuer reachability + OIDC discovery validity (200, `issuer` match, required
+endpoints). **NOT verified:** client ID, client secret, redirect URI, actual authentication, SCIM
+connectivity. Never word this as "credentials verified" — discovery is unauthenticated and the
+provider is deliberately constructed with **empty** client ID and secret, so no credential is sent.
+
+**Related files also changed:** `internal/auth/providers/oidc.go` (cache-neutral `ProbeFresh`),
+`graph/resolvers/idp_helpers.go` (`validateOIDCDiscovery`), `graph/resolvers/idp.resolvers.go`
+(`UpdateIdpConnection` validates a `discoveryUrl` override too). No schema change, no migration, no
+GraphQL schema change. Full write-up: `Sprint17/path.md` → **Finding D**.
