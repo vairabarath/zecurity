@@ -306,7 +306,12 @@ enable_service() {
     systemctl daemon-reload
 
     log "enabling and starting zecurity-shield.service"
-    systemctl enable --now zecurity-shield.service
+    # `restart`, not `enable --now`: on an ALREADY-RUNNING service `--now` is a
+    # no-op, so an in-place upgrade would install the new binary and unit and then
+    # report success while the OLD process kept running. `restart` also starts a
+    # stopped unit, so it is correct for a fresh install too.
+    systemctl enable zecurity-shield.service
+    systemctl restart zecurity-shield.service
 
     log "enabling zecurity-shield-update.timer"
     systemctl enable --now zecurity-shield-update.timer

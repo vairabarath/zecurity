@@ -123,7 +123,12 @@ chown root:"$SERVICE_USER" "$CONFIG_FILE"
 # ── Reload systemd + enable + start ─────────────────────────────────────────
 log "reloading systemd"
 systemctl daemon-reload
-systemctl enable --now zecurity-shield.service
+# `restart`, not `enable --now`: on an ALREADY-RUNNING service `--now` is a
+# no-op, so an in-place upgrade would install the new binary and unit and then
+# report success while the OLD process kept running. `restart` also starts a
+# stopped unit, so it is correct for a fresh install too.
+systemctl enable zecurity-shield.service
+systemctl restart zecurity-shield.service
 systemctl enable --now zecurity-shield-update.timer || warn "failed to enable update timer"
 
 log "install complete"

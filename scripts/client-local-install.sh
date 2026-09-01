@@ -115,13 +115,18 @@ log "reloading systemd"
 systemctl daemon-reload
 
 log "enabling and starting $SERVICE_NAME"
-systemctl enable --now "$SERVICE_NAME"
+# `restart`, not `enable --now`: on an ALREADY-RUNNING service `--now` is a
+# no-op, so an in-place upgrade would install the new binary and unit and then
+# report success while the OLD process kept running. `restart` also starts a
+# stopped unit, so it is correct for a fresh install too.
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 log "install complete"
 systemctl status "$SERVICE_NAME" --no-pager --lines=5 || true
 
 printf '\n'
-log "next steps (run as %s, not root):" "$ENROLLING_USER"
+log "next steps (run as $ENROLLING_USER, not root):"
 printf '  zecurity-client setup\n'
 printf '  zecurity-client login\n'

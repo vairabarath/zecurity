@@ -209,7 +209,12 @@ chown root:"$SERVICE_USER" "$CONFIG_FILE"
 # ── Reload systemd + enable + start ─────────────────────────────────────────
 log "reloading systemd"
 systemctl daemon-reload
-systemctl enable --now zecurity-relay.service
+# `restart`, not `enable --now`: on an ALREADY-RUNNING service `--now` is a
+# no-op, so an in-place upgrade would install the new binary and unit and then
+# report success while the OLD process kept running. `restart` also starts a
+# stopped unit, so it is correct for a fresh install too.
+systemctl enable zecurity-relay.service
+systemctl restart zecurity-relay.service
 
 log "install complete"
 systemctl status zecurity-relay.service --no-pager --lines=5 || true

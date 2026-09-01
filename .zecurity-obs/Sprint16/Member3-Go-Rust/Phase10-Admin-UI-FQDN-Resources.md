@@ -310,6 +310,32 @@ The single most costly finding.
 **Consequence:** a verification run can silently test the wrong binary and produce a clean-looking
 negative. This happened twice in this session.
 
+#### ✅ Fixed 2026-09-01 — every installer left the OLD process running
+
+Found while installing the client for the live pass, and it retroactively explains much of this
+sprint's "the installed binary is a release build" confusion.
+
+**All seven** install scripts ended with `systemctl enable --now <service>`. On an **already-running**
+service `--now` is a **no-op**, so an in-place upgrade wrote the new binary and the new unit, printed
+`install complete`, and left the previous process running. Observed directly: the client binary was
+installed at `12:32:24` while `MainPID` was still `1795`, started `10:27:49`. The unit file on disk had
+gained `CAP_NET_BIND_SERVICE`; the running daemon had neither that nor the new binary.
+
+This is the same shape as the socket-activation fix recorded in Phase 12 (*"a socket-activated service
+keeps its old unit until it exits"*) — **files updated, process not restarted, success reported** — which
+makes it the second instance, so it is a pattern rather than an oversight. Combined with finding #1 (no
+way to identify pre-release code) it is nearly undetectable: the version string is identical either way.
+
+**Fix:** `systemctl enable <unit>` followed by `systemctl restart <unit>`, in
+`scripts/{client,connector,shield,relay,relay-omitid}-local-install.sh`, `shield/scripts/shield-install.sh`
+and `client/scripts/client-install.sh`. `restart` also starts a stopped unit, so it is correct for a fresh
+install too — there was never a reason to prefer `--now`. Timer units keep `enable --now`, which is right
+for them.
+
+Also fixed in `client-local-install.sh`: `log "next steps (run as %s, ...)" "$ENROLLING_USER"` printed the
+`%s` literally, because `log()` is `printf '...%s\n' "$*"` — a format string passed as argument 1 is data,
+not a format.
+
 ### 2. No version negotiation on the tunnel
 
 A branch client against a release connector fails as:

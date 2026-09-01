@@ -128,7 +128,12 @@ chown root:"$SERVICE_USER" "$CONFIG_FILE"
 # ── Reload systemd + enable + start ─────────────────────────────────────────
 log "reloading systemd"
 systemctl daemon-reload
-systemctl enable --now zecurity-connector.service
+# `restart`, not `enable --now`: on an ALREADY-RUNNING service `--now` is a
+# no-op, so an in-place upgrade would install the new binary and unit and then
+# report success while the OLD process kept running. `restart` also starts a
+# stopped unit, so it is correct for a fresh install too.
+systemctl enable zecurity-connector.service
+systemctl restart zecurity-connector.service
 # Update timer might fail if the update script isn't there or misconfigured for local, but we'll enable it anyway
 systemctl enable --now zecurity-connector-update.timer || warn "failed to enable update timer"
 
