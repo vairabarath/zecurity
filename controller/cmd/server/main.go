@@ -103,6 +103,13 @@ func main() {
 		RenewalWindow:       mustDuration("CONNECTOR_RENEWAL_WINDOW", 48*time.Hour),
 	}
 
+	// A renewal window that is not shorter than the cert TTL makes a freshly
+	// renewed certificate still eligible for renewal — an endless loop of CA
+	// signings. See Config.Validate.
+	if err := connectorCfg.Validate(); err != nil {
+		log.Fatalf("invalid connector config: %v", err)
+	}
+
 	shieldCfg := shield.Config{
 		CertTTL:             mustDuration("SHIELD_CERT_TTL", 7*24*time.Hour),
 		RenewalWindow:       mustDuration("SHIELD_RENEWAL_WINDOW", 48*time.Hour),

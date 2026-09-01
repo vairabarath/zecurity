@@ -414,6 +414,50 @@ with exactly that message.
 state, but does not provide a way back once it is in one — that needs a bounded grace window for the
 `RenewCert` RPC, which is a trust-model change and belongs in the recovery-path ADR.
 
+#### ✅ Renewal chain VERIFIED LIVE 2026-09-01 — and it exposed a storm
+
+The whole chain ran end to end on a real stack, which retires the "never executed" caveat above:
+
+```text
+control_stream: controller requested cert renewal — starting renewal   <- maybeRequestRenewal
+renewal: starting certificate renewal                                  <- renewal.rs, first ever run
+renewal: certificate renewed successfully, new expiry: 2026-09-08       <- RenewCert -> RenewConnectorCert
+```
+
+The new expiry was a correct full TTL, and the connector reconnected using the new certificate — which
+confirms in reality what the integration test asserted about the public key and SPIFFE SAN.
+
+**🔴 But it also produced 244 certificate signings in one minute, one per second, and drove the connector
+to `disconnected`.**
+
+**Root cause — a renewal window that cannot terminate.** A freshly issued certificate always has very
+nearly `CertTTL` remaining. `maybeRequestRenewal` prompts whenever the **presented** cert is inside
+`RenewalWindow`, and the connector reconnects with its new cert immediately after renewing. So when
+`RenewalWindow >= CertTTL` the brand-new certificate is *still* inside the window and it is prompted again
+at once — for ever. The live pass used `CONNECTOR_RENEWAL_WINDOW=200h` against `CONNECTOR_CERT_TTL=168h`
+to bring the existing cert into range, and hit exactly that.
+
+**The tests missed it, and it is instructive why.** `TestRenewalPromptRepeatsUntilTheCertChanges` asserts
+that prompting *repeats* — correct when renewal keeps failing. No test asked what happens when renewal
+**succeeds**. The suite covered the failure path and left the success path's fixed point untested.
+
+**Fix** — `Config.Validate()` (`internal/connector/config.go`), called from `main.go` before anything
+binds: refuse to start when `RenewalWindow >= CertTTL`, or when `CertTTL <= 0`. Verified live — booting
+with the storm configuration now exits immediately:
+
+```text
+invalid connector config: renewal window must be shorter than the certificate TTL:
+CONNECTOR_RENEWAL_WINDOW=200h0m0s, CONNECTOR_CERT_TTL=168h0m0s — a renewed certificate
+would still be inside the window, so renewal would repeat without end
+```
+
+Refusing to boot is deliberate rather than clamping with a warning: the failure it prevents is a
+self-sustaining load on the CA, and a boot failure is loud, immediate and fixed in one edit.
+
+New regression tests: `TestAFreshlyRenewedCertIsNotPromptedAgain` (a cert with a full TTL remaining must
+not be prompted under a sane window — the assertion whose absence let this ship) and
+`TestConfigValidateRejectsAWindowThatCannotTerminate`.
+
 **Two smaller things left as-is, deliberately:**
 
 - `control_stream.rs:350` logs a failed renewal and continues rather than breaking the loop, so a

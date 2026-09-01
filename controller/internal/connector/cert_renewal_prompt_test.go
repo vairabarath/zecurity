@@ -158,3 +158,68 @@ func TestRenewalPromptFailsSoftOnAFullMailbox(t *testing.T) {
 		t.Fatal("reported a successful send into a full mailbox")
 	}
 }
+
+// The storm this suite originally missed.
+//
+// TestRenewalPromptRepeatsUntilTheCertChanges asserts that prompting REPEATS —
+// correct when renewal keeps failing. What no test asked was what happens when
+// renewal SUCCEEDS: the connector reconnects presenting a certificate with a full
+// TTL remaining, and if that is still inside the window it is prompted again at
+// once. Observed live 2026-09-01 with CERT_TTL=168h / RENEWAL_WINDOW=200h — 244
+// signings in a minute, one per second, until the connector fell over.
+//
+// Two assertions, because the guard has two halves: the prompt must be quiet for a
+// fresh cert under a sane window, and the configuration that breaks that must be
+// refused at startup rather than discovered in production.
+func TestAFreshlyRenewedCertIsNotPromptedAgain(t *testing.T) {
+	const certTTL = 168 * time.Hour
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	// Exactly what a connector presents one second after renewing.
+	h, c := promptFixture(now.Add(certTTL), testWindow)
+	if h.maybeRequestRenewal(c, now) {
+		t.Fatal("prompted a certificate that was just issued — the connector would renew, " +
+			"reconnect, be prompted again, and loop for ever")
+	}
+	if count, _ := drainReEnroll(t, c); count != 0 {
+		t.Fatalf("queued %d prompts for a fresh certificate, want none", count)
+	}
+}
+
+func TestConfigValidateRejectsAWindowThatCannotTerminate(t *testing.T) {
+	cases := []struct {
+		name    string
+		ttl     time.Duration
+		window  time.Duration
+		wantErr bool
+		why     string
+	}{
+		{
+			name: "the shipped defaults are valid", ttl: 168 * time.Hour, window: 48 * time.Hour,
+			wantErr: false, why: "48h < 168h, so a renewed cert leaves the window",
+		},
+		{
+			name: "window wider than the TTL is refused", ttl: 168 * time.Hour, window: 200 * time.Hour,
+			wantErr: true, why: "this is the exact live configuration that caused 244 signings a minute",
+		},
+		{
+			name: "window equal to the TTL is refused", ttl: 168 * time.Hour, window: 168 * time.Hour,
+			wantErr: true, why: "a fresh cert sits exactly ON the boundary, which prompts",
+		},
+		{
+			name: "a zero TTL is refused", ttl: 0, window: 48 * time.Hour,
+			wantErr: true, why: "no positive TTL means every cert is always inside any window",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := Config{CertTTL: tc.ttl, RenewalWindow: tc.window}.Validate()
+			if tc.wantErr && err == nil {
+				t.Fatalf("accepted TTL=%v window=%v: %s", tc.ttl, tc.window, tc.why)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("rejected a valid config (TTL=%v window=%v): %v — %s", tc.ttl, tc.window, err, tc.why)
+			}
+		})
+	}
+}
