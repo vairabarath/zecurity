@@ -7,7 +7,7 @@ title: Client Binding Registry + Synthetic Routing
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase8-Shield-Local-Target
-status: done — one verify item ("exactly one tunnel per app connection") failed on its first live run and exposed the listener-address bug; fixed + regression-tested, live re-run outstanding
+status: done — all verify items closed. "Exactly one tunnel per app connection" failed on its first live run and exposed the listener-address bug; fixed, regression-tested, and re-verified live 2026-09-01
 completed: 2026-08-18
 tags: [sprint16, client, rust, synthetic-ip, registry, smoltcp, nftables, routing, security, adr-002]
 ---
@@ -244,7 +244,26 @@ applies equally to pinned IPs outside any local subnet), not something this phas
       Live: rows 2 and 4 above.
 - [x] `down` removes the CIDR route, the `ip rule`, and the nft table completely (`ip route show table
       105` empty, `nft list table inet <ZECURITY_TABLE>` gone). Verified live in a namespace.
-- [ ] ⬜ Exactly **one** tunnel per app connection (the Gate 1 loop regression check). **Needs a live **❌ FAILED when finally run, and it found a real bug.** Gate 3 showed a connection to `fqdn-test.internal:5443` served by the **tls-test** listener: every smoltcp listener was bound with `listen(port)` (`addr: None` = any destination), so two resources sharing a port cross over. Fixed and regression-tested — see *Post-Phase Fixes* below. **The live re-run of this item is still outstanding.**
+- [x] ⬜ Exactly **one** tunnel per app connection (the Gate 1 loop regression check). **Needs a live **❌ FAILED on its first run, and it found a real bug — ✅ NOW PASSES LIVE (2026-09-01).** Gate 3 showed a connection to `fqdn-test.internal:5443` served by the **tls-test** listener: every smoltcp listener was bound with `listen(port)` (`addr: None` = any destination), so two resources sharing a port cross over. Fixed and regression-tested — see *Post-Phase Fixes* below. **The live re-run of this item is still outstanding.**
+
+      **✅ Re-verified live 2026-09-01.** Two resources on the SAME port (5443) with different
+      synthetic IPs, each reaching its own backend, and the connector authorising each against its own
+      `resource_id`:
+      ```text
+      curl fqdn-test.internal via 100.64.0.3 -> FQDN-BACKEND (172.21.0.1)
+      curl tls-test.internal  via 100.64.0.2 -> TLS-BACKEND  (172.20.0.1)
+
+      access allowed resource_id=86f515d9 hostname=fqdn-test.internal dest=172.21.0.1 route="connector"
+      access allowed resource_id=48c97664 hostname=tls-test.internal  dest=172.20.0.1 route="connector"
+      ```
+      Two distinct `resource_id`s, each with its own destination — against Gate 3's failure, which logged
+      `resource_id=48c97664 hostname=tls-test.internal` for an **fqdn-test** request.
+
+      ⚠️ **A trap that nearly produced a false PASS.** `/etc/hosts` still held both names pointing at
+      `172.20.0.1` from an earlier session, so a plain `curl http://fqdn-test.internal:5443/` returned
+      `TLS-BACKEND` **while bypassing the tunnel entirely** — indistinguishable from the bug itself. The
+      test uses `curl --resolve` with the responder's own synthetic IPs, so it exercises the data plane
+      rather than host-file resolution.
       stack** — requires a real connector to count tunnels against.
 - [x] ⬜ 🚩 **This is the first end-to-end exercise of Phases 6 and 7.** Expect to find bugs there, not **✅ and it did find bugs** — Gate 2 exercised Phases 6–7 end to end (5/5). The bugs surfaced were in the controller ACL compiler, not here; see Phase 12's "🔴 Controller defects found by running Gate 3".
       here. **Still pending** — the client half is proven, the wire half is not, so Phases 6–7 remain

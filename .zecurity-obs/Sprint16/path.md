@@ -930,8 +930,8 @@ recorded here rather than hidden inside a phase file:
 3. **Four Admin-UI verify items** — the FQDN create/edit flow was exercised only far enough to seed
    the Gate 2/3 resources (Phase 10).
 
-Also outstanding: a **live re-run of Phase 9's "exactly one tunnel per app connection"**. That item
-failed on its first live run and exposed the listener-address bug (every smoltcp listener matched any
-destination, so two resources sharing a port crossed over). The bug is fixed and regression-tested
-(`a_listener_only_accepts_its_own_synthetic_address`, revert-verified), but the live check has not
-been repeated.
+**✅ Closed 2026-09-01:** the live re-run of Phase 9's *"exactly one tunnel per app connection"* PASSED.
+Two resources on the same port with different synthetic IPs each reached their own backend, with the
+connector authorising each against its own `resource_id`. The listener-address bug is fixed,
+regression-tested (`a_listener_only_accepts_its_own_synthetic_address`, revert-verified) **and** confirmed
+on a real stack.
