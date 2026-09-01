@@ -90,10 +90,14 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	}
 
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
-	// compiler-visible field. description/port_to/remote_network_id/local_target
-	// are invisible to the compiler, so changing only those must not churn the ACL
-	// version or trigger a fan-out push — a version bump reaches every client as
+	// compiler-visible field. description/port_to/local_target are invisible to the
+	// compiler, so changing only those must not churn the ACL version or trigger a
+	// fan-out push — a version bump reaches every client as
 	// restart_tunnel_if_running.
+	//
+	// remote_network_id was listed here as invisible and is NOT: the compiler reads
+	// it from the resource row and emits it as ACLEntry.RemoteNetworkId, the routing
+	// reference clients follow to find their connectors. See ACLRelevantUpdate.
 	//
 	// This gate used to be dead: an unconditional NotifyPolicyChange ran two lines
 	// above it, so every edit churned the version regardless. resource_acl_

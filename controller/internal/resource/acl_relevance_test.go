@@ -33,10 +33,14 @@ func TestACLRelevantUpdate(t *testing.T) {
 		{"local_target only", UpdateInput{LocalTarget: aclStrPtr("127.0.0.1")}, false},
 		{"description only", UpdateInput{Description: aclStrPtr("note")}, false},
 		{"port_to only", UpdateInput{PortTo: aclIntPtr(9000)}, false},
-		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, false},
+		// Was asserted false, which is what let the bug stand. The compiler reads
+		// r.remote_network_id and emits it as ACLEntry.RemoteNetworkId — the routing
+		// reference a client follows to find which connectors serve the resource — so
+		// moving a resource between networks MUST bump the ACL version.
+		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, true},
 		{"empty input", UpdateInput{}, false},
 		{"irrelevant + relevant", UpdateInput{Description: aclStrPtr("note"), Protocol: aclStrPtr("udp")}, true},
-		{"all irrelevant", UpdateInput{Description: aclStrPtr("n"), PortTo: aclIntPtr(1), RemoteNetworkID: aclStrPtr("rn")}, false},
+		{"all irrelevant", UpdateInput{Description: aclStrPtr("n"), PortTo: aclIntPtr(1), LocalTarget: aclStrPtr("127.0.0.1")}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

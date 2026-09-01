@@ -133,6 +133,42 @@ The connector branches on `route_type` **first**. `resolver` is only ever consul
 
 ## Post-Phase Fixes
 
+### Fix: moving a resource between remote networks changed the ACL without bumping its version
+**Found 2026-09-01** while verifying Phase 10's item 118 (*"editing `hostname` or `resolver` bumps the ACL
+version"*) on a live stack.
+
+**Issue.** `ACLRelevantUpdate` (`internal/resource/store.go`) gates
+`NotifyPolicyChange` on the update touching a compiler-visible field. It omitted
+`RemoteNetworkID` — and both the resolver's comment and the unit test asserted, deliberately, that
+`remote_network_id` was *"invisible to the compiler"*.
+
+It is not. Three legs, all verified by reading:
+
+| Leg | Evidence |
+|---|---|
+| the field is editable | `internal/resource/store.go` — `Update` does `add("remote_network_id", …)` |
+| the compiler reads it **from the resource row** | `internal/policy/store.go` rules query selects `r.remote_network_id` |
+| the compiler emits it | `internal/policy/compiler.go` — `RemoteNetworkId: rnByKey[key]` on every `ACLEntry` |
+
+`ACLEntry.remote_network_id` is the **routing reference** a client follows to find which connectors serve
+a resource. So moving a resource to another remote network changed every affected client's routing while
+leaving the ACL version untouched — clients kept the stale id and dialled the *old* network's connectors
+until some unrelated edit churned the version.
+
+**Fix.** Add `input.RemoteNetworkID != nil` to `ACLRelevantUpdate`; correct the resolver comment; flip the
+test case from `false` to `true`. Revert-verified — dropping the field again fails
+`TestACLRelevantUpdate/remote_network_only`.
+
+**The other three exclusions are correct**, and worth recording so nobody "fixes" them too:
+`description`, `port_to` and `local_target` are genuinely not selected by the ACL rules query. Only one
+port per entry reaches the wire (`ACLEntry.port`), and `local_target` travels to shields via
+`PushSnapshotForShield`, which `UpdateResource` calls separately.
+
+**Why the test did not catch it.** The test asserted the buggy behaviour as intended. This is the second
+time in Sprint 16 that a test encoded the wrong expectation rather than missing the case — the first was
+the renewal prompt, where `TestRenewalPromptRepeatsUntilTheCertChanges` asserted repeat-prompting is
+correct and so never asked what happens when renewal *succeeds*.
+
 ### Fix: `AclEntry` test literal broke `cargo test`
 See 5.2 above. Root cause: exhaustive struct literal in `connector/src/policy/mod.rs`'s `entry()`
 helper, versus `..Default::default()` everywhere else.

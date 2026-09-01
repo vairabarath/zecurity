@@ -619,6 +619,14 @@ recovery-path pattern**, and it does not close it: a shield whose own cert has e
 channel either.
 → [[Sprint16/Member3-Go-Rust/Phase10-Admin-UI-FQDN-Resources]]
 
+### 🔴 Fixed 2026-09-01: moving a resource between remote networks did not bump the ACL version
+**Phase 5 / controller.** `ACLRelevantUpdate` omitted `RemoteNetworkID`, and both the resolver comment and
+the unit test asserted it was "invisible to the compiler". It is not: the compiler reads
+`r.remote_network_id` from the resource row and emits it as `ACLEntry.RemoteNetworkId`, the routing
+reference clients follow to find their connectors. Moving a resource therefore changed client routing while
+leaving the version untouched. Found while verifying Phase 10's item 118 live.
+→ [[Sprint16/Member3-Go-Rust/Phase5-Proto-ACL-Emission-GraphQL]]
+
 ### Fix: `CAP_NET_BIND_SERVICE` missing from the client unit (Phase 11 prerequisite)
 **Phase 11.** The DNS responder binds `127.0.0.1:53`, a privileged port, but the unit granted only
 `CAP_NET_ADMIN` **and** bounded the capability set to it — so an ambient grant alone would have been

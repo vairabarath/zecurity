@@ -486,8 +486,21 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 // Keep this in step with the ACLEntry literal in policy/compiler.go — a field
 // added there and forgotten here fails silently, which is the worst kind.
 func ACLRelevantUpdate(input UpdateInput) bool {
+	// RemoteNetworkID belongs here, and its absence was a bug. The ACL compiler
+	// reads `r.remote_network_id` from the RESOURCE row (policy/store.go's rules
+	// query) and emits it as `ACLEntry.RemoteNetworkId` (compiler.go), which is the
+	// routing reference a client follows to find which connectors serve the
+	// resource. Moving a resource between remote networks therefore changes the
+	// ACL — without a version bump, clients kept the stale id and dialled the old
+	// network's connectors until some unrelated edit churned the version.
+	//
+	// The other UpdateInput fields really are compiler-invisible: description,
+	// PortTo and LocalTarget are not selected by the rules query at all. Only one
+	// port per entry reaches the wire (`ACLEntry.port`), and LocalTarget travels to
+	// shields via PushSnapshotForShield instead, which UpdateResource calls
+	// separately.
 	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
-		input.Hostname != nil || input.Resolver != nil
+		input.Hostname != nil || input.Resolver != nil || input.RemoteNetworkID != nil
 }
 
 func joinSets(sets []string) string {
