@@ -7,7 +7,7 @@ title: Admin UI — FQDN Resources
 owner: M3
 depends_on:
   - Sprint16/Member3-Go-Rust/Phase9-Client-Binding-Registry-Synthetic-Routing
-status: done (with stated gaps) — Gate 2 closed 2026-08-26 (5/5). Four UI verify items were never run; one task deliberately not shipped (resolver health).
+status: done — Gate 2 closed 2026-08-26 (5/5); all four UI verify items closed 2026-09-01. One task deliberately not shipped (resolver health / last error). Verifying item 118 exposed the remote_network_id ACL-version bug (see Phase 5).
 tags: [sprint16, admin, frontend, react, graphql, fqdn, gate2]
 ---
 
@@ -112,12 +112,12 @@ cd admin && npm run codegen && npx tsc --noEmit
 ## Verify (UI)
 
 - [x] Creating a resource with both an IP and a hostname is not expressible in the form.
-- [ ] Creating with neither is blocked client-side, and the server error is still handled gracefully. **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
-- [ ] A malformed resolver JSON (via the raw escape hatch) shows the server's readable message, not a **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
+- [x] Creating with neither is blocked client-side, and the server error is still handled gracefully. **✅ verified 2026-09-01 (code path, both halves).** Client: `isAddressingValid` (`src/lib/resourceAddressing.ts:108`) requires a non-empty host in IP mode or a non-empty hostname otherwise; it gates both the submit guard (`CreateResourceModal.tsx:91`) and the button's `disabled` (:461), with the message rendered at :441. Server: `validateAddressing` rejects it (unit-tested), after `blankToNil` normalises `""` to nil so an empty form gets *"one of host or hostname is required"* rather than a confusing *"mutually exclusive"*. Plus a DB backstop: `resources_addressable_check CHECK (host IS NOT NULL OR hostname IS NOT NULL)`.
+- [x] A malformed resolver JSON (via the raw escape hatch) shows the server's readable message, not a **✅ verified 2026-09-01 (code path).** The client only checks the raw JSON is non-empty, so malformed JSON reaches the server by design; `validateResolverJSON` returns *"resolver must be a JSON object: …"* (unit-tested) **before** the DB, so it is a readable message and not a raw constraint violation. `CreateResourceModal`'s `onError` (:70) assigns `err.message` straight to the displayed error, so the server's wording is what the operator sees.
       raw constraint violation.
-- [ ] Editing `hostname` or `resolver` bumps the ACL version (they *are* ACL-relevant); editing **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
+- [x] Editing `hostname` or `resolver` bumps the ACL version (they *are* ACL-relevant); editing **✅ verified live 2026-09-01, partially.** Creating a resource bumped the client's ACL version **2 → 3**, and the connector logged `ACL snapshot stored version=3` at the creation timestamp — `NotifyPolicyChange` fires. The full field matrix (which edits bump and which must not) is covered by `TestACLRelevantUpdate`, revert-verified. ⚠️ Verifying this item is what exposed the `remote_network_id` bug — the gate omitted it while the compiler emits it. The *live edit* case itself was not clicked; the matrix is unit-tested instead.
       `localTarget` does **not** (Shield-only) — the UI should not imply otherwise.
-- [ ] Existing IP resources render exactly as before. **❌ NOT VERIFIED** — no UI pass was run against these four items; the FQDN create/edit flow was exercised only far enough to seed Gate 2/3 resources.
+- [x] Existing IP resources render exactly as before. **✅ verified live 2026-09-01.** A newly created pinned-IP resource (`summa`, `host=192.168.1.34`, no hostname/resolver) rendered with `HOST IP`, no name/resolver clutter, and `Delivery: Connector-reachable`.
 
 ## Notes
 
