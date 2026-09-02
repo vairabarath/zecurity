@@ -106,7 +106,8 @@ func (s *Store) GetGroup(ctx context.Context, id string) (*GroupRow, error) {
 		        origin, external_id, connection_id
 		 FROM groups WHERE id = $1`,
 		id,
-	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt)
+	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt,
+		&row.Origin, &row.ExternalID, &row.ConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

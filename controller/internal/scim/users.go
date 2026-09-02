@@ -422,8 +422,15 @@ func (h *groupHandler) handlePost(w http.ResponseWriter, r *http.Request) {
 	}
 	externalID := strTrim(resource["externalId"])
 	displayName := strTrim(resource["displayName"])
-	if externalID == "" {
-		writeSCIMError(w, newSCIMError(400, "invalidValue", "externalId is required"))
+	// externalId stays the preferred Canonical Identity Key. When the IdP omits
+	// it (Okta "Push Groups" by name sends displayName only), CreateGroup
+	// derives a slug fallback via DeriveGroupExternalID — see the caveats on
+	// that function. Test the derivation, not just displayName != "", so this
+	// guard and CreateGroup's own fallback can never disagree (e.g. "!!!"
+	// is non-empty but derives to "").
+	if externalID == "" && DeriveGroupExternalID(displayName) == "" {
+		writeSCIMError(w, newSCIMError(400, "invalidValue",
+			"externalId is required (or a displayName from which one can be derived)"))
 		return
 	}
 	g, serr := h.ds.CreateGroup(r.Context(), sc, externalID, displayName)

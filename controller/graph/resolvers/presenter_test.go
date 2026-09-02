@@ -122,19 +122,16 @@ func TestErrorPresenter_Scim401Masked(t *testing.T) {
 // The updateScimConfig enable-refusal must reach the client. It is the message
 // that tells an admin to use enableScimBreakGlass; masked to INTERNAL it is
 // indistinguishable from a DB outage and the UI cannot offer the break-glass
-// flow. Regression guard for a multi-line fmt.Errorf that a line-based apperr
-// conversion missed.
+// flow. Regression guard for the *gqlerror.Error path the resolver uses to
+// carry a branchable extensions.code.
 func TestErrorPresenter_ScimEnableRefusalSurfaced(t *testing.T) {
-	err := apperr.UserErrorf(
-		"cannot enable SCIM — %s. Enabling despite an unproven mapping "+
-			"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
-		"the identity mapping is not proven", "identity.mapping.break_glass")
+	err := scimEnableRefusedError("the identity mapping is not proven")
 
 	got := ErrorPresenter(context.Background(), err)
 	if !strings.Contains(got.Message, "enableScimBreakGlass") {
 		t.Fatalf("enable refusal must surface the break-glass path, got %q", got.Message)
 	}
-	if got.Extensions["code"] == "INTERNAL" {
-		t.Fatalf("enable refusal must not be masked as INTERNAL")
+	if got.Extensions["code"] != "SCIM_MAPPING_UNPROVEN" {
+		t.Fatalf("enable refusal must carry code=SCIM_MAPPING_UNPROVEN, got %v", got.Extensions["code"])
 	}
 }

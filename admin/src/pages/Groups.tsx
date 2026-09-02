@@ -266,18 +266,22 @@ export default function Groups() {
                   </div>
 
                   <div className="flex items-center justify-end gap-3">
-                    <button
-                      onClick={() => setEditTarget(group)}
-                      className="text-[12.5px] font-semibold text-muted-foreground transition hover:text-foreground"
-                    >
-                      Edit
-                    </button>
-                    <button
-                      onClick={() => setDeleteTarget(group)}
-                      className="text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
-                    >
-                      Delete
-                    </button>
+                    {group.origin !== 'scim' && (
+                      <>
+                        <button
+                          onClick={() => setEditTarget(group)}
+                          className="text-[12.5px] font-semibold text-muted-foreground transition hover:text-foreground"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          onClick={() => setDeleteTarget(group)}
+                          className="text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80"
+                        >
+                          Delete
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => navigate(`/groups/${group.id}`)}
                       className="inline-flex items-center gap-1 text-[13px] font-bold text-primary transition hover:opacity-80"

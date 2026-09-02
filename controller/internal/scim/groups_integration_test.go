@@ -497,6 +497,101 @@ func TestGroups_HTTP(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("GET after delete: expected 404, got %d", rec.Code)
 	}
+
+	// ── Okta "Push Groups" (push type: By name) ──────────────────────────────
+	// Okta sends displayName ONLY, no externalId. Before the fix this was
+	// rejected at the handler with 400 "externalId is required" before
+	// CreateGroup was ever reached, so Okta's group push failed with
+	// "Errors reported by remote server: externalId is required".
+	// The handler now derives a fallback key via DeriveGroupExternalID.
+	rec = do("POST", "/scim/v2/Groups",
+		`{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"hermes"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("Okta push-by-name (displayName only): expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var pushed scimGroup
+	if err := json.Unmarshal(rec.Body.Bytes(), &pushed); err != nil {
+		t.Fatalf("decode pushed group: %v", err)
+	}
+	if pushed.DisplayName != "hermes" {
+		t.Fatalf("pushed group displayName = %q, want %q", pushed.DisplayName, "hermes")
+	}
+	if pushed.ExternalID != "hermes" {
+		t.Fatalf("pushed group externalId should be derived as %q, got %q", "hermes", pushed.ExternalID)
+	}
+
+	// Multi-word name derives a slug.
+	rec = do("POST", "/scim/v2/Groups",
+		`{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"Marketing Team"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("push-by-name multi-word: expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var pushed2 scimGroup
+	if err := json.Unmarshal(rec.Body.Bytes(), &pushed2); err != nil {
+		t.Fatalf("decode pushed group 2: %v", err)
+	}
+	if pushed2.ExternalID != "marketing-team" {
+		t.Fatalf("derived externalId = %q, want %q", pushed2.ExternalID, "marketing-team")
+	}
+
+	// Still fail closed when neither externalId nor a derivable displayName
+	// is supplied — the fallback must not become an "accept anything" path.
+	rec = do("POST", "/scim/v2/Groups",
+		`{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"!!!"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("undrivable displayName: expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	rec = do("POST", "/scim/v2/Groups",
+		`{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("no externalId and no displayName: expected 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// ── Okta "Push Groups" first-push PATCH shape ─────────────────────────
+	// Okta sends the initial membership set as a bare array of member objects
+	// with NO "path" and NO wrapping {"members":...} object:
+	//   {"op":"add","value":[{"value":"<user-scim-id>"}, ...]}
+	// Before the fix this hit groupMemberValues' "group PATCH requires a
+	// members path or a members value object" 400 (groups.go) and Okta logged
+	// "Error while creating user group <name>: Bad Request. ... group PATCH
+	// requires a members path or a members value object". This is the exact
+	// payload Okta emitted during the 08-29-2026 hermes group push.
+	rec = do("POST", "/scim/v2/Groups",
+		`{"schemas":["urn:ietf:params:scim:schemas:core:2.0:Group"],"displayName":"okta-bare-array"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create okta-bare-array group: expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var bare scimGroup
+	if err := json.Unmarshal(rec.Body.Bytes(), &bare); err != nil {
+		t.Fatalf("decode okta-bare-array group: %v", err)
+	}
+	rec = do("PATCH", "/scim/v2/Groups/"+bare.ID,
+		`{"schemas":["urn:ietf:params:scim:api:messages:patchOp"],"Operations":[{"op":"add","value":[{"value":"h-1"},{"value":"h-2"}]}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Okta bare-array PATCH add: expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var bg scimGroup
+	if err := json.Unmarshal(rec.Body.Bytes(), &bg); err != nil {
+		t.Fatalf("decode bare-array patched group: %v", err)
+	}
+	if len(bg.Members) != 2 {
+		t.Fatalf("Okta bare-array PATCH: expected 2 members, got %d (%v)", len(bg.Members), bg.Members)
+	}
+	bvals := memberValues(bg)
+	if !(containsStr(bvals, u1ID) && containsStr(bvals, u2ID)) {
+		t.Fatalf("Okta bare-array PATCH must contain h-1 and h-2 uuids, got %v", bvals)
+	}
+
+	// ── Okta group-metadata sync PATCH (no members key) ───────────────────
+	// Okta also sends a group-replace PATCH carrying only displayName/id and
+	// NO "members" key: {"op":"replace","value":{"displayName":"x","id":"<g>"}}
+	// (observed live 08-31-2026). This is a metadata sync with no membership
+	// change and must be a no-op 200, not the "members path or value object" 400.
+	rec = do("PATCH", "/scim/v2/Groups/"+bare.ID,
+		`{"schemas":["urn:ietf:params:scim:api:messages:patchOp"],"Operations":[{"op":"replace","value":{"displayName":"okta-bare-array","id":"`+bare.ID+`"}}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Okta metadata-replace PATCH (no members): expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 type scimGroup struct {

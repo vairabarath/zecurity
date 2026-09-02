@@ -221,12 +221,20 @@ export default function GroupDetail() {
             title="Members"
             subtitle={`${group.members.length} user${group.members.length === 1 ? '' : 's'} in this group`}
             action={
-              <Button size="sm" className="gap-2" onClick={() => setShowAddMember(true)} disabled={nonMembers.length === 0}>
-                <Plus className="h-4 w-4" />
-                Add Member
-              </Button>
+              group.origin !== 'scim' ? (
+                <Button size="sm" className="gap-2" onClick={() => setShowAddMember(true)} disabled={nonMembers.length === 0}>
+                  <Plus className="h-4 w-4" />
+                  Add Member
+                </Button>
+              ) : undefined
             }
           />
+
+          {group.origin === 'scim' && (
+            <div className="border-b border-border bg-secondary/50 px-5 py-3 text-xs text-muted-foreground">
+              Membership is managed by your identity provider (SCIM) and cannot be edited in Zecurity.
+            </div>
+          )}
 
           {group.members.length === 0 ? (
             <div className="px-5 py-14 text-center text-sm text-muted-foreground">
@@ -248,14 +256,16 @@ export default function GroupDetail() {
                       <div className="text-[11.5px] capitalize text-muted-foreground">{member.role.toLowerCase()}</div>
                     </div>
                   </div>
-                  <button
-                    onClick={() => removeMember({ variables: { groupId: group.id, userId: member.id } })}
-                    disabled={removingMember}
-                    className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80 disabled:opacity-40"
-                  >
-                    <Minus className="h-3.5 w-3.5" />
-                    Remove
-                  </button>
+                  {group.origin !== 'scim' && (
+                    <button
+                      onClick={() => removeMember({ variables: { groupId: group.id, userId: member.id } })}
+                      disabled={removingMember}
+                      className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-[oklch(0.75_0.16_25)] transition hover:opacity-80 disabled:opacity-40"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                      Remove
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

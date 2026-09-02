@@ -351,6 +351,20 @@ mutation EnableScimBreakGlass($connectionId: ID!, $reason: String!) {
   enableScimBreakGlass(connectionId: $connectionId, reason: $reason)
 }
 
+# Explicit fine-grained permission grant (ADR-025 §3.2 break-glass primitive).
+# ADMIN may call this; possession is an explicit row, never implied by role.
+# Used by the SCIM config UI so an admin can grant themselves (or another user)
+# the identity.mapping.break_glass permission required to enable SCIM against an
+# unproven mapping via enableScimBreakGlass.
+mutation GrantWorkspacePermission($userId: ID!, $permission: String!) {
+  grantPermission(userId: $userId, permission: $permission) {
+    workspaceId
+    userId
+    permission
+    grantedBy
+  }
+}
+
 # --- Provisioning-conflicts resolution (ADR-025 §4.1/§9, Sprint 17 FE-4) -----
 # Every transition requires a reason (audited server-side). Accept additionally
 # enforces identity.mapping.break_glass — ADMIN role alone is denied with a

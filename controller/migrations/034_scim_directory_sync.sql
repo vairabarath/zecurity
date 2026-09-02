@@ -203,3 +203,25 @@ CREATE TABLE IF NOT EXISTS workspace_permissions (
     granted_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (workspace_id, user_id, permission)
 );
+
+-- 7. Idempotent index guard (Sprint 17 FE Phase 7 Finding F7-7):
+-- The original (tenant_id, issuer) unique index from migration 031 does not
+-- exclude deleted rows, so once a connection for a given Okta/Entra/etc. org
+-- is soft-deleted (status='deleted'), that issuer can never be reconfigured again:
+-- createIdpConnection fails with "duplicate key value violates unique constraint"
+-- forever, with no purge/restore path.
+--
+-- This migration replaces the unique index with an equivalent one that also
+-- excludes status='deleted', so a fresh connection can be created for the same
+-- issuer once the old one is deleted. A workspace can still only have one ACTIVE
+-- (or disabled) connection per issuer at a time — deleted history no longer
+-- blocks reuse.
+--
+-- Applied automatically on top of 034 (which adds the 'deleted' status CHECK
+-- constraint). If 036 has already been applied, the DROP INDEX is a no-op and
+-- the CREATE UNIQUE INDEX is also a no-op (idempotent).
+DROP INDEX IF EXISTS idx_idp_conn_ws_issuer;
+
+CREATE UNIQUE INDEX idx_idp_conn_ws_issuer
+    ON identity_connections (tenant_id, issuer)
+    WHERE tenant_id IS NOT NULL AND status != 'deleted';

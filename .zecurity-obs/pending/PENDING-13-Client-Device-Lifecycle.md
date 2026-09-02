@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: in-progress
 id: PENDING-13
 domain: identity/ops
 priority: P2
@@ -18,6 +18,16 @@ tags: [pending, adr, client, device, pki, lifecycle]
 > code** and reshaped into three tracks (close-the-SCIM-loop / server→client trust signal / auto-renew +
 > re-enroll). **Read ADR-028 for the authoritative, grounded design** — this file is retained as the
 > original problem statement. On team ratification, ADR-028 flips to `accepted`.
+
+> **Correction (2026-09-01, verified against source):** two of the three tracks are **built** — the
+> frontmatter said `pending`. Track 1 (outbox consumers revoking devices on
+> `device.trust.revoke.requested`) is `controller/internal/identity/device_trust.go` +
+> `controller/internal/client/device_trust_handler.go`; Track 2 (server→client `REVOKED` /
+> `RE_ENROLL_REQUIRED` / `RENEW_SOON` / `NONE` directive on the ACL poll) is merged — see
+> `.zecurity-obs/Sprint19/path.md`. **Track 3 is still open:** the client `RenewCert` RPC and the
+> daemon renewal scheduler. Note that the renewal code in `controller/internal/shield/renewal.go`
+> and `controller/internal/connector/enrollment.go` is *shield/connector* cert renewal, not the
+> client device path this ADR covers.
 
 ## Context / Current State
 

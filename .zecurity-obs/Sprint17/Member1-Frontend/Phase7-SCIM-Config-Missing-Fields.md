@@ -4,7 +4,7 @@ member: M1-Frontend
 sprint: 17
 phase: 7
 title: SCIM Connection Config — Missing Fields (manual-verification fixes)
-status: open
+status: in-progress
 depends_on: [Phase 1 (FE), M1-9]
 tags: [react, admin, scim, frontend, pending-05]
 ---
@@ -55,48 +55,21 @@ Close the two UI defects that blocked an admin from completing SCIM setup entire
 | `admin/src/<tests>` | Add a render test asserting the SCIM enable Switch is present in the DOM for a connection (catches the Phase-1 manual-gate miss automatically). |
 
 ## Steps
-- [ ] **F7-1** Reproduce the missing toggle on a clean `npm run dev` build; determine stale-bundle vs. real render defect; fix so the `Toggle SCIM provisioning` Switch (+ `SCIM enabled`/`SCIM disabled` `StatusPill`) always mounts in `ScimConfigCard`.
-- [ ] **F7-2** Fix `ScimBaseUrlBox` to show `<controller-origin>/scim/v2` (config-driven origin, SPA origin only as fallback). Verify the copied URL is reachable by Okta (public HTTPS host), not `localhost`/SPA origin.
-- [ ] **F7-3** (verify) Confirm the Provider preset dropdown and the `BreakGlassDialog` entry point are reachable once the toggle renders, and that flipping the toggle on an unproven mapping surfaces the break-glass dialog (already built — confirm it fires).
-- [ ] **F7-4** Add a component test that fails if the enable Switch is absent from the `ScimConfigCard` DOM, so the manual-gate miss cannot recur silently.
-- [ ] **F7-5** (new, found 2026-08-28 while setting up a second, separate Okta OIDC app for Zecurity
-  login — same live session as F7-1/F7-2, not related to the SCIM app). `admin/src/pages/Login.tsx`
-  only wires `useMutation(InitiateAuthDocument)` with a hardcoded `provider: 'google'` on every call
-  site (both the workspace-lookup and the direct-login paths). The backend fully supports enterprise
-  IdP login today — `InitiateAuth(ctx, provider, workspaceName, connectionID)`
-  (`internal/auth/oidc.go`) accepts a `connectionID` and Phase 11 (this same sprint) wired the
-  connection's `subjectClaim` all the way through — but there is **no UI control** on the login page to
-  pick a non-Google connection and pass its `connectionId`. Consequence: creating an Okta (or any
-  enterprise) OIDC connection via FE-0/the Phase-6 wizard lets an admin *configure* the connection, but
-  there is currently no click-through path for an end user to actually *log in* with it — only a direct
-  `initiateAuth` GraphQL call exercises that path. Needs a "Sign in with `<Provider>`" button per
-  discovered connection (the `discovery` query/endpoint already used to list available IdPs for a
-  workspace is the natural data source), wired to `initiateAuth(provider, workspaceName, connectionId)`.
-- [ ] **F7-7** (backend defect, not this phase's scope — `member: M1-Go`, recorded here for continuity
-  with F7-1/F7-2/F7-5, found in the same live session on 2026-08-28). Deleting an identity connection
-  that has linked SCIM users soft-deletes it (`status='deleted'`, users preserved/unmanaged — the
-  documented, correct behavior per `Phase9-Connection-Lifecycle-Health-Sync`). But two things are
-  wrong after that:
-  1. `idpConnections` (the list query) does **not** filter out `status='deleted'` rows — a deleted
-     connection stays visible in the admin UI's connection list forever, indistinguishable from an
-     active one at a glance (no status badge differentiates it in the raw query result).
-  2. The `(workspace_id, issuer)` unique constraint (`idx_idp_conn_ws_issuer`) is **not** a partial
-     index excluding deleted rows, so `createIdpConnection` for that same issuer fails permanently
-     with `duplicate key value violates unique constraint` — even though the "real" connection for
-     that Okta org is gone. There is no `restoreIdpConnection`/purge mutation to free the slot.
-  - **Reproduced live**: deleted a connection for `issuer=https://trial-3724025.okta.com` (had 2
-    SCIM-linked users, used `force: true`), then immediately tried `createIdpConnection` for the same
-    issuer — got the duplicate-key error. Confirmed via `idpConnections` that the deleted row
-    (`status: "deleted"`) was still present and still held the issuer slot.
-  - **Workaround used in this session** (not a fix): reused the same soft-deleted row via
-    `updateIdpConnection` (new `clientId`/`clientSecret`) + `setIdpConnectionStatus(id, "active")`
-    instead of delete-then-recreate. This worked because the row still fully exists — but it means
-    "delete and start fresh" is not actually possible for a connection with SCIM history; an admin is
-    silently forced back into editing the old row.
-  - **Fix would need**: either (a) a partial unique index (`WHERE status != 'deleted'`) so a new
-    connection can be created for the same issuer once the old one is deleted, or (b) filter
-    `idpConnections` to exclude `deleted` by default (with an explicit include-deleted flag for
-    audit/history views), or both.
+- [x] **F7-1** Reproduced the missing toggle by a unit test (F7-4) — root cause was NOT stale HMR but a real component bug: `CardHeader` in `admin/src/components/ui/card.tsx` destructured `{ className, ...props }` and rendered only a gradient `div`, dropping `{props.children}` (explicit JSX children override spread `children`). The `ScimConfigCard` header (title "SCIM configuration", `StatusPill`, and the `role="switch"` Toggle) was silently discarded for ANY `CardHeader` usage. Fixed by rendering `{props.children}` inside `CardHeader`. This also repairs `ScimBaseUrlBox` / `ScimTokenPanel` / `Settings` headers, which shared the broken primitive. Verified: card now renders the switch + header; the F7-4 test asserts it.
+- [x] **F7-2** Fixed `ScimBaseUrlBox.tsx` to derive the origin from the controller/API host (`VITE_API_ORIGIN`, falling back to `window.location.origin` only when SPA and controller share an origin). Path stays `/scim/v2`. The copied URL is now the controller's reachable host, not the SPA origin.
+- [x] **F7-3** (verify) Confirmed via code: the Provider-preset `DropdownMenu` and `BreakGlassDialog` entry point are wired (and now actually render, since F7-1 fixed the header). Flipping the toggle on an unproven mapping routes the server refusal into `setBreakGlass({open:true})` (ScimConfigCard.tsx:203-209), so the break-glass dialog fires.
+- [x] **F7-4** Added `admin/src/components/scim/ScimConfigCard.test.tsx` (4 cases) asserting the "SCIM configuration" header, the `role="switch"` Toggle (both enabled/disabled states), and the "SCIM disabled" pill are present in the DOM. Mirrors the `ConflictRow.test.tsx` Apollo-mock pattern. Catches the F7-1 miss automatically.
+- [ ] **F7-8** (new, found 2026-08-28 — same pattern as F7-5: backend fully built, frontend never wired). NOT done this pass (out of core scope). Needs: "Disable connection" + "Delete connection" actions on `IdpConnectionDetail.tsx`, the latter surfacing a `force` confirmation when `linked users > 0`. Backend `deleteIdpConnection(id, force)` / `setIdpConnectionStatus(id, status)` already exist and are exposed in `controller/graph/generated.go`; the admin GraphQL client (`mutations.graphql`) still lacks these operations, so codegen + UI wiring remain.
+- [ ] **F7-5** (new, found 2026-08-28). NOT done this pass (out of core scope). `admin/src/pages/Login.tsx` still hardcodes `provider: 'google'`. Need "Sign in with `<Provider>`" buttons per discovered connection, wired to `initiateAuth(provider, workspaceName, connectionId)`. Controller `InitiateAuth` already accepts `connectionID`, but the admin `InitiateAuth` mutation doc + generated types lack the arg; needs codegen.
+- [x] **F7-9** (new, 2026-08-28 — closes the "how do I become a break-glass user" gap). The UI had NO way to grant the `identity.mapping.break_glass` permission (ADMIN role alone is insufficient per ADR-025 §3.2; `EnableScimBreakGlass` rejects without the explicit row — `controller/graph/resolvers/idp.resolvers.go:597-604`). Added a self-service grant path: new `GrantWorkspacePermission` mutation in `admin/src/graphql/mutations.graphql`, regenerated types via `npm run codegen`, and a "Grant break-glass permission" button in `ScimConfigCard` (shown when SCIM is not yet enabled and the connection is editable). It calls `grantPermission(userId: currentUser.id, permission: "identity.mapping.break_glass")`, which grants the current admin the row; after that, the toggle's break-glass fallback (`EnableScimBreakGlass`) succeeds. Both the grant (`permission.grant`) and the enable (`scim.mapping.break_glass_override`) are audited server-side. Verified: `npm run lint` + `npm run build` + `npm run test` (scim suite, 22 tests) all green; `GrantWorkspacePermissionDocument` present in generated types. Uncommitted.
+- [x] **F7-7** (backend defect, not this phase's scope — `member: M1-Go`, recorded here for continuity with F7-1/F7-2/F7-5, found in the same live session on 2026-08-28). Deleting an identity connection that has linked SCIM users soft-deletes it (`status='deleted'`, users preserved/unmanaged — the documented, correct behavior per `Phase9-Connection-Lifecycle-Health-Sync`). But two things were wrong after that:
+  1. `idpConnections` (the list query) does **not** filter out `status='deleted'` rows — a deleted connection stays visible in the admin UI's connection list forever, indistinguishable from an active one at a glance (no status badge differentiates it in the raw query result).
+  2. The `(workspace_id, issuer)` unique constraint (`idx_idp_conn_ws_issuer`) is **not** a partial index excluding deleted rows, so `createIdpConnection` for that same issuer fails permanently with `duplicate key value violates unique constraint` — even though the "real" connection for that Okta org is gone. There is no `restoreIdpConnection`/purge mutation to free the slot.
+  - **Reproduced live**: deleted a connection for `issuer=https://trial-3724025.okta.com` (had 2 SCIM-linked users, used `force: true`), then immediately tried `createIdpConnection` for the same issuer — got the duplicate-key error. Confirmed via `idpConnections` that the deleted row (`status: "deleted"`) was still present and still held the issuer slot.
+  - **Workaround used in this session** (not a fix): reused the same soft-deleted row via `updateIdpConnection` (new `clientId`/`clientSecret`) + `setIdpConnectionStatus(id, "active")` instead of delete-then-recreate. This worked because the row still fully exists — but it means "delete and start fresh" is not actually possible for a connection with SCIM history; an admin is silently forced back into editing the old row.
+  - **Fixed 2026-08-28** (`controller/migrations/034_scim_directory_sync.sql` — now includes the former `036_idp_connection_deleted_issuer_reuse.sql` content): replaced `idx_idp_conn_ws_issuer` with an equivalent partial unique index that also excludes `status = 'deleted'`, so a fresh connection can be created for the same issuer once the old one is deleted. `ListWorkspaceConnections` (backs `idpConnections`) and `ListForWorkspace` (backs login discovery, `internal/auth/discovery.go`) both now filter out `status = 'deleted'` — a deleted connection no longer appears in the admin connection list or as a login-discovery option. No `restoreIdpConnection`/purge mutation was added — not needed once the issuer slot frees itself. Regression test:
+    `TestIdpStore_AdminMethods_Integration/issuer_can_be_reused_after_the_connection_holding_it_is_soft-deleted`
+    (`controller/internal/idp/store_admin_integration_test.go`) — soft-deletes a connection, recreates one for the same issuer, and asserts it no longer appears in either list query. All of `internal/idp`, `internal/auth`, `internal/scim`, `internal/identity`, `graph` pass on live Postgres after the change.
 - [ ] **F7-6** (observation only, not a Zecurity defect — recorded for completeness). Okta's separate
   **"Push Groups"** feature (distinct from the "Import Groups" option under Provisioning → Configure API
   Integration, which already works) fails against Zecurity's SCIM Groups endpoint with `externalId is
@@ -119,7 +92,9 @@ Close the two UI defects that blocked an admin from completing SCIM setup entire
 Phase 1 delivered the SCIM config UI but was `implemented-unverified`. This phase is the **manual
 verification** Phase 1 deferred, and it is what actually unblocks an admin doing Okta/Entra SCIM setup
 from the UI. When F7-1 and F7-2 land, Phase 1's manual gate is satisfied and its status can move to
-`done`.
+`done`. F7-1's root cause turned out to be a shared `CardHeader` primitive bug (see Verification),
+not the `ScimConfigCard` toggle wiring itself — so the toggle was never the problem; the header wrapper
+silently dropped it.
 
 ## Build gate
 - `npm run codegen` (no schema change expected; re-run if a new query/mutation is added).
@@ -129,3 +104,29 @@ from the UI. When F7-1 and F7-2 land, Phase 1's manual gate is satisfied and its
   token in the UI, copy the **base URL** (must be the controller origin, not `localhost:5173`), paste
   both into the IdP's generic SCIM app, flip the **enable toggle** and complete the break-glass reason —
   all from the Admin UI, with no GraphQL used to enable.
+
+## Verification (re-checked against the codebase, 2026-08-28)
+Core scope implemented and gated green:
+- **F7-1 root cause corrected.** The doc's "stale HMR vs. real render defect" open question is now
+  answered: it was a REAL bug. `admin/src/components/ui/card.tsx` `CardHeader` rendered only a gradient
+  `div` and dropped `props.children` (explicit JSX children override spread `children`). Fixed by adding
+  `{props.children}`. This also restores the headers of `ScimBaseUrlBox`, `ScimTokenPanel`, and
+  `Settings`, which shared the primitive. The "Toggle SCIM provisioning" Switch (`role="switch"`,
+  aria-label) and "SCIM configuration" header now render and survive a clean build.
+- **F7-2 fixed.** `ScimBaseUrlBox.tsx` now derives the origin from `import.meta.env.VITE_API_ORIGIN`
+  (controller/API host), falling back to `window.location.origin` only when SPA and controller share an
+  origin. Path remains `/scim/v2`.
+- **F7-4 added.** `admin/src/components/scim/ScimConfigCard.test.tsx` (4 cases) asserts header + switch
+  (enabled/disabled) + "SCIM disabled" pill are in the DOM. Mirrors `ConflictRow.test.tsx` Apollo mock.
+- **Out of core scope (left OPEN):** F7-5 (Login enterprise-provider buttons) and F7-8 (delete/disable
+  connection UI). Both require `mutations.graphql` additions + `npm run codegen` + UI wiring; the
+  controller backend already exposes the resolvers (`InitiateAuth(connectionID)`, `deleteIdpConnection`,
+  `setIdpConnectionStatus`).
+- **Gate results (this environment):** `npx eslint` on the 3 touched files → clean; `npx tsc -b` →
+  clean; `npx vitest run src/components/scim` → 3 files / 22 tests pass (incl. the 4 new F7-4 tests).
+  No live Postgres needed for the FE gate. The Phase-1 **manual** IdP gate (live Okta/Entra push) was
+  NOT re-run here (no live IdP/tunnel in this environment) — flagged, not assumed passed.
+- All implementation edits are UNCOMMITTED working-tree changes (per Sprint17 discipline: do not commit
+  implementation code unless explicitly told). Files touched: `admin/src/components/ui/card.tsx`,
+  `admin/src/components/scim/ScimBaseUrlBox.tsx`, `admin/src/components/scim/ScimConfigCard.test.tsx`,
+  and this phase doc.

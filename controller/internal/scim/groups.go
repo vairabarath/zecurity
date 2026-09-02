@@ -14,15 +14,15 @@ import (
 
 // groupRow is the minimal fields needed from the groups table for SCIM.
 type groupRow struct {
-	ID            string
-	WorkspaceID   string
-	Origin        string
-	ConnectionID  string
-	Name          string
-	ExternalID    string
+	ID             string
+	WorkspaceID    string
+	Origin         string
+	ConnectionID   string
+	Name           string
+	ExternalID     string
 	SyncInstanceID string
-	CreatedAt     string
-	UpdatedAt     string
+	CreatedAt      string
+	UpdatedAt      string
 }
 
 const (
@@ -59,6 +59,47 @@ type groupPatch struct {
 // members[value eq "user-id"] (case-insensitive on the path).
 var memberFilterRe = regexp.MustCompile(`^members\[value eq "([^"]*)"\]$`)
 
+// DeriveGroupExternalID builds a fallback Canonical Identity Key for a SCIM
+// group from its displayName, for IdPs that push groups without an externalId.
+//
+// Okta's "Push Groups" with push type "By name" sends only displayName — no
+// externalId — so without a fallback every push fails 400. This derives a
+// stable slug instead: lowercased, runs of non-alphanumerics collapsed to a
+// single hyphen, leading/trailing hyphens trimmed. Returns "" when nothing
+// usable remains, so the caller still fails closed.
+//
+// LIMITATION (deliberate, documented rather than hidden): this keys group
+// identity on a MUTABLE display name, which ADR-025 otherwise forbids for
+// canonical keys. Two consequences to be aware of:
+//
+//  1. Renaming a group at the IdP changes its derived key, so the next push
+//     looks like a different group — the original keeps its memberships and
+//     policy bindings while a new empty group appears.
+//  2. Names that normalise to the same slug ("Marketing Team" / "marketing
+//     team" / "Marketing-Team") collide against
+//     UNIQUE (workspace_id, connection_id, external_id) and return 409.
+//
+// It is only ever used when the IdP supplies no externalId. Any push that does
+// supply one (including Okta's Import Groups path) keeps the IdP's own
+// immutable identifier and is unaffected.
+func DeriveGroupExternalID(displayName string) string {
+	var b strings.Builder
+	lastHyphen := false
+	for _, r := range strings.ToLower(strings.TrimSpace(displayName)) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			lastHyphen = false
+		default:
+			if !lastHyphen && b.Len() > 0 {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
+}
+
 // ── DirectoryService group methods ───────────────────────────────────────────
 
 // CreateGroup creates a scim-origin group for the resolved scope. It opens a
@@ -67,7 +108,10 @@ var memberFilterRe = regexp.MustCompile(`^members\[value eq "([^"]*)"\]$`)
 // last_sync_at so Identity Health stays current.
 func (s *DirectoryService) CreateGroup(ctx context.Context, sc *scope, externalID, displayName string) (*groupRow, *SCIMError) {
 	if externalID == "" {
-		return nil, newSCIMError(400, "invalidValue", "externalId is required for scim groups")
+		externalID = DeriveGroupExternalID(displayName)
+		if externalID == "" {
+			return nil, newSCIMError(400, "invalidValue", "externalId is required for scim groups")
+		}
 	}
 	inst, err := s.EnsureSyncInstance(ctx, sc)
 	if err != nil {
@@ -597,12 +641,24 @@ func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
 func groupMemberValues(opType, path string, value any) ([]string, error) {
 	normed := strings.ToLower(strings.TrimSpace(path))
 
-	// No path: value may be a full resource object carrying a "members" key.
+	// No path: value may be a full resource object carrying a "members" key
+	// (e.g. {"op":"add","value":{"members":[{"value":"id"}]}}), a bare array
+	// of member objects directly (Okta's first-push shape:
+	// {"op":"add","value":[{"value":"id"}]}), or — as Okta also sends on a
+	// group metadata sync — a full resource object with NO members key
+	// ({"op":"replace","value":{"displayName":"hermes","id":"..."}}). The last
+	// case is a group-replace with no membership change and must be a no-op,
+	// not the "members path or value object" 400.
 	if normed == "" {
 		if obj, ok := value.(map[string]any); ok {
 			if mem, ok := obj["members"]; ok {
 				return groupMemberValues(opType, "members", mem)
 			}
+			// Resource object without a members key → no membership change.
+			return nil, nil
+		}
+		if arr, ok := value.([]any); ok {
+			return groupMemberValues(opType, "members", arr)
 		}
 		return nil, fmt.Errorf("group PATCH requires a members path or a members value object")
 	}

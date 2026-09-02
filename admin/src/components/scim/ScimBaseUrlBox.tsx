@@ -9,9 +9,19 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 // scoped to (workspace_id, connection_id) derived from the presented bearer
 // token, never from the URL. There is deliberately no per-connection path — the
 // token is what distinguishes connections.
+// The admin SPA and the controller API may be served from different origins
+// (e.g. SPA at an edge host, controller behind a tunnel). The SCIM base URL
+// must be the *controller's* publicly reachable origin — that is what Okta/
+// Entra/Entra/JumpCloud/Keycloak will call, not the admin app's origin.
+//
+// Source order: VITE_API_ORIGIN (controller/API origin, set in prod), else fall
+// back to window.location.origin, which is only correct when the SPA and the
+// controller share an origin (single-binary / dev). The path is always /scim/v2.
+const CONTROLLER_ORIGIN = import.meta.env.VITE_API_ORIGIN ?? window.location.origin
+
 export function ScimBaseUrlBox() {
   const [copied, setCopied] = useState(false)
-  const baseUrl = `${window.location.origin}/scim/v2`
+  const baseUrl = `${CONTROLLER_ORIGIN}/scim/v2`
 
   async function handleCopy() {
     try {

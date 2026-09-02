@@ -169,7 +169,7 @@ func (s *Store) scanConnection(row scannable) (*Connection, error) {
 func (s *Store) ListForWorkspace(ctx context.Context, tenantID string) ([]Connection, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+connColumns+` FROM identity_connections
-		 WHERE tenant_id IS NULL OR tenant_id = $1
+		 WHERE (tenant_id IS NULL OR tenant_id = $1) AND status != 'deleted'
 		 ORDER BY (tenant_id IS NOT NULL), display_name`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("query connections: %w", err)
@@ -484,7 +484,7 @@ func (s *Store) UpdateWorkspaceConnection(ctx context.Context, tenantID, id stri
 func (s *Store) ListWorkspaceConnections(ctx context.Context, tenantID string) ([]Connection, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+connColumns+` FROM identity_connections
-		 WHERE tenant_id = $1
+		 WHERE tenant_id = $1 AND status != 'deleted'
 		 ORDER BY display_name`, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("query workspace connections: %w", err)
