@@ -44,6 +44,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
+| [PENDING-17](PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (TPM/Secure Enclave) *(raised during PENDING-13 Track 3, 2026-08-27)* | identity/client | P2 | ADR-002, ADR-028 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.

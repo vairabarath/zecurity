@@ -291,6 +291,26 @@ pub fn save_rotated_tokens(
     Ok(())
 }
 
+/// Persists a renewed device cert after a successful RenewCert (Sprint 19
+/// Track 3 / PENDING-13, ADR-028 D1). Load -> mutate -> save, same idiom as
+/// save_rotated_tokens. Touches only certificate_pem/ca_cert_pem/
+/// cert_expires_at — private_key_pem is untouched because renewal reuses the
+/// existing key (that's the whole point of the fingerprint-pinning check on
+/// the controller side).
+pub fn save_renewed_cert(
+    workspace_slug: &str,
+    certificate_pem: String,
+    ca_cert_pem: String,
+    cert_expires_at: i64,
+) -> Result<()> {
+    let mut state = load_workspace_state(workspace_slug)?;
+    state.device.certificate_pem = certificate_pem;
+    state.device.ca_cert_pem = ca_cert_pem;
+    state.device.cert_expires_at = cert_expires_at;
+    save_workspace_state(workspace_slug, &state)?;
+    Ok(())
+}
+
 /// Sets the device_state marker (Sprint 19 Track 2 / PENDING-13) and wipes the
 /// on-disk cert + key material — both REVOKED and RE_ENROLL_REQUIRED mean the
 /// cert is dead server-side, so there is nothing to gain by keeping it on disk
