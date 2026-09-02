@@ -23,6 +23,14 @@ service ClientService {
   // Requires valid access_token in request (not in gRPC metadata).
   rpc EnrollDevice(EnrollDeviceRequest) returns (EnrollDeviceResponse);
 
+  // RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+  // proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+  // ADR-028). The CSR's public key must match the fingerprint pinned at
+  // EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+  // legacy device with no pinned fingerprint are all denied identically —
+  // callers must fall back to EnrollDevice, never retry RenewCert.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+
   // GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
   // Validates access_token and device_id; default-deny if either is invalid.
   rpc GetACLSnapshot(GetACLSnapshotRequest) returns (GetACLSnapshotResponse);
@@ -139,6 +147,23 @@ message EnrollDeviceResponse {
   string intermediate_ca_pem = 3;
   string spiffe_id           = 4;
   string device_id           = 5;
+}
+
+// ── RenewCert (Sprint 19 Track 3 / PENDING-13) ──────────────────────────────
+// Issues a fresh cert for an already-enrolled device. No spiffe_id/device_id
+// in the response — renewal never changes either; only the cert itself is new.
+
+message RenewCertRequest {
+  string access_token = 1;
+  string device_id    = 2;
+  string csr_pem      = 3;
+}
+
+message RenewCertResponse {
+  string certificate_pem     = 1;
+  string workspace_ca_pem    = 2;
+  string intermediate_ca_pem = 3;
+  int64  cert_expires_at     = 4; // unix seconds — mirrors client_devices.cert_not_after
 }
 
 // ── GetACLSnapshot ─────────────────────────────────────────────────────────
