@@ -15,6 +15,14 @@ tags: [pending, adr, operations, audit, siem, compliance]
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 > *(Current state below is from a presence/absence scan — confirm before scoping.)*
 
+> **Correction (2026-09-01, verified against source):** still **PENDING**, but the admin audit trail
+> described as missing below **now exists**: `controller/migrations/016_audit_logs.sql` and
+> `026_provider_audit_logs.sql`, written to across the identity/SCIM/provider paths (e.g.
+> `scim.user.conflict_approved`, `scim.mapping.break_glass_override`, `permission.grant`). What is
+> **entirely absent is the export half** — no syslog, webhook, S3 or SIEM sink anywhere in
+> `controller/`. Tamper-evidence (hash chaining / WORM) is also unaddressed. The remaining decision
+> is the export format and delivery, not whether to record.
+
 ## Context / Current State
 
 Per-access decisions exist (`ConnectorLog` carries dest/port/action/allow-deny/spiffe up the

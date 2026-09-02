@@ -168,6 +168,8 @@ query GetAllResources {
     groups {
       id
       name
+      origin
+      connectionId
     }
   }
 }
@@ -246,6 +248,9 @@ query GetUsers {
     email
     role
     createdAt
+    provider
+    provisioningOwner
+    provisionedBy
   }
 }
 
@@ -254,6 +259,8 @@ query GetGroups {
     id
     name
     description
+    origin
+    connectionId
     createdAt
     updatedAt
     members {
@@ -277,6 +284,8 @@ query GetGroup($id: ID!) {
     id
     name
     description
+    origin
+    connectionId
     createdAt
     updatedAt
     members {
@@ -360,5 +369,85 @@ query GetDevicePostureVisibility($profileId: ID!) {
       observedAt
       collectorError
     }
+  }
+}
+
+# --- SCIM / IdP connections (ADR-025 §3, Sprint 17 FE-1) --------------------
+# clientSecret is intentionally never selected — it is write-only server-side.
+# scimEnabledAllowed is deliberately NOT selected here: it lives only on
+# IdpTestResult, and pre-gating the enable toggle client-side would duplicate a
+# fail-closed server gate (ADR-025 §3.1). The server refuses; the UI reacts.
+query GetIdpConnections {
+  idpConnections {
+    id
+    protocol
+    provider
+    displayName
+    issuer
+    clientId
+    discoveryUrl
+    scopes
+    domainHint
+    status
+    managed
+    lastSyncAt
+    identityHealth
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+  }
+}
+
+query GetScimTokens($connectionId: ID!) {
+  scimTokens(connectionId: $connectionId) {
+    id
+    workspaceId
+    connectionId
+    label
+    createdBy
+    createdAt
+    lastUsedAt
+    expiresAt
+    revokedAt
+  }
+}
+
+# Static built-in provider presets. Data only — used to offer defaults and to
+# show what a connection's per-connection overrides deviate FROM.
+query GetScimProviderProfiles {
+  scimProviderProfiles {
+    key
+    displayName
+    defaultSubjectClaim
+    defaultScimIdentifier
+    supportsCreate
+    supportsDelete
+    supportsPatch
+    paginationOk
+    supportsProbeLifecycle
+    quirks
+  }
+}
+
+# Provisioning-conflicts queue for a connection (Sprint 17 FE-4, ADR-025 §4.1/§9).
+# ListConflicts returns every status newest-first (no server-side filter), so the
+# UI renders resolved rows (with their resolutionReason) alongside pending ones.
+query GetScimConflicts($connectionId: ID!) {
+  scimConflicts(connectionId: $connectionId) {
+    id
+    workspaceId
+    connectionId
+    userId
+    canonicalKey
+    scimExternalId
+    # Directory-claimed context so an admin sees WHO the conflict is about instead
+    # of a bare UUID. Null for deprovision/reactivate-raised conflicts and for
+    # rows written before the snapshot was captured — fall back to canonicalKey.
+    scimUsernameSnapshot
+    scimEmailSnapshot
+    status # pending | approved | rejected | expired (mutation CHECK; backend emits pending/approved/rejected only — expired is allowed but never written)
+    resolutionReason
+    createdAt
+    resolvedAt
   }
 }
