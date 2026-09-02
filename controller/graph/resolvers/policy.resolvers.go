@@ -11,6 +11,7 @@ import (
 	"fmt"
 
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
@@ -33,6 +34,20 @@ func (r *mutationResolver) CreateGroup(ctx context.Context, name string, descrip
 func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *string, description *string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
 
+	existing, err := r.PolicyStore.GetGroup(ctx, id)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("updateGroup: group not found")
+		}
+		return nil, fmt.Errorf("updateGroup: %w", err)
+	}
+	if existing.WorkspaceID != tc.TenantID {
+		return nil, fmt.Errorf("updateGroup: group not found")
+	}
+	if existing.Origin == "scim" {
+		return nil, apperr.UserErrorf("updateGroup: cannot edit a directory-managed (SCIM) group")
+	}
+
 	row, err := r.PolicyStore.UpdateGroup(ctx, id, name, description)
 	if err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
@@ -50,6 +65,20 @@ func (r *mutationResolver) UpdateGroup(ctx context.Context, id string, name *str
 func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	existing, err := r.PolicyStore.GetGroup(ctx, id)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return false, fmt.Errorf("deleteGroup: group not found")
+		}
+		return false, fmt.Errorf("deleteGroup: %w", err)
+	}
+	if existing.WorkspaceID != tc.TenantID {
+		return false, fmt.Errorf("deleteGroup: group not found")
+	}
+	if existing.Origin == "scim" {
+		return false, apperr.UserErrorf("deleteGroup: cannot delete a directory-managed (SCIM) group")
+	}
+
 	if err := r.PolicyStore.DeleteGroup(ctx, id); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {
 			return false, fmt.Errorf("deleteGroup: group not found")
@@ -66,6 +95,20 @@ func (r *mutationResolver) DeleteGroup(ctx context.Context, id string) (bool, er
 func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
 
+	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("addGroupMember: group not found")
+		}
+		return nil, fmt.Errorf("addGroupMember: %w", err)
+	}
+	if existing.WorkspaceID != tc.TenantID {
+		return nil, fmt.Errorf("addGroupMember: group not found")
+	}
+	if existing.Origin == "scim" {
+		return nil, apperr.UserErrorf("addGroupMember: cannot add members to a directory-managed (SCIM) group; membership is managed by the identity provider")
+	}
+
 	if err := r.PolicyStore.AddGroupMember(ctx, groupID, userID); err != nil {
 		return nil, fmt.Errorf("addGroupMember: %w", err)
 	}
@@ -78,6 +121,20 @@ func (r *mutationResolver) AddGroupMember(ctx context.Context, groupID string, u
 // RemoveGroupMember is the resolver for the removeGroupMember field.
 func (r *mutationResolver) RemoveGroupMember(ctx context.Context, groupID string, userID string) (*graph.Group, error) {
 	tc := tenant.MustGet(ctx)
+
+	existing, err := r.PolicyStore.GetGroup(ctx, groupID)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotFound) {
+			return nil, fmt.Errorf("removeGroupMember: group not found")
+		}
+		return nil, fmt.Errorf("removeGroupMember: %w", err)
+	}
+	if existing.WorkspaceID != tc.TenantID {
+		return nil, fmt.Errorf("removeGroupMember: group not found")
+	}
+	if existing.Origin == "scim" {
+		return nil, apperr.UserErrorf("removeGroupMember: cannot remove members from a directory-managed (SCIM) group; membership is managed by the identity provider")
+	}
 
 	if err := r.PolicyStore.RemoveGroupMember(ctx, groupID, userID); err != nil {
 		if errors.Is(err, policy.ErrNotFound) {

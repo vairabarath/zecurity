@@ -24,26 +24,35 @@ discussion — the "Options" and "Open Questions" are the point; the
 > product/ops items (04–14) are from a presence/absence scan and should be
 > confirmed before committing scope.
 
+> **Re-verified against the code 2026-09-01** (branch `feat/sprint17-scim`). Each row's status was
+> checked against source, not against this file's own history — several items had shipped while
+> their `status:` frontmatter still said `pending` (04, 05, 13). Per-item evidence is in a dated
+> "Correction" / "Verification note" callout at the top of each file. Scorecard: **7 done**
+> (01, 02, 03, 04, 07a, 08, 15) · **2 in progress** (05 — backend done, FE/conformance open;
+> 13 — Tracks 1 & 2 of 3) · **7 unbuilt** (06, 07b, 10, 11, 12, 14, 16; 10 and 11 hold partial
+> slices) · plus 09 (Option B shipped, Options A/C still an open decision) and 07 (vision, not a
+> build step).
+
 | # | Title | Domain | Priority | Related |
 |---|-------|--------|----------|---------|
 | PENDING-01 ✅ → [ADR-020](../Decisions/ADR-020-Authenticated-Relay-Provisioning.md) | Authenticated Relay Provisioning *(accepted, Sprint 12)* | security/relay | **P0** | ADR-014, Sprint 10.3 |
 | PENDING-02 ✅ → [ADR-027](../Decisions/ADR-027-Certificate-Revocation-Enforcement.md) | Certificate Revocation (CRL/OCSP) Enforcement *(accepted 2026-08-10)* | security | **P0** | ADR-014 |
 | ✅ [PENDING-03](PENDING-03-Decouple-Transport-From-ACL.md) | Decouple Transport from ACL (finish Track B) — implemented in Sprint 13 | relay | P1 | ADR-015/016/017/018 |
-| [PENDING-04](PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO | identity | P1 | ADR-005/006 |
-| [PENDING-05](PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) | identity | P2 | — |
-| [PENDING-06](PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication | identity | P2 | PENDING-04 |
+| ✅ [PENDING-04](PENDING-04-Multiple-IdPs-Enterprise-SSO.md) | Multiple IdPs & Enterprise SSO — implemented (OIDC per-workspace IdPs; **SAML not built**) | identity | P1 | ADR-023/024/026 |
+| 🚧 [PENDING-05](PENDING-05-Directory-Sync-SCIM.md) | Directory Sync (SCIM) — backend done in Sprint 17; **FE-7 wiring + conformance/interop outstanding** | identity | P2 | ADR-025 |
+| [PENDING-06](PENDING-06-MFA-Step-Up-Auth.md) | MFA & Step-Up Authentication — *unbuilt; only the `RequireBreakGlassMFA` no-op stub exists* | identity | P2 | PENDING-04 |
 | [PENDING-07](PENDING-07-Provider-Dashboard-Vision.md) | **Provider Dashboard — Vision** (functionality + phased roadmap) | operator | P1 | 07a, 07b |
 | PENDING-07a ✅ → [ADR-021](../Decisions/ADR-021-Provider-Identity-and-Authorization.md) | ↳ Provider Identity & Authorization tier *(accepted, Sprint 12)* | operator | P1 | 01, 04 |
 | [PENDING-07b](PENDING-07b-Provider-Console-Packaging.md) | ↳ Provider Console packaging (separate app vs shared; alpha = CLI) | operator | P1 | 07a |
 | ✅ [PENDING-08](PENDING-08-Device-Posture-Health.md) | Device Posture & Health Checks — implemented in Sprint 15 (manual/E2E pass outstanding) | zero-trust | P2 | — |
 | [PENDING-09](PENDING-09-Continuous-Authorization.md) | Continuous / Re-evaluated Authorization — *Option B (bounded) implemented in Sprint 15; full decision (A/C) still open* | zero-trust | P2 | ADR-001 |
-| [PENDING-10](PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health | operations | P1 | — |
-| [PENDING-11](PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export | operations | P2 | — |
-| [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region | operations | P2 | ADR-013 |
-| [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution *(proposed 2026-08-20)* | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
-| [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access | data-plane | P2 | — |
+| [PENDING-10](PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — *partial: reconcile-only `/metrics` + one `/health`; no tracing* | operations | P1 | — |
+| [PENDING-11](PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — *partial: audit tables exist and are written; **no export sink*** | operations | P2 | — |
+| [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt* | operations | P2 | ADR-013 |
+| ✅ [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **all 3 tracks done (Sprint 19)** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
+| [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access — *unbuilt (no `fqdn` code in the repo)* | data-plane | P2 | — |
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
-| [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding | policy | P1 | PENDING-08, PENDING-09 |
+| [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — *unbuilt; today's `resource_profile_bindings` is the direct binding this replaces* | policy | P1 | PENDING-08, PENDING-09 |
 | [PENDING-17](PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (TPM/Secure Enclave) *(raised during PENDING-13 Track 3, 2026-08-27)* | identity/client | P2 | ADR-002, ADR-028 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·

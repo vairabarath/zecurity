@@ -4,12 +4,14 @@ import { useQuery } from "@apollo/client/react";
 import { AlertCircle, Plus, Users, Wifi, WifiOff } from "lucide-react";
 import {
   GetAllResourcesDocument,
+  GetIdpConnectionsDocument,
   GetRemoteNetworksDocument,
   ShieldStatus,
 } from "@/generated/graphql";
 import { Button } from "@/components/ui/button";
 import { CreateResourceModal } from "@/components/CreateResourceModal";
 import { Skeleton } from "@/components/ui/skeleton";
+import { GroupOriginLabel } from "@/components/groups/GroupOriginLabel";
 import {
   EmptyState,
   ErrorState,
@@ -75,6 +77,15 @@ export default function Resources() {
       fetchPolicy: "cache-and-network",
       pollInterval: 30000,
     },
+  );
+
+  // Resolve SCIM connectionIds → display names so group pills render
+  // "Engineering · SCIM (Okta)" (reuses the existing GetIdpConnections).
+  const { data: connectionsData } = useQuery(GetIdpConnectionsDocument, {
+    fetchPolicy: "cache-and-network",
+  });
+  const connectionNameById = new Map<string, string>(
+    (connectionsData?.idpConnections ?? []).map((c) => [c.id, c.displayName]),
   );
 
   const resources = useMemo(() => data?.allResources ?? [], [data]);
@@ -248,7 +259,14 @@ export default function Resources() {
                             to={`/groups/${g.id}`}
                             className="inline-flex items-center gap-1 rounded-full border border-[oklch(0.85_0.13_80/0.28)] bg-[oklch(0.85_0.13_80/0.10)] px-2 py-0.5 text-[11px] font-semibold text-[oklch(0.85_0.13_80)] transition hover:opacity-80"
                           >
-                            {g.name}
+                            <GroupOriginLabel
+                              group={g}
+                              connectionName={
+                                g.connectionId
+                                  ? connectionNameById.get(g.connectionId)
+                                  : undefined
+                              }
+                            />
                           </Link>
                         ))
                       )}

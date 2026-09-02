@@ -56,7 +56,13 @@ func ProviderFor(conn *idp.Connection, google GoogleCreds) (providers.IdentityPr
 	}
 	switch conn.Protocol {
 	case "oidc", "":
-		return providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, conn.ClientSecret, conn.DiscoveryURL, conn.Scopes), nil
+		p := providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, conn.ClientSecret, conn.DiscoveryURL, conn.Scopes)
+		// ADR-025 §3.1: honor the connection's configured subject claim so
+		// the OIDC login path derives AuthenticationContext.Subject from it
+		// (empty ⇒ legacy default "sub"). The SCIM-side scimIdentifier is a
+		// separate, symmetric extractor in internal/scim.
+		p.SetSubjectClaim(conn.SubjectClaim)
+		return p, nil
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %q", conn.Protocol)
 	}

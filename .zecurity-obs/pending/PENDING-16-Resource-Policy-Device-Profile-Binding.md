@@ -15,6 +15,15 @@ tags: [pending, adr, policy, resource-policy, device-profile, posture]
 
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 
+> **Verification note (2026-09-01):** still **PENDING** — confirmed unbuilt. `resource_profile_bindings`
+> (`controller/migrations/030_device_posture.sql:106`), enforced in
+> `controller/internal/policy/compiler.go` via `applyPosture` and exposed as
+> `bindResourceToProfile` / `unbindResourceFromProfile` in `controller/graph/posture.graphqls`, is
+> the **direct Resource ↔ Device Profile binding this ADR proposes to replace** — it is the current
+> state, not the deliverable. There is no intermediate Resource Policy layer: `grep -r
+> 'resource_policies\|ResourcePolicy' controller/` returns nothing, and `posture.Profile` still
+> carries the audit/enforce `Mode` this ADR says should move to the policy layer.
+
 ## Context / Current State
 
 The Zecurity posture-check system is now capable of collecting device posture, evaluating posture requirements, and propagating authorization changes toward the connector/data plane.

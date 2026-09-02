@@ -4,7 +4,7 @@ member: M1
 sprint: 17
 phase: 6
 title: Users Deprovision + SideEffectSink → durable outbox
-status: planned
+status: done
 depends_on: [5]
 tags: [go, identity, scim, deprovision, revocation, sideeffectsink, pending-05, pending-15]
 ---
@@ -22,24 +22,30 @@ device-trust events by enqueuing them into the merged outbox inside the same ide
 ## Files
 | File | Change |
 | --- | --- |
-| `controller/internal/identity/side_effect_sink.go` | **new** — `SideEffectSink` interface + `DeviceTrustEvent` type |
-| `controller/internal/scim/side_effect_sink_outbox.go` | **new** — `DurableOutboxSink` adapts `SideEffectSink` → `outbox.Enqueue` |
-| `controller/internal/scim/users.go` | deprovision / reactivate handlers |
-| `controller/cmd/server/main.go` | construct `DurableOutboxSink` from the existing `outbox.Outbox`; inject into the SCIM engine |
+| `controller/internal/identity/device_trust.go` | **consumed** — contract merged from `feat/identity-device-trust-contract` (NOT redefined; `SideEffectSink`, `DeviceTrustEvent`, constructors live here) |
+| `controller/internal/scim/side_effect_sink_outbox.go` | **new** — `DurableOutboxSink` implements `identity.SideEffectSink` via `outbox.Enqueue` + `NewDeviceTrustRevokeEvent`/`NewDeviceTrustReEnrollmentRequired` |
+| `controller/internal/scim/directory_service.go` | **edit** — `Deprovision`/`Reactivate` (tx: status + `Revoker.BumpGenerationTx` + `sink.Enqueue`); ctor takes `sink` + `revoker` |
+| `controller/internal/scim/users.go` | **edit** — `DELETE /Users` (soft-delete) + `active=false→Deprovision` / `active=true→Reactivate` dispatch; drop `handleDeleteNotImplemented` |
+| `controller/internal/identity/revocation.go` | **edit** — add `BumpGenerationTx` (tx-aware generation bump) |
+| `controller/cmd/server/main.go` | **edit** — wire `scim.NewDurableOutboxSink(outboxStore)` + `identityRevoker` into `NewDirectoryService` |
+| `controller/internal/scim/deprovision_integration_test.go` | **new** — DB tests (suspend/delete/reactivate + same-tx enqueue + abort-tx invariant) |
 
-## Steps
-- [ ] Define `SideEffectSink { Enqueue(ctx, tx pgx.Tx, evt DeviceTrustEvent) error }` + `DeviceTrustEvent{WorkspaceID, UserID, Type, Reason, CorrelationID}`. The interface lives in `identity` so `scim`/`identity` never import `outbox` directly and unit tests can inject a fake.
-- [ ] `DurableOutboxSink` (production, the only impl): marshal `DeviceTrustEvent` → `json.RawMessage` and call the merged `outbox.Enqueue(ctx, tx, outbox.Event{EventType: evt.Type, WorkspaceID: evt.WorkspaceID, UserID: &evt.UserID, CorrelationID: evt.CorrelationID, Payload: payload})`. Enqueue runs in the **caller's tx**, so it commits atomically with the identity mutation.
-- [ ] Deprovision (one tx): `active=false`→suspend / `DELETE`→soft-delete + `identity_generation` bump + `Revoker` session kill + audit + `policy.Notifier` + `SideEffectSink.Enqueue(device.trust.revoke.requested)`.
-- [ ] Reactivate: `active=true` → enqueue `device.trust.re_enrollment_required`; new sessions only. Repeated DELETE idempotent.
-- [ ] Event `Type` strings match ADR-025 §5.1 exactly (`device.trust.revoke.requested`, `device.trust.re_enrollment_required`) — PENDING-13 registers the outbox handler that executes them. **SCIM only enqueues; it never revokes a device synchronously.**
+## Steps (all complete)
+- [x] Consume the merged `identity.SideEffectSink` + `DeviceTrustEvent` contract (single source of truth; the spec's `identity/side_effect_sink.go` plan is superseded by the merged `device_trust.go` — `Type` folded into `outbox.EventType`).
+- [x] `DurableOutboxSink` (the only impl): maps a `DeviceTrustEvent` → `outbox.Enqueue(ctx, tx, identity.NewDeviceTrustRevokeEvent(...))` / `...ReEnrollmentRequired(...)`. Enqueue runs in the **caller's tx** → commits atomically with the identity mutation.
+- [x] Deprovision (one tx): `active=false`→`suspended` / `DELETE`→`deleted` (soft-delete tombstone) + `identity_generation` bump (`Revoker.BumpGenerationTx`) + audit + `policy.Notifier` + `SideEffectSink.Enqueue(device.trust.revoke.requested)`. Unscoped/non-scim-owned → 409.
+- [x] Reactivate: `active=true` → `status='active'` + enqueue `device.trust.re_enrollment_required`; **no generation bump** (devices were already revoked on suspend; re-enroll via login per ADR-028).
+- [x] Event `Type` strings match ADR-025 §5.1 exactly (`device.trust.revoke.requested`, `device.trust.re_enrollment_required`). SCIM only enqueues; never revokes a device synchronously.
 
-## Rules
-- Identity effects (suspend/delete + generation + session kill + ACL invalidation) must be fully correct and tested **without** relying on the outbox handler existing.
-- The enqueue is transactional but delivery/execution is asynchronous (outbox → PENDING-13). Never present device revocation as synchronously guaranteed in the SCIM response.
-- Downstream (device) failure must never roll back the committed identity mutation — that is exactly why the outbox exists.
+## Rules honored
+- Identity effects (suspend/delete + generation + session kill + ACL invalidation) are fully correct and tested **without** relying on the outbox handler existing (verified with a fake sink).
+- The enqueue is transactional but delivery/execution is asynchronous (outbox → PENDING-13). A forced enqueue error **rolls back the whole tx** (user stays active, generation unbumped) — this is the integration-test invariant, the opposite of "device failure rolls back identity."
+- Downstream (device) failure must never roll back the committed identity mutation — exactly why the outbox exists.
 
 ## Build gate
-`go build ./...` + tests:
-- deprovision identity effects (suspend/delete + generation + session kill) with a **fake sink**, no DB outbox needed;
-- an integration test asserting a `outbox_events` row is written **in the same transaction** as the deprovision, and that a forced enqueue error aborts the whole tx (identity not mutated).
+`go build ./...` + tests: deprovision identity effects (suspend/delete + generation + session kill) with a **fake sink**; integration asserting an `outbox_events` row is written **in the same transaction**; forced-enqueue-error aborts the whole tx. All green against live Postgres (`PKI_TEST_DATABASE_URL`).
+
+## Notes / deferrals (honest)
+- We ENQUEUE only; the PENDING-13 consumer (Track 1) is a separate branch. Not built here (per sprint boundary).
+- Phase 8 `scim_identity_conflicts` row on collision: still only 409 (unchanged from Phase 5).
+- The `name`/profile column gap (Phase 5) is unaffected.

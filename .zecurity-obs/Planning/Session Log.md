@@ -10,6 +10,33 @@ tags:
 
 ---
 
+## 2026-08-26 — Claude Code (Opus 5) — Sprint 17 audit, tenant-isolation fix, GraphQL exposure
+
+**What was done:**
+- Reviewed the five `Member1-Frontend/Phase*.md` specs against the actual schema. All three "blocked" claims verified accurate; corrected two that were wrong: FE-2 is not standalone-buildable (both files it edits are created by FE-1, and no IdP UI exists in `admin/src/pages/` at all), and FE-4's "no backend gap" understated three real gaps.
+- Audited all ten ADR-025 acceptance criteria against source (previously all unchecked, which read as "unverified" but was being treated as passing). Result: 5 met, 1 partial, 3 not met, 1 not run.
+- **Criterion 9 — tenant isolation, found and fixed.** The deprovision ownership guard was an unscoped `SELECT provisioning_owner FROM users WHERE id = $1`; the scoped status `UPDATE` then matched 0 rows without erroring, and `Revoker.bump` had no tenant predicate at all. A valid SCIM token for workspace A could bump a workspace B user's `identity_generation` and enqueue a device-trust revoke naming the wrong workspace. Guard scoped, 0-row updates → 404, tenant predicate added.
+- Fixed a regression in the in-flight scoped guard: an INNER JOIN on `external_identities` collapsed the JIT/manual collision into a 404, swallowing the `409 identity_conflict` + pending record ADR-025 §4.1 requires. `scopedProvisioningOwner` now reports existence and connection-linkage separately.
+- Landed all nine backend GraphQL follow-ups: connection mapping fields, `updateScimConfig`, `scimProviderProfiles`, `User.provisionedBy`/`provisioningOwner`, `Group.origin`/`externalId`/`connectionId`, `ScimConflict` snapshots (write path included — the columns existed but `ensurePendingConflict` never populated them), `resolution_reason` in migration `034`, `ErrorPresenter` + `apperr` conversions, and the stale `ScimConflict.status` comment.
+- Committed as `b5c1bce` (backend) and `12e6b61` (docs). Verified against live Postgres throughout — `go build`, `go vet`, and the full `internal/...` + `graph/...` suite; `make gqlgen` + `npm run codegen` + admin build green.
+
+**Key decisions:**
+- `updateScimConfig` is deliberately **not** a free `scim_enabled` setter. Disable is always allowed; enable runs the fail-closed `MappingGate`. ADR-025 §3.2 says an ordinary admin confirmation cannot bypass failed mapping validation — a plain boolean behind `@hasRole(ADMIN)` would be exactly that bypass and would make `enableScimBreakGlass` decorative.
+- Editing `subjectClaim`/`scimIdentifier` **force-disables SCIM in the same write**. `resolveScope` re-reads both extractors on every push, so a changed mapping would otherwise apply to the next directory write and silently split or merge accounts (§3.1). Chose force-disable over refusing the edit: fail-closed, and it doesn't strand an admin whose mapping is wrong.
+- `ErrorPresenter` surfaces `serr.Detail`, never `err.Error()` — `Detail` is auditable per construction site, whereas `err.Error()` is whatever intermediate wrappers concatenated. The status set is an explicit **whitelist (400/403/404/409), not a 4xx range**: `Status` is a bare int, so a range would also surface a zero-valued `SCIMError`, and 401 must stay masked to prevent token enumeration. Verified every error-derived `Detail` on the GraphQL-reachable path is a 5xx.
+- A tenant mismatch now reports "not found" rather than "does not belong to this workspace". These messages became client-visible with the `apperr` conversion, so distinguishing them would be an enumeration oracle.
+- `resolution_reason` went into migration `034` rather than a new `036` (per request), with the column in the `CREATE TABLE` **and** a matching `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` — `CREATE TABLE IF NOT EXISTS` is a no-op where the table already exists, so the ALTER is what upgrades databases that already ran 034. Both paths verified against Postgres.
+- Reopen clears `resolution_reason`/`resolved_at`/`resolved_by`: a row back in `pending` has no resolution to describe. The reopen reason is not lost — `scim.user.conflict_reopened` carries it in the same transaction.
+
+**What's next:**
+- **Criterion 5 is still not met and is the sprint's real blocker.** `MappingGateResult.WithRoundTrip` has no production caller — the probe-user round-trip M1-4b deferred to Phase 5 was never wired. The only non-test `MappingGate.Evaluate` call site (`TestIdpConnection`) never attaches a round-trip result, so the mapping can never become `proven`, `scimEnabledAllowed` is permanently false, and break-glass is the **only** route to enabling SCIM — inverting §3.1/§3.2's intent.
+- Criterion 10 not run: no SCIM conformance suite exists anywhere in the repo. Live Okta/Entra interop still gated on tenant access.
+- Frontend is unblocked (FE-1/3/4/5). Start with FE-1's page shells + connection queries — FE-2 has nothing to mount until they land.
+- Carried gaps unchanged: `users` has no `name`/`title`/`department` columns; the `unmanaged`→`scim` re-enroll verb is still deferred.
+- Note for future sessions: `go generate ./graph/...` (per CLAUDE.md) is a **no-op** — there are no `go:generate` directives. Use `make gqlgen` from the repo root.
+
+---
+
 ## 2026-08-14 — Kilo — Sprint 18 Phase 10 Verification
 
 **What was done:**
