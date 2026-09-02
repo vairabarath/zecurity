@@ -1,4 +1,4 @@
--- 035_client_device_pubkey_fingerprint.sql
+-- 036_client_device_pubkey_fingerprint.sql
 -- Sprint 19 Track 3 (PENDING-13, ADR-028 D1/D4): pin the device's public key
 -- at enrollment so RenewCert can prove a renewal request actually comes from
 -- the device that holds that key, not just someone holding a stolen
@@ -9,9 +9,10 @@
 -- fingerprint on file. Track 3 treats that as "must re-enroll" rather than
 -- trust-on-first-use (D-A) — deliberately no migration-time fallback value.
 --
--- Migration number coordination: same caveat as 034_device_status.sql —
--- confirm this number is still free relative to any other branch at
--- integration/rebase time.
+-- Renumbered 035 -> 036 at integration time: feat/sprint17-scim (merged via
+-- PR #80) claimed both 034_scim_directory_sync.sql and
+-- 035_groups_sync_instance.sql first. No schema overlap either way — those
+-- touch identity_connections/groups/scim_sync_instances, never client_devices.
 
 ALTER TABLE client_devices
     ADD COLUMN public_key_fingerprint TEXT;
