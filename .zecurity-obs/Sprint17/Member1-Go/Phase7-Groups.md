@@ -75,3 +75,78 @@ Sync directory groups + membership so the policy engine reads directory-accurate
   available in this environment (`PKI_TEST_DATABASE_URL` unset, `pg_isready` down). The Bug #2
   tests exist and build/vet pass, but live-DB test execution was not independently verified in
   this pass — flagged, not assumed green.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: Okta group member removals silently never applied (2026-09-03)
+
+**Issue:** Removing a user from a group in the Okta dashboard did not remove them
+from the group in Zecurity — the user stayed a member indefinitely. Reported for
+"any change to group members".
+
+**Root cause:** `internal/scim/groups.go`, `groupMemberValues()`. The function
+lowercased the whole PATCH `path` and then ran the member-filter regex against
+that lowercased string:
+
+```go
+normed := strings.ToLower(strings.TrimSpace(path))
+...
+if m := memberFilterRe.FindStringSubmatch(normed); m != nil {
+    return []string{m[1]}, nil   // ← id has been case-folded
+}
+```
+
+Okta sends a member removal as a targeted filter path —
+`{"op":"remove","path":"members[value eq \"00u16w7qu5saDn60H698\"]"}` — and Okta
+user ids are **mixed case**. The captured id came back lowercased
+(`00u16w7qu5sadn60h698`) and `userIDsByExternalOrUUID` compares it byte-for-byte
+against `external_identities.subject` (`AND ei.subject = $3`). It matched zero
+rows, the UUID fallback rejected it as malformed, so `PatchGroup` collected it
+into `unknowns` and returned **404 `unknown members: …`**. No membership delta was
+ever computed, and Okta's push task failed.
+
+Lowercasing was intended only to make the *attribute name* case-insensitive; it
+also destroyed the *value*, which is an opaque provider identifier.
+
+**Why the existing tests missed it:** the only coverage
+(`groups_integration_test.go:441`) removes the member id `"h-1"`, which is already
+lowercase, so case folding was invisible.
+
+**Fix applied (`internal/scim/groups.go`):**
+```go
+// BEFORE:
+var memberFilterRe = regexp.MustCompile(`^members\[value eq "([^"]*)"\]$`)
+normed := strings.ToLower(strings.TrimSpace(path))
+... FindStringSubmatch(normed)
+
+// AFTER: attribute name case-insensitive + whitespace-tolerant via the regex,
+// matched against the ORIGINAL-CASE path so the captured value survives intact.
+var memberFilterRe = regexp.MustCompile(`(?i)^members\[\s*value\s+eq\s+"([^"]*)"\s*\]$`)
+trimmed := strings.TrimSpace(path)   // used for the filter match
+normed  := strings.ToLower(trimmed)  // used ONLY for path keyword comparison
+... FindStringSubmatch(trimmed)
+```
+`normed` is still used for the `""` / `"members"` keyword comparisons, where
+case-insensitivity is correct and no value is extracted.
+
+**Scope:** only the targeted-removal filter path was affected. Adds and
+replaces carry member ids in the `value` array (`{"value":[{"value":"00u…"}]}`),
+never in the path, so their case was always preserved.
+
+**Not changed:** `ei.subject = $3` stays a case-SENSITIVE comparison. The subject
+is an opaque per-issuer identifier (ADR-024); case-folding it in SQL would be the
+same class of mistake one layer down, and would risk collapsing two distinct
+provider identities.
+
+**Tests:** new `internal/scim/group_patch_path_test.go` —
+- `TestGroupMemberValues_FilterPathPreservesValueCase` (real Okta id shape)
+- `TestGroupMemberValues_FilterPathAttributeCaseAndSpacing` (`Members[Value eq …]`,
+  extra whitespace)
+- `TestGroupMemberValues_FilterPathRejectedForNonRemove` (add/replace still refused)
+- `TestPatchGroupFromOps_OktaRemoveShapePreservesCase` (through the Operations parser)
+
+Verified these FAIL on the unfixed tree (`got [00u16w7qu5sadn60h698] want
+[00u16w7qu5saDn60H698]`) and pass after. `go build ./...` clean;
+`go test ./internal/... ./graph/...` all green.
