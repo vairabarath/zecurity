@@ -19,6 +19,18 @@ query LookupWorkspacesByEmail($email: String!) {
   }
 }
 
+# Public login discovery: fetch the IdP connections configured for the workspace
+# identified by slug. Used by the public Login page to render explicit provider
+# choices. Only the fields required for selection are requested.
+query LookupIdpConnections($workspaceSlug: String!) {
+  lookupIdpConnections(workspaceSlug: $workspaceSlug) {
+    id
+    provider
+    displayName
+    tier
+  }
+}
+
 query Me {
   me {
     id

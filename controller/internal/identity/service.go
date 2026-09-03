@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 
@@ -51,6 +52,12 @@ func NewService(pool *pgxpool.Pool, linker *Linker, publisher EventPublisher) *S
 // switch point already validated the token against it). workspaceName is the
 // display name for a brand-new workspace on first-time signup (else "").
 //
+// connTenantID is the workspace owning the connection — set for an ENTERPRISE
+// connection, nil for the shared platform tier. It is what stops an enterprise
+// login from self-provisioning a workspace; see ProvisionInput.ConnectionTenantID.
+// A first-seen identity on an enterprise connection that has no invite is
+// refused with ErrNotInvited rather than provisioned.
+//
 // Web/platform login is not workspace-scoped, so resolution passes tenantID ""
 // and takes the stable first match for a shared platform IdP — mirroring the
 // pre-Phase-5 behavior. Fails closed: a resolved-but-inactive user is rejected.
@@ -58,6 +65,7 @@ func (s *Service) Authenticate(
 	ctx context.Context,
 	authCtx *providers.AuthenticationContext,
 	connectionID, workspaceName string,
+	connTenantID *string,
 ) (*Principal, error) {
 	core, found, err := s.resolver.Resolve(ctx, connectionID, authCtx.Subject, "")
 	if err != nil {
@@ -78,15 +86,22 @@ func (s *Service) Authenticate(
 		name = authCtx.Email
 	}
 	created, err := s.linker.Link(ctx, ProvisionInput{
-		Email:         authCtx.Email,
-		Provider:      authCtx.Provider,
-		Subject:       authCtx.Subject,
-		Name:          name,
-		ConnectionID:  connectionID,
-		Issuer:        authCtx.Issuer,
-		WorkspaceName: workspaceName,
+		Email:              authCtx.Email,
+		Provider:           authCtx.Provider,
+		Subject:            authCtx.Subject,
+		Name:               name,
+		ConnectionID:       connectionID,
+		Issuer:             authCtx.Issuer,
+		WorkspaceName:      workspaceName,
+		ConnectionTenantID: connTenantID,
 	})
 	if err != nil {
+		// Not an internal failure: the workspace simply has not granted this
+		// proven identity access. Pass it through for the caller to map to a
+		// user-facing reason.
+		if errors.Is(err, ErrNotInvited) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("link identity: %w", err)
 	}
 

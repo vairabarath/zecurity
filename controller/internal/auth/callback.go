@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 )
 
@@ -94,8 +95,18 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// lifecycle-gate → (link/JIT-create) → Principal. The identity anchor is
 		// Subject (never email); pkce.WorkspaceName names a brand-new workspace on
 		// first-time signup. Fails closed on an inactive/rejected user.
-		principal, err := s.identitySvc.Authenticate(ctx, authCtx, conn.ID, pkce.WorkspaceName)
+		// conn.TenantID distinguishes the tiers: non-nil means an ENTERPRISE
+		// connection, where a first-seen identity must NOT self-provision a
+		// workspace (see identity.ProvisionInput.ConnectionTenantID).
+		principal, err := s.identitySvc.Authenticate(ctx, authCtx, conn.ID, pkce.WorkspaceName, conn.TenantID)
 		if err != nil {
+			// The IdP proved who they are; this workspace just has not granted
+			// them access. That is a distinct, actionable outcome for the user —
+			// not a generic auth failure.
+			if errors.Is(err, identity.ErrNotInvited) {
+				fail("not_invited")
+				return
+			}
 			fail("authentication_failed")
 			return
 		}

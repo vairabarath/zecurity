@@ -217,7 +217,7 @@ which registers the handler that executes device/cert revocation.
 - [ ] **FE-3** Directory-owned fields read-only ("Managed by Google Workspace / Microsoft Entra") — [[Sprint17/Member1-Frontend/Phase3-Directory-Owned-Readonly]] · *blocked: backend `User` provisioning-source gap*.
 - [ ] **FE-4** Provisioning-Conflicts queue (Accept-Link / Reject / Reopen) — [[Sprint17/Member1-Frontend/Phase4-Provisioning-Conflicts-Queue]] · *buildable now (standalone page)*. **Three known data gaps**, see the phase file: (a) `scim_username_snapshot`/`scim_email_snapshot` exist in migration 034 but are **not exposed on GraphQL `ScimConflict`**, so rows render raw UUIDs; (b) `resolutionReason` is exposed but has no column → always null (M1-8 known gap); (c) `ErrorPresenter` exists (`controller/graph/resolvers/presenter.go`, wired at `controller/cmd/server/main.go:317`) and is fail-closed — only `*apperr.UserError`/`*gqlerror.Error` reach the client verbatim — but no SCIM resolver returns `apperr` (`grep -c apperr` on `idp.resolvers.go`/`scim_helpers.go` is 0), so `AcceptScimConflict`'s `fmt.Errorf("acceptScimConflict: %w", serr)` break-glass `403` is masked to `message: "an unexpected error occurred"` + `extensions.code="INTERNAL"` and is indistinguishable from any other error; every SCIM mutation error (conflict not found, invalid transition, missing reason, connection not found) is masked the same way, so this also blocks FE-1's token/enable flows, not just FE-4.
 - [ ] **FE-5** Origin-labelled groups (`Engineering · SCIM` / `· Local` / `· System`) — never display-name alone — [[Sprint17/Member1-Frontend/Phase5-Origin-Labelled-Groups]] · *blocked: backend `Group.origin` gap*.
-- [ ] **FE-7** SCIM config UI — missing fields / manual-verification fixes (enable toggle not rendering in `ScimConfigCard`; `ScimBaseUrlBox` shows the SPA origin `localhost:5173` instead of the controller origin) — [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] · *found 2026-08-28 while running the Okta→Zecurity SCIM manual gate that Phase 1 deferred; backend (`enableScimBreakGlass`/token mint) confirmed working over GraphQL. Closes Phase 1's `implemented-unverified` manual gate.*
+- [ ] **FE-7** (F7-5 done 2026-09-02, extended 2026-09-03 with the platform/`bootstrap` tier + `platform_login_enabled` and an "Other sign-in options" disclosure; F7-8 still open) SCIM config UI — missing fields / manual-verification fixes (enable toggle not rendering in `ScimConfigCard`; `ScimBaseUrlBox` shows the SPA origin `localhost:5173` instead of the controller origin) — [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] · *found 2026-08-28 while running the Okta→Zecurity SCIM manual gate that Phase 1 deferred; backend (`enableScimBreakGlass`/token mint) confirmed working over GraphQL. Closes Phase 1's `implemented-unverified` manual gate.*
 
 ### Backend GraphQL follow-up required to unblock the frontend
 
@@ -251,6 +251,67 @@ This is the critical path for FE-1/3/5 and for FE-4's usability.
 - [x] Add `scim_identity_conflicts.resolution_reason` (folded into migration `034`, not a new file), so the exposed `ScimConflict.resolutionReason` stops being permanently null (M1-8 known gap). → **FE-4**
 - [x] Have SCIM resolvers return `apperr.UserError` for user-actionable failures and extend the existing `ErrorPresenter` (`controller/graph/resolvers/presenter.go`, wired at `controller/cmd/server/main.go:317`) to surface `scim.SCIMError.Status`/`ScimType` in `extensions` — today `AcceptScimConflict` wraps via `fmt.Errorf("acceptScimConflict: %w", serr)` and with no `apperr` in SCIM resolvers the fail-closed presenter masks it to `message:"an unexpected error occurred"` + `code:"INTERNAL"`. → **FE-4** (also unblocks FE-1 — all SCIM mutation errors are masked the same way: token mint/enable, conflict not found, invalid transition, missing reason, connection not found).
 - [x] Fix the stale comment on `controller/graph/idp.graphqls` (~line 101): `# pending | linked | rejected` should be `# pending | approved | rejected | expired`, matching `internal/scim/conflict.go:44` and migration 034's CHECK constraint.
+
+## Post-Sprint Fixes
+
+### Fix: F7-5 follow-up — login discovery dropped the platform (Google) tier (2026-09-03)
+**Issue:** With Okta configured, `Login.tsx` showed ONLY Okta — no way to reach the shared platform
+(Google) path, and `platform_login_enabled` had no effect on the login page.
+
+**Root cause:** two public discovery paths disagreed. The pre-existing REST endpoint
+`GET /workspaces/{slug}/auth` (ADR-024 §0) uses `ListForWorkspace`
+(`tenant_id IS NULL OR tenant_id = $1`) and honors `platform_login_enabled`; F7-5's
+`lookupIdpConnections` used `ListWorkspaceConnections` (`tenant_id = $1`), which can never return the
+platform connection (seeded `tenant_id = NULL` by migration 031), and never read the toggle.
+
+**Fix applied:** `LookupIdpConnections` now uses `ListForWorkspace` + `PlatformLoginEnabled`, and
+`PublicIdpConnection` gained `tier: String!` (`"enterprise" | "bootstrap"`); enterprise ordered first.
+`Login.tsx` keys the Google auto-fallback off the ENTERPRISE subset being empty (not the whole list)
+and renders the platform option behind an "Other sign-in options" disclosure.
+
+**Note on the requested "admin-only" gate:** not implementable — discovery runs pre-JWT, so the server
+cannot know the visitor's identity, and an unauthenticated admin check is an enumeration oracle. It is
+also unnecessary: per `bootstrap.Provision`, a platform login by an unknown identity provisions a NEW
+workspace rather than joining this one. The disclosure addresses the real (UX) hazard instead.
+
+**Also fixed:** the F7-5 integration harness leaked one scratch database per test (`DROP DATABASE`
+issued on a pool connected to that same database, error discarded) — 32 had accumulated. Teardown now
+closes the pool first and drops via a separate admin connection.
+
+Details + the `gqlgen`/`go generate` command corrections:
+[[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] → "Post-Phase Fixes".
+
+### Fix: F7-5 — dynamic IdP selection on the public Login page (2026-09-02)
+**Issue:** `admin/src/pages/Login.tsx` hardcoded `provider: 'google'` and never passed
+`connectionId`, so a workspace with a configured Okta/Entra connection had no way to log in through
+it. `idpConnections` is ADMIN-only and the login page has no JWT.
+
+**Fix applied:**
+- New PUBLIC query `lookupIdpConnections(workspaceSlug: String!): [PublicIdpConnection!]!` in
+  `controller/graph/idp.graphqls` + resolver in `graph/resolvers/idp.resolvers.go`. **Also added to
+  `publicRootFields` in `controller/cmd/server/main.go`** — omitting `@hasRole` is not what makes a
+  field public here; `routeGraphQL`/`requestSelectsOnlyPublicFields` is fail-closed against that
+  allowlist, so without this line every login-page call would have been rejected `UNAUTHORIZED` in
+  production while passing every resolver test. Scoping is
+  derived from the slug (`IdpStore.WorkspaceIDBySlug`), reuses `ListWorkspaceConnections`, filters to
+  `status = 'active'`, and returns a 3-field projection. `idpConnections` stays `@hasRole([ADMIN])`.
+- `Login.tsx` renders one button per connection (label = `displayName`, falling back to `provider`),
+  no provider dedup, and calls `initiateAuth(provider, connectionId, workspaceName)` with the exact
+  selected connection. Google fallback only on an empty successful list.
+
+**Note — deviation:** the return type is `PublicIdpConnection`, not the originally specified
+`WorkspaceIdpConnection`, because the latter would expose `clientId`/`issuer`/SCIM-mapping/health
+fields on an unauthenticated field. Rationale + revert instructions in
+[[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]].
+
+**Related files:** `admin/src/graphql/{queries,mutations}.graphql`, `admin/src/generated/*`
+(regenerated), `controller/graph/{generated,models_gen}.go` (regenerated),
+`controller/graph/resolvers/idp_lookup_connections_test.go` (new, 4 live-DB tests),
+`admin/src/pages/Login.test.tsx` (new, 12 tests).
+
+**Pre-existing failure noted, NOT caused by this fix:** `graph/resolvers/policy_group_origin_test.go`
+has 7 tests failing at HEAD with `workspaces_status_check` (SQLSTATE 23514) on workspace insert —
+verified identical with these changes stashed.
 
 ## Final Build Gates
 ```bash

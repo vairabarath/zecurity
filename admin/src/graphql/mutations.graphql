@@ -1,5 +1,5 @@
-mutation InitiateAuth($provider: String!, $workspaceName: String) {
-  initiateAuth(provider: $provider, workspaceName: $workspaceName) {
+mutation InitiateAuth($provider: String!, $workspaceName: String, $connectionId: ID) {
+  initiateAuth(provider: $provider, workspaceName: $workspaceName, connectionId: $connectionId) {
     redirectUrl
     state
   }
@@ -296,6 +296,25 @@ mutation CreateIdpConnection($input: CreateIdpConnectionInput!) {
     subjectClaim
     scimIdentifier
     scimEnabled
+  }
+}
+
+# --- IdP Connection Management (Sprint 17 FE Phase 7 — F7-8) -----
+# Deletes an IdP connection. When the connection has linked users, a soft-delete
+# (status='deleted') is performed if force=true; otherwise the server refuses.
+# The refusal is surfaced as an Apollo error (UserError) and shown verbatim
+# in a confirmation dialog. A hard-delete occurs only when linked users = 0.
+mutation DeleteIdpConnection($id: ID!, $force: Boolean!) {
+  deleteIdpConnection(id: $id, force: $force)
+}
+
+# --- IdP Connection Management (Sprint 17 FE Phase 7 — F7-8) -----
+# Disables an IdP connection. Changes status to disabled, revokes sessions,
+# and suspends SCIM-managed users. Guarded by guardLastLoginPath.
+mutation SetIdpConnectionStatus($id: ID!, $status: String!) {
+  setIdpConnectionStatus(id: $id, status: $status) {
+    id
+    status
   }
 }
 
