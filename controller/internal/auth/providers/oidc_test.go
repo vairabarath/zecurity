@@ -157,6 +157,27 @@ func TestOIDC_Authenticate_EmailNotVerified(t *testing.T) {
 	}
 }
 
+// Most enterprise IdPs never emit email_verified (Entra ID does not send it at
+// all; Okta omits it on the org authorization server). Absence means the IdP
+// asserted NOTHING, which must not be read as "asserted false" — doing so
+// rejected every such login with a generic authentication_failed.
+func TestOIDC_Authenticate_EmailVerifiedAbsent(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	delete(mi.claims, "email_verified")
+	ac, err := authenticate(newTestOIDC(mi, "test-client"))
+	if err != nil {
+		t.Fatalf("absent email_verified must not reject the login: %v", err)
+	}
+	if ac.Subject != "user-123" || ac.Email != "user@acme.com" {
+		t.Fatalf("identity not carried through: sub=%q email=%q", ac.Subject, ac.Email)
+	}
+	// The claim was never asserted, so this must report false rather than
+	// silently upgrading an unvouched email to "verified".
+	if ac.EmailVerified {
+		t.Error("EmailVerified must be false when the IdP omitted the claim")
+	}
+}
+
 func TestOIDC_Authenticate_Expired(t *testing.T) {
 	mi := newMockIssuer(t, "test-client")
 	mi.claims["exp"] = time.Now().Add(-time.Hour).Unix()
