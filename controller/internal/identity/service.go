@@ -94,6 +94,7 @@ func (s *Service) Authenticate(
 		Issuer:             authCtx.Issuer,
 		WorkspaceName:      workspaceName,
 		ConnectionTenantID: connTenantID,
+		EmailVerified:      authCtx.EmailVerified,
 	})
 	if err != nil {
 		// Not an internal failure: the workspace simply has not granted this

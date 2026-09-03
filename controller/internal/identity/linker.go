@@ -29,6 +29,15 @@ type ProvisionInput struct {
 	// user joins the owning workspace if invited/provisioned, else is refused
 	// with ErrNotInvited.
 	ConnectionTenantID *string
+	// EmailVerified is TRUE only when the IdP explicitly asserted it. Most
+	// enterprise IdPs omit the claim entirely, so FALSE means "not vouched
+	// for", NOT "the IdP said unverified" — an explicit false never gets this
+	// far (providers/oidc.go rejects it at token verification).
+	//
+	// It is not an access decision here; it is recorded because Email IS the
+	// key the invite lookup matches on, and claiming an invite with an
+	// unvouched email is worth an audit trail.
+	EmailVerified bool
 }
 
 // ErrNotInvited is returned when a cryptographically proven identity arrives

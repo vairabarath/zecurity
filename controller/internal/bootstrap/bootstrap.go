@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"unicode"
 
@@ -84,6 +85,24 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 	}
 
 	if err == nil {
+		// Audit line, NOT a warning: most enterprise IdPs never assert
+		// email_verified, so this is the ordinary path for an Okta/Entra
+		// invited join, not an exception. It is recorded because the invite
+		// carries a role (possibly 'admin') and is matched on email, which is
+		// not an identity key.
+		//
+		// Permitting it is safe: the connection is admin-configured, the
+		// directory is the customer's own, and the lookup above is scoped to
+		// the workspace that owns the connection. An IdP that EXPLICITLY says
+		// email_verified=false never reaches here (providers/oidc.go rejects
+		// it at token verification).
+		//
+		// SCIM does not pass through here — internal/scim uses its own
+		// newSCIMProvisioner, so this never fires for directory-driven joins.
+		if !in.EmailVerified {
+			log.Printf("bootstrap: invited join on an email the IdP did not assert as verified: workspace=%s role=%s email=%q provider=%s subject=%q",
+				pendingWorkspaceID, pendingRole, email, in.Provider, in.Subject)
+		}
 		return s.runInvitedUserTransaction(ctx, email, in, pendingWorkspaceID, pendingRole)
 	}
 	if !isNoRows(err) {

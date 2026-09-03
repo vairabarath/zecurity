@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -349,8 +350,13 @@ func (p *OIDCProvider) AuthURL(ctx context.Context, params AuthURLParams) (strin
 
 // oidcClaims is the id_token payload we consume.
 type oidcClaims struct {
-	Email         string   `json:"email"`
-	EmailVerified bool     `json:"email_verified"`
+	Email string `json:"email"`
+	// Tri-state ON PURPOSE. A plain bool cannot tell "the IdP asserted false"
+	// from "the IdP omitted the claim", and the two mean opposite things:
+	// `email_verified` is NOT emitted by most enterprise IdPs (Entra ID never
+	// sends it; Okta omits it on the org authorization server), so treating
+	// absence as false made this adapter reject every such login.
+	EmailVerified *bool    `json:"email_verified"`
 	Name          string   `json:"name"`
 	Nonce         string   `json:"nonce"`
 	ACR           string   `json:"acr"`
@@ -403,7 +409,9 @@ func (p *OIDCProvider) Authenticate(ctx context.Context, code, codeVerifier, red
 		Subject:       subject,
 		Email:         claims.Email,
 		Name:          claims.Name,
-		EmailVerified: claims.EmailVerified,
+		// false here means "the IdP did not assert verified" — it does NOT
+		// mean the IdP said unverified (that case is rejected in verify()).
+		EmailVerified: claims.EmailVerified != nil && *claims.EmailVerified,
 		ACR:           claims.ACR,
 		AMR:           claims.AMR,
 		AuthTime:      claims.AuthTime,
@@ -472,22 +480,34 @@ func (p *OIDCProvider) verify(ctx context.Context, jwksURI, idToken string) (*oi
 	if err != nil {
 		return nil, nil, fmt.Errorf("id_token verification failed: %w", err)
 	}
-	// Unverified emails must never be trusted for identity.
-	if !claims.EmailVerified {
-		return nil, nil, fmt.Errorf("id_token email not verified")
-	}
-
 	// Raw claims map: an ADDITIONAL representation of the SAME already-validated
 	// token (no re-validation, no re-parse of the signature path). Used only so
 	// a configured non-default subjectClaim (e.g. "email", "oid") can be read.
 	// It is never consulted for issuer/aud/exp/nonce/email_verified — those
-	// were already enforced on the typed claims above. A parse failure here is
-	// non-fatal: it only means custom claims are unavailable, and the subject
-	// derivation below will then fail closed if a non-default claim was needed.
+	// were already enforced on the typed claims above, and the gate below still
+	// reads the TYPED claim, never this map. A parse failure here is non-fatal:
+	// it only means custom claims are unavailable, and the subject derivation
+	// below will then fail closed if a non-default claim was needed.
 	raw := map[string]any{}
 	if mt, _, perr := jwt.NewParser().ParseUnverified(idToken, jwt.MapClaims(raw)); perr != nil {
 		_ = mt
 		raw = nil
+	}
+
+	// An email the IdP has EXPLICITLY marked unverified must never be trusted.
+	// Absence is a different case and is permitted: the IdP is asserting
+	// nothing, and this adapter only ever serves admin-configured BYO
+	// enterprise connections (auth.ProviderFor sends managed/platform-tier
+	// logins to the Google adapter, which keeps the strict gate in
+	// internal/auth/idtoken.go because Google always emits the claim).
+	//
+	// Identity is anchored on Subject, never email (ADR-024). What email DOES
+	// decide is invite matching in internal/bootstrap — see the unvouched-email
+	// log line there.
+	if claims.EmailVerified != nil && !*claims.EmailVerified {
+		log.Printf("oidc verify: rejecting id_token with email_verified=false: issuer=%s email=%q sub=%q",
+			p.issuer, claims.Email, claims.Subject)
+		return nil, nil, fmt.Errorf("id_token email not verified")
 	}
 
 	return claims, raw, nil

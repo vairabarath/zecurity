@@ -144,3 +144,87 @@ evaluate the OIDC-derived subject, or a reconciliation check). That assertion
 is intentionally **out of scope** for this phase and must be tracked
 separately — do not mark ADR-025 §3.1 "fully proven" on the strength of this
 phase alone.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: `email_verified` absence rejected every enterprise OIDC login (2026-09-03)
+
+**Issue:** Every sign-in through a BYO enterprise OIDC connection failed with
+`/login?error=authentication_failed` ("Sign-in with your identity provider failed").
+Reproduced against a live Okta trial org (`https://trial-3724025.okta.com`, provider
+`okta`, scopes `openid email profile`).
+
+**Root cause:** `controller/internal/auth/providers/oidc.go` declared
+`oidcClaims.EmailVerified` as a plain `bool` and gated on `if !claims.EmailVerified`.
+An **absent** `email_verified` claim unmarshals to `false`, making it indistinguishable
+from the IdP asserting `false`. Most enterprise IdPs never emit the claim — Entra ID
+does not send it at all, and Okta omits it on the org authorization server — so the
+generic adapter rejected them all. The rule was inherited from the Google path
+(`internal/auth/idtoken.go:119`), where it is correct because Google always emits it.
+
+Confirmed by instrumentation before changing behavior:
+```
+oidc verify: email_verified gate: issuer=https://trial-3724025.okta.com \
+  claim_present=false raw_value=<nil> email="xiyo@gomail.edu.pl" sub="00u16w7qu5saDn60H698"
+```
+
+**Fix applied (`providers/oidc.go`):**
+```go
+// BEFORE:
+EmailVerified bool `json:"email_verified"`
+...
+if !claims.EmailVerified {
+    return nil, nil, fmt.Errorf("id_token email not verified")
+}
+
+// AFTER: tri-state — absent ("no assertion") is distinct from explicit false.
+EmailVerified *bool `json:"email_verified"`
+...
+if claims.EmailVerified != nil && !*claims.EmailVerified {
+    log.Printf("oidc verify: rejecting id_token with email_verified=false: ...")
+    return nil, nil, fmt.Errorf("id_token email not verified")
+}
+```
+`AuthenticationContext.EmailVerified` is now `claims.EmailVerified != nil &&
+*claims.EmailVerified`, so `false` there honestly means "the IdP did not assert
+verified" and never silently upgrades an unvouched email.
+
+**Why the gate was NOT simply deleted, and why it was not moved behind a
+per-connection opt-in:**
+- Blast radius is bounded by `auth.ProviderFor` (`internal/auth/idp_adapter.go`):
+  `providers.OIDCProvider` is reached **only** for non-managed, tenant-owned
+  connections. Managed/platform-tier logins always go to the Google adapter, whose
+  strict gate in `idtoken.go` is unchanged.
+- Identity is anchored on Subject, never email (ADR-024). But email **is** the key
+  `bootstrap.Provision` matches pending invites on, and an invite carries a role
+  (possibly `admin`). Permitting absence is safe because that lookup is already
+  scoped to `*in.ConnectionTenantID`, so only an identity from the customer's own
+  admin-configured directory can reach it.
+- An explicit admin opt-in flag was rejected as a default: it would leave every
+  Okta/Entra connection non-functional until toggled, which reads as a bug, not a
+  security posture.
+
+**Related files also changed:**
+- `internal/identity/linker.go` — `ProvisionInput.EmailVerified bool` (audit only,
+  not an access decision; documents that `false` means "not vouched for").
+- `internal/identity/service.go` — passes `authCtx.EmailVerified` into `Link`.
+- `internal/bootstrap/bootstrap.go` — logs `bootstrap: invite claimed with unvouched
+  email: workspace=… role=… email=… provider=… subject=…` when an invite is claimed
+  on an email the IdP did not vouch for. Allowed, but recorded.
+
+**Diagnosability fix that made this findable (`internal/auth/callback.go`):**
+all five `authentication_failed` branches were silent — `fail()` only redirected and
+the descriptive error from `adapter.Authenticate` was discarded, so the controller
+produced zero signal for a failed login. Added `failErr(reason, connID, err)` which
+logs `auth callback: <reason>: conn=<id>: <err>` before the same generic redirect, plus
+the actual status on the disabled-connection branch. User-facing reasons are unchanged.
+
+**Tests:**
+- `providers/oidc_test.go` — new `TestOIDC_Authenticate_EmailVerifiedAbsent`: absent
+  claim authenticates, carries `sub`/`email` through, and reports
+  `EmailVerified == false`.
+- `TestOIDC_Authenticate_EmailNotVerified` (explicit `false`) unchanged and still
+  rejecting — the security case was not weakened.
+- `go build ./...` clean; `go test ./internal/...` all green.
