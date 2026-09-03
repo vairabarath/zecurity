@@ -157,6 +157,13 @@ type PostureCheckDescriptor struct {
 	AllowUnsupportedMeaningful bool   `json:"allowUnsupportedMeaningful"`
 }
 
+type PublicIdpConnection struct {
+	ID          string `json:"id"`
+	Provider    string `json:"provider"`
+	DisplayName string `json:"displayName"`
+	Tier        string `json:"tier"`
+}
+
 type Query struct {
 }
 

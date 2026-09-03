@@ -287,7 +287,9 @@ func newScimEnableHarness(t *testing.T) *scimEnableHarness {
 		}
 	}
 
-	idpStore := idp.NewStore(pool, nil)
+	// A reversible encryptor: createIdpConnection now verifies credentials, so
+	// tests must be able to supply a real client secret.
+	idpStore := idp.NewStore(pool, testSecretEnc{})
 	scimStore, err := scim.NewStore(pool, []byte("updsc-test-hash-key"), 24*time.Hour)
 	if err != nil {
 		t.Fatalf("new scim store: %v", err)
@@ -323,6 +325,9 @@ func (h *scimEnableHarness) startDiscoveryFixture() string {
 			"jwks_uri":               issuerURL + "/jwks",
 		})
 	})
+	// Answer the credential probe positively; without a token endpoint the
+	// probe is inconclusive and every create/test is blocked.
+	registerCredentialProbeToken(mux)
 	srv := httptest.NewServer(mux)
 	h.srv = srv
 	issuerURL = srv.URL
@@ -354,11 +359,17 @@ func (h *scimEnableHarness) seedConnectionInWS(ws, issuer, subjectClaim, scimIde
 	}
 	connID = uuid.NewString()
 	if _, err := h.pool.Exec(ctx,
+		// A decryptable client secret is seeded so the connection has a real
+		// credential pair for the verification probe (updateIdpConnection /
+		// testIdpConnection); without it every probe is inconclusive.
 		`INSERT INTO identity_connections
 		   (id, tenant_id, protocol, provider, managed, display_name, issuer,
-		    client_id, status, subject_claim, scim_identifier, scim_enabled)
-		 VALUES ($1,$2,'oidc','okta',FALSE,'Okta Conn',$3,gen_random_uuid(),'active',$4,$5,FALSE)`,
+		    client_id, encrypted_client_secret, secret_nonce,
+		    status, subject_claim, scim_identifier, scim_enabled)
+		 VALUES ($1,$2,'oidc','okta',FALSE,'Okta Conn',$3,gen_random_uuid(),$6,$7,
+		         'active',$4,$5,FALSE)`,
 		connID, ws, issuer, subjectClaim, scimIdentifier,
+		seededSecretCiphertext, seededSecretNonce,
 	); err != nil {
 		h.t.Fatalf("seed connection: %v", err)
 	}
@@ -389,7 +400,11 @@ func (h *scimEnableHarness) ctxFor(ws string) context.Context {
 }
 
 func (h *scimEnableHarness) mutationResolver() *mutationResolver {
-	r := &Resolver{IdpStore: h.idpStore, ScimStore: h.scimStore, Pool: h.pool, PermissionStore: h.permissionStore}
+	r := &Resolver{
+		IdpStore: h.idpStore, ScimStore: h.scimStore, Pool: h.pool,
+		PermissionStore: h.permissionStore,
+		OIDCRedirectURI: "http://localhost:8080/auth/callback",
+	}
 	return &mutationResolver{r}
 }
 

@@ -201,6 +201,48 @@ const oidcDiscoveryProbeTimeout = 5 * time.Second
 // ProbeFresh (not Probe) is required: discoveryCache is keyed on the issuer
 // alone and shared process-wide, so a cache-consulting check could pass without
 // a request — including on another workspace's already-warm issuer.
+// verifyOIDCCredentials is the SINGLE credential-verification entry point for
+// the admin IdP API: createIdpConnection, updateIdpConnection (only when the
+// credential pair actually changes) and testIdpConnection all call it, so the
+// three can never drift apart.
+//
+// POLICY: block unless proven correct. Only a positive CredentialsValid passes.
+// An explicit rejection AND an inconclusive result both fail, because "we could
+// not establish that these credentials work" must not be presented to an admin
+// as a working connection — that is exactly the failure mode that let a
+// swapped client ID / client secret pair be saved and only surface later as an
+// opaque HTTP 400 from the IdP at login time.
+//
+// Errors are apperr.UserError so the fail-closed ErrorPresenter surfaces them
+// to the admin. They carry the IdP's bounded OAuth error code at most — never a
+// credential, never the raw upstream body. Nothing is logged here.
+func verifyOIDCCredentials(
+	ctx context.Context,
+	provider, issuer, discoveryURL, scopes, clientID, clientSecret, redirectURI string,
+) error {
+	ctx, cancel := context.WithTimeout(ctx, oidcDiscoveryProbeTimeout)
+	defer cancel()
+
+	p := providers.NewOIDCProvider(provider, issuer, clientID, clientSecret, discoveryURL, scopes)
+	verdict, reason := p.VerifyClientCredentials(ctx, redirectURI)
+
+	switch verdict {
+	case providers.CredentialsValid:
+		return nil
+	case providers.CredentialsInvalid:
+		return apperr.UserErrorf(
+			"The identity provider rejected these OAuth client credentials (%s). "+
+				"Nothing was saved. Check the client ID and client secret are correct "+
+				"and have not been entered in each other's field — they are different "+
+				"values and the client ID is not a secret.", reason)
+	default:
+		return apperr.UserErrorf(
+			"The OAuth client credentials could not be verified against %q: %s. "+
+				"Nothing was saved, because an unverified credential pair would only "+
+				"fail later at login. Resolve the issue above and retry.", issuer, reason)
+	}
+}
+
 func validateOIDCDiscovery(ctx context.Context, provider, issuer, discoveryURL, scopes string) error {
 	ctx, cancel := context.WithTimeout(ctx, oidcDiscoveryProbeTimeout)
 	defer cancel()

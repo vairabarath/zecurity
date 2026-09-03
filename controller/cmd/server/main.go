@@ -52,6 +52,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
 	"github.com/yourorg/ztna/controller/internal/outbox"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
@@ -60,7 +61,6 @@ import (
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
-	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/transport"
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
@@ -158,6 +158,11 @@ func main() {
 		identity.NewAuditSink(db.Pool),
 	)
 
+	// Shared by the login path (auth.Config.RedirectURI) and the admin
+	// credential-verification probe (resolvers.OIDCRedirectURI), so the probe
+	// always presents the redirect URI actually registered with the IdP.
+	oidcRedirectURI := mustEnv("GOOGLE_REDIRECT_URI")
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
 		IdentityService:    identitySvc,
@@ -166,7 +171,7 @@ func main() {
 		JWTIssuer:          appmeta.ControllerIssuer,
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: mustEnv("GOOGLE_CLIENT_SECRET"),
-		RedirectURI:        mustEnv("GOOGLE_REDIRECT_URI"),
+		RedirectURI:        oidcRedirectURI,
 		ValkeyURL:          mustEnv("VALKEY_URL"),
 		AllowedOrigin:      envOr("APP_BASE_URL", "http://localhost:5173"),
 	})
@@ -306,6 +311,7 @@ func main() {
 				PermissionStore:   permissionStore,
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
+				OIDCRedirectURI:   oidcRedirectURI,
 			},
 			Directives: graph.DirectiveRoot{
 				HasRole: resolvers.HasRole,
@@ -663,42 +669,61 @@ func main() {
 	}
 	log.Printf("listening on %s", addr)
 
+	// Serve the public/admin HTTP API. This MUST have its own goroutine: the
+	// outbox worker below previously replaced this call, so the process logged
+	// "listening on :8080", bound nothing, and every request through the SPA
+	// proxy came back 502.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("http serve: %v", err)
+		}
+	}()
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
+			log.Printf("outbox processor stopped: %v", err)
 		}
 	}()
 	<-ctx.Done()
 	log.Printf("shutdown requested")
 
+	// Signal shutdown to all background workers
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
+	// Shutdown HTTP server
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("http server shutdown error: %v", err)
 	}
+
+	// Shutdown metrics server
 	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("metrics server shutdown error: %v", err)
 	}
-	grpcStopped := make(chan struct{})
 
+	// Gracefully stop gRPC server with timeout
+	grpcStopped := make(chan struct{})
 	go func() {
 		grpcServer.GracefulStop()
 		close(grpcStopped)
 	}()
 	select {
 	case <-grpcStopped:
-		// Success. Nothing more required.
+		log.Printf("gRPC server gracefully stopped")
 	case <-shutdownCtx.Done():
 		log.Printf("gRPC graceful shutdown timed out; forcing stop")
 		grpcServer.Stop()
 	}
 
+	// Wait for all background workers to complete
 	wg.Wait()
+	log.Printf("all workers completed")
+
+	log.Printf("shutdown complete")
 }
 
 // publicRootFields are the GraphQL root fields callable WITHOUT authentication —
@@ -714,6 +739,7 @@ var publicRootFields = map[string]struct{}{
 	"initiateAuth":            {}, // login redirect
 	"lookupWorkspace":         {}, // signup slug availability / login flow
 	"lookupWorkspacesByEmail": {}, // login workspace picker
+	"lookupIdpConnections":    {}, // login IdP picker (F7-5); returns PublicIdpConnection only
 }
 
 // routeGraphQL decides server-side whether a /graphql request may bypass the auth

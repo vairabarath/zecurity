@@ -72,7 +72,7 @@ func TestAuthenticate_ReturningUser(t *testing.T) {
 	prov := &fakeProvisioner{}
 	svc := newTestService(res, prov, nil)
 
-	p, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "")
+	p, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "", nil)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestAuthenticate_InactiveUserRejected(t *testing.T) {
 	prov := &fakeProvisioner{}
 	svc := newTestService(res, prov, nil)
 
-	_, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "")
+	_, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "", nil)
 	if !errors.Is(err, ErrUserNotActive) {
 		t.Fatalf("expected ErrUserNotActive, got %v", err)
 	}
@@ -117,7 +117,7 @@ func TestAuthenticate_FirstSeenJITCreates(t *testing.T) {
 	pub := &capturePublisher{}
 	svc := newTestService(res, prov, pub)
 
-	p, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "Acme Inc")
+	p, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "Acme Inc", nil)
 	if err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestAuthenticate_ResolverErrorSurfaces(t *testing.T) {
 	prov := &fakeProvisioner{}
 	svc := newTestService(res, prov, nil)
 
-	if _, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", ""); err == nil {
+	if _, err := svc.Authenticate(context.Background(), testAuthCtx(), "conn-1", "", nil); err == nil {
 		t.Fatal("expected resolver error to surface")
 	}
 	if prov.called {
@@ -173,7 +173,7 @@ func TestAuthenticate_SubjectIsCanonicalAnchor(t *testing.T) {
 		Email:    "alice@example.com",
 		Name:     "Alice",
 	}
-	if _, err := svc.Authenticate(context.Background(), ac, "conn-1", ""); err != nil {
+	if _, err := svc.Authenticate(context.Background(), ac, "conn-1", "", nil); err != nil {
 		t.Fatalf("Authenticate: %v", err)
 	}
 	if res.gotSubject != "alice@example.com" {

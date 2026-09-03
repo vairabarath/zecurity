@@ -62,6 +62,7 @@ func newValidDiscoveryServer(t *testing.T) *httptest.Server {
 			"jwks_uri":               issuer + "/jwks",
 		})
 	})
+	registerCredentialProbeToken(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	issuer = srv.URL
@@ -213,19 +214,17 @@ func TestCreateIdpConnection_PersistsWhenDiscoverySucceeds(t *testing.T) {
 	issuer := h.startDiscoveryFixture()
 	ws := seedWorkspaceForCreateTest(t, h)
 
-	// ClientSecret is deliberately empty: the shared harness builds its idp.Store
-	// with a nil encryptor (its other tests seed rows via raw SQL), and
-	// CreateWorkspaceConnection only reaches the encryptor for a NON-empty
-	// secret. Supplying one would require a full pki.Service stub, which is
-	// beside the point of this test — that a VALID discovery document lets the
-	// create proceed to a persisted row. Secret handling is covered separately
-	// (the store's own encryption tests, and the no-credential-material tests
-	// above).
+	// A credential pair is now REQUIRED for the create to proceed: valid
+	// discovery is no longer sufficient on its own, because it sends no
+	// credential. The harness's discovery fixture answers the probe with
+	// `invalid_grant`, which is what a real IdP returns once the client has
+	// authenticated (registerCredentialProbeToken), so the pair verifies.
 	created, err := mr.CreateIdpConnection(h.ctxFor(ws), graph.CreateIdpConnectionInput{
-		Provider:    "okta",
-		DisplayName: "Corporate Okta",
-		Issuer:      issuer,
-		ClientID:    "client-abc",
+		Provider:     "okta",
+		DisplayName:  "Corporate Okta",
+		Issuer:       issuer,
+		ClientID:     "client-abc",
+		ClientSecret: "super-secret-value-must-never-appear",
 	})
 	if err != nil {
 		t.Fatalf("expected creation to succeed against a valid discovery fixture: %v", err)

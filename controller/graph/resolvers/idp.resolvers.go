@@ -45,6 +45,18 @@ func (r *mutationResolver) CreateIdpConnection(ctx context.Context, input graph.
 		return nil, err
 	}
 
+	// Credentials are PROVEN before anything is persisted. Discovery above only
+	// shows the issuer is real; it sends no credential. Without this an admin who
+	// swaps the client ID and client secret gets a "created" connection that
+	// cannot authenticate anyone, and the mistake only surfaces as an opaque IdP
+	// error at first login.
+	if err := verifyOIDCCredentials(ctx,
+		input.Provider, input.Issuer, deref(input.DiscoveryURL), deref(input.Scopes),
+		input.ClientID, input.ClientSecret, r.OIDCRedirectURI,
+	); err != nil {
+		return nil, err
+	}
+
 	created, err := r.IdpStore.CreateWorkspaceConnection(ctx, tc.TenantID, idp.CreateInput{
 		Provider:     input.Provider,
 		DisplayName:  input.DisplayName,
@@ -71,13 +83,23 @@ func (r *mutationResolver) CreateIdpConnection(ctx context.Context, input graph.
 // actually fetched from, so accepting an unreachable one would re-create the
 // "saved, therefore verified" illusion on a connection that already passed the
 // check at create time. The issuer is immutable here, so discoveryUrl is the
-// only field that changes what gets fetched — every other field (displayName,
-// clientId, clientSecret, scopes, domainHint) is persisted without a probe,
-// exactly as before.
+// only field that changes what gets fetched.
+//
+// A change to clientId and/or clientSecret is likewise VERIFIED against the IdP
+// before it is persisted — rotating to a wrong secret is exactly as breaking as
+// creating a connection with one. The probe runs on the EFFECTIVE pair (the
+// supplied value, else the stored one), because either field may be updated
+// alone. Verification happens before the single UPDATE statement, so a refused
+// credential change can never leave the row partially updated.
+//
+// An update that touches only unrelated metadata (displayName, domainHint,
+// scopes) is NOT credential-probed — there is no new credential to prove and a
+// probe would add a network round-trip to a rename.
 func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, input graph.UpdateIdpConnectionInput) (*graph.WorkspaceIdpConnection, error) {
 	tc := tenant.MustGet(ctx)
 
-	if input.DiscoveryURL != nil {
+	credentialChange := input.ClientID != nil || input.ClientSecret != nil
+	if input.DiscoveryURL != nil || credentialChange {
 		// Tenant-scoped read first: never probe (or reveal anything about) a
 		// connection outside the caller's workspace.
 		conn, gerr := r.IdpStore.GetByID(ctx, id)
@@ -90,12 +112,40 @@ func (r *mutationResolver) UpdateIdpConnection(ctx context.Context, id string, i
 		if conn.TenantID == nil || *conn.TenantID != tc.TenantID {
 			return nil, apperr.UserErrorf("updateIdpConnection: connection not found")
 		}
+
+		// Effective post-update values; a nil pointer leaves the stored one.
 		scopes := conn.Scopes
 		if input.Scopes != nil {
 			scopes = *input.Scopes
 		}
-		if err := validateOIDCDiscovery(ctx, conn.Provider, conn.Issuer, *input.DiscoveryURL, scopes); err != nil {
-			return nil, err
+		discoveryURL := conn.DiscoveryURL
+		if input.DiscoveryURL != nil {
+			discoveryURL = *input.DiscoveryURL
+		}
+
+		if input.DiscoveryURL != nil {
+			if err := validateOIDCDiscovery(ctx, conn.Provider, conn.Issuer, discoveryURL, scopes); err != nil {
+				return nil, err
+			}
+		}
+
+		if credentialChange {
+			// conn.ClientSecret is the decrypted stored secret, so changing only
+			// the client ID still verifies a complete, real pair.
+			clientID := conn.ClientID
+			if input.ClientID != nil {
+				clientID = *input.ClientID
+			}
+			clientSecret := conn.ClientSecret
+			if input.ClientSecret != nil {
+				clientSecret = *input.ClientSecret
+			}
+			if err := verifyOIDCCredentials(ctx,
+				conn.Provider, conn.Issuer, discoveryURL, scopes,
+				clientID, clientSecret, r.OIDCRedirectURI,
+			); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -266,7 +316,11 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 	}
 
 	// 1. OIDC discovery probe (issuer reachability + required endpoints).
-	p := providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, "", conn.DiscoveryURL, conn.Scopes)
+	//
+	// The provider is built with the connection's REAL client secret (this used
+	// to pass ""), because step 1b below authenticates the client. GetByID
+	// returns the decrypted secret; it is never surfaced in the result.
+	p := providers.NewOIDCProvider(conn.Provider, conn.Issuer, conn.ClientID, conn.ClientSecret, conn.DiscoveryURL, conn.Scopes)
 	issuer, perr := p.Probe(ctx)
 	if perr != nil {
 		msg := perr.Error()
@@ -277,6 +331,27 @@ func (r *mutationResolver) TestIdpConnection(ctx context.Context, id string) (*g
 			MappingState:       string(scim.MappingUnproven),
 			ScimEnabledAllowed: false,
 			Reason:             &reason,
+		}, nil
+	}
+
+	// 1b. Client-credential verification — the same primitive create/update use,
+	// so "Test connection" cannot report success on a connection that could not
+	// actually authenticate. Read-only: it never mutates the connection.
+	//
+	// Ok=false unless the credentials are POSITIVELY verified; an inconclusive
+	// probe is reported as a failure and must never be worded as verified.
+	if cerr := verifyOIDCCredentials(ctx,
+		conn.Provider, conn.Issuer, conn.DiscoveryURL, conn.Scopes,
+		conn.ClientID, conn.ClientSecret, r.OIDCRedirectURI,
+	); cerr != nil {
+		msg := cerr.Error()
+		return &graph.IdpTestResult{
+			Ok:                 false,
+			Issuer:             &issuer,
+			Message:            &msg,
+			MappingState:       string(scim.MappingUnproven),
+			ScimEnabledAllowed: false,
+			Reason:             &msg,
 		}, nil
 	}
 
@@ -753,6 +828,78 @@ func (r *queryResolver) IdpConnections(ctx context.Context) ([]*graph.WorkspaceI
 		out = append(out, r.idpConnToGQL(c))
 	}
 	return out, nil
+}
+
+// LookupIdpConnections is the resolver for the lookupIdpConnections field.
+//
+// PUBLIC login discovery (F7-5): the login page has no JWT yet, so this field
+// carries no @hasRole. Three properties keep that safe:
+//
+//  1. Workspace scoping is derived, never supplied. The caller passes a SLUG;
+//     the tenant id comes from WorkspaceIDBySlug and is the only value handed
+//     to the store. A client-supplied workspace/tenant id is never accepted,
+//     so a caller cannot address another workspace's connections.
+//  2. Only ACTIVE connections are returned. InitiateAuth fails closed on a
+//     non-active connection (internal/auth/oidc.go), so a disabled connection
+//     is not a login path and must not be offered as one.
+//  3. Only PublicIdpConnection is returned — id/provider/displayName/tier. The
+//     admin-only metadata on WorkspaceIdpConnection (clientId, discoveryUrl,
+//     domainHint, issuer, SCIM mapping, identity health) is never projected
+//     here, so nothing beyond "which buttons to draw" leaves the admin gate.
+//
+// Tiering mirrors the pre-existing REST discovery endpoint
+// (GET /workspaces/{slug}/auth — internal/auth/discovery.go, ADR-024 §0), which
+// this query would otherwise silently disagree with: ListForWorkspace returns
+// the workspace's own connections AND the shared platform (bootstrap) IdP, and
+// the platform tier is suppressed when the workspace has turned platform login
+// off (ADR-024 §5). Enterprise connections are ordered first so the login page
+// can render them as the primary path.
+//
+// An unknown slug yields an empty list rather than an error, matching
+// lookupWorkspace's found:false semantics.
+func (r *queryResolver) LookupIdpConnections(ctx context.Context, workspaceSlug string) ([]*graph.PublicIdpConnection, error) {
+	tenantID, err := r.IdpStore.WorkspaceIDBySlug(ctx, workspaceSlug)
+	if err != nil {
+		if errors.Is(err, idp.ErrWorkspaceNotFound) {
+			return []*graph.PublicIdpConnection{}, nil
+		}
+		return nil, fmt.Errorf("lookupIdpConnections: %w", err)
+	}
+
+	// `tenant_id IS NULL OR tenant_id = $1 AND status != 'deleted'` — the
+	// workspace's own connections plus the shared platform IdP.
+	conns, err := r.IdpStore.ListForWorkspace(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("lookupIdpConnections: %w", err)
+	}
+
+	platformEnabled, err := r.IdpStore.PlatformLoginEnabled(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("lookupIdpConnections: %w", err)
+	}
+
+	enterprise := make([]*graph.PublicIdpConnection, 0, len(conns))
+	bootstrap := make([]*graph.PublicIdpConnection, 0, len(conns))
+	for _, c := range conns {
+		if c.Status != "active" {
+			continue
+		}
+		// A nil tenant_id is the shared platform connection; everything else is
+		// this workspace's own (the query above admits no other tenant).
+		if c.TenantID == nil {
+			if !platformEnabled {
+				continue
+			}
+			bootstrap = append(bootstrap, &graph.PublicIdpConnection{
+				ID: c.ID, Provider: c.Provider, DisplayName: c.DisplayName, Tier: "bootstrap",
+			})
+			continue
+		}
+		enterprise = append(enterprise, &graph.PublicIdpConnection{
+			ID: c.ID, Provider: c.Provider, DisplayName: c.DisplayName, Tier: "enterprise",
+		})
+	}
+	return append(enterprise, bootstrap...), nil
 }
 
 // PlatformLoginEnabled is the resolver for the platformLoginEnabled field.

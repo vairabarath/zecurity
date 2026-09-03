@@ -221,6 +221,13 @@ type ComplexityRoot struct {
 		Platform                   func(childComplexity int) int
 	}
 
+	PublicIdpConnection struct {
+		DisplayName func(childComplexity int) int
+		ID          func(childComplexity int) int
+		Provider    func(childComplexity int) int
+		Tier        func(childComplexity int) int
+	}
+
 	Query struct {
 		AllResources            func(childComplexity int) int
 		ClientDevices           func(childComplexity int) int
@@ -235,6 +242,7 @@ type ComplexityRoot struct {
 		Groups                  func(childComplexity int) int
 		IdpConnections          func(childComplexity int) int
 		Invitation              func(childComplexity int, token string) int
+		LookupIdpConnections    func(childComplexity int, workspaceSlug string) int
 		LookupWorkspace         func(childComplexity int, slug string) int
 		LookupWorkspacesByEmail func(childComplexity int, email string) int
 		Me                      func(childComplexity int) int
@@ -497,6 +505,7 @@ type QueryResolver interface {
 	DeviceProfiles(ctx context.Context) ([]*DeviceProfile, error)
 	DevicePostureVisibility(ctx context.Context, profileID string) ([]*DevicePostureVisibility, error)
 	IdpConnections(ctx context.Context) ([]*WorkspaceIdpConnection, error)
+	LookupIdpConnections(ctx context.Context, workspaceSlug string) ([]*PublicIdpConnection, error)
 	PlatformLoginEnabled(ctx context.Context) (bool, error)
 	ScimTokens(ctx context.Context, connectionID string) ([]*ScimToken, error)
 	ScimConflicts(ctx context.Context, connectionID string) ([]*ScimConflict, error)
@@ -1584,6 +1593,31 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 
 		return e.ComplexityRoot.PostureCheckDescriptor.Platform(childComplexity), true
 
+	case "PublicIdpConnection.displayName":
+		if e.ComplexityRoot.PublicIdpConnection.DisplayName == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PublicIdpConnection.DisplayName(childComplexity), true
+	case "PublicIdpConnection.id":
+		if e.ComplexityRoot.PublicIdpConnection.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PublicIdpConnection.ID(childComplexity), true
+	case "PublicIdpConnection.provider":
+		if e.ComplexityRoot.PublicIdpConnection.Provider == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PublicIdpConnection.Provider(childComplexity), true
+	case "PublicIdpConnection.tier":
+		if e.ComplexityRoot.PublicIdpConnection.Tier == nil {
+			break
+		}
+
+		return e.ComplexityRoot.PublicIdpConnection.Tier(childComplexity), true
+
 	case "Query.allResources":
 		if e.ComplexityRoot.Query.AllResources == nil {
 			break
@@ -1703,6 +1737,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.Invitation(childComplexity, args["token"].(string)), true
+	case "Query.lookupIdpConnections":
+		if e.ComplexityRoot.Query.LookupIdpConnections == nil {
+			break
+		}
+
+		args, err := ec.field_Query_lookupIdpConnections_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.LookupIdpConnections(childComplexity, args["workspaceSlug"].(string)), true
 	case "Query.lookupWorkspace":
 		if e.ComplexityRoot.Query.LookupWorkspace == nil {
 			break
@@ -2906,6 +2951,20 @@ func (ec *executionContext) childFields_PostureCheckDescriptor(ctx context.Conte
 		return ec.fieldContext_PostureCheckDescriptor_allowUnsupportedMeaningful(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type PostureCheckDescriptor", field.Name)
+}
+
+func (ec *executionContext) childFields_PublicIdpConnection(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_PublicIdpConnection_id(ctx, field)
+	case "provider":
+		return ec.fieldContext_PublicIdpConnection_provider(ctx, field)
+	case "displayName":
+		return ec.fieldContext_PublicIdpConnection_displayName(ctx, field)
+	case "tier":
+		return ec.fieldContext_PublicIdpConnection_tier(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type PublicIdpConnection", field.Name)
 }
 
 func (ec *executionContext) childFields_RemoteNetwork(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -4507,6 +4566,20 @@ func (ec *executionContext) field_Query_invitation_args(ctx context.Context, raw
 		return nil, err
 	}
 	args["token"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_lookupIdpConnections_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "workspaceSlug",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["workspaceSlug"] = arg0
 	return args, nil
 }
 
@@ -9683,6 +9756,98 @@ func (ec *executionContext) fieldContext_PostureCheckDescriptor_allowUnsupported
 	return graphql.NewScalarFieldContext("PostureCheckDescriptor", field, false, false, errors.New("field of type Boolean does not have child fields"))
 }
 
+func (ec *executionContext) _PublicIdpConnection_id(ctx context.Context, field graphql.CollectedField, obj *PublicIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PublicIdpConnection_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PublicIdpConnection_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PublicIdpConnection", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _PublicIdpConnection_provider(ctx context.Context, field graphql.CollectedField, obj *PublicIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PublicIdpConnection_provider(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Provider, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PublicIdpConnection_provider(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PublicIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _PublicIdpConnection_displayName(ctx context.Context, field graphql.CollectedField, obj *PublicIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PublicIdpConnection_displayName(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.DisplayName, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PublicIdpConnection_displayName(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PublicIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _PublicIdpConnection_tier(ctx context.Context, field graphql.CollectedField, obj *PublicIdpConnection) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_PublicIdpConnection_tier(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Tier, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_PublicIdpConnection_tier(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("PublicIdpConnection", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
 func (ec *executionContext) _Query_me(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -10989,6 +11154,50 @@ func (ec *executionContext) fieldContext_Query_idpConnections(_ context.Context,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return ec.childFields_WorkspaceIdpConnection(ctx, field)
 		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_lookupIdpConnections(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_lookupIdpConnections(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().LookupIdpConnections(ctx, fc.Args["workspaceSlug"].(string))
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*PublicIdpConnection) graphql.Marshaler {
+			return ec.marshalNPublicIdpConnection2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPublicIdpConnectionᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_lookupIdpConnections(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_PublicIdpConnection(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_lookupIdpConnections_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
 	}
 	return fc, nil
 }
@@ -16653,6 +16862,60 @@ func (ec *executionContext) _PostureCheckDescriptor(ctx context.Context, sel ast
 	return out
 }
 
+var publicIdpConnectionImplementors = []string{"PublicIdpConnection"}
+
+func (ec *executionContext) _PublicIdpConnection(ctx context.Context, sel ast.SelectionSet, obj *PublicIdpConnection) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, publicIdpConnectionImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("PublicIdpConnection")
+		case "id":
+			out.Values[i] = ec._PublicIdpConnection_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "provider":
+			out.Values[i] = ec._PublicIdpConnection_provider(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "displayName":
+			out.Values[i] = ec._PublicIdpConnection_displayName(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "tier":
+			out.Values[i] = ec._PublicIdpConnection_tier(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
 var queryImplementors = []string{"Query"}
 
 func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) graphql.Marshaler {
@@ -17195,6 +17458,28 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 					}
 				}()
 				res = ec._Query_idpConnections(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "lookupIdpConnections":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_lookupIdpConnections(ctx, field)
 				if res == graphql.Null {
 					atomic.AddUint32(&fs.Invalids, 1)
 				}
@@ -19288,6 +19573,32 @@ func (ec *executionContext) unmarshalNPostureCheckStatus2githubᚗcomᚋyourorg�
 
 func (ec *executionContext) marshalNPostureCheckStatus2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPostureCheckStatus(ctx context.Context, sel ast.SelectionSet, v PostureCheckStatus) graphql.Marshaler {
 	return v
+}
+
+func (ec *executionContext) marshalNPublicIdpConnection2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPublicIdpConnectionᚄ(ctx context.Context, sel ast.SelectionSet, v []*PublicIdpConnection) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNPublicIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPublicIdpConnection(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNPublicIdpConnection2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐPublicIdpConnection(ctx context.Context, sel ast.SelectionSet, v *PublicIdpConnection) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._PublicIdpConnection(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalNRemoteNetwork2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRemoteNetwork(ctx context.Context, sel ast.SelectionSet, v RemoteNetwork) graphql.Marshaler {
