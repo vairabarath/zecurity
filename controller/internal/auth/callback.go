@@ -2,6 +2,7 @@ package auth
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -35,6 +36,16 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 			http.Redirect(w, r, s.cfg.AllowedOrigin+"/login?error="+reason, http.StatusFound)
 		}
 
+		// failErr is fail() plus a server-side log line. The user-facing reason
+		// stays generic, but the underlying error — which is the only thing that
+		// names WHICH of the several `authentication_failed` branches fired — is
+		// no longer discarded. connID is passed explicitly rather than closed
+		// over because it is not known until the scratchpad is read (step 3).
+		failErr := func(reason, connID string, err error) {
+			log.Printf("auth callback: %s: conn=%s: %v", reason, connID, err)
+			fail(reason)
+		}
+
 		// Step 1 — the only two values trusted from the browser.
 		code := r.URL.Query().Get("code")
 		state := r.URL.Query().Get("state")
@@ -65,13 +76,14 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		conn, err := s.idpStore.GetByID(ctx, pkce.ConnectionID)
 		if err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
-				fail("authentication_failed") // connection deleted during redirect window
+				failErr("authentication_failed", pkce.ConnectionID, err) // connection deleted during redirect window
 				return
 			}
-			fail("server_error")
+			failErr("server_error", pkce.ConnectionID, err)
 			return
 		}
 		if conn.Status != "active" {
+			log.Printf("auth callback: authentication_failed: conn=%s: status=%q (not active)", conn.ID, conn.Status)
 			fail("authentication_failed") // connection disabled during redirect window
 			return
 		}
@@ -79,7 +91,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// Step 5 — select the adapter (the single provider switch point).
 		adapter, err := providerForFn(conn, s.googleCreds())
 		if err != nil {
-			fail("authentication_failed")
+			failErr("authentication_failed", conn.ID, err)
 			return
 		}
 
@@ -87,7 +99,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		// the server-side verifier/nonce and the cryptographically verified token.
 		authCtx, err := adapter.Authenticate(ctx, code, pkce.CodeVerifier, s.cfg.RedirectURI, pkce.Nonce)
 		if err != nil {
-			fail("authentication_failed")
+			failErr("authentication_failed", conn.ID, err)
 			return
 		}
 
@@ -107,7 +119,7 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 				fail("not_invited")
 				return
 			}
-			fail("authentication_failed")
+			failErr("authentication_failed", conn.ID, err)
 			return
 		}
 		core := principal.Core
