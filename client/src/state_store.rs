@@ -79,9 +79,22 @@ pub struct StoredDevice {
     pub ca_cert_pem: String,
     #[serde(default)]
     pub cert_expires_at: i64,
-    /// Plaintext in memory after load; encrypted before it is written to disk.
+    /// Software-backed private key: plaintext in memory after load, encrypted
+    /// before it is written to disk. Empty when this device is TPM-backed —
+    /// see `tpm_key_material`, of which exactly one of the two is populated.
     #[serde(default)]
     pub private_key_pem: String,
+    /// TPM-backed key material (PENDING-17): an opaque, TPM-sealed
+    /// public+private blob pair, serialized by `tpm::serialize_key_material`.
+    /// `None` for software-backed devices — including every device enrolled
+    /// before this field existed, which is exactly why this is additive
+    /// rather than a tagged enum: old state files deserialize unchanged, with
+    /// `private_key_pem` populated and this left `None`.
+    ///
+    /// Stored as an opaque string, never a `tss_esapi` type — that crate is
+    /// Linux-only and this struct is not.
+    #[serde(default)]
+    pub tpm_key_material: Option<String>,
     #[serde(default)]
     pub hostname: String,
     #[serde(default)]
@@ -150,6 +163,7 @@ impl StoredWorkspaceState {
                 ca_cert_pem: result.device.ca_cert_pem,
                 cert_expires_at: result.device.cert_expires_at,
                 private_key_pem: result.device.private_key_pem,
+                tpm_key_material: result.device.tpm_key_material,
                 hostname: result.device.hostname,
                 os: result.device.os,
                 // A fresh login always re-enrolls; any prior revoke/re-enroll
@@ -195,6 +209,7 @@ impl From<&StoredWorkspaceState> for DeviceInfo {
             spiffe_id: state.device.spiffe_id.clone(),
             certificate_pem: state.device.certificate_pem.clone(),
             private_key_pem: state.device.private_key_pem.clone(),
+            tpm_key_material: state.device.tpm_key_material.clone(),
             ca_cert_pem: state.device.ca_cert_pem.clone(),
             cert_expires_at: state.device.cert_expires_at,
             hostname: state.device.hostname.clone(),
@@ -325,6 +340,11 @@ pub fn mark_device_state(workspace_slug: &str, device_state: &str) -> Result<()>
     state.device.device_state = device_state.to_string();
     state.device.certificate_pem.clear();
     state.device.private_key_pem.clear();
+    // A TPM-backed device's key material is discarded the same way
+    // (PENDING-17). The sealed blob is useless to an attacker without this
+    // exact chip, but a revoked device has no business keeping a loadable
+    // key handle around either.
+    state.device.tpm_key_material = None;
     state.device.cert_expires_at = 0;
     save_workspace_state(workspace_slug, &state)?;
     Ok(())

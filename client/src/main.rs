@@ -16,6 +16,8 @@ mod state_store;
 mod transport;
 mod tun;
 mod tunnel_pool;
+#[cfg(target_os = "linux")]
+mod tpm;
 
 mod cmd {
     pub mod down;

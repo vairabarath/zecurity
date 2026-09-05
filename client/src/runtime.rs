@@ -148,8 +148,16 @@ pub struct DeviceInfo {
     pub id: String,
     pub spiffe_id: String,
     pub certificate_pem: String,
-    pub private_key_pem: String, // plaintext in memory — never written to disk
-    pub ca_cert_pem: String,     // workspace CA + intermediate (concatenated)
+    /// Software-backed key: plaintext in memory — never written to disk
+    /// unencrypted. Empty when this device is TPM-backed (PENDING-17), in
+    /// which case `tpm_key_material` carries the key instead — exactly one of
+    /// the two is populated.
+    pub private_key_pem: String,
+    /// TPM-backed key material (PENDING-17), opaque as stored — see
+    /// `state_store::StoredDevice::tpm_key_material`. `None` for
+    /// software-backed devices.
+    pub tpm_key_material: Option<String>,
+    pub ca_cert_pem: String, // workspace CA + intermediate (concatenated)
     pub cert_expires_at: i64,    // Unix timestamp
     pub hostname: String,
     pub os: String,
