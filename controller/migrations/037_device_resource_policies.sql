@@ -8,8 +8,12 @@
 -- 034_device_status, 034_scim_directory_sync, 035 and 036. Migrations apply in
 -- filename order with no tracking table, so it is renumbered to the next free
 -- slot rather than becoming a third 034.
+--
+-- Idempotent: staging/prod is applied by hand with psql and there is no
+-- migration-tracking table, so a double-run must be a harmless no-op rather
+-- than a partial failure. Same reasoning as migration 018.
 
-CREATE TABLE device_resource_policies (
+CREATE TABLE IF NOT EXISTS device_resource_policies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     workspace_id UUID NOT NULL
@@ -30,16 +34,21 @@ CREATE TABLE device_resource_policies (
     UNIQUE (id, workspace_id)
 );
 
-CREATE INDEX idx_device_resource_policies_workspace
+CREATE INDEX IF NOT EXISTS idx_device_resource_policies_workspace
     ON device_resource_policies(workspace_id);
 
 
 -- Same purpose as the pair above, for the profile side of the
 -- policy -> profile relationship. Additive only: migration 030 owns
 -- device_profiles and is left untouched.
-ALTER TABLE device_profiles
-    ADD CONSTRAINT device_profiles_id_workspace_key
-        UNIQUE (id, workspace_id);
+DO $$
+BEGIN
+    ALTER TABLE device_profiles
+        ADD CONSTRAINT device_profiles_id_workspace_key
+            UNIQUE (id, workspace_id);
+EXCEPTION
+    WHEN duplicate_table OR duplicate_object THEN NULL;
+END $$;
 
 
 -- A resource carries at most one policy, so this is a single nullable column
@@ -53,20 +62,27 @@ ALTER TABLE device_profiles
 -- Default MATCH SIMPLE semantics skip the check entirely while
 -- device_resource_policy_id IS NULL, so "no policy assigned" remains valid.
 ALTER TABLE resources
-    ADD COLUMN device_resource_policy_id UUID NULL,
-    ADD CONSTRAINT resources_device_resource_policy_fkey
-        FOREIGN KEY (device_resource_policy_id, tenant_id)
-        REFERENCES device_resource_policies (id, workspace_id)
-        ON DELETE NO ACTION;
+    ADD COLUMN IF NOT EXISTS device_resource_policy_id UUID NULL;
 
-CREATE INDEX idx_resources_device_resource_policy_id
+DO $$
+BEGIN
+    ALTER TABLE resources
+        ADD CONSTRAINT resources_device_resource_policy_fkey
+            FOREIGN KEY (device_resource_policy_id, tenant_id)
+            REFERENCES device_resource_policies (id, workspace_id)
+            ON DELETE NO ACTION;
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_resources_device_resource_policy_id
     ON resources(device_resource_policy_id);
 
 
 -- Zero rows for a given policy is a valid, intentional state: the policy then
 -- imposes no device requirement ("Any Device"). Duplicate (policy, profile)
 -- pairs are rejected so one profile cannot attach to a policy twice.
-CREATE TABLE resource_policy_profile_bindings (
+CREATE TABLE IF NOT EXISTS resource_policy_profile_bindings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 
     device_resource_policy_id UUID NOT NULL,
@@ -89,11 +105,11 @@ CREATE TABLE resource_policy_profile_bindings (
     UNIQUE (device_resource_policy_id, profile_id)
 );
 
-CREATE INDEX idx_resource_policy_profile_bindings_workspace
+CREATE INDEX IF NOT EXISTS idx_resource_policy_profile_bindings_workspace
     ON resource_policy_profile_bindings(workspace_id);
 
-CREATE INDEX idx_resource_policy_profile_bindings_policy
+CREATE INDEX IF NOT EXISTS idx_resource_policy_profile_bindings_policy
     ON resource_policy_profile_bindings(device_resource_policy_id);
 
-CREATE INDEX idx_resource_policy_profile_bindings_profile
+CREATE INDEX IF NOT EXISTS idx_resource_policy_profile_bindings_profile
     ON resource_policy_profile_bindings(profile_id);

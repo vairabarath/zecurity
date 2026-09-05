@@ -152,20 +152,67 @@ Connector
 ## Dependency graph
 
 ```text
-P1  Database model + migration
- ├── P2 Store/domain model
- │    └── P3 GraphQL API
- ├── P4 Safe legacy-binding migration/compatibility
- └── P5 ACL compiler integration
-       └── P6 Policy-change propagation
-             └── P8 End-to-end authorization
+P1  Database model + migration                          [x] done
+ ├── P2 Store/domain model                              [x] done
+ │    └── P3 GraphQL API                                 [x] done
+ ├── P4 Safe legacy-binding migration/compatibility      [ ] NEXT
+ └── P5 ACL compiler integration                         [ ]
+       └── P6 Policy-change propagation                  [ ]
+             └── P8 End-to-end authorization             [ ]
 
-P7  Frontend Resource Policies + Device Profile usability
- └── P8 End-to-end verification
+P7  Frontend Resource Policies + Device Profile usability [ ]
+ └── P8 End-to-end verification                          [ ]
 
-P9  Testing
- └── P10 Final verification / documentation / build gates
+P9  Testing                                              [ ]
+ └── P10 Final verification / documentation / build gates [ ]
 ```
+
+## Progress — Phases 1–3 complete (2026-09-05)
+
+The new model exists end to end as an admin API and **coexists** with the legacy
+one. Nothing has been migrated and no authorization behaviour has changed yet:
+`compiler.go` still reads `resource_profile_bindings` exclusively, and
+`applyPosture()` is untouched.
+
+| Phase | State | Deliverable |
+|---|---|---|
+| P1 | done | `controller/migrations/037_device_resource_policies.sql` |
+| P2 | done | `controller/internal/posture/resource_policy_store.go` (12 operations) |
+| P3 | done | `controller/graph/resourcepolicy.graphqls` + resolvers (2 queries, 7 mutations, 3 relationship fields) |
+
+### Post-Sprint Fixes (P1–P3)
+
+1. **Workspace safety moved into the schema.** The original P1 foreign keys
+   referenced `id` alone, so only application code stopped a cross-workspace
+   policy assignment. Replaced with tenant-paired composite FKs
+   `(policy, tenant) -> (policy, workspace)`. Detail in `Member02/Phase1-*`.
+2. **Migration renumbered `034` -> `037`.** It was authored as `034` before
+   `034_device_status`, `034_scim_directory_sync`, `035` and `036` existed.
+   Confirmed first that no persistent database had ever received the `034`
+   version, so a rename was safe rather than needing a delta migration.
+3. **Migration made idempotent** (`IF NOT EXISTS` + guarded `ADD CONSTRAINT`),
+   because staging/prod is hand-applied with psql and there is no tracking table.
+   Same reasoning as `018`.
+
+### Known pre-existing issues inherited from `fixed-pendings`
+
+These were merged in, are **not** caused by P1–P3, and are deliberately left alone:
+
+- **7 failing `TestGroupOrigin_*` tests** in
+  `graph/resolvers/policy_group_origin_test.go`: the fixture inserts
+  `status = 'ACTIVE'` but migration 001 permits only lowercase
+  `('provisioning','active','suspended','deleted')`. Both that test file and
+  `001_schema.sql` are byte-identical to `fixed-pendings`, so they fail there too.
+- **gqlgen v0.17.90 cannot run under Go 1.27** (`x/tools` v0.42.0 export-data
+  mismatch). Use `GOTOOLCHAIN=go1.25.0`, the version `go.mod` declares.
+- **`controller/gen` protobuf stubs are gitignored** and must be generated
+  (`make generate-proto`) before `go build ./...` or gqlgen will fail.
+
+### Not started
+
+P4 onwards. In particular **no legacy binding has been migrated**, and the open
+Phase 4 questions (audit-only bindings, migrated-policy naming under
+`UNIQUE (workspace_id, name)`, `deleting`-status resources) remain undecided.
 
 ## Team assignment
 

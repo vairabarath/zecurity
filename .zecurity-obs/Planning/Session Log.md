@@ -2363,3 +2363,50 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Retry the browser OAuth callback; the existing user should resolve instead of being
   provisioned again.
+
+## 2026-09-05 — Claude Code (Sprint 19 / PENDING-16 Phases 1–3)
+
+**What was done:**
+- Recovered Phases 1–3 of PENDING-16 on `pending-16` (the previous local
+  implementation was lost to a PC reset; only the P1 migration and an empty P2
+  stub survived).
+- P1: hardened `037_device_resource_policies.sql` — tenant-paired composite
+  foreign keys so cross-workspace policy assignment is refused by the database,
+  not just by Go. Renumbered `034` -> `037` and made it idempotent.
+- P2: implemented `posture/resource_policy_store.go` — 12 operations, five new
+  distinguishable errors, row locks on assign and delete.
+- P3: added `resourcepolicy.graphqls` + resolvers — 2 queries, 7 mutations,
+  3 relationship fields, all ADMIN-guarded and workspace-scoped.
+- Merged `origin/fixed-pendings` into `pending-16` (58 commits). One conflict,
+  `Sprint19/path.md`, because both branches had opened a different "Sprint 19";
+  resolved by preserving both plans as Track A (PENDING-16) and Track B
+  (PENDING-13).
+
+**Key decisions:**
+- Workspace safety belongs in the schema, not only in application code — the
+  legacy `resource_profile_bindings` relies on Go checks alone and its own
+  comment says so; the new model does not repeat that.
+- The audit/enforce guard (`ErrEmptyEnforceProfile`) was deliberately **not**
+  carried into `AddProfileToPolicy`. It exists only because of
+  `device_profiles.mode`, which the new model retires.
+- Re-assigning a resource's existing policy is an idempotent success; only a
+  *different* second policy is refused. An existing assignment is never replaced.
+- Renaming the migration was chosen over an additive delta only after confirming
+  no persistent database had ever received the `034` version.
+
+**Verification:**
+- `go build ./...` clean; gqlgen generation succeeds with the committed config
+  and is idempotent.
+- `go test ./internal/posture/... -race` passes; all 25 Resource Policy tests
+  pass. Existing-database migration path proven explicitly (001..036, seed a
+  legacy binding, apply 037 — the legacy row survives).
+- 7 `TestGroupOrigin_*` failures are inherited from `fixed-pendings` (uppercase
+  `'ACTIVE'` vs the lowercase check constraint) and were left untouched.
+
+**What's next:**
+- Phase 4, legacy binding migration — not started. Its open questions are still
+  open: whether audit-only bindings migrate at all (they are authorization-inert
+  today, so migrating them would turn a no-op into an enforcing gate), how
+  migrated policies are named under `UNIQUE (workspace_id, name)` when resource
+  names are not unique per workspace, and whether `deleting`-status resources
+  are in scope.
