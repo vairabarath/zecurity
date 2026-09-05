@@ -3,6 +3,11 @@
 --
 -- This phase only introduces the new database model.
 -- Existing resource_profile_bindings remain untouched.
+--
+-- Numbered 037: this file was first authored as 034 on a branch that predated
+-- 034_device_status, 034_scim_directory_sync, 035 and 036. Migrations apply in
+-- filename order with no tracking table, so it is renumbered to the next free
+-- slot rather than becoming a third 034.
 
 CREATE TABLE device_resource_policies (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
