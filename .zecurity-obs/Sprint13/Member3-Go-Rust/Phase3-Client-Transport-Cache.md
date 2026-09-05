@@ -4,7 +4,7 @@ member: M3
 sprint: 13
 phase: 3
 title: Client Transport Cache — consume GetTransportSnapshot, route via remote_network_id
-status: planned
+status: done
 depends_on:
   - Sprint13/Member3-Go-Rust/Phase1-Transport-Proto-and-Compiler
 tags: [rust, client, transport, daemon, acl-decoupling, pending-03]
@@ -75,12 +75,25 @@ relay fields with no regression.
 
 ## Implementation checklist
 
-- [ ] **C1** `SharedState.transport_snapshot` + `fetch_and_store_transport` (60s TTL, `known_version`)
-- [ ] **C2** `build_transports_by_resource` resolves relay from Transport Cache on `remote_network_id`; ACL 4+5 fallback retained
-- [ ] **C3** retarget the `relay_resync` signal to wake the transport re-poll
-- [ ] **Build gate:** `cd client && cargo build`
-- [ ] Tests in a separate `_tests.rs` file
+- [x] **C1** `SharedState.transport_snapshot` + `fetch_and_store_transport` (60s TTL, `known_version`)
+- [x] **C2** routing resolves relay from Transport Cache on `remote_network_id`; ACL 4+5 fallback retained
+- [x] **C3** relay failure wakes an independent background transport recovery/re-poll
+- [x] **Build gate:** `cd client && cargo build`
+- [x] Routing tests cover transport preference, ACL fallback, missing remote network, and preferred connector
+- [x] Recovery coverage verifies version-aware synchronization, recovery-triggered rebuild behavior, and `up_to_date` cache preservation; Phase 4 adds concurrency and failure-classification hardening
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: Relay recovery no longer blocks the ACL scheduler
+
+**Issue:** Retargeting relay recovery inside the ACL scheduler could stall normal ACL polling while
+transport recovery backed off.
+
+**Fix applied:** The recovery path runs as an independent background task and refreshes the
+transport snapshot without coupling its retry lifecycle to authorization polling (`59110e0`). The
+client still requires an authorizing ACL entry and falls back to legacy ACL relay coordinates when
+the transport entry is absent.
+
+**Verification:** The client build and complete test suite pass (38 tests). Focused routing,
+transport, and recovery/version tests are included. An end-to-end relay-failover run remains open
+at the sprint acceptance level.

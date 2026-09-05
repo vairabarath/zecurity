@@ -11,16 +11,19 @@ import (
 // InitiateAuth, updated by AuthCallbackHandler, and consumed (deleted) by
 // TokenExchange. All access is protected by sessionMu.
 type authSession struct {
-	WorkspaceID        string
-	WorkspaceSlug      string
-	Email              string    // set by AuthCallbackHandler after Google verifies identity
-	GoogleSub          string    // set by AuthCallbackHandler — used as provider_sub in upsertUser
-	CliCodeChallenge   string    // BASE64URL(SHA256(cli_code_verifier)) — verified in TokenExchange
-	LocalRedirectURI   string    // http://127.0.0.1:<port>/callback — CLI's local server
-	GoogleCodeVerifier string    // controller's own Google PKCE verifier — never leaves server
-	CtrlCode           string    // one-time code; set after Google callback completes
-	CtrlCodeExpiresAt  time.Time // 60-second TTL after ctrl_code is issued
-	ExpiresAt          time.Time // 10-minute overall session TTL
+	WorkspaceID       string
+	WorkspaceSlug     string
+	ConnectionID      string    // identity_connections id resolved at InitiateAuth (adapter selection)
+	Provider          string    // set by AuthCallbackHandler after the IdP verifies identity
+	Email             string    // set by AuthCallbackHandler after the IdP verifies identity
+	Subject           string    // set by AuthCallbackHandler — immutable per-issuer subject → provider_sub
+	CliCodeChallenge  string    // BASE64URL(SHA256(cli_code_verifier)) — verified in TokenExchange
+	LocalRedirectURI  string    // http://127.0.0.1:<port>/callback — CLI's local server
+	IdpCodeVerifier   string    // controller's own IdP PKCE verifier — never leaves server
+	Nonce             string    // OIDC nonce — round-trips to the IdP, checked at callback
+	CtrlCode          string    // one-time code; set after the IdP callback completes
+	CtrlCodeExpiresAt time.Time // 60-second TTL after ctrl_code is issued
+	ExpiresAt         time.Time // 10-minute overall session TTL
 }
 
 var (
@@ -82,7 +85,7 @@ func consumeSession(id string) (*authSession, bool) {
 
 // updateSessionCtrlCode records the verified identity and ctrl_code after the
 // Google callback completes. Returns false if the session has already expired.
-func updateSessionCtrlCode(id, email, googleSub, ctrlCode string, expiresAt time.Time) bool {
+func updateSessionCtrlCode(id, email, provider, subject, ctrlCode string, expiresAt time.Time) bool {
 	sessionMu.Lock()
 	defer sessionMu.Unlock()
 	s, ok := sessionStore[id]
@@ -90,7 +93,8 @@ func updateSessionCtrlCode(id, email, googleSub, ctrlCode string, expiresAt time
 		return false
 	}
 	s.Email = email
-	s.GoogleSub = googleSub
+	s.Provider = provider
+	s.Subject = subject
 	s.CtrlCode = ctrlCode
 	s.CtrlCodeExpiresAt = expiresAt
 	return true

@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 // TestParseResolver covers the JSON → proto conversion without a database.
@@ -112,6 +113,7 @@ func TestCompileACLSnapshot_FQDNAddressing(t *testing.T) {
 
 	notifier := NewNotifier(NewSnapshotCache())
 	store := NewStore(testPool)
+	postureStore := posture.NewStore(testPool)
 
 	// One workspace holding all three resources, so a single compile exercises
 	// every addressing mode at once — including the malformed one, which must
@@ -133,10 +135,11 @@ func TestCompileACLSnapshot_FQDNAddressing(t *testing.T) {
 		mustAssignResourceToGroup(t, ctx, testPool, wsID, id, grpID)
 	}
 
-	snap, err := CompileACLSnapshot(ctx, store, notifier, wsID)
+	compiled, err := CompileACLSnapshot(ctx, store, postureStore, notifier, wsID)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
+	snap := compiled.Snapshot
 
 	byID := make(map[string]*clientv1.ACLEntry, len(snap.Entries))
 	for _, e := range snap.Entries {

@@ -15,6 +15,17 @@ tags: [pending, adr, zero-trust, authorization]
 # Pending ADR 09 — Continuous / Re-evaluated Authorization
 
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+>
+> **Partial implementation note (Sprint 15):** a bounded variant of **Option B only** shipped as a
+> side effect of PENDING-08's connector session-registry work — no new revocation RPC; the connector
+> diffs `(spiffe_id, resource_id)` between the previous and newly-applied ACL snapshot in
+> `control_stream.rs`'s `AclSnapshot` handler and cancels tunnels for pairs that dropped out, bounded
+> by the existing heartbeat/snapshot-expiry interval, not immediate. **Options A (push-based
+> immediate revocation) and C (risk-scored step-up) are still fully open**, and the team explicitly
+> deferred promoting this to an ADR until the bounded-latency approach is validated in practice —
+> see `.zecurity-obs/Sprint15/path.md` line ~362. Status stays `pending` because the actual decision
+> (which option to standardize on) has not been made; Sprint 15 is a tactical interim measure, not a
+> ratified choice.
 
 ## Context / Current State
 

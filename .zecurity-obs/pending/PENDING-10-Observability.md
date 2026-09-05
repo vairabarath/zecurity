@@ -14,6 +14,15 @@ tags: [pending, adr, operations, observability, metrics]
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 > *(Current state below is from a presence/absence scan — confirm before scoping.)*
 
+> **Correction (2026-09-01, verified against source):** still **PENDING**, but no longer a clean
+> greenfield — a narrow metrics slice exists. `controller/internal/metrics/metrics.go` (104 lines)
+> registers reconcile-only counters/gauges (reports, drift, resyncs, tombstones reaped) and serves
+> Prometheus text at `/metrics` (`controller/cmd/server/main.go:642`); there is a single `/health`
+> handler (`main.go:356`). **Absent:** distributed tracing, SLOs, a readiness/liveness split, and
+> every operator signal named below — relay capacity, probe/migration rates, ACL compile latency,
+> heartbeat health, tunnel throughput, cert-expiry runway. Scope this as "extend the existing
+> registry", not "introduce metrics".
+
 ## Context / Current State
 
 There is structured logging (e.g. `tracing` in Rust services, connector `ConnectorLog`), but no

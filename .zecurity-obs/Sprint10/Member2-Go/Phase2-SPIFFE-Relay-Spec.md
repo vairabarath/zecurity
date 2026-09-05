@@ -67,11 +67,11 @@ All functions return `false`/`None` on malformed input — never panic, never lo
 
 ## Review Checklist (M2 reviews M3's implementation)
 
-- [ ] `validate_connector_spiffe` rejects `spiffe://domain/shield/id` (wrong role)
-- [ ] `validate_client_spiffe` rejects `spiffe://domain/connector/id` (wrong role)
-- [ ] `same_workspace` returns false for `spiffe://workspace-a/...` vs `spiffe://workspace-b/...`
-- [ ] Functions return false for empty strings — no panics
-- [ ] No logging of full certificate contents (PII/security risk)
+- [x] `validate_connector_spiffe` rejects `spiffe://domain/shield/id` (wrong role)
+- [x] `validate_client_spiffe` rejects `spiffe://domain/connector/id` (wrong role)
+- [x] `same_workspace` returns false for `spiffe://workspace-a/...` vs `spiffe://workspace-b/...`
+- [x] Functions return false for empty strings — no panics
+- [x] No logging of full certificate contents (PII/security risk)
 
 ---
 

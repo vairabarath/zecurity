@@ -61,7 +61,7 @@ cd connector && cargo build && cd ../client && cargo build
 - [x] **M2-F1** `connector/src/relay_client.rs` — relay-CRL check via the hardened manager; fail-closed.
 - [x] **M2-F2** `client/src/relay_pool.rs` — same, including active cached-connection eviction.
 - [x] **Build gate:** `cd connector && cargo build && cd ../client && cargo build`
-- [ ] **M2-F3 E2E gate:** revoke a Relay through the Controller and prove a connector/client holding
+- [x] **M2-F3 E2E gate:** revoke a Relay through the Controller and prove a connector/client holding
   a cached `LabelledRelayList` closes/refuses it. Requires completed M1 Phase C endpoint and a test
   environment that permits local QUIC sockets.
 

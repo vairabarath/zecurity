@@ -11,16 +11,18 @@ A team member will tell you their member number. When they do, execute this sequ
 
 ```
 1. Read this file (agent.md) fully
-2. Read .zecurity-obs/Sprint8/path.md
+2. Read .zecurity-obs/Sprint17/path.md
 3. Find the first unchecked phase for your member where all depends_on are checked
 4. Read that phase file
 5. Tell the member: what they're building, which files to touch, the build check command
 ```
 
-If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), M3 (Go+Rust), or M4 (Rust)?"*
+If no member number is given, ask which Sprint 17 member role the human is working as.
 
-**Active sprint plan:** `.zecurity-obs/Sprint8/path.md`
-**Follow-on sprint plans:** `.zecurity-obs/Sprint8.5/path.md`, `.zecurity-obs/Sprint9/path.md`
+**Active sprint plan:** `.zecurity-obs/Sprint17/path.md`
+
+**Sprint 17 member roles:**
+- M1: Go Controller — the whole SCIM identity engine (schema, SCIM token auth, break-glass permission, provider profiles + mapping, Users provision/update/deprovision, Groups, identity-conflict workflow, connection lifecycle + health + sync, `SideEffectSink`→outbox adapter). Solo M1; the durable outbox (Sprint 18) is already merged.
 
 ---
 
@@ -33,7 +35,7 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - **Shield:** Rust — `shield/` — Linux binary, enrollment + heartbeat via Connector + zecurity0 + nftables *(Sprint 4)*
 - **Admin UI:** React + Vite + Apollo — `admin/`
 - **Client:** Rust CLI/daemon — `client/` *(Sprint 7 + Sprint 8.5 + Sprint 9 client dataplane)*
-- **Database:** PostgreSQL (pgx/v5) + Redis (sessions + JTI burn)
+- **Database:** PostgreSQL (pgx/v5) + Valkey (Redis-protocol-compatible fork; sessions + JTI burn)
 - **PKI:** 3-tier CA (Root → Intermediate → Workspace CA → Connector cert / Shield cert)
 - **Identity:** SPIFFE — `spiffe://<trust_domain>/connector/<id>` and `spiffe://<trust_domain>/shield/<id>`
 - **Releases:** GitHub Actions — `connector-v*` tags (connector), `shield-v*` tags (shield)
@@ -42,17 +44,24 @@ If no member number given, ask: *"Which member are you? M1 (Frontend), M2 (Go), 
 - Sprint 1: Auth (Google OAuth + JWT), workspace management, admin UI
 - Sprint 2: PKI, connector enrollment, mTLS heartbeat, SPIFFE interceptor, auto-update
 - Sprint 3: Automatic cert renewal (RenewCert RPC, proof-of-possession CSR, channel rebuild)
-
-**What's complete:**
 - Sprint 4: Shield deployment — zecurity0 TUN, nftables base table, heartbeat via Connector, SPIFFE identity
-
-**What's complete:**
 - Sprint 5: Resource protection — Shield applies nftables rules per resource, lifecycle `pending → managing → protecting → protected` via heartbeat piggyback
+- Sprint 15: Device Posture + Continuous Authorization — PENDING-08 implemented; a bounded variant of PENDING-09 Option B landed with it
+
+**What's merged:**
+- Sprint 18: Durable Outbox Infrastructure (PENDING-15) — `controller/internal/outbox/*` + `migrations/033_outbox_events.sql`. Already merged into `fixed-pendings`; SCIM (Sprint 17) consumes it via `outbox.Enqueue` and never rebuilds it.
 
 **What's active:**
-- Sprint 8: Policy Engine — groups, access rules, ACL snapshot compilation, Connector ACL push, Client `GetACLSnapshot` support. See `.zecurity-obs/Sprint8/path.md`
-- Sprint 8.5: M4 client daemon foundation — planned bridge before Sprint 9. See `.zecurity-obs/Sprint8.5/path.md`
-- Sprint 9: RDE dataplane — planned after Sprint 8 + 8.5. See `.zecurity-obs/Sprint9/path.md`
+- Sprint 17: SCIM Directory Synchronization (ADR-025) — solo M1 sprint building the SCIM identity engine (schema, token auth, break-glass permission, provider profiles + mapping, Users provision/update/deprovision, Groups, conflict workflow, connection lifecycle + health + sync). See `.zecurity-obs/Sprint17/path.md`. It depends on the already-merged outbox (Sprint 18), so SCIM only calls `outbox.Enqueue` inside the identity tx.
+
+### Current M1 Task — M1 (SCIM identity engine)
+
+Build the directory-driven identity lifecycle:
+
+- Schema is **done** (Phase 1, `migrations/034_scim_directory_sync.sql`): connection/identity/group columns + `scim_tokens` / `scim_identity_conflicts` / `scim_sync_instances`.
+- Next phases: SCIM bearer-token auth (HMAC-SHA256 over `SCIM_TOKEN_HASH_KEY`), break-glass permission primitive, provider profiles + mapping probe, Users provision/update/deprovision (atomic with `identity.Revoker` + `SideEffectSink.Enqueue` into the merged outbox), Groups, identity-conflict workflow, connection lifecycle + health + sync.
+- `SideEffectSink` wraps the merged `outbox.Enqueue` — do **not** rebuild the outbox; SCIM only calls `outbox.Enqueue` inside the identity tx. Keep the `identity.SideEffectSink` interface as the seam so `scim`/`identity` never import `outbox` directly.
+- Verify with `go build ./...` and `go test ./internal/scim ./internal/identity` from `controller/`.
 
 ---
 
@@ -110,9 +119,9 @@ The shared brain. All agents should read relevant notes before working on a subs
   Sprint1/ (complete) - Sprint5/ (complete)
   Sprint6/ (complete) - Discovery
   Sprint7/ (complete) - Client Application
-  Sprint8/ (ACTIVE)  - Policy Engine: Groups, Resources, ACL Push
-  Sprint8.5/ (planned) - Client Daemon Foundation
-  Sprint9/ (planned) - RDE Dataplane
+  Sprint15/ (complete) - Device Posture + Continuous Authorization
+  Sprint17/ (ACTIVE) - SCIM Directory Synchronization
+  Sprint18/ (merged) - Durable Outbox Infrastructure
   Decisions/
   Research/
 ```
@@ -134,7 +143,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 1. Read `agent.md` (this file)
 2. Read `.zecurity-obs/Planning/Session Log.md` for recent context
 3. Read `.zecurity-obs/Planning/Roadmap.md` for current priorities
-4. **If Sprint 8:** Read `.zecurity-obs/Sprint8/path.md` — check which phases are unchecked, confirm all dependencies for your phase are met
+4. **For Sprint 17:** Read `.zecurity-obs/Sprint17/path.md` — check which phases are unchecked and confirm all dependencies for your phase are met
 5. Read relevant service note(s) if touching a specific subsystem
 
 ### During Work
@@ -145,7 +154,7 @@ The shared brain. All agents should read relevant notes before working on a subs
 - Shield: `cargo build --manifest-path shield/Cargo.toml` must pass
 - Client: `cargo build --manifest-path client/Cargo.toml` must pass
 - DNS helper: `cargo build --manifest-path dns-helper/Cargo.toml` must pass (ADR-023, privileged helper)
-- **Sprint 8:** After completing a phase, check its box in `Sprint8/path.md` and update the phase file `status:` frontmatter to `done`
+- **Per sprint:** After completing a phase, check its box in that sprint's `path.md` and update the phase file `status:` frontmatter to `done`
 - If making an architecture decision, document it or flag it for Claude Code
 - Do not touch files owned by other members — see conflict zone table in `Sprint6/path.md`
 
@@ -237,7 +246,7 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 | Release connector binary | `git tag connector-vX.Y.Z && git push origin connector-vX.Y.Z` |
 | Release shield binary | `git tag shield-vX.Y.Z && git push origin shield-vX.Y.Z` |
 | Open vault | Open `.zecurity-obs/` in Obsidian |
-| Sprint 8 dependency map | Read `.zecurity-obs/Sprint8/path.md` |
+| Active sprint dependency map | Read `.zecurity-obs/Sprint17/path.md` |
 
 ---
 
@@ -265,3 +274,14 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 6. **Default deny.** Missing snapshot, missing resource, disabled rule, or missing SPIFFE ID means deny.
 7. **Connector ACL push.** Connector receives ACL snapshots via heartbeat piggyback.
 8. **Client state model.** Durable client state is encrypted at rest in `state_store.rs`; decrypted private key and active access token live only in process/daemon memory during active use. See `.zecurity-obs/Decisions/ADR-002-Client-Daemon-Required.md`.
+
+---
+
+## Sprint 17 Quick Rules (for any AI agent)
+
+1. **Read `Sprint17/path.md` first.** It is reconciled to a **solo M1** plan — the durable outbox (PENDING-15) already shipped as **Sprint 18** and is NOT built here.
+2. **Do not rebuild the outbox.** `internal/outbox/*` is merged infra. SCIM calls `outbox.Enqueue(ctx, tx, evt)` inside the identity transaction; keep the `identity.SideEffectSink` interface as the only seam so `scim`/`identity` never import `outbox` directly.
+3. **Migration number is `034`** (`034_scim_directory_sync.sql`) — next free slot after `030`/`031`/`032`/`033`. Never author `outbox_events` in a SCIM migration; it lives in `033_outbox_events.sql`.
+4. **Build gates are mandatory.** Every phase file has a "Build gate" section. Do not proceed until `go build ./...` and the listed tests pass.
+5. **Conflict zones.** `scim/**`, `idp/store.go`, `identity/**`, `permission/**`, `graph/idp*.{graphqls,go}` are M1-only; `internal/outbox/**` is Sprint 18 (do not modify).
+6. **Branch workflow.** `fixed-pendings` is the reconciled source of truth. Feature branches (e.g. `mnemosyne`) carry no unique commits and are **fast-forwarded** via `git merge --ff-only origin/fixed-pendings`. Before fast-forwarding, stash in-flight work; keep implementation code but discard stale sprint-plan doc edits the reconciliation supersedes.

@@ -14,8 +14,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
@@ -42,17 +45,24 @@ import (
 	"github.com/yourorg/ztna/controller/internal/connector"
 	"github.com/yourorg/ztna/controller/internal/db"
 	"github.com/yourorg/ztna/controller/internal/discovery"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
 	"github.com/yourorg/ztna/controller/internal/metrics"
 	"github.com/yourorg/ztna/controller/internal/middleware"
 	"github.com/yourorg/ztna/controller/internal/netutil"
+	"github.com/yourorg/ztna/controller/internal/outbox"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/transport"
+	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
@@ -60,11 +70,56 @@ import (
 func main() {
 	loadOptionalEnv()
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+
+	defer stop()
+	var wg sync.WaitGroup
+	var outboxStore *outbox.Outbox
+	var err error
+
 	if err := db.Init(ctx); err != nil {
 		log.Fatalf("db init: %v", err)
 	}
 	defer db.Close()
+
+	outboxMaxRetries := envOrInt(
+		"OUTBOX_MAX_RETRIES",
+		100,
+	)
+	outboxBatchSize := envOrInt(
+		"OUTBOX_BATCH_SIZE",
+		100,
+	)
+	outboxStore, err = outbox.NewOutboxWithMaxRetries(
+		db.Pool,
+		outboxMaxRetries,
+	)
+
+	if err != nil {
+		log.Fatalf("outbox init: %v", err)
+	}
+	outboxRegistry := outbox.NewHandlerRegistry()
+	outboxProcessor, err := outbox.NewProcessor(
+		outboxStore,
+		outboxRegistry,
+		outbox.WithPollInterval(
+			mustDuration("OUTBOX_POLL_INTERVAL", 1*time.Second),
+		),
+		outbox.WithLockWindow(
+			mustDuration("OUTBOX_LOCK_WINDOW", 30*time.Second),
+		),
+		outbox.WithReaperInterval(
+			mustDuration("OUTBOX_REAPER_INTERVAL", 30*time.Second),
+		),
+		outbox.WithMaxRetries(outboxMaxRetries),
+	)
+	if err != nil {
+		log.Fatalf("outbox processor init: %v", err)
+	}
 
 	pkiService, err := pki.Init(ctx, db.Pool)
 	if err != nil {
@@ -78,9 +133,35 @@ func main() {
 
 	tenantDB := db.NewTenantDB(db.Pool)
 
+	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
+	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
+	idpStore := idp.NewStore(db.Pool, pkiService)
+
+	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
+	// (SCIM_TOKEN_HASH_KEY) distinct from the PKI master secret.
+	scimStore, err := scim.NewStore(db.Pool, []byte(mustEnv("SCIM_TOKEN_HASH_KEY")), 0)
+	if err != nil {
+		log.Fatalf("scim token store init: %v", err)
+	}
+
+	// Explicit fine-grained permission store (Sprint 17 / ADR-025 Phase 3).
+	// Backs the break-glass primitive; possession is always an explicit row.
+	permissionStore := permission.NewStore(db.Pool)
+
+	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
+	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
+	// invokes on a resolver miss; the audit sink writes identity events to
+	// audit_logs.
+	identitySvc := identity.NewService(
+		db.Pool,
+		identity.NewLinker(bootstrapSvc),
+		identity.NewAuditSink(db.Pool),
+	)
+
 	authSvc, err := auth.NewService(auth.Config{
 		Pool:               db.Pool,
-		BootstrapService:   bootstrapSvc,
+		IdentityService:    identitySvc,
+		IdpStore:           idpStore,
 		JWTSecret:          mustEnv("JWT_SECRET"),
 		JWTIssuer:          appmeta.ControllerIssuer,
 		GoogleClientID:     mustEnv("GOOGLE_CLIENT_ID"),
@@ -92,6 +173,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth init: %v", err)
 	}
+
+	// Session-generation revoker (PENDING-04 Phase 6): admin actions that remove
+	// a login path (disable/delete a connection) bump users.identity_generation
+	// and drop the live refresh session — authSvc satisfies
+	// identity.SessionInvalidator. Break-glass admins may always authenticate via
+	// the platform IdP so a workspace can never lock itself out (ADR-024 §5).
+	identityRevoker := identity.NewRevoker(db.Pool, authSvc, identity.NewAuditSink(db.Pool))
+	breakGlassEmails := parseBreakGlassEmails(os.Getenv("IDP_BREAK_GLASS_EMAILS"))
 
 	connectorCfg := connector.Config{
 		CertTTL:             mustDuration("CONNECTOR_CERT_TTL", 7*24*time.Hour),
@@ -164,7 +253,14 @@ func main() {
 	policyStore := policy.NewStore(db.Pool)
 	policyCache := policy.NewSnapshotCache()
 	policyNotifier := policy.NewNotifier(policyCache)
-
+	policy.RegisterExpiryNotifier(func(workspaceID string) {
+		if err := policyNotifier.NotifyPolicyChange(
+			context.Background(),
+			workspaceID,
+		); err != nil {
+			log.Printf("expiry policy notification: %v", err)
+		}
+	})
 	// ADR-015/017 Track B: transport (connectivity) plane, independent of the
 	// ACL (authorization) plane. Relay metadata/eviction and connector relay
 	// placement changes drive transportNotifier.NotifyTopologyChange — never
@@ -174,6 +270,8 @@ func main() {
 	transportNotifier := transport.NewNotifier(transportCache)
 	transportCompiler := transport.NewCompiler(transportStore, transportCache, transportNotifier)
 	relaySvc.WithTransportNotifier(transportNotifier)
+	postureStore := posture.NewStore(db.Pool)
+	postureEvaluator := posture.NewEvaluator(postureStore, policyNotifier)
 
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
@@ -206,8 +304,15 @@ func main() {
 				InvitationStore:   inviteStore,
 				InvitationEmailer: inviteEmailer,
 				PolicyStore:       policyStore,
+				PostureStore:      postureStore,
+				PostureEvaluator:  postureEvaluator,
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
+				IdpStore:          idpStore,
+				ScimStore:         scimStore,
+				PermissionStore:   permissionStore,
+				Revoker:           identityRevoker,
+				BreakGlassEmails:  breakGlassEmails,
 			},
 			Directives: graph.DirectiveRoot{
 				HasRole: resolvers.HasRole,
@@ -251,6 +356,8 @@ func main() {
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
+	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
+	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
 	mux.Handle("/auth/refresh", authSvc.RefreshHandler())
 	mux.Handle("/auth/logout", authSvc.LogoutHandler())
 	mux.Handle("/health", healthHandler())
@@ -304,6 +411,15 @@ func main() {
 		),
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
+
+	// SCIM 2.0 directory-sync endpoint (Sprint 17 / ADR-025 Phase 5). Mounted
+	// under the SCIM bearer-auth middleware, which binds (workspace_id,
+	// connection_id) from the token onto the request context. The DirectoryService
+	// derives all scope from that token — never from the request payload.
+	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
+		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimStore.WithDirectoryService(scimDirSvc)
+	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 
 	// REST endpoint: POST /provider/relays — creates a relay registration +
 	// provisioning token. Provider-plane action (PENDING-07a): guarded by
@@ -367,13 +483,13 @@ func main() {
 	)
 
 	connectorSvc := &connector.EnrollmentHandler{
-		Cfg:        connectorCfg,
-		Pool:       db.Pool,
-		Redis:      valkeycompat.NewAdapter(connectorValkey),
-		PKIService: pkiService,
-		ShieldSvc:  shieldSvc,
-		Registry:   connectorRegistry,
-
+		Cfg:               connectorCfg,
+		Pool:              db.Pool,
+		Redis:             valkeycompat.NewAdapter(connectorValkey),
+		PKIService:        pkiService,
+		ShieldSvc:         shieldSvc,
+		Registry:          connectorRegistry,
+		PostureStore:      postureStore,
 		PolicyStore:       policyStore,
 		PolicyCache:       policyCache,
 		PolicyNotifier:    policyNotifier,
@@ -389,7 +505,7 @@ func main() {
 	// invalidates the cache, push the fresh snapshot to all connected connectors
 	// in the workspace immediately instead of waiting for the next heartbeat.
 	// Heartbeat reconciliation remains the fallback for offline/missed connectors.
-	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, policyCache, policyNotifier, db.Pool)
+	aclPusher := connector.NewACLPusher(connectorRegistry, policyStore, postureStore, policyCache, policyNotifier)
 	policyNotifier.RegisterPushHook(aclPusher.PushWorkspace)
 
 	// Transport plane has no proactive push: the client is the sole consumer and
@@ -402,6 +518,7 @@ func main() {
 		db.Pool,
 		authSvc,
 		pkiService,
+		idpStore,
 		mustEnv("CLIENT_GOOGLE_CLIENT_ID"),
 		mustEnv("CLIENT_GOOGLE_CLIENT_SECRET"),
 		mustEnv("CONTROLLER_HOST"),
@@ -410,31 +527,114 @@ func main() {
 		policyCache,
 		policyNotifier,
 		transportCompiler,
+		postureStore,
+		postureEvaluator,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
+
+	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM
+	// deprovision/reactivate (PENDING-05) enqueues device.trust.* events; these
+	// handlers execute them — revoking the user's device certs (→ workspace CRL)
+	// and recording re-enrollment requirements. Fail-fast at startup so a missing
+	// registration is caught immediately rather than letting events dead-letter.
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustRevokeRequested,
+		clientsvc.NewDeviceTrustRevokeHandler(db.Pool, policyNotifier),
+	); err != nil {
+		log.Fatalf("register device.trust.revoke.requested handler: %v", err)
+	}
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustReEnrollmentRequired,
+		clientsvc.NewDeviceTrustReEnrollHandler(db.Pool),
+	); err != nil {
+		log.Fatalf("register device.trust.re_enrollment_required handler: %v", err)
+	}
 
 	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
 	// Google redirects here after user consent; controller exchanges the code
 	// server-side and redirects the browser to the CLI's local loopback server.
 	mux.Handle("GET /api/clients/callback", clientSvc.AuthCallbackHandler())
 
-	go connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
-	go shieldSvc.RunDisconnectWatcher(ctx)
-	go relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	wg.Add(1)
+
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
-		defer ticker.Stop()
-		for range ticker.C {
-			cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
-			if err := discovery.PurgeScanResults(context.Background(), db.Pool, cutoff); err != nil {
-				log.Printf("discovery: purge scan results: %v", err)
-			}
+		defer wg.Done()
+
+		if err := outboxProcessor.Run(ctx, outboxBatchSize); err != nil {
+			log.Printf("outbox processor stopped: %v", err)
 		}
 	}()
 
+	wg.Add(1)
+
 	go func() {
+		defer wg.Done()
+		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
+	}()
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		shieldSvc.RunDisconnectWatcher(ctx)
+	}()
+
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+	}()
+
+	retentionDays := envOrInt(
+		"POSTURE_RETENTION_DAYS",
+		30,
+	)
+
+	retentionBatchSize := envOrInt(
+		"POSTURE_RETENTION_BATCH_SIZE",
+		2000,
+	)
+
+	retentionWorker := posture.NewRetentionWorker(
+		postureStore,
+		time.Duration(retentionDays)*24*time.Hour,
+		retentionBatchSize,
+		nil,
+	)
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		retentionWorker.Run(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case <-ticker.C:
+				cutoff := time.Now().UTC().Add(-discovery.ScanResultTTL)
+				if err := discovery.PurgeScanResults(ctx, db.Pool, cutoff); err != nil {
+					log.Printf("discovery: purge scan results: %v", err)
+				}
+			}
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
 		log.Printf("gRPC server listening on :%s", connectorCfg.GRPCPort)
-		if err := grpcServer.Serve(grpcListener); err != nil {
+		if err := grpcServer.Serve(grpcListener); err != nil && err != grpc.ErrServerStopped {
 			log.Fatalf("grpc serve: %v", err)
 		}
 	}()
@@ -443,19 +643,69 @@ func main() {
 	// must not sit on the public mux. Defaults to loopback; set METRICS_ADDR (e.g.
 	// ":9102") to expose to a network scraper behind your own firewall. A failure
 	// here is logged, not fatal — metrics are non-critical to serving traffic.
+
+	metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", metrics.Handler())
+	metricsServer := &http.Server{
+		Addr:    metricsAddr,
+		Handler: metricsMux,
+	}
+
+	wg.Add(1)
 	go func() {
-		metricsAddr := envOr("METRICS_ADDR", "127.0.0.1:9102")
-		metricsMux := http.NewServeMux()
-		metricsMux.Handle("/metrics", metrics.Handler())
-		log.Printf("metrics listening on %s/metrics", metricsAddr)
-		if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil {
+		defer wg.Done()
+
+		log.Printf("metrics listenin on %s/metrics", metricsAddr)
+
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server stopped: %v", err)
 		}
 	}()
 
 	addr := ":" + envOr("PORT", "8080")
+	httpServer := &http.Server{
+		Addr:    addr,
+		Handler: mux,
+	}
 	log.Printf("listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, mux))
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("http serve: %v", err)
+
+		}
+	}()
+	<-ctx.Done()
+	log.Printf("shutdown requested")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("http server shutdown error: %v", err)
+	}
+	if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("metrics server shutdown error: %v", err)
+	}
+	grpcStopped := make(chan struct{})
+
+	go func() {
+		grpcServer.GracefulStop()
+		close(grpcStopped)
+	}()
+	select {
+	case <-grpcStopped:
+		// Success. Nothing more required.
+	case <-shutdownCtx.Done():
+		log.Printf("gRPC graceful shutdown timed out; forcing stop")
+		grpcServer.Stop()
+	}
+
+	wg.Wait()
 }
 
 // publicRootFields are the GraphQL root fields callable WITHOUT authentication —
@@ -825,6 +1075,20 @@ func loadOptionalEnv() {
 	}
 }
 
+// parseBreakGlassEmails parses IDP_BREAK_GLASS_EMAILS (comma-separated) into a
+// lowercased set of workspace admins who may always authenticate via the
+// platform IdP, so a workspace can never lock itself out (ADR-024 §5). Consulted
+// by the no-lockout guard. Empty/unset → no break-glass admins.
+func parseBreakGlassEmails(raw string) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range strings.Split(raw, ",") {
+		if email := strings.ToLower(strings.TrimSpace(e)); email != "" {
+			out[email] = true
+		}
+	}
+	return out
+}
+
 // seedProviderUsers upserts each email in PROVIDER_BOOTSTRAP_EMAILS as an active
 // super-admin. This is the ONLY way the first provider user comes into existence
 // — there is no self-registration. Idempotent: safe to run on every startup.
@@ -845,4 +1109,24 @@ func seedProviderUsers(ctx context.Context, store *provider.Store) {
 		}
 		log.Printf("seeded provider super-admin: %s", email)
 	}
+}
+
+func envOrInt(key string, fallback int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Printf(
+			"invalid value for %s=%q, using default %d",
+			key,
+			v,
+			fallback,
+		)
+		return fallback
+	}
+
+	return n
 }

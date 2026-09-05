@@ -12,10 +12,10 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,9 +27,14 @@ import (
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
+	"github.com/yourorg/ztna/controller/internal/audit"
 	"github.com/yourorg/ztna/controller/internal/auth"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
+	"github.com/yourorg/ztna/controller/internal/identity"
+	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -38,6 +43,13 @@ const (
 	googleTokenEndpoint = "https://oauth2.googleapis.com/token"
 
 	clientCertTTL = 7 * 24 * time.Hour
+
+	// renewalWindow: RENEW_SOON fires once elapsed cert life crosses ~60%
+	// (ADR-028 D4) — i.e. remaining life drops to 40% of clientCertTTL,
+	// ~2.8 days for the current 7-day TTL. Derived from clientCertTTL so it
+	// scales automatically if the TTL ever changes; not a separate magic
+	// number to keep in sync by hand.
+	renewalWindow = clientCertTTL * 2 / 5
 )
 
 // Service implements clientv1.ClientServiceServer.
@@ -47,6 +59,7 @@ type Service struct {
 	pool                     *pgxpool.Pool
 	authSvc                  auth.Service
 	pkiSvc                   pki.Service
+	idpStore                 *idp.Store
 	clientGoogleClientID     string
 	clientGoogleClientSecret string
 	controllerHost           string
@@ -55,6 +68,8 @@ type Service struct {
 	policyCache              *policy.SnapshotCache
 	policyNotifier           *policy.Notifier
 	transportCompiler        *transport.Compiler
+	postureStore             *posture.Store
+	postureEvaluator         *posture.Evaluator
 }
 
 // NewService wires the ClientService with the dependencies it needs.
@@ -62,17 +77,21 @@ func NewService(
 	pool *pgxpool.Pool,
 	authSvc auth.Service,
 	pkiSvc pki.Service,
+	idpStore *idp.Store,
 	clientGoogleClientID, clientGoogleClientSecret,
 	controllerHost, controllerHTTPURL string,
 	policyStore *policy.Store,
 	policyCache *policy.SnapshotCache,
 	policyNotifier *policy.Notifier,
 	transportCompiler *transport.Compiler,
+	postureStore *posture.Store,
+	postureEvaluator *posture.Evaluator,
 ) *Service {
 	return &Service{
 		pool:                     pool,
 		authSvc:                  authSvc,
 		pkiSvc:                   pkiSvc,
+		idpStore:                 idpStore,
 		clientGoogleClientID:     clientGoogleClientID,
 		clientGoogleClientSecret: clientGoogleClientSecret,
 		controllerHost:           controllerHost,
@@ -81,6 +100,8 @@ func NewService(
 		policyCache:              policyCache,
 		policyNotifier:           policyNotifier,
 		transportCompiler:        transportCompiler,
+		postureStore:             postureStore,
+		postureEvaluator:         postureEvaluator,
 	}
 }
 
@@ -88,46 +109,6 @@ func NewService(
 func sha256b64url(b []byte) string {
 	sum := sha256.Sum256(b)
 	return base64.RawURLEncoding.EncodeToString(sum[:])
-}
-
-// exchangeCode performs the Google OAuth code exchange using the CLI OAuth
-// app's credentials. codeVerifier is the controller's own Google PKCE verifier.
-func (s *Service) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*auth.GoogleTokenResponse, error) {
-	body := url.Values{}
-	body.Set("code", code)
-	body.Set("code_verifier", codeVerifier)
-	body.Set("client_id", s.clientGoogleClientID)
-	body.Set("client_secret", s.clientGoogleClientSecret)
-	body.Set("redirect_uri", redirectURI)
-	body.Set("grant_type", "authorization_code")
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		googleTokenEndpoint, strings.NewReader(body.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("token exchange request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errBody map[string]any
-		json.NewDecoder(resp.Body).Decode(&errBody) //nolint:errcheck
-		return nil, fmt.Errorf("google token exchange failed: status=%d body=%v", resp.StatusCode, errBody)
-	}
-
-	var tokenResp auth.GoogleTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if tokenResp.IDToken == "" {
-		return nil, fmt.Errorf("google did not return id_token")
-	}
-	return &tokenResp, nil
 }
 
 // GetAuthConfig returns the OAuth configuration the CLI needs for informational
@@ -179,14 +160,38 @@ func (s *Service) InitiateAuth(ctx context.Context, req *clientv1.InitiateAuthRe
 		return nil, status.Errorf(codes.Internal, "lookup workspace: %v", err)
 	}
 
-	// Generate the controller's own Google PKCE pair.
-	// The CLI never sees this verifier — it lives only in the session store.
+	// Resolve the workspace's effective identity connection and its adapter.
+	// The Rust client sends no connection selector, so the server picks a single
+	// effective IdP (1 enterprise → it, 0 → bootstrap, >1 → explicit error).
+	conns, err := s.idpStore.ListForWorkspace(ctx, ws.ID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "list identity connections: %v", err)
+	}
+	conn, err := selectEffectiveConnection(conns)
+	if err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	adapter, err := auth.ProviderFor(conn, auth.GoogleCreds{
+		ClientID:     s.clientGoogleClientID,
+		ClientSecret: s.clientGoogleClientSecret,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "select identity provider: %v", err)
+	}
+
+	// Controller↔IdP PKCE pair (leg a) — never leaves the server. This is
+	// distinct from the CLI↔controller PKCE (leg b, req.CodeChallenge).
 	rawVerifier := make([]byte, 32)
 	if _, err := rand.Read(rawVerifier); err != nil {
-		return nil, status.Errorf(codes.Internal, "generate google pkce verifier: %v", err)
+		return nil, status.Errorf(codes.Internal, "generate idp pkce verifier: %v", err)
 	}
-	googleVerifier := base64.RawURLEncoding.EncodeToString(rawVerifier)
-	googleChallenge := sha256b64url([]byte(googleVerifier))
+	idpVerifier := base64.RawURLEncoding.EncodeToString(rawVerifier)
+	idpChallenge := sha256b64url([]byte(idpVerifier))
+
+	nonce, err := newNonce()
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "generate nonce: %v", err)
+	}
 
 	sessionID, err := newSessionID()
 	if err != nil {
@@ -194,29 +199,74 @@ func (s *Service) InitiateAuth(ctx context.Context, req *clientv1.InitiateAuthRe
 	}
 
 	callbackURL := s.controllerHTTPURL + "/api/clients/callback"
-	authURL := fmt.Sprintf(
-		"%s?client_id=%s&redirect_uri=%s&response_type=code"+
-			"&scope=openid%%20email&code_challenge=%s&code_challenge_method=S256&state=%s",
-		googleAuthEndpoint,
-		url.QueryEscape(s.clientGoogleClientID),
-		url.QueryEscape(callbackURL),
-		url.QueryEscape(googleChallenge),
-		url.QueryEscape(sessionID),
-	)
+	authURL, err := adapter.AuthURL(ctx, providers.AuthURLParams{
+		State:         sessionID,
+		Nonce:         nonce,
+		CodeChallenge: idpChallenge,
+		RedirectURI:   callbackURL,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "build auth url: %v", err)
+	}
 
 	putSession(sessionID, &authSession{
-		WorkspaceID:        ws.ID,
-		WorkspaceSlug:      ws.Slug,
-		CliCodeChallenge:   req.GetCodeChallenge(),
-		LocalRedirectURI:   req.GetLocalRedirectUri(),
-		GoogleCodeVerifier: googleVerifier,
-		ExpiresAt:          time.Now().Add(10 * time.Minute),
+		WorkspaceID:      ws.ID,
+		WorkspaceSlug:    ws.Slug,
+		ConnectionID:     conn.ID,
+		CliCodeChallenge: req.GetCodeChallenge(),
+		LocalRedirectURI: req.GetLocalRedirectUri(),
+		IdpCodeVerifier:  idpVerifier,
+		Nonce:            nonce,
+		ExpiresAt:        time.Now().Add(10 * time.Minute),
 	})
 
 	return &clientv1.InitiateAuthResponse{
 		AuthUrl:   authURL,
 		SessionId: sessionID,
 	}, nil
+}
+
+// selectEffectiveConnection picks the single connection the CLI should use, given
+// all active connections resolvable for the workspace. The Rust proto has no
+// connection selector yet (M4 follow-up), so: exactly one active Enterprise IdP
+// → use it; none → the Bootstrap (platform) IdP; more than one Enterprise IdP →
+// explicit error (the CLI can't disambiguate).
+func selectEffectiveConnection(conns []idp.Connection) (*idp.Connection, error) {
+	var enterprise []*idp.Connection
+	var bootstrap *idp.Connection
+	for i := range conns {
+		c := &conns[i]
+		if c.Status != "active" {
+			continue
+		}
+		if c.TenantID == nil {
+			if bootstrap == nil {
+				bootstrap = c
+			}
+		} else {
+			enterprise = append(enterprise, c)
+		}
+	}
+	switch {
+	case len(enterprise) == 1:
+		return enterprise[0], nil
+	case len(enterprise) == 0:
+		if bootstrap != nil {
+			return bootstrap, nil
+		}
+		return nil, fmt.Errorf("no active identity provider configured for this workspace")
+	default:
+		return nil, fmt.Errorf("workspace has multiple identity providers; CLI selection is not yet supported — sign in via the web console")
+	}
+}
+
+// newNonce returns a 256-bit base64url OIDC nonce.
+func newNonce() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // AuthCallbackHandler handles GET /api/clients/callback — the fixed redirect
@@ -240,14 +290,26 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 		}
 
 		callbackURL := s.controllerHTTPURL + "/api/clients/callback"
-		tokens, err := s.exchangeCode(r.Context(), googleCode, sess.GoogleCodeVerifier, callbackURL)
+
+		// Re-resolve the connection from the session's connection_id (never from
+		// the request) and authenticate via the adapter. Fail closed if the
+		// connection was deleted or disabled during the redirect window.
+		conn, err := s.idpStore.GetByID(r.Context(), sess.ConnectionID)
+		if err != nil || conn.Status != "active" {
+			http.Error(w, "identity connection unavailable", http.StatusUnauthorized)
+			return
+		}
+		adapter, err := auth.ProviderFor(conn, auth.GoogleCreds{
+			ClientID:     s.clientGoogleClientID,
+			ClientSecret: s.clientGoogleClientSecret,
+		})
 		if err != nil {
-			http.Error(w, "google token exchange failed", http.StatusBadRequest)
+			http.Error(w, "identity provider unavailable", http.StatusUnauthorized)
 			return
 		}
 
-		claims, err := auth.VerifyGoogleIDToken(r.Context(), tokens.IDToken, s.clientGoogleClientID)
-		if err != nil || claims.Sub == "" || claims.Email == "" {
+		authCtx, err := adapter.Authenticate(r.Context(), googleCode, sess.IdpCodeVerifier, callbackURL, sess.Nonce)
+		if err != nil || authCtx.Subject == "" || authCtx.Email == "" {
 			http.Error(w, "identity verification failed", http.StatusUnauthorized)
 			return
 		}
@@ -258,7 +320,7 @@ func (s *Service) AuthCallbackHandler() http.Handler {
 			return
 		}
 
-		if !updateSessionCtrlCode(sessionID, claims.Email, claims.Sub, ctrlCode, time.Now().Add(60*time.Second)) {
+		if !updateSessionCtrlCode(sessionID, authCtx.Email, authCtx.Provider, authCtx.Subject, ctrlCode, time.Now().Add(60*time.Second)) {
 			http.Error(w, "auth session expired during callback", http.StatusBadRequest)
 			return
 		}
@@ -316,10 +378,24 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 		inviteRow = inv
 	}
 
-	user, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, "google", sess.GoogleSub, inviteRow != nil)
+	// Re-resolve the connection from the session's stored id to obtain the issuer
+	// for the identity link, and to fail closed if the connection was deleted or
+	// disabled during the login window.
+	conn, err := s.idpStore.GetByID(ctx, sess.ConnectionID)
+	if err != nil {
+		return nil, status.Errorf(codes.Unauthenticated, "identity connection unavailable: %v", err)
+	}
+	if conn.Status != "active" {
+		return nil, status.Error(codes.Unauthenticated, "identity connection is not active")
+	}
+
+	user, gen, created, err := upsertUser(ctx, s.pool, sess.WorkspaceID, sess.Email, sess.Provider, sess.Subject, conn.ID, conn.Issuer, inviteRow != nil)
 	if err != nil {
 		if errors.Is(err, errUserNotInvited) {
 			return nil, status.Error(codes.PermissionDenied, "no membership in workspace; ask an admin for an invitation")
+		}
+		if errors.Is(err, identity.ErrUserNotActive) {
+			return nil, status.Error(codes.PermissionDenied, "account is not active")
 		}
 		return nil, status.Errorf(codes.Internal, "upsert user: %v", err)
 	}
@@ -331,7 +407,7 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email)
+	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
 	}
@@ -371,6 +447,14 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 		return nil, status.Errorf(codes.InvalidArgument, "CSR signature invalid: %v", err)
 	}
 
+	// Pinned once, here, for Track 3 (PENDING-13, ADR-028 D1): RenewCert will
+	// require every future renewal CSR to match this fingerprint, proving
+	// possession of THIS key, not just a valid access_token.
+	fingerprint, err := publicKeyFingerprint(csr.PublicKey)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported CSR public key: %v", err)
+	}
+
 	slug, err := lookupWorkspaceSlug(ctx, s.pool, tokenClaims.TenantID)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "lookup workspace slug: %v", err)
@@ -388,7 +472,7 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}
 
 	spiffeID := appmeta.ClientSPIFFEID(trustDomain, deviceID)
-	if err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID); err != nil {
+	if err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID, fingerprint); err != nil {
 		return nil, status.Errorf(codes.Internal, "record device cert: %v", err)
 	}
 	if err := s.policyNotifier.NotifyPolicyChange(ctx, tokenClaims.TenantID); err != nil {
@@ -404,6 +488,226 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}, nil
 }
 
+// renewalDeniedMsg is returned verbatim for EVERY authorization-level denial
+// in RenewCert — device not found, wrong workspace, revoked, re-enroll-
+// required, fingerprint missing, fingerprint mismatch, or a state change
+// racing the gate check. D-D (Track3-Renew-Reenroll.md): the caller must
+// never be able to distinguish WHY a renewal was denied from the response
+// alone; the specific reason is audited server-side only, in device.cert.
+// renew_denied's Details.
+const renewalDeniedMsg = "device not eligible for certificate renewal"
+
+// RenewCert issues a fresh cert for an already-enrolled device, proving the
+// caller still holds the key pinned at EnrollDevice time (Sprint 19 Track 3 /
+// PENDING-13, ADR-028 D1; see Track3-Renew-Reenroll.md). Authorization order
+// (D-C):
+//  1. verify access_token
+//  2. deviceGate — reject REVOKED / RE_ENROLL_REQUIRED (those need EnrollDevice,
+//     not a silent renewal); RENEW_SOON/NONE are both fine to renew — the
+//     directive is a client-side nudge, not a server-side gate.
+//  3. parse + verify the CSR signature (proves possession of SOME key)
+//  4. compare the CSR's public key fingerprint against the one pinned at
+//     enrollment — proves possession of THE SAME key, not just a valid
+//     access_token. NULL on file (a device enrolled before this fingerprint
+//     existed) denies rather than trusting-on-first-use (D-A).
+//  5. sign (pkiSvc.SignClientCert, unmodified) and record
+//     (updateClientDeviceCertOnRenewal, guarded against a concurrent
+//     revoke/re-enroll landing between step 2 and here — see that function's
+//     doc comment).
+func (s *Service) RenewCert(ctx context.Context, req *clientv1.RenewCertRequest) (*clientv1.RenewCertResponse, error) {
+	if req.GetAccessToken() == "" || req.GetDeviceId() == "" || req.GetCsrPem() == "" {
+		return nil, status.Error(codes.InvalidArgument, "access_token, device_id, csr_pem are required")
+	}
+
+	tokenClaims, err := s.authSvc.VerifyAccessToken(req.GetAccessToken())
+	if err != nil {
+		log.Printf("RenewCert: invalid access token for device %s: %v", req.GetDeviceId(), err)
+		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
+	}
+
+	// Every denial from here on has a validated actor (tenant_id + email),
+	// so it gets a real audit row — unlike the two cases above, which happen
+	// before we know who's asking and are only log.Printf'd (audit_logs.
+	// tenant_id and .actor_email are both NOT NULL; there's nothing to
+	// attach a row to yet).
+	auditDenied := func(reason string) error {
+		_ = audit.Record(ctx, s.pool, audit.Entry{
+			TenantID:    tokenClaims.TenantID,
+			ActorUserID: tokenClaims.UserID,
+			ActorEmail:  tokenClaims.Email,
+			Action:      "device.cert.renew_denied",
+			TargetType:  "device",
+			TargetID:    req.GetDeviceId(),
+			Details:     map[string]any{"reason": reason},
+		})
+		return status.Error(codes.PermissionDenied, renewalDeniedMsg)
+	}
+
+	directive, _, err := deviceGate(ctx, s.pool, req.GetDeviceId(), tokenClaims)
+	if err != nil {
+		return nil, auditDenied("not_found")
+	}
+	switch directive {
+	case clientv1.DeviceDirective_DIRECTIVE_REVOKED:
+		return nil, auditDenied("revoked")
+	case clientv1.DeviceDirective_DIRECTIVE_RE_ENROLL_REQUIRED:
+		return nil, auditDenied("re_enroll_required")
+	}
+
+	// Unlike invalid_request/invalid_access_token (before tokenClaims exists,
+	// so there's no tenant to attach a row to), these DO get real audit rows:
+	// tokenClaims is already verified by this point. Kept as distinct
+	// InvalidArgument codes rather than folded into the uniform PermissionDenied
+	// bucket — D-D's obscurity requirement is scoped to the authorization
+	// decision (is THIS device/key allowed to renew), not ordinary request
+	// validation, which EnrollDevice already returns distinguishable errors
+	// for with no obscurity concern.
+	auditInvalid := func(reason string, rpcErr error) error {
+		_ = audit.Record(ctx, s.pool, audit.Entry{
+			TenantID:    tokenClaims.TenantID,
+			ActorUserID: tokenClaims.UserID,
+			ActorEmail:  tokenClaims.Email,
+			Action:      "device.cert.renew_denied",
+			TargetType:  "device",
+			TargetID:    req.GetDeviceId(),
+			Details:     map[string]any{"reason": reason},
+		})
+		return rpcErr
+	}
+
+	block, _ := pem.Decode([]byte(req.GetCsrPem()))
+	if block == nil || block.Type != "CERTIFICATE REQUEST" {
+		return nil, auditInvalid("invalid_csr", status.Error(codes.InvalidArgument, "csr_pem is not a valid CERTIFICATE REQUEST PEM block"))
+	}
+	csr, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		return nil, auditInvalid("invalid_csr", status.Errorf(codes.InvalidArgument, "parse CSR: %v", err))
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return nil, auditInvalid("invalid_csr_signature", status.Errorf(codes.InvalidArgument, "CSR signature invalid: %v", err))
+	}
+
+	var storedFingerprint *string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT public_key_fingerprint FROM client_devices WHERE id = $1`,
+		req.GetDeviceId(),
+	).Scan(&storedFingerprint); err != nil {
+		return nil, auditDenied("not_found")
+	}
+	if storedFingerprint == nil {
+		// Legacy device, enrolled before public_key_fingerprint existed. No
+		// trust-on-first-use (D-A) — must go through EnrollDevice instead.
+		return nil, auditDenied("fingerprint_missing")
+	}
+	csrFingerprint, err := publicKeyFingerprint(csr.PublicKey)
+	if err != nil {
+		log.Printf("RenewCert: unsupported CSR public key for device %s: %v", req.GetDeviceId(), err)
+		return nil, status.Errorf(codes.InvalidArgument, "unsupported CSR public key: %v", err)
+	}
+	if csrFingerprint != *storedFingerprint {
+		return nil, auditDenied("fingerprint_mismatch")
+	}
+
+	slug, err := lookupWorkspaceSlug(ctx, s.pool, tokenClaims.TenantID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "lookup workspace slug: %v", err)
+	}
+	trustDomain := appmeta.WorkspaceTrustDomain(slug)
+
+	certResult, err := s.pkiSvc.SignClientCert(ctx, tokenClaims.TenantID, req.GetDeviceId(), trustDomain, csr, clientCertTTL)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "sign client cert: %v", err)
+	}
+
+	rows, err := updateClientDeviceCertOnRenewal(ctx, s.pool, req.GetDeviceId(), certResult.Serial, certResult.NotAfter)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "record renewed cert: %v", err)
+	}
+	if rows == 0 {
+		// Raced: the device was revoked or flagged re-enroll-required between
+		// the deviceGate check above and this write. The cert SignClientCert
+		// just produced is discarded here — never returned in the response —
+		// so the caller never actually receives usable certificate material,
+		// regardless of what was signed a moment ago. Denial happens before
+		// the response is built; that is the actual safety net, not whether
+		// this serial ever reaches a CRL.
+		return nil, auditDenied("state_changed_during_renewal")
+	}
+
+	_ = audit.Record(ctx, s.pool, audit.Entry{
+		TenantID:    tokenClaims.TenantID,
+		ActorUserID: tokenClaims.UserID,
+		ActorEmail:  tokenClaims.Email,
+		Action:      "device.cert.renewed",
+		TargetType:  "device",
+		TargetID:    req.GetDeviceId(),
+		Details:     map[string]any{"cert_not_after": certResult.NotAfter},
+	})
+
+	return &clientv1.RenewCertResponse{
+		CertificatePem:    certResult.CertificatePEM,
+		WorkspaceCaPem:    certResult.WorkspaceCAPEM,
+		IntermediateCaPem: certResult.IntermediateCAPEM,
+		CertExpiresAt:     certResult.NotAfter.Unix(),
+	}, nil
+}
+
+// deviceGate confirms a device belongs to claims' user + workspace and derives
+// the DeviceDirective to report to the client (Sprint 19 Track 2 / PENDING-13,
+// see Track2-Device-Trust-Directive.md D-C). Priority: re_enroll_required (the
+// status column) beats revoked (derived from revoked_at — never duplicated
+// into status, so there is exactly one writer of "revoked-ness") beats
+// renew_soon (derived from cert_not_after, Track 3 / Track3-Renew-Reenroll.md
+// D-B — also never a stored status value, same "derive, don't duplicate"
+// pattern as revoked), else none.
+//
+// Used by BOTH GetACLSnapshot and GetTransportSnapshot so the two RPCs can
+// never disagree about a device's trust state. A non-nil error means the
+// device wasn't found or belongs to someone else; callers translate that into
+// PermissionDenied exactly as before — it carries no directive information.
+// On a successful lookup, last_seen_at is stamped (throttled to once per 5
+// minutes, D-E) regardless of directive — the server heard from the device
+// either way. The stamp is best-effort and must never fail the RPC.
+func deviceGate(ctx context.Context, db *pgxpool.Pool, deviceID string, claims *auth.AccessTokenClaims) (directive clientv1.DeviceDirective, reason string, err error) {
+	var deviceWorkspaceID, deviceStatus string
+	var revokedAt, certNotAfter *time.Time
+	err = db.QueryRow(ctx,
+		`SELECT workspace_id, status, revoked_at, cert_not_after FROM client_devices
+		 WHERE id = $1 AND user_id = $2`,
+		deviceID, claims.UserID,
+	).Scan(&deviceWorkspaceID, &deviceStatus, &revokedAt, &certNotAfter)
+	if err != nil {
+		return clientv1.DeviceDirective_DIRECTIVE_NONE, "", fmt.Errorf("device not found: %w", err)
+	}
+	if deviceWorkspaceID != claims.TenantID {
+		return clientv1.DeviceDirective_DIRECTIVE_NONE, "", fmt.Errorf("device does not belong to this user")
+	}
+
+	switch {
+	case deviceStatus == "re_enroll_required":
+		directive = clientv1.DeviceDirective_DIRECTIVE_RE_ENROLL_REQUIRED
+		reason = "sign in again to re-register this device"
+	case revokedAt != nil:
+		directive = clientv1.DeviceDirective_DIRECTIVE_REVOKED
+		reason = "device access revoked — contact your admin"
+	case certNotAfter != nil && time.Until(*certNotAfter) <= renewalWindow:
+		directive = clientv1.DeviceDirective_DIRECTIVE_RENEW_SOON
+		reason = "certificate renewal due soon"
+	default:
+		directive = clientv1.DeviceDirective_DIRECTIVE_NONE
+	}
+
+	if _, stampErr := db.Exec(ctx,
+		`UPDATE client_devices SET last_seen_at = NOW()
+		  WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '5 minutes')`,
+		deviceID,
+	); stampErr != nil {
+		log.Printf("deviceGate: stamp last_seen_at for device %s: %v", deviceID, stampErr)
+	}
+
+	return directive, reason, nil
+}
+
 // GetACLSnapshot returns the current workspace ACL snapshot for the calling device.
 // Validates the access token and confirms the device belongs to the token's user/workspace.
 // Default-deny: returns an empty snapshot on any validation or compile failure.
@@ -417,31 +721,23 @@ func (s *Service) GetACLSnapshot(ctx context.Context, req *clientv1.GetACLSnapsh
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace, and is not revoked.
-	// The access token is user-scoped (not device-scoped), so a revoked device
-	// with a still-valid token would otherwise keep pulling ACL snapshots — a
-	// control-plane leak. Gate on revoked_at here; cert revocation (CRL) handles
-	// the data plane separately.
-	var deviceWorkspaceID string
-	var revokedAt *time.Time
-	err = s.pool.QueryRow(ctx,
-		`SELECT workspace_id, revoked_at FROM client_devices
-		 WHERE id = $1 AND user_id = $2`,
-		req.GetDeviceId(), claims.UserID,
-	).Scan(&deviceWorkspaceID, &revokedAt)
-	if err != nil || deviceWorkspaceID != claims.TenantID {
+	directive, reason, err := deviceGate(ctx, s.pool, req.GetDeviceId(), claims)
+	if err != nil {
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
 	}
-	if revokedAt != nil {
-		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	if directive != clientv1.DeviceDirective_DIRECTIVE_NONE {
+		// Directive-in-response, not error (D-B): gRPC OK, no ACL payload
+		// regardless of directive — fail-closed even for a directive-ignoring
+		// client, since up_to_date also stays false so it drops its cached ACL.
+		return &clientv1.GetACLSnapshotResponse{DeviceDirective: directive, DirectiveReason: reason}, nil
 	}
 
 	workspaceID := claims.TenantID
 
 	// Serve from cache, or compile under the epoch CAS so a compile raced by a
 	// policy change is not cached as stale (ADR-013).
-	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*clientv1.ACLSnapshot, error) {
-		return policy.CompileACLSnapshot(ctx, s.policyStore, s.policyNotifier, workspaceID)
+	snap, err := s.policyCache.GetOrCompile(workspaceID, func() (*policy.CompiledACL, error) {
+		return policy.CompileACLSnapshot(ctx, s.policyStore,s.postureStore, s.policyNotifier, workspaceID)
 	})
 	if err != nil {
 		// Default-deny: do not serve a partial or stale snapshot.
@@ -484,21 +780,16 @@ func (s *Service) GetTransportSnapshot(ctx context.Context, req *clientv1.GetTra
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
 
-	// Confirm the device belongs to this user and workspace, and is not revoked
-	// — identical gate to GetACLSnapshot so a revoked device cannot pull
-	// transport topology either.
-	var deviceWorkspaceID string
-	var revokedAt *time.Time
-	err = s.pool.QueryRow(ctx,
-		`SELECT workspace_id, revoked_at FROM client_devices
-		 WHERE id = $1 AND user_id = $2`,
-		req.GetDeviceId(), claims.UserID,
-	).Scan(&deviceWorkspaceID, &revokedAt)
-	if err != nil || deviceWorkspaceID != claims.TenantID {
+	// Same gate as GetACLSnapshot (deviceGate) so the two RPCs never disagree
+	// about a device's trust state. The ACL poll is the authoritative reaction
+	// path (Track2-Device-Trust-Directive.md D-A) — this just returns a clean
+	// directive instead of spamming PermissionDenied post-revoke.
+	directive, reason, err := deviceGate(ctx, s.pool, req.GetDeviceId(), claims)
+	if err != nil {
 		return nil, status.Error(codes.PermissionDenied, "device not found or does not belong to this user")
 	}
-	if revokedAt != nil {
-		return nil, status.Error(codes.PermissionDenied, "device has been revoked")
+	if directive != clientv1.DeviceDirective_DIRECTIVE_NONE {
+		return &clientv1.GetTransportSnapshotResponse{DeviceDirective: directive, DirectiveReason: reason}, nil
 	}
 
 	workspaceID := claims.TenantID

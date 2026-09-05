@@ -2,8 +2,8 @@
 
 GQLGEN_VERSION := v0.17.90
 BUF_VERSION := v1.66.0
-GQLGEN_CACHE ?= /tmp/go-build-cache
-GQLGEN_MODCACHE ?= /tmp/go-mod-cache
+GQLGEN_CACHE ?= $(HOME)/.cache/zecurity/go-build-cache
+GQLGEN_MODCACHE ?= $(HOME)/.cache/zecurity/go-mod-cache
 BUF := $(shell command -v buf 2>/dev/null || echo $(shell go env GOPATH)/bin/buf)
 
 # Regenerate GraphQL code for the Go controller.

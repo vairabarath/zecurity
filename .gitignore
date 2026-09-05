@@ -67,3 +67,4 @@ relay/pki/*.crt
 zecurity-handoff/
 zecurity-handoff.zip
 controller/zecurity-controller
+cloudflared-linux-amd64.deb

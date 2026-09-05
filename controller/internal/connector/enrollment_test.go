@@ -23,9 +23,9 @@ import (
 	tcvalkey "github.com/testcontainers/testcontainers-go/modules/valkey"
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
-	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )

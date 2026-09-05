@@ -38,7 +38,7 @@ Add `SignShieldCert` and `RenewShieldCert` to `controller/internal/pki/workspace
 
 ### Add to PKI Service interface (`internal/pki/service.go`)
 
-- [ ] Add to `Service` interface:
+- [x] Add to `Service` interface:
   ```go
   SignShieldCert(ctx context.Context, tenantID, shieldID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ShieldCertResult, error)
   RenewShieldCert(ctx context.Context, tenantID, shieldID, trustDomain string, csr *x509.CertificateRequest, certTTL time.Duration) (*ShieldCertResult, error)
@@ -46,7 +46,7 @@ Add `SignShieldCert` and `RenewShieldCert` to `controller/internal/pki/workspace
 
 ### Add `ShieldCertResult` type
 
-- [ ] In `workspace.go` (or `service.go`), add:
+- [x] In `workspace.go` (or `service.go`), add:
   ```go
   type ShieldCertResult struct {
       CertificatePEM    []byte
@@ -60,17 +60,17 @@ Add `SignShieldCert` and `RenewShieldCert` to `controller/internal/pki/workspace
 
 ### Implement `SignShieldCert` in `workspace.go`
 
-- [ ] Identical to `SignConnectorCert` except:
+- [x] Identical to `SignConnectorCert` except:
   - SPIFFE SAN uses `appmeta.ShieldSPIFFEID(trustDomain, shieldID)`
   - CN uses `appmeta.PKIShieldCNPrefix + shieldID` (i.e. `"shield-<id>"`)
   - `certTTL` comes from `ShieldConfig.CertTTL` (passed as parameter)
-- [ ] Fields: `KeyUsage: DigitalSignature`, `ExtKeyUsage: ClientAuth`, `IsCA: false`
-- [ ] Use existing `loadWorkspaceCA()`, `newSerial()`, `zeroKey()` helpers
-- [ ] Return full cert + CA chain
+- [x] Fields: `KeyUsage: DigitalSignature`, `ExtKeyUsage: ClientAuth`, `IsCA: false`
+- [x] Use existing `loadWorkspaceCA()`, `newSerial()`, `zeroKey()` helpers
+- [x] Return full cert + CA chain
 
 ### Implement `RenewShieldCert` in `workspace.go`
 
-- [ ] Delegates directly to `SignShieldCert` — CSR already has correct public key
+- [x] Delegates directly to `SignShieldCert` — CSR already has correct public key
   ```go
   func (s *serviceImpl) RenewShieldCert(...) (*ShieldCertResult, error) {
       return s.SignShieldCert(ctx, tenantID, shieldID, trustDomain, csr, certTTL)

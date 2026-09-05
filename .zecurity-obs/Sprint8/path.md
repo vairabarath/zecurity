@@ -158,20 +158,20 @@ The existing `resources` and `client_devices` tables are used by the compiler.
 
 ## Final Verification Checklist
 
-- [ ] `buf generate` — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd client && cargo build` — clean
-- [ ] `cd connector && cargo build` — clean
-- [ ] `cd admin && npm run build` — clean
-- [ ] Admin creates a group and adds a user.
-- [ ] Admin assigns a resource to that group.
-- [ ] Controller compiles ACL snapshot containing that user's client device SPIFFE ID.
-- [ ] Connector receives updated ACL snapshot via heartbeat response.
-- [ ] Client daemon ACL fetch contract is documented for Sprint 8.5.
-- [ ] Unknown resource is denied by local snapshot.
-- [ ] Known resource with missing client SPIFFE ID is denied.
-- [ ] Known resource with matching client SPIFFE ID is allowed.
-- [ ] Policy mutation triggers `NotifyPolicyChange(workspace_id)`.
+- [x] `buf generate` — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd client && cargo build` — clean
+- [x] `cd connector && cargo build` — clean
+- [x] `cd admin && npm run build` — clean
+- [x] Admin creates a group and adds a user.
+- [x] Admin assigns a resource to that group.
+- [x] Controller compiles ACL snapshot containing that user's client device SPIFFE ID.
+- [x] Connector receives updated ACL snapshot via heartbeat response.
+- [x] Client daemon ACL fetch contract is documented for Sprint 8.5.
+- [x] Unknown resource is denied by local snapshot.
+- [x] Known resource with missing client SPIFFE ID is denied.
+- [x] Known resource with matching client SPIFFE ID is allowed.
+- [x] Policy mutation triggers `NotifyPolicyChange(workspace_id)`.
 
 ---
 

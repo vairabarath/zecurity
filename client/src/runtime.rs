@@ -19,6 +19,57 @@ impl std::fmt::Debug for TunHandle {
     }
 }
 
+/// Coordination state for `daemon::restart_tunnel_if_running`'s queued-oneshot
+/// batch coordinator. `running` is true while a worker task is draining
+/// `pending` passes; a caller pushes a oneshot sender onto `pending` and
+/// starts a worker only if none is already running.
+#[derive(Default)]
+pub struct TunnelRestartCoordinator {
+    pub running: bool,
+    pub pending: Vec<tokio::sync::oneshot::Sender<std::result::Result<(), String>>>,
+}
+
+impl std::fmt::Debug for TunnelRestartCoordinator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TunnelRestartCoordinator")
+            .field("running", &self.running)
+            .field("pending_count", &self.pending.len())
+            .finish()
+    }
+}
+
+/// Mirrors the persisted `StoredDevice.device_state` marker (state_store.rs)
+/// so live code — IPC handlers, the ACL sync scheduler — can check the
+/// daemon's trust state without re-reading disk. Sprint 19 Track 2
+/// (PENDING-13, see Track2-Device-Trust-Directive.md). Active means proceed
+/// normally; ReEnrollRequired/Revoked mean the on-disk cert has been wiped
+/// and must not be used.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceState {
+    #[default]
+    Active,
+    ReEnrollRequired,
+    Revoked,
+}
+
+impl DeviceState {
+    pub fn from_marker(marker: &str) -> Self {
+        match marker {
+            "revoked" => Self::Revoked,
+            "re_enroll_required" => Self::ReEnrollRequired,
+            _ => Self::Active,
+        }
+    }
+
+    pub fn as_marker(&self) -> &'static str {
+        match self {
+            Self::Active => "",
+            Self::ReEnrollRequired => "re_enroll_required",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 /// All runtime state. Lives only in process memory.
 #[derive(Debug, Default, Clone)]
 pub struct RuntimeState {
@@ -59,17 +110,33 @@ pub struct RuntimeState {
     /// snapshot with an older response. Held across the whole known-version →
     /// fetch → store sequence, not just the store.
     pub transport_sync_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes tunnel down→up restarts. Multiple triggers (relay recovery, the
-    /// 60s ACL tick, IPC sync/resources, post-login) can each call
-    /// restart_tunnel_if_running concurrently; without this, two down/up sequences
-    /// interleave and corrupt the live TUN session (tunnel left down, orphaned
-    /// handle, or duplicate sessions). Held across the whole restart.
-    pub tunnel_restart_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Coordinates tunnel down→up restarts so concurrent triggers (relay
+    /// recovery, the 60s ACL tick, IPC sync/resources, post-login) share
+    /// restart passes instead of each running its own full down/up cycle.
+    /// See `daemon::restart_tunnel_if_running`.
+    pub tunnel_restart: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
     /// Signalled by the data plane (net_stack) when a managed-resource relay
     /// transport fails, so the ACL sync scheduler re-syncs early instead of
     /// waiting for the next poll tick. Coalescing: a burst of failures collapses
     /// into a single wake.
     pub relay_resync: Arc<tokio::sync::Notify>,
+     /// Signalled by PostLoginState right after a successful login, so the
+    /// posture scheduler collects and submits immediately instead of waiting
+    /// for the next 5-minute tick.
+    pub posture_resync: Arc<tokio::sync::Notify>,
+    /// Sprint 19 Track 2 (PENDING-13): the device trust directive last
+    /// reported by the controller. Active unless a revoke/re-enroll directive
+    /// has been received this process (or was already persisted at startup).
+    pub device_state: DeviceState,
+    /// Human-readable reason accompanying device_state — the server's
+    /// directive_reason. Empty when device_state is Active.
+    pub device_state_reason: String,
+    /// Sprint 19 Track 3 (PENDING-13, ADR-028 D1): signalled when the ACL
+    /// poll reports DIRECTIVE_RENEW_SOON, so the cert renewal scheduler wakes
+    /// early instead of waiting for its own timer — a backstop for a
+    /// scheduler that's running late (sleep/suspend, clock drift), not the
+    /// primary trigger. See daemon::run_cert_renewal_scheduler.
+    pub cert_renewal_resync: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,7 +192,11 @@ pub fn new_shared() -> SharedState {
         synthetic_bindings: std::collections::HashMap::new(),
         refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
         transport_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
-        tunnel_restart_lock: Arc::new(tokio::sync::Mutex::new(())),
+        tunnel_restart: Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default())),
         relay_resync: Arc::new(tokio::sync::Notify::new()),
+         posture_resync: Arc::new(tokio::sync::Notify::new()),
+        device_state: DeviceState::Active,
+        device_state_reason: String::new(),
+        cert_renewal_resync: Arc::new(tokio::sync::Notify::new()),
     }))
 }

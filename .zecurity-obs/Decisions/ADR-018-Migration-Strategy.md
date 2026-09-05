@@ -1,6 +1,6 @@
 # ADR-018: Track A → Track B Migration Strategy
 
-**Status:** Proposed
+**Status:** Accepted — Phases 1 and 3 implemented by Sprint 13; breaking Phase 4 deferred
 **Track:** B — Architecture (migration phase)
 **Author:** Zecurity Engineering
 **Reviewed:** 2026-06-26
@@ -226,14 +226,18 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 
 ## Implementation Checklist
 
+> **Sprint 13 reconciliation:** Phases 1 and 3 use version-aware client polling. Transport messages
+> are client-owned, connector field 16 is reserved, and the proposed connector stream-push path was
+> intentionally superseded. Phase 4 remains deferred for the compatibility window.
+
 ### Phase 1 — Transport Snapshot Proto + Compiler
-- [ ] Add `TransportSnapshot`, `TransportRemoteNetwork`, `TransportConnector` to `connector.proto` (field 16 on `ConnectorControlMessage`)
-- [ ] Add `GetTransportSnapshot` RPC + request/response messages to `client.proto`
-- [ ] `buf generate` — regenerate Go stubs
-- [ ] Build Transport Compiler in `controller/internal/transport/compiler.go`
-- [ ] Build `GetTransportSnapshot` handler in controller client service
-- [ ] Controller pushes `TransportSnapshot` on control stream open (alongside ACLSnapshot)
-- [ ] Build gate: `cd controller && go build ./...` passes
+- [x] **Architecture correction:** add transport messages to `client.proto`; reserve obsolete connector field 16
+- [x] Add `GetTransportSnapshot` RPC + request/response messages to `client.proto`
+- [x] `buf generate` — regenerate Go stubs
+- [x] Build Transport Compiler in `controller/internal/transport/compiler.go`
+- [x] Build `GetTransportSnapshot` handler in controller client service
+- [x] **Architecture correction:** serve snapshots through version-aware client polling rather than connector stream push
+- [x] Build gate: `cd controller && go build ./...` passes
 
 ### Phase 2 — Connector Dynamic Relay Selection *(delivered by ADR-016 / Sprint 11)*
 - [x] `connector/src/relay_selector.rs` (new) — three-phase state machine: instant startup, background optimization, make-before-break migration
@@ -244,9 +248,9 @@ New clients (Phase 3+) that receive an old controller (without `GetTransportSnap
 - [x] Build gate: `cd connector && cargo build` passes
 
 ### Phase 3 — Client Transport Cache
-- [ ] `client/src/daemon.rs` — add `TransportCache`; fetch via `GetTransportSnapshot` alongside ACL
-- [ ] `build_transports_by_resource` — resolve relay from Transport Cache on `remote_network_id`; fall back to ACLConnector fields 4+5 if cache empty
-- [ ] Build gate: `cd client && cargo build` passes
+- [x] `client/src/daemon.rs` — add `TransportCache`; fetch via `GetTransportSnapshot` alongside ACL
+- [x] `build_transports_by_resource` — resolve relay from Transport Cache on `remote_network_id`; fall back to ACLConnector fields 4+5 if cache empty
+- [x] Build gate: `cd client && cargo build` passes
 
 ### Phase 4 — Remove Track A Elements (coordinated deploy)
 - [ ] Reserve `ACLConnector` fields 4+5 in `client.proto` (exact statements above)

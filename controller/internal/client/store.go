@@ -2,6 +2,10 @@ package client
 
 import (
 	"context"
+	"crypto"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
 // ── Sentinel errors ─────────────────────────────────────────────────────────
@@ -61,12 +67,18 @@ func lookupWorkspaceSlug(ctx context.Context, db *pgxpool.Pool, workspaceID stri
 
 // ── User upsert ─────────────────────────────────────────────────────────────
 //
-// Schema (migration 001) keys users by (tenant_id, provider_sub). The same
-// Google account in two workspaces is two rows. So "upsert" here means:
-//   - lookup by (tenant_id, provider, provider_sub)
-//   - if found  → update last_login_at, return existing row
-//   - if missing and createIfMissing → insert role='member'
+// Identity is keyed on external_identities (tenant_id, connection_id, subject)
+// — the ADR-024 key, never email — resolved via the shared identity.Resolver so
+// the CLI and web flow agree on "who is this". The CLI logs in workspace-first,
+// so tenantID scopes the lookup. "upsert" here means:
+//   - resolve (tenant, connection, subject) → canonical user
+//   - if found  → lifecycle-gate, update last_login_at, return existing row
+//   - if missing and createIfMissing → insert user + external_identities (one tx)
 //   - if missing and !createIfMissing → errUserNotInvited
+//
+// Unlike the web flow (bootstrap), the CLI never creates a workspace: an
+// unresolved identity either joins the known workspace as 'member' (invited) or
+// is rejected.
 
 type userRow struct {
 	ID   string
@@ -76,54 +88,67 @@ type userRow struct {
 func upsertUser(
 	ctx context.Context,
 	db *pgxpool.Pool,
-	tenantID, email, provider, providerSub string,
+	tenantID, email, provider, providerSub, connectionID, issuer string,
 	createIfMissing bool,
-) (*userRow, bool, error) {
+) (row *userRow, generation int, created bool, err error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	var u userRow
-	err := db.QueryRow(ctx,
-		`SELECT id, role
-		   FROM users
-		  WHERE tenant_id = $1
-		    AND provider = $2
-		    AND provider_sub = $3`,
-		tenantID, provider, providerSub,
-	).Scan(&u.ID, &u.Role)
+	core, found, err := identity.NewResolver(db).Resolve(ctx, connectionID, providerSub, tenantID)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("resolve identity: %w", err)
+	}
 
-	switch {
-	case err == nil:
+	if found {
+		// Fail closed on a suspended/locked/deleted canonical user.
+		if err := identity.CheckLifecycle(core.Status); err != nil {
+			return nil, 0, false, err
+		}
 		if _, uErr := db.Exec(ctx,
 			`UPDATE users
 			    SET last_login_at = NOW(), updated_at = NOW()
 			  WHERE id = $1`,
-			u.ID,
+			core.UserID,
 		); uErr != nil {
-			// Last-login bookkeeping should never fail the login;
-			// surface it as a log line by returning nil for the error.
-			fmt.Printf("warning: update last_login_at for user %s: %v\n", u.ID, uErr)
+			// Last-login bookkeeping should never fail the login; log and proceed.
+			fmt.Printf("warning: update last_login_at for user %s: %v\n", core.UserID, uErr)
 		}
-		return &u, false, nil
-
-	case errors.Is(err, pgx.ErrNoRows):
-		if !createIfMissing {
-			return nil, false, errUserNotInvited
-		}
-		err = db.QueryRow(ctx,
-			`INSERT INTO users
-			   (tenant_id, email, provider, provider_sub, role, status, last_login_at)
-			 VALUES ($1, $2, $3, $4, 'member', 'active', NOW())
-			 RETURNING id, role`,
-			tenantID, email, provider, providerSub,
-		).Scan(&u.ID, &u.Role)
-		if err != nil {
-			return nil, false, fmt.Errorf("insert user: %w", err)
-		}
-		return &u, true, nil
-
-	default:
-		return nil, false, fmt.Errorf("lookup user: %w", err)
+		return &userRow{ID: core.UserID, Role: core.Role}, core.Generation, false, nil
 	}
+
+	if !createIfMissing {
+		return nil, 0, false, errUserNotInvited
+	}
+
+	// JIT-create the member and its identity link atomically.
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("begin user tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var u userRow
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO users
+		   (tenant_id, email, provider, provider_sub, role, status, last_login_at)
+		 VALUES ($1, $2, $3, $4, 'member', 'active', NOW())
+		 RETURNING id, role`,
+		tenantID, email, provider, providerSub,
+	).Scan(&u.ID, &u.Role); err != nil {
+		return nil, 0, false, fmt.Errorf("insert user: %w", err)
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO external_identities (tenant_id, user_id, connection_id, issuer, subject)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, u.ID, connectionID, issuer, providerSub,
+	); err != nil {
+		return nil, 0, false, fmt.Errorf("insert external_identity: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, false, fmt.Errorf("commit user tx: %w", err)
+	}
+	return &u, 1, true, nil
 }
 
 // ── Invitation lookup / accept ──────────────────────────────────────────────
@@ -173,6 +198,25 @@ func markInvitationAccepted(ctx context.Context, db *pgxpool.Pool, invitationID 
 
 // ── Client device persistence ──────────────────────────────────────────────
 
+// publicKeyFingerprint identifies a public key by the SHA-256 of its
+// DER-encoded SPKI (Subject Public Key Info) form — the standard unambiguous
+// binary encoding of a public key. Pure function, no DB access.
+//
+// Sprint 19 Track 3 (PENDING-13, ADR-028 D1): EnrollDevice calls this once,
+// at enrollment, and pins the result to client_devices.public_key_fingerprint.
+// RenewCert calls it on every renewal CSR and compares against the pinned
+// value — never overwrites it (Track3-Renew-Reenroll.md D-A). That asymmetry
+// is what proves a renewal actually comes from the device that holds the
+// enrolled key, not just someone holding a stolen access_token.
+func publicKeyFingerprint(pub crypto.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", fmt.Errorf("marshal public key: %w", err)
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func insertClientDevice(
 	ctx context.Context,
 	db *pgxpool.Pool,
@@ -191,25 +235,64 @@ func insertClientDevice(
 	return id, nil
 }
 
+// updateClientDeviceCert records a device's cert after EnrollDevice — and
+// pins its public key fingerprint. Called exactly once per device, at
+// enrollment. Never called again on renewal; see updateClientDeviceCertOnRenewal,
+// whose signature has no fingerprint parameter at all so a future edit can't
+// accidentally reintroduce an overwrite (Track3-Renew-Reenroll.md D-A).
 func updateClientDeviceCert(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	deviceID, certSerial string,
 	notAfter time.Time,
-	spiffeID string,
+	spiffeID, publicKeyFingerprint string,
 ) error {
 	_, err := db.Exec(ctx,
 		`UPDATE client_devices
 		    SET cert_serial = $1,
 		        cert_not_after = $2,
-		        spiffe_id = $3
-		  WHERE id = $4`,
-		certSerial, notAfter, spiffeID, deviceID,
+		        spiffe_id = $3,
+		        public_key_fingerprint = $4
+		  WHERE id = $5`,
+		certSerial, notAfter, spiffeID, publicKeyFingerprint, deviceID,
 	)
 	if err != nil {
 		return fmt.Errorf("update client_device cert: %w", err)
 	}
 	return nil
+}
+
+// updateClientDeviceCertOnRenewal records a fresh cert issued by RenewCert.
+// Deliberately does NOT take a fingerprint — renewal only ever reads
+// client_devices.public_key_fingerprint (to verify the renewal CSR's key
+// matches it), never writes it. spiffe_id also isn't touched: renewal never
+// changes a device's identity, only its cert.
+//
+// Guarded by AND revoked_at IS NULL AND status <> 're_enroll_required' —
+// closes the TOCTOU window between RenewCert's deviceGate check and this
+// write (a concurrent revoke/re-enroll-required landing in between). Returns
+// rows affected so the caller can tell a race apart from a normal success:
+// 0 rows means the device's state changed after the gate check and the
+// renewal must be denied, not silently applied to a now-ineligible device.
+func updateClientDeviceCertOnRenewal(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	deviceID, certSerial string,
+	notAfter time.Time,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET cert_serial = $1,
+		        cert_not_after = $2
+		  WHERE id = $3
+		    AND revoked_at IS NULL
+		    AND status <> 're_enroll_required'`,
+		certSerial, notAfter, deviceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("update client_device cert on renewal: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // revokeClientDevice marks a client device as revoked. The ownership fields
@@ -232,4 +315,65 @@ func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID,
 		return fmt.Errorf("revoke client_device: %w", err)
 	}
 	return nil
+}
+
+// revokeUserDevices revokes every one of a user's client devices within a
+// workspace, scoped by (user_id, workspace_id) and gated with
+// AND revoked_at IS NULL. It returns the number of rows actually affected.
+//
+// Idempotent on replay: re-running against already-revoked rows affects 0 rows,
+// so callers can use the 0 count to skip downstream side effects (audit,
+// notify) on at-least-once redelivery without producing duplicate entries.
+//
+// Intentionally pool-based (autocommit), not transactional with the audit
+// write: a security revocation must never be blocked by a transient failure of
+// the audit table. The durable enforcement path is revoked_at → workspace CRL
+// (connectors poll it independently); the audit row is best-effort context.
+func revokeUserDevices(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET revoked_at = NOW()
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND revoked_at IS NULL`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user devices: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// markUserDevicesReEnrollRequired sets status = 're_enroll_required' on every
+// one of a user's devices within a workspace. Unlike revokeUserDevices, this
+// does NOT filter on revoked_at — a reactivated user's devices are typically
+// already revoked (from the prior suspend's revokeUserDevices call), and
+// re_enroll_required must still be set so deviceGate reports the recoverable
+// RE_ENROLL_REQUIRED directive instead of the terminal REVOKED one (status
+// takes priority over revoked_at — see Track2-Device-Trust-Directive.md D-C).
+//
+// Idempotent on replay: gated on status <> 're_enroll_required', so
+// re-running against already-marked rows affects 0 rows. Returns the number
+// of rows actually affected.
+func markUserDevicesReEnrollRequired(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET status = 're_enroll_required'
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND status      <> 're_enroll_required'`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark user devices re-enroll required: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

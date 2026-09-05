@@ -4,99 +4,57 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yourorg/ztna/controller/internal/appmeta" // WorkspaceTrustDomain for bootstrap INSERT
+	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/pki"
 )
 
-// Result is returned by Bootstrap and consumed by auth code when issuing JWTs.
-type Result struct {
-	TenantID string
-	UserID   string
-	Role     string
-}
-
-// Service owns the dependencies required for bootstrap provisioning.
+// Service is the workspace-creating provisioner for the identity pipeline
+// (PENDING-04 / ADR-024). It is the JIT-create leg the Linker invokes on a
+// resolver miss: a first-time user gets a brand-new workspace (as admin), an
+// invited user joins the workspace they were invited to (as member). In both
+// cases the canonical users row AND its external_identities link are written in
+// ONE transaction, so an authenticated login never leaves a user without an
+// identity key.
+//
+// Identity RESOLUTION for a returning user lives in internal/identity (the
+// Resolver, keyed on external_identities); this package only provisions the
+// never-seen identity. It satisfies identity.Provisioner.
 type Service struct {
 	Pool       *pgxpool.Pool
 	PKIService pki.Service
 }
 
-// Bootstrap creates a new workspace for a first-time user or returns the
-// existing membership for a returning user.
+// Provision creates (or joins) the workspace membership for a never-before-seen
+// external identity and links it. It is only called after the Resolver reports
+// no existing user for (ConnectionID, Subject) — see identity.Service.
 //
 // Email is normalized to lowercase at entry so it matches stored invites
 // regardless of admin input casing. See: ADR-005 Email Normalization.
-func (s *Service) Bootstrap(
-	ctx context.Context,
-	email, provider, providerSub, name string,
-) (*Result, error) {
-	email = strings.ToLower(strings.TrimSpace(email))
+func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*identity.PrincipalCore, error) {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
 
-	// F14 — provider allowlist. Only google is wired today; reject unknown
-	// values defensively so a future caller can't pass an arbitrary string.
-	if provider != "google" {
-		return nil, fmt.Errorf("unsupported provider: %q", provider)
+	// The connection already proved this identity cryptographically, so any
+	// provider the resolver hands us is legitimate. Guard only the empty case
+	// so a misconfigured caller can't create a provider-less user.
+	if in.Provider == "" {
+		return nil, fmt.Errorf("provision: provider is required")
 	}
-
-	var existingUserID string
-	var existingTenantID string
-	var existingRole string
-
-	// NOTE (F12): this query does not filter by users.status or
-	// workspaces.status. When a "Suspend User" or "Suspend Workspace"
-	// admin feature ships, harden this query (and lookupWorkspacesByEmail)
-	// to require status='active' on both tables. Schema already supports
-	// 'suspended'/'deleted' enum values; auth path must follow.
-	err := s.Pool.QueryRow(
-		ctx,
-		`SELECT id, tenant_id, role
-		 FROM users
-		 WHERE provider_sub = $1 AND provider = $2
-		 LIMIT 1`,
-		providerSub,
-		provider,
-	).Scan(&existingUserID, &existingTenantID, &existingRole)
-
-	if err == nil {
-		// F13 — fire-and-forget last_login_at update so a slow metadata
-		// write doesn't add latency to login. Uses Background context
-		// because the request ctx may be canceled before the goroutine runs.
-		userID := existingUserID
-		go func() {
-			_, uErr := s.Pool.Exec(
-				context.Background(),
-				`UPDATE users
-				 SET last_login_at = NOW(), updated_at = NOW()
-				 WHERE id = $1`,
-				userID,
-			)
-			if uErr != nil {
-				log.Printf("bootstrap: update last_login_at failed for user %s: %v", userID, uErr)
-			}
-		}()
-
-		return &Result{
-			TenantID: existingTenantID,
-			UserID:   existingUserID,
-			Role:     existingRole,
-		}, nil
-	}
-
-	if !isNoRows(err) {
-		return nil, fmt.Errorf("lookup user by provider_sub: %w", err)
+	if in.ConnectionID == "" || in.Subject == "" {
+		return nil, fmt.Errorf("provision: connection_id and subject are required")
 	}
 
 	// New user — check workspace_members for a pending invite by email before
 	// creating a new workspace. Invited users join an existing workspace as
-	// 'member'; only truly first-time signups get a new workspace as 'admin'.
+	// their assigned role; only truly first-time signups get a new workspace as
+	// 'admin'. (Email here is an invite-matching hint, never an identity key.)
 	var pendingWorkspaceID, pendingRole string
-	err = s.Pool.QueryRow(ctx,
+	err := s.Pool.QueryRow(ctx,
 		`SELECT workspace_id, role
 		   FROM workspace_members
 		  WHERE email = $1
@@ -107,26 +65,35 @@ func (s *Service) Bootstrap(
 	).Scan(&pendingWorkspaceID, &pendingRole)
 
 	if err == nil {
-		return s.runInvitedUserTransaction(ctx, email, provider, providerSub, pendingWorkspaceID, pendingRole)
+		return s.runInvitedUserTransaction(ctx, email, in, pendingWorkspaceID, pendingRole)
 	}
 	if !isNoRows(err) {
 		return nil, fmt.Errorf("lookup pending invite: %w", err)
 	}
 
-	return s.runBootstrapTransaction(ctx, email, provider, providerSub, name)
+	return s.runBootstrapTransaction(ctx, email, in)
 }
 
 func (s *Service) runBootstrapTransaction(
 	ctx context.Context,
-	email, provider, providerSub, name string,
-) (*Result, error) {
+	email string,
+	in identity.ProvisionInput,
+) (*identity.PrincipalCore, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	slug := slugify(name)
+	// Workspace display name: the caller's chosen name, else the user's name.
+	displayName := in.WorkspaceName
+	if displayName == "" {
+		displayName = in.Name
+	}
+	if displayName == "" {
+		displayName = email
+	}
+	slug := slugify(displayName)
 
 	// SPIFFE trust domain derived from workspace slug.
 	// Required since migration 002 makes trust_domain NOT NULL.
@@ -139,7 +106,7 @@ func (s *Service) runBootstrapTransaction(
 		 VALUES ($1, $2, 'provisioning', $3)
 		 RETURNING id`,
 		slug,
-		name,
+		displayName,
 		trustDomain,
 	).Scan(&tenantID)
 	if err != nil {
@@ -155,11 +122,15 @@ func (s *Service) runBootstrapTransaction(
 		 RETURNING id`,
 		tenantID,
 		email,
-		provider,
-		providerSub,
+		in.Provider,
+		in.Subject,
 	).Scan(&userID)
 	if err != nil {
 		return nil, fmt.Errorf("insert user: %w", err)
+	}
+
+	if err := insertExternalIdentity(ctx, tx, tenantID, userID, in); err != nil {
+		return nil, err
 	}
 
 	caResult, err := s.PKIService.GenerateWorkspaceCA(ctx, tenantID)
@@ -215,10 +186,13 @@ func (s *Service) runBootstrapTransaction(
 		return nil, fmt.Errorf("commit bootstrap transaction: %w", err)
 	}
 
-	return &Result{
-		TenantID: tenantID,
-		UserID:   userID,
-		Role:     "admin",
+	return &identity.PrincipalCore{
+		UserID:     userID,
+		TenantID:   tenantID,
+		Role:       "admin",
+		Email:      email,
+		Status:     "active",
+		Generation: 1,
 	}, nil
 }
 
@@ -227,8 +201,10 @@ func (s *Service) runBootstrapTransaction(
 // is created — the invite already assigned them a workspace and role.
 func (s *Service) runInvitedUserTransaction(
 	ctx context.Context,
-	email, provider, providerSub, workspaceID, role string,
-) (*Result, error) {
+	email string,
+	in identity.ProvisionInput,
+	workspaceID, role string,
+) (*identity.PrincipalCore, error) {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
@@ -241,10 +217,14 @@ func (s *Service) runInvitedUserTransaction(
 		 (tenant_id, email, provider, provider_sub, role, status)
 		 VALUES ($1, $2, $3, $4, $5, 'active')
 		 RETURNING id`,
-		workspaceID, email, provider, providerSub, role,
+		workspaceID, email, in.Provider, in.Subject, role,
 	).Scan(&userID)
 	if err != nil {
 		return nil, fmt.Errorf("insert invited user: %w", err)
+	}
+
+	if err := insertExternalIdentity(ctx, tx, workspaceID, userID, in); err != nil {
+		return nil, err
 	}
 
 	// Link the workspace_members row to the now-known user_id.
@@ -266,11 +246,29 @@ func (s *Service) runInvitedUserTransaction(
 		return nil, fmt.Errorf("commit invited user transaction: %w", err)
 	}
 
-	return &Result{
-		TenantID: workspaceID,
-		UserID:   userID,
-		Role:     role,
+	return &identity.PrincipalCore{
+		UserID:     userID,
+		TenantID:   workspaceID,
+		Role:       role,
+		Email:      email,
+		Status:     "active",
+		Generation: 1,
 	}, nil
+}
+
+// insertExternalIdentity writes the ADR-024 identity link inside the caller's
+// provisioning transaction, so the users row and its identity key commit
+// atomically. Keyed on (tenant_id, connection_id, subject) — never email.
+func insertExternalIdentity(ctx context.Context, tx pgx.Tx, tenantID, userID string, in identity.ProvisionInput) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO external_identities (tenant_id, user_id, connection_id, issuer, subject)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		tenantID, userID, in.ConnectionID, in.Issuer, in.Subject,
+	)
+	if err != nil {
+		return fmt.Errorf("insert external_identity: %w", err)
+	}
+	return nil
 }
 
 // slugify converts a display name into a URL-safe lowercase slug.

@@ -68,10 +68,10 @@ func toProtoInstructions(resources []resource.Resource) *connectorpb.ShieldResou
 //   })
 ```
 
-- [ ] `HeartbeatResponse` now includes `shield_resources` map
-- [ ] `req.ResourceAcks` processed and persisted via `resource.RecordAck`
-- [ ] Status transitions: `managing → protecting/failed`, `removing → deleted/failed`
-- [ ] Only active shields (in `req.Shields`) get resource instructions injected
+- [x] `HeartbeatResponse` now includes `shield_resources` map
+- [x] `req.ResourceAcks` processed and persisted via `resource.RecordAck`
+- [x] Status transitions: `managing → protecting/failed`, `removing → deleted/failed`
+- [x] Only active shields (in `req.Shields`) get resource instructions injected
 
 ### 2. Modify `connector/src/agent_server.rs`
 
@@ -108,10 +108,10 @@ pub struct ShieldServer {
 // Clears the vec after draining
 ```
 
-- [ ] `ShieldServer` has `resource_instructions` + `pending_acks` fields
-- [ ] Shield HeartbeatResponse includes cached instructions for that shield
-- [ ] Shield ResourceAcks collected into `pending_acks`
-- [ ] `update_resource_instructions` and `drain_resource_acks` public methods
+- [x] `ShieldServer` has `resource_instructions` + `pending_acks` fields
+- [x] Shield HeartbeatResponse includes cached instructions for that shield
+- [x] Shield ResourceAcks collected into `pending_acks`
+- [x] `update_resource_instructions` and `drain_resource_acks` public methods
 
 ### 3. Modify `connector/src/heartbeat.rs` (historical — now `connector/src/control_stream.rs`)
 
@@ -127,9 +127,9 @@ let resource_acks = shield_server.drain_resource_acks();
 // Include in HeartbeatRequest.resource_acks
 ```
 
-- [ ] `HeartbeatResponse.shield_resources` processed and cached in ShieldServer
-- [ ] `HeartbeatRequest.resource_acks` populated from drained acks
-- [ ] No acks lost between heartbeat cycles (drain is atomic)
+- [x] `HeartbeatResponse.shield_resources` processed and cached in ShieldServer
+- [x] `HeartbeatRequest.resource_acks` populated from drained acks
+- [x] No acks lost between heartbeat cycles (drain is atomic)
 
 ---
 

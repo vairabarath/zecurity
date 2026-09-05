@@ -102,11 +102,11 @@ func toResourceGQL(r resource.Resource) *model.Resource {
 }
 ```
 
-- [ ] All 6 resolver functions implemented
-- [ ] `CreateResource` returns clear error if no shield on host
-- [ ] `ProtectResource` rejects invalid status transitions
-- [ ] `DeleteResource` blocks delete if currently protected
-- [ ] `toResourceGQL` maps all fields including nullable ones
+- [x] All 6 resolver functions implemented
+- [x] `CreateResource` returns clear error if no shield on host
+- [x] `ProtectResource` rejects invalid status transitions
+- [x] `DeleteResource` blocks delete if currently protected
+- [x] `toResourceGQL` maps all fields including nullable ones
 
 ---
 

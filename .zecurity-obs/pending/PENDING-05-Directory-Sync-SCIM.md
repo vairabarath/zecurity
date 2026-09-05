@@ -1,18 +1,31 @@
 ---
 type: adr
-status: pending
+status: in-progress
 id: PENDING-05
 domain: identity
 priority: P2
 created: 2026-07-03
 related:
   - PENDING-04-Multiple-IdPs-Enterprise-SSO
+  - ADR-025-SCIM-Directory-Synchronization
 tags: [pending, adr, identity, scim, provisioning]
 ---
 
 # Pending ADR 05 — Directory Sync (SCIM)
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: PENDING — proposed design captured in [[ADR-025-SCIM-Directory-Synchronization]] (PROPOSED, 2026-08-06).**
+> Awaiting team ratification. **Implementation does not begin until ADR-025 is ACCEPTED** — at which
+> point ADR-025 becomes the authoritative SCIM design (exactly as ADR-024 is authoritative for identity
+> federation). The options/recommendation below are the original framing; the resolved decisions live in ADR-025.
+
+> **Correction (2026-09-01, verified against source):** ADR-025 was ACCEPTED and the work is **largely
+> built** as Sprint 17 — the frontmatter said `pending` throughout. The SCIM engine is
+> `controller/internal/scim/*` with migration `034` (which now includes the former 036 idempotent index guard); all 13 backend phases in
+> `.zecurity-obs/Sprint17/path.md` are checked. **Still open:** FE Phase 7 (`status: in-progress`) —
+> per-connection sign-in buttons on `Login.tsx` (F7-5) and disable/delete connection actions on
+> `IdpConnectionDetail.tsx` (F7-8); FE Phases 0–6 are `implemented-unverified`; and **no SCIM
+> conformance suite exists** — live Okta/Entra interop is still gated on tenant access. Hence
+> `in-progress`, not `implemented`.
 
 ## Context / Current State
 

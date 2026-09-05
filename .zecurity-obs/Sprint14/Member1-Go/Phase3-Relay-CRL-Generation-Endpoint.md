@@ -4,7 +4,7 @@ member: M1
 sprint: 14
 phase: 3
 title: Relay CRL Generation + Endpoint
-status: planned
+status: done
 depends_on:
   - Sprint14/Member1-Go/Phase1-Relay-Cert-History-Data-Model
 tags: [go, pki, crl, relay, revocation, pending-02]
@@ -61,10 +61,10 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-C1** `GenerateRelayCRL` on the `Service` interface.
-- [ ] **M1-C2** `relay_crl.go` — Intermediate-CA-signed; `NextUpdate` margin > refresh interval.
-- [ ] **M1-C3** `RelayCRLEndpointHandler` + `GET /relay.crl`.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-C1** `GenerateRelayCRL` on the `Service` interface.
+- [x] **M1-C2** `relay_crl.go` — Intermediate-CA-signed; `NextUpdate` margin > refresh interval.
+- [x] **M1-C3** `internal/relay.RelayCRLHandler` + `GET /relay.crl`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **Stale line references.** Re-locate at implementation time: in `pki/relay.go` the method begins at

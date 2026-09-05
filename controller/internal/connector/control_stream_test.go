@@ -4,10 +4,12 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/policy"
+	"github.com/yourorg/ztna/controller/internal/posture"
 )
 
 // TestPushACLSnapshot_DeliversCachedAndRespectsGate verifies the heartbeat path
@@ -20,10 +22,11 @@ func TestPushACLSnapshot_DeliversCachedAndRespectsGate(t *testing.T) {
 	const ws = "ws-A"
 	cache := policy.NewSnapshotCache()
 	// Seed via the public epoch-aware store (Set is unexported after the ADR-013 seal).
-	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, cache.Epoch(ws))
+	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 2}, time.Time{}, cache.Epoch(ws))
 
 	h := &EnrollmentHandler{
 		PolicyStore:    policy.NewStore(nil), // non-nil for the guard; never used on a cache hit
+		PostureStore: posture.NewStore(nil),
 		PolicyCache:    cache,
 		PolicyNotifier: policy.NewNotifier(cache),
 	}

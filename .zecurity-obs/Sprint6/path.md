@@ -176,19 +176,19 @@ Two features land together:
 
 Run these once all phases are complete:
 
-- [ ] `buf generate` (from repo root) — clean, no errors
-- [ ] `cd controller && go build ./...` — clean
-- [ ] `cd connector && cargo build` — clean (warnings OK)
-- [ ] `cargo build --manifest-path shield/Cargo.toml` — clean
-- [ ] `cd admin && npm run build` — clean
-- [ ] Full DB migration: `008_discovery.sql` runs on fresh DB
-- [ ] Shield connects → within 60s, discovered services appear in UI for that shield
-- [ ] Stop a service on Shield host → within 120s, it disappears from discovered services
-- [ ] Start a new service on Shield host → within 120s, it appears in discovered services
-- [ ] Click Promote → resource created with correct host/port/protocol, auto-matched shield
-- [ ] Trigger Scan from UI → results appear within 10s for reachable hosts
-- [ ] Scan result "Create Resource" → resource row created correctly
-- [ ] Scan results purged after 24h (background goroutine)
+- [x] `buf generate` (from repo root) — clean, no errors
+- [x] `cd controller && go build ./...` — clean
+- [x] `cd connector && cargo build` — clean (warnings OK)
+- [x] `cargo build --manifest-path shield/Cargo.toml` — clean
+- [x] `cd admin && npm run build` — clean
+- [x] Full DB migration: `008_discovery.sql` runs on fresh DB
+- [x] Shield connects → within 60s, discovered services appear in UI for that shield
+- [x] Stop a service on Shield host → within 120s, it disappears from discovered services
+- [x] Start a new service on Shield host → within 120s, it appears in discovered services
+- [x] Click Promote → resource created with correct host/port/protocol, auto-matched shield
+- [x] Trigger Scan from UI → results appear within 10s for reachable hosts
+- [x] Scan result "Create Resource" → resource row created correctly
+- [x] Scan results purged after 24h (background goroutine)
 
 ---
 

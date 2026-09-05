@@ -13,6 +13,19 @@ use crate::session;
 use crate::state::RelayState;
 use crate::tls;
 
+/// Pure fail-closed revocation decision: only `NotRevoked` may proceed to
+/// bridging. `Revoked` and `Unavailable` are both rejected — an unknown
+/// revocation state is treated exactly like a confirmed revocation, never
+/// as "allow by default". Ok(()) = allow; Err(reason) = reject with this
+/// QUIC close reason.
+fn revocation_action(status: RevocationStatus) -> Result<(), &'static [u8]> {
+    match status {
+        RevocationStatus::NotRevoked => Ok(()),
+        RevocationStatus::Revoked => Err(b"peer certificate revoked"),
+        RevocationStatus::Unavailable => Err(b"revocation state unavailable"),
+    }
+}
+
 pub async fn run_listener(
     bind_addr: SocketAddr,
     server_config: quinn::ServerConfig,
@@ -89,22 +102,16 @@ pub async fn run_listener(
             );
             // Track-2: reject a revoked connector/client on the outer mTLS. Fail closed.
             match tls::peer_revocation(&connection) {
-                Ok(pr) => match crl
-                    .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
-                    .await
-                {
-                    RevocationStatus::NotRevoked => {}
-                    RevocationStatus::Revoked => {
-                        warn!(spiffe_id = %identity.uri, "rejecting revoked peer certificate");
-                        connection.close(0u32.into(), b"peer certificate revoked");
+                Ok(pr) => {
+                    let status = crl
+                        .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
+                        .await;
+                    if let Err(reason) = revocation_action(status) {
+                        warn!(spiffe_id = %identity.uri, ?status, "rejecting peer due to revocation check");
+                        connection.close(0u32.into(), reason);
                         return;
                     }
-                    RevocationStatus::Unavailable => {
-                        warn!(spiffe_id = %identity.uri, "workspace CRL unavailable — failing closed");
-                        connection.close(0u32.into(), b"revocation state unavailable");
-                        return;
-                    }
-                },
+                }
                 Err(error) => {
                     warn!(error = %error, "cannot derive peer revocation context — failing closed");
                     connection.close(0u32.into(), b"revocation context error");
@@ -120,4 +127,30 @@ pub async fn run_listener(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod revocation_action_tests {
+    use super::*;
+
+    #[test]
+    fn allows_not_revoked() {
+        assert!(revocation_action(RevocationStatus::NotRevoked).is_ok());
+    }
+
+    #[test]
+    fn rejects_revoked() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Revoked),
+            Err(b"peer certificate revoked" as &[u8]),
+        );
+    }
+
+    #[test]
+    fn fails_closed_on_unavailable() {
+        assert_eq!(
+            revocation_action(RevocationStatus::Unavailable),
+            Err(b"revocation state unavailable" as &[u8]),
+        );
+    }
 }

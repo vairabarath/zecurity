@@ -15,6 +15,11 @@ tags: [pending, adr, identity, mfa]
 
 > **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
 
+> **Verification note (2026-09-01):** still **PENDING** — confirmed unbuilt. No TOTP, WebAuthn or step-up
+> code exists in `controller/`. The one hook is `RequireBreakGlassMFA`
+> (`controller/graph/resolvers/permission_helpers.go:14-22`), a deliberate no-op stub left by
+> Sprint 17 Phase 3 so that the SCIM break-glass path has a call site to enforce once this lands.
+
 ## Context / Current State
 
 There is no first-party MFA and no step-up (re-auth for sensitive resources). Today MFA, if any,

@@ -4,7 +4,7 @@ member: M1
 sprint: 14
 phase: 4
 title: Controller Revocation Enforcement
-status: planned
+status: done
 depends_on:
   - Sprint14/Member1-Go/Phase1-Relay-Cert-History-Data-Model
   - Sprint14/Member1-Go/Phase2-Provider-Revoke-Transaction
@@ -61,9 +61,9 @@ cd controller && go build ./...
 ```
 
 ## Implementation Checklist
-- [ ] **M1-D1** `RevocationChecker` (cache + DB) + check in `verifyRelayCertificate`; fail-closed.
-- [ ] **M1-D2** wire the checker in `main.go`; refresh inside the revoke transaction.
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-D1** `RevocationChecker` (cache + DB) + authenticated relay check; fail-closed.
+- [x] **M1-D2** wire the checker in `main.go`; refresh **post-commit** through `OnRelayRevoked`.
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Pre-Implementation Corrections (validated review — codex)
 - **Provision is NOT covered by `verifyRelayCertificate` (must-fix).** `RelayService/Provision` is in

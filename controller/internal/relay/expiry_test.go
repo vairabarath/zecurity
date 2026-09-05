@@ -53,6 +53,37 @@ func TestRunEviction_EvictsAndNotifiesWorkspaces(t *testing.T) {
 			t.Fatalf("unexpected workspace notification %q", id)
 		}
 	}
+
+	expectedConnectors := map[string][]string{
+		"ws-a": {"c1"},
+		"ws-b": {"c2"},
+		"ws-c": {"c3"},
+	}
+
+	for workspaceID, expected := range expectedConnectors {
+		actual := notifier.connectorIDs[workspaceID]
+
+		if len(actual) != len(expected) {
+			t.Fatalf(
+				"workspace %q connector count = %d, want %d: %v",
+				workspaceID,
+				len(actual),
+				len(expected),
+				actual,
+			)
+		}
+
+		for index := range expected {
+			if actual[index] != expected[index] {
+				t.Fatalf(
+					"workspace %q connectors = %v, want %v",
+					workspaceID,
+					actual,
+					expected,
+				)
+			}
+		}
+	}
 }
 
 // TestRunEviction_EmptyEvictionIsNoop — no expired relays → no notifications fired.

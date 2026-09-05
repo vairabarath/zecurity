@@ -89,11 +89,11 @@ The Relay may observe Lookup metadata, but must never observe `TunnelRequest`,
 
 > Depends on Phases A–C. See [[Sprint10.2/Member3-Rust/Phase3-Integration-Security]].
 
-- [ ] **M3-D1** Test exact Relay and Connector SPIFFE rejection.
-- [ ] **M3-D2** Test wrong-workspace and wrong-role rejection.
-- [ ] **M3-D3** Prove Relay-observed bridged bytes contain no plaintext markers.
-- [ ] **M3-D4** Test direct-first selection and Relay fallback.
-- [ ] **M3-D5** Test reconnect and pooled concurrent Lookup streams.
+- [x] **M3-D1** Test exact Relay and Connector SPIFFE rejection.
+- [x] **M3-D2** Test wrong-workspace and wrong-role rejection.
+- [x] **M3-D3** Prove Relay-observed bridged bytes contain no plaintext markers.
+- [x] **M3-D4** Test direct-first selection and Relay fallback.
+- [x] **M3-D5** Test reconnect and pooled concurrent Lookup streams.
 
 ## Dependency Graph
 
@@ -116,22 +116,22 @@ Completed Relay + Connector runtime
 ## Final Build Gates
 
 - [x] `buf generate`
-- [ ] `cd controller && go test ./internal/policy/... ./internal/client/... ./internal/connector/...`
+- [x] `cd controller && go test ./internal/policy/... ./internal/client/... ./internal/connector/...`
 - [x] `cd controller && go build ./...`
-- [ ] `cd client && cargo test && cargo build`
-- [ ] `cd connector && cargo test && cargo build`
-- [ ] `cd relay && cargo test && cargo build`
+- [x] `cd client && cargo test && cargo build`
+- [x] `cd connector && cargo test && cargo build`
+- [x] `cd relay && cargo test && cargo build`
 
 ## Acceptance Criteria
 
-- [ ] Same-network Client uses direct Connector QUIC path.
-- [ ] Unreachable direct Connector falls back through Relay after at most two seconds.
-- [ ] Client verifies exact Relay SPIFFE before sending Lookup.
-- [ ] Client verifies exact Connector SPIFFE inside the bridged stream.
-- [ ] Relay sees no plaintext tunnel request or resource payload.
-- [ ] Cross-workspace Lookup and inner mTLS fail closed.
-- [ ] ACL denial never triggers a Relay retry.
-- [ ] Missing Relay discovery fields leave Client in direct-only mode.
+- [x] Same-network Client uses direct Connector QUIC path.
+- [x] Unreachable direct Connector falls back through Relay after at most two seconds.
+- [x] Client verifies exact Relay SPIFFE before sending Lookup.
+- [x] Client verifies exact Connector SPIFFE inside the bridged stream.
+- [x] Relay sees no plaintext tunnel request or resource payload.
+- [x] Cross-workspace Lookup and inner mTLS fail closed.
+- [x] ACL denial never triggers a Relay retry.
+- [x] Missing Relay discovery fields leave Client in direct-only mode.
 
 ## Deferred
 

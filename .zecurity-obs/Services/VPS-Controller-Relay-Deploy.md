@@ -212,17 +212,17 @@ That last command succeeding proves: DNS + Caddy TLS + controller HTTP are all w
 cargo build --release --manifest-path ~/zecurity/relay/Cargo.toml
 ```
 
-### 6.2 (Optional) Admin pre-register the relay row
+### 6.2 Provider pre-registers the relay row (required)
 
 ```bash
-# Get an admin JWT first (via the admin UI / login), then:
-curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" -X POST https://zecurity.in/api/relays \
+# Get a provider JWT first, then:
+curl -sS -H "Authorization: Bearer $PROVIDER_TOKEN" -X POST https://zecurity.in/provider/relays \
   -d '{"name":"relay-vps","dns_allowlist":["zecurity.in"],"ip_allowlist":["<VPS_IP>"]}' | jq .
-# note the returned relay id → RELAY_ID
+# note the returned relay_id and provisioning_token
 ```
 
-If you skip this, the relay self-provisions and generates its own UUID (finding F1 —
-provisioning is currently unauthenticated; fine for a test).
+Do not skip this step. Authenticated provisioning rejects unregistered relay IDs and requires the
+single-use token on the first boot.
 
 ### 6.3 Pin the CA fingerprint (from localhost, plaintext)
 

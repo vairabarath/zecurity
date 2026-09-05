@@ -7,6 +7,10 @@ edition = "2021"
 name = "zecurity-client"
 path = "src/main.rs"
 
+
+[dev-dependencies]
+tempfile = "3"
+
 [dependencies]
 # Phase 11 DNS responder. `-proto` only: we need message parse/serialise, not a
 # server framework. Same version family as the connector's hickory-resolver so the
@@ -20,6 +24,7 @@ tokio      = { version = "1", features = ["full"] }
 anyhow     = "1"
 thiserror  = "1"
 async-trait = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 # Phase 2 — add now so they compile clean:
 tonic      = { version = "0.12", features = ["tls"] }

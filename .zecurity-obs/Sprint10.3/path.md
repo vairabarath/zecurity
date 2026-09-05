@@ -76,7 +76,7 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 - [x] **M2-A3** Define and generate the Relay heartbeat protobuf contract.
 - [x] **M2-A4** Authenticate heartbeat identity through mTLS and persist health.
 - [x] **M2-A4.1** Persist Relay heartbeat peer address metadata (`observed_ip`, `observed_port`, `address_scope`, `public_addr` when public).
-- [ ] **M2-A5** Add provisioning, replay, identity, and heartbeat tests.
+- [x] **M2-A5** Add provisioning, replay, identity, and heartbeat tests.
 
 ### Phase B — M3: Relay Runtime Resource & Routing Hardening
 
@@ -94,56 +94,56 @@ Lookup while remaining unable to observe inner tunnel plaintext.
 > Depends on the Phase A provisioning and heartbeat contracts.
 > See [[Sprint10.3/Member3-Rust/Phase2-Certificate-Lifecycle-Trust-Bundles]].
 
-- [ ] **M3-C1** Validate stored Relay certificate identity, key match, chain, and expiry.
-- [ ] **M3-C2** Store Relay certificate material atomically with restrictive permissions.
-- [ ] **M3-C3** Renew Relay certificates before expiry and reload runtime TLS material.
-- [ ] **M3-C4** Reload Connector Relay client/handler material after Connector renewal.
-- [ ] **M3-C5** Select Workspace and Intermediate CAs by validated certificate relationships.
+- [x] **M3-C1** Validate stored Relay certificate identity, key match, chain, and expiry.
+- [x] **M3-C2** Store Relay certificate material atomically with restrictive permissions.
+- [x] **M3-C3** Renew Relay certificates before expiry and reload runtime TLS material.
+- [x] **M3-C4** Reload Connector Relay client/handler material after Connector renewal.
+- [x] **M3-C5** Select Workspace and Intermediate CAs by validated certificate relationships.
 
 ### Phase D — M2/M3: Integration & Production Security Gates
 
 > Depends on Phases A–C.
 > See [[Sprint10.3/Shared/Phase1-Integration-Production-Gates]].
 
-- [ ] **S-D1** Test provisioning token expiry, mismatch, and replay rejection.
-- [ ] **S-D2** Test connection/stream exhaustion limits and handshake timeouts.
-- [ ] **S-D3** Test stale registration eviction and negative ACK behavior.
-- [ ] **S-D4** Test Relay and Connector certificate renewal without process restart.
-- [ ] **S-D5** Test reordered/malformed CA bundles and complete real certificate chains.
-- [ ] **S-D6** Test mTLS Relay heartbeat identity and persisted health transitions.
+- [x] **S-D1** Test provisioning token expiry, mismatch, and replay rejection.
+- [x] **S-D2** Test connection/stream exhaustion limits and handshake timeouts.
+- [x] **S-D3** Test stale registration eviction and negative ACK behavior.
+- [x] **S-D4** Test Relay and Connector certificate renewal without process restart.
+- [x] **S-D5** Test reordered/malformed CA bundles and complete real certificate chains.
+- [x] **S-D6** Test mTLS Relay heartbeat identity and persisted health transitions.
 
 ## Dependency Graph
 
 ```text
 M2-A authenticated provisioning + heartbeat ──> M3-C lifecycle/trust hardening ──┐
-                                                                                  │
+                                                                                   │
 M3-B runtime/resource hardening ──────────────────────────────────────────────────┤
-                                                                                  ▼
+                                                                                   ▼
                                                     Shared integration/security gates
 ```
 
 ## Final Build Gates
 
-- [ ] `buf generate`
-- [ ] `cd controller && go test ./internal/relay/... ./internal/pki/... && go build ./...`
-- [ ] `cd relay && cargo test && cargo build`
-- [ ] `cd connector && cargo test && cargo build`
-- [ ] Run end-to-end authenticated provisioning, heartbeat, renewal, and limit tests.
+- [x] `buf generate`
+- [x] `cd controller && go test ./internal/relay/... ./internal/pki/... && go build ./...`
+- [x] `cd relay && cargo test && cargo build`
+- [x] `cd connector && cargo test && cargo build`
+- [x] Run end-to-end authenticated provisioning, heartbeat, renewal, and limit tests.
 
 ## Acceptance Criteria
 
-- [ ] Controller never signs a Relay CSR without a valid Relay-bound single-use token.
-- [ ] Reusing, modifying, or using an expired provisioning token fails closed.
-- [ ] Relay heartbeat uses mTLS identity and Controller persists Relay health.
-- [ ] Relay heartbeat stores observed peer address metadata without treating private/LAN addresses as public client discovery addresses.
-- [ ] Slow or excessive connections/streams cannot grow tasks without bounds.
-- [ ] Connector inner TLS handshakes time out and release capacity.
-- [ ] Lookup never routes to a known-closed Connector registration.
-- [ ] Relay and Connector certificate renewal takes effect without process restart.
-- [ ] Partial certificate writes cannot replace valid runtime material.
-- [ ] Reordered or malformed CA bundles fail safely or are selected by chain validation.
-- [ ] Relay rejects noncanonical uppercase UUID identities.
-- [ ] Existing workspace isolation and inner-TLS confidentiality tests continue to pass.
+- [x] Controller never signs a Relay CSR without a valid Relay-bound single-use token.
+- [x] Reusing, modifying, or using an expired provisioning token fails closed.
+- [x] Relay heartbeat uses mTLS identity and Controller persists Relay health.
+- [x] Relay heartbeat stores observed peer address metadata without treating private/LAN addresses as public client discovery addresses.
+- [x] Slow or excessive connections/streams cannot grow tasks without bounds.
+- [x] Connector inner TLS handshakes time out and release capacity.
+- [x] Lookup never routes to a known-closed Connector registration.
+- [x] Relay and Connector certificate renewal takes effect without process restart.
+- [x] Partial certificate writes cannot replace valid runtime material.
+- [x] Reordered or malformed CA bundles fail safely or are selected by chain validation.
+- [x] Relay rejects noncanonical uppercase UUID identities.
+- [x] Existing workspace isolation and inner-TLS confidentiality tests continue to pass.
 
 ## Deferred
 

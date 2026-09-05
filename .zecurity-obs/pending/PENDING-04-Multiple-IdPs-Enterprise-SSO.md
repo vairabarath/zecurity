@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: implemented
 id: PENDING-04
 domain: identity
 priority: P1
@@ -13,7 +13,19 @@ tags: [pending, adr, identity, sso, oidc, saml]
 
 # Pending ADR 04 — Multiple IdPs & Enterprise SSO
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> ~~**Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.~~
+> *(superseded — see the correction below)*
+
+> **Correction (2026-09-01, verified against source):** this is **IMPLEMENTED** — the frontmatter
+> said `pending` long after the work landed. Per-workspace IdP configuration lives in
+> `controller/internal/idp/store.go` on the `identity_connections` table
+> (`controller/migrations/031_identity_federation.sql`), the Google hardwiring described below is
+> gone (provider abstraction under `controller/internal/auth/providers/`), and
+> `controller/internal/auth/discovery.go` returns a workspace's connections with a
+> `platformFallback` flag. The resolved design is [[ADR-023-Identity-Philosophy]] /
+> [[ADR-024-Identity-Linking-and-Provider-Migration]] / [[ADR-026-Identity-Governance-and-Identity-Linking]].
+> SAML is still not implemented — OIDC only. The "Context / Current State" below is the
+> 2026-07-03 pre-implementation snapshot; read it as history.
 
 ## Context / Current State
 

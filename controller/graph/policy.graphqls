@@ -6,6 +6,16 @@ type Group {
   resources:   [Resource!]!
   createdAt:   String!
   updatedAt:   String!
+
+  # Where this group came from (ADR-025 §7): "manual" | "scim" | "system".
+  # The UI MUST render origin alongside every group name — a directory-pushed
+  # group and a local one can share a display name, and confusing them is an
+  # authorization mistake. Read-only: the directory owns scim-origin groups.
+  origin:       String!
+  # SCIM group id for scim-origin groups; null for manual/system.
+  externalId:   String
+  # The IdP connection that pushed this group; null for manual/system.
+  connectionId: ID
 }
 
 extend type Resource {

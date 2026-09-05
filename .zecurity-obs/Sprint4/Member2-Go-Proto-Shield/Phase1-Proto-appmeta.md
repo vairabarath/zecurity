@@ -39,24 +39,28 @@ tags:
 
 ### 1. Create `proto/shield/v1/shield.proto`
 
-- [ ] Create directory `proto/shield/v1/`
-- [ ] Write proto with package `shield.v1`
+- [x] Create directory `proto/shield/v1/`
+- [x] Write proto with package `shield.v1`
 - [ ] `option go_package = "github.com/vairabarath/zecurity/gen/go/proto/shield/v1;shieldv1";`
+  <!-- DIFFERS: actual uses "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1;shieldv1" -->
 - [ ] `service ShieldService` with 4 RPCs: `Enroll`, `Heartbeat`, `RenewCert`, `Goodbye`
+  <!-- PARTIAL: Heartbeat RPC replaced with Control (bidirectional stream); only 3 of 4 specified RPCs exist -->
 - [ ] All messages defined: `EnrollRequest`, `EnrollResponse`, `HeartbeatRequest`, `HeartbeatResponse`, `RenewCertRequest`, `RenewCertResponse`, `GoodbyeRequest`, `GoodbyeResponse`
-- [ ] `EnrollResponse` includes: `certificate_pem`, `workspace_ca_pem`, `intermediate_ca_pem`, `shield_id`, `interface_addr`, `connector_addr`, `connector_id`
+  <!-- PARTIAL: HeartbeatRequest/Response do NOT exist; replaced by ShieldControlMessage and nested types -->
+- [x] `EnrollResponse` includes: `certificate_pem`, `workspace_ca_pem`, `intermediate_ca_pem`, `shield_id`, `interface_addr`, `connector_addr`, `connector_id`
 - [ ] `HeartbeatResponse` includes: `ok`, `latest_version`, `re_enroll`
+  <!-- NOT FOUND: no HeartbeatResponse message exists -->
 
 > See sprint4-shield-plan.md for full proto content.
 
 ### 2. Modify `proto/connector/v1/connector.proto`
 
-- [ ] Add `Goodbye` RPC to `ConnectorService`:
+- [x] Add `Goodbye` RPC to `ConnectorService`:
   ```protobuf
   rpc Goodbye(GoodbyeRequest) returns (GoodbyeResponse);
   ```
-- [ ] Add `GoodbyeRequest` message: `{ string connector_id = 1; }`
-- [ ] Add `GoodbyeResponse` message: `{ bool ok = 1; }`
+- [x] Add `GoodbyeRequest` message: `{ string connector_id = 1; }`
+- [x] Add `GoodbyeResponse` message: `{ bool ok = 1; }`
 - [ ] Add `ShieldHealth` message:
   ```protobuf
   message ShieldHealth {
@@ -66,12 +70,14 @@ tags:
     int64  last_heartbeat_at = 4;
   }
   ```
+  <!-- NOT FOUND: uses ShieldStatusUpdate with different fields instead -->
 - [ ] Add `shields` field to `HeartbeatRequest`: `repeated ShieldHealth shields = 5;`
-- [ ] **Do NOT remove or renumber existing fields.** Proto field numbers are permanent.
+  <!-- NOT FOUND: no HeartbeatRequest exists; ShieldStatusBatch.shields uses ShieldStatusUpdate -->
+- [x] **Do NOT remove or renumber existing fields.** Proto field numbers are permanent.
 
 ### 3. Modify `controller/internal/appmeta/identity.go`
 
-- [ ] Add Shield constants block (after existing connector constants):
+- [x] Add Shield constants block (after existing connector constants):
   ```go
   const (
       SPIFFERoleShield    = "shield"
@@ -80,13 +86,13 @@ tags:
       ShieldInterfaceCIDR = "100.64.0.0/10"
   )
   ```
-- [ ] Add `ShieldSPIFFEID()` function:
+- [x] Add `ShieldSPIFFEID()` function:
   ```go
   func ShieldSPIFFEID(trustDomain, shieldID string) string {
       return "spiffe://" + trustDomain + "/" + SPIFFERoleShield + "/" + shieldID
   }
   ```
-- [ ] **Do NOT remove existing constants.** Connectors still use them.
+- [x] **Do NOT remove existing constants.** Connectors still use them.
 
 ### 4. Run buf generate (team step — anyone can do this after commit)
 
@@ -97,11 +103,12 @@ buf generate
 # Verify: controller/gen/go/proto/connector/v1/ updated with Goodbye + ShieldHealth
 ```
 
-- [ ] Buf generate runs cleanly (no errors)
-- [ ] `controller/gen/go/proto/shield/v1/shield.pb.go` exists
-- [ ] `controller/gen/go/proto/shield/v1/shield_grpc.pb.go` exists
+- [x] Buf generate runs cleanly (no errors)
+- [x] `controller/gen/go/proto/shield/v1/shield.pb.go` exists
+- [x] `controller/gen/go/proto/shield/v1/shield_grpc.pb.go` exists
 - [ ] Connector stubs updated with `GoodbyeRequest`, `ShieldHealth`
-- [ ] `cd controller && go build ./...` passes (stubs compile, no import errors)
+  <!-- GoodbyeRequest ✅, ShieldHealth NOT FOUND (uses ShieldStatusUpdate) -->
+- [x] `cd controller && go build ./...` passes (stubs compile, no import errors)
 
 ---
 

@@ -121,29 +121,29 @@ pub struct SharedResourceState {
 //   into state.acks (replacing any previous ack for same resource_id)
 ```
 
-- [ ] `validate_host` implemented using `detect_lan_ip()`
-- [ ] `check_port` uses 2s timeout connect to `127.0.0.1:{port}`
-- [ ] `apply_nftables` flushes + rebuilds `chain resource_protect` atomically
-- [ ] `ActiveResource` and `SharedResourceState` structs defined
-- [ ] `run_health_check_loop` runs every 30s, pushes acks into shared state
+- [x] `validate_host` implemented using `detect_lan_ip()`
+- [x] `check_port` uses 2s timeout connect to `127.0.0.1:{port}`
+- [x] `apply_nftables` flushes + rebuilds `chain resource_protect` atomically
+- [x] `ActiveResource` and `SharedResourceState` structs defined
+- [x] `run_health_check_loop` runs every 30s, pushes acks into shared state
 
 ### 2. Modify `shield/src/config.rs`
 
-- [ ] Add field:
+- [x] Add field:
   ```rust
   #[serde(default = "default_resource_check_interval")]
   pub resource_check_interval_secs: u64,
   ```
-- [ ] Add default function:
+- [x] Add default function:
   ```rust
   fn default_resource_check_interval() -> u64 { 30 }
   ```
 
 ### 3. Modify `shield/src/main.rs`
 
-- [ ] Add `mod resources;`
-- [ ] Create `Arc<SharedResourceState>` shared between heartbeat + health check loop
-- [ ] Spawn health check loop:
+- [x] Add `mod resources;`
+- [x] Create `Arc<SharedResourceState>` shared between heartbeat + health check loop
+- [x] Spawn health check loop:
   ```rust
   let state_clone = Arc::clone(&resource_state);
   tokio::spawn(resources::run_health_check_loop(
@@ -151,7 +151,7 @@ pub struct SharedResourceState {
       state_clone,
   ));
   ```
-- [ ] Pass `resource_state` into `heartbeat::run()`
+- [x] Pass `resource_state` into `heartbeat::run()`
 
 ---
 

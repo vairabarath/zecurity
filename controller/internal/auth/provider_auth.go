@@ -63,7 +63,7 @@ func (pa *providerAuth) initiateHandler() http.Handler {
 			writeProviderAuthJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 			return
 		}
-		if err := pa.s.redisClient.SetPKCEState(r.Context(), state, codeVerifier, nil); err != nil {
+		if err := pa.s.redisClient.SetPKCEState(r.Context(), state, PKCEState{CodeVerifier: codeVerifier}); err != nil {
 			writeProviderAuthJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 			return
 		}
@@ -98,7 +98,7 @@ func (pa *providerAuth) callbackHandler() http.Handler {
 			writeProviderAuthJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_state"})
 			return
 		}
-		codeVerifier, _, found, err := pa.s.redisClient.GetAndDeletePKCEState(ctx, state)
+		pkce, found, err := pa.s.redisClient.GetAndDeletePKCEState(ctx, state)
 		if err != nil {
 			writeProviderAuthJSON(w, http.StatusInternalServerError, map[string]string{"error": "server_error"})
 			return
@@ -107,6 +107,7 @@ func (pa *providerAuth) callbackHandler() http.Handler {
 			writeProviderAuthJSON(w, http.StatusBadRequest, map[string]string{"error": "state_expired"})
 			return
 		}
+		codeVerifier := pkce.CodeVerifier
 		tokenResp, err := pa.s.ExchangeCode(ctx, code, codeVerifier, pa.redirectURI)
 		if err != nil {
 			writeProviderAuthJSON(w, http.StatusBadGateway, map[string]string{"error": "token_exchange_failed"})

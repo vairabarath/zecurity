@@ -4,7 +4,7 @@ member: M2
 sprint: 12
 phase: 2
 title: Re-home Relay Management under /provider
-status: planned
+status: done
 depends_on:
   - Sprint12/Member1-Go/Phase2-Provider-Session-Middleware
 tags:
@@ -109,11 +109,23 @@ cd controller && go test ./internal/relay/...
 
 ## Implementation Checklist
 
-- [ ] **M2-D1** `main.go` — remove `POST /api/relays`; add `POST /provider/relays` behind `RequireProvider`
-- [ ] **M2-D2** `admin_handler.go` — `CanIssueProvisioningToken` check + `provider_audit_logs` write
-- [ ] **M2-D3** (optional) `DELETE /provider/relays/{id}` seam for PENDING-02
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-D1** `main.go` — remove `POST /api/relays`; add `POST /provider/relays` behind `RequireProvider`
+- [x] **M2-D2** `admin_handler.go` — `CanIssueProvisioningToken` check + `provider_audit_logs` write
+- [x] **M2-D3** (optional) `DELETE /provider/relays/{id}` seam for PENDING-02
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
+
+### Documentation Reconciliation: Implementation was complete but phase remained planned
+**Issue:** The Sprint 12 execution path and code contained the completed provider-only relay
+management flow, but this phase retained `status: planned` and unchecked implementation items.
+
+**Verified implementation:** Relay creation is registered at `POST /provider/relays` behind
+`RequireProvider`; the handler enforces `CanIssueProvisioningToken`, records provider audit data,
+and exposes the provider-authorized delete/revocation seam used by Sprint 14. The controller build
+passes.
+
+**Fix Applied:** Set the phase status to `done` and marked M2-D1 through M2-D3 and the build gate
+complete.
 
 _None yet._

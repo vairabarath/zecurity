@@ -20,6 +20,7 @@ use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
 use crate::resolver::Resolver;
+use crate::session_registry::{SessionRegistry, SessionTransport};
 use crate::tls::cert_store::CertStore;
 use crate::ControlMessage;
 
@@ -89,6 +90,7 @@ pub struct RelayHandler {
     acceptor: TlsAcceptor,
     workspace_trust_domain: String,
     acl: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
     crl_manager: CrlManager,
     connector_id: String,
@@ -102,6 +104,7 @@ impl RelayHandler {
     pub fn new(
         store: &CertStore,
         acl: Arc<PolicyCache>,
+        registry: Arc<SessionRegistry>,
         tunnel_hub: AgentTunnelHub,
         crl_manager: CrlManager,
         connector_id: String,
@@ -116,6 +119,7 @@ impl RelayHandler {
             acceptor: TlsAcceptor::from(Arc::new(tls_config)),
             workspace_trust_domain,
             acl,
+            registry,
             tunnel_hub,
             crl_manager,
             connector_id,
@@ -189,6 +193,8 @@ impl RelayHandler {
             client_spiffe_id,
             cert_serial,
             self.acl.clone(),
+            self.registry.clone(),
+            SessionTransport::Relay,
             self.tunnel_hub.clone(),
             self.crl_manager.clone(),
             &self.connector_id,

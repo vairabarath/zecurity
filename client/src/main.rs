@@ -19,6 +19,7 @@ mod state_store;
 mod transport;
 mod tun;
 mod tunnel_pool;
+
 mod cmd {
     pub mod down;
     pub mod login;
@@ -29,6 +30,10 @@ mod cmd {
     pub mod sync;
     pub mod up;
 }
+
+mod posture;
+#[cfg(test)]
+mod posture_tests;
 
 use clap::{Parser, Subcommand};
 

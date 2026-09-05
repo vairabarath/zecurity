@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::FutureExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -14,10 +15,13 @@ use crate::dns;
 use crate::grpc::{
     self,
     client_v1::{
-        AclConnector, AclEntry, AclRemoteNetwork, GetAclSnapshotRequest,
-        GetTransportSnapshotRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
+        AclConnector, AclEntry, AclRemoteNetwork, DeviceDirective, DevicePostureReport,
+        GetAclSnapshotRequest, GetTransportSnapshotRequest, RenewCertRequest,
+        ReportDevicePostureRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
     },
 };
+use crate::posture;
+use uuid::Uuid;
 use crate::ipc::{check_same_user, ipc_socket_path, IpcRequest, IpcResource, IpcResponse};
 use crate::login::LoginResult;
 use crate::net_stack;
@@ -25,7 +29,8 @@ use crate::os_dns;
 use crate::registry::{select_cidr, BindingRegistry, Net};
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
-    self, DeviceInfo, SessionInfo, SharedState, TunHandle, UserInfo, WorkspaceInfo,
+    self, DeviceInfo, DeviceState, SessionInfo, SharedState, TunHandle, TunnelRestartCoordinator,
+    UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
@@ -70,6 +75,12 @@ pub async fn run() -> Result<()> {
 
     let state = runtime::new_shared();
 
+    // Created here (rather than just before the acl-sync-scheduler spawn
+    // below) so the startup ACL fetch can react to a device directive by
+    // stopping a tunnel — moot on a fresh daemon (nothing is up yet), but
+    // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
+    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
     // Load encrypted durable state on startup if present.
     if let Ok(stored) = state_store::load_workspace_state(&conf.workspace) {
         let mut s = state.write().await;
@@ -80,10 +91,12 @@ pub async fn run() -> Result<()> {
         // Fetch ACL snapshot in background — stale token will just log a warning.
         let state_clone = Arc::clone(&state);
         let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
         let ca_pem = stored.device.ca_cert_pem.clone();
         let device_id = stored.device.id.clone();
         tokio::spawn(async move {
-            fetch_and_store_acl(&state_clone, &conf_clone, ca_pem, device_id).await;
+            fetch_and_store_acl(&state_clone, &conf_clone, &tun_slot_clone, ca_pem, device_id)
+                .await;
         });
 
         // Fetch the transport snapshot too, so relay routing is available before
@@ -95,6 +108,7 @@ pub async fn run() -> Result<()> {
                 warn!(error = %e, "startup transport snapshot fetch failed");
             }
         });
+
     }
 
     // DNS responder (Phase 11). Runs for the daemon's whole lifetime rather than
@@ -145,7 +159,27 @@ pub async fn run() -> Result<()> {
             run_refresh_scheduler(state_clone, conf_clone).await;
         });
     }
-
+    // Posture collection loop. Sibling to run_refresh_scheduler — posture
+    // cadence (fixed 5-minute interval) and token-refresh cadence are
+    // different concerns, so this is its own task, not merged into either.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_posture_scheduler(state_clone, conf_clone).await;
+        });
+    }
+    // Proactive device-cert renewal loop (Sprint 19 Track 3 / PENDING-13,
+    // ADR-028 D1). Sibling to run_refresh_scheduler — cert renewal (days-long
+    // TTL) and token refresh (minutes-long TTL) are on completely different
+    // clocks. No tun_slot needed: renewal never touches tunnels.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_cert_renewal_scheduler(state_clone, conf_clone).await;
+        });
+    }
     let socket_path = ipc_socket_path();
 
     // Remove stale socket from a previous run.
@@ -171,8 +205,6 @@ pub async fn run() -> Result<()> {
     // Keep the systemd watchdog alive. Reads WATCHDOG_USEC set by systemd and
     // pings every half-interval so a transient slow tick never trips the timeout.
     sd_spawn_watchdog();
-
-    let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
     // Background ACL sync loop. Fetches the snapshot every ACL_REFRESH_TTL_SECS
     // and restarts the tunnel when the version changes — the timer counterpart
@@ -220,9 +252,16 @@ async fn handle_connection(
 
     let (response, shutdown) = match serde_json::from_str::<IpcRequest>(line.trim()) {
         Ok(req) => {
-            let is_shutdown = matches!(req, IpcRequest::Shutdown);
+            let is_shutdown_req = matches!(req, IpcRequest::Shutdown);
             let resp = handle_request(req, &state, &conf, &tun_slot).await;
-            (resp, is_shutdown)
+            // A device directive reaction may have set Revoked while handling
+            // this request (Sprint 19 Track 2 / PENDING-13, react_to_device_
+            // directive) — exit after the response is flushed below, same as
+            // an explicit Shutdown request. Checked generically (not tied to
+            // one IpcRequest variant) so any future call path that can trigger
+            // a directive reaction is covered automatically.
+            let revoked = state.read().await.device_state == DeviceState::Revoked;
+            (resp, is_shutdown_req || revoked)
         }
         Err(_) => (
             IpcResponse {
@@ -269,11 +308,20 @@ async fn handle_request(
                 acl_snapshot_version: s.acl_snapshot.as_ref().map(|snap| snap.version),
                 acl_last_sync_at: s.acl_last_sync_at,
                 acl_entry_count: s.acl_snapshot.as_ref().map(|snap| snap.entries.len()),
+                device_state: match s.device_state {
+                    DeviceState::Active => None,
+                    other => Some(other.as_marker().to_string()),
+                },
+                revoked_reason: if s.device_state == DeviceState::Active {
+                    None
+                } else {
+                    Some(s.device_state_reason.clone())
+                },
                 ..Default::default()
             }
         }
 
-        IpcRequest::Sync => match sync_acl_now(state, conf).await {
+        IpcRequest::Sync => match sync_acl_now(state, conf, tun_slot).await {
             Ok(result) => {
                 if result.changed {
                     info!(
@@ -314,7 +362,7 @@ async fn handle_request(
         },
 
         IpcRequest::Resources => {
-            match refresh_acl_if_needed(state, conf).await {
+            match refresh_acl_if_needed(state, conf, tun_slot).await {
                 Ok(Some(result)) if result.changed => {
                     if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
                         return IpcResponse {
@@ -469,8 +517,11 @@ async fn handle_request(
                     populate_runtime(&mut s, &stored);
                     info!("PostLoginState: durable state saved, runtime updated");
                     drop(s);
-
-                    let result = match sync_acl_now(state, conf).await {
+                    {
+                        let s = state.read().await;
+                        s.posture_resync.notify_one();
+                    }
+                    let result = match sync_acl_now(state, conf, tun_slot).await {
                         Ok(r) => r,
                         Err(e) => {
                             return IpcResponse {
@@ -569,7 +620,7 @@ async fn handle_up(
     // was the same shape of bug, and `handle_up` still has no unit coverage.
     state.write().await.synthetic_bindings.clear();
 
-    if let Err(e) = refresh_acl_if_needed(state, conf).await {
+    if let Err(e) = refresh_acl_if_needed(state, conf, tun_slot).await {
         return IpcResponse {
             ok: false,
             kind: "Up".into(),
@@ -841,21 +892,46 @@ async fn handle_down(state: &SharedState, tun_slot: &TunSlot) -> IpcResponse {
     }
 }
 
+/// Relay recovery, the 60s ACL tick, IPC sync/resources, and post-login can
+/// each call this concurrently. Requests are coalesced via
+/// `register_restart_request`: everyone queued before a restart pass starts
+/// shares that pass's result; anyone arriving mid-pass is deferred to the
+/// next one. This avoids one full down/up cycle per concurrent caller while
+/// still giving every caller the correct pass's real result.
 async fn restart_tunnel_if_running(
     state: &SharedState,
     conf: &config::ClientConf,
     tun_slot: &TunSlot,
 ) -> Result<()> {
-    // Serialize the whole down→up sequence. Relay recovery, the 60s ACL tick,
-    // IPC sync/resources, and post-login can each call this concurrently; without
-    // the lock two restarts interleave and corrupt the live TUN session.
-    let restart_lock = { state.read().await.tunnel_restart_lock.clone() };
-    let _restart_guard = restart_lock.lock().await;
+    let coordinator = { state.read().await.tunnel_restart.clone() };
+    let state = state.clone();
+    let conf = conf.clone();
+    let tun_slot = tun_slot.clone();
 
-    // Re-check AFTER acquiring the lock: while this task waited, another restart
-    // may have already completed the transition we intended, so there is nothing
-    // to do. (This guard drops immediately so handle_down/handle_up can take
-    // tun_slot themselves.)
+    let work = move || {
+        let state = state.clone();
+        let conf = conf.clone();
+        let tun_slot = tun_slot.clone();
+        async move {
+            perform_tunnel_restart(&state, &conf, &tun_slot)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+
+    register_restart_request(&coordinator, work)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// One down→up restart pass. Extracted so `run_restart_worker` can drive it
+/// through the queued-oneshot coordinator, and so tests can drive the
+/// coordination logic itself against a fake `work` closure.
+async fn perform_tunnel_restart(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<()> {
     if tun_slot.lock().await.is_none() {
         return Ok(());
     }
@@ -881,11 +957,410 @@ async fn restart_tunnel_if_running(
     Ok(())
 }
 
+/// Runs restart passes for one `TunnelRestartCoordinator` until its `pending`
+/// queue is drained. Each pass answers exactly the requests queued at the
+/// moment it starts (`batch`); requests arriving mid-pass land in `pending`
+/// and are picked up by the next loop iteration. On failure, both the
+/// failing batch and everything queued during that failed pass are failed
+/// together — a later pass re-checking tunnel state could otherwise
+/// misreport success to requests that were actually waiting on the failure.
+async fn run_restart_worker<F, Fut>(coordinator: Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>, work: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    loop {
+        let batch = {
+            let mut c = coordinator.lock().await;
+            if c.pending.is_empty() {
+                c.running = false;
+                return;
+            }
+            std::mem::take(&mut c.pending)
+        };
+
+        let outcome = std::panic::AssertUnwindSafe(work()).catch_unwind().await;
+        match outcome {
+            Ok(Ok(())) => {
+                for waiter in batch {
+                    let _ = waiter.send(Ok(()));
+                }
+                // Loop: pick up any stragglers that arrived mid-pass.
+            }
+            Ok(Err(e)) => {
+                // Stabilize coordinator state before publishing the failure.
+                // Otherwise a waiter can observe Err, immediately enqueue a
+                // fresh request while running is still true, and be incorrectly
+                // drained as a straggler of this failed pass.
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(e.clone()));
+                }
+                return;
+            }
+            Err(_) => {
+                // Catch the panic while `batch` is still owned here. Reset the
+                // coordinator before resolving any receiver so callers cannot
+                // race a fresh request against stale running=true state.
+                let error = "tunnel restart worker panicked".to_string();
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in batch {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                for waiter in stragglers {
+                    let _ = waiter.send(Err(error.clone()));
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Registers a restart request with the coordinator, starting a worker if
+/// none is running, and waits for the pass that answers this request.
+///
+/// The worker is supervised with `catch_unwind` in the same spawned task
+/// that runs it, so a panic mid-pass still resets `running` and fails any
+/// queued waiters instead of leaving the coordinator permanently wedged.
+/// This is best-effort panic recovery, not an absolute guarantee against
+/// every possible abnormal termination (e.g. process exit) — nothing
+/// currently retains the worker's `JoinHandle` to observe or abort it
+/// externally, so an in-task panic is the realistic failure mode covered.
+async fn register_restart_request<F, Fut>(
+    coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+    work: F,
+) -> std::result::Result<(), String>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let start_worker = {
+        let mut c = coordinator.lock().await;
+        c.pending.push(tx);
+        if c.running {
+            false
+        } else {
+            c.running = true;
+            true
+        }
+    };
+
+    if start_worker {
+        let coordinator = coordinator.clone();
+        // The worker catches panics from the restart operation per pass while
+        // it still owns that pass's batch. This outer supervisor is defensive
+        // best-effort cleanup for an unexpected panic in coordinator logic.
+        tokio::spawn(async move {
+            let outcome = std::panic::AssertUnwindSafe(run_restart_worker(coordinator.clone(), work))
+                .catch_unwind()
+                .await;
+            if outcome.is_err() {
+                let stragglers = {
+                    let mut c = coordinator.lock().await;
+                    c.running = false;
+                    std::mem::take(&mut c.pending)
+                };
+                for waiter in stragglers {
+                    let _ = waiter.send(Err("tunnel restart worker panicked".into()));
+                }
+            }
+        });
+    }
+
+    match rx.await {
+        Ok(result) => result,
+        Err(_) => Err("tunnel restart worker stopped unexpectedly".into()),
+    }
+}
+
+#[cfg(test)]
+mod tunnel_restart_coordinator_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn new_coordinator() -> Arc<tokio::sync::Mutex<TunnelRestartCoordinator>> {
+        Arc::new(tokio::sync::Mutex::new(TunnelRestartCoordinator::default()))
+    }
+
+    /// A controllable fake restart operation: counts calls, and only
+    /// completes each call once the test explicitly releases it via the
+    /// returned `Notify`, so tests can deterministically control pass
+    /// timing instead of relying on real sleeps.
+    struct FakeWork {
+        calls: Arc<AtomicUsize>,
+        release: Arc<tokio::sync::Notify>,
+        result: Arc<std::sync::Mutex<std::result::Result<(), String>>>,
+    }
+
+    impl FakeWork {
+        fn new() -> Self {
+            Self {
+                calls: Arc::new(AtomicUsize::new(0)),
+                release: Arc::new(tokio::sync::Notify::new()),
+                result: Arc::new(std::sync::Mutex::new(Ok(()))),
+            }
+        }
+
+        fn set_result(&self, result: std::result::Result<(), String>) {
+            *self.result.lock().unwrap() = result;
+        }
+
+        fn release(&self) {
+            self.release.notify_one();
+        }
+
+        fn closure(&self) -> impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>> + 'static
+        {
+            let calls = self.calls.clone();
+            let release = self.release.clone();
+            let result = self.result.clone();
+            move || {
+                let calls = calls.clone();
+                let release = release.clone();
+                let result = result.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    release.notified().await;
+                    result.lock().unwrap().clone()
+                })
+            }
+        }
+    }
+
+    /// Registers one restart request as its own spawned task, so it is
+    /// driven independently by the runtime (not just when the test task
+    /// happens to poll it directly).
+    fn spawn_request<F, Fut>(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        work: F,
+    ) -> tokio::task::JoinHandle<std::result::Result<(), String>>
+    where
+        F: Fn() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = std::result::Result<(), String>> + Send + 'static,
+    {
+        let coordinator = coordinator.clone();
+        tokio::spawn(async move { register_restart_request(&coordinator, work).await })
+    }
+
+    async fn wait_until(mut condition: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if condition() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never became true");
+    }
+
+    async fn wait_for_pending(
+        coordinator: &Arc<tokio::sync::Mutex<TunnelRestartCoordinator>>,
+        expected: usize,
+    ) {
+        for _ in 0..1000 {
+            if coordinator.lock().await.pending.len() == expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("pending queue never reached {expected}");
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_before_a_pass_share_one_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // Pre-populate one batch under the coordinator lock so this assertion
+        // does not depend on task scheduling between two registration calls.
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "only one pass should have started");
+        fake.release();
+
+        assert!(rx1.await.unwrap().is_ok());
+        assert!(rx2.await.unwrap().is_ok());
+        worker.await.unwrap();
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "both requests must be answered by the same pass");
+    }
+
+    #[tokio::test]
+    async fn request_arriving_mid_pass_is_answered_by_next_pass() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        // Register a second request while pass 1 is still in flight.
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "straggler must not join the in-flight pass");
+
+        // Releasing pass 1 lets the worker loop and start pass 2 for the straggler.
+        fake.release();
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 2).await;
+        fake.release();
+
+        assert!(r1.await.unwrap().is_ok());
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn failing_pass_fails_its_whole_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let (tx1, rx1) = tokio::sync::oneshot::channel();
+        let (tx2, rx2) = tokio::sync::oneshot::channel();
+        {
+            let mut c = coordinator.lock().await;
+            c.running = true;
+            c.pending.extend([tx1, tx2]);
+        }
+        let worker = tokio::spawn(run_restart_worker(
+            coordinator.clone(),
+            fake.closure(),
+        ));
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+
+        assert_eq!(rx1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(rx2.await.unwrap(), Err("boom".to_string()));
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stragglers_during_a_failing_pass_are_also_failed() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_for_pending(&coordinator, 1).await;
+
+        // Only one pass ever runs: it fails, and must drain+fail the
+        // straggler too instead of letting a spurious pass 2 report success.
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(r2.await.unwrap(), Err("boom".to_string()));
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 1);
+        assert!(!coordinator.lock().await.running, "worker must reset running on failure");
+    }
+
+    #[tokio::test]
+    async fn fresh_request_after_failure_starts_a_new_worker() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+        fake.set_result(Err("boom".into()));
+
+        let r1 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert_eq!(r1.await.unwrap(), Err("boom".to_string()));
+        assert!(!coordinator.lock().await.running);
+
+        let fake2 = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake2.closure());
+        wait_until(|| fake2.calls.load(Ordering::SeqCst) >= 1).await;
+        fake2.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_does_not_break_other_waiters_in_the_batch() {
+        let coordinator = new_coordinator();
+        let fake = FakeWork::new();
+
+        // r1's task (and its oneshot receiver) will be aborted before the
+        // pass completes; r2 must still get its result.
+        let r1 = spawn_request(&coordinator, fake.closure());
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+
+        r1.abort();
+        tokio::task::yield_now().await;
+        fake.release();
+
+        assert!(
+            r2.await.unwrap().is_ok(),
+            "surviving waiter in the same batch must still get its result"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_mid_pass_resets_running_and_fails_queued_waiters() {
+        let coordinator = new_coordinator();
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let work_calls = calls.clone();
+        let work = move || {
+            let work_calls = work_calls.clone();
+            Box::pin(async move {
+                work_calls.fetch_add(1, Ordering::SeqCst);
+                panic!("simulated restart panic");
+                #[allow(unreachable_code)]
+                Ok(())
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>
+        };
+
+        let res = register_restart_request(&coordinator, work).await;
+        assert_eq!(
+            res,
+            Err("tunnel restart worker panicked".to_string()),
+            "a panicked pass must surface its explicit error, not a closed channel"
+        );
+        assert!(
+            !coordinator.lock().await.running,
+            "panic recovery must reset running so a later request can start a fresh worker"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Confirm the coordinator is usable again after the panic.
+        let fake = FakeWork::new();
+        let r2 = spawn_request(&coordinator, fake.closure());
+        wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
+        fake.release();
+        assert!(r2.await.unwrap().is_ok());
+    }
+}
+
 fn populate_runtime(s: &mut runtime::RuntimeState, stored: &StoredWorkspaceState) {
     s.workspace = Some(WorkspaceInfo::from(stored));
     s.user = Some(UserInfo::from(stored));
     s.device = Some(DeviceInfo::from(stored));
     s.session = Some(SessionInfo::from(stored));
+    // Restores the device directive across a daemon restart (e.g. the
+    // service manager relaunching after a RE_ENROLL_REQUIRED disable, which
+    // — unlike REVOKED — does not exit the process, so a restart mid-disable
+    // shouldn't be the common case, but must still recover correctly).
+    s.device_state = DeviceState::from_marker(&stored.device.device_state);
 }
 
 fn sd_notify_ready() {
@@ -917,15 +1392,26 @@ fn sd_spawn_watchdog() {
     });
 }
 
-/// Raw GetACLSnapshot RPC. Returns Ok(None) when the controller reports
-/// up_to_date (client's known_version matches — keep the cached snapshot).
+/// Outcome of an ACL-plane fetch: a fresh snapshot, confirmation the cached
+/// one is current, or a device directive (Sprint 19 Track 2 / PENDING-13).
+/// Directive always means no snapshot — REVOKED/RE_ENROLL_REQUIRED gate the
+/// controller's ACL response entirely (D-B: empty payload, up_to_date=false).
+enum AclFetchOutcome {
+    Snapshot(crate::grpc::client_v1::AclSnapshot),
+    UpToDate,
+    Directive(DeviceDirective, String),
+}
+
+/// Raw GetACLSnapshot RPC. Returns AclFetchOutcome::UpToDate when the
+/// controller reports up_to_date (client's known_version matches — keep the
+/// cached snapshot).
 async fn fetch_acl_snapshot(
     conf: &config::ClientConf,
     ca_pem: &str,
     access_token: &str,
     device_id: &str,
     known_version: u64,
-) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+) -> Result<AclFetchOutcome> {
     let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
     let resp = client
         .get_acl_snapshot(GetAclSnapshotRequest {
@@ -935,12 +1421,18 @@ async fn fetch_acl_snapshot(
         })
         .await?
         .into_inner();
+
+    let directive = DeviceDirective::try_from(resp.device_directive)
+        .unwrap_or(DeviceDirective::DirectiveNone);
+    if directive != DeviceDirective::DirectiveNone {
+        return Ok(AclFetchOutcome::Directive(directive, resp.directive_reason));
+    }
     if resp.up_to_date {
-        return Ok(None);
+        return Ok(AclFetchOutcome::UpToDate);
     }
     resp.snapshot
         .ok_or_else(|| anyhow::anyhow!("controller returned empty ACL snapshot"))
-        .map(Some)
+        .map(AclFetchOutcome::Snapshot)
 }
 
 /// Fetch the ACL snapshot, transparently refreshing the access token on 401.
@@ -968,7 +1460,7 @@ async fn fetch_acl_snapshot_with_refresh(
     state: &SharedState,
     device_id: &str,
     known_version: u64,
-) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+) -> Result<AclFetchOutcome> {
     let refresh_lock = {
         let s = state.read().await;
         s.refresh_lock.clone()
@@ -1057,6 +1549,68 @@ async fn fetch_acl_snapshot_with_refresh(
             .await
         }
     }
+}
+
+/// Reacts to a device directive from deviceGate (Sprint 19 Track 2 /
+/// PENDING-13, ADR-028): wipes the cert/key in memory and on disk, stops any
+/// running tunnel, clears the cached ACL, and records the new DeviceState —
+/// both in memory and via the on-disk marker (state_store::mark_device_state)
+/// so a daemon restart while still revoked/re-enroll-required picks the
+/// state back up (see populate_runtime).
+///
+/// Deliberately does NOT exit the process for REVOKED — that decision
+/// belongs to the caller, which may have a pending IPC response to write
+/// first (see fetch_and_store_acl and the IpcRequest::Sync arm in
+/// handle_request, which differ in whether a response is in flight).
+async fn react_to_device_directive(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    directive: DeviceDirective,
+    reason: String,
+) -> Result<()> {
+    let new_state = match directive {
+        DeviceDirective::DirectiveRevoked => DeviceState::Revoked,
+        DeviceDirective::DirectiveReEnrollRequired => DeviceState::ReEnrollRequired,
+        DeviceDirective::DirectiveRenewSoon => {
+            // Backstop, not the primary trigger: run_cert_renewal_scheduler
+            // wakes on its own timer computed from cert_expires_at. This just
+            // wakes it early if it's running late (sleep/suspend, clock
+            // drift) — same relationship run_refresh_scheduler's 401-retry
+            // path has to its own proactive scheduler. No DeviceState change:
+            // the device is still fully trusted, just due for a fresh cert.
+            let resync = state.read().await.cert_renewal_resync.clone();
+            resync.notify_one();
+            return Ok(());
+        }
+        // NONE is not a reaction this function handles.
+        _ => return Ok(()),
+    };
+
+    warn!(
+        directive = ?directive,
+        reason = %reason,
+        "device directive received — wiping credentials"
+    );
+
+    handle_down(state, tun_slot).await;
+
+    {
+        let mut s = state.write().await;
+        if let Some(device) = s.device.as_mut() {
+            device.certificate_pem.clear();
+            device.private_key_pem.clear();
+            device.cert_expires_at = 0;
+        }
+        s.acl_snapshot = None;
+        s.device_state = new_state;
+        s.device_state_reason = reason;
+    }
+
+    state_store::mark_device_state(&conf.workspace, new_state.as_marker())
+        .context("persist device directive marker")?;
+
+    Ok(())
 }
 
 /// True when an error surfaced from a gRPC control-plane call is the
@@ -1172,6 +1726,278 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
     }
 }
 
+// ── Cert renewal (Sprint 19 Track 3 / PENDING-13, ADR-028 D1) ───────────────
+
+/// Mirrors the controller's clientCertTTL/renewalWindow (service.go) — a
+/// schedule constant, not device state, so it's duplicated here rather than
+/// fetched from the server, same reasoning as clientCertTTL itself being a
+/// compile-time constant server-side. Keep these two constants in lockstep
+/// with service.go's clientCertTTL/renewalWindow if either ever changes.
+const CLIENT_CERT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const RENEWAL_WINDOW_SECS: i64 = CLIENT_CERT_TTL_SECS * 2 / 5;
+
+/// Builds a fresh, self-signed CSR from the device's EXISTING private key —
+/// never a new keypair. Mirrors login.rs's enrollment CSR construction
+/// (rcgen::KeyPair::generate_for + CertificateParams) minus the key
+/// generation step. Reusing the same key is what makes RenewCert's
+/// fingerprint-pinning check (controller service.go D-A) meaningful: a fresh
+/// key on every renewal would defeat it entirely. The CSR's CommonName is
+/// cosmetic — the server derives the SPIFFE SAN from (trustDomain, deviceID),
+/// never from the CSR's subject fields.
+fn build_renewal_csr(private_key_pem: &str, hostname: &str) -> Result<String> {
+    let key_pair = rcgen::KeyPair::from_pem(private_key_pem)?;
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, hostname);
+    Ok(params.serialize_request(&key_pair)?.pem()?)
+}
+
+/// Raw RenewCert RPC.
+async fn renew_cert_rpc(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .renew_cert(RenewCertRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            csr_pem: csr_pem.to_string(),
+        })
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+/// RenewCert with the same 401-retry dance as fetch_acl_snapshot_with_refresh
+/// (verify -> on Unauthenticated, refresh via /auth/refresh, retry once).
+/// Duplicated rather than factored into a shared helper — this codebase's
+/// existing convention (ACL and Transport fetch each have their own copy
+/// too), not an oversight.
+async fn renew_cert_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
+    let access_token = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        sess.access_token.clone()
+    };
+
+    match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("RenewCert returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+                Ok(resp) => {
+                    info!("RenewCert succeeded after another task refreshed the session");
+                    return Ok(resp);
+                }
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            renew_cert_rpc(conf, ca_pem, &new_tokens.access_token, device_id, csr_pem).await
+        }
+    }
+}
+
+/// Pure: how long to sleep before the renewal window begins. Split out from
+/// the scheduler loop for unit testing without async/network, same reasoning
+/// as sync_acl_now_with being split from its real fetch. Clamped to 0 (never
+/// negative) — a cert already inside (or past) its renewal window means
+/// renew immediately, same as run_refresh_scheduler's `.max(0)`.
+fn renewal_sleep_secs(cert_expires_at: i64, now: i64) -> u64 {
+    let renew_at = cert_expires_at - RENEWAL_WINDOW_SECS;
+    (renew_at - now).max(0) as u64
+}
+
+/// Adds a one-time random jitter (±15 min) so a fleet of devices enrolled
+/// together doesn't all wake and hit RenewCert at the exact same instant
+/// (ADR-028 D1: "jittered retries"). Kept separate from renewal_sleep_secs so
+/// that function stays pure and testable.
+fn jittered_sleep_secs(sleep_secs: u64) -> u64 {
+    use rand::Rng;
+    let jitter_secs: i64 = rand::thread_rng().gen_range(-900..=900);
+    (sleep_secs as i64 + jitter_secs).max(0) as u64
+}
+
+/// Proactive device-cert renewal loop (ADR-028 D1). The daemon renews its own
+/// cert before expiry using a proof-of-possession CSR built from the SAME key
+/// it already holds — no user interaction, mirrors the connector/shield
+/// renewal pattern. Runs for the daemon's lifetime.
+///
+/// Lifecycle:
+///   - No device yet, or device_state != Active (Track 2 already revoked /
+///     flagged re-enroll-required — the key is wiped, nothing to renew):
+///     sleep and recheck, same shape as run_refresh_scheduler's "no session"
+///     branch.
+///   - Otherwise sleep until the renewal window (jittered), or wake early on
+///     cert_renewal_resync (DIRECTIVE_RENEW_SOON backstop — see
+///     react_to_device_directive).
+///   - Re-check device/device_state after waking — it may have changed
+///     during the sleep.
+///   - On success: update in-memory state AND persist via
+///     state_store::save_renewed_cert.
+///   - On failure: warn and retry after a flat backoff. Deliberately does
+///     NOT react to a denial by wiping/exiting — that is exclusively
+///     react_to_device_directive's job via the ACL poll. This loop's only
+///     job is renewing; it never touches DeviceState itself.
+async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf) {
+    const NO_DEVICE_POLL_SECS: u64 = 60;
+    const RENEWAL_RETRY_SECS: u64 = 30;
+
+    let resync = { state.read().await.cert_renewal_resync.clone() };
+
+    loop {
+        let (device_id, private_key_pem, hostname, cert_expires_at, ca_pem, eligible) = {
+            let s = state.read().await;
+            match (&s.device, s.device_state) {
+                (Some(d), DeviceState::Active) => (
+                    d.id.clone(),
+                    d.private_key_pem.clone(),
+                    d.hostname.clone(),
+                    d.cert_expires_at,
+                    d.ca_cert_pem.clone(),
+                    true,
+                ),
+                _ => (String::new(), String::new(), String::new(), 0, String::new(), false),
+            }
+        };
+
+        if !eligible {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_DEVICE_POLL_SECS)).await;
+            continue;
+        }
+
+        let sleep_secs = jittered_sleep_secs(renewal_sleep_secs(cert_expires_at, now_unix()));
+        if sleep_secs > 0 {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {}
+                _ = resync.notified() => {
+                    info!("RENEW_SOON directive received — waking renewal scheduler early");
+                }
+            }
+        }
+
+        // Re-check after waking: device_state may have changed while asleep.
+        let still_eligible = {
+            let s = state.read().await;
+            matches!((&s.device, s.device_state), (Some(_), DeviceState::Active))
+        };
+        if !still_eligible {
+            continue;
+        }
+
+        if let Err(e) = attempt_cert_renewal(
+            &state,
+            &conf,
+            &device_id,
+            &private_key_pem,
+            &hostname,
+            &ca_pem,
+        )
+        .await
+        {
+            warn!(error = %e, "cert renewal failed — retrying in {}s", RENEWAL_RETRY_SECS);
+            tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_RETRY_SECS)).await;
+        }
+    }
+}
+
+/// One renewal attempt: build the CSR, call RenewCert, persist + update state
+/// on success. Split out from run_cert_renewal_scheduler's loop (which owns
+/// only the sleep/eligibility/retry-timing logic) so the actual network +
+/// state + persistence wiring is directly callable from tests — same
+/// reasoning as sync_acl_now_with being split from sync_acl_now.
+async fn attempt_cert_renewal(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    device_id: &str,
+    private_key_pem: &str,
+    hostname: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    let csr_pem = build_renewal_csr(private_key_pem, hostname).context("build renewal CSR")?;
+    let resp = renew_cert_with_refresh(conf, ca_pem, state, device_id, &csr_pem).await?;
+
+    let new_ca_cert_pem = format!("{}\n{}", resp.workspace_ca_pem, resp.intermediate_ca_pem);
+
+    if let Err(e) = state_store::save_renewed_cert(
+        &conf.workspace,
+        resp.certificate_pem.clone(),
+        new_ca_cert_pem.clone(),
+        resp.cert_expires_at,
+    ) {
+        warn!(error = %e, "persist renewed cert failed — in-memory update still applied");
+    }
+
+    let mut s = state.write().await;
+    if let Some(device) = s.device.as_mut() {
+        device.certificate_pem = resp.certificate_pem;
+        device.ca_cert_pem = new_ca_cert_pem;
+        device.cert_expires_at = resp.cert_expires_at;
+    }
+    info!(new_expiry = resp.cert_expires_at, "device cert renewed proactively");
+    Ok(())
+}
+
 /// Single-flight + cooldown state for the transport-recovery task, shared
 /// between the scheduler's select! loop and the spawned recovery task.
 #[derive(Debug, Default)]
@@ -1277,7 +2103,221 @@ async fn run_acl_sync_scheduler(state: SharedState, conf: config::ClientConf, tu
         }
     }
 }
+/// Posture collection + submission loop. Sibling to run_refresh_scheduler and
+/// run_acl_sync_scheduler — posture cadence is a fixed 5-minute interval, a
+/// different concern from token-refresh or ACL-poll cadence.
+///
+/// Lifecycle:
+///   - No session in state (fresh daemon before login, or post-logout): sleep
+///     and recheck — same "not logged in yet" handling as run_refresh_scheduler.
+///   - PostLoginState signals `posture_resync` right after a successful login,
+///     so a freshly-logged-in device reports posture immediately rather than
+///     waiting for the first 5-minute tick.
+///   - Unlike run_acl_sync_scheduler, this does NOT pre-consume the ticker's
+///     immediate first tick — there is no separate startup-time posture fetch
+///     elsewhere (unlike ACL's fetch_and_store_acl spawned in run()), so the
+///     interval's natural immediate first tick IS the "collect at startup"
+///     trigger the spec asks for.
+async fn run_posture_scheduler(state: SharedState, conf: config::ClientConf) {
+    const POSTURE_COLLECT_INTERVAL_SECS: u64 = 300;
+    const NO_SESSION_POLL_SECS: u64 = 60;
 
+    let resync = { state.read().await.posture_resync.clone() };
+
+    let mut ticker =
+        tokio::time::interval(std::time::Duration::from_secs(POSTURE_COLLECT_INTERVAL_SECS));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        let has_session = { state.read().await.session.is_some() };
+        if !has_session {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_SESSION_POLL_SECS)).await;
+            continue;
+        }
+
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = resync.notified() => {}
+        }
+
+        collect_and_submit_posture(&state, &conf).await;
+    }
+}
+
+/// Collects one posture report via the real gRPC submitter. Splitting
+/// collection (here) from assembly+retry (submit_with_retry) lets tests
+/// inject a fake submitter and drive the retry path without a live
+/// controller or real system posture collection.
+async fn collect_and_submit_posture(state: &SharedState, conf: &config::ClientConf) {
+    let (ca_pem, device_id) = {
+        let s = state.read().await;
+        match s.device.as_ref() {
+            Some(d) => (d.ca_cert_pem.clone(), d.id.clone()),
+            None => return,
+        }
+    };
+
+    let collected = posture::collect().await;
+    let submitter = GrpcPostureSubmitter {
+        state,
+        conf,
+        ca_pem: &ca_pem,
+        device_id: &device_id,
+    };
+    submit_with_retry(&submitter, collected).await;
+}
+
+/// Abstracts "submit this assembled report" so the retry-with-same-report_id
+/// logic in submit_with_retry can be unit-tested without a live controller —
+/// mirrors the AclFetcher/TransportFetcher pattern used by sync_acl_now_with /
+/// fetch_and_store_transport_with.
+#[async_trait::async_trait]
+trait PostureSubmitter {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()>;
+}
+
+/// Real submitter: submits via the gRPC RPC, transparently refreshing the
+/// access token on Unauthenticated (see submit_posture_report).
+struct GrpcPostureSubmitter<'a> {
+    state: &'a SharedState,
+    conf: &'a config::ClientConf,
+    ca_pem: &'a str,
+    device_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl PostureSubmitter for GrpcPostureSubmitter<'_> {
+    async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+        submit_posture_report(self.conf, self.ca_pem, self.state, self.device_id, report).await
+    }
+}
+
+/// Assembles the DevicePostureReport (one fresh report_id for this cycle) and
+/// submits it, retrying once with the SAME report_id on failure so the
+/// controller's UNIQUE(report_id) constraint makes the retry idempotent
+/// rather than creating a duplicate row. Gives up after the retry — the next
+/// scheduled tick collects fresh data anyway.
+async fn submit_with_retry(submitter: &impl PostureSubmitter, collected: posture::PostureReport) {
+    let report = DevicePostureReport {
+        report_id: Uuid::new_v4().to_string(),
+        reported_at: now_unix(),
+        client_version: env!("CARGO_PKG_VERSION").to_string(),
+        os_name: collected.os_name,
+        os_version: collected.os_version,
+        checks: collected.checks,
+    };
+
+    if let Err(e) = submitter.submit(report.clone()).await {
+        warn!(error = %e, "posture submission failed, retrying once with same report_id");
+        if let Err(e) = submitter.submit(report).await {
+            warn!(error = %e, "posture submission retry failed, will try again next cycle");
+        }
+    }
+}
+
+/// Submit a device posture report, transparently refreshing the access token
+/// on Unauthenticated — same shape as fetch_acl_snapshot_with_refresh (see
+/// its doc comment for the full flow this mirrors).
+async fn submit_posture_report(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let refresh_lock = { state.read().await.refresh_lock.clone() };
+    let (access_token, _refresh_token) = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        (sess.access_token.clone(), sess.refresh_token.clone())
+    };
+
+    match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone()).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("posture submit returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match report_device_posture(conf, ca_pem, &access_token, device_id, report.clone())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            report_device_posture(conf, ca_pem, &new_tokens.access_token, device_id, report).await
+        }
+    }
+}
+
+/// Raw ReportDevicePosture RPC.
+async fn report_device_posture(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    report: DevicePostureReport,
+) -> Result<()> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .report_device_posture(ReportDevicePostureRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            report: Some(report),
+        })
+        .await?
+        .into_inner();
+    if !resp.accepted {
+        anyhow::bail!(
+            "controller rejected posture report: {}",
+            resp.rejection_reason
+        );
+    }
+    Ok(())
+}
 /// Early transport re-poll after a relay failure, run as its own task so it
 /// never blocks the ACL sync tick (revocations keep polling). Retries with
 /// backoff until the transport version changes (then restarts the tunnel to
@@ -1334,10 +2374,16 @@ async fn sync_and_restart_if_changed(
         return;
     }
 
-    let acl_changed = match sync_acl_now(state, conf).await {
+    let acl_changed = match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => result.changed,
         Err(e) => {
             warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
+            // No IPC response is in flight on this scheduler task, so REVOKED
+            // can exit immediately (Sprint 19 Track 2 / PENDING-13).
+            if state.read().await.device_state == DeviceState::Revoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
             false
         }
     };
@@ -1366,13 +2412,14 @@ async fn sync_and_restart_if_changed(
 async fn fetch_and_store_acl(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
     ca_pem: String,
     device_id: String,
 ) {
     // known_version = 0: startup has no cached snapshot, so always request the
     // full ACL (the controller never reports up_to_date for known_version == 0).
     match fetch_acl_snapshot_with_refresh(conf, &ca_pem, state, &device_id, 0).await {
-        Ok(Some(snapshot)) => {
+        Ok(AclFetchOutcome::Snapshot(snapshot)) => {
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
@@ -1380,10 +2427,25 @@ async fn fetch_and_store_acl(
             s.acl_last_sync_at = Some(synced_at);
             info!(version, "ACL snapshot stored");
         }
-        Ok(None) => {
+        Ok(AclFetchOutcome::UpToDate) => {
             // Contract violation: up_to_date for known_version == 0. Keep whatever
             // we have rather than acting on an empty response.
             warn!("ACL fetch reported up_to_date for known_version=0 — unexpected; keeping cached snapshot");
+        }
+        Ok(AclFetchOutcome::Directive(directive, reason)) => {
+            if let Err(e) =
+                react_to_device_directive(state, conf, tun_slot, directive, reason).await
+            {
+                warn!(error = %e, "failed to react to device directive at startup");
+                return;
+            }
+            // No IPC response is in flight at startup (this runs in a
+            // detached tokio::spawn), so REVOKED can exit immediately —
+            // mirrors the shutdown precedent in handle_connection.
+            if directive == DeviceDirective::DirectiveRevoked {
+                info!("device revoked — exiting");
+                std::process::exit(0);
+            }
         }
         Err(e) => {
             warn!(error = %e, "ACL snapshot fetch failed — default-deny in effect");
@@ -1596,6 +2658,7 @@ async fn fetch_and_store_transport_with(
 async fn refresh_acl_if_needed(
     state: &SharedState,
     conf: &config::ClientConf,
+    tun_slot: &TunSlot,
 ) -> Result<Option<AclSyncResult>> {
     let should_refresh = {
         let s = state.read().await;
@@ -1611,7 +2674,7 @@ async fn refresh_acl_if_needed(
         return Ok(None);
     }
 
-    match sync_acl_now(state, conf).await {
+    match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => Ok(Some(result)),
         Err(e) => {
             if state.read().await.acl_snapshot.is_some() {
@@ -1626,13 +2689,10 @@ async fn refresh_acl_if_needed(
 
 /// Abstracts the ACL-snapshot fetch (given the client's known_version) so the
 /// version-comparison / up_to_date logic in sync_acl_now_with can be unit-tested
-/// without a live controller. Ok(None) means up_to_date.
+/// without a live controller.
 #[async_trait::async_trait]
 trait AclFetcher {
-    async fn fetch(
-        &self,
-        known_version: u64,
-    ) -> Result<Option<crate::grpc::client_v1::AclSnapshot>>;
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome>;
 }
 
 /// Real fetcher: reads the device identity from state and calls the gRPC RPC.
@@ -1643,10 +2703,7 @@ struct GrpcAclFetcher<'a> {
 
 #[async_trait::async_trait]
 impl AclFetcher for GrpcAclFetcher<'_> {
-    async fn fetch(
-        &self,
-        known_version: u64,
-    ) -> Result<Option<crate::grpc::client_v1::AclSnapshot>> {
+    async fn fetch(&self, known_version: u64) -> Result<AclFetchOutcome> {
         let (ca_pem, device_id) = {
             let s = self.state.read().await;
             let device = s.device.as_ref().ok_or_else(|| {
@@ -1659,28 +2716,35 @@ impl AclFetcher for GrpcAclFetcher<'_> {
     }
 }
 
-async fn sync_acl_now(state: &SharedState, conf: &config::ClientConf) -> Result<AclSyncResult> {
-    sync_acl_now_with(state, &GrpcAclFetcher { state, conf }).await
+async fn sync_acl_now(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+) -> Result<AclSyncResult> {
+    sync_acl_now_with(state, conf, tun_slot, &GrpcAclFetcher { state, conf }).await
 }
 
 /// Inner: reads the cached version, fetches, and applies the result. Split out so
 /// tests can drive the up_to_date (keep cached, changed=false) and changed paths
-/// without a controller.
+/// without a controller. conf/tun_slot are only used on the Directive arm (Sprint
+/// 19 Track 2 / PENDING-13) — the up_to_date/snapshot arms are unchanged.
 async fn sync_acl_now_with(
     state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
     fetcher: &impl AclFetcher,
 ) -> Result<AclSyncResult> {
     let old_version = {
         let s = state.read().await;
         s.acl_snapshot.as_ref().map(|a| a.version)
     };
-    let snapshot = fetcher.fetch(old_version.unwrap_or(0)).await?;
+    let outcome = fetcher.fetch(old_version.unwrap_or(0)).await?;
 
-    match snapshot {
+    match outcome {
         // up_to_date — the controller confirms our cached version is current.
         // This branch is only reachable when we sent a non-zero known_version,
         // which requires a cached snapshot, so acl_snapshot is guaranteed Some.
-        None => {
+        AclFetchOutcome::UpToDate => {
             let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_last_sync_at = Some(synced_at);
@@ -1699,7 +2763,7 @@ async fn sync_acl_now_with(
             );
             Ok(result)
         }
-        Some(snapshot) => {
+        AclFetchOutcome::Snapshot(snapshot) => {
             let changed = match old_version {
                 Some(v) => v != snapshot.version,
                 None => true,
@@ -1720,6 +2784,19 @@ async fn sync_acl_now_with(
                 "ACL snapshot synced"
             );
             Ok(result)
+        }
+        // No AclSyncResult makes sense here — there is no ACL. react_to_device_
+        // directive wipes credentials/tunnel and records DeviceState; returning
+        // Err fits the existing default-deny contract every caller already has
+        // for a failed fetch. Callers that can safely exit (no pending IPC
+        // response) check state.device_state after this Err to decide whether
+        // to terminate the process.
+        AclFetchOutcome::Directive(directive, reason) => {
+            react_to_device_directive(state, conf, tun_slot, directive, reason.clone()).await?;
+            Err(anyhow::anyhow!(
+                "device directive received: {} ({reason})",
+                directive.as_str_name()
+            ))
         }
     }
 }
@@ -2284,8 +3361,8 @@ mod fetch_tests {
     struct UpToDateAcl;
     #[async_trait::async_trait]
     impl AclFetcher for UpToDateAcl {
-        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
-            Ok(None)
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::UpToDate)
         }
     }
 
@@ -2301,8 +3378,12 @@ mod fetch_tests {
             ],
             ..Default::default()
         });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
-        let result = sync_acl_now_with(&state, &UpToDateAcl).await.unwrap();
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &UpToDateAcl)
+            .await
+            .unwrap();
 
         assert!(!result.changed, "up_to_date must report unchanged");
         assert_eq!(result.version, 7, "result reflects the cached version");
@@ -2321,8 +3402,8 @@ mod fetch_tests {
     struct NewAcl;
     #[async_trait::async_trait]
     impl AclFetcher for NewAcl {
-        async fn fetch(&self, _known: u64) -> Result<Option<AclSnapshot>> {
-            Ok(Some(AclSnapshot {
+        async fn fetch(&self, _known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
                 version: 8,
                 entries: vec![AclEntry::default()],
                 ..Default::default()
@@ -2337,8 +3418,12 @@ mod fetch_tests {
             version: 7,
             ..Default::default()
         });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
-        let result = sync_acl_now_with(&state, &NewAcl).await.unwrap();
+        let result = sync_acl_now_with(&state, &conf, &tun_slot, &NewAcl)
+            .await
+            .unwrap();
 
         assert!(result.changed, "a new version must report changed");
         assert_eq!(result.version, 8);
@@ -2347,5 +3432,581 @@ mod fetch_tests {
             8,
             "new ACL snapshot must be stored"
         );
+    }
+}
+
+#[cfg(test)]
+mod posture_scheduler_tests {
+    use super::*;
+
+    // --- posture_resync wiring: notify_one() actually wakes a waiter ---
+    #[tokio::test]
+    async fn posture_resync_wakes_a_waiting_task() {
+        let state = crate::runtime::new_shared();
+        let resync = state.read().await.posture_resync.clone();
+
+        let waiter = {
+            let resync = resync.clone();
+            tokio::spawn(async move {
+                resync.notified().await;
+            })
+        };
+
+        // Give the spawned task a chance to start waiting before notifying.
+        tokio::task::yield_now().await;
+        resync.notify_one();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter task timed out — posture_resync did not wake it")
+            .expect("waiter task panicked");
+    }
+
+    // --- submit_with_retry: fake submitter records every report_id it saw ---
+    struct FakeSubmitter {
+        report_ids_seen: Mutex<Vec<String>>,
+        fail_first_n: usize,
+    }
+
+    impl FakeSubmitter {
+        fn new(fail_first_n: usize) -> Self {
+            Self {
+                report_ids_seen: Mutex::new(Vec::new()),
+                fail_first_n,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PostureSubmitter for FakeSubmitter {
+        async fn submit(&self, report: DevicePostureReport) -> Result<()> {
+            let mut seen = self.report_ids_seen.lock().await;
+            seen.push(report.report_id.clone());
+            if seen.len() <= self.fail_first_n {
+                anyhow::bail!("simulated transient failure");
+            }
+            Ok(())
+        }
+    }
+
+    fn fake_collected() -> posture::PostureReport {
+        posture::PostureReport {
+            checks: Vec::new(),
+            os_name: "TestOS".into(),
+            os_version: "1.0".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_reuses_report_id_on_failure() {
+        let submitter = FakeSubmitter::new(1); // first call fails, second succeeds
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(seen.len(), 2, "expected exactly one retry");
+        assert_eq!(
+            seen[0], seen[1],
+            "retry must reuse the same report_id, not generate a new one"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_with_retry_gives_up_after_one_retry() {
+        let submitter = FakeSubmitter::new(usize::MAX); // always fails
+        submit_with_retry(&submitter, fake_collected()).await;
+
+        let seen = submitter.report_ids_seen.lock().await;
+        assert_eq!(
+            seen.len(),
+            2,
+            "must attempt exactly once plus one retry, then give up — not loop forever"
+        );
+    }
+}
+
+/// react_to_device_directive tests (Sprint 19 Track 2 / PENDING-13). Uses a
+/// real state_store round-trip (not a mock) so the on-disk marker is actually
+/// verified — redirected to a tempdir via ZECURITY_STATE_DIR (state_store.rs)
+/// so tests never touch the real user's XDG state directory.
+// ZECURITY_STATE_DIR is a process-global env var; serialize every test that
+// sets it — across BOTH directive_tests and renewal_tests, not just within
+// one module — so parallel test threads (cargo test's default) never race
+// on it. A per-module guard would only serialize within that module, not
+// against the other one touching the same env var.
+#[cfg(test)]
+static STATE_DIR_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod directive_tests {
+    use super::*;
+    use crate::grpc::client_v1::AclSnapshot;
+    use crate::state_store::{self, StoredDevice, StoredWorkspaceState};
+    use tempfile::TempDir;
+
+    /// Points state_store at a fresh tempdir and seeds a state file for
+    /// `workspace` with placeholder cert/key material, so mark_device_state's
+    /// load->mutate->save has something to load.
+    fn seed_state_file(dir: &TempDir, workspace: &str) -> config::ClientConf {
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let stored = StoredWorkspaceState {
+            device: StoredDevice {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                cert_expires_at: 1_700_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(workspace, &stored).expect("seed state file");
+        config::ClientConf {
+            workspace: workspace.to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn state_with_live_device() -> SharedState {
+        let state = crate::runtime::new_shared();
+        let mut s = state.write().await;
+        s.device = Some(DeviceInfo {
+            id: "device-1".into(),
+            spiffe_id: "spiffe://example.test/device-1".into(),
+            certificate_pem: "CERT".into(),
+            private_key_pem: "KEY".into(),
+            ca_cert_pem: "CA".into(),
+            cert_expires_at: 1_700_000_000,
+            hostname: "host".into(),
+            os: "linux".into(),
+        });
+        s.acl_snapshot = Some(AclSnapshot {
+            version: 3,
+            ..Default::default()
+        });
+        drop(s);
+        state
+    }
+
+    #[tokio::test]
+    async fn revoked_wipes_credentials_stops_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-revoked");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRevoked,
+            "user suspended".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert!(device.private_key_pem.is_empty(), "key must be wiped");
+        assert_eq!(device.cert_expires_at, 0);
+        assert!(s.acl_snapshot.is_none(), "cached ACL must be cleared");
+        assert_eq!(s.device_state, DeviceState::Revoked);
+        assert_eq!(s.device_state_reason, "user suspended");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-revoked").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "revoked");
+        assert!(on_disk.device.certificate_pem.is_empty());
+        assert!(on_disk.device.private_key_pem.is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_enroll_required_wipes_credentials_and_records_state() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let conf = seed_state_file(&dir, "ws-re-enroll");
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveReEnrollRequired,
+            "sign in again".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert!(device.certificate_pem.is_empty(), "cert must be wiped");
+        assert_eq!(s.device_state, DeviceState::ReEnrollRequired);
+        assert_eq!(s.device_state_reason, "sign in again");
+        drop(s);
+
+        let on_disk = state_store::load_workspace_state("ws-re-enroll").expect("reload state");
+        assert_eq!(on_disk.device.device_state, "re_enroll_required");
+    }
+
+    #[tokio::test]
+    async fn none_directive_is_a_no_op() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        // No seeded state file: a no-op must never touch disk, so
+        // mark_device_state (which would fail to load a nonexistent file)
+        // must never be reached.
+        let dir = TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let conf = config::ClientConf {
+            workspace: "ws-none".into(),
+            ..Default::default()
+        };
+        let state = state_with_live_device().await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveNone,
+            String::new(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        let s = state.read().await;
+        let device = s.device.as_ref().expect("device retained");
+        assert_eq!(device.certificate_pem, "CERT", "NONE must not wipe credentials");
+        assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
+        assert_eq!(s.device_state, DeviceState::Active);
+    }
+}
+
+/// Cert renewal tests (Sprint 19 Track 3 / PENDING-13, ADR-028 D1).
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    // --- renewal_sleep_secs: pure wake-time math ---
+
+    #[test]
+    fn renewal_sleep_secs_far_from_expiry_sleeps_until_the_window() {
+        // 600_000s (~6.9d) remaining, window is 241_920s (~2.8d) — sleep
+        // until remaining life drops to exactly the window.
+        assert_eq!(renewal_sleep_secs(600_000, 0), 600_000 - RENEWAL_WINDOW_SECS as u64);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_inside_the_window_is_zero() {
+        // 200_000s (~2.3d) remaining is already less than the 241_920s
+        // window — renew immediately, don't sleep.
+        assert_eq!(renewal_sleep_secs(200_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_already_expired_is_zero() {
+        assert_eq!(renewal_sleep_secs(-100_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_at_the_exact_boundary_is_zero() {
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS, 0), 0);
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS + 1, 0), 1);
+    }
+
+    // --- build_renewal_csr: same key, not a fresh one ---
+
+    #[test]
+    fn build_renewal_csr_reuses_the_same_key() {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let original_pem = key_pair.serialize_pem();
+        let original_pub_der = key_pair.public_key_der();
+
+        let csr_pem = build_renewal_csr(&original_pem, "test-host").expect("build CSR");
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
+        let (_, csr) =
+            X509CertificationRequest::from_der(&pem.contents).expect("parse CSR DER");
+
+        assert_eq!(
+            csr.certification_request_info.subject_pki.raw,
+            original_pub_der.as_slice(),
+            "renewal CSR must carry the SAME public key as the original device \
+             key — a fresh key would defeat the server's fingerprint-pinning \
+             check (Track3-Renew-Reenroll.md D-A)"
+        );
+    }
+
+    // --- RENEW_SOON directive wakes the scheduler, nothing else ---
+
+    #[tokio::test]
+    async fn renew_soon_directive_wakes_the_renewal_scheduler() {
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                ca_cert_pem: "CA".into(),
+                cert_expires_at: 1_700_000_000,
+                hostname: "host".into(),
+                os: "linux".into(),
+            });
+        }
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let resync = { state.read().await.cert_renewal_resync.clone() };
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRenewSoon,
+            "certificate renewal due soon".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        // Notify buffers a single permit even with no waiter yet, so a
+        // notified() call made AFTER notify_one() still resolves immediately
+        // — this is what actually proves the notification fired.
+        tokio::time::timeout(std::time::Duration::from_millis(100), resync.notified())
+            .await
+            .expect("cert_renewal_resync should have a pending notification");
+
+        let s = state.read().await;
+        assert_eq!(
+            s.device_state,
+            DeviceState::Active,
+            "RENEW_SOON must not change DeviceState — the device is still fully trusted"
+        );
+        assert_eq!(
+            s.device.as_ref().unwrap().certificate_pem,
+            "CERT",
+            "RENEW_SOON must not wipe credentials"
+        );
+    }
+
+    // --- Full e2e: attempt_cert_renewal against a REAL in-process TLS
+    // server. Every other test above verifies one piece of the wiring in
+    // isolation (the sleep math, the CSR reuses the same key, the notify
+    // fires) — this is the one test that proves those pieces are actually
+    // wired together correctly: real TLS handshake, real RenewCertRequest/
+    // Response wire types, real response parsing into RuntimeState, real
+    // save_renewed_cert disk write. build.rs enables server codegen (normally
+    // dead weight — this binary only ever dials OUT as a client) purely so
+    // this fake server can exist.
+
+    /// Only renew_cert does real work; every other RPC is unreachable in
+    /// this test and returns Unimplemented rather than panicking, so an
+    /// accidental call fails the test cleanly instead of aborting the task.
+    struct FakeRenewCertServer {
+        expected_device_id: String,
+    }
+
+    #[tonic::async_trait]
+    impl crate::grpc::client_v1::client_service_server::ClientService for FakeRenewCertServer {
+        async fn get_auth_config(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAuthConfigRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAuthConfigResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn initiate_auth(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::InitiateAuthRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::InitiateAuthResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn token_exchange(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::TokenExchangeRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::TokenExchangeResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn enroll_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::EnrollDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::EnrollDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_acl_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAclSnapshotRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAclSnapshotResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_transport_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetTransportSnapshotRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::GetTransportSnapshotResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn revoke_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RevokeDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RevokeDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn report_device_posture(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::ReportDevicePostureRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::ReportDevicePostureResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        async fn renew_cert(
+            &self,
+            request: tonic::Request<crate::grpc::client_v1::RenewCertRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RenewCertResponse>, tonic::Status>
+        {
+            let req = request.into_inner();
+            if req.device_id != self.expected_device_id {
+                return Err(tonic::Status::not_found("unknown device"));
+            }
+            if req.csr_pem.is_empty() || req.access_token.is_empty() {
+                return Err(tonic::Status::invalid_argument("missing csr_pem/access_token"));
+            }
+            Ok(tonic::Response::new(crate::grpc::client_v1::RenewCertResponse {
+                certificate_pem: "FAKE-RENEWED-CERT".into(),
+                workspace_ca_pem: "FAKE-WORKSPACE-CA".into(),
+                intermediate_ca_pem: "FAKE-INTERMEDIATE-CA".into(),
+                cert_expires_at: 9_999_999_999,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_e2e_against_real_tls_server() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+
+        // Real self-signed TLS identity — connect_grpc always uses TLS, never
+        // plaintext, so a real handshake is part of what this test proves
+        // works. The self-signed cert doubles as its own trust anchor, same
+        // as any CA-of-one.
+        let cert_key =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let ca_pem = cert_key.cert.pem();
+        let server_identity = tonic::transport::Identity::from_pem(
+            cert_key.cert.pem(),
+            cert_key.key_pair.serialize_pem(),
+        );
+
+        let device_id = "device-e2e-1".to_string();
+
+        // Grab a free port, then release it — tonic binds it fresh. Small
+        // TOCTOU window, negligible in practice for a single-machine test.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let server_device_id = device_id.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(server_identity))
+                .unwrap()
+                .add_service(
+                    crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
+                        FakeRenewCertServer {
+                            expected_device_id: server_device_id,
+                        },
+                    ),
+                )
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        // Let the server start listening before the client dials.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conf = config::ClientConf {
+            workspace: "ws-e2e-renewal".into(),
+            controller_address: format!("localhost:{}", addr.port()),
+            ..Default::default()
+        };
+
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let private_key_pem = key_pair.serialize_pem();
+
+        // Seed a state file so save_renewed_cert's load->mutate->save has
+        // something to load — mirrors seed_state_file in directive_tests.
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device_id.clone(),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&conf.workspace, &seeded).expect("seed state file");
+
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: device_id.clone(),
+                spiffe_id: "spiffe://example.test/device-e2e-1".into(),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                ca_cert_pem: "OLD-CA".into(),
+                cert_expires_at: 1_000,
+                hostname: "e2e-host".into(),
+                os: "linux".into(),
+            });
+            s.session = Some(SessionInfo {
+                access_token: "fake-access-token".into(),
+                refresh_token: "fake-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+
+        attempt_cert_renewal(
+            &state,
+            &conf,
+            &device_id,
+            &private_key_pem,
+            "e2e-host",
+            &ca_pem,
+        )
+        .await
+        .expect("attempt_cert_renewal against the real TLS server");
+
+        // In-memory state reflects the server's response.
+        let s = state.read().await;
+        let device = s.device.as_ref().unwrap();
+        assert_eq!(device.certificate_pem, "FAKE-RENEWED-CERT");
+        assert_eq!(device.ca_cert_pem, "FAKE-WORKSPACE-CA\nFAKE-INTERMEDIATE-CA");
+        assert_eq!(device.cert_expires_at, 9_999_999_999);
+        drop(s);
+
+        // Disk reflects it too — save_renewed_cert actually ran, not just
+        // the in-memory update.
+        let on_disk = state_store::load_workspace_state(&conf.workspace).expect("reload state");
+        assert_eq!(on_disk.device.certificate_pem, "FAKE-RENEWED-CERT");
+        assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
+        // The key never changes on renewal — that's the whole point of D-A.
+        assert_eq!(on_disk.device.private_key_pem, private_key_pem);
     }
 }

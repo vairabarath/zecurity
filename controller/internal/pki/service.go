@@ -70,6 +70,15 @@ type Service interface {
 	// separate CRL. Serials are canonical hex (SerialNumber.Text(16)). Pure: the
 	// caller supplies the serials, so the PKI service needs no relay-store handle.
 	GenerateRelayCRL(ctx context.Context, revoked []RevokedEntry) ([]byte, error)
+
+	// EncryptSecret / DecryptSecret encrypt arbitrary secrets at rest (e.g. a
+	// per-workspace OIDC client secret, PENDING-04) reusing the CA key-storage
+	// primitive (AES-256-GCM + HKDF-SHA256) under the PKI master secret. context
+	// must be a caller-unique, domain-separated label, e.g.
+	// "idp-client-secret:"+tenantID. Same rotation caveat as CA keys: changing
+	// PKI_MASTER_SECRET renders stored ciphertext undecryptable.
+	EncryptSecret(plaintext []byte, context string) (ciphertextB64, nonceB64 string, err error)
+	DecryptSecret(ciphertextB64, nonceB64, context string) ([]byte, error)
 }
 
 // WorkspaceCAResult is the bootstrap-ready output of GenerateWorkspaceCA.

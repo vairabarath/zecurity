@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: implemented
 id: PENDING-08
 domain: zero-trust
 priority: P2
@@ -12,7 +12,16 @@ tags: [pending, adr, zero-trust, posture, device]
 
 # Pending ADR 08 — Device Posture & Health Checks
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: IMPLEMENTED (Sprint 15).** Linux posture collection (OS/version, LUKS, firewall, Secure
+> Boot), Device Profiles with requirements and audit/enforce mode, resource↔profile bindings,
+> posture-aware ACL compilation (AND within a profile, OR across enforce-mode profiles bound to a
+> resource, revision-gated fail-closed evaluation), retention worker, and admin UI (list/create/edit,
+> requirements editor, resource-binding picker) are built and merged on `fixed-pendings` — see
+> `.zecurity-obs/Sprint15/path.md` (64/65 checkboxes; the one open item is a manual/E2E pass against
+> a running backend, not a code gap) and `Sprint15/Member1-Go/Phase1-4`. Options / Recommendation /
+> Open Questions below are retained as the original decision record; ADR promotion to `ADR-0NN` was
+> deliberately deferred pending real-world validation (see PENDING-09's note on the shared
+> revocation-latency mechanism).
 
 ## Context / Current State
 
