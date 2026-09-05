@@ -107,6 +107,14 @@ func newTestOIDC(mi *mockIssuer, clientID string) *OIDCProvider {
 	return NewOIDCProvider("oidc", mi.server.URL, clientID, "test-secret", "", "")
 }
 
+// newTestOIDCWithClaim builds an OIDC provider with a configured subjectClaim,
+// exercising the ADR-025 §3.1 login-path mapping wiring.
+func newTestOIDCWithClaim(mi *mockIssuer, clientID, subjectClaim string) *OIDCProvider {
+	p := NewOIDCProvider("oidc", mi.server.URL, clientID, "test-secret", "", "")
+	p.SetSubjectClaim(subjectClaim)
+	return p
+}
+
 // authenticate is the common happy-path call.
 func authenticate(p *OIDCProvider) (*AuthenticationContext, error) {
 	return p.Authenticate(context.Background(), "code", "verifier", "http://localhost/cb", "expected-nonce")
@@ -178,6 +186,88 @@ func TestOIDC_Authenticate_MissingSubject(t *testing.T) {
 	mi.claims["sub"] = ""
 	if _, err := authenticate(newTestOIDC(mi, "test-client")); err == nil {
 		t.Fatal("expected missing-subject rejection")
+	}
+}
+
+// TestOIDC_Authenticate_DefaultSubjectIsSub verifies the legacy default: when
+// no subjectClaim is configured, AuthenticationContext.Subject is the raw OIDC
+// `sub` and nothing else.
+func TestOIDC_Authenticate_DefaultSubjectIsSub(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	ac, err := authenticate(newTestOIDC(mi, "test-client"))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if ac.Subject != "user-123" {
+		t.Fatalf("default subject must be sub=user-123, got %q", ac.Subject)
+	}
+	if ac.RawClaims == nil {
+		t.Fatal("RawClaims must be populated for subject extraction")
+	}
+}
+
+// TestOIDC_Authenticate_ConfiguredSubjectClaim extracts the configured claim
+// (email) and ignores raw `sub`. Subject must equal the email value.
+func TestOIDC_Authenticate_ConfiguredSubjectClaim(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	ac, err := authenticate(newTestOIDCWithClaim(mi, "test-client", "email"))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if ac.Subject != "user@acme.com" {
+		t.Fatalf("configured subjectClaim=email must yield Subject=user@acme.com, got %q", ac.Subject)
+	}
+	if ac.RawClaims["sub"] == ac.Subject {
+		t.Fatal("configured claim must not equal raw sub; the mapping is supposed to switch the anchor")
+	}
+}
+
+// TestOIDC_Authenticate_MissingConfiguredClaim_FailsClosed: a configured claim
+// that is absent from the (verified) token must fail authentication. It must
+// NOT fall back to `sub` — that would authenticate the wrong canonical
+// identity.
+func TestOIDC_Authenticate_MissingConfiguredClaim_FailsClosed(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	// Token has sub but no "email" claim at all.
+	delete(mi.claims, "email")
+	if _, err := authenticate(newTestOIDCWithClaim(mi, "test-client", "email")); err == nil {
+		t.Fatal("expected authentication to fail when configured claim is missing")
+	}
+}
+
+// TestOIDC_Authenticate_EmptyConfiguredClaim_FailsClosed: the configured claim
+// is present but empty/whitespace — must fail closed, never resolve to sub.
+func TestOIDC_Authenticate_EmptyConfiguredClaim_FailsClosed(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	mi.claims["email"] = "   " // whitespace only
+	if _, err := authenticate(newTestOIDCWithClaim(mi, "test-client", "email")); err == nil {
+		t.Fatal("expected authentication to fail when configured claim is empty/whitespace")
+	}
+}
+
+// TestOIDC_Authenticate_ConfiguredClaim_NoSilentSubFallback is an explicit
+// guard: even if `sub` is perfectly valid, a configured-but-unavailable claim
+// must not authenticate via sub.
+func TestOIDC_Authenticate_ConfiguredClaim_NoSilentSubFallback(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	delete(mi.claims, "email") // sub="user-123" still present and valid
+	ac, err := authenticate(newTestOIDCWithClaim(mi, "test-client", "email"))
+	if err == nil {
+		t.Fatalf("must NOT fall back to sub; got Subject=%q", ac.Subject)
+	}
+}
+
+// TestOIDC_Authenticate_CustomSubjectClaim exercises a non-default, non-email
+// claim to prove the extractor is claim-agnostic (e.g. "oid").
+func TestOIDC_Authenticate_CustomSubjectClaim(t *testing.T) {
+	mi := newMockIssuer(t, "test-client")
+	mi.claims["oid"] = "oid-9988"
+	ac, err := authenticate(newTestOIDCWithClaim(mi, "test-client", "oid"))
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	if ac.Subject != "oid-9988" {
+		t.Fatalf("custom subjectClaim=oid must yield oid-9988, got %q", ac.Subject)
 	}
 }
 

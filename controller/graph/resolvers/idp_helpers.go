@@ -9,16 +9,23 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
+	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/yourorg/ztna/controller/graph"
+	"github.com/yourorg/ztna/controller/internal/apperr"
 	"github.com/yourorg/ztna/controller/internal/audit"
+	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
 // idpConnToGQL maps a store connection to its GraphQL view. The client secret is
-// NEVER mapped — it must not leave the server (ADR-024).
-func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
+// NEVER mapped — it must not leave the server (ADR-024). Identity Health and
+// LastSyncAt are derived for SCIM-capable connections via the SCIM engine when
+// it is wired (nil-safe: a nil engine yields an empty health label).
+func (r *Resolver) idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 	proto := graph.IdpProtocolOidc
 	if strings.EqualFold(c.Protocol, "saml") {
 		proto = graph.IdpProtocolSaml
@@ -32,6 +39,12 @@ func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 		Scopes:      c.Scopes,
 		Status:      c.Status,
 		Managed:     c.Managed,
+		LastSyncAt:  c.LastSyncAt,
+		// Identity mapping (ADR-025 §3). Non-null in the DB (migration 034
+		// defaults 'sub' / 'externalId'), so these are plain values.
+		SubjectClaim:   c.SubjectClaim,
+		ScimIdentifier: c.ScimIdentifier,
+		ScimEnabled:    c.ScimEnabled,
 	}
 	if c.ClientID != "" {
 		id := c.ClientID
@@ -44,6 +57,14 @@ func idpConnToGQL(c idp.Connection) *graph.WorkspaceIdpConnection {
 	if c.DomainHint != "" {
 		h := c.DomainHint
 		out.DomainHint = &h
+	}
+	// Identity Health is a SCIM concept derived from last_sync_at + status
+	// (ADR-025 §12). Only meaningful for SCIM-enabled connections; for other
+	// connections we leave the label empty rather than fabricating a state.
+	if c.ScimEnabled && r.ScimStore != nil && r.ScimStore.DirectoryService() != nil {
+		if h, err := r.ScimStore.DirectoryService().IdentityHealth(context.Background(), c.TenantIDOrEmpty(), c.ID); err == nil {
+			out.IdentityHealth = string(h)
+		}
 	}
 	return out
 }
@@ -131,4 +152,74 @@ func deref(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// scimEnableRefusedError builds the user-actionable error returned when
+// UpdateScimConfig(scimEnabled:true) cannot enable SCIM because the live
+// mapping round-trip proof failed (or was never run). It is returned as a
+// *gqlerror.Error so the fail-closed ErrorPresenter (graph/resolvers/presenter.go)
+// passes it through verbatim with a branchable extensions.code, letting the
+// admin UI offer the enableScimBreakGlass path instead of guessing from a
+// generic failure. The message points at the dedicated identity.mapping.break_glass
+// permission required to override.
+func scimEnableRefusedError(reason string) error {
+	gerr := gqlerror.Errorf("cannot enable SCIM — %s. Enabling despite an unproven mapping "+
+		"requires the %q permission via enableScimBreakGlass (a mandatory reason is audited)",
+		reason, permission.BreakGlassMapping)
+	if gerr.Extensions == nil {
+		gerr.Extensions = map[string]any{}
+	}
+	// Branchable code so the admin UI can offer the break-glass flow instead of
+	// guessing from a generic failure. SCIM mapping not proven is a client-side
+	// precondition failure, not a 409 identity_conflict, so it is not CONFLICT.
+	gerr.Extensions["code"] = "SCIM_MAPPING_UNPROVEN"
+	return gerr
+}
+
+// oidcDiscoveryProbeTimeout bounds the create-time discovery check. The
+// provider's own HTTP client allows 10s, which is too long to hold a UI dialog
+// on a mistyped domain; this keeps a bad host from stalling the mutation.
+const oidcDiscoveryProbeTimeout = 5 * time.Second
+
+// validateOIDCDiscovery verifies an operator-supplied OIDC configuration before
+// it is persisted, by reusing the adapter layer's own discovery client
+// (providers.OIDCProvider.ProbeFresh) rather than adding a second one.
+//
+// SCOPE — what a successful return proves, and nothing beyond it:
+//
+//   - the configured issuer (or explicit discoveryURL) is reachable, and
+//   - it serves a valid OIDC discovery document whose `issuer` matches the
+//     configured issuer and which advertises authorization/token/JWKS endpoints.
+//
+// It does NOT prove the OAuth client ID or client secret is valid, that the
+// redirect URI is registered, or that any user can log in. Discovery is a
+// public, unauthenticated endpoint: the provider is deliberately constructed
+// with EMPTY client credentials here, so no secret can be sent, logged by a
+// transport, or embedded in a returned error. Never report a successful return
+// as "credentials verified".
+//
+// ProbeFresh (not Probe) is required: discoveryCache is keyed on the issuer
+// alone and shared process-wide, so a cache-consulting check could pass without
+// a request — including on another workspace's already-warm issuer.
+func validateOIDCDiscovery(ctx context.Context, provider, issuer, discoveryURL, scopes string) error {
+	ctx, cancel := context.WithTimeout(ctx, oidcDiscoveryProbeTimeout)
+	defer cancel()
+
+	p := providers.NewOIDCProvider(provider, issuer, "", "", discoveryURL, scopes)
+	if _, err := p.ProbeFresh(ctx); err != nil {
+		// User-safe by construction: every error the discovery path returns is
+		// built in internal/auth/providers from the operator's OWN configured
+		// URL plus a transport/parse condition (status code, decode failure,
+		// issuer mismatch, missing endpoints). No DB text, no credential, and
+		// Go errors carry no stack trace. Surfaced through apperr so the
+		// fail-closed ErrorPresenter passes it to the admin instead of masking
+		// it to "an unexpected error occurred" — the same reason
+		// testIdpConnection reports its probe failure verbatim.
+		return apperr.UserErrorf(
+			"OIDC discovery failed for issuer %q: %s. The connection was NOT created. "+
+				"Check that the domain is correct and reachable from the controller. "+
+				"Note that this check does not validate the client ID or client secret.",
+			issuer, err.Error())
+	}
+	return nil
 }

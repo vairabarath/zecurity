@@ -4,7 +4,7 @@ member: M1
 sprint: 17
 phase: 8
 title: Identity Conflict Workflow
-status: planned
+status: done
 depends_on: [5]
 tags: [go, identity, scim, conflict, governance, pending-05]
 ---

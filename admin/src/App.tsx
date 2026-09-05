@@ -26,6 +26,9 @@ import TeamUsers from '@/pages/TeamUsers'
 import AccessLog from '@/pages/AccessLog'
 import DeviceManagement from '@/pages/DeviceManagement'
 import Policies from '@/pages/Policies'
+import IdpConnections from '@/pages/IdpConnections'
+import IdpConnectionDetail from '@/pages/IdpConnectionDetail'
+import ScimConflicts from '@/pages/ScimConflicts'
 import { AppShell } from '@/components/layout/AppShell'
 import { useRequireAuth } from '@/hooks/useRequireAuth'
 import { useAuthStore } from '@/store/auth'
@@ -93,6 +96,9 @@ export default function App() {
         <Route path="/access-log"        element={<AccessLog />} />
         <Route path="/devices"           element={<DeviceManagement />} />
         <Route path="/policies"          element={<Policies />} />
+        <Route path="/idp-connections"     element={<IdpConnections />} />
+        <Route path="/idp-connections/:id" element={<IdpConnectionDetail />} />
+        <Route path="/scim-conflicts" element={<ScimConflicts />} />
       </Route>
     </Routes>
   )

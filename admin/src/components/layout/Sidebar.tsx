@@ -9,6 +9,7 @@ import {
   Network,
   Plug,
   Radar,
+  KeyRound,
   ScrollText,
   Settings,
   Shield,
@@ -173,6 +174,7 @@ export function Sidebar() {
         <TeamSection />
         {user?.role === 'ADMIN' && (
           <>
+            <NavItem to="/idp-connections" label="Identity Providers" icon={KeyRound} />
             <NavItem to="/access-log"     label="Access Log"     icon={ScrollText} />
             <NavItem to="/devices"        label="Devices"        icon={Laptop} />
             <PoliciesSection />

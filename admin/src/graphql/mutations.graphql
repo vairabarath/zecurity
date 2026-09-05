@@ -274,3 +274,136 @@ mutation UnbindResourceFromProfile($profileId: ID!, $resourceId: ID!) {
 mutation DeleteDeviceProfile($id: ID!) {
   deleteDeviceProfile(id: $id)
 }
+
+# --- Enterprise IdP Connection Onboarding (ADR-024 §0, Sprint 17 FE-0) -----
+# Creates a workspace-owned BYO OIDC connection. The client secret is write-only
+# and is never returned in any query or mutation response.
+mutation CreateIdpConnection($input: CreateIdpConnectionInput!) {
+  createIdpConnection(input: $input) {
+    id
+    protocol
+    provider
+    displayName
+    issuer
+    clientId
+    discoveryUrl
+    scopes
+    domainHint
+    status
+    managed
+    lastSyncAt
+    identityHealth
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+  }
+}
+
+# --- SCIM configuration + token lifecycle (ADR-025 §3, Sprint 17 FE-1) ------
+# SAFETY: editing subjectClaim/scimIdentifier on a SCIM-enabled connection
+# force-disables SCIM in the same server-side write — re-enabling is deliberate.
+mutation UpdateScimConfig($connectionId: ID!, $input: UpdateScimConfigInput!) {
+  updateScimConfig(connectionId: $connectionId, input: $input) {
+    id
+    subjectClaim
+    scimIdentifier
+    scimEnabled
+    identityHealth
+    lastSyncAt
+  }
+}
+
+mutation MintScimToken($connectionId: ID!, $label: String, $expiresAt: Time) {
+  mintScimToken(connectionId: $connectionId, label: $label, expiresAt: $expiresAt) {
+    plaintext
+    token {
+      id
+      label
+      createdAt
+      expiresAt
+      revokedAt
+    }
+  }
+}
+
+mutation RotateScimToken($connectionId: ID!, $label: String, $expiresAt: Time) {
+  rotateScimToken(connectionId: $connectionId, label: $label, expiresAt: $expiresAt) {
+    plaintext
+    token {
+      id
+      label
+      createdAt
+      expiresAt
+      revokedAt
+    }
+  }
+}
+
+mutation RevokeScimToken($connectionId: ID!, $tokenId: ID!) {
+  revokeScimToken(connectionId: $connectionId, tokenId: $tokenId)
+}
+
+# Enable SCIM despite an unproven identity mapping (ADR-025 §3.2). Requires the
+# explicit identity.mapping.break_glass permission — ADMIN role alone is NOT
+# sufficient — plus a mandatory reason. Audited as
+# scim.mapping.break_glass_override.
+mutation EnableScimBreakGlass($connectionId: ID!, $reason: String!) {
+  enableScimBreakGlass(connectionId: $connectionId, reason: $reason)
+}
+
+# Explicit fine-grained permission grant (ADR-025 §3.2 break-glass primitive).
+# ADMIN may call this; possession is an explicit row, never implied by role.
+# Used by the SCIM config UI so an admin can grant themselves (or another user)
+# the identity.mapping.break_glass permission required to enable SCIM against an
+# unproven mapping via enableScimBreakGlass.
+mutation GrantWorkspacePermission($userId: ID!, $permission: String!) {
+  grantPermission(userId: $userId, permission: $permission) {
+    workspaceId
+    userId
+    permission
+    grantedBy
+  }
+}
+
+# --- Provisioning-conflicts resolution (ADR-025 §4.1/§9, Sprint 17 FE-4) -----
+# Every transition requires a reason (audited server-side). Accept additionally
+# enforces identity.mapping.break_glass — ADMIN role alone is denied with a
+# 403 (extensions.code === "FORBIDDEN"). Reject/Reopen never return FORBIDDEN.
+mutation AcceptScimConflict(
+  $connectionId: ID!
+  $canonicalKey: String!
+  $reason: String!
+) {
+  acceptScimConflict(
+    connectionId: $connectionId
+    canonicalKey: $canonicalKey
+    reason: $reason
+  )
+}
+
+mutation RejectScimConflict(
+  $connectionId: ID!
+  $canonicalKey: String!
+  $reason: String!
+) {
+  rejectScimConflict(
+    connectionId: $connectionId
+    canonicalKey: $canonicalKey
+    reason: $reason
+  )
+}
+
+# Reopen returns a resolved row to pending; the server nulls resolutionReason /
+# resolvedAt / resolvedBy (a pending row has no resolution). The reopen reason is
+# carried in the scim.user.conflict_reopened audit event, not on the row.
+mutation ReopenScimConflict(
+  $connectionId: ID!
+  $canonicalKey: String!
+  $reason: String!
+) {
+  reopenScimConflict(
+    connectionId: $connectionId
+    canonicalKey: $canonicalKey
+    reason: $reason
+  )
+}

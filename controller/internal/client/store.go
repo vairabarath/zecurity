@@ -2,6 +2,10 @@ package client
 
 import (
 	"context"
+	"crypto"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -194,6 +198,25 @@ func markInvitationAccepted(ctx context.Context, db *pgxpool.Pool, invitationID 
 
 // ── Client device persistence ──────────────────────────────────────────────
 
+// publicKeyFingerprint identifies a public key by the SHA-256 of its
+// DER-encoded SPKI (Subject Public Key Info) form — the standard unambiguous
+// binary encoding of a public key. Pure function, no DB access.
+//
+// Sprint 19 Track 3 (PENDING-13, ADR-028 D1): EnrollDevice calls this once,
+// at enrollment, and pins the result to client_devices.public_key_fingerprint.
+// RenewCert calls it on every renewal CSR and compares against the pinned
+// value — never overwrites it (Track3-Renew-Reenroll.md D-A). That asymmetry
+// is what proves a renewal actually comes from the device that holds the
+// enrolled key, not just someone holding a stolen access_token.
+func publicKeyFingerprint(pub crypto.PublicKey) (string, error) {
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		return "", fmt.Errorf("marshal public key: %w", err)
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func insertClientDevice(
 	ctx context.Context,
 	db *pgxpool.Pool,
@@ -212,25 +235,64 @@ func insertClientDevice(
 	return id, nil
 }
 
+// updateClientDeviceCert records a device's cert after EnrollDevice — and
+// pins its public key fingerprint. Called exactly once per device, at
+// enrollment. Never called again on renewal; see updateClientDeviceCertOnRenewal,
+// whose signature has no fingerprint parameter at all so a future edit can't
+// accidentally reintroduce an overwrite (Track3-Renew-Reenroll.md D-A).
 func updateClientDeviceCert(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	deviceID, certSerial string,
 	notAfter time.Time,
-	spiffeID string,
+	spiffeID, publicKeyFingerprint string,
 ) error {
 	_, err := db.Exec(ctx,
 		`UPDATE client_devices
 		    SET cert_serial = $1,
 		        cert_not_after = $2,
-		        spiffe_id = $3
-		  WHERE id = $4`,
-		certSerial, notAfter, spiffeID, deviceID,
+		        spiffe_id = $3,
+		        public_key_fingerprint = $4
+		  WHERE id = $5`,
+		certSerial, notAfter, spiffeID, publicKeyFingerprint, deviceID,
 	)
 	if err != nil {
 		return fmt.Errorf("update client_device cert: %w", err)
 	}
 	return nil
+}
+
+// updateClientDeviceCertOnRenewal records a fresh cert issued by RenewCert.
+// Deliberately does NOT take a fingerprint — renewal only ever reads
+// client_devices.public_key_fingerprint (to verify the renewal CSR's key
+// matches it), never writes it. spiffe_id also isn't touched: renewal never
+// changes a device's identity, only its cert.
+//
+// Guarded by AND revoked_at IS NULL AND status <> 're_enroll_required' —
+// closes the TOCTOU window between RenewCert's deviceGate check and this
+// write (a concurrent revoke/re-enroll-required landing in between). Returns
+// rows affected so the caller can tell a race apart from a normal success:
+// 0 rows means the device's state changed after the gate check and the
+// renewal must be denied, not silently applied to a now-ineligible device.
+func updateClientDeviceCertOnRenewal(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	deviceID, certSerial string,
+	notAfter time.Time,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET cert_serial = $1,
+		        cert_not_after = $2
+		  WHERE id = $3
+		    AND revoked_at IS NULL
+		    AND status <> 're_enroll_required'`,
+		certSerial, notAfter, deviceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("update client_device cert on renewal: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // revokeClientDevice marks a client device as revoked. The ownership fields
@@ -253,4 +315,65 @@ func revokeClientDevice(ctx context.Context, db *pgxpool.Pool, deviceID, userID,
 		return fmt.Errorf("revoke client_device: %w", err)
 	}
 	return nil
+}
+
+// revokeUserDevices revokes every one of a user's client devices within a
+// workspace, scoped by (user_id, workspace_id) and gated with
+// AND revoked_at IS NULL. It returns the number of rows actually affected.
+//
+// Idempotent on replay: re-running against already-revoked rows affects 0 rows,
+// so callers can use the 0 count to skip downstream side effects (audit,
+// notify) on at-least-once redelivery without producing duplicate entries.
+//
+// Intentionally pool-based (autocommit), not transactional with the audit
+// write: a security revocation must never be blocked by a transient failure of
+// the audit table. The durable enforcement path is revoked_at → workspace CRL
+// (connectors poll it independently); the audit row is best-effort context.
+func revokeUserDevices(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET revoked_at = NOW()
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND revoked_at IS NULL`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("revoke user devices: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// markUserDevicesReEnrollRequired sets status = 're_enroll_required' on every
+// one of a user's devices within a workspace. Unlike revokeUserDevices, this
+// does NOT filter on revoked_at — a reactivated user's devices are typically
+// already revoked (from the prior suspend's revokeUserDevices call), and
+// re_enroll_required must still be set so deviceGate reports the recoverable
+// RE_ENROLL_REQUIRED directive instead of the terminal REVOKED one (status
+// takes priority over revoked_at — see Track2-Device-Trust-Directive.md D-C).
+//
+// Idempotent on replay: gated on status <> 're_enroll_required', so
+// re-running against already-marked rows affects 0 rows. Returns the number
+// of rows actually affected.
+func markUserDevicesReEnrollRequired(
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID, workspaceID string,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
+		`UPDATE client_devices
+		    SET status = 're_enroll_required'
+		  WHERE user_id      = $1
+		    AND workspace_id = $2
+		    AND status      <> 're_enroll_required'`,
+		userID, workspaceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("mark user devices re-enroll required: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }

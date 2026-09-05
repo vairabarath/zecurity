@@ -30,7 +30,8 @@ func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
 	var u models.User
 	err := r.TenantDB.QueryRow(ctx,
 		`SELECT id, tenant_id, email, provider, provider_sub,
-		        role, status, last_login_at, created_at, updated_at
+		        role, status, last_login_at, created_at, updated_at,
+		        provisioned_by, provisioning_owner
 		 FROM users
 		 WHERE id        = $1
 		   AND tenant_id = $2
@@ -41,6 +42,7 @@ func (r *queryResolver) Me(ctx context.Context) (*models.User, error) {
 		&u.Provider, &u.ProviderSub,
 		&u.Role, &u.Status, &u.LastLoginAt,
 		&u.CreatedAt, &u.UpdatedAt,
+		&u.ProvisionedBy, &u.ProvisioningOwner,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("me: %w", err)
@@ -55,7 +57,8 @@ func (r *queryResolver) Users(ctx context.Context) ([]*models.User, error) {
 
 	rows, err := r.TenantDB.Query(ctx,
 		`SELECT id, tenant_id, email, provider, provider_sub,
-		        role, status, last_login_at, created_at, updated_at
+		        role, status, last_login_at, created_at, updated_at,
+		        provisioned_by, provisioning_owner
 		 FROM users
 		 WHERE tenant_id = $1
 		   AND status    = 'active'
@@ -75,6 +78,7 @@ func (r *queryResolver) Users(ctx context.Context) ([]*models.User, error) {
 			&u.Provider, &u.ProviderSub,
 			&u.Role, &u.Status, &u.LastLoginAt,
 			&u.CreatedAt, &u.UpdatedAt,
+			&u.ProvisionedBy, &u.ProvisioningOwner,
 		); err != nil {
 			return nil, fmt.Errorf("users scan: %w", err)
 		}

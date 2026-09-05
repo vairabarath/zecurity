@@ -4,7 +4,7 @@ member: M1
 sprint: 17
 phase: 3
 title: Break-Glass Permission Primitive
-status: planned
+status: done
 depends_on: []
 tags: [go, identity, authz, permission, break-glass, pending-05]
 ---
@@ -26,10 +26,10 @@ The smallest fine-grained permission primitive needed to represent and check
 | `controller/graph/*` | grant/revoke mutations (audited) |
 
 ## Steps
-- [ ] `workspace_permissions(workspace_id, user_id, permission, granted_by, granted_at)`.
-- [ ] `HasPermission(ctx, workspace, user, "identity.mapping.break_glass") bool` — explicit possession only.
-- [ ] Grant/revoke mutations (an ADMIN may grant, but possession is an explicit record, not implied by role); every grant/revoke audited.
-- [ ] MFA hook present at the break-glass call site; enforced only where auth infra supports it (PENDING-06) — no-op stub until then.
+- [x] `workspace_permissions(workspace_id, user_id, permission, granted_by, granted_at)`.
+- [x] `HasPermission(ctx, workspace, user, "identity.mapping.break_glass") bool` — explicit possession only.
+- [x] Grant/revoke mutations (an ADMIN may grant, but possession is an explicit record, not implied by role); every grant/revoke audited.
+- [x] MFA hook present at the break-glass call site; enforced only where auth infra supports it (PENDING-06) — no-op stub until then.
 
 ## Rules
 - ADMIN without an explicit grant → **denied**. Never widen ADMIN to cover this.

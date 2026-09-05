@@ -58,9 +58,10 @@ import (
 	"github.com/yourorg/ztna/controller/internal/provider"
 	"github.com/yourorg/ztna/controller/internal/relay"
 	"github.com/yourorg/ztna/controller/internal/resource"
+	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/transport"
-
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -135,6 +136,17 @@ func main() {
 	// Identity-connection store (Bootstrap + Enterprise IdPs). Reuses the PKI
 	// service to decrypt per-workspace OIDC client secrets at rest (PENDING-04).
 	idpStore := idp.NewStore(db.Pool, pkiService)
+
+	// SCIM bearer-token store (Sprint 17 / ADR-025). Uses a dedicated HMAC key
+	// (SCIM_TOKEN_HASH_KEY) distinct from the PKI master secret.
+	scimStore, err := scim.NewStore(db.Pool, []byte(mustEnv("SCIM_TOKEN_HASH_KEY")), 0)
+	if err != nil {
+		log.Fatalf("scim token store init: %v", err)
+	}
+
+	// Explicit fine-grained permission store (Sprint 17 / ADR-025 Phase 3).
+	// Backs the break-glass primitive; possession is always an explicit row.
+	permissionStore := permission.NewStore(db.Pool)
 
 	// Identity pipeline (PENDING-04 Phase 5): resolve → lifecycle → link →
 	// Principal → event. bootstrapSvc is the workspace-creating Provisioner it
@@ -290,6 +302,8 @@ func main() {
 				PolicyNotifier:    policyNotifier,
 				TransportNotifier: transportNotifier,
 				IdpStore:          idpStore,
+				ScimStore:         scimStore,
+				PermissionStore:   permissionStore,
 				Revoker:           identityRevoker,
 				BreakGlassEmails:  breakGlassEmails,
 			},
@@ -390,6 +404,15 @@ func main() {
 		),
 	)
 	mux.Handle("/api/shields/", shieldTokenRoute)
+
+	// SCIM 2.0 directory-sync endpoint (Sprint 17 / ADR-025 Phase 5). Mounted
+	// under the SCIM bearer-auth middleware, which binds (workspace_id,
+	// connection_id) from the token onto the request context. The DirectoryService
+	// derives all scope from that token — never from the request payload.
+	scimDirSvc := scim.NewDirectoryService(db.Pool, idpStore, identity.NewAuditSink(db.Pool), policyNotifier,
+		scim.NewDurableOutboxSink(outboxStore), identityRevoker).WithPermissionStore(permissionStore)
+	scimStore.WithDirectoryService(scimDirSvc)
+	mux.Handle("/scim/v2/", scimStore.Router(scimDirSvc))
 
 	// REST endpoint: POST /provider/relays — creates a relay registration +
 	// provisioning token. Provider-plane action (PENDING-07a): guarded by
@@ -501,6 +524,24 @@ func main() {
 		postureEvaluator,
 	)
 	clientpb.RegisterClientServiceServer(grpcServer, clientSvc)
+
+	// PENDING-13 Track 1: register the first-ever outbox consumers. SCIM
+	// deprovision/reactivate (PENDING-05) enqueues device.trust.* events; these
+	// handlers execute them — revoking the user's device certs (→ workspace CRL)
+	// and recording re-enrollment requirements. Fail-fast at startup so a missing
+	// registration is caught immediately rather than letting events dead-letter.
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustRevokeRequested,
+		clientsvc.NewDeviceTrustRevokeHandler(db.Pool, policyNotifier),
+	); err != nil {
+		log.Fatalf("register device.trust.revoke.requested handler: %v", err)
+	}
+	if err := outboxRegistry.RegisterHandler(
+		identity.EventDeviceTrustReEnrollmentRequired,
+		clientsvc.NewDeviceTrustReEnrollHandler(db.Pool),
+	); err != nil {
+		log.Fatalf("register device.trust.re_enrollment_required handler: %v", err)
+	}
 
 	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
 	// Google redirects here after user consent; controller exchanges the code

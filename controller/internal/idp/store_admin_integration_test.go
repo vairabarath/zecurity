@@ -133,6 +133,69 @@ func TestIdpStore_AdminMethods_Integration(t *testing.T) {
 		}
 	})
 
+	// Regression for Sprint 17 FE Phase 7 Finding F7-7 (migration
+	// 036_idp_connection_deleted_issuer_reuse.sql): soft-deleting a connection
+	// used to permanently occupy its (tenant_id, issuer) slot — the unique
+	// index did not exclude status='deleted' — so a fresh connection for the
+	// same issuer could never be created again. Reproduced live against a
+	// real Okta org 2026-08-28.
+	t.Run("issuer can be reused after the connection holding it is soft-deleted", func(t *testing.T) {
+		dyingWS := mustInsertWorkspace(t, ctx, pool, "ws-idp-reuse")
+		dying, err := store.CreateWorkspaceConnection(ctx, dyingWS, CreateInput{
+			Provider:     "okta",
+			DisplayName:  "Soon Deleted",
+			Issuer:       "https://reuse-me.okta.com",
+			ClientID:     "client-old",
+			ClientSecret: "secret-old",
+		})
+		if err != nil {
+			t.Fatalf("create original: %v", err)
+		}
+
+		if err := store.SoftDeleteConnection(ctx, dyingWS, dying.ID); err != nil {
+			t.Fatalf("soft-delete: %v", err)
+		}
+
+		// Before the fix, this next create would fail with a duplicate-key
+		// error on idx_idp_conn_ws_issuer even though the original connection
+		// is gone.
+		fresh, err := store.CreateWorkspaceConnection(ctx, dyingWS, CreateInput{
+			Provider:     "okta",
+			DisplayName:  "Fresh Connection",
+			Issuer:       "https://reuse-me.okta.com",
+			ClientID:     "client-new",
+			ClientSecret: "secret-new",
+		})
+		if err != nil {
+			t.Fatalf("expected the issuer to be reusable after soft-delete, got: %v", err)
+		}
+		if fresh.ID == dying.ID {
+			t.Fatalf("expected a new connection row, got the same id back")
+		}
+
+		// The deleted connection must not resurface in the workspace's own
+		// connection list (list-only fix, same finding).
+		conns, err := store.ListWorkspaceConnections(ctx, dyingWS)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(conns) != 1 || conns[0].ID != fresh.ID {
+			t.Fatalf("expected only the fresh connection listed, got %+v", conns)
+		}
+
+		// And the login-discovery view (ListForWorkspace) must not offer the
+		// deleted connection as a sign-in option either.
+		discoverable, err := store.ListForWorkspace(ctx, dyingWS)
+		if err != nil {
+			t.Fatalf("list for workspace: %v", err)
+		}
+		for _, c := range discoverable {
+			if c.ID == dying.ID {
+				t.Fatalf("deleted connection %s must not appear in login discovery", dying.ID)
+			}
+		}
+	})
+
 	t.Run("users-for-connection returns linked users", func(t *testing.T) {
 		var userID string
 		if err := pool.QueryRow(ctx,

@@ -22,7 +22,45 @@ type WorkspaceIdpConnection {
   domainHint:   String
   status:       String!
   managed:      Boolean!
+  # Last time SCIM wrote to this connection (provision/update/group sync).
+  # Drives Identity Health (Healthy/Delayed/Disconnected). Null if SCIM has
+  # never synced (ADR-025 §12).
+  lastSyncAt:   Time
+  # Derived sync-health state: Healthy | Delayed | Disconnected | Disabled.
+  identityHealth: String!
+
+  # --- Identity mapping (ADR-025 §3) ---------------------------------------
+  # The two extractors that MUST resolve to the same Canonical Identity Key for
+  # the same person. Security-critical: a wrong pairing silently splits or
+  # merges accounts, so they are first-class columns, not claim_mappings JSONB.
+  #
+  # subjectClaim is the OIDC claim the login path reads (default "sub";
+  # e.g. Entra → "oid"). scimIdentifier is the SCIM attribute the provisioning
+  # path reads (default "externalId"). Never assume sub == externalId.
+  subjectClaim:   String!
+  scimIdentifier: String!
+  # Whether SCIM provisioning is currently permitted for this connection.
+  # Fail-closed: false unless the mapping was proven (ADR-025 §3.1 round-trip)
+  # or explicitly overridden via enableScimBreakGlass (§3.2).
+  scimEnabled:    Boolean!
   # NOTE: clientSecret is intentionally absent — it is never exposed.
+}
+
+type ScimToken {
+  id: ID!
+  workspaceId: ID!
+  connectionId: ID!
+  label: String
+  createdBy: ID
+  createdAt: Time!
+  lastUsedAt: Time
+  expiresAt: Time
+  revokedAt: Time
+}
+
+type ScimTokenMintResult {
+  token: ScimToken!
+  plaintext: String!
 }
 
 input CreateIdpConnectionInput {
@@ -36,6 +74,24 @@ input CreateIdpConnectionInput {
   domainHint:   String
 }
 
+# Per-connection SCIM configuration (ADR-025 §3). Every field is optional;
+# omitted fields are left unchanged.
+input UpdateScimConfigInput {
+  # OIDC claim the login path reads as the Canonical Identity Key (e.g. "sub",
+  # Entra → "oid"). Must differ from scimIdentifier.
+  subjectClaim:   String
+  # SCIM attribute the provisioning path reads (e.g. "externalId").
+  scimIdentifier: String
+  # Turning SCIM OFF is always permitted — it is the fail-closed direction.
+  #
+  # Turning it ON is gated by the fail-closed MappingGate: it succeeds only for
+  # a PROVEN mapping (§3.1). An ADMIN cannot force it on here — that would be
+  # exactly the bypass §3.2 forbids. Where the mapping cannot be proven, use
+  # enableScimBreakGlass, which requires the dedicated
+  # identity.mapping.break_glass permission plus a mandatory audited reason.
+  scimEnabled:    Boolean
+}
+
 input UpdateIdpConnectionInput {
   displayName:  String
   clientId:     String
@@ -45,17 +101,86 @@ input UpdateIdpConnectionInput {
   domainHint:   String
 }
 
-# Result of a connection reachability check (OIDC discovery).
+# Result of a connection reachability + mapping-validation check.
+# ADR-025 §3.1: mapping "proven" enables SCIM; "unproven" keeps it disabled
+# unless identity.mapping.break_glass overrides.
 type IdpTestResult {
   ok:      Boolean!
   issuer:  String
   message: String
+  # The active mapping-validation state: "proven" or "unproven" (ADR-025 §3.1).
+  # Phase 4 cannot run the real POST→GET→verify→DELETE round-trip (the /Users
+  # endpoint lands in Phase 5), so until that probe runs this is always
+  # "unproven" and SCIM stays disabled.
+  mappingState: String!
+  # Whether SCIM provisioning is permitted for this connection after validation.
+  # False unless the mapping is proven or an identity.mapping.break_glass
+  # override applies.
+  scimEnabledAllowed: Boolean!
+  # Human-readable explanation of the mapping/validation outcome.
+  reason: String
+}
+
+# A built-in SCIM provider profile (ADR-025 §3.1). Data only — profiles carry
+# defaults, capability metadata and known quirks; they contain NO identity
+# mutation logic and there is NO per-provider handler. One engine drives them
+# all, and "generic" is always available as the fallback.
+#
+# The UI uses these to offer a provider preset and to show what a connection's
+# per-connection overrides are deviating FROM.
+type ScimProviderProfile {
+  key:                   String!   # "okta" | "entra" | "jumpcloud" | "keycloak" | "generic"
+  displayName:           String!
+  defaultSubjectClaim:   String!   # e.g. Entra → "oid"
+  defaultScimIdentifier: String!   # e.g. "externalId"
+  # Capability metadata used by the mapping-validation probe to choose the
+  # active POST→GET→verify→DELETE lifecycle vs a read-only fallback.
+  supportsCreate:        Boolean!
+  supportsDelete:        Boolean!
+  supportsPatch:         Boolean!
+  paginationOk:          Boolean!
+  # Whether the full probe-user round-trip is possible for this provider.
+  supportsProbeLifecycle: Boolean!
+  # Known provider-specific behaviors, for display next to the preset.
+  quirks:                [String!]!
+}
+
+# A pending/resolved SCIM identity-conflict (ADR-025 §4.1/§9). A collision between
+# a directory push and an existing JIT/manual identity is held here for an admin
+# to resolve; the directory operation returns 409 identity_conflict until resolved.
+type ScimConflict {
+  id:               ID!
+  workspaceId:      ID!
+  connectionId:     ID!
+  userId:           ID!
+  canonicalKey:     String!
+  scimExternalId:   String
+  # Snapshot of what the DIRECTORY claimed at conflict time (ADR-025 §4.1), so
+  # an admin can see WHO the conflict is about instead of a bare UUID. These are
+  # context only — never the identity key. Matching on email is forbidden.
+  # Null for conflicts raised by verbs that carry no directory payload
+  # (deprovision / reactivate) and for rows written before this was captured.
+  scimUsernameSnapshot: String
+  scimEmailSnapshot:    String
+  status:           String!  # pending | approved | rejected | expired
+  resolutionReason: String
+  createdAt:        Time!
+  resolvedAt:       Time
 }
 
 extend type Query {
   idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
   # Whether the workspace still offers the shared platform IdP as a login path.
   platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
+
+  scimTokens(connectionId: ID!): [ScimToken!]! @hasRole(roles: [ADMIN])
+
+  # Provisioning-conflicts queue for a connection (admin-scoped).
+  scimConflicts(connectionId: ID!): [ScimConflict!]! @hasRole(roles: [ADMIN])
+
+  # The built-in SCIM provider profiles, for the connection-config preset picker.
+  # Static data — no workspace scoping needed beyond the admin gate.
+  scimProviderProfiles: [ScimProviderProfile!]! @hasRole(roles: [ADMIN])
 }
 
 extend type Mutation {
@@ -64,10 +189,90 @@ extend type Mutation {
   # status is "active" | "disabled". Disabling revokes the sessions of every user
   # who authenticates through this connection (their login path is gone).
   setIdpConnectionStatus(id: ID!, status: String!): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
-  deleteIdpConnection(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  deleteIdpConnection(id: ID!, force: Boolean!): Boolean! @hasRole(roles: [ADMIN])
   testIdpConnection(id: ID!): IdpTestResult! @hasRole(roles: [ADMIN])
+  # Update a connection's SCIM mapping config and/or enabled flag.
+  #
+  # SAFETY: editing subjectClaim or scimIdentifier on a connection that is
+  # currently SCIM-enabled invalidates whatever proof enabled it, so this
+  # mutation force-disables SCIM in the same write and the connection must be
+  # re-enabled deliberately. A wrong mapping silently splits or merges accounts
+  # (§3.1), which is far harder to repair than a re-enable.
+  updateScimConfig(
+    connectionId: ID!
+    input: UpdateScimConfigInput!
+  ): WorkspaceIdpConnection! @hasRole(roles: [ADMIN])
   # Toggle the shared platform IdP as a login path for this workspace. Disabling
   # is refused if the workspace has no active identity provider of its own and
   # the actor is not a break-glass admin (no-lockout, ADR-024 §5).
   setPlatformLoginEnabled(enabled: Boolean!): Boolean! @hasRole(roles: [ADMIN])
+
+  mintScimToken(
+    connectionId: ID!
+    label: String
+    expiresAt: Time
+  ): ScimTokenMintResult! @hasRole(roles: [ADMIN])
+
+  rotateScimToken(
+    connectionId: ID!
+    label: String
+    expiresAt: Time
+  ): ScimTokenMintResult! @hasRole(roles: [ADMIN])
+
+  revokeScimToken(
+    connectionId: ID!
+    tokenId: ID!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Explicit fine-grained permission grant (Phase 3 break-glass primitive).
+  # ADMIN may grant, but possession is an explicit row — never implied by role.
+  # granted_to receives the permission; grantor is the authenticated admin.
+  grantPermission(
+    userId: ID!
+    permission: String!
+  ): WorkspacePermission! @hasRole(roles: [ADMIN])
+
+  # Enable SCIM for a connection despite an unproven identity mapping, using the
+  # dedicated identity.mapping.break_glass permission (ADR-025 §3.2). ADMIN role
+  # alone is NOT sufficient — the caller must explicitly hold the permission, and
+  # a mandatory reason is required. Every invocation is audited as
+  # scim.mapping.break_glass_override.
+  enableScimBreakGlass(
+    connectionId: ID!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Resolve a pending SCIM identity-conflict by accepting the directory's claim and
+  # linking it to the existing user. Requires the explicit identity.mapping.break_glass
+  # permission (ADMIN role alone is NOT sufficient) and a mandatory reason. Atomic:
+  # links the external identity, sets provisioning_owner=scim, and audits in one tx.
+  acceptScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Reject a pending SCIM identity-conflict (no identity change). Audited.
+  rejectScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # Reopen a rejected SCIM identity-conflict back to pending (audited as
+  # scim.user.conflict_reopened).
+  reopenScimConflict(
+    connectionId: ID!
+    canonicalKey: String!
+    reason: String!
+  ): Boolean! @hasRole(roles: [ADMIN])
+}
+
+# One explicit (workspace, user, permission) grant. A row existing is the ONLY
+# thing that satisfies a permission check — ADMIN role does not.
+type WorkspacePermission {
+  workspaceId: ID!
+  userId: ID!
+  permission: String!
+  grantedBy: ID
 }

@@ -21,6 +21,12 @@ type GroupRow struct {
 	Description *string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// Provenance (ADR-025 §7). Origin is NOT NULL in the DB (migration 034
+	// defaults 'manual'); ExternalID/ConnectionID are set only for scim-origin
+	// groups. Surfaced so the UI never shows a bare display name.
+	Origin       string
+	ExternalID   *string
+	ConnectionID *string
 }
 
 // AccessRuleRow represents a single access_rules record.
@@ -54,7 +60,8 @@ func (s *Store) CreateGroup(ctx context.Context, workspaceID, name string, descr
 		 VALUES ($1, $2, $3)
 		 RETURNING id, workspace_id, name, description, created_at, updated_at`,
 		workspaceID, name, description,
-	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt)
+	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt,
+		&row.Origin, &row.ExternalID, &row.ConnectionID)
 	if err != nil {
 		return nil, fmt.Errorf("create group: %w", err)
 	}
@@ -95,10 +102,12 @@ func (s *Store) DeleteGroup(ctx context.Context, id string) error {
 func (s *Store) GetGroup(ctx context.Context, id string) (*GroupRow, error) {
 	row := &GroupRow{}
 	err := s.pool.QueryRow(ctx,
-		`SELECT id, workspace_id, name, description, created_at, updated_at
+		`SELECT id, workspace_id, name, description, created_at, updated_at,
+		        origin, external_id, connection_id
 		 FROM groups WHERE id = $1`,
 		id,
-	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt)
+	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt,
+		&row.Origin, &row.ExternalID, &row.ConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -110,7 +119,8 @@ func (s *Store) GetGroup(ctx context.Context, id string) (*GroupRow, error) {
 
 func (s *Store) ListGroups(ctx context.Context, workspaceID string) ([]*GroupRow, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, workspace_id, name, description, created_at, updated_at
+		`SELECT id, workspace_id, name, description, created_at, updated_at,
+		        origin, external_id, connection_id
 		 FROM groups WHERE workspace_id = $1 ORDER BY created_at`,
 		workspaceID,
 	)
@@ -122,7 +132,8 @@ func (s *Store) ListGroups(ctx context.Context, workspaceID string) ([]*GroupRow
 	var out []*GroupRow
 	for rows.Next() {
 		r := &GroupRow{}
-		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.Name, &r.Description, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.WorkspaceID, &r.Name, &r.Description, &r.CreatedAt, &r.UpdatedAt,
+			&r.Origin, &r.ExternalID, &r.ConnectionID); err != nil {
 			return nil, fmt.Errorf("scan group: %w", err)
 		}
 		out = append(out, r)
