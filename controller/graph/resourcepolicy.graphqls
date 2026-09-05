@@ -1,0 +1,76 @@
+# PENDING-16 Phase 3 — Resource Policy admin API.
+#
+# A Resource Policy is the access-policy layer between a Resource and the
+# Device Profiles that define device trust:
+#
+#   Resource -> exactly one Resource Policy -> zero or more Device Profiles
+#
+# An empty deviceProfiles list is a valid, intentional state meaning
+# "Any Device". Several profiles on one policy are OR-evaluated by the
+# authorization path, which a later phase wires up.
+#
+# There is deliberately no audit/enforce toggle here. Enforcement follows from a
+# policy referencing a profile, not from a mode on the policy or the profile.
+#
+# The legacy Resource <-> Device Profile binding surface
+# (bindResourceToProfile / unbindResourceFromProfile in posture.graphqls) is
+# untouched and still authoritative; the two models coexist for now.
+
+type ResourcePolicy {
+  id: ID!
+  name: String!
+  # Empty means "Any Device" — no posture gate from this policy.
+  deviceProfiles: [DeviceProfile!]! @goField(forceResolver: true)
+  # The resources currently assigned to this policy.
+  resources: [Resource!]! @goField(forceResolver: true)
+  createdAt: String!
+  updatedAt: String!
+}
+
+extend type Resource {
+  # Null when the resource has no policy assigned.
+  resourcePolicy: ResourcePolicy @goField(forceResolver: true)
+}
+
+extend type Query {
+  resourcePolicies: [ResourcePolicy!]! @hasRole(roles: [ADMIN])
+  resourcePolicy(id: ID!): ResourcePolicy @hasRole(roles: [ADMIN])
+}
+
+extend type Mutation {
+  createResourcePolicy(
+    name: String!
+  ): ResourcePolicy! @hasRole(roles: [ADMIN])
+
+  updateResourcePolicy(
+    id: ID!
+    name: String!
+  ): ResourcePolicy! @hasRole(roles: [ADMIN])
+
+  # Refused while any resource still references the policy, so deleting one can
+  # never silently strip a resource of the policy its access depends on.
+  deleteResourcePolicy(
+    id: ID!
+  ): Boolean! @hasRole(roles: [ADMIN])
+
+  # A resource holds exactly one policy: assigning a second, different policy is
+  # refused rather than replacing the existing one.
+  assignResourcePolicy(
+    resourceId: ID!
+    policyId: ID!
+  ): Resource! @hasRole(roles: [ADMIN])
+
+  unassignResourcePolicy(
+    resourceId: ID!
+  ): Resource! @hasRole(roles: [ADMIN])
+
+  addProfileToResourcePolicy(
+    policyId: ID!
+    profileId: ID!
+  ): ResourcePolicy! @hasRole(roles: [ADMIN])
+
+  removeProfileFromResourcePolicy(
+    policyId: ID!
+    profileId: ID!
+  ): ResourcePolicy! @hasRole(roles: [ADMIN])
+}
