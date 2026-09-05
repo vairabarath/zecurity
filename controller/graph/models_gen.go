@@ -172,21 +172,31 @@ type RemoteNetwork struct {
 }
 
 type Resource struct {
-	ID             string         `json:"id"`
-	Name           string         `json:"name"`
-	Description    *string        `json:"description,omitempty"`
-	Host           string         `json:"host"`
-	Protocol       string         `json:"protocol"`
-	PortFrom       int            `json:"portFrom"`
-	PortTo         int            `json:"portTo"`
-	Status         string         `json:"status"`
-	ErrorMessage   *string        `json:"errorMessage,omitempty"`
-	AppliedAt      *string        `json:"appliedAt,omitempty"`
-	LastVerifiedAt *string        `json:"lastVerifiedAt,omitempty"`
-	CreatedAt      string         `json:"createdAt"`
-	Shield         *Shield        `json:"shield,omitempty"`
-	RemoteNetwork  *RemoteNetwork `json:"remoteNetwork"`
-	Groups         []*Group       `json:"groups"`
+	ID             string          `json:"id"`
+	Name           string          `json:"name"`
+	Description    *string         `json:"description,omitempty"`
+	Host           string          `json:"host"`
+	Protocol       string          `json:"protocol"`
+	PortFrom       int             `json:"portFrom"`
+	PortTo         int             `json:"portTo"`
+	Status         string          `json:"status"`
+	ErrorMessage   *string         `json:"errorMessage,omitempty"`
+	AppliedAt      *string         `json:"appliedAt,omitempty"`
+	LastVerifiedAt *string         `json:"lastVerifiedAt,omitempty"`
+	CreatedAt      string          `json:"createdAt"`
+	Shield         *Shield         `json:"shield,omitempty"`
+	RemoteNetwork  *RemoteNetwork  `json:"remoteNetwork"`
+	Groups         []*Group        `json:"groups"`
+	ResourcePolicy *ResourcePolicy `json:"resourcePolicy,omitempty"`
+}
+
+type ResourcePolicy struct {
+	ID             string           `json:"id"`
+	Name           string           `json:"name"`
+	DeviceProfiles []*DeviceProfile `json:"deviceProfiles"`
+	Resources      []*Resource      `json:"resources"`
+	CreatedAt      string           `json:"createdAt"`
+	UpdatedAt      string           `json:"updatedAt"`
 }
 
 type ScanResult struct {

@@ -34,6 +34,8 @@ type ResolverRoot interface {
 	DeviceProfile() DeviceProfileResolver
 	Mutation() MutationResolver
 	Query() QueryResolver
+	Resource() ResourceResolver
+	ResourcePolicy() ResourcePolicyResolver
 	User() UserResolver
 	Workspace() WorkspaceResolver
 }
@@ -163,55 +165,62 @@ type ComplexityRoot struct {
 	}
 
 	Mutation struct {
-		AcceptScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		AddGroupMember                 func(childComplexity int, groupID string, userID string) int
-		AddProfileRequirement          func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
-		AssignResourceToGroup          func(childComplexity int, resourceID string, groupID string) int
-		BindResourceToProfile          func(childComplexity int, profileID string, resourceID string) int
-		CreateDeviceProfile            func(childComplexity int, name string, manualTrust *bool) int
-		CreateGroup                    func(childComplexity int, name string, description *string) int
-		CreateIdpConnection            func(childComplexity int, input CreateIdpConnectionInput) int
-		CreateInvitation               func(childComplexity int, email string) int
-		CreateRemoteNetwork            func(childComplexity int, name string, location NetworkLocation) int
-		CreateResource                 func(childComplexity int, input CreateResourceInput) int
-		DeleteConnector                func(childComplexity int, id string) int
-		DeleteDeviceProfile            func(childComplexity int, id string) int
-		DeleteGroup                    func(childComplexity int, id string) int
-		DeleteIdpConnection            func(childComplexity int, id string, force bool) int
-		DeleteRemoteNetwork            func(childComplexity int, id string) int
-		DeleteResource                 func(childComplexity int, id string) int
-		DeleteShield                   func(childComplexity int, id string) int
-		EnableScimBreakGlass           func(childComplexity int, connectionID string, reason string) int
-		ForceDeleteResource            func(childComplexity int, id string) int
-		GenerateConnectorToken         func(childComplexity int, remoteNetworkID string, connectorName string) int
-		GenerateShieldToken            func(childComplexity int, remoteNetworkID string, shieldName string) int
-		GrantPermission                func(childComplexity int, userID string, permission string) int
-		InitiateAuth                   func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
-		MintScimToken                  func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		PromoteDiscoveredService       func(childComplexity int, shieldID string, protocol string, port int) int
-		ProtectResource                func(childComplexity int, id string) int
-		RejectScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RemoveGroupMember              func(childComplexity int, groupID string, userID string) int
-		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
-		ReopenScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RevokeConnector                func(childComplexity int, id string) int
-		RevokeDevice                   func(childComplexity int, deviceID string) int
-		RevokeScimToken                func(childComplexity int, connectionID string, tokenID string) int
-		RevokeShield                   func(childComplexity int, id string) int
-		RotateScimToken                func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
-		SetIdpConnectionStatus         func(childComplexity int, id string, status string) int
-		SetPlatformLoginEnabled        func(childComplexity int, enabled bool) int
-		TestIdpConnection              func(childComplexity int, id string) int
-		TriggerScan                    func(childComplexity int, connectorID string, targets []string, ports []int) int
-		UnassignResourceFromGroup      func(childComplexity int, resourceID string, groupID string) int
-		UnbindResourceFromProfile      func(childComplexity int, profileID string, resourceID string) int
-		UnprotectResource              func(childComplexity int, id string) int
-		UpdateDeviceProfileManualTrust func(childComplexity int, id string, enabled bool) int
-		UpdateDeviceProfileMode        func(childComplexity int, id string, mode DeviceProfileMode) int
-		UpdateGroup                    func(childComplexity int, id string, name *string, description *string) int
-		UpdateIdpConnection            func(childComplexity int, id string, input UpdateIdpConnectionInput) int
-		UpdateResource                 func(childComplexity int, id string, input UpdateResourceInput) int
-		UpdateScimConfig               func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
+		AcceptScimConflict              func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		AddGroupMember                  func(childComplexity int, groupID string, userID string) int
+		AddProfileRequirement           func(childComplexity int, profileID string, checkID string, allowUnsupported bool) int
+		AddProfileToResourcePolicy      func(childComplexity int, policyID string, profileID string) int
+		AssignResourcePolicy            func(childComplexity int, resourceID string, policyID string) int
+		AssignResourceToGroup           func(childComplexity int, resourceID string, groupID string) int
+		BindResourceToProfile           func(childComplexity int, profileID string, resourceID string) int
+		CreateDeviceProfile             func(childComplexity int, name string, manualTrust *bool) int
+		CreateGroup                     func(childComplexity int, name string, description *string) int
+		CreateIdpConnection             func(childComplexity int, input CreateIdpConnectionInput) int
+		CreateInvitation                func(childComplexity int, email string) int
+		CreateRemoteNetwork             func(childComplexity int, name string, location NetworkLocation) int
+		CreateResource                  func(childComplexity int, input CreateResourceInput) int
+		CreateResourcePolicy            func(childComplexity int, name string) int
+		DeleteConnector                 func(childComplexity int, id string) int
+		DeleteDeviceProfile             func(childComplexity int, id string) int
+		DeleteGroup                     func(childComplexity int, id string) int
+		DeleteIdpConnection             func(childComplexity int, id string, force bool) int
+		DeleteRemoteNetwork             func(childComplexity int, id string) int
+		DeleteResource                  func(childComplexity int, id string) int
+		DeleteResourcePolicy            func(childComplexity int, id string) int
+		DeleteShield                    func(childComplexity int, id string) int
+		EnableScimBreakGlass            func(childComplexity int, connectionID string, reason string) int
+		ForceDeleteResource             func(childComplexity int, id string) int
+		GenerateConnectorToken          func(childComplexity int, remoteNetworkID string, connectorName string) int
+		GenerateShieldToken             func(childComplexity int, remoteNetworkID string, shieldName string) int
+		GrantPermission                 func(childComplexity int, userID string, permission string) int
+		InitiateAuth                    func(childComplexity int, provider string, workspaceName *string, connectionID *string) int
+		MintScimToken                   func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		PromoteDiscoveredService        func(childComplexity int, shieldID string, protocol string, port int) int
+		ProtectResource                 func(childComplexity int, id string) int
+		RejectScimConflict              func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RemoveGroupMember               func(childComplexity int, groupID string, userID string) int
+		RemoveProfileFromResourcePolicy func(childComplexity int, policyID string, profileID string) int
+		RemoveProfileRequirement        func(childComplexity int, profileID string, checkID string) int
+		ReopenScimConflict              func(childComplexity int, connectionID string, canonicalKey string, reason string) int
+		RevokeConnector                 func(childComplexity int, id string) int
+		RevokeDevice                    func(childComplexity int, deviceID string) int
+		RevokeScimToken                 func(childComplexity int, connectionID string, tokenID string) int
+		RevokeShield                    func(childComplexity int, id string) int
+		RotateScimToken                 func(childComplexity int, connectionID string, label *string, expiresAt *time.Time) int
+		SetIdpConnectionStatus          func(childComplexity int, id string, status string) int
+		SetPlatformLoginEnabled         func(childComplexity int, enabled bool) int
+		TestIdpConnection               func(childComplexity int, id string) int
+		TriggerScan                     func(childComplexity int, connectorID string, targets []string, ports []int) int
+		UnassignResourceFromGroup       func(childComplexity int, resourceID string, groupID string) int
+		UnassignResourcePolicy          func(childComplexity int, resourceID string) int
+		UnbindResourceFromProfile       func(childComplexity int, profileID string, resourceID string) int
+		UnprotectResource               func(childComplexity int, id string) int
+		UpdateDeviceProfileManualTrust  func(childComplexity int, id string, enabled bool) int
+		UpdateDeviceProfileMode         func(childComplexity int, id string, mode DeviceProfileMode) int
+		UpdateGroup                     func(childComplexity int, id string, name *string, description *string) int
+		UpdateIdpConnection             func(childComplexity int, id string, input UpdateIdpConnectionInput) int
+		UpdateResource                  func(childComplexity int, id string, input UpdateResourceInput) int
+		UpdateResourcePolicy            func(childComplexity int, id string, name string) int
+		UpdateScimConfig                func(childComplexity int, connectionID string, input UpdateScimConfigInput) int
 	}
 
 	PostureCheckDescriptor struct {
@@ -242,6 +251,8 @@ type ComplexityRoot struct {
 		PlatformLoginEnabled    func(childComplexity int) int
 		RemoteNetwork           func(childComplexity int, id string) int
 		RemoteNetworks          func(childComplexity int) int
+		ResourcePolicies        func(childComplexity int) int
+		ResourcePolicy          func(childComplexity int, id string) int
 		Resources               func(childComplexity int, remoteNetworkID string) int
 		ScimConflicts           func(childComplexity int, connectionID string) int
 		ScimProviderProfiles    func(childComplexity int) int
@@ -278,8 +289,18 @@ type ComplexityRoot struct {
 		PortTo         func(childComplexity int) int
 		Protocol       func(childComplexity int) int
 		RemoteNetwork  func(childComplexity int) int
+		ResourcePolicy func(childComplexity int) int
 		Shield         func(childComplexity int) int
 		Status         func(childComplexity int) int
+	}
+
+	ResourcePolicy struct {
+		CreatedAt      func(childComplexity int) int
+		DeviceProfiles func(childComplexity int) int
+		ID             func(childComplexity int) int
+		Name           func(childComplexity int) int
+		Resources      func(childComplexity int) int
+		UpdatedAt      func(childComplexity int) int
 	}
 
 	ScanResult struct {
@@ -455,6 +476,13 @@ type MutationResolver interface {
 	RemoveProfileRequirement(ctx context.Context, profileID string, checkID string) (*DeviceProfile, error)
 	BindResourceToProfile(ctx context.Context, profileID string, resourceID string) (*DeviceProfile, error)
 	UnbindResourceFromProfile(ctx context.Context, profileID string, resourceID string) (*DeviceProfile, error)
+	CreateResourcePolicy(ctx context.Context, name string) (*ResourcePolicy, error)
+	UpdateResourcePolicy(ctx context.Context, id string, name string) (*ResourcePolicy, error)
+	DeleteResourcePolicy(ctx context.Context, id string) (bool, error)
+	AssignResourcePolicy(ctx context.Context, resourceID string, policyID string) (*Resource, error)
+	UnassignResourcePolicy(ctx context.Context, resourceID string) (*Resource, error)
+	AddProfileToResourcePolicy(ctx context.Context, policyID string, profileID string) (*ResourcePolicy, error)
+	RemoveProfileFromResourcePolicy(ctx context.Context, policyID string, profileID string) (*ResourcePolicy, error)
 	CreateIdpConnection(ctx context.Context, input CreateIdpConnectionInput) (*WorkspaceIdpConnection, error)
 	UpdateIdpConnection(ctx context.Context, id string, input UpdateIdpConnectionInput) (*WorkspaceIdpConnection, error)
 	SetIdpConnectionStatus(ctx context.Context, id string, status string) (*WorkspaceIdpConnection, error)
@@ -496,11 +524,20 @@ type QueryResolver interface {
 	SupportedPostureChecks(ctx context.Context) ([]*PostureCheckDescriptor, error)
 	DeviceProfiles(ctx context.Context) ([]*DeviceProfile, error)
 	DevicePostureVisibility(ctx context.Context, profileID string) ([]*DevicePostureVisibility, error)
+	ResourcePolicies(ctx context.Context) ([]*ResourcePolicy, error)
+	ResourcePolicy(ctx context.Context, id string) (*ResourcePolicy, error)
 	IdpConnections(ctx context.Context) ([]*WorkspaceIdpConnection, error)
 	PlatformLoginEnabled(ctx context.Context) (bool, error)
 	ScimTokens(ctx context.Context, connectionID string) ([]*ScimToken, error)
 	ScimConflicts(ctx context.Context, connectionID string) ([]*ScimConflict, error)
 	ScimProviderProfiles(ctx context.Context) ([]*ScimProviderProfile, error)
+}
+type ResourceResolver interface {
+	ResourcePolicy(ctx context.Context, obj *Resource) (*ResourcePolicy, error)
+}
+type ResourcePolicyResolver interface {
+	DeviceProfiles(ctx context.Context, obj *ResourcePolicy) ([]*DeviceProfile, error)
+	Resources(ctx context.Context, obj *ResourcePolicy) ([]*Resource, error)
 }
 type UserResolver interface {
 	Role(ctx context.Context, obj *models.User) (Role, error)
@@ -1052,6 +1089,28 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.AddProfileRequirement(childComplexity, args["profileId"].(string), args["checkId"].(string), args["allowUnsupported"].(bool)), true
+	case "Mutation.addProfileToResourcePolicy":
+		if e.ComplexityRoot.Mutation.AddProfileToResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_addProfileToResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.AddProfileToResourcePolicy(childComplexity, args["policyId"].(string), args["profileId"].(string)), true
+	case "Mutation.assignResourcePolicy":
+		if e.ComplexityRoot.Mutation.AssignResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_assignResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.AssignResourcePolicy(childComplexity, args["resourceId"].(string), args["policyId"].(string)), true
 	case "Mutation.assignResourceToGroup":
 		if e.ComplexityRoot.Mutation.AssignResourceToGroup == nil {
 			break
@@ -1140,6 +1199,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.CreateResource(childComplexity, args["input"].(CreateResourceInput)), true
+	case "Mutation.createResourcePolicy":
+		if e.ComplexityRoot.Mutation.CreateResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_createResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.CreateResourcePolicy(childComplexity, args["name"].(string)), true
 	case "Mutation.deleteConnector":
 		if e.ComplexityRoot.Mutation.DeleteConnector == nil {
 			break
@@ -1206,6 +1276,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.DeleteResource(childComplexity, args["id"].(string)), true
+	case "Mutation.deleteResourcePolicy":
+		if e.ComplexityRoot.Mutation.DeleteResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_deleteResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.DeleteResourcePolicy(childComplexity, args["id"].(string)), true
 	case "Mutation.deleteShield":
 		if e.ComplexityRoot.Mutation.DeleteShield == nil {
 			break
@@ -1338,6 +1419,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.RemoveGroupMember(childComplexity, args["groupId"].(string), args["userId"].(string)), true
+	case "Mutation.removeProfileFromResourcePolicy":
+		if e.ComplexityRoot.Mutation.RemoveProfileFromResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_removeProfileFromResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.RemoveProfileFromResourcePolicy(childComplexity, args["policyId"].(string), args["profileId"].(string)), true
 	case "Mutation.removeProfileRequirement":
 		if e.ComplexityRoot.Mutation.RemoveProfileRequirement == nil {
 			break
@@ -1470,6 +1562,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UnassignResourceFromGroup(childComplexity, args["resourceId"].(string), args["groupId"].(string)), true
+	case "Mutation.unassignResourcePolicy":
+		if e.ComplexityRoot.Mutation.UnassignResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_unassignResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UnassignResourcePolicy(childComplexity, args["resourceId"].(string)), true
 	case "Mutation.unbindResourceFromProfile":
 		if e.ComplexityRoot.Mutation.UnbindResourceFromProfile == nil {
 			break
@@ -1547,6 +1650,17 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Mutation.UpdateResource(childComplexity, args["id"].(string), args["input"].(UpdateResourceInput)), true
+	case "Mutation.updateResourcePolicy":
+		if e.ComplexityRoot.Mutation.UpdateResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Mutation_updateResourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Mutation.UpdateResourcePolicy(childComplexity, args["id"].(string), args["name"].(string)), true
 	case "Mutation.updateScimConfig":
 		if e.ComplexityRoot.Mutation.UpdateScimConfig == nil {
 			break
@@ -1760,6 +1874,23 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Query.RemoteNetworks(childComplexity), true
+	case "Query.resourcePolicies":
+		if e.ComplexityRoot.Query.ResourcePolicies == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Query.ResourcePolicies(childComplexity), true
+	case "Query.resourcePolicy":
+		if e.ComplexityRoot.Query.ResourcePolicy == nil {
+			break
+		}
+
+		args, err := ec.field_Query_resourcePolicy_args(ctx, rawArgs)
+		if err != nil {
+			return 0, false
+		}
+
+		return e.ComplexityRoot.Query.ResourcePolicy(childComplexity, args["id"].(string)), true
 	case "Query.resources":
 		if e.ComplexityRoot.Query.Resources == nil {
 			break
@@ -1967,6 +2098,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.RemoteNetwork(childComplexity), true
+	case "Resource.resourcePolicy":
+		if e.ComplexityRoot.Resource.ResourcePolicy == nil {
+			break
+		}
+
+		return e.ComplexityRoot.Resource.ResourcePolicy(childComplexity), true
 	case "Resource.shield":
 		if e.ComplexityRoot.Resource.Shield == nil {
 			break
@@ -1979,6 +2116,43 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.ComplexityRoot.Resource.Status(childComplexity), true
+
+	case "ResourcePolicy.createdAt":
+		if e.ComplexityRoot.ResourcePolicy.CreatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.CreatedAt(childComplexity), true
+	case "ResourcePolicy.deviceProfiles":
+		if e.ComplexityRoot.ResourcePolicy.DeviceProfiles == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.DeviceProfiles(childComplexity), true
+	case "ResourcePolicy.id":
+		if e.ComplexityRoot.ResourcePolicy.ID == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.ID(childComplexity), true
+	case "ResourcePolicy.name":
+		if e.ComplexityRoot.ResourcePolicy.Name == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.Name(childComplexity), true
+	case "ResourcePolicy.resources":
+		if e.ComplexityRoot.ResourcePolicy.Resources == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.Resources(childComplexity), true
+	case "ResourcePolicy.updatedAt":
+		if e.ComplexityRoot.ResourcePolicy.UpdatedAt == nil {
+			break
+		}
+
+		return e.ComplexityRoot.ResourcePolicy.UpdatedAt(childComplexity), true
 
 	case "ScanResult.firstSeen":
 		if e.ComplexityRoot.ScanResult.FirstSeen == nil {
@@ -2627,7 +2801,7 @@ func newExecutionContext(
 	}
 }
 
-//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls" "posture.graphqls" "idp.graphqls"
+//go:embed "schema.graphqls" "connector.graphqls" "shield.graphqls" "resource.graphqls" "discovery.graphqls" "client.graphqls" "policy.graphqls" "log.graphqls" "posture.graphqls" "resourcepolicy.graphqls" "idp.graphqls"
 var sourcesFS embed.FS
 
 func sourceData(filename string) string {
@@ -2648,6 +2822,7 @@ var sources = []*ast.Source{
 	{Name: "policy.graphqls", Input: sourceData("policy.graphqls"), BuiltIn: false},
 	{Name: "log.graphqls", Input: sourceData("log.graphqls"), BuiltIn: false},
 	{Name: "posture.graphqls", Input: sourceData("posture.graphqls"), BuiltIn: false},
+	{Name: "resourcepolicy.graphqls", Input: sourceData("resourcepolicy.graphqls"), BuiltIn: false},
 	{Name: "idp.graphqls", Input: sourceData("idp.graphqls"), BuiltIn: false},
 }
 var parsedSchema = gqlparser.MustLoadSchema(sources...)
@@ -2962,8 +3137,28 @@ func (ec *executionContext) childFields_Resource(ctx context.Context, field grap
 		return ec.fieldContext_Resource_remoteNetwork(ctx, field)
 	case "groups":
 		return ec.fieldContext_Resource_groups(ctx, field)
+	case "resourcePolicy":
+		return ec.fieldContext_Resource_resourcePolicy(ctx, field)
 	}
 	return nil, fmt.Errorf("no field named %q was found under type Resource", field.Name)
+}
+
+func (ec *executionContext) childFields_ResourcePolicy(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+	switch field.Name {
+	case "id":
+		return ec.fieldContext_ResourcePolicy_id(ctx, field)
+	case "name":
+		return ec.fieldContext_ResourcePolicy_name(ctx, field)
+	case "deviceProfiles":
+		return ec.fieldContext_ResourcePolicy_deviceProfiles(ctx, field)
+	case "resources":
+		return ec.fieldContext_ResourcePolicy_resources(ctx, field)
+	case "createdAt":
+		return ec.fieldContext_ResourcePolicy_createdAt(ctx, field)
+	case "updatedAt":
+		return ec.fieldContext_ResourcePolicy_updatedAt(ctx, field)
+	}
+	return nil, fmt.Errorf("no field named %q was found under type ResourcePolicy", field.Name)
 }
 
 func (ec *executionContext) childFields_ScanResult(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
@@ -3444,6 +3639,50 @@ func (ec *executionContext) field_Mutation_addProfileRequirement_args(ctx contex
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_addProfileToResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "policyId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["policyId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_assignResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "resourceId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["resourceId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "policyId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["policyId"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_assignResourceToGroup_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3582,6 +3821,20 @@ func (ec *executionContext) field_Mutation_createRemoteNetwork_args(ctx context.
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_createResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "name",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["name"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_createResource_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -3661,6 +3914,20 @@ func (ec *executionContext) field_Mutation_deleteIdpConnection_args(ctx context.
 }
 
 func (ec *executionContext) field_Mutation_deleteRemoteNetwork_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_deleteResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
@@ -3960,6 +4227,28 @@ func (ec *executionContext) field_Mutation_removeGroupMember_args(ctx context.Co
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_removeProfileFromResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "policyId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["policyId"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "profileId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["profileId"] = arg1
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_removeProfileRequirement_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -4208,6 +4497,20 @@ func (ec *executionContext) field_Mutation_unassignResourceFromGroup_args(ctx co
 	return args, nil
 }
 
+func (ec *executionContext) field_Mutation_unassignResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "resourceId",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["resourceId"] = arg0
+	return args, nil
+}
+
 func (ec *executionContext) field_Mutation_unbindResourceFromProfile_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
@@ -4337,6 +4640,28 @@ func (ec *executionContext) field_Mutation_updateIdpConnection_args(ctx context.
 		return nil, err
 	}
 	args["input"] = arg1
+	return args, nil
+}
+
+func (ec *executionContext) field_Mutation_updateResourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "name",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNString2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["name"] = arg1
 	return args, nil
 }
 
@@ -4539,6 +4864,20 @@ func (ec *executionContext) field_Query_lookupWorkspacesByEmail_args(ctx context
 }
 
 func (ec *executionContext) field_Query_remoteNetwork_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
+	var err error
+	args := map[string]any{}
+	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
+		func(ctx context.Context, v any) (string, error) {
+			return ec.unmarshalNID2string(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["id"] = arg0
+	return args, nil
+}
+
+func (ec *executionContext) field_Query_resourcePolicy_args(ctx context.Context, rawArgs map[string]any) (map[string]any, error) {
 	var err error
 	args := map[string]any{}
 	arg0, err := graphql.ProcessArgField(ctx, rawArgs, "id",
@@ -8661,6 +9000,440 @@ func (ec *executionContext) fieldContext_Mutation_unbindResourceFromProfile(ctx 
 	return fc, nil
 }
 
+func (ec *executionContext) _Mutation_createResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_createResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().CreateResourcePolicy(ctx, fc.Args["name"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_createResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_createResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_updateResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_updateResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UpdateResourcePolicy(ctx, fc.Args["id"].(string), fc.Args["name"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_updateResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_updateResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_deleteResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_deleteResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().DeleteResourcePolicy(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal bool
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal bool
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v bool) graphql.Marshaler {
+			return ec.marshalNBoolean2bool(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_deleteResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_deleteResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_assignResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_assignResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().AssignResourcePolicy(ctx, fc.Args["resourceId"].(string), fc.Args["policyId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
+			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_assignResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_Resource(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_assignResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_unassignResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_unassignResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().UnassignResourcePolicy(ctx, fc.Args["resourceId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *Resource
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *Resource
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *Resource) graphql.Marshaler {
+			return ec.marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResource(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_unassignResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_Resource(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_unassignResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_addProfileToResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_addProfileToResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().AddProfileToResourcePolicy(ctx, fc.Args["policyId"].(string), fc.Args["profileId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_addProfileToResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_addProfileToResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Mutation_removeProfileFromResourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Mutation_removeProfileFromResourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Mutation().RemoveProfileFromResourcePolicy(ctx, fc.Args["policyId"].(string), fc.Args["profileId"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Mutation_removeProfileFromResourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Mutation",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Mutation_removeProfileFromResourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Mutation_createIdpConnection(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -10943,6 +11716,118 @@ func (ec *executionContext) fieldContext_Query_devicePostureVisibility(ctx conte
 	return fc, nil
 }
 
+func (ec *executionContext) _Query_resourcePolicies(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_resourcePolicies(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Query().ResourcePolicies(ctx)
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal []*ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal []*ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v []*ResourcePolicy) graphql.Marshaler {
+			return ec.marshalNResourcePolicy2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_Query_resourcePolicies(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _Query_resourcePolicy(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Query_resourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			fc := graphql.GetFieldContext(ctx)
+			return ec.Resolvers.Query().ResourcePolicy(ctx, fc.Args["id"].(string))
+		},
+		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
+			directive0 := next
+
+			directive1 := func(ctx context.Context) (any, error) {
+				roles, err := ec.unmarshalNRole2ᚕgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRoleᚄ(ctx, []any{"ADMIN"})
+				if err != nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, err
+				}
+				if ec.Directives.HasRole == nil {
+					var zeroVal *ResourcePolicy
+					return zeroVal, errors.New("directive hasRole is not implemented")
+				}
+				return ec.Directives.HasRole(ctx, nil, directive0, roles)
+			}
+
+			next = directive1
+			return next
+		},
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalOResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Query_resourcePolicy(ctx context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Query",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = ec.Recover(ctx, r)
+			ec.Error(ctx, err)
+		}
+	}()
+	ctx = graphql.WithFieldContext(ctx, fc)
+	if fc.Args, err = ec.field_Query_resourcePolicy_args(ctx, field.ArgumentMap(ec.Variables)); err != nil {
+		ec.Error(ctx, err)
+		return fc, err
+	}
+	return fc, nil
+}
+
 func (ec *executionContext) _Query_idpConnections(ctx context.Context, field graphql.CollectedField) (ret graphql.Marshaler) {
 	return graphql.ResolveField(
 		ctx,
@@ -11856,6 +12741,194 @@ func (ec *executionContext) fieldContext_Resource_groups(_ context.Context, fiel
 		},
 	}
 	return fc, nil
+}
+
+func (ec *executionContext) _Resource_resourcePolicy(ctx context.Context, field graphql.CollectedField, obj *Resource) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_Resource_resourcePolicy(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.Resource().ResourcePolicy(ctx, obj)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+			return ec.marshalOResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, selections, v)
+		},
+		true,
+		false,
+	)
+}
+func (ec *executionContext) fieldContext_Resource_resourcePolicy(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "Resource",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_ResourcePolicy(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ResourcePolicy_id(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_id(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.ID, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNID2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_id(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type ID does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicy_name(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_name(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.Name, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_name(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicy_deviceProfiles(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_deviceProfiles(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.ResourcePolicy().DeviceProfiles(ctx, obj)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*DeviceProfile) graphql.Marshaler {
+			return ec.marshalNDeviceProfile2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐDeviceProfileᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_deviceProfiles(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ResourcePolicy",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_DeviceProfile(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ResourcePolicy_resources(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_resources(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return ec.Resolvers.ResourcePolicy().Resources(ctx, obj)
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v []*Resource) graphql.Marshaler {
+			return ec.marshalNResource2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourceᚄ(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_resources(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ResourcePolicy",
+		Field:      field,
+		IsMethod:   true,
+		IsResolver: true,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.childFields_Resource(ctx, field)
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ResourcePolicy_createdAt(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_createdAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.CreatedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_createdAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type String does not have child fields"))
+}
+
+func (ec *executionContext) _ResourcePolicy_updatedAt(ctx context.Context, field graphql.CollectedField, obj *ResourcePolicy) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return ec.fieldContext_ResourcePolicy_updatedAt(ctx, field)
+		},
+		func(ctx context.Context) (any, error) {
+			return obj.UpdatedAt, nil
+		},
+		nil,
+		func(ctx context.Context, selections ast.SelectionSet, v string) graphql.Marshaler {
+			return ec.marshalNString2string(ctx, selections, v)
+		},
+		true,
+		true,
+	)
+}
+func (ec *executionContext) fieldContext_ResourcePolicy_updatedAt(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	return graphql.NewScalarFieldContext("ResourcePolicy", field, false, false, errors.New("field of type String does not have child fields"))
 }
 
 func (ec *executionContext) _ScanResult_requestId(ctx context.Context, field graphql.CollectedField, obj *ScanResult) (ret graphql.Marshaler) {
@@ -16471,6 +17544,55 @@ func (ec *executionContext) _Mutation(ctx context.Context, sel ast.SelectionSet)
 			if out.Values[i] == graphql.Null {
 				out.Invalids++
 			}
+		case "createResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_createResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "updateResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_updateResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "deleteResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_deleteResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "assignResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_assignResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "unassignResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_unassignResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "addProfileToResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_addProfileToResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
+		case "removeProfileFromResourcePolicy":
+			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
+				return ec._Mutation_removeProfileFromResourcePolicy(ctx, field)
+			})
+			if out.Values[i] == graphql.Null {
+				out.Invalids++
+			}
 		case "createIdpConnection":
 			out.Values[i] = ec.OperationContext.RootResolverMiddleware(innerCtx, func(ctx context.Context) (res graphql.Marshaler) {
 				return ec._Mutation_createIdpConnection(ctx, field)
@@ -17185,6 +18307,47 @@ func (ec *executionContext) _Query(ctx context.Context, sel ast.SelectionSet) gr
 			}
 
 			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "resourcePolicies":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_resourcePolicies(ctx, field)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
+		case "resourcePolicy":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Query_resourcePolicy(ctx, field)
+				return res
+			}
+
+			rrm := func(ctx context.Context) graphql.Marshaler {
+				return ec.OperationContext.RootResolverMiddleware(ctx,
+					func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return rrm(innerCtx) })
 		case "idpConnections":
 			field := field
 
@@ -17414,39 +18577,39 @@ func (ec *executionContext) _Resource(ctx context.Context, sel ast.SelectionSet,
 		case "id":
 			out.Values[i] = ec._Resource_id(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "name":
 			out.Values[i] = ec._Resource_name(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "description":
 			out.Values[i] = ec._Resource_description(ctx, field, obj)
 		case "host":
 			out.Values[i] = ec._Resource_host(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "protocol":
 			out.Values[i] = ec._Resource_protocol(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "portFrom":
 			out.Values[i] = ec._Resource_portFrom(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "portTo":
 			out.Values[i] = ec._Resource_portTo(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "status":
 			out.Values[i] = ec._Resource_status(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "errorMessage":
 			out.Values[i] = ec._Resource_errorMessage(ctx, field, obj)
@@ -17457,19 +18620,178 @@ func (ec *executionContext) _Resource(ctx context.Context, sel ast.SelectionSet,
 		case "createdAt":
 			out.Values[i] = ec._Resource_createdAt(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "shield":
 			out.Values[i] = ec._Resource_shield(ctx, field, obj)
 		case "remoteNetwork":
 			out.Values[i] = ec._Resource_remoteNetwork(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		case "groups":
 			out.Values[i] = ec._Resource_groups(ctx, field, obj)
 			if out.Values[i] == graphql.Null {
-				out.Invalids++
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "resourcePolicy":
+			field := field
+
+			innerFunc := func(ctx context.Context, _ *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._Resource_resourcePolicy(ctx, field, obj)
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		default:
+			panic("unknown field " + strconv.Quote(field.Name))
+		}
+	}
+	out.Dispatch(ctx)
+	if out.Invalids > 0 {
+		return graphql.Null
+	}
+
+	atomic.AddInt32(&ec.Deferred, int32(min(len(deferred), math.MaxInt32)))
+
+	for label, dfs := range deferred {
+		ec.ProcessDeferredGroup(graphql.DeferredGroup{
+			Label:    label,
+			Path:     graphql.GetPath(ctx),
+			FieldSet: dfs,
+			Context:  ctx,
+		})
+	}
+
+	return out
+}
+
+var resourcePolicyImplementors = []string{"ResourcePolicy"}
+
+func (ec *executionContext) _ResourcePolicy(ctx context.Context, sel ast.SelectionSet, obj *ResourcePolicy) graphql.Marshaler {
+	fields := graphql.CollectFields(ec.OperationContext, sel, resourcePolicyImplementors)
+
+	out := graphql.NewFieldSet(fields)
+	deferred := make(map[string]*graphql.FieldSet)
+	for i, field := range fields {
+		switch field.Name {
+		case "__typename":
+			out.Values[i] = graphql.MarshalString("ResourcePolicy")
+		case "id":
+			out.Values[i] = ec._ResourcePolicy_id(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "name":
+			out.Values[i] = ec._ResourcePolicy_name(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "deviceProfiles":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._ResourcePolicy_deviceProfiles(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "resources":
+			field := field
+
+			innerFunc := func(ctx context.Context, fs *graphql.FieldSet) (res graphql.Marshaler) {
+				defer func() {
+					if r := recover(); r != nil {
+						ec.Error(ctx, ec.Recover(ctx, r))
+					}
+				}()
+				res = ec._ResourcePolicy_resources(ctx, field, obj)
+				if res == graphql.Null {
+					atomic.AddUint32(&fs.Invalids, 1)
+				}
+				return res
+			}
+
+			if field.Deferrable != nil {
+				dfs, ok := deferred[field.Deferrable.Label]
+				di := 0
+				if ok {
+					dfs.AddField(field)
+					di = len(dfs.Values) - 1
+				} else {
+					dfs = graphql.NewFieldSet([]graphql.CollectedField{field})
+					deferred[field.Deferrable.Label] = dfs
+				}
+				dfs.Concurrently(di, func(ctx context.Context) graphql.Marshaler {
+					return innerFunc(ctx, dfs)
+				})
+
+				// don't run the out.Concurrently() call below
+				out.Values[i] = graphql.Null
+				continue
+			}
+
+			out.Concurrently(i, func(ctx context.Context) graphql.Marshaler { return innerFunc(ctx, out) })
+		case "createdAt":
+			out.Values[i] = ec._ResourcePolicy_createdAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
+			}
+		case "updatedAt":
+			out.Values[i] = ec._ResourcePolicy_updatedAt(ctx, field, obj)
+			if out.Values[i] == graphql.Null {
+				atomic.AddUint32(&out.Invalids, 1)
 			}
 		default:
 			panic("unknown field " + strconv.Quote(field.Name))
@@ -19360,6 +20682,36 @@ func (ec *executionContext) marshalNResource2ᚖgithubᚗcomᚋyourorgᚋztnaᚋ
 	return ec._Resource(ctx, sel, v)
 }
 
+func (ec *executionContext) marshalNResourcePolicy2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx context.Context, sel ast.SelectionSet, v ResourcePolicy) graphql.Marshaler {
+	return ec._ResourcePolicy(ctx, sel, &v)
+}
+
+func (ec *executionContext) marshalNResourcePolicy2ᚕᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicyᚄ(ctx context.Context, sel ast.SelectionSet, v []*ResourcePolicy) graphql.Marshaler {
+	ret := graphql.MarshalSliceConcurrently(ctx, len(v), 0, false, func(ctx context.Context, i int) graphql.Marshaler {
+		fc := graphql.GetFieldContext(ctx)
+		fc.Result = &v[i]
+		return ec.marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx, sel, v[i])
+	})
+
+	for _, e := range ret {
+		if e == graphql.Null {
+			return graphql.Null
+		}
+	}
+
+	return ret
+}
+
+func (ec *executionContext) marshalNResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx context.Context, sel ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+	if v == nil {
+		if !graphql.HasFieldError(ctx, graphql.GetFieldContext(ctx)) {
+			graphql.AddErrorf(ctx, "the requested element is null which the schema does not allow")
+		}
+		return graphql.Null
+	}
+	return ec._ResourcePolicy(ctx, sel, v)
+}
+
 func (ec *executionContext) unmarshalNRole2githubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐRole(ctx context.Context, v any) (Role, error) {
 	var res Role
 	err := res.UnmarshalGQL(v)
@@ -20031,6 +21383,13 @@ func (ec *executionContext) marshalORemoteNetwork2ᚖgithubᚗcomᚋyourorgᚋzt
 		return graphql.Null
 	}
 	return ec._RemoteNetwork(ctx, sel, v)
+}
+
+func (ec *executionContext) marshalOResourcePolicy2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐResourcePolicy(ctx context.Context, sel ast.SelectionSet, v *ResourcePolicy) graphql.Marshaler {
+	if v == nil {
+		return graphql.Null
+	}
+	return ec._ResourcePolicy(ctx, sel, v)
 }
 
 func (ec *executionContext) marshalOShield2ᚖgithubᚗcomᚋyourorgᚋztnaᚋcontrollerᚋgraphᚐShield(ctx context.Context, sel ast.SelectionSet, v *Shield) graphql.Marshaler {
