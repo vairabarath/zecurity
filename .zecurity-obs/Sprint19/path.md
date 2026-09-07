@@ -155,8 +155,8 @@ Connector
 P1  Database model + migration                          [x] done
  ├── P2 Store/domain model                              [x] done
  │    └── P3 GraphQL API                                 [x] done
- ├── P4 Safe legacy-binding migration/compatibility      [ ] NEXT
- └── P5 ACL compiler integration                         [ ]
+ ├── P4 Safe legacy-binding migration/compatibility      [x] done (verified, code withdrawn)
+ └── P5 ACL compiler integration                         [ ] NEXT
        └── P6 Policy-change propagation                  [ ]
              └── P8 End-to-end authorization             [ ]
 
@@ -167,7 +167,7 @@ P9  Testing                                              [ ]
  └── P10 Final verification / documentation / build gates [ ]
 ```
 
-## Progress — Phases 1–3 complete (2026-09-05)
+## Progress — Phases 1–4 complete (2026-09-05)
 
 The new model exists end to end as an admin API and **coexists** with the legacy
 one. Nothing has been migrated and no authorization behaviour has changed yet:
@@ -179,6 +179,7 @@ one. Nothing has been migrated and no authorization behaviour has changed yet:
 | P1 | done | `controller/migrations/037_device_resource_policies.sql` |
 | P2 | done | `controller/internal/posture/resource_policy_store.go` (12 operations) |
 | P3 | done | `controller/graph/resourcepolicy.graphqls` + resolvers (2 queries, 7 mutations, 3 relationship fields) |
+| P4 | done | Decision record + verification method in `Member02/Phase4-*`. No code retained: the database is empty, so a backfill would move zero rows. Implemented and verified on 2026-09-05 (9 synthetic shapes, 7 tests, `LegacySet == NewSet` for every case), then deliberately withdrawn. |
 
 ### Post-Sprint Fixes (P1–P3)
 
@@ -208,11 +209,29 @@ These were merged in, are **not** caused by P1–P3, and are deliberately left a
 - **`controller/gen` protobuf stubs are gitignored** and must be generated
   (`make generate-proto`) before `go build ./...` or gqlgen will fail.
 
+### Phase 4 decisions (no longer open)
+
+- **Audit-only bindings are not migrated.** They are authorization-inert today
+  (`compiler.go:160` discards non-enforce profiles), so copying one into a policy
+  would create a gate that never existed. Skipped and reported.
+- **Migrated policy naming:** `Migrated policy for <resource-uuid>` — deterministic
+  and collision-free. Resource names cannot be used; `resources` is
+  `UNIQUE (shield_id, name)`, i.e. per shield, not per workspace.
+- **`deleting` resources are skipped**, and flagged. Already excluded from ACL
+  compilation, so they gate nothing.
+- **Every non-`deleting` resource gets a policy**, including unbound ones; zero
+  profiles means Any Device.
+- **Drift is handled by full reconcile**, re-run immediately before the Phase 5
+  cutover.
+
 ### Not started
 
-P4 onwards. In particular **no legacy binding has been migrated**, and the open
-Phase 4 questions (audit-only bindings, migrated-policy naming under
-`UNIQUE (workspace_id, name)`, `deleting`-status resources) remain undecided.
+P5 onwards. **No legacy binding has been migrated** — the two models still
+coexist and `compiler.go` reads only `resource_profile_bindings`.
+
+**Phase 5 must handle two hazards recorded in `Member02/Phase4-*`:** a `NULL`
+policy silently ungates a resource (zero enforced profiles = allow everyone), and
+`internal/resource` never assigns a policy, so new resources always start `NULL`.
 
 ## Team assignment
 

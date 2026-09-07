@@ -2410,3 +2410,47 @@ serves on `127.0.0.1:9102`.
   migrated policies are named under `UNIQUE (workspace_id, name)` when resource
   names are not unique per workspace, and whether `deleting`-status resources
   are in scope.
+
+## 2026-09-05 — Claude Code (Sprint 19 / PENDING-16 Phase 4)
+
+**What was done:**
+- Implemented Phase 4 (legacy binding migration) as Go in the posture package —
+  inventory, reconcile-style backfill, and `LegacySet == NewSet` equivalence
+  verification — and verified it against nine synthetic legacy shapes in a
+  temporary PostgreSQL database. All seven tests passed.
+- Then **removed the implementation from the branch by decision**: the project is
+  pre-production with no legacy `resource_profile_bindings` rows anywhere, so a
+  backfill would move zero rows. `Member02/Phase4-*` now carries the decision
+  record and verification method instead of code.
+- No migration file was introduced at any point.
+
+**Key decisions:**
+- Audit-only bindings are **not** migrated. They are authorization-inert today
+  (`compiler.go:160` discards non-enforce profiles before building the OR-set),
+  so copying one into a policy would manufacture a gate that never existed and
+  could cut access for every device. Skipped and reported, never dropped.
+- Migrated policy naming is `Migrated policy for <resource-uuid>` — deterministic
+  so a re-run collides with itself. Resource names are unusable because
+  `resources` is `UNIQUE (shield_id, name)`, i.e. per shield, not per workspace.
+- `deleting` resources are skipped: ADR-004 tombstones, already excluded from ACL
+  compilation, so they gate nothing.
+- Drift is handled by full reconcile rather than insert-only, because the legacy
+  bind/unbind mutations stay live and the compiler still reads only legacy —
+  equivalence is otherwise true for one instant only.
+
+**Verification:**
+- Seven tests passed pre-removal, including idempotency (second run a total
+  no-op), three drift kinds repaired, workspace isolation, and a test proving the
+  equivalence verifier can actually fail.
+- `go build ./...` clean after removal; `internal/posture` compiles and its
+  remaining tests pass.
+- The 7 `TestGroupOrigin_*` failures in `graph/resolvers` remain inherited from
+  `fixed-pendings` (fixture inserts `status='ACTIVE'` against a lowercase-only
+  check constraint) and were left untouched.
+
+**What's next:**
+- Phase 5, ACL compiler integration. Two hazards are recorded in
+  `Member02/Phase4-*` and must be handled there: a `NULL` policy silently
+  ungates a resource (zero enforced profiles means allow everyone, per
+  `compiler.go:320-326`), and `internal/resource` never assigns a policy, so new
+  resources always start `NULL`.
