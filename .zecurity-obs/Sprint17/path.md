@@ -254,6 +254,91 @@ This is the critical path for FE-1/3/5 and for FE-4's usability.
 
 ## Post-Sprint Fixes
 
+### Fix: Okta's deactivation PATCH shape silently ignored (2026-09-03)
+**Issue:** unassigning a user from the SCIM app in Okta did not deprovision them in
+Zecurity — they stayed `active`.
+
+**Root cause:** `internal/scim/users.go` `applyPatchValue()` handled an empty PATCH `path`
+only when the value was a bare STRING. Okta deactivates with the whole-resource shape
+`{"op":"replace","value":{"active":false}}` (no path, object value), so the object fell
+through and was dropped: `p.Active` stayed nil, `dispatchActive()` no-opped, and the request
+degraded into a plain attribute update — 2xx to Okta, `updated_at` bumped, `status`
+unchanged. Okta's side was verified healthy first (`pushDeactivation` enabled).
+
+**Fix applied:** dispatch each key of a no-path object as its own attribute path (one level,
+empty keys skipped). Bare strings keep their old meaning.
+
+**Verified end-to-end:** unassign pre-fix left the user `active`; post-fix the same action
+yields `status='suspended'` plus a `session.generation.bump` audit event (invalidating
+issued JWTs). Details: [[Sprint17/Member1-Go/Phase6-Deprovision-and-SideEffectSink]].
+
+**Pattern:** third silent failure this session from an unaccepted Okta request shape (with
+the group member-filter case folding and the metadata-only group replace). Validate new
+SCIM parsing against Okta's real payloads, not just the RFC examples.
+
+
+### Fix: metadata-only SCIM PATCH wiped the entire group membership (2026-09-03)
+**Severity: data loss.** Removing one member in Okta left the group in Zecurity with ZERO
+members (Okta had one). Any IdP-pushed group rename/metadata sync silently emptied the group.
+
+**Root cause:** `patchGroupFromOps` recorded a PATCH op even when `groupMemberValues`
+returned a nil value slice (Okta's metadata shape
+`{"op":"replace","value":{"displayName":…}}`, which the code comment already said must be a
+no-op). `PatchGroup`'s REPLACE branch resets the working set, so a REPLACE with zero members
+removed every member.
+
+**Fix applied:** skip ops whose value slice is nil. `nil` (no membership info → no-op) vs
+non-nil empty (explicit "clear all") is the whole distinction — `groupMemberValues` already
+returns `make([]string, 0, …)` for the latter. A PATCH of only metadata now returns the
+group unchanged instead of 400.
+
+**Verified end-to-end** against the live Okta trial org: removing one member now leaves
+Okta and Zecurity both at exactly the remaining member (pre-fix the same action left
+Zecurity empty). Okta's "Push now" full re-push also confirmed as the resync path.
+
+Details: [[Sprint17/Member1-Go/Phase7-Groups]] → "Post-Phase Fixes".
+
+
+### Fix: Okta group member removals never applied (2026-09-03)
+**Issue:** removing a user from a group in Okta left them a member in Zecurity.
+
+**Root cause:** `internal/scim/groups.go` lowercased the whole SCIM PATCH `path` before
+extracting the member id from `members[value eq "…"]`. Okta user ids are mixed case, and
+`userIDsByExternalOrUUID` compares byte-for-byte against `external_identities.subject`, so
+the folded id resolved to zero users and `PatchGroup` returned 404 `unknown members`.
+Case-insensitivity was only ever wanted for the ATTRIBUTE NAME, not the value. The
+existing integration test used the already-lowercase id `"h-1"`, so it could not catch it.
+
+**Fix applied:** case-insensitive + whitespace-tolerant regex matched against the
+original-case path; `strings.ToLower` retained only for path-keyword comparison. Adds and
+replaces were unaffected (their ids travel in `value`, not the path).
+
+Details: [[Sprint17/Member1-Go/Phase7-Groups]] → "Post-Phase Fixes".
+
+
+### Fix: `email_verified` absence rejected every enterprise OIDC login (2026-09-03)
+**Issue:** every BYO enterprise OIDC sign-in failed with `authentication_failed`
+(reproduced against a live Okta trial org).
+
+**Root cause:** `providers/oidc.go` typed `email_verified` as a plain `bool`, so an
+**absent** claim was indistinguishable from an explicit `false`. Entra ID never emits the
+claim and Okta omits it on the org authorization server, so the generic adapter rejected
+every such login. The rule was inherited from the Google path (`idtoken.go`), where it is
+correct because Google always emits it.
+
+**Fix applied:** `EmailVerified *bool` — reject only present-and-`false`, permit absence.
+Bounded by `auth.ProviderFor`: the generic adapter serves only non-managed, tenant-owned
+connections; platform-tier logins keep the strict Google gate. Invite matching (the one
+place email is authorization-relevant) is already workspace-scoped, and an invite claimed
+on an unvouched email is now logged in `bootstrap.Provision`.
+
+**Also fixed:** `auth/callback.go` logged nothing on any of its five
+`authentication_failed` branches — the error from `adapter.Authenticate` was discarded
+entirely, so a failed login produced no server-side signal at all. Added `failErr()`.
+
+Details: [[Sprint17/Member1-Go/Phase11-OIDC-SubjectClaim-Wiring]] → "Post-Phase Fixes".
+
+
 ### Fix: F7-5 follow-up — login discovery dropped the platform (Google) tier (2026-09-03)
 **Issue:** With Okta configured, `Login.tsx` showed ONLY Okta — no way to reach the shared platform
 (Google) path, and `platform_login_enabled` had no effect on the login page.
@@ -280,6 +365,59 @@ closes the pool first and drops via a separate admin connection.
 
 Details + the `gqlgen`/`go generate` command corrections:
 [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] → "Post-Phase Fixes".
+
+### Fix: re-provisioning after a connection delete failed with an opaque 500 (2026-09-05)
+**Issue:** Delete an Okta connection, create a fresh one for the same Okta org, re-run provisioning →
+every user push failed.
+
+**Root Cause:** `identity.Resolver.Resolve` is keyed on `(connection_id, subject)` but
+`users_tenant_id_provider_sub_key` is `(tenant_id, provider_sub)`. Soft-delete preserves users as
+`provisioning_owner='unmanaged'` (ADR-025 §12, correct), so they keep occupying the canonical key. The
+new connection missed on resolve, fell into JIT-create, and died on the tenant-scoped unique index —
+surfaced to Okta as an opaque 500. Reproduced live against the dev DB.
+
+**Fix applied:** `internal/scim/directory_service.go` — `Provision` now checks tenant-scoped canonical
+key occupancy before JIT-creating and raises the ADR-025 §4.1 workflow instead: 409 `identity_conflict`
++ pending conflict record, resolvable from the Provisioning Conflicts queue. Silent re-link is NOT
+permitted (ADR-025 §4: `unmanaged → scim` requires explicit authorized admin action); the existing
+`AcceptLink` already performs the re-link correctly on approval.
+
+**Verified:** new `internal/scim/reconnect_after_delete_integration_test.go` replays the live sequence
+end-to-end through admin approval — confirmed red against the pre-fix code with the verbatim
+production duplicate-key error, green with the fix. Full scim/idp/identity suites pass.
+
+**Also still open (found while verifying the fix reaches the workflow):** the queued 409 cannot be
+resolved in the dev workspace — nobody holds `identity.mapping.break_glass` (0 rows in
+`workspace_permissions`; `AcceptLink` refuses ADMIN role alone), and `admin/src/pages/ScimConflicts.tsx`
+is read-only (0 `useMutation`; `acceptScimConflict`/`rejectScimConflict`/`reopenScimConflict` have no
+frontend — same backend-built/frontend-unwired pattern as F7-5 and F7-8).
+
+**Still open:** orphaned `origin='scim'` groups survive a soft-delete (`hermes` in dev: deleted
+connection, 2 members, 0 access rules), are unsynced, but remain listed and ACL-resolvable. Needs a
+product decision — ADR-025 §12 forbids cascade-deleting them, and hiding them changes authorization
+surface. Details: [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] → "Post-Phase Fixes".
+
+### Fix: F7-8 Danger Zone Disable/Delete were no-ops (2026-09-05)
+**Issue:** `admin/src/pages/IdpConnectionDetail.tsx` — the Danger Zone "Disable" and "Delete"
+buttons fired no request at all.
+
+**Root Cause:** `useMutation` (a React hook) was called inside the async click handlers via a dynamic
+`await import(...)`, so it only ever registered a mutation and returned; nothing executed. Compounding
+it, all `useState`/hook calls sat after the loading/error/not-found early returns — a rules-of-hooks
+order violation.
+
+**Fix applied:** static-imported the two mutation documents, hoisted every hook above the early
+returns, called the returned mutate functions from the handlers, made `attemptDelete` handle both a
+rejected promise and a `res.error` result so a refusal can never be mistaken for success, and derived
+the disabled state from `connection.status` instead of stale local state.
+
+**Verified:** new `admin/src/pages/IdpConnectionDetail.dangerzone.test.tsx` clicks Disable and asserts
+the mutation is consumed *and* the button flips to "Disabled" — confirmed red against the pre-fix file,
+green against the fix. A build gate alone could not have caught either defect. Note that `npm run lint`
+*would* have flagged both (5 `react-hooks/rules-of-hooks` errors), but 27 pre-existing errors elsewhere
+in `admin/` make its exit code useless as a gate.
+
+Details: [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] → "Post-Phase Fixes".
 
 ### Fix: F7-5 — dynamic IdP selection on the public Login page (2026-09-02)
 **Issue:** `admin/src/pages/Login.tsx` hardcoded `provider: 'google'` and never passed

@@ -619,6 +619,9 @@ func OriginAwareID(id, origin, externalID string) string {
 // supported. Each operation keeps its own op so mixed add/remove/replace PATCHes
 // are preserved.
 func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("no membership operations in PATCH")
+	}
 	p := &groupPatch{}
 	for _, op := range ops {
 		opType, _ := op["op"].(string)
@@ -630,6 +633,25 @@ func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
 			if err != nil {
 				return nil, err
 			}
+			// A NIL values slice means the op carried NO membership information
+			// at all — e.g. Okta's group metadata sync,
+			// {"op":"replace","value":{"displayName":"hermes","id":"…"}}. Such an
+			// op MUST be dropped, not recorded.
+			//
+			// Recording it was a membership-WIPE bug: PatchGroup's REPLACE branch
+			// resets the working set and then adds this op's members, so a
+			// REPLACE carrying zero members emptied the entire group. A rename
+			// pushed from the IdP silently deleted every member in Zecurity.
+			//
+			// This is distinct from an EXPLICIT empty list
+			// ({"op":"replace","path":"members","value":[]}), which is a
+			// legitimate "clear all members": groupMemberValues returns a
+			// non-nil, zero-length slice for that, so it is still recorded and
+			// still clears. nil vs empty is the whole distinction — do not
+			// collapse it to len(values) == 0.
+			if values == nil {
+				continue
+			}
 			// Preserve the operation boundary: all values of one PATCH op stay
 			// together so PatchGroup applies them as a single add/remove/replace.
 			p.Ops = append(p.Ops, patchOp{Op: opType, Values: values})
@@ -637,9 +659,10 @@ func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
 			return nil, fmt.Errorf("unsupported PATCH op %q", opType)
 		}
 	}
-	if len(p.Ops) == 0 {
-		return nil, fmt.Errorf("no membership operations in PATCH")
-	}
+	// Every op was metadata-only. That is a well-formed PATCH that simply does
+	// not change membership: PatchGroup short-circuits to GetGroup and returns
+	// the group unchanged (200), which is what the IdP expects. Erroring here
+	// would 400 a routine directory rename.
 	return p, nil
 }
 
