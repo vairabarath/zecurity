@@ -260,6 +260,8 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 	if linked > 0 {
 		// Soft-delete: preserve users, flip ownership to unmanaged, mark the
 		// connection terminal. Never removes the row or user data.
+		// Also cleans up SCIM-managed groups, tokens, and sync instances
+		// to prevent orphaned state from blocking re-provisioning.
 		if _, err := r.IdpStore.SetSCIMUsersUnmanaged(ctx, tc.TenantID, id); err != nil {
 			return false, fmt.Errorf("deleteIdpConnection: unmanage users: %w", err)
 		}
@@ -272,6 +274,8 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 		action = "idp.connection.delete.soft"
 	} else {
 		// No linked users: a clean hard-delete is safe.
+		// DeleteWorkspaceConnection cascades to scim_tokens, external_identities,
+		// scim_sync_instances, and groups (via FK CASCADE on connection_id).
 		if err := r.IdpStore.DeleteWorkspaceConnection(ctx, tc.TenantID, id); err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
 				return false, apperr.UserErrorf("deleteIdpConnection: connection not found")
@@ -279,6 +283,16 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 			return false, fmt.Errorf("deleteIdpConnection: %w", err)
 		}
 	}
+
+	// Both branches remove the connection's SCIM-owned groups (the soft path
+	// explicitly, the hard path via FK CASCADE), and dropping a group cascades
+	// away every access_rules row targeting it. That is a policy mutation, so
+	// the per-workspace ACL snapshot cache must be invalidated or connectors
+	// keep serving access through a group that no longer exists.
+	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+		return false, fmt.Errorf("deleteIdpConnection notify: %w", err)
+	}
+
 	r.auditIdp(ctx, tc, action, id, map[string]any{"linked_users": linked, "force": force})
 
 	// Revoke sessions of anyone who authenticated through the connection (they
