@@ -392,10 +392,39 @@ resolved in the dev workspace — nobody holds `identity.mapping.break_glass` (0
 is read-only (0 `useMutation`; `acceptScimConflict`/`rejectScimConflict`/`reopenScimConflict` have no
 frontend — same backend-built/frontend-unwired pattern as F7-5 and F7-8).
 
-**Still open:** orphaned `origin='scim'` groups survive a soft-delete (`hermes` in dev: deleted
-connection, 2 members, 0 access rules), are unsynced, but remain listed and ACL-resolvable. Needs a
-product decision — ADR-025 §12 forbids cascade-deleting them, and hiding them changes authorization
-surface. Details: [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] → "Post-Phase Fixes".
+**~~Still open~~ → fixed 2026-09-07 (`ba68e24`), ADR reading unratified:** orphaned `origin='scim'`
+groups survived a soft-delete (`hermes` in dev: deleted connection, 2 members, 0 access rules),
+unsynced but still listed and ACL-resolvable. `SoftDeleteConnection` now deletes them in the delete
+transaction. **Caveat:** this line previously said ADR-025 §12 *forbids* cascade-deleting them; the
+fix deletes them on the reading that §12's preservation list omits groups — a reading recorded in the
+commit, **not in ADR-025**. See the new fix entry below and
+[[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]] → "Post-Phase Fixes".
+
+### Fix: connection soft-delete orphaned SCIM groups, tokens and sync instances (2026-09-07)
+**Issue:** Delete an Okta connection, create a fresh one for the same Okta org → Okta's group
+operations failed with `404 group not found`; the `hermes` group survived with `origin='scim'` and a
+`connection_id` pointing at the deleted connection.
+
+**Root Cause:** `SoftDeleteConnection` (`controller/internal/idp/store.go`) only flipped
+`identity_connections.status='deleted'`. Groups, `group_members`, `scim_tokens` and
+`scim_sync_instances` keyed on `connection_id` all survived — reachable by nothing, updatable by the
+replacement connection never (different `connection_id`). `ON DELETE CASCADE` on
+`groups.connection_id` only fires on a *hard* delete, and ADR-025 §12 mandates a *soft* delete
+whenever linked users exist.
+
+**Fix applied:** `SoftDeleteConnection` now wraps the status flip plus cleanup in one transaction —
+delete `origin='scim'` groups (`group_members` cascades via `012_groups_acl.sql:18`), revoke open
+SCIM tokens, purge sync instances. Users, external identities, roles, policies, devices and audit
+history are untouched (ADR-025 §12). Delete resolver simplified to call the unified method; new
+`internal/scim/group_cleanup_integration_test.go` (~500 lines) covers delete → re-provision.
+
+**⚠️ Unratified ADR reading — to verify:** this closes an item both `path.md` and Phase 7 recorded as
+needing a **product decision**, and Phase 7 stated deletion was *"forbidden by ADR-025 §12"*. The fix
+deletes anyway, on the reading that §12's preservation list omits groups. That reading is asserted in
+`ba68e24`, **not in ADR-025**. Confirm against §12 (and amend the ADR if it holds) before treating it
+as settled; the `external_id` reconciliation alternative was neither built nor explicitly rejected.
+
+Details: [[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]] → "Post-Phase Fixes".
 
 ### Fix: F7-8 Danger Zone Disable/Delete were no-ops (2026-09-05)
 **Issue:** `admin/src/pages/IdpConnectionDetail.tsx` — the Danger Zone "Disable" and "Delete"

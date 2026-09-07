@@ -38,6 +38,7 @@ pgdata/
 # Local tooling
 .codex
 .claude
+.hermes
 .qwen
 completed/
 
