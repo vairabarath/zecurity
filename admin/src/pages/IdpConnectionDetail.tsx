@@ -2,7 +2,11 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useState } from 'react'
 import { useQuery, useMutation } from '@apollo/client/react'
 import { ArrowLeft, KeyRound } from 'lucide-react'
-import { GetIdpConnectionsDocument } from '@/generated/graphql'
+import {
+  GetIdpConnectionsDocument,
+  DeleteIdpConnectionDocument,
+  SetIdpConnectionStatusDocument,
+} from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { EmptyState, ErrorState, StatusPill } from '@/lib/console'
@@ -31,9 +35,64 @@ export default function IdpConnectionDetail() {
     fetchPolicy: 'cache-and-network',
   })
 
+  // Every hook must run on every render — the loading / error / not-found
+  // early returns below sit *after* this block for exactly that reason.
+  const [deleteRefusal, setDeleteRefusal] = useState<string | null>(null)
+  const [deletePending, setDeletePending] = useState<boolean>(false)
+
+  const [deleteConnection] = useMutation(DeleteIdpConnectionDocument, {
+    refetchQueries: [{ query: GetIdpConnectionsDocument }],
+  })
+  const [setConnectionStatus, { loading: disablePending }] = useMutation(
+    SetIdpConnectionStatusDocument,
+    { refetchQueries: [{ query: GetIdpConnectionsDocument }] },
+  )
+
   const connection = (data?.idpConnections ?? []).find(
     (c) => c.id === id,
   ) as IdpConnectionDetailData | undefined
+
+  async function attemptDelete(force: boolean) {
+    if (!connection) return
+    setDeletePending(true)
+    try {
+      const res = await deleteConnection({
+        variables: { id: connection.id, force },
+      })
+      // errorPolicy may surface a refusal on the result rather than by
+      // rejecting, depending on the client config — handle both shapes.
+      if (res?.error) {
+        setDeleteRefusal(res.error.message)
+        return
+      }
+      // Success — navigate away; the deleted connection will not appear in the
+      // admin list because ListWorkspaceConnections already filters status='deleted'.
+      navigate('/idp-connections')
+    } catch (err: unknown) {
+      // Apollo UserError carries the server's verbatim refusal; show it in a
+      // confirmation dialog so the user can decide to force-delete.
+      let msg = ''
+      if (err && typeof err === 'object' && 'graphQLErrors' in err) {
+        const gqe = (err as { graphQLErrors?: unknown[] }).graphQLErrors?.[0]
+        if (gqe && typeof gqe === 'object' && 'message' in gqe) {
+          msg = String((gqe as { message: unknown }).message)
+        }
+      }
+      if (!msg && err && typeof err === 'object' && 'message' in err) {
+        msg = String((err as { message: unknown }).message)
+      }
+      setDeleteRefusal(msg || 'Server refused to delete the connection')
+    } finally {
+      setDeletePending(false)
+    }
+  }
+
+  async function handleDisable() {
+    if (!connection) return
+    await setConnectionStatus({
+      variables: { id: connection.id, status: 'disabled' },
+    })
+  }
 
   if (loading && !connection) {
     return (
@@ -74,65 +133,9 @@ export default function IdpConnectionDetail() {
     )
   }
 
-  // At this point connection is guaranteed to exist (early returns above).
-
-  // -------------------------------------------------------------------------
-  // Delete state
-  // -------------------------------------------------------------------------
-  const [deleteRefusal, setDeleteRefusal] = useState<string | null>(null)
-  const [deletePending, setDeletePending] = useState<boolean>(false)
-
-  async function attemptDelete(force: boolean) {
-    setDeletePending(true)
-    try {
-      await useMutation(
-        (await import('@/generated/graphql')).DeleteIdpConnectionDocument,
-        {
-          variables: { id: connection!.id, force },
-          refetchQueries: [{ query: GetIdpConnectionsDocument }],
-        },
-      )
-      // Success — navigate away; the deleted connection will not appear in the
-      // admin list because ListWorkspaceConnections already filters status='deleted'.
-      navigate('/idp-connections')
-    } catch (err: unknown) {
-      // Apollo UserError carries the server's verbatim refusal; show it in a
-      // confirmation dialog so the user can decide to force-delete.
-      let msg = ''
-      if (err && typeof err === 'object' && 'graphQLErrors' in err) {
-        const gqe = (err as { graphQLErrors?: unknown[] }).graphQLErrors?.[0]
-        if (gqe && typeof gqe === 'object' && 'message' in gqe) {
-          msg = String((gqe as { message: unknown }).message)
-        }
-      }
-      if (!msg && err && typeof err === 'object' && 'message' in err) {
-        msg = String((err as { message: unknown }).message)
-      }
-      setDeleteRefusal(msg || 'Server refused to delete the connection')
-    } finally {
-      setDeletePending(false)
-    }
-  }
-
-  // -------------------------------------------------------------------------
-  // Disable state
-  // -------------------------------------------------------------------------
-  const [disableStatus, setDisableStatus] = useState<'active' | 'disabled'>(
-    connection!.status === 'active' ? 'active' : 'disabled',
-  )
-
-  async function handleDisable() {
-    await useMutation(
-      (await import('@/generated/graphql')).SetIdpConnectionStatusDocument,
-      {
-        variables: { id: connection!.id, status: 'disabled' },
-        refetchQueries: [{ query: GetIdpConnectionsDocument }],
-        onCompleted: () => {
-          setDisableStatus('disabled')
-        },
-      },
-    )
-  }
+  // Derived from the cache-normalised entity rather than held in local state,
+  // so the button reflects the server's view after the mutation lands.
+  const isDisabled = connection.status !== 'active'
 
   return (
     <div className="space-y-6">
@@ -200,12 +203,12 @@ export default function IdpConnectionDetail() {
             </label>
             <Button
               variant="outline"
-              onClick={handleDisable}
-              disabled={disableStatus === 'disabled' || loading}
+              onClick={() => void handleDisable()}
+              disabled={isDisabled || disablePending}
             >
-              {disableStatus === 'disabled' ? 'Disabled' : 'Disable'}
+              {isDisabled ? 'Disabled' : 'Disable'}
             </Button>
-            {disableStatus === 'disabled' && (
+            {isDisabled && (
               <p className="text-xs text-muted-foreground">
                 Connection is disabled. Sessions revoked; SCIM-managed users suspended.
               </p>
@@ -221,8 +224,8 @@ export default function IdpConnectionDetail() {
             ) : (
               <Button
                 variant="destructive"
-                onClick={() => attemptDelete(false)}
-                disabled={loading || deletePending}
+                onClick={() => void attemptDelete(false)}
+                disabled={deletePending}
               >
                 Delete
               </Button>
@@ -246,7 +249,7 @@ export default function IdpConnectionDetail() {
                 </Button>
                 <Button
                   variant="destructive"
-                  onClick={() => attemptDelete(true)}
+                  onClick={() => void attemptDelete(true)}
                   disabled={deletePending}
                 >
                   Force delete anyway
