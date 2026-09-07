@@ -2,6 +2,7 @@ package scim
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 )
@@ -127,6 +128,11 @@ func writeSCIMError(w http.ResponseWriter, e *SCIMError) {
 	if e.ScimType != "" {
 		env["scimType"] = e.ScimType
 	}
+	// A rejected SCIM request is otherwise invisible on this side: the IdP sees
+	// the error envelope and shows a failed provisioning task in ITS console,
+	// while the operator looking at Zecurity sees only "the change did not
+	// arrive". Log every non-2xx so a broken push is diagnosable here.
+	log.Printf("scim: rejected request: status=%d scimType=%q detail=%q", status, e.ScimType, e.Detail)
 	writeJSON(w, status, env)
 }
 
