@@ -94,7 +94,14 @@
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    overflow: hidden;
+    /* NO `overflow: hidden` here. It was added to suppress a second scrollbar
+       from the 100vh .admin-shell, but the shell already scrolls internally
+       (its <main> is overflow-y-auto), so it never needed clipping at the body.
+       Meanwhile it clipped every page that does NOT render inside that shell —
+       /login, /signup/*, /invite/:token and /install (ProtectedLayout renders a
+       bare <Outlet>) — making them completely unscrollable, and it silently
+       defeated the <=980px .admin-shell breakpoint, which deliberately switches
+       to `height: auto; overflow: auto` and expects the PAGE to scroll. */
   }
 
   a {
@@ -306,7 +313,13 @@
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    /* Contains the horizontal bleed of the decorative ::before/::after
+       gradients (absolute, inset: 0) without clipping vertically. `clip` rather
+       than `hidden` on purpose: `overflow-x: hidden` would force overflow-y to
+       compute to `auto`, making this its own scroll container nested inside the
+       page; `clip` leaves overflow-y visible so a tall auth page (a long error
+       banner, a workspace list, a narrow viewport) scrolls with the page. */
+    overflow-x: clip;
   }
 
   .auth-shell::before {
