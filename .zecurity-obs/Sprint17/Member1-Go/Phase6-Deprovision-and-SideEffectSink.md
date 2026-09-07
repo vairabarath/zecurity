@@ -49,3 +49,87 @@ device-trust events by enqueuing them into the merged outbox inside the same ide
 - We ENQUEUE only; the PENDING-13 consumer (Track 1) is a separate branch. Not built here (per sprint boundary).
 - Phase 8 `scim_identity_conflicts` row on collision: still only 409 (unchanged from Phase 5).
 - The `name`/profile column gap (Phase 5) is unaffected.
+
+---
+
+## Post-Phase Fixes
+
+### Fix: Okta's deactivation PATCH shape was silently ignored (2026-09-03)
+
+**Issue:** unassigning a user from the SCIM app in Okta (Assignments → the row's
+✕) did NOT deprovision them in Zecurity. The user stayed `active`.
+
+**Root cause:** `internal/scim/users.go`, `applyPatchValue()`. Okta deactivates
+with the RFC 7644 §3.5.2 whole-resource shape — **no `path`**, value is an
+object:
+
+```json
+{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+ "Operations":[{"op":"replace","value":{"active":false}}]}
+```
+
+The empty-path branch only handled a bare **string**:
+
+```go
+case "", "emails":
+    // value may be a string (email) or map
+    if s, ok := value.(string); ok && s != "" { ... }   // ← map falls through
+```
+
+so the object was dropped. `p.Active` stayed nil → `dispatchActive()` returned
+early → the request degraded into a plain attribute update. The failure mode was
+maximally quiet: **2xx returned to Okta, `users.updated_at` bumped, `status`
+unchanged.** Okta showed a clean provisioning task; nothing was wrong on its side.
+
+The inline comment ("or empty with a value object") shows the object case was
+intended — only the string half was implemented.
+
+**Fix applied:** dispatch each key of a no-path object as its own attribute path.
+```go
+if lower == "" {
+    if obj, ok := value.(map[string]any); ok {
+        for k, v := range obj {
+            if strings.TrimSpace(k) == "" { continue }
+            applyPatchValue(p, k, v)
+        }
+        return
+    }
+}
+```
+Keys are attribute names and never empty, so this recurses exactly one level;
+the empty-key guard makes that structural rather than incidental. A bare string
+with no path keeps its previous meaning (an email change).
+
+**How it was found:** `users.updated_at` was bumped at the moment of the
+unassign while `status` stayed `active` — proof that the request ARRIVED and was
+accepted rather than never being sent. The Okta side was verified healthy first:
+`userMgmtSettings.pushDeactivation` is checked and editable ("Deactivate Users"
+enabled), and the tunnel was reachable.
+
+**Tests** (`internal/scim/user_patch_shape_test.go`):
+- `TestUserPatch_NoPathObjectDeactivates` / `…Reactivates` — both directions
+  through Okta's shape.
+- `TestUserPatch_ExplicitActivePathStillWorks` — the `path:"active"` form.
+- `TestUserPatch_NoPathObjectAppliesEveryAttribute` — multi-attribute object.
+- `TestUserPatch_NoPathBareStringStillEmail` — the string case is unchanged.
+
+Three of these were verified FAILING on the unfixed tree (`Active` was `<nil>`).
+
+**Live verification (controller restarted 17:39:43 with the fix):**
+
+| Step | Okta | Zecurity |
+|---|---|---|
+| Unassign `shin chan`, **PRE-fix** | removed from Assignments | `active` — **bug reproduced**, `updated_at` bumped only |
+| Re-assign, POST-fix | assigned | `active`, audit `device.re_enroll_required` |
+| Unassign, **POST-fix** | removed | **`suspended`**, audit `session.generation.bump` |
+
+`Deprovision(hard=false)` yields `status='suspended'` (soft deactivate), which
+`identity.CheckLifecycle` rejects at login, and the `session.generation.bump`
+audit event invalidates already-issued JWTs. A DELETE (`?hard=true`) is the
+tombstone path — distinct and unaffected.
+
+**Pattern worth noting:** this is the THIRD bug this session caused by an Okta
+request shape the parser did not accept — alongside the group member-filter case
+folding and the metadata-only group replace. All three failed silently. Any new
+SCIM request-shape handling should be checked against Okta's actual payloads,
+not only against the RFC's canonical examples.

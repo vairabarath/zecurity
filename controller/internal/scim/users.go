@@ -297,8 +297,35 @@ func patchFromOps(ops []map[string]any) (*userPatch, error) {
 }
 
 func applyPatchValue(p *userPatch, path string, value any) {
-	// path may be "active", "emails", "userName", or empty with a value object.
 	lower := strings.ToLower(strings.TrimSpace(path))
+
+	// No path + a value OBJECT is the RFC 7644 §3.5.2 whole-resource shape, and
+	// it is what Okta sends to DEACTIVATE a user (unassigning them from the app):
+	//
+	//   {"op":"replace","value":{"active":false}}
+	//
+	// Each key of that object is an attribute name, so dispatch them one by one.
+	// Without this the map fell straight through the string-only ""/"emails"
+	// branch below and was SILENTLY DROPPED: p.Active stayed nil, so
+	// dispatchActive() no-opped and the request degraded into a plain attribute
+	// update. The effect was a deactivation that returned 2xx, bumped
+	// users.updated_at, and left the user active — observed live.
+	//
+	// Keys are attribute names and never empty, so this recurses exactly one
+	// level; the empty-key guard makes that structural rather than incidental.
+	if lower == "" {
+		if obj, ok := value.(map[string]any); ok {
+			for k, v := range obj {
+				if strings.TrimSpace(k) == "" {
+					continue
+				}
+				applyPatchValue(p, k, v)
+			}
+			return
+		}
+	}
+
+	// path may be "active", "emails", "userName", or empty with a bare string.
 	switch lower {
 	case "", "emails":
 		// value may be a string (email) or map
