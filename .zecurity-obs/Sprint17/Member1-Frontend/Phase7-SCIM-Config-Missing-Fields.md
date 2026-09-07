@@ -223,6 +223,196 @@ Core scope implemented and gated green:
 
 ## Post-Phase Fixes
 
+### Fix: re-provisioning after a connection delete failed with an opaque 500 (2026-09-05)
+**Issue:** An admin deleted an Okta connection, created a fresh connection for the *same* Okta org,
+and re-ran provisioning from Okta. Every user push failed. The admin also observed that the SCIM
+users and the `hermes` group were still present in Zecurity after the delete.
+
+**Reproduced live** against the dev database (workspace `0d3b8f09`): connection
+`731ef05c…` was `status='deleted'`, connection `1779ca3e…` active on the same issuer
+`https://trial-3724025.okta.com`, with 3 surviving Okta users still bound to the deleted
+connection at `provisioning_owner='unmanaged'`.
+
+**Root Cause:** a scope mismatch between identity *resolution* and identity *uniqueness*.
+
+| | scope |
+|---|---|
+| `identity.Resolver.Resolve` | `(connection_id, subject)` — **connection**-scoped |
+| `users_tenant_id_provider_sub_key` | `(tenant_id, provider_sub)` — **tenant**-scoped |
+
+Deleting a connection with linked users is a soft-delete by design (ADR-025 §12): users are never
+removed, they flip to `provisioning_owner='unmanaged'` and keep their canonical keys. When the new
+connection re-pushed those same subjects, `Resolve` looked them up under the *new* `connection_id`,
+found nothing (their `external_identities` rows still point at the old connection), and fell straight
+through to the JIT-create path. The `INSERT INTO users` then hit the tenant-scoped unique index:
+
+```
+ERROR: duplicate key value violates unique constraint "users_tenant_id_provider_sub_key"
+DETAIL: Key (tenant_id, provider_sub)=(0d3b8f09-…, 00u16w7qu5saDn60H698) already exists.
+```
+
+`Provision` wraps that as `newSCIMError(500, "", "provision identity: "+err.Error())`, so Okta saw an
+opaque 500 for every user and reported that it could not push to Zecurity.
+
+So the users "remaining after delete" is correct, specified behavior — the defect is that the system
+had no path to *reclaim* them, and failed with a 500 instead of the workflow ADR-025 already defines.
+
+**Fix Applied — `internal/scim/directory_service.go`:**
+
+ADR-025 §4 states `unmanaged → scim` happens "only through explicit authorized admin action", so
+silently re-linking the surviving user is not permitted. ADR-025 §4.1 already specifies the correct
+outcome for a canonical key that is occupied by an identity this connection does not own: **409
+`identity_conflict` + a persistent pending record, resolved from the Provisioning Conflicts queue.**
+The bug was simply that this case never reached that path.
+
+`Provision` now checks tenant-scoped key occupancy before JIT-creating:
+
+```go
+// BEFORE — a connection-scoped miss went straight to JIT-create
+// First-seen → JIT-create via the SCIM provisioner (atomic user + link).
+prov := newSCIMProvisioner(...)
+
+// AFTER
+if occupantID, occErr := s.tenantKeyOccupant(ctx, sc.workspaceID, key); occErr != nil {
+    return nil, newSCIMError(500, "", "check canonical key occupancy: "+occErr.Error())
+} else if occupantID != "" {
+    s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, key, occupantID,
+        conflictSnapshot{externalID: key, userName: userNameOf(resource), email: primaryEmailOf(resource)})
+    return &provisionResult{conflict: true}, newSCIMError(409, "identity_conflict",
+        "an existing identity already owns this canonical key; admin approval required")
+}
+```
+
+plus a new `tenantKeyOccupant` helper (`SELECT id FROM users WHERE tenant_id = $1 AND provider_sub = $2`).
+
+The existing `AcceptLink` path already does exactly the right thing on approval: it inserts the
+`external_identities` row for the **new** connection and flips `provisioning_owner` back to `'scim'`,
+preserving the immutable `provisioned_by`, local roles, policies and devices. So the admin workflow is
+now: re-push → conflicts queue → approve (requires `identity.mapping.break_glass`) → Okta's next push
+succeeds idempotently against the preserved user.
+
+This also closes the general case: any cross-connection canonical-key collision inside a workspace now
+yields the specified 409 instead of a raw duplicate-key 500.
+
+**Verification — `internal/scim/reconnect_after_delete_integration_test.go` (new):**
+Replays the exact live sequence (provision → soft-delete → new connection → re-push) and asserts
+409 + `identity_conflict`, a single pending conflict row scoped to the new connection, that the
+surviving user is NOT silently reclaimed (`provisioning_owner` stays `unmanaged`), no duplicate user,
+retry idempotence (Okta retries hard — one pending row, not two), and that after `AcceptLink` the push
+succeeds and resolves to the *preserved* user rather than creating a new one.
+
+**Confirmed red against the pre-fix code**, failing with the verbatim production error:
+`re-push returned an opaque 500 …: provision identity: scim insert user: ERROR: duplicate key value
+violates unique constraint "users_tenant_id_provider_sub_key" (SQLSTATE 23505)`.
+
+`go build ./...` clean; `go test ./internal/scim/ ./internal/idp/ ./internal/identity/` all pass.
+
+**Follow-on blockers found while verifying the fix reaches the user's workflow (NOT fixed here):**
+
+The fix turns the 500 into the specified 409 + queued conflict, but in the dev workspace the admin
+cannot currently *resolve* that conflict, so re-provisioning still would not complete:
+
+1. **Nobody holds `identity.mapping.break_glass`.** `SELECT * FROM workspace_permissions WHERE
+   workspace_id='0d3b8f09-…'` returns 0 rows. `AcceptLink` hard-requires it and explicitly refuses
+   ADMIN role alone, so every approval attempt 403s. The `grantPermission(userId, permission)`
+   mutation exists to issue it.
+2. **The Provisioning Conflicts queue is read-only.** `admin/src/pages/ScimConflicts.tsx` contains
+   zero `useMutation` calls — it renders `GetScimConflicts` and nothing else. The backend mutations
+   `acceptScimConflict` / `rejectScimConflict` / `reopenScimConflict` (`controller/graph/idp.graphqls`)
+   have no frontend. Same pattern as findings F7-5 and F7-8: backend fully built, frontend never wired.
+
+Until both are addressed the 409 is a better-diagnosed failure rather than a resolved one.
+
+**Still open — orphaned SCIM groups (NOT fixed here, needs a product decision):**
+`groups.connection_id` is `ON DELETE CASCADE`, so groups vanish on a *hard* delete but survive a
+*soft* delete. The live `hermes` group is still present with `origin='scim'`, `connection_id` pointing
+at the deleted connection, 2 members and 0 access rules. It is no longer synced by anything, yet it
+still appears in `policy.Store.ListGroups` (no connection-status filter) and
+`ListActiveDeviceSPIFFEsForGroup` resolves membership purely from `group_members` — so if an admin
+later attaches an access rule to it, it would grant access from frozen, unsynced membership.
+Deleting it is forbidden by ADR-025 §12 ("does NOT silently cascade-delete anything"), and hiding it
+changes authorization surface, so this needs an explicit decision: reconcile onto the new connection
+by `external_id` under the same admin-approval rule as users, or mark/exclude stale-connection groups.
+
+### Fix: F7-8 Danger Zone — Disable and Delete were no-ops (2026-09-05)
+**Issue:** On `/idp-connections/{id}`, the Danger Zone "Disable" and "Delete" buttons did nothing.
+No network request was ever issued; no error surfaced in the UI.
+
+**Root Cause:** Two defects in `admin/src/pages/IdpConnectionDetail.tsx`.
+
+1. `useMutation` — a React hook — was being *called inside the async click handlers*, via a dynamic
+   `await import('@/generated/graphql')`. That is an invalid hook call: `useMutation` registers a
+   mutation and returns `[mutate, result]`; it never executes anything. Both handlers therefore
+   awaited a hook call and returned without touching the network.
+2. All `useState` calls (and the handlers that closed over them) sat *after* the
+   `loading` / `error` / `!connection` early returns, so the hook order differed between the first
+   render (loading, returns early) and later renders — a rules-of-hooks violation that leaves the
+   component's state slots mismatched.
+
+Additionally, `disableStatus` was held in local state seeded from `connection.status`, which is
+`undefined` on the first render and goes stale after `refetchQueries`.
+
+**Fix applied:**
+
+```tsx
+// BEFORE — invalid hook call inside a handler
+async function handleDisable() {
+  await useMutation(
+    (await import('@/generated/graphql')).SetIdpConnectionStatusDocument,
+    { variables: { id: connection!.id, status: 'disabled' }, ... },
+  )
+}
+
+// AFTER — hook at the top level, handler calls the returned mutate fn
+const [setConnectionStatus, { loading: disablePending }] = useMutation(
+  SetIdpConnectionStatusDocument,
+  { refetchQueries: [{ query: GetIdpConnectionsDocument }] },
+)
+
+async function handleDisable() {
+  if (!connection) return
+  await setConnectionStatus({ variables: { id: connection.id, status: 'disabled' } })
+}
+```
+
+- `DeleteIdpConnectionDocument` / `SetIdpConnectionStatusDocument` are now statically imported
+  alongside `GetIdpConnectionsDocument` — the dynamic `import()` bought nothing.
+- Every hook (`useQuery`, both `useState`s, both `useMutation`s) moved above all early returns;
+  `connection!` inside the handlers replaced by an `if (!connection) return` guard.
+- `attemptDelete` now handles *both* refusal shapes — Apollo Client v4 rejects on a GraphQL error
+  under the default `errorPolicy`, but the result is also checked for `res.error` so a config change
+  cannot make a refused delete look like a success and navigate away.
+- Disable state is derived (`connection.status !== 'active'`) from the cache-normalised entity
+  instead of local state; `SetIdpConnectionStatus` selects `{ id, status }`, so the button flips on
+  its own. The Delete button's `disabled` no longer includes the ambient query `loading`.
+
+**Semantics deliberately preserved:** `isDisabled` is `status !== 'active'`, so a connection in any
+non-active state (e.g. `pending`) renders a disabled "Disabled" button. That matches the old
+`disableStatus` seed exactly — it is not a regression introduced here, and not treated as in scope.
+
+**Files touched:**
+- `admin/src/pages/IdpConnectionDetail.tsx`
+- `admin/src/pages/IdpConnectionDetail.dangerzone.test.tsx` (new)
+
+**Why lint did not catch this before it shipped:** it would have. Running `npx eslint` on the
+pre-fix file reports 5 `react-hooks/rules-of-hooks` errors — 3 "called conditionally" (the
+post-early-return `useState`s) and 2 "called in function attemptDelete/handleDisable that is neither
+a React function component nor a custom React Hook". The repo-wide `npm run lint` currently has 27
+pre-existing errors and 6 warnings across other files, so a non-zero exit is not a usable signal and
+these were lost in the noise. Worth cleaning up separately so the hooks rule can gate again.
+
+**Verification (a build gate alone proves nothing here — both defects are invisible to `tsc` and
+`vite build`, which is why this shipped compiling-but-broken):**
+- `npx vitest run src/pages/IdpConnectionDetail.dangerzone.test.tsx` — 2 passed. The test renders the
+  page under `MockedProvider`, clicks Disable, and asserts (a) the `SetIdpConnectionStatus` mock was
+  actually consumed and (b) the button then reads "Disabled" and is disabled. Assertion (b) is the
+  discriminating one: it proves the derived-from-cache state re-renders, rather than assuming
+  `refetchQueries` did it.
+- **The test was confirmed to fail against the pre-fix file** (both cases red) and pass against the
+  fixed one — otherwise it would prove nothing.
+- `npx eslint` on both files: clean. `npx tsc --noEmit -p tsconfig.app.json`: clean.
+  `npm run build`: passes. No codegen needed — the schema and `mutations.graphql` are unchanged.
+
 ### Fix: F7-5 login discovery dropped the platform (Google) tier — 2026-09-03
 **Issue:** After F7-5 landed, a workspace with an enterprise IdP configured (Okta) showed ONLY that
 provider on `Login.tsx`. There was no way to reach the shared platform (Google) login path, and the
