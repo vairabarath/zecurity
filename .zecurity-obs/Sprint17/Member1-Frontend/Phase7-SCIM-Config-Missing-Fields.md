@@ -323,7 +323,17 @@ cannot currently *resolve* that conflict, so re-provisioning still would not com
 
 Until both are addressed the 409 is a better-diagnosed failure rather than a resolved one.
 
-**Still open — orphaned SCIM groups (NOT fixed here, needs a product decision):**
+**~~Still open~~ — orphaned SCIM groups — RESOLVED IN CODE 2026-09-07, reading unratified.**
+> Superseded by commit `ba68e24`: `SoftDeleteConnection` now deletes `origin='scim'` groups (and
+> revokes tokens / purges sync instances) inside the delete transaction, so the orphan described
+> below no longer survives a soft delete. **Note the tension:** the paragraph below states that
+> deleting these groups is *forbidden by ADR-025 §12*, and the fix deletes them anyway — on the
+> reading that §12's preservation list omits groups. That reading lives in the commit, **not in
+> ADR-025** — to verify. The `external_id` reconciliation alternative proposed below was neither
+> implemented nor explicitly rejected. Full writeup:
+> [[Sprint17/Member1-Go/Phase9-Connection-Lifecycle-Health-Sync]] → "Post-Phase Fixes".
+
+*Original entry, left intact for the record:*
 `groups.connection_id` is `ON DELETE CASCADE`, so groups vanish on a *hard* delete but survive a
 *soft* delete. The live `hermes` group is still present with `origin='scim'`, `connection_id` pointing
 at the deleted connection, 2 members and 0 access rules. It is no longer synced by anything, yet it
