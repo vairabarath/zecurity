@@ -467,6 +467,127 @@ func TestResourcePolicyStoreIntegration(t *testing.T) {
 		}
 	})
 
+	// ------------------------------- workspace batch lookup (Phase 5 input) --
+
+	t.Run("ListPolicyProfilesForWorkspace", func(t *testing.T) {
+		// This is what the ACL compiler consumes after PENDING-16 Phase 5, so its
+		// exact absence/presence semantics are load-bearing:
+		//   absent from the map == no posture gate == Any Device.
+		unassigned := insertPostureTestResource(t, ctx, pool, workspaceA, "batch-unassigned")
+		emptyPolicyRes := insertPostureTestResource(t, ctx, pool, workspaceA, "batch-empty")
+		onePolicyRes := insertPostureTestResource(t, ctx, pool, workspaceA, "batch-one")
+		manyPolicyRes := insertPostureTestResource(t, ctx, pool, workspaceA, "batch-many")
+		auditPolicyRes := insertPostureTestResource(t, ctx, pool, workspaceA, "batch-audit")
+
+		emptyPolicy, err := store.CreateResourcePolicy(ctx, workspaceA, "Batch Empty")
+		if err != nil {
+			t.Fatalf("create empty policy: %v", err)
+		}
+		onePolicy, err := store.CreateResourcePolicy(ctx, workspaceA, "Batch One")
+		if err != nil {
+			t.Fatalf("create one-profile policy: %v", err)
+		}
+		manyPolicy, err := store.CreateResourcePolicy(ctx, workspaceA, "Batch Many")
+		if err != nil {
+			t.Fatalf("create many-profile policy: %v", err)
+		}
+		auditPolicy, err := store.CreateResourcePolicy(ctx, workspaceA, "Batch Audit")
+		if err != nil {
+			t.Fatalf("create audit policy: %v", err)
+		}
+
+		alpha, err := store.CreateProfile(ctx, workspaceA, "Batch Alpha", true)
+		if err != nil {
+			t.Fatalf("create alpha: %v", err)
+		}
+		beta, err := store.CreateProfile(ctx, workspaceA, "Batch Beta", true)
+		if err != nil {
+			t.Fatalf("create beta: %v", err)
+		}
+		auditProfile, err := store.CreateProfile(ctx, workspaceA, "Batch Audit Profile", true)
+		if err != nil {
+			t.Fatalf("create audit profile: %v", err)
+		}
+
+		for _, pair := range []struct {
+			policyID  uuid.UUID
+			profileID uuid.UUID
+		}{
+			{onePolicy.ID, alpha.ID},
+			{manyPolicy.ID, alpha.ID},
+			{manyPolicy.ID, beta.ID},
+			{auditPolicy.ID, auditProfile.ID},
+		} {
+			if err := store.AddProfileToPolicy(ctx, workspaceA, pair.policyID, pair.profileID); err != nil {
+				t.Fatalf("attach profile: %v", err)
+			}
+		}
+
+		for _, pair := range []struct {
+			resourceID uuid.UUID
+			policyID   uuid.UUID
+		}{
+			{emptyPolicyRes, emptyPolicy.ID},
+			{onePolicyRes, onePolicy.ID},
+			{manyPolicyRes, manyPolicy.ID},
+			{auditPolicyRes, auditPolicy.ID},
+		} {
+			if err := store.AssignResourcePolicy(ctx, workspaceA, pair.resourceID, pair.policyID); err != nil {
+				t.Fatalf("assign policy: %v", err)
+			}
+		}
+
+		byResource, err := store.ListPolicyProfilesForWorkspace(ctx, workspaceA)
+		if err != nil {
+			t.Fatalf("ListPolicyProfilesForWorkspace: %v", err)
+		}
+
+		// A resource with no policy at all is absent -> Any Device.
+		if got, ok := byResource[unassigned]; ok {
+			t.Fatalf("unassigned resource present with %v, want absent", got)
+		}
+		// A policy holding zero profiles is likewise absent -> Any Device. The two
+		// states are deliberately indistinguishable to the compiler.
+		if got, ok := byResource[emptyPolicyRes]; ok {
+			t.Fatalf("empty-policy resource present with %v, want absent", got)
+		}
+
+		if got := byResource[onePolicyRes]; len(got) != 1 || got[0].ID != alpha.ID {
+			t.Fatalf("one-profile resource = %v, want [alpha]", got)
+		}
+
+		many := byResource[manyPolicyRes]
+		if len(many) != 2 {
+			t.Fatalf("many-profile resource = %v, want 2 profiles", many)
+		}
+		// ORDER BY p.name -- "Batch Alpha" before "Batch Beta".
+		if many[0].ID != alpha.ID || many[1].ID != beta.ID {
+			t.Fatalf("profiles not name-ordered: %q, %q", many[0].Name, many[1].Name)
+		}
+
+		// The semantic inversion of this sprint: an audit-mode profile attached to
+		// a policy DOES gate, because attachment is what enforces now. The legacy
+		// compiler would have filtered it out.
+		audited := byResource[auditPolicyRes]
+		if len(audited) != 1 || audited[0].ID != auditProfile.ID {
+			t.Fatalf("audit-mode profile = %v, want it returned", audited)
+		}
+		if audited[0].Mode != ModeAudit {
+			t.Fatalf("expected the fixture profile to be audit mode, got %q", audited[0].Mode)
+		}
+
+		// Workspace-scoped: nothing from workspace A leaks into workspace B.
+		otherWS, err := store.ListPolicyProfilesForWorkspace(ctx, workspaceB)
+		if err != nil {
+			t.Fatalf("other-workspace lookup: %v", err)
+		}
+		for _, id := range []uuid.UUID{onePolicyRes, manyPolicyRes, auditPolicyRes} {
+			if got, ok := otherWS[id]; ok {
+				t.Fatalf("workspace-A resource %s leaked into workspace B with %v", id, got)
+			}
+		}
+	})
+
 	// ----------------------------------------- legacy model left untouched --
 
 	t.Run("LegacyBindingsPreserved", func(t *testing.T) {

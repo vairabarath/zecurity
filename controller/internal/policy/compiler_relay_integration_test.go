@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	clientv1 "github.com/yourorg/ztna/controller/gen/go/proto/client/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
@@ -69,7 +70,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		wsID := mustInsertWorkspace(t, ctx, testPool, "ws-disabled")
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -88,7 +89,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "relay.x:9093", "", "public")
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -106,7 +107,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		relayID := mustInsertActiveRelay(t, ctx, testPool, "", "8.8.8.8", "public")
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -124,7 +125,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		_ = mustInsertActiveRelay(t, ctx, testPool, "", "192.168.1.71", "private")
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -156,7 +157,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -217,7 +218,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -261,7 +262,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -306,7 +307,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
 		if err != nil {
 			t.Fatalf("compile: %v", err)
@@ -353,9 +354,9 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 
 		policyStore := NewStore(testPool)
 		postureStore := posture.NewStore(testPool)
-		
+
 		compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
-		
+
 		if err != nil {
 			t.Fatalf("first compile: %v", err)
 		}
@@ -368,7 +369,7 @@ func TestCompileACLSnapshot_RelayDiscovery(t *testing.T) {
 		_ = mustInsertActiveRelay(t, ctx, testPool, "relay.compat:9093", "", "public")
 
 		compiled, err = CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
-		
+
 		if err != nil {
 			t.Fatalf("second compile: %v", err)
 		}
@@ -632,5 +633,363 @@ func mustAssignResourceToGroup(t *testing.T, ctx context.Context, pool *pgxpool.
 		workspaceID, resourceID, groupID,
 	); err != nil {
 		t.Fatalf("assign resource to group: %v", err)
+	}
+}
+
+// ── PENDING-16 Phase 5: posture gating through the Resource Policy ───────────
+
+// TestCompileACLSnapshot_ResourcePolicyGating proves the Phase 5 verification
+// matrix survives full ACL snapshot generation, not just a direct applyPosture
+// call.
+//
+// Before Phase 5 this file had no posture seeding at all: every subtest compiled
+// with zero device profiles, so applyPosture always took the ungated branch and
+// the gated path was never exercised end to end. These cases close that gap.
+//
+// Each case builds a complete authorization chain -- workspace, group, user,
+// device, remote network + connector, resource, access rule -- then attaches a
+// Resource Policy and asserts on the compiled snapshot's AllowedSpiffeIds.
+func TestCompileACLSnapshot_ResourcePolicyGating(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := uniqueTestDBName(t)
+	adminPool := mustConnectTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDBDSN, err := withTestDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test DSN: %v", err)
+	}
+	testPool := mustConnectTestPool(t, ctx, testDBDSN)
+	defer testPool.Close()
+	applyAllMigrations(ctx, testPool)
+
+	notifier := NewNotifier(NewSnapshotCache())
+
+	tests := []struct {
+		name string
+		// profileSatisfied is nil for "attach no profiles at all".
+		profileSatisfied  *bool
+		secondSatisfied   *bool
+		wantDeviceAllowed bool
+	}{
+		{
+			name:              "policy with zero profiles is Any Device",
+			profileSatisfied:  nil,
+			wantDeviceAllowed: true,
+		},
+		{
+			name:              "one profile satisfied allows the device",
+			profileSatisfied:  boolPtr(true),
+			wantDeviceAllowed: true,
+		},
+		{
+			name:              "one profile unsatisfied denies the device",
+			profileSatisfied:  boolPtr(false),
+			wantDeviceAllowed: false,
+		},
+		{
+			name:              "two profiles, second satisfied allows (OR)",
+			profileSatisfied:  boolPtr(false),
+			secondSatisfied:   boolPtr(true),
+			wantDeviceAllowed: true,
+		},
+		{
+			name:              "two profiles, both unsatisfied denies",
+			profileSatisfied:  boolPtr(false),
+			secondSatisfied:   boolPtr(false),
+			wantDeviceAllowed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Each case gets its own workspace so the compiled snapshots cannot
+			// interfere with one another.
+			slug := fmt.Sprintf("gating-%d", time.Now().UnixNano())
+			wsID := mustInsertWorkspace(t, ctx, testPool, slug)
+			groupID := mustInsertGroup(t, ctx, testPool, wsID, "gating-group")
+			userID := mustInsertUser(t, ctx, testPool, wsID)
+			mustAddGroupMember(t, ctx, testPool, groupID, userID)
+
+			spiffeID := "spiffe://gating.test/client/" + userID
+			deviceID := mustInsertClientDevice(t, ctx, testPool, wsID, userID, spiffeID)
+
+			rnID, _ := mustInsertRNWithConnector(t, ctx, testPool, wsID, "gating-rn", slug+".test", "10.9.0.10:9092")
+			resourceID := mustInsertResource(t, ctx, testPool, wsID, rnID, "gated-app", "10.9.0.1", 8443)
+			mustAssignResourceToGroup(t, ctx, testPool, wsID, resourceID, groupID)
+
+			postureStore := posture.NewStore(testPool)
+			wsUUID := mustParseUUID(t, wsID)
+			resourceUUID := mustParseUUID(t, resourceID)
+			deviceUUID := mustParseUUID(t, deviceID)
+
+			policy, err := postureStore.CreateResourcePolicy(ctx, wsUUID, "Gating Policy")
+			if err != nil {
+				t.Fatalf("create resource policy: %v", err)
+			}
+			if err := postureStore.AssignResourcePolicy(ctx, wsUUID, resourceUUID, policy.ID); err != nil {
+				t.Fatalf("assign resource policy: %v", err)
+			}
+
+			// A posture report is the provenance every evaluation needs; without a
+			// fresh received_at applyPosture fails closed regardless of Satisfied.
+			reportID := mustInsertPostureReport(t, ctx, testPool, wsID, deviceID)
+
+			attach := func(name string, satisfied bool) {
+				profile, err := postureStore.CreateProfile(ctx, wsUUID, name, true)
+				if err != nil {
+					t.Fatalf("create profile %s: %v", name, err)
+				}
+				if err := postureStore.AddProfileToPolicy(ctx, wsUUID, policy.ID, profile.ID); err != nil {
+					t.Fatalf("attach profile %s: %v", name, err)
+				}
+				mustUpsertEvaluation(t, ctx, testPool, wsID, deviceID, profile.ID.String(), reportID, satisfied)
+				_ = deviceUUID
+			}
+
+			if tt.profileSatisfied != nil {
+				attach("Gating Profile A", *tt.profileSatisfied)
+			}
+			if tt.secondSatisfied != nil {
+				attach("Gating Profile B", *tt.secondSatisfied)
+			}
+
+			policyStore := NewStore(testPool)
+			compiled, err := CompileACLSnapshot(ctx, policyStore, postureStore, notifier, wsID)
+			if err != nil {
+				t.Fatalf("CompileACLSnapshot: %v", err)
+			}
+
+			var entry *clientv1.ACLEntry
+			for _, e := range compiled.Snapshot.Entries {
+				if e.ResourceId == resourceID {
+					entry = e
+				}
+			}
+			if entry == nil {
+				t.Fatalf("resource %s missing from snapshot entries %+v", resourceID, compiled.Snapshot.Entries)
+			}
+
+			allowed := false
+			for _, id := range entry.AllowedSpiffeIds {
+				if id == spiffeID {
+					allowed = true
+				}
+			}
+			if allowed != tt.wantDeviceAllowed {
+				t.Fatalf("device allowed = %v, want %v (allowed_spiffe_ids = %v)",
+					allowed, tt.wantDeviceAllowed, entry.AllowedSpiffeIds)
+			}
+
+			// Routing must survive posture gating untouched: the entry is still
+			// present and still carries its route, even when the device is denied.
+			if entry.RouteType != "connector" {
+				t.Fatalf("route_type = %q, want connector", entry.RouteType)
+			}
+			if entry.RemoteNetworkId != rnID {
+				t.Fatalf("remote_network_id = %q, want %q", entry.RemoteNetworkId, rnID)
+			}
+		})
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+// mustInsertPostureReport seeds a posture report received just now, so
+// evaluations built from it are inside posture.MaxReportAge.
+func mustInsertPostureReport(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, deviceID string) string {
+	t.Helper()
+	var id string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO device_posture_reports (
+		     report_id, device_id, workspace_id, client_version, os_info, reported_at, received_at
+		 )
+		 VALUES (gen_random_uuid()::text, $1, $2, 'test-client', '{"name":"linux"}'::jsonb, NOW(), NOW())
+		 RETURNING id::text`,
+		deviceID, workspaceID,
+	).Scan(&id); err != nil {
+		t.Fatalf("insert posture report: %v", err)
+	}
+	return id
+}
+
+// mustUpsertEvaluation seeds a latest-revision evaluation for (device, profile).
+// profile_revision is read from the profile so the freshness/revision checks in
+// applyPosture see a current result.
+func mustUpsertEvaluation(t *testing.T, ctx context.Context, pool *pgxpool.Pool, workspaceID, deviceID, profileID, reportID string, satisfied bool) {
+	t.Helper()
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO device_profile_evaluations (
+		     device_id, profile_id, workspace_id, satisfied, profile_revision, report_id
+		 )
+		 SELECT $1, p.id, $2, $3, p.revision, $5
+		   FROM device_profiles p
+		  WHERE p.id = $4
+		 ON CONFLICT (device_id, profile_id) DO UPDATE
+		    SET satisfied = EXCLUDED.satisfied,
+		        profile_revision = EXCLUDED.profile_revision,
+		        report_id = EXCLUDED.report_id`,
+		deviceID, workspaceID, satisfied, profileID, reportID,
+	); err != nil {
+		t.Fatalf("upsert evaluation: %v", err)
+	}
+}
+
+// mustParseUUID converts a ::text id from the seed helpers into a uuid.UUID for
+// the posture store, which is uuid-typed throughout.
+func mustParseUUID(t *testing.T, id string) uuid.UUID {
+	t.Helper()
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		t.Fatalf("parse uuid %q: %v", id, err)
+	}
+	return parsed
+}
+
+// TestCompileACLSnapshot_LegacyBindingNoLongerGates documents the one accepted
+// behaviour change of the PENDING-16 Phase 5 cutover.
+//
+// A resource carrying a legacy enforce-mode resource_profile_bindings row but no
+// Resource Policy is now UNGATED. Before the cutover that row gated the resource;
+// the compiler no longer reads the legacy table, and a resource with no policy
+// resolves to zero profiles, which applyPosture treats as Any Device.
+//
+// This is a deliberate widening, safe here only because the project is
+// pre-production and no such row exists in any real database. The test exists so
+// the consequence is asserted rather than discovered: if it ever starts mattering,
+// this is the test that explains why.
+func TestCompileACLSnapshot_LegacyBindingNoLongerGates(t *testing.T) {
+	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("PKI_TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	dbName := uniqueTestDBName(t)
+	adminPool := mustConnectTestPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDBDSN, err := withTestDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test DSN: %v", err)
+	}
+	testPool := mustConnectTestPool(t, ctx, testDBDSN)
+	defer testPool.Close()
+	applyAllMigrations(ctx, testPool)
+
+	slug := fmt.Sprintf("legacy-gate-%d", time.Now().UnixNano())
+	wsID := mustInsertWorkspace(t, ctx, testPool, slug)
+	groupID := mustInsertGroup(t, ctx, testPool, wsID, "legacy-group")
+	userID := mustInsertUser(t, ctx, testPool, wsID)
+	mustAddGroupMember(t, ctx, testPool, groupID, userID)
+
+	spiffeID := "spiffe://legacy.test/client/" + userID
+	deviceID := mustInsertClientDevice(t, ctx, testPool, wsID, userID, spiffeID)
+
+	rnID, _ := mustInsertRNWithConnector(t, ctx, testPool, wsID, "legacy-rn", slug+".test", "10.9.1.10:9092")
+	resourceID := mustInsertResource(t, ctx, testPool, wsID, rnID, "legacy-app", "10.9.1.1", 8443)
+	mustAssignResourceToGroup(t, ctx, testPool, wsID, resourceID, groupID)
+
+	postureStore := posture.NewStore(testPool)
+	wsUUID := mustParseUUID(t, wsID)
+
+	// An enforce-mode profile the device does NOT satisfy, bound the legacy way
+	// and NOT attached to any Resource Policy. The resource keeps a NULL policy.
+	profile, err := postureStore.CreateProfile(ctx, wsUUID, "Legacy Enforce", true)
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO device_profile_requirements (profile_id, check_id, allow_unsupported)
+		 VALUES ($1, 'legacy.synthetic.check', FALSE)`,
+		profile.ID,
+	); err != nil {
+		t.Fatalf("add requirement: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`UPDATE device_profiles SET mode = 'enforce' WHERE id = $1`, profile.ID,
+	); err != nil {
+		t.Fatalf("set enforce mode: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO resource_profile_bindings (resource_id, profile_id, workspace_id)
+		 VALUES ($1, $2, $3)`,
+		resourceID, profile.ID, wsID,
+	); err != nil {
+		t.Fatalf("insert legacy binding: %v", err)
+	}
+
+	reportID := mustInsertPostureReport(t, ctx, testPool, wsID, deviceID)
+	mustUpsertEvaluation(t, ctx, testPool, wsID, deviceID, profile.ID.String(), reportID, false)
+
+	// Sanity: the legacy row really is there and the resource really has no policy.
+	var legacyCount int
+	if err := testPool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM resource_profile_bindings WHERE resource_id = $1`, resourceID,
+	).Scan(&legacyCount); err != nil {
+		t.Fatalf("count legacy bindings: %v", err)
+	}
+	var hasPolicy bool
+	if err := testPool.QueryRow(ctx,
+		`SELECT device_resource_policy_id IS NOT NULL FROM resources WHERE id = $1`, resourceID,
+	).Scan(&hasPolicy); err != nil {
+		t.Fatalf("read policy assignment: %v", err)
+	}
+	if legacyCount != 1 || hasPolicy {
+		t.Fatalf("fixture wrong: legacyCount=%d hasPolicy=%v, want 1 and false", legacyCount, hasPolicy)
+	}
+
+	compiled, err := CompileACLSnapshot(ctx, NewStore(testPool), postureStore, NewNotifier(NewSnapshotCache()), wsID)
+	if err != nil {
+		t.Fatalf("CompileACLSnapshot: %v", err)
+	}
+
+	var entry *clientv1.ACLEntry
+	for _, e := range compiled.Snapshot.Entries {
+		if e.ResourceId == resourceID {
+			entry = e
+		}
+	}
+	if entry == nil {
+		t.Fatalf("resource missing from snapshot: %+v", compiled.Snapshot.Entries)
+	}
+
+	allowed := false
+	for _, id := range entry.AllowedSpiffeIds {
+		if id == spiffeID {
+			allowed = true
+		}
+	}
+	if !allowed {
+		t.Fatalf("device denied (allowed=%v) -- the compiler is still honouring the legacy binding; "+
+			"after Phase 5 a resource with no Resource Policy must be Any Device", entry.AllowedSpiffeIds)
+	}
+
+	// The snapshot must also carry no posture-driven expiry, since nothing gates.
+	if !compiled.ValidUntil.IsZero() {
+		t.Fatalf("ValidUntil = %v, want zero (no posture-gated entry)", compiled.ValidUntil)
 	}
 }

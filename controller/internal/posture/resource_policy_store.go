@@ -702,6 +702,84 @@ func (s *Store) ListProfilesForPolicy(
 	return profiles, nil
 }
 
+// ListPolicyProfilesForWorkspace returns, for every resource in the workspace,
+// the device profiles that gate it through its Resource Policy:
+//
+//	resource -> device_resource_policies -> resource_policy_profile_bindings
+//	         -> device_profiles
+//
+// One query for the whole workspace, so ACL compilation stays free of
+// per-resource lookups. Mirrors the batch style of EvaluationsForDevices.
+//
+// A resource with no policy, or a policy holding no profiles, is simply absent
+// from the map. Callers read a nil slice for it, which is the "Any Device" state
+// -- no posture gate. That is deliberate: it makes an unassigned policy and an
+// empty policy behave identically, with no special-casing at the call site.
+//
+// Profile mode is NOT consulted. In the Resource Policy model a profile gates a
+// resource because the policy references it, not because of an audit/enforce
+// flag, so an audit-mode profile attached to a policy is returned like any other.
+func (s *Store) ListPolicyProfilesForWorkspace(
+	ctx context.Context,
+	workspaceID uuid.UUID,
+) (map[uuid.UUID][]Profile, error) {
+	rows, err := s.pool.Query(
+		ctx,
+		`SELECT r.id,
+		        p.id,
+		        p.workspace_id,
+		        p.name,
+		        p.mode,
+		        p.revision,
+		        p.manual_trust_enabled,
+		        p.created_at,
+		        p.updated_at
+		   FROM resources r
+		   JOIN resource_policy_profile_bindings b
+		     ON b.device_resource_policy_id = r.device_resource_policy_id
+		   JOIN device_profiles p
+		     ON p.id = b.profile_id
+		  WHERE r.tenant_id = $1
+		    AND b.workspace_id = $1
+		  ORDER BY r.id, p.name`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list resource policy profiles for workspace: %w", err)
+	}
+	defer rows.Close()
+
+	byResource := make(map[uuid.UUID][]Profile)
+
+	for rows.Next() {
+		var (
+			resourceID uuid.UUID
+			profile    Profile
+		)
+
+		if err := rows.Scan(
+			&resourceID,
+			&profile.ID,
+			&profile.WorkspaceID,
+			&profile.Name,
+			&profile.Mode,
+			&profile.Revision,
+			&profile.ManualTrustEnabled,
+			&profile.CreatedAt,
+			&profile.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan resource policy profile: %w", err)
+		}
+
+		byResource[resourceID] = append(byResource[resourceID], profile)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate resource policy profiles: %w", err)
+	}
+
+	return byResource, nil
+}
+
 // isForeignKeyViolation reports whether err is a Postgres foreign-key
 // violation. Mirrors isUniqueViolation in store.go.
 func isForeignKeyViolation(err error) bool {

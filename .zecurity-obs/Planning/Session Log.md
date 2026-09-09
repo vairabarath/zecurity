@@ -2454,3 +2454,51 @@ serves on `127.0.0.1:9102`.
   ungates a resource (zero enforced profiles means allow everyone, per
   `compiler.go:320-326`), and `internal/resource` never assigns a policy, so new
   resources always start `NULL`.
+
+## 2026-09-09 — Claude Code (Sprint 19 / PENDING-16 Phase 5 — ACL compiler cutover)
+
+**What was done:**
+- Switched the ACL compiler's profile source from the legacy
+  `resource_profile_bindings` to `Resource → Resource Policy → Device Profile(s)`.
+  This is the cutover: the Resource Policy now decides authorization.
+- Added one batch store method, `ListPolicyProfilesForWorkspace`, after verifying
+  no equivalent existed (the three per-policy/per-resource methods would all have
+  been N+1 from the compiler).
+- Deleted the `if profile.Mode != posture.ModeEnforce { continue }` filter, which
+  was the only production authorization read of `device_profiles.mode`.
+- Total production change: 97 insertions, 34 deletions in two files. No migration,
+  no proto change, no `applyPosture` change, no Connector change.
+
+**Key decisions:**
+- A resource with `device_resource_policy_id IS NULL` means **Any Device**, not
+  deny-all. Achieved for free by using an INNER JOIN in the new query, so "no
+  policy" and "empty policy" are indistinguishable to the compiler and need no
+  special-casing.
+- `CompileACLSnapshot`'s signature was kept identical, so the three production
+  call sites and the five injected-compiler closures in `connector/acl_push_test.go`
+  needed no edit.
+- `device_profiles.mode` was retired from *authorization only*. The column, its
+  GraphQL field, `updateDeviceProfileMode` and all four write-path guards remain —
+  they protect a real invariant on the legacy write path.
+- `posture.ResourceSatisfied` is mode-based authorization logic but is called only
+  from its own test — dead code, deliberately left alone as unrelated cleanup.
+
+**Verification:**
+- The six-row matrix proven twice: directly against `applyPosture`, and through
+  full `CompileACLSnapshot` output asserting on `AllowedSpiffeIds`.
+- Closed a real gap: `compiler_relay_integration_test.go` previously had no
+  posture seeding at all, so the gated path had never been exercised end to end.
+  The new fixtures create no legacy bindings, so the "denies" cases could only
+  pass if the compiler truly resolves through the policy.
+- Added a cutover guard asserting the one accepted behaviour change: a resource
+  with a legacy enforce binding but no policy is now ungated. Safe only because
+  the project is pre-production; the test exists so it is asserted, not discovered.
+- `go build ./...` clean; 23 packages pass. The 7 `TestGroupOrigin_*` failures
+  remain inherited from `fixed-pendings` and were left untouched.
+
+**What's next:**
+- Phase 6, policy-change propagation — mostly verification, since Phase 3 already
+  wired `NotifyPolicyChange` into all seven Resource Policy mutations.
+- Still open and deliberately out of Phase 5's scope: `internal/resource` never
+  assigns a policy, so new resources start `NULL`. Harmless under "NULL = Any
+  Device", but "every resource has exactly one policy" is not self-maintaining.

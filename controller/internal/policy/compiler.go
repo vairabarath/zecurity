@@ -133,42 +133,27 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		})
 	}
 
-	// Posture batch fetching: profiles, bindings, and evaluations
-	profiles, err := postureStore.ListProfiles(ctx, workspaceUUID)
+	// Posture batch fetching: policy-resolved profiles, and evaluations below.
+	//
+	// A resource gates on the Device Profiles its Resource Policy references
+	// (PENDING-16). Profile mode is deliberately not consulted: a profile gates a
+	// resource because the policy references it, not because of an audit/enforce
+	// flag.
+	//
+	// A resource with no policy, or a policy holding no profiles, is absent from
+	// this map. applyPosture then sees an empty profile list and takes its
+	// existing ungated "Any Device" branch -- identical to the old behaviour for a
+	// resource with no enforce-mode binding.
+	policyProfiles, err := postureStore.ListPolicyProfilesForWorkspace(ctx, workspaceUUID)
 	if err != nil {
-		return nil, fmt.Errorf("compile acl: list posture profiles: %w", err)
-	}
-	bindings, err := postureStore.ListResourceBindingsForWorkspace(ctx, workspaceUUID)
-	if err != nil {
-		return nil, fmt.Errorf("compile acl: list resource bindings: %w", err)
+		return nil, fmt.Errorf("compile acl: list resource policy profiles: %w", err)
 	}
 
-	profileMap := make(map[uuid.UUID]posture.Profile)
+	// Re-key by resource-ID string to match entryKey.resourceID below.
+	gatingProfilesByResource := make(map[string][]posture.Profile, len(policyProfiles))
 
-	for _, p := range profiles {
-		profileMap[p.ID] = p
-	}
-
-	enforceProfilesByResource := make(map[string][]posture.Profile)
-
-	for _, binding := range bindings {
-		profile, ok := profileMap[binding.ProfileID]
-		if !ok {
-			continue
-		}
-
-		if profile.Mode != posture.ModeEnforce {
-			continue
-		}
-
-		resourceID := binding.ResourceID.String()
-
-		enforceProfilesByResource[resourceID] =
-			append(
-				enforceProfilesByResource[resourceID],
-				profile,
-			)
-
+	for resourceID, profiles := range policyProfiles {
+		gatingProfilesByResource[resourceID.String()] = profiles
 	}
 
 	allDeviceIDs := make(map[uuid.UUID]struct{})
@@ -225,10 +210,10 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 				entryDevices[device.DeviceID] = device.SPIFFEID
 			}
 		}
-		enforcedProfiles := enforceProfilesByResource[key.resourceID]
+		gatingProfiles := gatingProfilesByResource[key.resourceID]
 
 		allowedSPIFFEs, pairValidUntil, isGated := applyPosture(
-			now, entryDevices, enforcedProfiles, evaluations,
+			now, entryDevices, gatingProfiles, evaluations,
 		)
 		if isGated && len(allowedSPIFFEs) > 0 {
 
