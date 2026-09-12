@@ -120,6 +120,12 @@ pub struct RuntimeState {
     /// Human-readable reason accompanying device_state — the server's
     /// directive_reason. Empty when device_state is Active.
     pub device_state_reason: String,
+    /// Sprint 19 Track 3 (PENDING-13, ADR-028 D1): signalled when the ACL
+    /// poll reports DIRECTIVE_RENEW_SOON, so the cert renewal scheduler wakes
+    /// early instead of waiting for its own timer — a backstop for a
+    /// scheduler that's running late (sleep/suspend, clock drift), not the
+    /// primary trigger. See daemon::run_cert_renewal_scheduler.
+    pub cert_renewal_resync: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,5 +185,6 @@ pub fn new_shared() -> SharedState {
          posture_resync: Arc::new(tokio::sync::Notify::new()),
         device_state: DeviceState::Active,
         device_state_reason: String::new(),
+        cert_renewal_resync: Arc::new(tokio::sync::Notify::new()),
     }))
 }

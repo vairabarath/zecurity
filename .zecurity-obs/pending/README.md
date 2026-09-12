@@ -49,10 +49,11 @@ discussion — the "Options" and "Open Questions" are the point; the
 | [PENDING-10](PENDING-10-Observability.md) | Observability: Metrics, Tracing, Health — *partial: reconcile-only `/metrics` + one `/health`; no tracing* | operations | P1 | — |
 | [PENDING-11](PENDING-11-Audit-Logging-SIEM.md) | Audit Logging & SIEM Export — *partial: audit tables exist and are written; **no export sink*** | operations | P2 | — |
 | [PENDING-12](PENDING-12-Controller-HA-Multi-Region.md) | Controller HA & Multi-Region — *unbuilt* | operations | P2 | ADR-013 |
-| 🚧 [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **Tracks 1 & 2 done (Sprint 19); Track 3 (client `RenewCert` + daemon scheduler) open** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
+| ✅ [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **all 3 tracks done (Sprint 19)** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access — *unbuilt (no `fqdn` code in the repo)* | data-plane | P2 | — |
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — *unbuilt; today's `resource_profile_bindings` is the direct binding this replaces* | policy | P1 | PENDING-08, PENDING-09 |
+| [PENDING-17](PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (TPM/Secure Enclave) *(raised during PENDING-13 Track 3, 2026-08-27)* | identity/client | P2 | ADR-002, ADR-028 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.

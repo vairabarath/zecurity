@@ -23,6 +23,7 @@ const (
 	ClientService_InitiateAuth_FullMethodName         = "/client.v1.ClientService/InitiateAuth"
 	ClientService_TokenExchange_FullMethodName        = "/client.v1.ClientService/TokenExchange"
 	ClientService_EnrollDevice_FullMethodName         = "/client.v1.ClientService/EnrollDevice"
+	ClientService_RenewCert_FullMethodName            = "/client.v1.ClientService/RenewCert"
 	ClientService_GetACLSnapshot_FullMethodName       = "/client.v1.ClientService/GetACLSnapshot"
 	ClientService_GetTransportSnapshot_FullMethodName = "/client.v1.ClientService/GetTransportSnapshot"
 	ClientService_RevokeDevice_FullMethodName         = "/client.v1.ClientService/RevokeDevice"
@@ -47,6 +48,13 @@ type ClientServiceClient interface {
 	// EnrollDevice — issue mTLS certificate for the client device.
 	// Requires valid access_token in request (not in gRPC metadata).
 	EnrollDevice(ctx context.Context, in *EnrollDeviceRequest, opts ...grpc.CallOption) (*EnrollDeviceResponse, error)
+	// RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+	// proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+	// ADR-028). The CSR's public key must match the fingerprint pinned at
+	// EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+	// legacy device with no pinned fingerprint are all denied identically —
+	// callers must fall back to EnrollDevice, never retry RenewCert.
+	RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error)
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(ctx context.Context, in *GetACLSnapshotRequest, opts ...grpc.CallOption) (*GetACLSnapshotResponse, error)
@@ -114,6 +122,16 @@ func (c *clientServiceClient) EnrollDevice(ctx context.Context, in *EnrollDevice
 	return out, nil
 }
 
+func (c *clientServiceClient) RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewCertResponse)
+	err := c.cc.Invoke(ctx, ClientService_RenewCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *clientServiceClient) GetACLSnapshot(ctx context.Context, in *GetACLSnapshotRequest, opts ...grpc.CallOption) (*GetACLSnapshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetACLSnapshotResponse)
@@ -172,6 +190,13 @@ type ClientServiceServer interface {
 	// EnrollDevice — issue mTLS certificate for the client device.
 	// Requires valid access_token in request (not in gRPC metadata).
 	EnrollDevice(context.Context, *EnrollDeviceRequest) (*EnrollDeviceResponse, error)
+	// RenewCert — issue a fresh mTLS certificate for an already-enrolled device,
+	// proving the same key is still held (Sprint 19 Track 3 / PENDING-13,
+	// ADR-028). The CSR's public key must match the fingerprint pinned at
+	// EnrollDevice time; a mismatch, a revoked/re-enroll-required device, or a
+	// legacy device with no pinned fingerprint are all denied identically —
+	// callers must fall back to EnrollDevice, never retry RenewCert.
+	RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error)
 	// GetACLSnapshot — returns the workspace ACL snapshot for the calling client.
 	// Validates access_token and device_id; default-deny if either is invalid.
 	GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error)
@@ -207,6 +232,9 @@ func (UnimplementedClientServiceServer) TokenExchange(context.Context, *TokenExc
 }
 func (UnimplementedClientServiceServer) EnrollDevice(context.Context, *EnrollDeviceRequest) (*EnrollDeviceResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method EnrollDevice not implemented")
+}
+func (UnimplementedClientServiceServer) RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenewCert not implemented")
 }
 func (UnimplementedClientServiceServer) GetACLSnapshot(context.Context, *GetACLSnapshotRequest) (*GetACLSnapshotResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetACLSnapshot not implemented")
@@ -305,6 +333,24 @@ func _ClientService_EnrollDevice_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_RenewCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).RenewCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_RenewCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).RenewCert(ctx, req.(*RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ClientService_GetACLSnapshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetACLSnapshotRequest)
 	if err := dec(in); err != nil {
@@ -399,6 +445,10 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "EnrollDevice",
 			Handler:    _ClientService_EnrollDevice_Handler,
+		},
+		{
+			MethodName: "RenewCert",
+			Handler:    _ClientService_RenewCert_Handler,
 		},
 		{
 			MethodName: "GetACLSnapshot",

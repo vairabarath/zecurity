@@ -25,8 +25,9 @@ tags:
   `REVOKED` / `RE_ENROLL_REQUIRED` / `RENEW_SOON` / `NONE`, with the client daemon
   reacting (wipe key, stop tunnels, surface the right message). See
   `Member2-Go/Track2-Device-Trust-Directive.md` (all acceptance criteria checked).
-- Track 3 (later): `RenewCert` RPC + daemon renewal scheduler, riding the
-  `RENEW_SOON` channel defined in Track 2.
+- Track 3 (next): `RenewCert` RPC + daemon renewal scheduler, riding the
+  `RENEW_SOON` channel defined in Track 2. See
+  `Member2-Go/Track3-Renew-Reenroll.md`.
 
 ## Dependency shape
 - Track 1 ships independently; its branch is stacked on the merged

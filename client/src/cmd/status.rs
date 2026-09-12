@@ -3,6 +3,14 @@ use anyhow::Result;
 use crate::ipc::{send_ipc, IpcRequest};
 use crate::state_store::format_duration_until;
 
+/// Sprint 19 Track 3 (PENDING-13, ADR-028 D4): below this, renewal
+/// (run_cert_renewal_scheduler in daemon.rs, which normally succeeds around
+/// 2.8 days of remaining life) should already have happened. Still counting
+/// down this low means renewal has likely been silently failing — a
+/// deliberately smaller/later threshold than the scheduler's own renewal
+/// window, since this one means "something is wrong," not "time to renew."
+const CERT_EXPIRY_WARNING_SECS: i64 = 24 * 3_600;
+
 pub async fn run() -> Result<()> {
     let conf = match crate::config::load() {
         Err(_) => {
@@ -37,6 +45,15 @@ pub async fn run() -> Result<()> {
                 "Status:     Running as {}, cert expires in {}",
                 email, expires
             );
+            if let Some(cert_expires_at) = resp.cert_expires_at {
+                if seconds_until(cert_expires_at) <= CERT_EXPIRY_WARNING_SECS {
+                    println!(
+                        "WARNING:    certificate renewal appears to be failing — \
+                         expires in {}. If this persists, try `zecurity-client login`.",
+                        expires
+                    );
+                }
+            }
 
             if let Some(id) = &resp.device_id {
                 println!("Device ID:  {}", id);
@@ -94,6 +111,17 @@ fn print_device_directive_status(marker: &str, reason: Option<&str>) {
     if let Some(reason) = reason.filter(|r| !r.is_empty()) {
         println!("Reason:     {}", reason);
     }
+}
+
+/// Seconds remaining until `ts` (negative if already past). Same
+/// SystemTime/UNIX_EPOCH computation as format_duration_since, kept separate
+/// since this returns a signed count for comparison, not a display string.
+fn seconds_until(ts: i64) -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    ts - now
 }
 
 fn format_duration_since(ts: i64) -> String {

@@ -15,8 +15,8 @@ use crate::grpc::{
     self,
     client_v1::{
         AclConnector, AclEntry, AclRemoteNetwork, DeviceDirective, DevicePostureReport,
-        GetAclSnapshotRequest, GetTransportSnapshotRequest, ReportDevicePostureRequest,
-        TransportConnector, TransportRemoteNetwork, TransportSnapshot,
+        GetAclSnapshotRequest, GetTransportSnapshotRequest, RenewCertRequest,
+        ReportDevicePostureRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
     },
 };
 use crate::posture;
@@ -125,6 +125,17 @@ pub async fn run() -> Result<()> {
         let conf_clone = conf.clone();
         tokio::spawn(async move {
             run_posture_scheduler(state_clone, conf_clone).await;
+        });
+    }
+    // Proactive device-cert renewal loop (Sprint 19 Track 3 / PENDING-13,
+    // ADR-028 D1). Sibling to run_refresh_scheduler — cert renewal (days-long
+    // TTL) and token refresh (minutes-long TTL) are on completely different
+    // clocks. No tun_slot needed: renewal never touches tunnels.
+    {
+        let state_clone = Arc::clone(&state);
+        let conf_clone = conf.clone();
+        tokio::spawn(async move {
+            run_cert_renewal_scheduler(state_clone, conf_clone).await;
         });
     }
     let socket_path = ipc_socket_path();
@@ -1450,7 +1461,18 @@ async fn react_to_device_directive(
     let new_state = match directive {
         DeviceDirective::DirectiveRevoked => DeviceState::Revoked,
         DeviceDirective::DirectiveReEnrollRequired => DeviceState::ReEnrollRequired,
-        // RENEW_SOON (Track 3) and NONE are not reactions this function handles.
+        DeviceDirective::DirectiveRenewSoon => {
+            // Backstop, not the primary trigger: run_cert_renewal_scheduler
+            // wakes on its own timer computed from cert_expires_at. This just
+            // wakes it early if it's running late (sleep/suspend, clock
+            // drift) — same relationship run_refresh_scheduler's 401-retry
+            // path has to its own proactive scheduler. No DeviceState change:
+            // the device is still fully trusted, just due for a fresh cert.
+            let resync = state.read().await.cert_renewal_resync.clone();
+            resync.notify_one();
+            return Ok(());
+        }
+        // NONE is not a reaction this function handles.
         _ => return Ok(()),
     };
 
@@ -1591,6 +1613,278 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
             }
         }
     }
+}
+
+// ── Cert renewal (Sprint 19 Track 3 / PENDING-13, ADR-028 D1) ───────────────
+
+/// Mirrors the controller's clientCertTTL/renewalWindow (service.go) — a
+/// schedule constant, not device state, so it's duplicated here rather than
+/// fetched from the server, same reasoning as clientCertTTL itself being a
+/// compile-time constant server-side. Keep these two constants in lockstep
+/// with service.go's clientCertTTL/renewalWindow if either ever changes.
+const CLIENT_CERT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+const RENEWAL_WINDOW_SECS: i64 = CLIENT_CERT_TTL_SECS * 2 / 5;
+
+/// Builds a fresh, self-signed CSR from the device's EXISTING private key —
+/// never a new keypair. Mirrors login.rs's enrollment CSR construction
+/// (rcgen::KeyPair::generate_for + CertificateParams) minus the key
+/// generation step. Reusing the same key is what makes RenewCert's
+/// fingerprint-pinning check (controller service.go D-A) meaningful: a fresh
+/// key on every renewal would defeat it entirely. The CSR's CommonName is
+/// cosmetic — the server derives the SPIFFE SAN from (trustDomain, deviceID),
+/// never from the CSR's subject fields.
+fn build_renewal_csr(private_key_pem: &str, hostname: &str) -> Result<String> {
+    let key_pair = rcgen::KeyPair::from_pem(private_key_pem)?;
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, hostname);
+    Ok(params.serialize_request(&key_pair)?.pem()?)
+}
+
+/// Raw RenewCert RPC.
+async fn renew_cert_rpc(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    access_token: &str,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let mut client = grpc::connect_grpc(conf.controller(), ca_pem).await?;
+    let resp = client
+        .renew_cert(RenewCertRequest {
+            access_token: access_token.to_string(),
+            device_id: device_id.to_string(),
+            csr_pem: csr_pem.to_string(),
+        })
+        .await?
+        .into_inner();
+    Ok(resp)
+}
+
+/// RenewCert with the same 401-retry dance as fetch_acl_snapshot_with_refresh
+/// (verify -> on Unauthenticated, refresh via /auth/refresh, retry once).
+/// Duplicated rather than factored into a shared helper — this codebase's
+/// existing convention (ACL and Transport fetch each have their own copy
+/// too), not an oversight.
+async fn renew_cert_with_refresh(
+    conf: &config::ClientConf,
+    ca_pem: &str,
+    state: &SharedState,
+    device_id: &str,
+    csr_pem: &str,
+) -> Result<crate::grpc::client_v1::RenewCertResponse> {
+    let refresh_lock = {
+        let s = state.read().await;
+        s.refresh_lock.clone()
+    };
+    let access_token = {
+        let s = state.read().await;
+        let sess = s.session.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("no session in state — run zecurity-client login first")
+        })?;
+        sess.access_token.clone()
+    };
+
+    match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => {
+            if !is_grpc_unauthenticated(&err) {
+                return Err(err);
+            }
+            info!("RenewCert returned Unauthenticated; refreshing session");
+            let _guard = refresh_lock.lock().await;
+
+            let (access_token, refresh_token) = {
+                let s = state.read().await;
+                let sess = s
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("no session in state"))?;
+                (sess.access_token.clone(), sess.refresh_token.clone())
+            };
+
+            match renew_cert_rpc(conf, ca_pem, &access_token, device_id, csr_pem).await {
+                Ok(resp) => {
+                    info!("RenewCert succeeded after another task refreshed the session");
+                    return Ok(resp);
+                }
+                Err(err) if is_grpc_unauthenticated(&err) => {
+                    // Still expired. Continue to refresh below.
+                }
+                Err(err) => return Err(err),
+            }
+
+            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
+                .await
+                .map_err(|e| match e {
+                    auth::RefreshError::SessionDead => {
+                        anyhow::anyhow!("session expired; re-login required")
+                    }
+                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
+                })?;
+
+            state_store::save_rotated_tokens(
+                &conf.workspace,
+                new_tokens.access_token.clone(),
+                new_tokens.refresh_token.clone(),
+                new_tokens.expires_at,
+            )
+            .context("persist rotated tokens")?;
+
+            {
+                let mut s = state.write().await;
+                if let Some(sess) = s.session.as_mut() {
+                    sess.access_token = new_tokens.access_token.clone();
+                    sess.refresh_token = new_tokens.refresh_token;
+                    sess.expires_at = new_tokens.expires_at;
+                }
+            }
+
+            renew_cert_rpc(conf, ca_pem, &new_tokens.access_token, device_id, csr_pem).await
+        }
+    }
+}
+
+/// Pure: how long to sleep before the renewal window begins. Split out from
+/// the scheduler loop for unit testing without async/network, same reasoning
+/// as sync_acl_now_with being split from its real fetch. Clamped to 0 (never
+/// negative) — a cert already inside (or past) its renewal window means
+/// renew immediately, same as run_refresh_scheduler's `.max(0)`.
+fn renewal_sleep_secs(cert_expires_at: i64, now: i64) -> u64 {
+    let renew_at = cert_expires_at - RENEWAL_WINDOW_SECS;
+    (renew_at - now).max(0) as u64
+}
+
+/// Adds a one-time random jitter (±15 min) so a fleet of devices enrolled
+/// together doesn't all wake and hit RenewCert at the exact same instant
+/// (ADR-028 D1: "jittered retries"). Kept separate from renewal_sleep_secs so
+/// that function stays pure and testable.
+fn jittered_sleep_secs(sleep_secs: u64) -> u64 {
+    use rand::Rng;
+    let jitter_secs: i64 = rand::thread_rng().gen_range(-900..=900);
+    (sleep_secs as i64 + jitter_secs).max(0) as u64
+}
+
+/// Proactive device-cert renewal loop (ADR-028 D1). The daemon renews its own
+/// cert before expiry using a proof-of-possession CSR built from the SAME key
+/// it already holds — no user interaction, mirrors the connector/shield
+/// renewal pattern. Runs for the daemon's lifetime.
+///
+/// Lifecycle:
+///   - No device yet, or device_state != Active (Track 2 already revoked /
+///     flagged re-enroll-required — the key is wiped, nothing to renew):
+///     sleep and recheck, same shape as run_refresh_scheduler's "no session"
+///     branch.
+///   - Otherwise sleep until the renewal window (jittered), or wake early on
+///     cert_renewal_resync (DIRECTIVE_RENEW_SOON backstop — see
+///     react_to_device_directive).
+///   - Re-check device/device_state after waking — it may have changed
+///     during the sleep.
+///   - On success: update in-memory state AND persist via
+///     state_store::save_renewed_cert.
+///   - On failure: warn and retry after a flat backoff. Deliberately does
+///     NOT react to a denial by wiping/exiting — that is exclusively
+///     react_to_device_directive's job via the ACL poll. This loop's only
+///     job is renewing; it never touches DeviceState itself.
+async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf) {
+    const NO_DEVICE_POLL_SECS: u64 = 60;
+    const RENEWAL_RETRY_SECS: u64 = 30;
+
+    let resync = { state.read().await.cert_renewal_resync.clone() };
+
+    loop {
+        let (device_id, private_key_pem, hostname, cert_expires_at, ca_pem, eligible) = {
+            let s = state.read().await;
+            match (&s.device, s.device_state) {
+                (Some(d), DeviceState::Active) => (
+                    d.id.clone(),
+                    d.private_key_pem.clone(),
+                    d.hostname.clone(),
+                    d.cert_expires_at,
+                    d.ca_cert_pem.clone(),
+                    true,
+                ),
+                _ => (String::new(), String::new(), String::new(), 0, String::new(), false),
+            }
+        };
+
+        if !eligible {
+            tokio::time::sleep(std::time::Duration::from_secs(NO_DEVICE_POLL_SECS)).await;
+            continue;
+        }
+
+        let sleep_secs = jittered_sleep_secs(renewal_sleep_secs(cert_expires_at, now_unix()));
+        if sleep_secs > 0 {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)) => {}
+                _ = resync.notified() => {
+                    info!("RENEW_SOON directive received — waking renewal scheduler early");
+                }
+            }
+        }
+
+        // Re-check after waking: device_state may have changed while asleep.
+        let still_eligible = {
+            let s = state.read().await;
+            matches!((&s.device, s.device_state), (Some(_), DeviceState::Active))
+        };
+        if !still_eligible {
+            continue;
+        }
+
+        if let Err(e) = attempt_cert_renewal(
+            &state,
+            &conf,
+            &device_id,
+            &private_key_pem,
+            &hostname,
+            &ca_pem,
+        )
+        .await
+        {
+            warn!(error = %e, "cert renewal failed — retrying in {}s", RENEWAL_RETRY_SECS);
+            tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_RETRY_SECS)).await;
+        }
+    }
+}
+
+/// One renewal attempt: build the CSR, call RenewCert, persist + update state
+/// on success. Split out from run_cert_renewal_scheduler's loop (which owns
+/// only the sleep/eligibility/retry-timing logic) so the actual network +
+/// state + persistence wiring is directly callable from tests — same
+/// reasoning as sync_acl_now_with being split from sync_acl_now.
+async fn attempt_cert_renewal(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    device_id: &str,
+    private_key_pem: &str,
+    hostname: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    let csr_pem = build_renewal_csr(private_key_pem, hostname).context("build renewal CSR")?;
+    let resp = renew_cert_with_refresh(conf, ca_pem, state, device_id, &csr_pem).await?;
+
+    let new_ca_cert_pem = format!("{}\n{}", resp.workspace_ca_pem, resp.intermediate_ca_pem);
+
+    if let Err(e) = state_store::save_renewed_cert(
+        &conf.workspace,
+        resp.certificate_pem.clone(),
+        new_ca_cert_pem.clone(),
+        resp.cert_expires_at,
+    ) {
+        warn!(error = %e, "persist renewed cert failed — in-memory update still applied");
+    }
+
+    let mut s = state.write().await;
+    if let Some(device) = s.device.as_mut() {
+        device.certificate_pem = resp.certificate_pem;
+        device.ca_cert_pem = new_ca_cert_pem;
+        device.cert_expires_at = resp.cert_expires_at;
+    }
+    info!(new_expiry = resp.cert_expires_at, "device cert renewed proactively");
+    Ok(())
 }
 
 /// Single-flight + cooldown state for the transport-recovery task, shared
@@ -2942,17 +3236,20 @@ mod posture_scheduler_tests {
 /// real state_store round-trip (not a mock) so the on-disk marker is actually
 /// verified — redirected to a tempdir via ZECURITY_STATE_DIR (state_store.rs)
 /// so tests never touch the real user's XDG state directory.
+// ZECURITY_STATE_DIR is a process-global env var; serialize every test that
+// sets it — across BOTH directive_tests and renewal_tests, not just within
+// one module — so parallel test threads (cargo test's default) never race
+// on it. A per-module guard would only serialize within that module, not
+// against the other one touching the same env var.
+#[cfg(test)]
+static STATE_DIR_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod directive_tests {
     use super::*;
     use crate::grpc::client_v1::AclSnapshot;
     use crate::state_store::{self, StoredDevice, StoredWorkspaceState};
-    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
-
-    // ZECURITY_STATE_DIR is a process-global env var; serialize the tests
-    // that set it so parallel test threads (cargo test's default) never race.
-    static STATE_DIR_GUARD: StdMutex<()> = StdMutex::new(());
 
     /// Points state_store at a fresh tempdir and seeds a state file for
     /// `workspace` with placeholder cert/key material, so mark_device_state's
@@ -3091,5 +3388,333 @@ mod directive_tests {
         assert_eq!(device.certificate_pem, "CERT", "NONE must not wipe credentials");
         assert!(s.acl_snapshot.is_some(), "NONE must not clear the cached ACL");
         assert_eq!(s.device_state, DeviceState::Active);
+    }
+}
+
+/// Cert renewal tests (Sprint 19 Track 3 / PENDING-13, ADR-028 D1).
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    // --- renewal_sleep_secs: pure wake-time math ---
+
+    #[test]
+    fn renewal_sleep_secs_far_from_expiry_sleeps_until_the_window() {
+        // 600_000s (~6.9d) remaining, window is 241_920s (~2.8d) — sleep
+        // until remaining life drops to exactly the window.
+        assert_eq!(renewal_sleep_secs(600_000, 0), 600_000 - RENEWAL_WINDOW_SECS as u64);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_inside_the_window_is_zero() {
+        // 200_000s (~2.3d) remaining is already less than the 241_920s
+        // window — renew immediately, don't sleep.
+        assert_eq!(renewal_sleep_secs(200_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_already_expired_is_zero() {
+        assert_eq!(renewal_sleep_secs(-100_000, 0), 0);
+    }
+
+    #[test]
+    fn renewal_sleep_secs_at_the_exact_boundary_is_zero() {
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS, 0), 0);
+        assert_eq!(renewal_sleep_secs(RENEWAL_WINDOW_SECS + 1, 0), 1);
+    }
+
+    // --- build_renewal_csr: same key, not a fresh one ---
+
+    #[test]
+    fn build_renewal_csr_reuses_the_same_key() {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let original_pem = key_pair.serialize_pem();
+        let original_pub_der = key_pair.public_key_der();
+
+        let csr_pem = build_renewal_csr(&original_pem, "test-host").expect("build CSR");
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
+        let (_, csr) =
+            X509CertificationRequest::from_der(&pem.contents).expect("parse CSR DER");
+
+        assert_eq!(
+            csr.certification_request_info.subject_pki.raw,
+            original_pub_der.as_slice(),
+            "renewal CSR must carry the SAME public key as the original device \
+             key — a fresh key would defeat the server's fingerprint-pinning \
+             check (Track3-Renew-Reenroll.md D-A)"
+        );
+    }
+
+    // --- RENEW_SOON directive wakes the scheduler, nothing else ---
+
+    #[tokio::test]
+    async fn renew_soon_directive_wakes_the_renewal_scheduler() {
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: "device-1".into(),
+                spiffe_id: "spiffe://example.test/device-1".into(),
+                certificate_pem: "CERT".into(),
+                private_key_pem: "KEY".into(),
+                ca_cert_pem: "CA".into(),
+                cert_expires_at: 1_700_000_000,
+                hostname: "host".into(),
+                os: "linux".into(),
+            });
+        }
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let resync = { state.read().await.cert_renewal_resync.clone() };
+
+        react_to_device_directive(
+            &state,
+            &conf,
+            &tun_slot,
+            DeviceDirective::DirectiveRenewSoon,
+            "certificate renewal due soon".into(),
+        )
+        .await
+        .expect("react_to_device_directive");
+
+        // Notify buffers a single permit even with no waiter yet, so a
+        // notified() call made AFTER notify_one() still resolves immediately
+        // — this is what actually proves the notification fired.
+        tokio::time::timeout(std::time::Duration::from_millis(100), resync.notified())
+            .await
+            .expect("cert_renewal_resync should have a pending notification");
+
+        let s = state.read().await;
+        assert_eq!(
+            s.device_state,
+            DeviceState::Active,
+            "RENEW_SOON must not change DeviceState — the device is still fully trusted"
+        );
+        assert_eq!(
+            s.device.as_ref().unwrap().certificate_pem,
+            "CERT",
+            "RENEW_SOON must not wipe credentials"
+        );
+    }
+
+    // --- Full e2e: attempt_cert_renewal against a REAL in-process TLS
+    // server. Every other test above verifies one piece of the wiring in
+    // isolation (the sleep math, the CSR reuses the same key, the notify
+    // fires) — this is the one test that proves those pieces are actually
+    // wired together correctly: real TLS handshake, real RenewCertRequest/
+    // Response wire types, real response parsing into RuntimeState, real
+    // save_renewed_cert disk write. build.rs enables server codegen (normally
+    // dead weight — this binary only ever dials OUT as a client) purely so
+    // this fake server can exist.
+
+    /// Only renew_cert does real work; every other RPC is unreachable in
+    /// this test and returns Unimplemented rather than panicking, so an
+    /// accidental call fails the test cleanly instead of aborting the task.
+    struct FakeRenewCertServer {
+        expected_device_id: String,
+    }
+
+    #[tonic::async_trait]
+    impl crate::grpc::client_v1::client_service_server::ClientService for FakeRenewCertServer {
+        async fn get_auth_config(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAuthConfigRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAuthConfigResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn initiate_auth(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::InitiateAuthRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::InitiateAuthResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn token_exchange(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::TokenExchangeRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::TokenExchangeResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn enroll_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::EnrollDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::EnrollDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_acl_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetAclSnapshotRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::GetAclSnapshotResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn get_transport_snapshot(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::GetTransportSnapshotRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::GetTransportSnapshotResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn revoke_device(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RevokeDeviceRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RevokeDeviceResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn report_device_posture(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::ReportDevicePostureRequest>,
+        ) -> Result<
+            tonic::Response<crate::grpc::client_v1::ReportDevicePostureResponse>,
+            tonic::Status,
+        > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        async fn renew_cert(
+            &self,
+            request: tonic::Request<crate::grpc::client_v1::RenewCertRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RenewCertResponse>, tonic::Status>
+        {
+            let req = request.into_inner();
+            if req.device_id != self.expected_device_id {
+                return Err(tonic::Status::not_found("unknown device"));
+            }
+            if req.csr_pem.is_empty() || req.access_token.is_empty() {
+                return Err(tonic::Status::invalid_argument("missing csr_pem/access_token"));
+            }
+            Ok(tonic::Response::new(crate::grpc::client_v1::RenewCertResponse {
+                certificate_pem: "FAKE-RENEWED-CERT".into(),
+                workspace_ca_pem: "FAKE-WORKSPACE-CA".into(),
+                intermediate_ca_pem: "FAKE-INTERMEDIATE-CA".into(),
+                cert_expires_at: 9_999_999_999,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn renewal_e2e_against_real_tls_server() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+
+        // Real self-signed TLS identity — connect_grpc always uses TLS, never
+        // plaintext, so a real handshake is part of what this test proves
+        // works. The self-signed cert doubles as its own trust anchor, same
+        // as any CA-of-one.
+        let cert_key =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let ca_pem = cert_key.cert.pem();
+        let server_identity = tonic::transport::Identity::from_pem(
+            cert_key.cert.pem(),
+            cert_key.key_pair.serialize_pem(),
+        );
+
+        let device_id = "device-e2e-1".to_string();
+
+        // Grab a free port, then release it — tonic binds it fresh. Small
+        // TOCTOU window, negligible in practice for a single-machine test.
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let server_device_id = device_id.clone();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(server_identity))
+                .unwrap()
+                .add_service(
+                    crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
+                        FakeRenewCertServer {
+                            expected_device_id: server_device_id,
+                        },
+                    ),
+                )
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        // Let the server start listening before the client dials.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let conf = config::ClientConf {
+            workspace: "ws-e2e-renewal".into(),
+            controller_address: format!("localhost:{}", addr.port()),
+            ..Default::default()
+        };
+
+        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let private_key_pem = key_pair.serialize_pem();
+
+        // Seed a state file so save_renewed_cert's load->mutate->save has
+        // something to load — mirrors seed_state_file in directive_tests.
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device_id.clone(),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&conf.workspace, &seeded).expect("seed state file");
+
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: device_id.clone(),
+                spiffe_id: "spiffe://example.test/device-e2e-1".into(),
+                certificate_pem: "OLD-CERT".into(),
+                private_key_pem: private_key_pem.clone(),
+                ca_cert_pem: "OLD-CA".into(),
+                cert_expires_at: 1_000,
+                hostname: "e2e-host".into(),
+                os: "linux".into(),
+            });
+            s.session = Some(SessionInfo {
+                access_token: "fake-access-token".into(),
+                refresh_token: "fake-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+
+        attempt_cert_renewal(
+            &state,
+            &conf,
+            &device_id,
+            &private_key_pem,
+            "e2e-host",
+            &ca_pem,
+        )
+        .await
+        .expect("attempt_cert_renewal against the real TLS server");
+
+        // In-memory state reflects the server's response.
+        let s = state.read().await;
+        let device = s.device.as_ref().unwrap();
+        assert_eq!(device.certificate_pem, "FAKE-RENEWED-CERT");
+        assert_eq!(device.ca_cert_pem, "FAKE-WORKSPACE-CA\nFAKE-INTERMEDIATE-CA");
+        assert_eq!(device.cert_expires_at, 9_999_999_999);
+        drop(s);
+
+        // Disk reflects it too — save_renewed_cert actually ran, not just
+        // the in-memory update.
+        let on_disk = state_store::load_workspace_state(&conf.workspace).expect("reload state");
+        assert_eq!(on_disk.device.certificate_pem, "FAKE-RENEWED-CERT");
+        assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
+        // The key never changes on renewal — that's the whole point of D-A.
+        assert_eq!(on_disk.device.private_key_pem, private_key_pem);
     }
 }
