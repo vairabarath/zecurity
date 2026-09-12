@@ -1,0 +1,187 @@
+# CI — build, lint and test on every push and pull request.
+#
+# Until this existed, the only workflows were tag-triggered release builds,
+# so nothing verified a branch before it merged. That is how `fixed-pendings`
+# came to have failing tests on it.
+#
+# Two deliberate choices:
+#
+#   * clippy runs WITHOUT `-D warnings`. There is a pre-existing warning
+#     backlog; failing on it would make this workflow red on day one and get
+#     it ignored, which is worse than not having it. Flip it on once the
+#     backlog is cleared — that is the point of adding it here as a comment
+#     rather than a TODO nobody sees.
+#
+#   * the Go job asserts an integration test actually RAN. Those tests
+#     `t.Skip()` when their database env vars are unset, so a suite with no
+#     database silently passes while testing almost nothing. Setting the
+#     variables is not enough; something has to check they arrived.
+
+name: CI
+
+on:
+  # `pull_request` is deliberately unfiltered: it fires for PRs into
+  # `fixed-pendings` today, and for the eventual `fixed-pendings` -> `main`
+  # PR, without needing an edit in between.
+  #
+  # `fixed-pendings` is a temporary integration branch. Remove it from the
+  # push list once it has merged to `main`. Until then it stays, because
+  # breakage has arrived there by direct merge rather than by PR before.
+  push:
+    branches: [main, fixed-pendings]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  controller:
+    name: controller (go)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ztna
+          POSTGRES_PASSWORD: ztna_dev_secret
+          POSTGRES_DB: ztna_platform
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ztna"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      valkey:
+        image: valkey/valkey:7.2-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "valkey-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # The suite reads a different variable per package, and any one left
+      # unset silently skips that package's integration tests. They all point
+      # at the same server; each test creates its own throwaway database.
+      PKI_TEST_DATABASE_URL: postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform?sslmode=disable
+      AUTH_TEST_DATABASE_URL: postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform?sslmode=disable
+      ENROLLMENT_TEST_DATABASE_URL: postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform?sslmode=disable
+      RESOURCE_TEST_DATABASE_URL: postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform?sslmode=disable
+      SHIELD_TEST_DATABASE_URL: postgres://ztna:ztna_dev_secret@localhost:5432/ztna_platform?sslmode=disable
+      AUTH_TEST_VALKEY_URL: redis://localhost:6379/15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: controller/go.mod
+          cache-dependency-path: controller/go.sum
+
+      - name: go build
+        working-directory: controller
+        run: go build ./...
+
+      - name: go vet
+        working-directory: controller
+        run: go vet ./...
+
+      - name: go test
+        working-directory: controller
+        run: go test ./...
+
+      - name: Verify integration tests actually ran
+        working-directory: controller
+        # Guards the failure mode this job exists to prevent: env vars not
+        # reaching the suite, every DB-backed test skipping, and the run going
+        # green having verified nothing.
+        run: |
+          out=$(go test ./internal/client/... -run TestDeviceGateDirectiveDerivation -v 2>&1) || true
+          echo "$out" | tail -25
+          if echo "$out" | grep -q -- "--- SKIP"; then
+            echo "::error::Integration tests SKIPPED — database env vars are not reaching the suite."
+            exit 1
+          fi
+          if ! echo "$out" | grep -q -- "--- PASS: TestDeviceGateDirectiveDerivation"; then
+            echo "::error::Expected integration test did not run or did not pass."
+            exit 1
+          fi
+
+  rust:
+    name: ${{ matrix.crate }} (rust)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [client, connector, shield, relay]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }}
+
+      - name: Install TPM libraries
+        # The client links tss-esapi against the system tpm2-tss stack
+        # (PENDING-17). No TPM device is needed to build or to run the tests:
+        # the TPM tests detect an unreachable /dev/tpmrm0 and skip, which is
+        # the correct behaviour on a runner.
+        if: matrix.crate == 'client'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+
+      - name: Install protoc
+        # client/connector/shield/relay generate their gRPC stubs at build
+        # time via tonic-build, which shells out to protoc.
+        run: sudo apt-get install -y protobuf-compiler
+
+      - name: cargo build
+        working-directory: ${{ matrix.crate }}
+        run: cargo build --all-targets
+
+      - name: cargo clippy
+        working-directory: ${{ matrix.crate }}
+        # No `-D warnings` yet — see the note at the top of this file.
+        run: cargo clippy --all-targets
+
+      - name: cargo test
+        working-directory: ${{ matrix.crate }}
+        run: cargo test
+
+  admin:
+    name: admin (react)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+
+      - name: npm ci
+        working-directory: admin
+        run: npm ci
+
+      - name: lint
+        working-directory: admin
+        run: npm run lint
+
+      - name: test
+        working-directory: admin
+        run: npm run test
+
+      - name: build
+        working-directory: admin
+        run: npm run build
