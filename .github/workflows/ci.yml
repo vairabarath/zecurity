@@ -186,7 +186,17 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Not 20: admin depends on undici 8, which calls
+          # `webidl.util.markAsUncloneable` — absent before Node 20.17/22, so
+          # every vitest worker failed to start with a TypeError that looked
+          # like a broken test suite and was not. The suite itself is fine
+          # (14 files, 69 tests) on a current Node.
+          #
+          # There is no `engines` field or `.nvmrc` in the repo, so nothing
+          # stops CI and developer machines drifting apart like this again.
+          # Adding one and switching to `node-version-file` would give both a
+          # single source of truth, the way the Go job uses go.mod.
+          node-version: 24
           cache: npm
           cache-dependency-path: admin/package-lock.json
 
