@@ -39,6 +39,11 @@ type resourcePolicyFixture struct {
 	pool  *pgxpool.Pool
 	fires *atomic.Int32
 
+	// notifier and cache are exposed so the Phase 6 propagation tests can drive
+	// the real invalidate -> recompile path rather than compiling blind.
+	notifier *policy.Notifier
+	cache    *policy.SnapshotCache
+
 	ctx         context.Context
 	workspaceID uuid.UUID
 	networkID   uuid.UUID
@@ -98,7 +103,8 @@ func newResourcePolicyFixture(t *testing.T) *resourcePolicyFixture {
 	networkID, shieldID := seedResourcePolicyNetwork(t, ctx, pool, workspaceID, "main")
 
 	fires := new(atomic.Int32)
-	notifier := policy.NewNotifier(policy.NewSnapshotCache())
+	cache := policy.NewSnapshotCache()
+	notifier := policy.NewNotifier(cache)
 	notifier.RegisterPushHook(func(string) { fires.Add(1) })
 
 	r := &Resolver{
@@ -123,6 +129,8 @@ func newResourcePolicyFixture(t *testing.T) *resourcePolicyFixture {
 		rr:               &resourceResolver{r},
 		pool:             pool,
 		fires:            fires,
+		notifier:         notifier,
+		cache:            cache,
 		ctx:              tctx,
 		workspaceID:      workspaceID,
 		networkID:        networkID,

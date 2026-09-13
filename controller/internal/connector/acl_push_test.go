@@ -23,8 +23,7 @@ func newTestPusher(reg *ConnectorRegistry, cache *policy.SnapshotCache, compile 
 
 func okCompile(version uint64) func(context.Context, *policy.Store, *posture.Store, *policy.Notifier, string) (*policy.CompiledACL, error) {
 	return func(_ context.Context, _ *policy.Store, _ *posture.Store, _ *policy.Notifier, ws string) (*policy.CompiledACL, error) {
-		return &policy.CompiledACL{Snapshot: &clientv1.ACLSnapshot{WorkspaceId: ws, Version: version},
-		}, nil
+		return &policy.CompiledACL{Snapshot: &clientv1.ACLSnapshot{WorkspaceId: ws, Version: version}}, nil
 	}
 }
 
@@ -96,7 +95,7 @@ func TestPushWorkspace_CompileErrorNoPush(t *testing.T) {
 	c := testClient("c1", "ws-A")
 	reg.add("c1", c)
 
-	failCompile := func(ctx context.Context, store *policy.Store, postureStore *posture.Store, notifier *policy.Notifier,ws string) (*policy.CompiledACL, error) {
+	failCompile := func(ctx context.Context, store *policy.Store, postureStore *posture.Store, notifier *policy.Notifier, ws string) (*policy.CompiledACL, error) {
 		return nil, errors.New("boom")
 	}
 	p := newTestPusher(reg, policy.NewSnapshotCache(), failCompile)
@@ -165,10 +164,10 @@ func TestPushWorkspace_Coalesces(t *testing.T) {
 		}
 		return &policy.CompiledACL{
 			Snapshot: &clientv1.ACLSnapshot{
-				WorkspaceId: ws, 
-				Version: v,
-				},
-				}, nil
+				WorkspaceId: ws,
+				Version:     v,
+			},
+		}, nil
 	}
 	p := newTestPusher(reg, cache, blockingCompile)
 	notifier.RegisterPushHook(p.PushWorkspace)
@@ -303,11 +302,11 @@ func TestPushWorkspace_StaleInsertDefersLastChange(t *testing.T) {
 			<-release
 		}
 		return &policy.CompiledACL{
-			 Snapshot: &clientv1.ACLSnapshot{
+			Snapshot: &clientv1.ACLSnapshot{
 				WorkspaceId: ws,
-				 Version: v,
-				  },
-				   }, nil
+				Version:     v,
+			},
+		}, nil
 	}
 	p := newTestPusher(reg, cache, compile)
 	notifier.RegisterPushHook(p.PushWorkspace)
@@ -343,5 +342,106 @@ func TestPushWorkspace_StaleInsertDefersLastChange(t *testing.T) {
 	if got := last.GetAclSnapshot().GetVersion(); got != 2 {
 		t.Fatalf("connector ended at version %d, want latest 2 "+
 			"(change #2 deferred by stale-insert; heartbeat cannot recover a version-matched cache)", got)
+	}
+}
+
+// ── PENDING-16 Phase 6: disconnect during push, recovery via heartbeat ───────
+
+// TestPushWorkspace_DisconnectedConnectorCatchesUpOnHeartbeat closes the one
+// propagation gap with no coverage.
+//
+// The pusher fans out to whoever is registered at that instant and never
+// retries: a Connector that is gone, or whose 128-slot mailbox is full, simply
+// misses the update (acl_push.go logs and moves on). The code relies entirely on
+// the Connector "recovering on its next heartbeat" -- a claim nothing exercised
+// end to end until now.
+//
+// TestPusher_ConcurrentPushAndDisconnect looks like it covers this but does not:
+// it is a -race smoke test that asserts nothing about delivery.
+func TestPushWorkspace_DisconnectedConnectorCatchesUpOnHeartbeat(t *testing.T) {
+	const ws = "ws-recover"
+
+	cache := policy.NewSnapshotCache()
+	reg := NewConnectorRegistry()
+	pusher := newTestPusher(reg, cache, okCompile(7))
+
+	// The Connector is disconnected when the policy changes, so it is absent
+	// from the registry and receives nothing.
+	pusher.PushWorkspace(ws)
+	waitDrained(t, pusher, ws)
+
+	// It reconnects, still holding the pre-change version 5.
+	reconnected := testClient("c-recover", ws)
+	reg.add("c-recover", reconnected)
+	if len(reconnected.outbound) != 0 {
+		t.Fatalf("reconnected connector already has %d messages, want 0", len(reconnected.outbound))
+	}
+
+	// Its next heartbeat reports the stale version. This is the fallback path:
+	// the handler compares against the cached snapshot and pushes because the
+	// versions differ.
+	h := &EnrollmentHandler{
+		PolicyStore:    policy.NewStore(nil),
+		PostureStore:   posture.NewStore(nil),
+		PolicyCache:    cache,
+		PolicyNotifier: policy.NewNotifier(cache),
+	}
+	if err := h.pushACLSnapshot(context.Background(), reconnected, 5); err != nil {
+		t.Fatalf("heartbeat catch-up: %v", err)
+	}
+	if len(reconnected.outbound) != 1 {
+		t.Fatalf("catch-up delivered %d messages, want 1", len(reconnected.outbound))
+	}
+	if v := (<-reconnected.outbound).GetAclSnapshot().GetVersion(); v != 7 {
+		t.Fatalf("caught up to version %d, want 7", v)
+	}
+
+	// A second heartbeat now reporting the current version must be a no-op, so
+	// convergence does not re-send on every subsequent beat.
+	if err := h.pushACLSnapshot(context.Background(), reconnected, 7); err != nil {
+		t.Fatalf("second heartbeat: %v", err)
+	}
+	if len(reconnected.outbound) != 0 {
+		t.Fatalf("converged connector got %d further messages, want 0", len(reconnected.outbound))
+	}
+}
+
+// TestPushACLSnapshot_GateEdges covers the two branches of the heartbeat gate
+// that the existing gate test does not reach.
+//
+// The gate skips only on `connectorVersion != 0 && connectorVersion ==
+// snap.Version` (control_stream.go), which leaves two cases that must both push:
+// a Connector that has never held a snapshot, and one reporting a version ahead
+// of the Controller's -- possible after a Controller rollback or cache reset,
+// and the safe direction to err in.
+func TestPushACLSnapshot_GateEdges(t *testing.T) {
+	const ws = "ws-gate"
+
+	cache := policy.NewSnapshotCache()
+	cache.SetIfEpoch(ws, &clientv1.ACLSnapshot{WorkspaceId: ws, Version: 4}, time.Time{}, cache.Epoch(ws))
+
+	h := &EnrollmentHandler{
+		PolicyStore:    policy.NewStore(nil),
+		PostureStore:   posture.NewStore(nil),
+		PolicyCache:    cache,
+		PolicyNotifier: policy.NewNotifier(cache),
+	}
+
+	// Version 0 means "never received a snapshot": the gate is bypassed.
+	fresh := testClient("c-fresh", ws)
+	if err := h.pushACLSnapshot(context.Background(), fresh, 0); err != nil {
+		t.Fatalf("fresh connector: %v", err)
+	}
+	if len(fresh.outbound) != 1 {
+		t.Fatalf("fresh connector got %d messages, want 1 (version 0 must always push)", len(fresh.outbound))
+	}
+
+	// Ahead of the Controller: not equal, so it is treated as behind and pushed.
+	ahead := testClient("c-ahead", ws)
+	if err := h.pushACLSnapshot(context.Background(), ahead, 9); err != nil {
+		t.Fatalf("ahead connector: %v", err)
+	}
+	if len(ahead.outbound) != 1 {
+		t.Fatalf("ahead connector got %d messages, want 1 (resync to the Controller's view)", len(ahead.outbound))
 	}
 }

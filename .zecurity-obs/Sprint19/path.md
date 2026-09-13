@@ -157,8 +157,8 @@ P1  Database model + migration                          [x] done
  │    └── P3 GraphQL API                                 [x] done
  ├── P4 Safe legacy-binding migration/compatibility      [x] done (verified, code withdrawn)
  └── P5 ACL compiler integration                         [x] done — CUTOVER
-       └── P6 Policy-change propagation                  [ ] NEXT
-             └── P8 End-to-end authorization             [ ]
+       └── P6 Policy-change propagation                  [x] done
+             └── P8 End-to-end authorization             [ ] NEXT
 
 P7  Frontend Resource Policies + Device Profile usability [ ]
  └── P8 End-to-end verification                          [ ]
@@ -167,7 +167,7 @@ P9  Testing                                              [ ]
  └── P10 Final verification / documentation / build gates [ ]
 ```
 
-## Progress — Phases 1–5 complete (P1–P4 2026-09-05, P5 2026-09-09)
+## Progress — Phases 1–6 complete (P1–P4 2026-09-05, P5 2026-09-09, P6 2026-09-13)
 
 **The cutover has happened.** As of Phase 5 the ACL compiler resolves
 `Resource → Resource Policy → Device Profile(s)`; it no longer reads
@@ -182,6 +182,7 @@ field for visibility, but it no longer affects authorization.
 | P1 | done | `controller/migrations/037_device_resource_policies.sql` |
 | P2 | done | `controller/internal/posture/resource_policy_store.go` (12 operations) |
 | P3 | done | `controller/graph/resourcepolicy.graphqls` + resolvers (2 queries, 7 mutations, 3 relationship fields) |
+| P6 | done | Verification only — **no production code changed**. 8 boxes satisfied by pre-existing tests (cited in `Member02/Phase6-*`), 7 by new tests: 4 end-to-end convergence tests in `graph/resolvers/resourcepolicy_propagation_test.go` and 2 in `internal/connector/acl_push_test.go` (Connector disconnect → heartbeat catch-up, gate edges). |
 | P5 | done | `internal/posture/resource_policy_store.go` (`ListPolicyProfilesForWorkspace`) + `internal/policy/compiler.go` profile-source swap. 97 insertions / 34 deletions, no migration, no proto change, compiler signature unchanged. Matrix proven both directly against `applyPosture` and through full `CompileACLSnapshot` output. |
 | P4 | done | Decision record + verification method in `Member02/Phase4-*`. No code retained: the database is empty, so a backfill would move zero rows. Implemented and verified on 2026-09-05 (9 synthetic shapes, 7 tests, `LegacySet == NewSet` for every case), then deliberately withdrawn. |
 

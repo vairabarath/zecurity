@@ -2502,3 +2502,46 @@ serves on `127.0.0.1:9102`.
 - Still open and deliberately out of Phase 5's scope: `internal/resource` never
   assigns a policy, so new resources start `NULL`. Harmless under "NULL = Any
   Device", but "every resource has exactly one policy" is not self-maintaining.
+
+## 2026-09-13 — Claude Code (Sprint 19 / PENDING-16 Phase 6 — policy change propagation)
+
+**What was done:**
+- Verified that every Resource Policy change converges through the existing
+  mutation → NotifyPolicyChange → invalidate → recompile → push path.
+- **No production code changed.** All 15 boxes are verification; 8 were already
+  satisfied by pre-existing tests and are now cited in the phase doc, 7 needed
+  new tests.
+- New: 4 end-to-end convergence tests in
+  `graph/resolvers/resourcepolicy_propagation_test.go`, and 2 in
+  `internal/connector/acl_push_test.go` (Connector disconnect → heartbeat
+  catch-up; the two untested heartbeat-gate edges).
+
+**Key decisions:**
+- Convergence tests stop at the Controller boundary — mutation resolver →
+  recompile → assert `allowed_spiffe_ids`. Delivery is already covered by the
+  policy-agnostic push tests, so re-testing it would add maintenance, not proof.
+- Tests compile through `SnapshotCache.GetOrCompile`, never
+  `CompileACLSnapshot` directly, so each assertion also proves the mutation's
+  cache invalidation landed. A direct compile would pass even with invalidation
+  broken.
+- The requirement-change test asserts **both** halves of a two-step convergence:
+  the revision bump makes every stored evaluation stale so all devices are denied
+  (fail-closed), and `ReevaluateWorkspace` then restores access for satisfying
+  devices. Asserted so the transient deny window is never mistaken for a bug.
+
+**Verification:**
+- `go build ./...` clean; 23 packages pass; zero Phase 6 failures.
+- The 7 `TestGroupOrigin_*` failures remain inherited from `fixed-pendings`.
+- `TestProcessorRunProcessesEventIntegration` (`internal/outbox`, Sprint 18 code,
+  untouched here) failed once under a full parallel run and passed in isolation
+  and on a repeat run — DB contention against one test Postgres, not a
+  regression.
+
+**What's next:**
+- P7 (frontend) and P8 (Linux end-to-end) are the remaining build work; P8 is
+  marked NEXT in the dependency graph.
+- Two gaps recorded rather than fixed: the heartbeat wiring at
+  `control_stream.go:645` cannot be tested at that level without a database or a
+  refactor (`handleConnectorHealth` opens on a concrete `*pgxpool.Pool`), and
+  `GetACLSnapshot` — the Client convergence path with its `known_version` gate —
+  still has zero test coverage anywhere.
