@@ -37,6 +37,11 @@ pub enum IpcRequest {
         spiffe_id: String,
         certificate_pem: String,
         private_key_pem: String,
+        /// PENDING-17: set instead of `private_key_pem` when the device
+        /// enrolled with a TPM-backed key. Opaque here — the daemon just
+        /// persists whichever of the two the CLI produced.
+        #[serde(default)]
+        tpm_key_material: Option<String>,
         ca_cert_pem: String,
         cert_expires_at: i64,
         hostname: String,

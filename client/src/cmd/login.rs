@@ -93,6 +93,7 @@ pub async fn run() -> Result<()> {
         spiffe_id: result.device.spiffe_id,
         certificate_pem: result.device.certificate_pem,
         private_key_pem: result.device.private_key_pem,
+        tpm_key_material: result.device.tpm_key_material,
         ca_cert_pem: result.device.ca_cert_pem,
         cert_expires_at: result.device.cert_expires_at,
         hostname: result.device.hostname,
