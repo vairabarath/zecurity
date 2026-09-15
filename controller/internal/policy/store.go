@@ -58,7 +58,8 @@ func (s *Store) CreateGroup(ctx context.Context, workspaceID, name string, descr
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO groups (workspace_id, name, description)
 		 VALUES ($1, $2, $3)
-		 RETURNING id, workspace_id, name, description, created_at, updated_at`,
+		 RETURNING id, workspace_id, name, description, created_at, updated_at,
+		           origin, external_id, connection_id`,
 		workspaceID, name, description,
 	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt,
 		&row.Origin, &row.ExternalID, &row.ConnectionID)
@@ -76,9 +77,11 @@ func (s *Store) UpdateGroup(ctx context.Context, id string, name *string, descri
 		     description = COALESCE($3, description),
 		     updated_at  = NOW()
 		 WHERE id = $1
-		 RETURNING id, workspace_id, name, description, created_at, updated_at`,
+		 RETURNING id, workspace_id, name, description, created_at, updated_at,
+		           origin, external_id, connection_id`,
 		id, name, description,
-	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt)
+	).Scan(&row.ID, &row.WorkspaceID, &row.Name, &row.Description, &row.CreatedAt, &row.UpdatedAt,
+		&row.Origin, &row.ExternalID, &row.ConnectionID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

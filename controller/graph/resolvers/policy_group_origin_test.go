@@ -76,7 +76,7 @@ func newPolicyResolverFixture(t *testing.T) *policyResolverFixture {
 	slug := "test-ws-" + wsID.String()[:8]
 	_, err = pool.Exec(ctx,
 		`INSERT INTO workspaces (id, slug, name, status, trust_domain)
-		 VALUES ($1, $2, 'Policy Test Workspace', 'ACTIVE', 'td-policy-test')`,
+		 VALUES ($1, $2, 'Policy Test Workspace', 'active', 'td-policy-test')`,
 		wsID, slug,
 	)
 	if err != nil {
@@ -134,8 +134,8 @@ func createTestUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, works
 	t.Helper()
 	var uid string
 	err := pool.QueryRow(ctx,
-		`INSERT INTO users (tenant_id, email, role, provider, status)
-		 VALUES ($1, $2, 'MEMBER', 'manual', 'active')
+		`INSERT INTO users (tenant_id, email, role, provider, provider_sub, status)
+		 VALUES ($1, $2, 'member', 'manual', 'sub-' || $2, 'active')
 		 RETURNING id`,
 		workspaceID, email,
 	).Scan(&uid)
@@ -151,7 +151,7 @@ func createTestResource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	var netID string
 	err := pool.QueryRow(ctx,
 		`INSERT INTO remote_networks (tenant_id, name, location, status)
-		 VALUES ($1, 'Net-' || $2, 'us-east', 'ACTIVE')
+		 VALUES ($1, 'Net-' || $2, 'aws', 'active')
 		 RETURNING id`,
 		workspaceID, name,
 	).Scan(&netID)
@@ -159,13 +159,26 @@ func createTestResource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 		t.Fatalf("create remote network: %v", err)
 	}
 
+	// Insert connector — shields.connector_id is NOT NULL with no default,
+	// so a shield cannot exist without one.
+	var connectorID string
+	err = pool.QueryRow(ctx,
+		`INSERT INTO connectors (tenant_id, remote_network_id, name, status)
+		 VALUES ($1, $2, 'Conn-' || $3, 'active')
+		 RETURNING id`,
+		workspaceID, netID, name,
+	).Scan(&connectorID)
+	if err != nil {
+		t.Fatalf("create connector: %v", err)
+	}
+
 	// Insert shield
 	var shieldID string
 	err = pool.QueryRow(ctx,
-		`INSERT INTO shields (tenant_id, remote_network_id, name, lan_ip, status, auth_token_hash)
-		 VALUES ($1, $2, 'Shield-' || $3, '10.0.0.1', 'ACTIVE', 'dummy')
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, lan_ip, status)
+		 VALUES ($1, $2, $3, 'Shield-' || $4, '10.0.0.1', 'active')
 		 RETURNING id`,
-		workspaceID, netID, name,
+		workspaceID, netID, connectorID, name,
 	).Scan(&shieldID)
 	if err != nil {
 		t.Fatalf("create shield: %v", err)
@@ -174,7 +187,7 @@ func createTestResource(t *testing.T, ctx context.Context, pool *pgxpool.Pool, w
 	var resID string
 	err = pool.QueryRow(ctx,
 		`INSERT INTO resources (tenant_id, remote_network_id, shield_id, name, host, protocol, port_from, port_to, status)
-		 VALUES ($1, $2, $3, $4, 'internal.app', 'tcp', 8080, 8080, 'active')
+		 VALUES ($1, $2, $3, $4, 'internal.app', 'tcp', 8080, 8080, 'protected')
 		 RETURNING id`,
 		workspaceID, netID, shieldID, name,
 	).Scan(&resID)
@@ -404,7 +417,7 @@ func TestGroupOrigin_CrossWorkspace_RejectedAsNotFound(t *testing.T) {
 	otherWS := uuid.New()
 	_, err := f.pool.Exec(f.ctx,
 		`INSERT INTO workspaces (id, slug, name, status, trust_domain)
-		 VALUES ($1, $2, 'Other Workspace', 'ACTIVE', 'td-other')`,
+		 VALUES ($1, $2, 'Other Workspace', 'active', 'td-other')`,
 		otherWS, "other-"+otherWS.String()[:8],
 	)
 	if err != nil {
