@@ -19,6 +19,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { StatusPill } from '@/lib/console'
 import { asConflictError, conflictGuidance, type ConflictError } from '@/lib/conflictError'
+import { GrantBreakGlassButton } from '@/components/scim/GrantBreakGlassButton'
 
 function statusTone(status: string): 'ok' | 'warn' | 'muted' {
   switch (status) {
@@ -227,6 +228,17 @@ export function ConflictRow({
                 <AlertTitle>{guidance.title}</AlertTitle>
                 <AlertDescription>{guidance.body}</AlertDescription>
               </Alert>
+            ) : null}
+            {/* Recovery affordance on the FORBIDDEN accept path (PENDING-05 §5.1).
+                Only Accept can 403; require BOTH the accept dialog AND the
+                FORBIDDEN code (branch on extensions.code only, never on message
+                or guidance title). onGranted must NOT refetch, clear the reason,
+                or close the dialog — that would remount the row and destroy the
+                typed reason. Confirm stays gated on busy || !reason.trim(), so
+                the admin re-confirms deliberately; the accept is never
+                auto-retried (§9). */}
+            {dialog === 'accept' && error?.code === 'FORBIDDEN' ? (
+              <GrantBreakGlassButton successMessage="Granted identity.mapping.break_glass. Re-confirm to accept the link." />
             ) : null}
           </div>
 

@@ -91,10 +91,81 @@ describe('IdpConnectionDetail danger zone', () => {
 
     // The discriminating assertion: the mutation actually reached the link…
     await waitFor(() => expect(mutationFired).toBe(true))
-    // …and the derived state re-rendered the button from the normalised cache.
+    // …and the derived state re-rendered the control from the normalised cache.
+    // The control is BIDIRECTIONAL: a disabled connection offers a live "Enable"
+    // button, not an inert "Disabled" label. setIdpConnectionStatus accepts both
+    // 'active' and 'disabled', so leaving the admin with no way back was a gap,
+    // not a safety property.
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Disabled' })).toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Enable' })).toBeEnabled(),
     )
+  })
+
+  it('fires SetIdpConnectionStatus with active when Enable is clicked', async () => {
+    const user = userEvent.setup()
+    let sentStatus: string | null = null
+
+    const mocks = [
+      {
+        request: { query: GetIdpConnectionsDocument },
+        result: { data: { idpConnections: [connection('disabled')] } },
+        maxUsageCount: Number.POSITIVE_INFINITY,
+      },
+      {
+        request: {
+          query: SetIdpConnectionStatusDocument,
+          variables: { id: ID, status: 'active' },
+        },
+        result: () => {
+          sentStatus = 'active'
+          return {
+            data: {
+              setIdpConnectionStatus: {
+                __typename: 'IdpConnection',
+                id: ID,
+                status: 'active',
+              },
+            },
+          }
+        },
+      },
+    ]
+
+    renderDetail(mocks)
+
+    // The recovery guidance must be present so the admin learns that re-enabling
+    // restores the login path only — users stay suspended + unmanaged.
+    expect(
+      await screen.findByText(/affected users stay suspended/i),
+    ).toBeInTheDocument()
+
+    await user.click(await screen.findByRole('button', { name: 'Enable' }))
+
+    // The mutation variables are the discriminating assertion: the mock only
+    // matches status:'active', so a regression to the hardcoded 'disabled'
+    // fails here rather than silently no-opping.
+    await waitFor(() => expect(sentStatus).toBe('active'))
+  })
+
+  it('offers neither Enable nor Disable for a soft-deleted connection', async () => {
+    const mocks = [
+      {
+        request: { query: GetIdpConnectionsDocument },
+        result: { data: { idpConnections: [connection('deleted')] } },
+        maxUsageCount: Number.POSITIVE_INFINITY,
+      },
+    ]
+
+    renderDetail(mocks)
+
+    // 'deleted' is terminal — setIdpConnectionStatus only accepts
+    // 'active'/'disabled', so offering Enable here would always fail. It must
+    // also not be described as merely "disabled".
+    expect(await screen.findByText('Danger Zone')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Enable' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Disable' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Connection is disabled/i)).not.toBeInTheDocument()
+    expect(screen.getByText(/soft-deleted/i)).toBeInTheDocument()
   })
 
   it('hides the danger zone for platform-managed connections', async () => {
