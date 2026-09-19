@@ -5,7 +5,6 @@ import { toast } from 'sonner'
 import {
   EnableScimBreakGlassDocument,
   GetScimProviderProfilesDocument,
-  GrantWorkspacePermissionDocument,
   UpdateScimConfigDocument,
 } from '@/generated/graphql'
 import { Button } from '@/components/ui/button'
@@ -29,7 +28,7 @@ import { Switch } from '@/components/ui/switch'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { StatusPill } from '@/lib/console'
 import { BreakGlassDialog } from '@/components/scim/BreakGlassDialog'
-import { useAuthStore } from '@/store/auth'
+import { GrantBreakGlassButton } from '@/components/scim/GrantBreakGlassButton'
 
 type ScimProviderProfile = {
   key: string
@@ -145,13 +144,6 @@ export function ScimConfigCard({
 
   const [updateScimConfig, { loading: saving }] = useMutation(UpdateScimConfigDocument)
   const [enableBreakGlass, { loading: overriding }] = useMutation(EnableScimBreakGlassDocument)
-  // Grants the caller the identity.mapping.break_glass permission (ADR-025 §3.2).
-  // ADMIN-only mutation; possession is an explicit row, never implied by role.
-  // Once granted, enableScimBreakGlass (or the toggle's break-glass fallback) succeeds.
-  const [grantBreakGlass, { loading: granting }] = useMutation(GrantWorkspacePermissionDocument)
-
-  const currentUser = useAuthStore((s) => s.user)
-  const [breakGlassGranted, setBreakGlassGranted] = useState(false)
 
   const readOnly = connection.managed
   const mappingDirty =
@@ -223,30 +215,6 @@ export function ScimConfigCard({
       await enableBreakGlass({ variables: { connectionId: connection.id, reason } })
       setBreakGlass({ open: false, refusal: null })
       toast.success('SCIM enabled via break-glass override. The action was audited.')
-      onChanged()
-    } catch (err) {
-      toast.error(errorMessage(err))
-    }
-  }
-
-  // Grants the current admin the identity.mapping.break_glass permission so the
-  // break-glass enable path is available. Required because ADMIN role alone is
-  // NOT sufficient to enable SCIM against an unproven mapping (ADR-025 §3.2).
-  // The grant is itself audited server-side.
-  async function handleGrantBreakGlass() {
-    if (!currentUser?.id) {
-      toast.error('No authenticated user — cannot grant permission.')
-      return
-    }
-    try {
-      await grantBreakGlass({
-        variables: {
-          userId: currentUser.id,
-          permission: 'identity.mapping.break_glass',
-        },
-      })
-      setBreakGlassGranted(true)
-      toast.success('Granted identity.mapping.break_glass. You can now enable SCIM via break-glass.')
       onChanged()
     } catch (err) {
       toast.error(errorMessage(err))
@@ -398,19 +366,11 @@ export function ScimConfigCard({
                 an admin may grant the explicit <code>identity.mapping.break_glass</code> permission
                 and enable anyway — this is audited and does not mark the mapping proven.
               </p>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => void handleGrantBreakGlass()}
-                disabled={granting || breakGlassGranted}
-              >
-                {breakGlassGranted
-                  ? 'Break-glass permission granted'
-                  : granting
-                    ? 'Granting…'
-                    : 'Grant break-glass permission'}
-              </Button>
+              <GrantBreakGlassButton
+                label="Grant break-glass permission"
+                successMessage="Granted identity.mapping.break_glass. You can now enable SCIM via break-glass."
+                onGranted={onChanged}
+              />
             </AlertDescription>
           </Alert>
         ) : null}

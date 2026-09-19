@@ -43,7 +43,7 @@ export default function IdpConnectionDetail() {
   const [deleteConnection] = useMutation(DeleteIdpConnectionDocument, {
     refetchQueries: [{ query: GetIdpConnectionsDocument }],
   })
-  const [setConnectionStatus, { loading: disablePending }] = useMutation(
+  const [setConnectionStatus, { loading: statusPending }] = useMutation(
     SetIdpConnectionStatusDocument,
     { refetchQueries: [{ query: GetIdpConnectionsDocument }] },
   )
@@ -71,12 +71,17 @@ export default function IdpConnectionDetail() {
     } catch (err: unknown) {
       // Apollo UserError carries the server's verbatim refusal; show it in a
       // confirmation dialog so the user can decide to force-delete.
+      // Apollo Client 4 exposes the GraphQL errors on `.errors`
+      // (CombinedGraphQLErrors); `.graphQLErrors` is the removed v3 field and is
+      // kept only as a fallback. The err.message fallback below already covered
+      // this, so the symptom was invisible — the branch was simply dead.
       let msg = ''
-      if (err && typeof err === 'object' && 'graphQLErrors' in err) {
-        const gqe = (err as { graphQLErrors?: unknown[] }).graphQLErrors?.[0]
-        if (gqe && typeof gqe === 'object' && 'message' in gqe) {
-          msg = String((gqe as { message: unknown }).message)
-        }
+      const gqlErrors =
+        (err as { errors?: unknown[] })?.errors ??
+        (err as { graphQLErrors?: unknown[] })?.graphQLErrors
+      const gqe = gqlErrors?.[0]
+      if (gqe && typeof gqe === 'object' && 'message' in gqe) {
+        msg = String((gqe as { message: unknown }).message)
       }
       if (!msg && err && typeof err === 'object' && 'message' in err) {
         msg = String((err as { message: unknown }).message)
@@ -87,10 +92,12 @@ export default function IdpConnectionDetail() {
     }
   }
 
-  async function handleDisable() {
+  // Both directions go through the same mutation; the backend only accepts
+  // 'active' or 'disabled' (terminal deletion is a separate guarded mutation).
+  async function handleSetStatus(status: 'active' | 'disabled') {
     if (!connection) return
     await setConnectionStatus({
-      variables: { id: connection.id, status: 'disabled' },
+      variables: { id: connection.id, status },
     })
   }
 
@@ -135,7 +142,12 @@ export default function IdpConnectionDetail() {
 
   // Derived from the cache-normalised entity rather than held in local state,
   // so the button reflects the server's view after the mutation lands.
-  const isDisabled = connection.status !== 'active'
+  //
+  // 'deleted' is terminal and NOT re-enableable — setIdpConnectionStatus only
+  // accepts 'active' or 'disabled', so a soft-deleted connection must never be
+  // offered an Enable button (nor described as merely "disabled").
+  const isDeleted = connection.status === 'deleted'
+  const isDisabled = connection.status !== 'active' && !isDeleted
 
   return (
     <div className="space-y-6">
@@ -196,24 +208,35 @@ export default function IdpConnectionDetail() {
             Danger Zone
           </h3>
 
-          {/* Disable connection */}
-          <div className="space-y-2">
-            <label className="text-xs font-medium text-muted-foreground">
-              Disable connection
-            </label>
-            <Button
-              variant="outline"
-              onClick={() => void handleDisable()}
-              disabled={isDisabled || disablePending}
-            >
-              {isDisabled ? 'Disabled' : 'Disable'}
-            </Button>
-            {isDisabled && (
-              <p className="text-xs text-muted-foreground">
-                Connection is disabled. Sessions revoked; SCIM-managed users suspended.
-              </p>
-            )}
-          </div>
+          {/* Enable / disable connection. Terminal 'deleted' offers neither. */}
+          {!isDeleted && (
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">
+                {isDisabled ? 'Enable connection' : 'Disable connection'}
+              </label>
+              <Button
+                variant="outline"
+                onClick={() => void handleSetStatus(isDisabled ? 'active' : 'disabled')}
+                disabled={statusPending}
+              >
+                {statusPending
+                  ? 'Working…'
+                  : isDisabled
+                    ? 'Enable'
+                    : 'Disable'}
+              </Button>
+              {isDisabled && (
+                <p className="text-xs text-muted-foreground">
+                  Connection is disabled. Sessions revoked; SCIM-managed users suspended.
+                  Re-enabling restores the login path only — affected users stay suspended
+                  and <code>provisioning_owner=&apos;unmanaged&apos;</code>, so the directory&apos;s
+                  next push raises one entry per user in Provisioning conflicts. Accept each
+                  (requires <code>identity.mapping.break_glass</code>) to return them to SCIM
+                  control.
+                </p>
+              )}
+            </div>
+          )}
 
           {/* Delete connection */}
           <div className="space-y-2">
