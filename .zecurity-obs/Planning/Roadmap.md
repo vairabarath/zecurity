@@ -1,6 +1,6 @@
 ---
 type: planning
-status: active
+status: stale
 tags:
   - roadmap
   - planning
@@ -8,9 +8,20 @@ tags:
 
 # Roadmap
 
+> [!warning] Stale — last maintained during Sprint 6
+> Everything below is a snapshot from Sprint 6 and was never updated afterwards.
+> **Sprint 19 is the active sprint**, so the "Future Sprints" table and the
+> Sprint 6 plan here are history, not plans. Current status lives in:
+> - `.zecurity-obs/pending/README.md` — the accurate status index
+> - [[Sprint19/path]] — the active sprint's tracker
+> - [[Planning/Session Log]] — session-by-session record
+>
+> The completed-sprint write-ups below are still accurate for what those
+> sprints built, which is why this file is kept rather than deleted.
+
 ---
 
-## Current State (2026-04-24)
+## Historical State (as of 2026-04-24)
 
 Five sprints complete. Sprint 5 resource protection is done — Admin defines resources, Shield applies nftables rules, lifecycle tracked through `pending → managing → protecting → protected`. Sprint 6 is now active — discovery: Shield scans its own host for listening services and reports via Control stream; Connector executes admin-triggered TCP network scans.
 
@@ -71,7 +82,7 @@ Five sprints complete. Sprint 5 resource protection is done — Admin defines re
 
 ---
 
-### 🚧 Sprint 6 — Discovery (Active)
+### ✅ Sprint 6 — Discovery (Complete)
 
 **Goal:** Two discovery features: **(1) Shield Discovery** — Shield scans its own host's listening TCP ports via `/proc/net/tcp`, sends differential `DiscoveryReport` messages up the Control stream → Connector relays to Controller → Admin sees discovered services per Shield host and can promote any to a resource in one click. **(2) Connector Network Discovery** — Admin defines a scan scope (CIDR/IP list + ports) → Controller sends `ScanCommand` to Connector → Connector TCP-pings targets → Admin sees live services and can create resources from results.
 
@@ -125,7 +136,11 @@ After resource protection is stable:
 
 ---
 
-## Future Sprints (Rough Order)
+## Future Sprints (Rough Order — as planned in Sprint 6)
+
+> This was the plan *at the time*. Sprints 7–18 have since happened and did not
+> follow it line for line. Do not read this as the backlog; see
+> `.zecurity-obs/pending/README.md`.
 
 | Sprint | Feature |
 |--------|---------|

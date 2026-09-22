@@ -52,7 +52,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | ✅ [PENDING-13](PENDING-13-Client-Device-Lifecycle.md) → [ADR-028](../Decisions/ADR-028-Client-Device-Lifecycle-and-Cert-Renewal.md) | Client Device Lifecycle, Cert Renewal & Trust-Revocation Execution — **all 3 tracks done (Sprint 19)** | identity/ops | P1 | ADR-002, ADR-027, ADR-025 |
 | [PENDING-14](PENDING-14-FQDN-Resource-Access.md) | DNS / FQDN-Based Resource Access — *unbuilt (no `fqdn` code in the repo)* | data-plane | P2 | — |
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
-| [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — *unbuilt; today's `resource_profile_bindings` is the direct binding this replaces* | policy | P1 | PENDING-08, PENDING-09 |
+| 🚧 [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — **in progress, Sprint 19 Track A on branch `pending-16`**. Phases 1–7 done: the ACL compiler was cut over in Phase 5 and now resolves `Resource → Resource Policy → Device Profile(s)`; `device_profiles.mode` no longer affects authorization. Phase 8 (Linux end-to-end) next. | policy | P1 | PENDING-08, PENDING-09 |
 | [PENDING-17](PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (TPM/Secure Enclave) *(raised during PENDING-13 Track 3, 2026-08-27)* | identity/client | P2 | ADR-002, ADR-028 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·

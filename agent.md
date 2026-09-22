@@ -11,18 +11,20 @@ A team member will tell you their member number. When they do, execute this sequ
 
 ```
 1. Read this file (agent.md) fully
-2. Read .zecurity-obs/Sprint17/path.md
+2. Read .zecurity-obs/Sprint19/path.md — it carries BOTH Sprint 19 tracks
 3. Find the first unchecked phase for your member where all depends_on are checked
-4. Read that phase file
+4. Read that phase file (completed ones carry an Implementation record: what was
+   built, the decisions taken, and gaps deliberately left open)
 5. Tell the member: what they're building, which files to touch, the build check command
 ```
 
-If no member number is given, ask which Sprint 17 member role the human is working as.
+If no member number is given, ask which Sprint 19 track the human is picking up.
 
-**Active sprint plan:** `.zecurity-obs/Sprint17/path.md`
+**Active sprint plan:** `.zecurity-obs/Sprint19/path.md`
 
-**Sprint 17 member roles:**
-- M1: Go Controller — the whole SCIM identity engine (schema, SCIM token auth, break-glass permission, provider profiles + mapping, Users provision/update/deprovision, Groups, identity-conflict workflow, connection lifecycle + health + sync, `SideEffectSink`→outbox adapter). Solo M1; the durable outbox (Sprint 18) is already merged.
+**Sprint 19 roles — two independent tracks sharing the number:**
+- **Member02 — Track A (PENDING-16, Resource Policy → Device Profile Binding).** Full stack: migration, posture store, GraphQL, ACL compiler cutover, propagation, admin UI. Phases in `Sprint19/Member02/`. **Lives on branch `pending-16`.**
+- **Member2-Go — Track B (PENDING-13, Client Device Lifecycle).** Controller + Rust client. Phases in `Sprint19/Member2-Go/`.
 
 ---
 
@@ -51,17 +53,36 @@ If no member number is given, ask which Sprint 17 member role the human is worki
 **What's merged:**
 - Sprint 18: Durable Outbox Infrastructure (PENDING-15) — `controller/internal/outbox/*` + `migrations/033_outbox_events.sql`. Already merged into `fixed-pendings`; SCIM (Sprint 17) consumes it via `outbox.Enqueue` and never rebuilds it.
 
+- Sprint 17: SCIM Directory Synchronization (ADR-025) — merged into `fixed-pendings`.
+
 **What's active:**
-- Sprint 17: SCIM Directory Synchronization (ADR-025) — solo M1 sprint building the SCIM identity engine (schema, token auth, break-glass permission, provider profiles + mapping, Users provision/update/deprovision, Groups, conflict workflow, connection lifecycle + health + sync). See `.zecurity-obs/Sprint17/path.md`. It depends on the already-merged outbox (Sprint 18), so SCIM only calls `outbox.Enqueue` inside the identity tx.
+- **Sprint 19 Track A: Resource Policy → Device Profile Binding (PENDING-16).** Solo Member02, on branch `pending-16`. See `.zecurity-obs/Sprint19/path.md`.
+- Sprint 19 Track B: Client Device Lifecycle (PENDING-13), Member2-Go. Tracks 1–3 done.
 
-### Current M1 Task — M1 (SCIM identity engine)
+### Current Member02 Task — Track A, Phase 8 (Linux end-to-end)
 
-Build the directory-driven identity lifecycle:
+Phases 1–7 are complete. The authorization model has already been cut over:
 
-- Schema is **done** (Phase 1, `migrations/034_scim_directory_sync.sql`): connection/identity/group columns + `scim_tokens` / `scim_identity_conflicts` / `scim_sync_instances`.
-- Next phases: SCIM bearer-token auth (HMAC-SHA256 over `SCIM_TOKEN_HASH_KEY`), break-glass permission primitive, provider profiles + mapping probe, Users provision/update/deprovision (atomic with `identity.Revoker` + `SideEffectSink.Enqueue` into the merged outbox), Groups, identity-conflict workflow, connection lifecycle + health + sync.
-- `SideEffectSink` wraps the merged `outbox.Enqueue` — do **not** rebuild the outbox; SCIM only calls `outbox.Enqueue` inside the identity tx. Keep the `identity.SideEffectSink` interface as the seam so `scim`/`identity` never import `outbox` directly.
-- Verify with `go build ./...` and `go test ./internal/scim ./internal/identity` from `controller/`.
+- `Resource → Resource Policy → Device Profile(s)` is the **live** authorization
+  path. `internal/policy/compiler.go` no longer reads `resource_profile_bindings`
+  and no longer consults `device_profiles.mode`.
+- `applyPosture()` is unchanged — only the source of the profiles it receives.
+  Zero profiles still means **Any Device**; several are still OR'd.
+- `device_profiles.mode` survives as a column, a GraphQL field, and four
+  write-path guards, but has **no authorization effect**. Do not reintroduce it.
+- The legacy `resource_profile_bindings` table and its bind/unbind GraphQL
+  surface still exist and are untouched. The two models coexist; no data was
+  migrated (there is none to migrate — the project is pre-production).
+- Admin UI ships a Resource Policies tab; the Device Profiles page no longer
+  shows `boundResources`.
+
+**Phase 8 is the end-to-end proof:** a real Linux device reports posture,
+satisfies a profile, is authorized through a Resource Policy, and reaches a
+protected Resource. Note that Phase 7's eight "Admin can…" boxes rest on
+component tests, **not** a live pass — re-confirm them here.
+
+- Verify with `go build ./...` and `go test ./internal/policy ./internal/posture ./graph/resolvers` from `controller/`; `npm test` from `admin/`.
+- Integration tests need a PostgreSQL DSN in `PKI_TEST_DATABASE_URL`; the harness creates and drops its own databases.
 
 ---
 

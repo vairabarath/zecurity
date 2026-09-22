@@ -1,6 +1,6 @@
 ---
 type: adr
-status: pending
+status: in-progress
 id: PENDING-16
 domain: policy
 priority: P1
@@ -13,7 +13,38 @@ tags: [pending, adr, policy, resource-policy, device-profile, posture]
 
 # Pending ADR 16 — Resource Policy to Device Profile Binding
 
-> **Status: PENDING — for team discussion.** On adoption, promote to the next free `ADR-0NN`.
+> **Status: IN PROGRESS (Sprint 19 Track A, branch `pending-16`).** Phases 1–7 of
+> 10 are complete; Phase 8 (Linux end-to-end) is next. On completion, promote to
+> the next free `ADR-0NN`.
+>
+> **The open questions below are answered.** Every "Options" and "Open Questions"
+> entry is retained as the original decision record, but the decisions actually
+> taken are listed under *Decisions taken* immediately after this note. Where the
+> two differ, the decisions are authoritative.
+
+## Decisions taken (Sprint 19)
+
+| Question from below | Decision |
+|---|---|
+| Replace, retain, or extend `resource_profile_bindings`? | **Option B — retain temporarily.** The table and its bind/unbind GraphQL surface still exist and are untouched. The ACL compiler stopped reading it in Phase 5; a later, explicit cleanup owns removal. |
+| Schema for exactly one policy per Resource | A single nullable `resources.device_resource_policy_id`, so two policies are structurally impossible. Tenant safety is a **composite** foreign key `(policy, tenant) → (policy, workspace)`, not application-only. See `migrations/037_device_resource_policies.sql`. |
+| Default Policy — persisted object or fallback? | **Neither.** A `NULL` policy means Any Device, which is identical in effect to a policy holding zero profiles. No default object exists, so none has to be maintained. |
+| Reassignment when a policy is deleted | Does not arise: deleting a policy that any resource still uses is **refused** (`ErrPolicyAssigned`). The admin unassigns first. |
+| Permissions | `@hasRole(roles: [ADMIN])` on all 9 operations, matching the existing admin surface. |
+| Triggering `NotifyPolicyChange` | All 7 mutations call it exactly once on success and never on rejection. Verified in Phase 6. |
+| How the ACL compiler consumes the new relationship | One workspace-batch lookup, `ListPolicyProfilesForWorkspace`, keyed by resource. Its INNER JOIN makes "no policy" and "empty policy" indistinguishable — both yield Any Device with no special-casing. |
+| Migrating existing bindings without changing authorization | **Nothing was migrated: there is no data.** The project is pre-production, so a backfill would move zero rows. The migration logic was written and verified against nine synthetic legacy shapes, then deliberately withdrawn; `Sprint19/Member02/Phase4-*` records the method and the decisions for when real data exists. |
+| Frontend exposure | A Resource Policies tab with a profile picker. Zero profiles reads as "Any Device"; several read as `A or B`. The Device Profiles page no longer shows `boundResources`, which would have implied a profile grants access. |
+| OR semantics in the ACL snapshot/protobuf | **No protobuf change.** `ACLEntry` already carries only resolved `allowed_spiffe_ids`; the Connector never learns that Resource Policies exist. |
+| Future policy conditions | The policy is a first-class row, so new conditions attach to it without touching the Resource relationship. |
+
+**One behaviour change, accepted deliberately:** a resource carrying a legacy
+enforce binding but no Resource Policy is now **ungated**. Safe only because the
+database is empty; asserted by a test so it can never be discovered by surprise.
+
+**`device_profiles.mode` is retired from authorization** but survives as a column,
+a GraphQL field, and four write-path guards. Do not reintroduce it as a gate, and
+do not invent a replacement toggle.
 
 > **Verification note (2026-09-01):** still **PENDING** — confirmed unbuilt. `resource_profile_bindings`
 > (`controller/migrations/030_device_posture.sql:106`), enforced in

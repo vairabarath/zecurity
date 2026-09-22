@@ -10,6 +10,14 @@ tags:
 > Shared brain for all agents working on this project.
 > Read [[agent.md]] (project root) before starting any session.
 
+> [!warning] This index stopped being maintained after Sprint 6
+> The navigation and sprint table below were last updated during Sprint 6 and
+> are **not** a current status source. **Sprint 19 is the active sprint.**
+> For current status use, in order:
+> - `.zecurity-obs/pending/README.md` — the accurate status index (which PENDING items are built)
+> - [[Sprint19/path]] — the active sprint's dependency map and progress tracker
+> - [[Planning/Session Log]] — what was actually done, session by session
+
 ---
 
 ## Navigation
@@ -37,7 +45,12 @@ tags:
 - [[Sprint4/Member3-Go-DB-GraphQL/Phase1-DB-GraphQL-Schema]] — M3 phases (DB + GraphQL + Connector)
 - [[Sprint4/Member4-Rust-Shield-CI/Phase1-Crate-Scaffold]] — M4 phases (Shield binary + CI)
 
-### Sprint 6 (Active)
+### Sprint 19 (Active)
+- [[Sprint19/path]] — **Dependency map + progress tracker** for both Sprint 19 tracks
+- `Sprint19/Member02/` — Track A, PENDING-16 (Resource Policy → Device Profile binding)
+- `Sprint19/Member2-Go/` — Track B, PENDING-13 (Client device lifecycle)
+
+### Sprint 6 (Complete)
 - [[Sprint6/team-workflow]] — **How to start a session** (AI tool onboarding guide for team members)
 - [[Sprint6/path]] — **Dependency map + progress checkboxes** (check before any code)
 - [[Sprint6/Member1-Frontend/Phase1-Discovery-Tab]] — M1 phases (discovery tab + scan UI)
@@ -97,7 +110,9 @@ Controller:  spiffe://<trust_domain>/controller
 | Sprint 3 | ✅ Done    | Automatic cert renewal (RenewCert RPC, channel rebuild) |
 | Sprint 4 | ✅ Done    | Shield deployment (resource host agent, zecurity0, nftables base table) |
 | Sprint 5 | ✅ Done    | Resource protection (nftables per-resource, `pending → protected` lifecycle) |
-| Sprint 6 | 🚧 Active  | Discovery (Shield local service scan + Connector network scan) |
+| Sprint 6 | ✅ Done    | Discovery (Shield local service scan + Connector network scan) |
+| Sprints 7–18 | ✅ Done | Not itemised here — see `.zecurity-obs/pending/README.md` and [[Planning/Session Log]] |
+| Sprint 19 | 🚧 Active | Track A: Resource Policy → Device Profile binding (PENDING-16). Track B: client device lifecycle (PENDING-13) |
 
 ---
 
@@ -106,4 +121,4 @@ Controller:  spiffe://<trust_domain>/controller
 All agents: read `agent.md` at project root before any session.
 All changes to architecture: update the canvas files in `Architecture/`.
 All sessions: append an entry to [[Planning/Session Log]].
-Sprint 6 work: check [[Sprint6/path]] before touching any file.
+Sprint 19 work: check [[Sprint19/path]] before touching any file.

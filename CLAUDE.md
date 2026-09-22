@@ -8,7 +8,12 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 13 is the active sprint.** Decoupling transport from the ACL (Track B / PENDING-03 Option A): a first-class `TransportSnapshot` plane so relay routing propagates independently of authorization. **Solo sprint — M3 (Yogesh).** Executes the already-approved design in `Decisions/ADR-015`, `ADR-017`, `ADR-018` (Phases 1 & 3 only; the breaking ADR-018 Phase 4 removal is deferred). Sprint 12 (provider identity tier + authenticated relay provisioning, now `ADR-020`/`ADR-021`) just completed.
+**Sprint 19 is the active sprint.** Two independent tracks share the number:
+
+- **Track A — PENDING-16, Resource Policy → Device Profile Binding.** Solo, Member02. Introduces `Resource → Resource Policy → Device Profile(s)` as the authorization path, replacing the direct `resource_profile_bindings` model and retiring `device_profiles.mode` from authorization. **Phases 1–7 complete; Phase 8 (Linux end-to-end) is next.** Plan: `.zecurity-obs/Sprint19/path.md` (Track A), phases in `Sprint19/Member02/`.
+- **Track B — PENDING-13, Client Device Lifecycle.** Owner Member2-Go, phases in `Sprint19/Member2-Go/`. Tracks 1–3 done.
+
+> **Branch note.** Track A lives on `pending-16`, not `fixed-pendings`. Sprints 1–18 are complete; **do not** trust the sprint-by-sprint tables in `.zecurity-obs/Home.md` or `Planning/Roadmap.md` — both are frozen at Sprint 6. The accurate status index is `.zecurity-obs/pending/README.md`.
 
 ---
 
@@ -17,9 +22,9 @@
 When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint13/path.md` — dependency map and progress checkboxes (Sprint 13 is solo M3; other members: ask what they're picking up)
+2. Read `.zecurity-obs/Sprint19/path.md` — it carries **both** Sprint 19 tracks; Track A (PENDING-16) is Member02's, Track B (PENDING-13) is Member2-Go's
 3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
-4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
+4. **Check for "Post-Phase Fixes" / "Implementation" sections** in the phase file — completed phases record what was built, the decisions taken, and any gaps deliberately left
 5. Brief them: what they're building, which files to touch, and the build check command
 
 If they don't give you a member number, ask: *"Which team member are you? (M1 Frontend / M2 Go / M3 Go+Rust / M4 Rust)"*
@@ -31,8 +36,9 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint13/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint13/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint19/path.md` | Dependency map + progress tracker, both tracks |
+| `.zecurity-obs/Sprint19/Member02/Phase*.md` | Track A spec per phase, with an Implementation record once done |
+| `.zecurity-obs/pending/README.md` | **The accurate status index** — which PENDING items are built |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---

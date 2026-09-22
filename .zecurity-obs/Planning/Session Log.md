@@ -2599,3 +2599,55 @@ serves on `127.0.0.1:9102`.
   added (tab state is local `useState`, so two items on `/policies` would both
   highlight — deep-linking needs a `?tab=` convention), and the unmounted
   `<Toaster />` is worth fixing app-wide.
+
+---
+
+## 2026-09-22 — Claude Code (Opus 5) — Documentation status sweep
+
+**What was done:**
+- Docs only. No code in `controller/`, `connector/`, `shield/`, `client/`,
+  `relay/`, `admin/` or `proto/` was touched.
+- Brought the entry-point docs in line with where the project actually is. The
+  problem being fixed: a session starting from `CLAUDE.md`, `agent.md`,
+  `Home.md` or `Roadmap.md` was told Sprint 6 or Sprint 13/17 was active, and
+  would have picked up the wrong work.
+- `CLAUDE.md` — now states Sprint 19 is active and carries **two independent
+  tracks** under the same number: Track A (PENDING-16, Member02, branch
+  `pending-16`, Phases 1–7 done, Phase 8 next) and Track B (PENDING-13,
+  Member2-Go). Key Files table repointed at `Sprint19/path.md` and
+  `pending/README.md`.
+- `agent.md` — Quick Start reads `Sprint19/path.md`; added a "Current Member02
+  Task" section describing the completed authorization cutover.
+- `pending/README.md` — PENDING-16 row moved to 🚧 in progress with the branch
+  and phase state.
+- `PENDING-16-*.md` — `status: in-progress`, plus a "Decisions taken (Sprint 19)"
+  table answering all 11 of its original Open Questions from what was actually
+  built.
+- `Home.md` and `Planning/Roadmap.md` — both were frozen at Sprint 6 and both
+  claimed Sprint 6 was still active. Each now carries a staleness banner naming
+  the three sources that *are* current, Sprint 6 is marked complete, and
+  Roadmap's "Future Sprints" table is labelled as the Sprint 6-era plan rather
+  than the backlog.
+
+**Key decisions:**
+- `Home.md` and `Roadmap.md` were **kept, not rewritten**. Their completed-sprint
+  write-ups (Sprints 1–6) are still accurate for what those sprints built; only
+  the forward-looking parts were wrong. Deleting them would lose that history.
+- Sprints 7–18 are recorded as a single "done, not itemised here" row rather
+  than reconstructed sprint by sprint. Itemising them would mean asserting
+  history that was not verified in this session, and
+  `.zecurity-obs/pending/README.md` is already the authoritative index.
+- Every stale doc now points at the same three sources — `pending/README.md`,
+  `Sprint19/path.md`, `Planning/Session Log.md` — so there is one answer to
+  "what is true now", not four.
+
+**Notable findings:**
+- `Sprint19/Member02/Phase9-Testing.md` had an uncommitted stray keystroke
+  (`ws.7x` on the line after the H1), almost certainly typed into Obsidian by
+  accident. Reverted; the file is otherwise unchanged.
+- `origin/fixed-pendings` has moved ahead again (`db843e2`, was `c504f71`).
+  `pending-16` is behind and will need another merge before Phase 8 starts.
+
+**What's next:**
+- Phase 8, Linux end-to-end (Track A). Merge `fixed-pendings` into `pending-16`
+  first.
