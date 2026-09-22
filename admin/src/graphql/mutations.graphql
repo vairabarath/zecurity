@@ -407,3 +407,61 @@ mutation ReopenScimConflict(
     reason: $reason
   )
 }
+
+# --- Resource Policies (PENDING-16, Sprint 19 Phase 7) ---
+
+mutation CreateResourcePolicy($name: String!) {
+  createResourcePolicy(name: $name) {
+    id
+    name
+  }
+}
+
+mutation UpdateResourcePolicy($id: ID!, $name: String!) {
+  updateResourcePolicy(id: $id, name: $name) {
+    id
+    name
+  }
+}
+
+# Refused by the server while any resource still references the policy, so a
+# delete can never silently strip a resource of the policy its access depends on.
+mutation DeleteResourcePolicy($id: ID!) {
+  deleteResourcePolicy(id: $id)
+}
+
+# A resource holds exactly one policy: assigning a second, different one is
+# refused rather than replacing the existing assignment.
+mutation AssignResourcePolicy($resourceId: ID!, $policyId: ID!) {
+  assignResourcePolicy(resourceId: $resourceId, policyId: $policyId) {
+    id
+    name
+  }
+}
+
+mutation UnassignResourcePolicy($resourceId: ID!) {
+  unassignResourcePolicy(resourceId: $resourceId) {
+    id
+    name
+  }
+}
+
+mutation AddProfileToResourcePolicy($policyId: ID!, $profileId: ID!) {
+  addProfileToResourcePolicy(policyId: $policyId, profileId: $profileId) {
+    id
+    deviceProfiles {
+      id
+      name
+    }
+  }
+}
+
+mutation RemoveProfileFromResourcePolicy($policyId: ID!, $profileId: ID!) {
+  removeProfileFromResourcePolicy(policyId: $policyId, profileId: $profileId) {
+    id
+    deviceProfiles {
+      id
+      name
+    }
+  }
+}

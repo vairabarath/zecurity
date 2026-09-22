@@ -5,6 +5,7 @@ import { Plus, ShieldCheck } from "lucide-react";
 import {
   DeleteDeviceProfileDocument,
   GetDeviceProfilesDocument,
+  GetResourcePoliciesDocument,
 } from "@/generated/graphql";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,6 +17,7 @@ import {
 } from "@/components/ui/dialog";
 import { CreateDeviceProfileModal } from "@/components/CreateDeviceProfileModal";
 import { EditDeviceProfileModal } from "@/components/EditDeviceProfileModal";
+import { DeviceProfilePostureModal } from "@/components/DeviceProfilePostureModal";
 
 import { EmptyState, ErrorState, EntityIcon } from "@/lib/console";
 
@@ -65,6 +67,7 @@ export default function DeviceProfiles() {
   const [showAdd, setShowAdd] = useState(false);
   const [editingProfile, setEditingProfile] = useState<EditableProfile | null>(null);
   const [deletingProfile, setDeletingProfile] = useState<{ id: string; name: string } | null>(null);
+  const [posturingProfile, setPosturingProfile] = useState<{ id: string; name: string } | null>(null);
 
   const { data, loading, error, refetch } = useQuery(
     GetDeviceProfilesDocument,
@@ -85,7 +88,27 @@ export default function DeviceProfiles() {
     },
   );
 
+  // Which Resource Policies require each profile. This replaces the old
+  // "Bound Resources" column, which showed the legacy direct binding — a
+  // relationship Sprint 19 Phase 5 removed from authorization entirely, so
+  // displaying it told admins that a profile grants resource access when it does
+  // not. The reverse lookup is not exposed on DeviceProfile, so it is derived
+  // from the policies.
+  const { data: policyData } = useQuery(GetResourcePoliciesDocument, {
+    fetchPolicy: "cache-and-network",
+  });
+
   const deviceProfiles = useMemo(() => data?.deviceProfiles ?? [], [data]);
+
+  const policiesByProfile = useMemo(() => {
+    const map = new Map<string, string[]>();
+    for (const policy of policyData?.resourcePolicies ?? []) {
+      for (const profile of policy.deviceProfiles) {
+        map.set(profile.id, [...(map.get(profile.id) ?? []), policy.name]);
+      }
+    }
+    return map;
+  }, [policyData]);
 
   return (
     <div className="space-y-6">
@@ -110,8 +133,8 @@ export default function DeviceProfiles() {
 
       <div className="table-shell">
         <div className="table-scroll">
-          <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4">
-            {["Name", "Requirements", "Bound Resources", "Actions"].map(
+          <div className="table-head grid min-w-300 items-center grid-cols-[1.5fr_150px_170px_190px] gap-4 px-5 py-4">
+            {["Name", "Requirements", "Required By", "Actions"].map(
               (label, index) => (
                 <div
                   key={label + index}
@@ -153,7 +176,7 @@ export default function DeviceProfiles() {
               {deviceProfiles.map((profile) => (
                 <div
                   key={profile.id}
-                  className="admin-table-row group grid items-center grid-cols-[1.5fr_160px_160px_120px] gap-4 px-5 py-4"
+                  className="admin-table-row group grid items-center grid-cols-[1.5fr_150px_170px_190px] gap-4 px-5 py-4"
                 >
                   <div className="flex min-w-0 items-center gap-3">
                     <EntityIcon type="resource" />
@@ -173,15 +196,25 @@ export default function DeviceProfiles() {
                       </span>
                     )}
                   </div>
-                  <div className="text-[13px] font-semibold text-muted-foreground">
-                    {profile.boundResources.length === 0 ? (
-                      <span className="italic opacity-60">none</span>
+                  <div className="min-w-0 text-[13px] font-semibold text-muted-foreground">
+                    {(policiesByProfile.get(profile.id) ?? []).length === 0 ? (
+                      <span className="italic opacity-60">no policies</span>
                     ) : (
-                      profile.boundResources.length
+                      <span className="truncate">
+                        {(policiesByProfile.get(profile.id) ?? []).join(", ")}
+                      </span>
                     )}
                   </div>
 
                   <div className="flex items-center justify-end gap-3">
+                    <button
+                      onClick={() =>
+                        setPosturingProfile({ id: profile.id, name: profile.name })
+                      }
+                      className="text-[13px] font-bold text-muted-foreground transition hover:text-foreground"
+                    >
+                      Posture
+                    </button>
                     <button
                       onClick={() =>
                         setEditingProfile({
@@ -227,6 +260,16 @@ export default function DeviceProfiles() {
           setEditingProfile(null);
           refetch();
         }}
+      />
+
+      <DeviceProfilePostureModal
+        open={posturingProfile !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPosturingProfile(null);
+          }
+        }}
+        profile={posturingProfile}
       />
 
       <DeleteDeviceProfileDialog

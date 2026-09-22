@@ -328,6 +328,11 @@ query GetClientDevices {
   }
 }
 
+# boundResources is deliberately NOT selected. It is the legacy
+# resource_profile_bindings relationship, which Sprint 19 Phase 5 removed from
+# authorization entirely -- showing it would state that a Device Profile grants
+# Resource access, which is exactly what the new model does not do. Profile usage
+# is derived from GetResourcePolicies instead.
 query GetDeviceProfiles {
   deviceProfiles {
     id
@@ -337,10 +342,6 @@ query GetDeviceProfiles {
       id
       checkId
       allowUnsupported
-    }
-    boundResources {
-      id
-      name
     }
   }
 }
@@ -449,5 +450,42 @@ query GetScimConflicts($connectionId: ID!) {
     resolutionReason
     createdAt
     resolvedAt
+  }
+}
+
+# --- Resource Policies (PENDING-16, Sprint 19 Phase 7) ---
+# A Resource Policy is the access requirement layer:
+#   Resource -> exactly one Resource Policy -> zero or more Device Profiles.
+# An empty deviceProfiles list is a valid, intentional state meaning "Any Device";
+# several profiles are OR-evaluated. There is deliberately no audit/enforce mode.
+query GetResourcePolicies {
+  resourcePolicies {
+    id
+    name
+    createdAt
+    updatedAt
+    deviceProfiles {
+      id
+      name
+    }
+    resources {
+      id
+      name
+    }
+  }
+}
+
+# Posture satisfaction per device for one profile. Deliberately independent of
+# whether the profile is referenced by any Resource Policy — visibility is not
+# enforcement.
+query GetDeviceProfilePosture($profileId: ID!) {
+  devicePostureVisibility(profileId: $profileId) {
+    deviceId
+    deviceName
+    satisfied
+    stale
+    failureReason
+    evaluatedAt
+    reportAgeSeconds
   }
 }

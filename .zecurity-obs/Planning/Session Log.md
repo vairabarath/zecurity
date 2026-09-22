@@ -2545,3 +2545,57 @@ serves on `127.0.0.1:9102`.
   refactor (`handleConnectorHealth` opens on a concrete `*pgxpool.Pool`), and
   `GetACLSnapshot` — the Client convergence path with its `known_version` gate —
   still has zero test coverage anywhere.
+
+## 2026-09-22 — Claude Code (Sprint 19 / PENDING-16 Phase 7 — admin UI)
+
+**What was done:**
+- Built the admin surface for the Resource Policy model. Before this the Phase 3
+  API had no UI at all: an admin could not create a policy, attach a profile, or
+  assign a resource.
+- New Resource Policies tab: list page, create/edit slide-overs, delete
+  confirmation, device-profile picker, and a resource-assignment dialog.
+- New posture-visibility panel, wired to `GetDevicePostureVisibility` — a query
+  that already existed in the frontend but was consumed by no component.
+- `admin/` only. No controller, connector, shield, client, relay or proto change.
+
+**Key decisions:**
+- **Sign In Policy omitted.** The Policies tree lists one, but no backend exists
+  anywhere in the controller — no schema, no resolver, no store — so a tab would
+  be a control that cannot do anything. Recorded in `Policies.tsx` and asserted
+  by a test.
+- **`boundResources` removed from the Device Profiles page.** It is the legacy
+  binding Phase 5 made authorization-inert, so displaying it told admins that a
+  profile grants resource access when it no longer does — exactly what this
+  phase's UX requirement forbids. Replaced by "Required By", listing the Resource
+  Policies that reference the profile, derived client-side since `DeviceProfile`
+  exposes no reverse field.
+- The two misreadable semantics are stated in words, never as counts: zero
+  profiles reads as "Any Device" (never none/deny-all), and several profiles read
+  as `A or B` with "any one of N profiles".
+- One-policy-per-resource is expressed by filtering the assignment picker to
+  resources carrying no policy — the pattern `GroupDetail.tsx` already uses. The
+  server still enforces it and its refusal is surfaced.
+
+**Notable findings:**
+- `codegen.yml` lists the controller's schema files explicitly and was missing
+  `resourcepolicy.graphqls`, so codegen failed on every unknown field. One line
+  fixed it. `node_modules` was also absent; `npm ci` installed the pinned tree.
+- The phase asked to "remove the old Audit/Enforce control" — there was none to
+  remove. `updateDeviceProfileMode` was never defined in the frontend and
+  `GetDeviceProfiles` never selected `mode`.
+- `sonner`'s `<Toaster />` is not mounted anywhere in the app, so every
+  `toast.*()` call — pre-existing ones included — is a visual no-op. New panels
+  keep the inline error banner as the channel that works.
+
+**Verification:**
+- `npm run codegen`, `npx tsc -b`, `npm run build` all succeed; `npm test` is
+  86 passing across 17 files. All 18 lint problems are in pre-existing files.
+- The eight "Admin can…" boxes are checked on component tests, **not** a manual
+  pass against a running stack with a real Linux device. Phase 8 owns that proof
+  and should re-confirm them rather than treat them as demonstrated.
+
+**What's next:**
+- Phase 8, Linux end-to-end. Two items carried forward: no sidebar entry was
+  added (tab state is local `useState`, so two items on `/policies` would both
+  highlight — deep-linking needs a `?tab=` convention), and the unmounted
+  `<Toaster />` is worth fixing app-wide.

@@ -160,28 +160,31 @@ P1  Database model + migration                          [x] done
        └── P6 Policy-change propagation                  [x] done
              └── P8 End-to-end authorization             [ ] NEXT
 
-P7  Frontend Resource Policies + Device Profile usability [ ]
- └── P8 End-to-end verification                          [ ]
+P7  Frontend Resource Policies + Device Profile usability [x] done
+ └── P8 End-to-end verification                          [ ] NEXT
 
 P9  Testing                                              [ ]
  └── P10 Final verification / documentation / build gates [ ]
 ```
 
-## Progress — Phases 1–6 complete (P1–P4 2026-09-05, P5 2026-09-09, P6 2026-09-13)
+## Progress — Phases 1–7 complete (P1–P4 2026-09-05, P5 2026-09-09, P6 2026-09-13, P7 2026-09-22)
 
 **The cutover has happened.** As of Phase 5 the ACL compiler resolves
 `Resource → Resource Policy → Device Profile(s)`; it no longer reads
 `resource_profile_bindings` and no longer consults `device_profiles.mode`.
 `applyPosture()` itself is unchanged — only the source of the profiles it receives.
 
-The legacy table still exists and is still read by the `boundResources` GraphQL
-field for visibility, but it no longer affects authorization.
+The legacy table still exists and the `boundResources` GraphQL field still
+resolves from it, but nothing depends on either: it no longer affects
+authorization (Phase 5), and as of Phase 7 the admin UI no longer queries it —
+the Device Profiles page shows which Resource Policies require a profile instead.
 
 | Phase | State | Deliverable |
 |---|---|---|
 | P1 | done | `controller/migrations/037_device_resource_policies.sql` |
 | P2 | done | `controller/internal/posture/resource_policy_store.go` (12 operations) |
 | P3 | done | `controller/graph/resourcepolicy.graphqls` + resolvers (2 queries, 7 mutations, 3 relationship fields) |
+| P7 | done | Admin UI, `admin/` only — no backend change. New Resource Policies tab (list, create, edit, delete, resource assignment), profile picker, posture-visibility panel. The misleading `boundResources` column is replaced by "Required By". Sign In Policy deliberately omitted: no backend exists. 86 tests pass. The eight "Admin can…" boxes rest on component tests, not a live pass — Phase 8 must re-confirm them. |
 | P6 | done | Verification only — **no production code changed**. 8 boxes satisfied by pre-existing tests (cited in `Member02/Phase6-*`), 7 by new tests: 4 end-to-end convergence tests in `graph/resolvers/resourcepolicy_propagation_test.go` and 2 in `internal/connector/acl_push_test.go` (Connector disconnect → heartbeat catch-up, gate edges). |
 | P5 | done | `internal/posture/resource_policy_store.go` (`ListPolicyProfilesForWorkspace`) + `internal/policy/compiler.go` profile-source swap. 97 insertions / 34 deletions, no migration, no proto change, compiler signature unchanged. Matrix proven both directly against `applyPosture` and through full `CompileACLSnapshot` output. |
 | P4 | done | Decision record + verification method in `Member02/Phase4-*`. No code retained: the database is empty, so a backfill would move zero rows. Implemented and verified on 2026-09-05 (9 synthetic shapes, 7 tests, `LegacySet == NewSet` for every case), then deliberately withdrawn. |

@@ -5,6 +5,7 @@ import { MockedProvider } from "@apollo/client/testing/react";
 import DeviceProfiles from "./DeviceProfiles";
 import {
   GetDeviceProfilesDocument,
+  GetResourcePoliciesDocument,
   GetSupportedPostureChecksDocument,
 } from "@/generated/graphql";
 
@@ -22,7 +23,6 @@ const PROFILES = [
         allowUnsupported: false,
       },
     ],
-    boundResources: [],
   },
 ];
 
@@ -45,6 +45,10 @@ function renderWithMocks(profiles = PROFILES) {
     {
       request: { query: GetSupportedPostureChecksDocument },
       result: { data: { supportedPostureChecks: CHECKS } },
+    },
+    {
+      request: { query: GetResourcePoliciesDocument },
+      result: { data: { resourcePolicies: [] } },
     },
   ];
   return render(
