@@ -10,6 +10,11 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+# Independent signature verification in the TPM tests: proves a TPM-produced
+# signature validates against the TPM's public key under the exact algorithm
+# rustls uses (ECDSA P-256 / SHA-256, ASN.1 DER signature). Already in the
+# tree via rustls' "ring" feature.
+ring = "0.17"
 
 [dependencies]
 clap       = { version = "4", features = ["derive"] }
@@ -55,6 +60,17 @@ smoltcp            = { version = "0.11", features = ["proto-ipv4", "socket-tcp",
 rtnetlink          = "0.14"
 netlink-packet-route = "0.19"
 futures            = "0.3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PENDING-17: hardware-backed device keys. Linux-only — never attempted on a
+# hypothetical future non-Linux target.
+tss-esapi = "7"
+# DER-encode the TPM's raw ECDSA r/s components into an ECDSA-Sig-Value
+# SEQUENCE — already in the dependency tree transitively via tss-esapi, this
+# just makes them directly usable. Versions pinned to what tss-esapi already
+# resolves to avoid a duplicate second copy in the build.
+picky-asn1 = "0.10"
+picky-asn1-der = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"

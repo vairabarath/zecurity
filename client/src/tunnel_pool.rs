@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use quinn::Connection;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
 use rustls::{CertificateError, DigitallySignedStruct, Error, SignatureScheme};
 use rustls_pemfile::{certs, private_key};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -198,6 +199,53 @@ pub fn parse_private_key_der(key_pem: &str, label: &str) -> Result<PrivateKeyDer
         .with_context(|| format!("{label} private key PEM contains no private key"))
 }
 
+/// The device's mTLS client identity: its certificate chain plus a signing
+/// key that is either an in-memory software key or a TPM-backed signer.
+///
+/// Both data-plane pools build client auth through this one function so the
+/// two key backends stay indistinguishable to everything downstream. It
+/// returns rustls' own [`CertifiedKey`], which is exactly what
+/// `with_client_auth_cert` constructs internally — that convenience method is
+/// literally `CertifiedKey::from_der(...)` followed by
+/// `with_client_cert_resolver(SingleCertAndKey::from(...))`. Callers use the
+/// resolver form directly because the TPM branch has no private key DER to
+/// hand `with_client_auth_cert` in the first place.
+///
+/// Software devices take the identical path rustls would have taken for them
+/// anyway; only the TPM branch differs, and only in *where the signature
+/// comes from*.
+pub fn build_client_certified_key(
+    cert_chain: Vec<CertificateDer<'static>>,
+    key_pem: &str,
+    tpm_key_material: Option<&str>,
+) -> Result<Arc<CertifiedKey>> {
+    match tpm_key_material {
+        #[cfg(target_os = "linux")]
+        Some(serialized) => {
+            // No private key is produced, parsed, or passed to rustls here:
+            // the signing key is a handle that asks the TPM to sign.
+            let key_material = crate::tpm::deserialize_key_material(serialized)?;
+            let signing_key = crate::tpm::signing_key(key_material)
+                .context("build TPM-backed rustls signing key")?;
+            Ok(Arc::new(CertifiedKey {
+                cert: cert_chain,
+                key: signing_key,
+                ocsp: None,
+            }))
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some(_) => bail!("device has TPM-backed key material but this build has no TPM support"),
+        None => {
+            let key_der = parse_private_key_der(key_pem, "device")?;
+            let provider = rustls::crypto::CryptoProvider::get_default()
+                .context("no rustls crypto provider installed")?;
+            CertifiedKey::from_der(cert_chain, key_der, provider)
+                .map(Arc::new)
+                .context("build software-key client identity")
+        }
+    }
+}
+
 pub fn parse_ca_bundle(ca_pem: &str) -> Result<ParsedCaBundle> {
     let mut reader = std::io::BufReader::new(ca_pem.as_bytes());
     let certs = certs(&mut reader)
@@ -275,7 +323,12 @@ pub struct TunnelPool {
 }
 
 impl TunnelPool {
-    pub fn new(cert_pem: &str, key_pem: &str, ca_pem: &str) -> Result<Self> {
+    pub fn new(
+        cert_pem: &str,
+        key_pem: &str,
+        tpm_key_material: Option<&str>,
+        ca_pem: &str,
+    ) -> Result<Self> {
         let cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
         let trust_domain = extract_client_trust_domain(
             cert_chain
@@ -283,7 +336,7 @@ impl TunnelPool {
                 .context("device cert chain is empty")?
                 .as_ref(),
         )?;
-        let private_key = parse_private_key_der(key_pem, "device")?;
+        let certified_key = build_client_certified_key(cert_chain, key_pem, tpm_key_material)?;
         let ca_bundle = parse_ca_bundle(ca_pem)?;
         let expected = format!("spiffe://{trust_domain}/connector/");
 
@@ -298,8 +351,7 @@ impl TunnelPool {
         let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(PrefixSpiffeVerifier::new(roots, expected)?)
-            .with_client_auth_cert(cert_chain, private_key)
-            .context("build tunnel rustls client config")?;
+            .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
         tls_config.alpn_protocols = vec![b"ztna-tunnel-v1".to_vec()];
 
         let quic_client_cfg = quinn_proto::crypto::rustls::QuicClientConfig::try_from(tls_config)
@@ -525,5 +577,168 @@ mod tests {
             ExactSpiffeVerifier::new_relay(roots, "spiffe://zecurity.in/relay/test", manager)
                 .unwrap();
         assert!(verifier.verify_relay_revocation(&cert).is_err());
+    }
+}
+
+/// TPM-backed client authentication (PENDING-17). Exercises the real
+/// `build_client_certified_key` path all three data-plane call sites use,
+/// against real TPM hardware. Skips when no TPM is reachable.
+#[cfg(all(test, target_os = "linux"))]
+mod tpm_client_auth_tests {
+    use super::*;
+    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
+
+    fn install_provider() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+
+    struct TestPki {
+        ca_der: CertificateDer<'static>,
+        client_chain: Vec<CertificateDer<'static>>,
+        server_chain: Vec<CertificateDer<'static>>,
+        server_key_der: PrivateKeyDer<'static>,
+    }
+
+    /// Issues a client certificate whose SUBJECT PUBLIC KEY is the TPM's —
+    /// `signed_by` takes the subject's public key and the issuer's signing
+    /// key separately, so the TPM key pair supplies the former while the
+    /// software test CA signs. This is the same shape the real controller
+    /// produces from a TPM-backed CSR.
+    fn test_pki(tpm_key_pair: &KeyPair) -> TestPki {
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name = DistinguishedName::new();
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "tpm-test-ca");
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+        let mut client_params = CertificateParams::new(vec!["tpm-client".to_string()]).unwrap();
+        client_params.distinguished_name = DistinguishedName::new();
+        client_params
+            .distinguished_name
+            .push(DnType::CommonName, "tpm-client");
+        let client_cert = client_params
+            .signed_by(tpm_key_pair, &ca_cert, &ca_key)
+            .unwrap();
+
+        let server_key = KeyPair::generate().unwrap();
+        let server_cert = CertificateParams::new(vec!["localhost".to_string()])
+            .unwrap()
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
+
+        TestPki {
+            ca_der: ca_cert.der().clone(),
+            client_chain: vec![client_cert.der().clone()],
+            server_chain: vec![server_cert.der().clone()],
+            server_key_der: PrivateKeyDer::try_from(server_key.serialize_der()).unwrap(),
+        }
+    }
+
+    /// Requirements C/E/F: a real mTLS handshake authenticated by a key that
+    /// only exists inside the TPM.
+    ///
+    /// The client identity is built through the same
+    /// `build_client_certified_key` the tunnel and relay pools use, and is
+    /// given an EMPTY private-key PEM — if any code path still needed private
+    /// key material it would fail here rather than silently succeed, which is
+    /// the negative assertion requirement E asks for.
+    ///
+    /// A completed handshake means the server verified a CertificateVerify
+    /// signature that the TPM produced.
+    #[tokio::test]
+    async fn tpm_backed_client_auth_completes_a_real_mtls_handshake() {
+        install_provider();
+        if !crate::tpm::tpm_available() {
+            eprintln!("skipping: no accessible TPM on this machine");
+            return;
+        }
+
+        let (key_material, _public) = crate::tpm::generate().expect("generate TPM key");
+        let serialized =
+            crate::tpm::serialize_key_material(&key_material).expect("serialize key material");
+        let tpm_key_pair = crate::tpm::load(key_material).expect("load TPM key");
+        let pki = test_pki(&tpm_key_pair);
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(pki.ca_der.clone()).unwrap();
+        let roots = Arc::new(roots);
+
+        // Server demands a client certificate chaining to the test CA.
+        let verifier = rustls::server::WebPkiClientVerifier::builder(roots.clone())
+            .build()
+            .expect("build client cert verifier");
+        let server_config = rustls::ServerConfig::builder()
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(pki.server_chain, pki.server_key_der)
+            .expect("server config");
+
+        // Client identity: TPM-backed, and note the empty key PEM.
+        let certified_key = build_client_certified_key(pki.client_chain, "", Some(&serialized))
+            .expect("build TPM-backed client identity");
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(Arc::try_unwrap(roots).unwrap_or_else(|a| (*a).clone()))
+            .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+            let (stream, _) = listener.accept().await.expect("accept");
+            let tls = acceptor.accept(stream).await.expect("server handshake");
+            // Peer certificates are only present once client auth succeeded.
+            let (_, conn) = tls.get_ref();
+            conn.peer_certificates()
+                .map(|c| c.len())
+                .expect("server must have received a client certificate")
+        });
+
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let server_name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let client_tls = connector
+            .connect(server_name, stream)
+            .await
+            .expect("client handshake must succeed using a TPM-held key");
+
+        let (_, client_conn) = client_tls.get_ref();
+        assert!(
+            client_conn.negotiated_cipher_suite().is_some(),
+            "handshake should be complete"
+        );
+
+        let peer_cert_count = server.await.expect("server task");
+        assert_eq!(peer_cert_count, 1, "server saw the TPM-backed client cert");
+    }
+
+    /// Requirement E, stated directly: the software path genuinely needs a
+    /// private key, and the TPM path genuinely does not. If the TPM branch
+    /// ever started requiring key material, this test would start passing
+    /// for the wrong reason — hence asserting the software branch fails on
+    /// the same empty input.
+    #[test]
+    fn tpm_identity_needs_no_private_key_but_software_identity_does() {
+        install_provider();
+        if !crate::tpm::tpm_available() {
+            eprintln!("skipping: no accessible TPM on this machine");
+            return;
+        }
+
+        let (key_material, _public) = crate::tpm::generate().expect("generate TPM key");
+        let serialized =
+            crate::tpm::serialize_key_material(&key_material).expect("serialize key material");
+        let tpm_key_pair = crate::tpm::load(key_material).expect("load TPM key");
+        let pki = test_pki(&tpm_key_pair);
+
+        build_client_certified_key(pki.client_chain.clone(), "", Some(&serialized))
+            .expect("TPM identity must build with no private key whatsoever");
+
+        assert!(
+            build_client_certified_key(pki.client_chain, "", None).is_err(),
+            "software identity must require an actual private key"
+        );
     }
 }
