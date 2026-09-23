@@ -2,16 +2,40 @@ package permission
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // ── test harness ───────────────────────────────────────────────────────────────
+
+func mustConnectPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping: %v", err)
+	}
+	return pool
+}
+
+func withDBName(dsn, dbName string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + dbName
+	return parsed.String(), nil
+}
 
 func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
@@ -23,14 +47,6 @@ func applyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	sort.Strings(files)
-
-	// Reset the schema so migrations are applied against a clean database on
-	// every run. Tests share a persistent DB via PKI_TEST_DATABASE_URL, and the
-	// migrations are not idempotent (plain CREATE TABLE), so without this the
-	// second run fails with "relation already exists".
-	if _, err := pool.Exec(ctx, "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"); err != nil {
-		return err
-	}
 
 	for _, f := range files {
 		b, err := os.ReadFile(f)
@@ -77,11 +93,30 @@ func TestPermissionStore_Integration(t *testing.T) {
 		t.Skip("PKI_TEST_DATABASE_URL not set")
 	}
 
+	// Migrate a throwaway database rather than the one PKI_TEST_DATABASE_URL
+	// names. That database is shared with other packages' integration tests,
+	// which `go test ./...` runs in parallel, so resetting its schema here
+	// dropped their tables out from under them mid-test.
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, adminDSN)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
+	dbName := "permission_test_" + uuid.NewString()[0:8]
+
+	adminPool := mustConnectPool(t, ctx, adminDSN)
+	defer adminPool.Close()
+
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
 	}
+	defer func() {
+		if _, err := adminPool.Exec(ctx, "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	}()
+
+	testDSN, err := withDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test dsn: %v", err)
+	}
+	pool := mustConnectPool(t, ctx, testDSN)
 	defer pool.Close()
 
 	if err := applyMigrations(ctx, pool); err != nil {
