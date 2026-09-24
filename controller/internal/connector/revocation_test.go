@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -57,19 +61,88 @@ func (s *stubControlServer) Recv() (*pb.ConnectorControlMessage, error) {
 var _ pb.ConnectorService_ControlServer = (*stubControlServer)(nil)
 var _ grpc.ServerStream = (*stubControlServer)(nil)
 
+// setupRevocationTestDB migrates a throwaway database rather than the one
+// ENROLLMENT_TEST_DATABASE_URL names. That database is shared with other
+// packages' integration tests, which `go test ./...` runs in parallel, and
+// (unlike this package's other DB-backed tests) these seed rows directly
+// against it with no migration step of their own — so it must already carry
+// the full schema, which nothing here can assume. Create a uniquely named
+// connector_test_<id> database, migrate that, and drop it afterwards — the
+// pattern the scim, idp, permission and identity integration tests use.
 func setupRevocationTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
 	t.Helper()
-	dsn := os.Getenv("ENROLLMENT_TEST_DATABASE_URL")
-	if dsn == "" {
+	adminDSN := os.Getenv("ENROLLMENT_TEST_DATABASE_URL")
+	if adminDSN == "" {
 		t.Skip("ENROLLMENT_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
+	dbName := "connector_test_" + uuid.NewString()[:8]
+
+	adminPool := mustConnectRevocationPool(t, ctx, adminDSN)
+	t.Cleanup(adminPool.Close)
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := adminPool.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	})
+
+	testDSN, err := withRevocationDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test dsn: %v", err)
+	}
+	pool := mustConnectRevocationPool(t, ctx, testDSN)
+	t.Cleanup(pool.Close)
+	if err := applyRevocationMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	return pool, ctx
+}
+
+func mustConnectRevocationPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatalf("connect to database: %v", err)
+		t.Fatalf("pgxpool.New: %v", err)
 	}
-	t.Cleanup(pool.Close)
-	return pool, ctx
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping: %v", err)
+	}
+	return pool
+}
+
+func withRevocationDBName(dsn, dbName string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + dbName
+	return parsed.String(), nil
+}
+
+func applyRevocationMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		return err
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, string(b)); err != nil {
+			return fmt.Errorf("execute %s: %w", filepath.Base(f), err)
+		}
+	}
+	return nil
 }
 
 func seedRevocationWorkspace(t *testing.T, pool *pgxpool.Pool, ctx context.Context, slug string) (wsID string, trustDomain string, rnID string) {

@@ -2,31 +2,108 @@ package shield
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// setupHeartbeatTestDB migrates a throwaway database rather than the one
+// SHIELD_TEST_DATABASE_URL names. That database is shared with other
+// packages' integration tests, which `go test ./...` runs in parallel, and
+// (unlike this package's other DB-backed tests) these seed rows directly
+// against it with no migration step of their own — so it must already carry
+// the full schema, which nothing here can assume. Create a uniquely named
+// shield_test_<id> database, migrate that, and drop it afterwards — the
+// pattern the scim, idp, permission and identity integration tests use.
+func setupHeartbeatTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
+	t.Helper()
+	adminDSN := os.Getenv("SHIELD_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("SHIELD_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	dbName := "shield_test_" + uuid.NewString()[:8]
+
+	adminPool := mustConnectHeartbeatPool(t, ctx, adminDSN)
+	t.Cleanup(adminPool.Close)
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := adminPool.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	})
+
+	testDSN, err := withHeartbeatDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test dsn: %v", err)
+	}
+	pool := mustConnectHeartbeatPool(t, ctx, testDSN)
+	t.Cleanup(pool.Close)
+	if err := applyHeartbeatMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	return pool, ctx
+}
+
+func mustConnectHeartbeatPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping: %v", err)
+	}
+	return pool
+}
+
+func withHeartbeatDBName(dsn, dbName string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + dbName
+	return parsed.String(), nil
+}
+
+func applyHeartbeatMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		return err
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, string(b)); err != nil {
+			return fmt.Errorf("execute %s: %w", filepath.Base(f), err)
+		}
+	}
+	return nil
+}
 
 // TestUpdateShieldHealthResyncsResourceHostOnLanIPChange exercises the shield-sync
 // fix against a real Postgres (migrations applied): when a shield's LAN IP changes
 // on heartbeat, the resources bound to it that were tracking the old IP are
 // re-pointed to the new IP, lanIPChanged is reported, and unrelated hosts
-// (127.0.0.1) are preserved. Gated on SHIELD_TEST_DATABASE_URL; skipped otherwise.
+// (127.0.0.1) are preserved. Skips cleanly when no DB is configured.
 func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
-	dsn := os.Getenv("SHIELD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SHIELD_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	// Defensive: clear any leftover from a crashed prior run (slug is UNIQUE).
-	_, _ = db.Exec(ctx, `DELETE FROM workspaces WHERE slug = 'shieldsync-test'`)
+	db, ctx := setupHeartbeatTestDB(t)
 
 	must := func(q string, args ...any) string {
 		t.Helper()
@@ -37,9 +114,7 @@ func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
 		return id
 	}
 
-	// Seed the FK chain; everything cascades from the workspace on cleanup.
 	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shieldsync-test','shieldsync','shieldsync.example.com','active') RETURNING id`)
-	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, wsID) })
 
 	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
 	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
@@ -125,19 +200,7 @@ func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
 // TestUpdateShieldHealth_RevokedShieldIgnored tests that heartbeat updates are ignored
 // when the shield row has status='revoked', preserving the shield row and associated resource hosts.
 func TestUpdateShieldHealth_RevokedShieldIgnored(t *testing.T) {
-	dsn := os.Getenv("SHIELD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SHIELD_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	slug := "shield-revoked-test"
-	_, _ = db.Exec(ctx, `DELETE FROM workspaces WHERE slug = $1`, slug)
+	db, ctx := setupHeartbeatTestDB(t)
 
 	must := func(q string, args ...any) string {
 		t.Helper()
@@ -148,8 +211,7 @@ func TestUpdateShieldHealth_RevokedShieldIgnored(t *testing.T) {
 		return id
 	}
 
-	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ($1,'shieldrev','shieldrev.example.com','active') RETURNING id`, slug)
-	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, wsID) })
+	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shield-revoked-test','shieldrev','shieldrev.example.com','active') RETURNING id`)
 
 	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
 	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
@@ -201,19 +263,7 @@ func TestUpdateShieldHealth_RevokedShieldIgnored(t *testing.T) {
 
 // TestUpdateShieldHealth_ActiveShieldStillUpdates verifies regression: active shield updates successfully.
 func TestUpdateShieldHealth_ActiveShieldStillUpdates(t *testing.T) {
-	dsn := os.Getenv("SHIELD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SHIELD_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	slug := "shield-active-test"
-	_, _ = db.Exec(ctx, `DELETE FROM workspaces WHERE slug = $1`, slug)
+	db, ctx := setupHeartbeatTestDB(t)
 
 	must := func(q string, args ...any) string {
 		t.Helper()
@@ -224,8 +274,7 @@ func TestUpdateShieldHealth_ActiveShieldStillUpdates(t *testing.T) {
 		return id
 	}
 
-	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ($1,'shieldact','shieldact.example.com','active') RETURNING id`, slug)
-	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, wsID) })
+	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shield-active-test','shieldact','shieldact.example.com','active') RETURNING id`)
 
 	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
 	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
