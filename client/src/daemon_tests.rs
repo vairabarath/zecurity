@@ -44,6 +44,7 @@ fn test_device_info() -> DeviceInfo {
         spiffe_id: "spiffe://test.example/client/device1".to_string(),
         certificate_pem: cert_pem,
         private_key_pem: key_pem,
+        tpm_key_material: None,
         ca_cert_pem: issue_ca_bundle(),
         cert_expires_at: i64::MAX,
         hostname: "test-host".to_string(),

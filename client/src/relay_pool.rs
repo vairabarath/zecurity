@@ -12,9 +12,11 @@ use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use rustls::sign::{CertifiedKey, SingleCertAndKey};
+
 use crate::tunnel_pool::{
-    classify_quinn, parse_ca_bundle, parse_cert_chain, parse_private_key_der, root_store_from_cert,
-    AuthenticatedStream, ExactSpiffeVerifier, TunnelOpenError,
+    build_client_certified_key, classify_quinn, parse_ca_bundle, parse_cert_chain,
+    root_store_from_cert, AuthenticatedStream, ExactSpiffeVerifier, TunnelOpenError,
 };
 
 const RELAY_ALPN: &[u8] = b"ztna-relay-v1";
@@ -36,8 +38,10 @@ struct RelayAck {
 pub struct RelayPool {
     connections: Arc<Mutex<HashMap<String, CachedRelay>>>,
     endpoint: quinn::Endpoint,
-    client_cert_chain: Vec<rustls::pki_types::CertificateDer<'static>>,
-    client_private_key: rustls::pki_types::PrivateKeyDer<'static>,
+    /// Cert chain + signing key, software or TPM-backed. Held rather than
+    /// rebuilt because the inner (relay-wrapped) tunnel handshake in
+    /// `open_tunnel` authenticates with the same identity.
+    client_key: Arc<CertifiedKey>,
     workspace_ca: rustls::pki_types::CertificateDer<'static>,
     relay_crl: crate::crl::CrlManager,
 }
@@ -53,12 +57,12 @@ impl RelayPool {
     pub fn new(
         cert_pem: &str,
         key_pem: &str,
+        tpm_key_material: Option<&str>,
         ca_bundle_pem: &str,
         relay_spiffe_id: &str,
         relay_crl: crate::crl::CrlManager,
     ) -> Result<Self> {
         let mut client_cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
-        let client_private_key = parse_private_key_der(key_pem, "device")?;
         let ca_bundle = parse_ca_bundle(ca_bundle_pem)?;
 
         // Relay's mTLS verifier needs the workspace CA in the chain to reach
@@ -66,6 +70,7 @@ impl RelayPool {
         if client_cert_chain.len() == 1 {
             client_cert_chain.push(ca_bundle.workspace_ca.clone());
         }
+        let client_key = build_client_certified_key(client_cert_chain, key_pem, tpm_key_material)?;
 
         let relay_roots =
             root_store_from_cert(&ca_bundle.intermediate_ca, "platform intermediate CA")?;
@@ -75,8 +80,7 @@ impl RelayPool {
         let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(verifier)
-            .with_client_auth_cert(client_cert_chain.clone(), client_private_key.clone_key())
-            .context("build Relay rustls client config")?;
+            .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(client_key.clone())));
         tls_config.alpn_protocols = vec![RELAY_ALPN.to_vec()];
 
         let quic_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)
@@ -90,8 +94,7 @@ impl RelayPool {
         Ok(Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
             endpoint,
-            client_cert_chain,
-            client_private_key,
+            client_key,
             workspace_ca: ca_bundle.workspace_ca,
             relay_crl,
         })
@@ -133,15 +136,7 @@ impl RelayPool {
         let mut tls_config = rustls::ClientConfig::builder_with_protocol_versions(&[&TLS13])
             .dangerous()
             .with_custom_certificate_verifier(verifier)
-            .with_client_auth_cert(
-                self.client_cert_chain.clone(),
-                self.client_private_key.clone_key(),
-            )
-            .map_err(|e| {
-                TunnelOpenError::Authenticate(
-                    anyhow::Error::from(e).context("build inner rustls client config"),
-                )
-            })?;
+            .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(self.client_key.clone())));
         tls_config.alpn_protocols = vec![INNER_TUNNEL_ALPN.to_vec()];
 
         let connector = TlsConnector::from(Arc::new(tls_config));

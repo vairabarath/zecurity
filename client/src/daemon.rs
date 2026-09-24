@@ -431,6 +431,7 @@ async fn handle_request(
             spiffe_id,
             certificate_pem,
             private_key_pem,
+            tpm_key_material,
             ca_cert_pem,
             cert_expires_at,
             hostname,
@@ -455,6 +456,7 @@ async fn handle_request(
                     spiffe_id,
                     certificate_pem,
                     private_key_pem,
+                    tpm_key_material,
                     ca_cert_pem,
                     cert_expires_at,
                     hostname,
@@ -1489,6 +1491,7 @@ async fn react_to_device_directive(
         if let Some(device) = s.device.as_mut() {
             device.certificate_pem.clear();
             device.private_key_pem.clear();
+            device.tpm_key_material = None;
             device.cert_expires_at = 0;
         }
         s.acl_snapshot = None;
@@ -1625,6 +1628,29 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
 const CLIENT_CERT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 const RENEWAL_WINDOW_SECS: i64 = CLIENT_CERT_TTL_SECS * 2 / 5;
 
+/// Loads this device's signing key, whichever backend it enrolled with
+/// (PENDING-17). Both arms return a plain `rcgen::KeyPair`, so callers —
+/// `build_renewal_csr` today — neither know nor care which one they got: the
+/// TPM arm is a `RemoteKeyPair` that delegates signing to the chip, the
+/// software arm is an ordinary in-memory key.
+fn load_device_key_pair(
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+) -> Result<rcgen::KeyPair> {
+    match tpm_key_material {
+        #[cfg(target_os = "linux")]
+        Some(serialized) => {
+            let key_material = crate::tpm::deserialize_key_material(serialized)?;
+            crate::tpm::load(key_material)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Some(_) => Err(anyhow::anyhow!(
+            "device has TPM-backed key material but this build has no TPM support"
+        )),
+        None => rcgen::KeyPair::from_pem(private_key_pem).map_err(Into::into),
+    }
+}
+
 /// Builds a fresh, self-signed CSR from the device's EXISTING private key —
 /// never a new keypair. Mirrors login.rs's enrollment CSR construction
 /// (rcgen::KeyPair::generate_for + CertificateParams) minus the key
@@ -1633,8 +1659,12 @@ const RENEWAL_WINDOW_SECS: i64 = CLIENT_CERT_TTL_SECS * 2 / 5;
 /// key on every renewal would defeat it entirely. The CSR's CommonName is
 /// cosmetic — the server derives the SPIFFE SAN from (trustDomain, deviceID),
 /// never from the CSR's subject fields.
-fn build_renewal_csr(private_key_pem: &str, hostname: &str) -> Result<String> {
-    let key_pair = rcgen::KeyPair::from_pem(private_key_pem)?;
+fn build_renewal_csr(
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+) -> Result<String> {
+    let key_pair = load_device_key_pair(private_key_pem, tpm_key_material)?;
     let mut params = rcgen::CertificateParams::default();
     params.distinguished_name = rcgen::DistinguishedName::new();
     params
@@ -1795,18 +1825,27 @@ async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf
     let resync = { state.read().await.cert_renewal_resync.clone() };
 
     loop {
-        let (device_id, private_key_pem, hostname, cert_expires_at, ca_pem, eligible) = {
+        let (device_id, private_key_pem, tpm_key_material, hostname, cert_expires_at, ca_pem, eligible) = {
             let s = state.read().await;
             match (&s.device, s.device_state) {
                 (Some(d), DeviceState::Active) => (
                     d.id.clone(),
                     d.private_key_pem.clone(),
+                    d.tpm_key_material.clone(),
                     d.hostname.clone(),
                     d.cert_expires_at,
                     d.ca_cert_pem.clone(),
                     true,
                 ),
-                _ => (String::new(), String::new(), String::new(), 0, String::new(), false),
+                _ => (
+                    String::new(),
+                    String::new(),
+                    None,
+                    String::new(),
+                    0,
+                    String::new(),
+                    false,
+                ),
             }
         };
 
@@ -1839,6 +1878,7 @@ async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf
             &conf,
             &device_id,
             &private_key_pem,
+            tpm_key_material.as_deref(),
             &hostname,
             &ca_pem,
         )
@@ -1860,10 +1900,12 @@ async fn attempt_cert_renewal(
     conf: &config::ClientConf,
     device_id: &str,
     private_key_pem: &str,
+    tpm_key_material: Option<&str>,
     hostname: &str,
     ca_pem: &str,
 ) -> Result<()> {
-    let csr_pem = build_renewal_csr(private_key_pem, hostname).context("build renewal CSR")?;
+    let csr_pem = build_renewal_csr(private_key_pem, tpm_key_material, hostname)
+        .context("build renewal CSR")?;
     let resp = renew_cert_with_refresh(conf, ca_pem, state, device_id, &csr_pem).await?;
 
     let new_ca_cert_pem = format!("{}\n{}", resp.workspace_ca_pem, resp.intermediate_ca_pem);
@@ -2901,6 +2943,7 @@ fn build_transport_from_coords(
     let direct = Arc::new(TunnelPool::new(
         &device.certificate_pem,
         &device.private_key_pem,
+        device.tpm_key_material.as_deref(),
         &device.ca_cert_pem,
     )?);
 
@@ -2913,6 +2956,7 @@ fn build_transport_from_coords(
         let pool = Arc::new(RelayPool::new(
             &device.certificate_pem,
             &device.private_key_pem,
+            device.tpm_key_material.as_deref(),
             &device.ca_cert_pem,
             &c.relay_spiffe_id,
             relay_crl,
@@ -3262,6 +3306,7 @@ mod directive_tests {
                 spiffe_id: "spiffe://example.test/device-1".into(),
                 certificate_pem: "CERT".into(),
                 private_key_pem: "KEY".into(),
+                tpm_key_material: None,
                 cert_expires_at: 1_700_000_000,
                 ..Default::default()
             },
@@ -3282,6 +3327,7 @@ mod directive_tests {
             spiffe_id: "spiffe://example.test/device-1".into(),
             certificate_pem: "CERT".into(),
             private_key_pem: "KEY".into(),
+                tpm_key_material: None,
             ca_cert_pem: "CA".into(),
             cert_expires_at: 1_700_000_000,
             hostname: "host".into(),
@@ -3425,6 +3471,37 @@ mod renewal_tests {
 
     // --- build_renewal_csr: same key, not a fresh one ---
 
+    /// PENDING-17: the renewal path must work for a TPM-backed device too —
+    /// `build_renewal_csr` loads whichever backend the device enrolled with,
+    /// and the resulting CSR has to be a valid, self-consistent CSR either
+    /// way. Exercises real hardware; skips when no TPM is reachable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_renewal_csr_works_with_a_tpm_backed_key() {
+        use x509_parser::certification_request::X509CertificationRequest;
+        use x509_parser::prelude::FromDer;
+
+        if !crate::tpm::tpm_available() {
+            eprintln!("skipping: no accessible TPM on this machine");
+            return;
+        }
+
+        let (key_material, _public) = crate::tpm::generate().expect("generate TPM key");
+        let serialized =
+            crate::tpm::serialize_key_material(&key_material).expect("serialize key material");
+
+        // No software PEM at all — exactly how a TPM-enrolled device is stored.
+        let csr_pem = build_renewal_csr("", Some(&serialized), "tpm-renewal-host")
+            .expect("build renewal CSR from TPM key material");
+
+        let (_, pem) =
+            x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
+        let (_, csr) =
+            X509CertificationRequest::from_der(&pem.contents).expect("parse CSR DER");
+        csr.verify_signature()
+            .expect("a TPM-signed renewal CSR must verify against its own public key");
+    }
+
     #[test]
     fn build_renewal_csr_reuses_the_same_key() {
         use x509_parser::certification_request::X509CertificationRequest;
@@ -3434,7 +3511,8 @@ mod renewal_tests {
         let original_pem = key_pair.serialize_pem();
         let original_pub_der = key_pair.public_key_der();
 
-        let csr_pem = build_renewal_csr(&original_pem, "test-host").expect("build CSR");
+        let csr_pem = build_renewal_csr(&original_pem, None, "test-host").expect("build CSR");
+
         let (_, pem) =
             x509_parser::pem::parse_x509_pem(csr_pem.as_bytes()).expect("decode CSR PEM");
         let (_, csr) =
@@ -3461,6 +3539,7 @@ mod renewal_tests {
                 spiffe_id: "spiffe://example.test/device-1".into(),
                 certificate_pem: "CERT".into(),
                 private_key_pem: "KEY".into(),
+                tpm_key_material: None,
                 ca_cert_pem: "CA".into(),
                 cert_expires_at: 1_700_000_000,
                 hostname: "host".into(),
@@ -3678,6 +3757,7 @@ mod renewal_tests {
                 spiffe_id: "spiffe://example.test/device-e2e-1".into(),
                 certificate_pem: "OLD-CERT".into(),
                 private_key_pem: private_key_pem.clone(),
+                tpm_key_material: None,
                 ca_cert_pem: "OLD-CA".into(),
                 cert_expires_at: 1_000,
                 hostname: "e2e-host".into(),
@@ -3695,6 +3775,7 @@ mod renewal_tests {
             &conf,
             &device_id,
             &private_key_pem,
+            None,
             "e2e-host",
             &ca_pem,
         )

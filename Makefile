@@ -1,19 +1,18 @@
 .PHONY: gqlgen codegen generate-proto setup
 
-GQLGEN_VERSION := v0.17.90
 BUF_VERSION := v1.66.0
-GQLGEN_CACHE ?= $(HOME)/.cache/zecurity/go-build-cache
-GQLGEN_MODCACHE ?= $(HOME)/.cache/zecurity/go-mod-cache
 BUF := $(shell command -v buf 2>/dev/null || echo $(shell go env GOPATH)/bin/buf)
 
-# Regenerate GraphQL code for the Go controller.
-# `controller/graph/generated.go` is intentionally gitignored and should be
-# recreated locally whenever the schema or gqlgen config changes.
+# Regenerate GraphQL code for the Go controller. Commit the regenerated
+# `controller/graph/generated.go` and `models_gen.go` — they are tracked.
+#
+# gqlgen is a `tool` dependency in controller/go.mod, so its version and its
+# golang.org/x/tools come from go.mod/go.sum. Do not go back to
+# `go run gqlgen@<version>`: that builds with gqlgen's own pinned x/tools,
+# which fails on newer Go toolchains ("package "time" without types was
+# imported") after gqlgen has already deleted the generated files.
 gqlgen:
-	cd controller && \
-	GOCACHE=$(GQLGEN_CACHE) \
-	GOMODCACHE=$(GQLGEN_MODCACHE) \
-	go run github.com/99designs/gqlgen@$(GQLGEN_VERSION) generate --config graph/gqlgen.yml
+	cd controller && go tool gqlgen generate --config graph/gqlgen.yml
 
 # Regenerate both Go and TypeScript types from the shared schema.
 codegen: gqlgen
