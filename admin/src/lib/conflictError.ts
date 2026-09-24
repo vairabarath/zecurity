@@ -35,10 +35,23 @@ const KNOWN_CODES: ReadonlySet<string> = new Set([
 
 // Extracts the first GraphQL error's extensions.code, if it is a recognized
 // client-safe code. Returns undefined for anything else (masked/unknown).
+//
+// APOLLO CLIENT 4: a GraphQL-errors throw is a CombinedGraphQLErrors, whose
+// array lives on `.errors`. The v3 `ApolloError.graphQLErrors` field no longer
+// exists — reading it yields undefined, which collapsed every coded error to
+// INTERNAL and made the FORBIDDEN break-glass path unreachable in the UI. The
+// legacy field is kept as a fallback so a v3-shaped throw (or a hand-built
+// error) still classifies. Read structurally rather than via
+// CombinedGraphQLErrors.is() so this stays dependency-free and also handles a
+// throw that is not a CombinedGraphQLErrors at all.
+type GqlErrorLike = { extensions?: Record<string, unknown> }
+
 function firstExtensionCode(err: unknown): string | undefined {
-  const gqlErrors = (
-    err as { graphQLErrors?: Array<{ extensions?: Record<string, unknown> }> }
-  )?.graphQLErrors
+  const e = err as {
+    errors?: ReadonlyArray<GqlErrorLike>
+    graphQLErrors?: ReadonlyArray<GqlErrorLike>
+  }
+  const gqlErrors = e?.errors ?? e?.graphQLErrors
   const code = gqlErrors?.[0]?.extensions?.['code']
   return typeof code === 'string' ? code : undefined
 }

@@ -46,6 +46,34 @@ type WorkspaceIdpConnection {
   # NOTE: clientSecret is intentionally absent — it is never exposed.
 }
 
+# Minimal public projection of an identity connection, for LOGIN DISCOVERY ONLY.
+#
+# Deliberately NOT WorkspaceIdpConnection: that type carries admin-only
+# connection metadata (clientId, discoveryUrl, domainHint, issuer, the SCIM
+# identity mapping and identity health) which must never be readable without a
+# JWT. `lookupIdpConnections` is unauthenticated, so it returns only what the
+# login page needs to render a choice and name the exact connection:
+#   id          -> passed back as initiateAuth(connectionId:)
+#   provider    -> passed back as initiateAuth(provider:)
+#   displayName -> the user-visible button label
+#   tier        -> "enterprise" | "bootstrap"; how prominently to render it
+type PublicIdpConnection {
+  id:          ID!
+  provider:    String!
+  displayName: String!
+  # Which identity tier this connection belongs to, mirroring the REST
+  # discovery endpoint (GET /workspaces/{slug}/auth, ADR-024 §0):
+  #   "enterprise" — the workspace's own BYO connection (tenant-scoped)
+  #   "bootstrap"  — the shared platform IdP (tenant_id IS NULL)
+  #
+  # The login page renders enterprise connections as the primary path and keeps
+  # bootstrap behind an explicit "other sign-in options" disclosure. Clicking a
+  # bootstrap option as a never-before-seen identity does NOT join this
+  # workspace — bootstrap.Provision either matches a pending invite or creates a
+  # brand-new workspace — so surfacing it is a UX choice, not an access grant.
+  tier:        String!
+}
+
 type ScimToken {
   id: ID!
   workspaceId: ID!
@@ -170,6 +198,15 @@ type ScimConflict {
 
 extend type Query {
   idpConnections: [WorkspaceIdpConnection!]! @hasRole(roles: [ADMIN])
+  # Public login discovery (F7-5). PUBLIC BY DESIGN — no @hasRole: the login
+  # page has no JWT yet. Returns the ACTIVE identity connections of the single
+  # workspace named by `workspaceSlug`, projected down to PublicIdpConnection so
+  # that admin-only connection metadata stays behind the admin gate. An unknown
+  # slug returns an empty list, matching lookupWorkspace's found:false semantics
+  # (no error, no existence oracle beyond what lookupWorkspace already gives).
+  #
+  # `idpConnections` above remains ADMIN-only and MUST NOT be broadened.
+  lookupIdpConnections(workspaceSlug: String!): [PublicIdpConnection!]!
   # Whether the workspace still offers the shared platform IdP as a login path.
   platformLoginEnabled: Boolean! @hasRole(roles: [ADMIN])
 

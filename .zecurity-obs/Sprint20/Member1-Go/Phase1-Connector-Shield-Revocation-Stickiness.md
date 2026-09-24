@@ -6,7 +6,7 @@ sprint: 20
 phase: 1
 execution: B
 title: Connector + Shield Revocation Stickiness
-status: planned
+status: done
 depends_on: []
 tags:
   - go
@@ -188,14 +188,14 @@ cd controller && go test ./internal/connector/... ./internal/shield/...
 
 ## Implementation Checklist
 
-- [ ] **M1-B1** `Control` open: revocation check + guarded activation before registry add
-- [ ] **M1-B2** stream-close defer: `active → disconnected` only
-- [ ] **M1-B3** `Goodbye`: guarded + notify both planes
-- [ ] **M1-B4** `RenewCert`: `revoked_at` check + guarded UPDATE
-- [ ] **M1-B5** `handleConnectorHealth`: `revoked_at IS NULL`
-- [ ] **M1-B6** `UpdateShieldHealth`: skip revoked shields
-- [ ] **M1-B7** Tests
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-B1** `Control` open: revocation check + guarded activation before registry add
+- [x] **M1-B2** stream-close defer: `active → disconnected` only
+- [x] **M1-B3** `Goodbye`: guarded + notify both planes
+- [x] **M1-B4** `RenewCert`: `revoked_at` check + guarded UPDATE
+- [x] **M1-B5** `handleConnectorHealth`: `revoked_at IS NULL`
+- [x] **M1-B6** `UpdateShieldHealth`: skip revoked shields
+- [x] **M1-B7** Tests
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 

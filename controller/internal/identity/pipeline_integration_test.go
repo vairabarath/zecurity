@@ -80,7 +80,7 @@ func TestIdentityPipeline_Integration(t *testing.T) {
 	}
 
 	t.Run("first login JIT-creates a user and its identity link", func(t *testing.T) {
-		p, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "Acme A")
+		p, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "Acme A", nil)
 		if err != nil {
 			t.Fatalf("authenticate: %v", err)
 		}
@@ -100,11 +100,11 @@ func TestIdentityPipeline_Integration(t *testing.T) {
 	})
 
 	t.Run("returning login resolves the same canonical user", func(t *testing.T) {
-		p1, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "")
+		p1, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "", nil)
 		if err != nil {
 			t.Fatalf("first: %v", err)
 		}
-		p2, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "")
+		p2, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "", nil)
 		if err != nil {
 			t.Fatalf("second: %v", err)
 		}
@@ -114,11 +114,11 @@ func TestIdentityPipeline_Integration(t *testing.T) {
 	})
 
 	t.Run("same email different subject yields distinct users (no email-merge)", func(t *testing.T) {
-		pA, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "")
+		pA, err := svc.Authenticate(ctx, authFor("google-sub-A"), googleConnID, "", nil)
 		if err != nil {
 			t.Fatalf("A: %v", err)
 		}
-		pB, err := svc.Authenticate(ctx, authFor("google-sub-B"), googleConnID, "Acme B")
+		pB, err := svc.Authenticate(ctx, authFor("google-sub-B"), googleConnID, "Acme B", nil)
 		if err != nil {
 			t.Fatalf("B: %v", err)
 		}
@@ -128,20 +128,20 @@ func TestIdentityPipeline_Integration(t *testing.T) {
 	})
 
 	t.Run("suspended user is rejected at the lifecycle gate", func(t *testing.T) {
-		p, err := svc.Authenticate(ctx, authFor("google-sub-C"), googleConnID, "Acme C")
+		p, err := svc.Authenticate(ctx, authFor("google-sub-C"), googleConnID, "Acme C", nil)
 		if err != nil {
 			t.Fatalf("provision C: %v", err)
 		}
 		if _, err := pool.Exec(ctx, `UPDATE users SET status = 'suspended' WHERE id = $1`, p.Core.UserID); err != nil {
 			t.Fatalf("suspend: %v", err)
 		}
-		if _, err := svc.Authenticate(ctx, authFor("google-sub-C"), googleConnID, ""); !errors.Is(err, identity.ErrUserNotActive) {
+		if _, err := svc.Authenticate(ctx, authFor("google-sub-C"), googleConnID, "", nil); !errors.Is(err, identity.ErrUserNotActive) {
 			t.Fatalf("expected ErrUserNotActive for suspended user, got %v", err)
 		}
 	})
 
 	t.Run("generation bump increments and revokes older tokens", func(t *testing.T) {
-		p, err := svc.Authenticate(ctx, authFor("google-sub-D"), googleConnID, "Acme D")
+		p, err := svc.Authenticate(ctx, authFor("google-sub-D"), googleConnID, "Acme D", nil)
 		if err != nil {
 			t.Fatalf("provision D: %v", err)
 		}

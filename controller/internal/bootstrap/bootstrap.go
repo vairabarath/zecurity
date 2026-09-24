@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"unicode"
 
@@ -53,24 +54,71 @@ func (s *Service) Provision(ctx context.Context, in identity.ProvisionInput) (*i
 	// creating a new workspace. Invited users join an existing workspace as
 	// their assigned role; only truly first-time signups get a new workspace as
 	// 'admin'. (Email here is an invite-matching hint, never an identity key.)
+	//
+	// On an ENTERPRISE connection the invite lookup is SCOPED to the workspace
+	// that owns the connection. Unscoped, an invite pending in workspace B would
+	// let someone signing in through workspace A's IdP join B — the invite is
+	// matched on email, which is not an identity key and not workspace proof.
 	var pendingWorkspaceID, pendingRole string
-	err := s.Pool.QueryRow(ctx,
-		`SELECT workspace_id, role
-		   FROM workspace_members
-		  WHERE email = $1
-		    AND status = 'invited'
-		    AND user_id IS NULL
-		  LIMIT 1`,
-		email,
-	).Scan(&pendingWorkspaceID, &pendingRole)
+	var err error
+	if in.ConnectionTenantID != nil {
+		err = s.Pool.QueryRow(ctx,
+			`SELECT workspace_id, role
+			   FROM workspace_members
+			  WHERE email = $1
+			    AND workspace_id = $2
+			    AND status = 'invited'
+			    AND user_id IS NULL
+			  LIMIT 1`,
+			email, *in.ConnectionTenantID,
+		).Scan(&pendingWorkspaceID, &pendingRole)
+	} else {
+		err = s.Pool.QueryRow(ctx,
+			`SELECT workspace_id, role
+			   FROM workspace_members
+			  WHERE email = $1
+			    AND status = 'invited'
+			    AND user_id IS NULL
+			  LIMIT 1`,
+			email,
+		).Scan(&pendingWorkspaceID, &pendingRole)
+	}
 
 	if err == nil {
+		// Audit line, NOT a warning: most enterprise IdPs never assert
+		// email_verified, so this is the ordinary path for an Okta/Entra
+		// invited join, not an exception. It is recorded because the invite
+		// carries a role (possibly 'admin') and is matched on email, which is
+		// not an identity key.
+		//
+		// Permitting it is safe: the connection is admin-configured, the
+		// directory is the customer's own, and the lookup above is scoped to
+		// the workspace that owns the connection. An IdP that EXPLICITLY says
+		// email_verified=false never reaches here (providers/oidc.go rejects
+		// it at token verification).
+		//
+		// SCIM does not pass through here — internal/scim uses its own
+		// newSCIMProvisioner, so this never fires for directory-driven joins.
+		if !in.EmailVerified {
+			log.Printf("bootstrap: invited join on an email the IdP did not assert as verified: workspace=%s role=%s email=%q provider=%s subject=%q",
+				pendingWorkspaceID, pendingRole, email, in.Provider, in.Subject)
+		}
 		return s.runInvitedUserTransaction(ctx, email, in, pendingWorkspaceID, pendingRole)
 	}
 	if !isNoRows(err) {
 		return nil, fmt.Errorf("lookup pending invite: %w", err)
 	}
 
+	// No invite. An ENTERPRISE connection must never create a workspace here:
+	// it already belongs to one, so provisioning would hand a brand-new
+	// workspace (with ADMIN) to anyone in the customer's directory who signs in.
+	// Access to THIS workspace is granted by an invite or by SCIM provisioning,
+	// neither of which happened — so refuse and let the caller say so.
+	if in.ConnectionTenantID != nil {
+		return nil, identity.ErrNotInvited
+	}
+
+	// Platform tier: a genuine first-time signup creates the workspace.
 	return s.runBootstrapTransaction(ctx, email, in)
 }
 

@@ -10,6 +10,32 @@ tags:
 
 ---
 
+## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 1 (B): Connector + Shield Revocation Stickiness
+
+**What was done:**
+- Implemented Phase B (Day-1, independent, no deps) end-to-end on `feat/sprint20-m1-phase1` (created from post-`fixed-pendings` HEAD `e72925d`), with code written by the Google Antigravity CLI (`agy`, Gemini 3.8 Flash Low) driven one small task at a time through an Orca terminal, each verified before the next.
+- **B1/B2 (`control_stream.go`):** `Control` now reads `revoked_at` and rejects (`PermissionDenied "connector is revoked"`) when `status='revoked'` **or** `revoked_at IS NOT NULL`; the activation UPDATE is guarded (`AND status <> 'revoked' AND revoked_at IS NULL`) and moved **before** `Registry.add` — `pgx.ErrNoRows` → deny without registering or arming the disconnect defer. Stream-close defer guarded (`AND status = 'active'`). (A spec-aligned Control revocation reject pre-existed as an uncommitted external edit; kept and folded in.)
+- **B3 (`goodbye.go`):** guarded `AND status = 'active'` + `RETURNING tenant_id`; `ErrNoRows` → no notify, still `Ok:true`; real transition fires `PolicyNotifier` + `TransportNotifier` (both planes).
+- **B4 (`enrollment.go` `RenewCert`):** reject on `status='revoked'` or `revoked_at IS NOT NULL` **before** signing; guarded cert UPDATE; 0 rows → `PermissionDenied`, no signed cert returned.
+- **B5 (`control_stream.go` `handleConnectorHealth`):** guard adds `AND revoked_at IS NULL`; no-match behaviour unchanged (close stream).
+- **B6 (`shield/heartbeat.go` `UpdateShieldHealth`):** `updated` CTE adds `AND sh.status <> 'revoked'`; revoked shield → row untouched, `synced` resource re-point skipped, `(false,false,nil)`, logged "ignored status report for revoked shield".
+- **Tests (DB-backed, all gated on set DSNs; none skipped in the run):**
+  - `controller/internal/connector/revocation_test.go` (new): `TestControl_RejectsRevokedConnector`, `TestControl_RejectsRevokedAtLegacyStatus`, `TestGoodbye_RevokedStaysRevoked`, `TestGoodbye_ActiveGoesDisconnectedAndNotifies`, `TestRenewCert_RevokedStatusDenied`, `TestRenewCert_RevokedAtLegacyDenied`, `TestRenewCert_RaceRevokeReturnsNoCert` (stub PKI revokes mid-sign as a deterministic race), `TestHandleConnectorHealth_RevokedClosesStream`.
+  - `controller/internal/shield/heartbeat_test.go` (extended): `TestUpdateShieldHealth_RevokedShieldIgnored`, `TestUpdateShieldHealth_ActiveShieldStillUpdates` (regression).
+- **Verification:** per-task and final gate `cd controller && go build ./... && go test -count=1 ./internal/connector/... ./internal/shield/...` green against live Postgres (`ENROLLMENT/SHIELD/PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL`); gofmt clean.
+- No bugs required Post-Phase Fixes. Checkboxes M1-B1…B7 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`.
+
+**Key decisions:**
+- Orchestration `worker-start` could not supervise the agy terminal (created via raw `terminal create --command`, so Orca has no registered agent process); fell back to the `terminal send`/`terminal read` supervised loop with independent re-verification after each task (safe-failure route per orchestration skill).
+- `RenewCert` race test made deterministic by a stub `pki.Service` that revokes the row inside `RenewConnectorCert` before returning a dummy result — exercises the guarded-0-rows path exactly.
+- No migrations (Sprint 20 rule); `revoked`/`revoked_at` terminality preserved; `workspaces.status='active'` predicates untouched; no shield CRL/`revoked_at` added (I6).
+
+**What's next:**
+- Live acceptance criteria (admin UI E2E) still outstanding per phase spec: revoke a running connector → stream closes ≤15 s, row stays `revoked` across ≥3 reconnects, UI shows REVOKED; revoke a running shield → UI still shows REVOKED after 2 min of heartbeats.
+- M2-G (connector renewal trigger + cert hot-swap) can now rebase onto M1-B's `control_stream.go` + `RenewCert` guard.
+
+---
+
 ## 2026-08-26 — Claude Code (Opus 5) — Sprint 17 audit, tenant-isolation fix, GraphQL exposure
 
 **What was done:**
@@ -2345,3 +2371,117 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - Complete M1-E1 posture visibility, then implement M1-E3 compiler gating and M1-E3b
   cache expiry before closing the Phase 3 build gate.
+
+## 2026-09-12 — Claude Code (PENDING-05 Break-Glass Grant Surface, FE only)
+
+**What was done:**
+- Surfaced the break-glass self-grant on the FORBIDDEN Accept-link path in the
+  provisioning-conflicts queue (PENDING-05 §5.1). An ADMIN who 403s on Accept can now
+  grant themselves `identity.mapping.break_glass` and re-confirm without leaving the UI
+  or touching the DB.
+- New shared `admin/src/components/scim/GrantBreakGlassButton.tsx` — owns
+  `useMutation(GrantWorkspacePermissionDocument)` + `useAuthStore((s) => s.user)`, keeps
+  the `!currentUser?.id` guard and its toast, keeps local `granted` state, and takes a
+  caller-supplied `onGranted?` + success message. It never refetches itself.
+- `ScimConfigCard.tsx`: extraction only — replaced the inlined grant button with the
+  shared component (`onGranted={onChanged}`, existing toast text); removed the now-dead
+  `grantBreakGlass` hook, `handleGrantBreakGlass`, `breakGlassGranted` state, and the
+  unused `GrantWorkspacePermissionDocument`/`useAuthStore` imports. Behaviour unchanged.
+- `ConflictRow.tsx`: render the grant button inside the still-open dialog beneath the
+  guidance alert, guarded by `dialog === 'accept' && error?.code === 'FORBIDDEN'`. The
+  conflict caller passes no `onGranted`, so the grant never refetches/clears reason/closes
+  the dialog. Confirm stays gated on `busy || !reason.trim()` only.
+- Tests: replaced ConflictRow's single-tuple Apollo mock with a document-dispatching mock
+  (keyed on operation name; second tuple element kept as bare `false` so `busy` stays
+  falsy). Added §10 coverage: FORBIDDEN→grant+guidance, INTERNAL/CONFLICT/NOT_FOUND→no
+  grant, grant-success→accept not auto-retried until 2nd Confirm, grant-failure→error+
+  dialog open, reason persists, Reject/Reopen never render it. New
+  `GrantBreakGlassButton.test.tsx` (success, failure, no-authenticated-user).
+
+**Key decisions:**
+- No permissions read query (spec §5.3/§5.5/§6): no Query field returns
+  `WorkspacePermission`; adding one means schema + resolver + codegen for zero §9 criteria.
+  So no `.graphql`, no codegen, no controller/generated changes.
+- Corrected the stale §5.1 "re-enable Confirm": current Confirm is gated only on
+  `busy || !reason.trim()` — nothing to re-enable. Did NOT build a disable/re-enable
+  state machine; requirement is simply not to add FORBIDDEN-based disabling.
+- Grant must not refetch on the conflict path: `onGranted` omitted there so the row is
+  not remounted and the typed reason survives (§9).
+
+**Verification:**
+- `cd admin && npm run build` — passes (tsc -b + vite, no type errors).
+- `npm run test` — 104 passed / 104 (17 files). Touched SCIM files: ConflictRow 22,
+  GrantBreakGlassButton 3, ScimConfigCard 4. Baseline pre-change ConflictRow was 13
+  `it` blocks; +7 added (one `it.each` over 3 codes → +9 test cases → 22). Note: an
+  unbounded-parallelism run on a loaded box flaked 10 tests via CPU contention
+  (including untouched idp/* tests); capping threads or `--no-file-parallelism` is
+  deterministic 104/104, and bare `npm run test` passed once the box was idle.
+- `npm run lint` — 33 pre-existing problems (27 errors, 6 warnings), all in unrelated
+  files (Topology, signup, ui/*); identical count with my changes stashed. Zero new lint
+  problems in any touched file.
+- `git diff --stat`: 3 modified + 2 new, clean of controller/, *.graphql, generated/,
+  and path.md.
+
+**Post-implementation fix — Apollo Client 4 error shape (PRE-EXISTING FE-4 defect):**
+- **Symptom:** in the real app, an Accept-link 403 rendered "Action failed" (the INTERNAL
+  branch) with the correct server detail, and the new grant affordance never appeared.
+- **Root cause:** `admin/src/lib/conflictError.ts:firstExtensionCode` read
+  `err.graphQLErrors` — the Apollo Client **v3** `ApolloError` field. The project is on
+  `@apollo/client` 4.2.12, where a GraphQL-errors throw is a `CombinedGraphQLErrors` and
+  the array lives on **`.errors`**; `graphQLErrors` no longer exists. The read returned
+  undefined, so every coded error collapsed to INTERNAL and the
+  `error?.code === 'FORBIDDEN'` guard could never be true. The backend was correct
+  throughout: `presenter.go` sets `extensions.code = "FORBIDDEN"` for a 403 SCIMError, and
+  `Message = serr.Detail` only happens in that branch — which is why the right message
+  appeared under the wrong title.
+- **Why the suite did not catch it:** `ConflictRow.test.tsx`'s `codedError` fixture
+  hand-rolled a v3-style `{ graphQLErrors: [...] }` object. All 22 tests validated the
+  mock's contract, not Apollo's. The fixture now constructs a real
+  `CombinedGraphQLErrors`; verified load-bearing by restoring the old read, which fails 5
+  tests (22 → 5 failed / 17 passed).
+- **Fixed:** `conflictError.ts` reads `e?.errors ?? e?.graphQLErrors` (legacy kept as
+  fallback; the whitelist collapse and `conflictGuidance` are unchanged, so §7.7's
+  "unrecognized code stays INTERNAL" still holds).
+- **Same defect, separate bug:** `admin/src/pages/IdpConnectionDetail.tsx:75` had the
+  identical dead `'graphQLErrors' in err` branch. Its `err.message` fallback masked the
+  symptom. Fixed in the same pass.
+- This was a pre-existing FE-4 bug from `79c009f`, not introduced by the PENDING-05 work.
+  `path.md`'s note that `ScimConflicts.tsx` was unfinished was closer to true than §0
+  credited: the page shipped, but its error-classification path never worked.
+- **Status: applied, gates green (build + 104/104 + lint clean on touched files), but NOT
+  yet confirmed in the running app.** Green tests are what failed here; acceptance is an
+  operator seeing "Permission required" plus the grant button on a real 403.
+
+**Follow-on fix — IdP connection could be disabled but never re-enabled (UI gap):**
+- **Symptom:** after Disable, the Danger Zone showed an inert "Disabled" button and the
+  admin had no path back. `handleDisable` hardcoded `status: 'disabled'` and the button
+  carried `disabled={isDisabled || disablePending}`, so the control was one-way.
+- **Not a backend limitation:** `setIdpConnectionStatus` accepts both `'active'` and
+  `'disabled'` (`idp.resolvers.go:184`); only the UI was missing the reverse direction.
+- **Fixed** (`admin/src/pages/IdpConnectionDetail.tsx`): `handleDisable` →
+  `handleSetStatus(status: 'active' | 'disabled')`; the button is now bidirectional with
+  its label/handler derived from `isDisabled`; `disablePending` renamed `statusPending`.
+- **`deleted` separated from `disabled`:** `isDisabled` was `status !== 'active'`, so a
+  soft-deleted connection rendered as "disabled" and would have been offered an Enable
+  button that can only fail (the mutation rejects any status but active/disabled). Now
+  `isDeleted = status === 'deleted'` and `isDisabled = status !== 'active' && !isDeleted`;
+  a deleted connection gets neither control.
+- **Recovery guidance added to the disabled banner**, because re-enabling is deliberately
+  NOT symmetric (`idp.resolvers.go:179-181`): disable sets `status='suspended'` AND
+  `provisioning_owner='unmanaged'`, and re-enable restores neither. Since `Provision`,
+  `Reactivate`, and `Deprovision` all require `owner == 'scim'`, the directory's next push
+  raises one `409 identity_conflict` per affected user; each must be resolved with Accept
+  link (which restores the link and flips owner back to `'scim'`, but does NOT touch
+  `status` — the directory's next reactivate push does that).
+- **Tests** (`IdpConnectionDetail.dangerzone.test.tsx`, 2 → 4): the existing test asserted
+  the one-way behaviour (button flips to an inert "Disabled") and was updated to assert a
+  live "Enable"; added Enable-fires-`status:'active'` (matched on mutation variables) and
+  soft-deleted-offers-neither. Both verified load-bearing: re-hardcoding `'disabled'`
+  fails the first, and `isDeleted = false` fails the second.
+
+**What's next:**
+- Re-run the real flow: provoke a conflict, Accept without the permission, confirm
+  "Permission required" + grant button, grant, re-confirm, check both audit entries.
+- If possession needs to be observable/pre-labelled (§4.2/§5.3), that requires a new
+  ADMIN-scoped read query (schema + resolver + codegen) — deliberately deferred here.
+- path.md's FE-4 checkbox and stale "Also still open" note remain untouched per §0/§12.

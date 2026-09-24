@@ -237,15 +237,16 @@ func (h *EnrollmentHandler) RenewCert(ctx context.Context, req *pb.RenewCertRequ
 
 	var connStatus, tenantID string
 	var certNotAfter *time.Time
+	var revokedAt *time.Time
 	err := h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id, cert_not_after FROM connectors WHERE id = $1 AND trust_domain = $2`,
+		`SELECT status, tenant_id, cert_not_after, revoked_at FROM connectors WHERE id = $1 AND trust_domain = $2`,
 		connectorID, trustDomain,
-	).Scan(&connStatus, &tenantID, &certNotAfter)
+	).Scan(&connStatus, &tenantID, &certNotAfter, &revokedAt)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "connector not found: %v", err)
 	}
 
-	if connStatus == "revoked" {
+	if connStatus == "revoked" || revokedAt != nil {
 		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
@@ -261,12 +262,14 @@ func (h *EnrollmentHandler) RenewCert(ctx context.Context, req *pb.RenewCertRequ
 		return nil, status.Errorf(codes.Internal, "renew connector cert: %v", err)
 	}
 
-	_, err = h.Pool.Exec(ctx,
+	cmdTag, err := h.Pool.Exec(ctx,
 		`UPDATE connectors
 		    SET cert_serial = $1,
 		        cert_not_after = $2,
 		        updated_at = NOW()
-		  WHERE id = $3 AND tenant_id = $4`,
+		  WHERE id = $3 AND tenant_id = $4
+		    AND status <> 'revoked'
+		    AND revoked_at IS NULL`,
 		certResult.Serial,
 		certResult.NotAfter,
 		connectorID,
@@ -274,6 +277,9 @@ func (h *EnrollmentHandler) RenewCert(ctx context.Context, req *pb.RenewCertRequ
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update connector cert: %v", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
 	workspaceCAPEM, intermediateCAPEM, err := h.loadCACerts(ctx, tenantID)

@@ -17,6 +17,14 @@ func TestRequestSelectsOnlyPublicFields(t *testing.T) {
 		{"unnamed public query", `{"query":"{ lookupWorkspace(slug:\"acme\") { id } }"}`, true},
 		{"public mutation initiateAuth", `{"query":"mutation { initiateAuth(provider:\"google\") { redirectUrl } }"}`, true},
 		{"public lookupWorkspacesByEmail", `{"query":"query { lookupWorkspacesByEmail(email:\"a@b.com\") { workspaces { id } } }"}`, true},
+		{"public lookupIdpConnections (F7-5 login IdP picker)", `{"query":"query LookupIdpConnections($s: String!) { lookupIdpConnections(workspaceSlug:$s) { id provider displayName } }"}`, true},
+		// The login page must be able to pair discovery with the redirect it drives.
+		{"public lookupIdpConnections beside initiateAuth", `{"query":"mutation { initiateAuth(provider:\"okta\", connectionId:\"c1\") { redirectUrl } }"}`, true},
+		// ...but it must NOT become a way to smuggle an admin field alongside it.
+		{"smuggle lookupIdpConnections+idpConnections", `{"query":"{ lookupIdpConnections(workspaceSlug:\"a\") { id } idpConnections { clientId } }"}`, false},
+		{"aliased idpConnections as lookupIdpConnections", `{"query":"{ lookupIdpConnections: idpConnections { clientId } }"}`, false},
+		// The ADMIN-only sibling stays protected on its own.
+		{"protected idpConnections", `{"query":"{ idpConnections { id clientId subjectClaim } }"}`, false},
 
 		// --- protected: ordinary protected operation ---
 		{"protected mutation", `{"query":"mutation { generateConnectorToken(remoteNetworkId:\"1\", connectorName:\"c\") { connectorId } }"}`, false},

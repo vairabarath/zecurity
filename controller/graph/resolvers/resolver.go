@@ -9,12 +9,12 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
 	"github.com/yourorg/ztna/controller/internal/resource"
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
-	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/transport"
 )
 
@@ -50,4 +50,11 @@ type Resolver struct {
 	// IdP, so a workspace can never lock itself out. Consulted by the no-lockout
 	// guard; from IDP_BREAK_GLASS_EMAILS. See ADR-024 §5.
 	BreakGlassEmails map[string]bool
+	// OIDCRedirectURI is the callback URL sent with the client-credential
+	// verification probe (verifyOIDCCredentials). It is the SAME value the login
+	// path uses (auth.Config.RedirectURI / GOOGLE_REDIRECT_URI): sending the real
+	// registered URI keeps the probe from tripping a redirect_uri check on IdPs
+	// that evaluate one before client authentication, which would otherwise read
+	// as "not invalid_client" and wrongly pass.
+	OIDCRedirectURI string
 }

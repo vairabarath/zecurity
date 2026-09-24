@@ -182,6 +182,31 @@ func (s *DirectoryService) Provision(ctx context.Context, sc *scope, resource ma
 			"an existing identity already owns this canonical key; admin approval required")
 	}
 
+	// Connection-scoped miss is NOT proof the key is free. Resolve keys on
+	// (connection_id, subject), but users.UNIQUE(tenant_id, provider_sub) is
+	// TENANT-scoped. When a previous connection for the same IdP was deleted or
+	// disabled, its users survive by design (ADR-025 §12: never delete, flip to
+	// provisioning_owner='unmanaged') and keep occupying the canonical key. A
+	// fresh connection to that same IdP re-pushes the same subjects, misses here,
+	// and used to fall straight into the JIT-create below — where the INSERT died
+	// on users_tenant_id_provider_sub_key and surfaced to the IdP as an opaque
+	// 500. Okta reports that as "cannot push to Zecurity" for every user.
+	//
+	// ADR-025 §4 is explicit that `unmanaged → scim` happens "only through
+	// explicit authorized admin action", so this must NOT silently reclaim the
+	// identity. It is the same situation §4.1 already specifies for an existing
+	// JIT/manual identity: 409 identity_conflict + a persistent pending record the
+	// admin resolves in the Provisioning Conflicts queue (AcceptLink re-links the
+	// external identity to this connection and flips ownership back to 'scim').
+	if occupantID, occErr := s.tenantKeyOccupant(ctx, sc.workspaceID, key); occErr != nil {
+		return nil, newSCIMError(500, "", "check canonical key occupancy: "+occErr.Error())
+	} else if occupantID != "" {
+		s.ensurePendingConflict(ctx, sc.workspaceID, sc.connectionID, key, occupantID,
+			conflictSnapshot{externalID: key, userName: userNameOf(resource), email: primaryEmailOf(resource)})
+		return &provisionResult{conflict: true}, newSCIMError(409, "identity_conflict",
+			"an existing identity already owns this canonical key; admin approval required")
+	}
+
 	// First-seen → JIT-create via the SCIM provisioner (atomic user + link).
 	prov := newSCIMProvisioner(s.pool, sc.workspaceID, sc.connectionID, syncInst, s.publisher)
 	linker := identity.NewLinker(prov)
@@ -497,6 +522,33 @@ func (s *DirectoryService) canonicalKeyOfUser(ctx context.Context, sc *scope, us
 		return ""
 	}
 	return sub
+}
+
+// tenantKeyOccupant reports the canonical user, if any, that already holds this
+// canonical identity key inside the workspace — regardless of which connection
+// linked it. It exists because users.UNIQUE(tenant_id, provider_sub) is
+// tenant-scoped while identity resolution is connection-scoped; without this
+// check a cross-connection collision reaches the INSERT as a raw duplicate-key
+// error instead of the 409 + pending-conflict record ADR-025 §4.1 requires.
+//
+// Returns ("", nil) when the key is free — the only case in which a JIT-create
+// may proceed.
+func (s *DirectoryService) tenantKeyOccupant(ctx context.Context, workspaceID, key string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	var userID string
+	err := s.pool.QueryRow(ctx,
+		`SELECT id FROM users WHERE tenant_id = $1 AND provider_sub = $2`,
+		workspaceID, key,
+	).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("lookup canonical key occupant: %w", err)
+	}
+	return userID, nil
 }
 
 // scopedProvisioningOwner returns users.provisioning_owner for a user id,

@@ -89,7 +89,9 @@ func TestIdpConnection_DoesNotPersistScimEnabled(t *testing.T) {
 		}
 	}
 
-	idpStore := idp.NewStore(pool, nil)
+	// Reversible encryptor: testIdpConnection now verifies the connection's
+	// real client credentials, so the seeded secret must decrypt.
+	idpStore := idp.NewStore(pool, testSecretEnc{})
 	scimStore, err := scim.NewStore(pool, []byte("c1-test-hash-key"), 24*time.Hour)
 	if err != nil {
 		t.Fatalf("new scim store: %v", err)
@@ -97,7 +99,10 @@ func TestIdpConnection_DoesNotPersistScimEnabled(t *testing.T) {
 	ds := scim.NewDirectoryService(pool, idpStore, nil, nil, nil, nil)
 	scimStore = scimStore.WithDirectoryService(ds)
 
-	r := &Resolver{IdpStore: idpStore, ScimStore: scimStore}
+	r := &Resolver{
+		IdpStore: idpStore, ScimStore: scimStore,
+		OIDCRedirectURI: "http://localhost:8080/auth/callback",
+	}
 	mr := &mutationResolver{r}
 
 	seedWorkspaceAndConnection := func(t *testing.T, issuer string) (ws, connID string) {
@@ -114,9 +119,11 @@ func TestIdpConnection_DoesNotPersistScimEnabled(t *testing.T) {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO identity_connections
 			   (id, tenant_id, protocol, provider, managed, display_name, issuer,
-			    client_id, status, subject_claim, scim_identifier, scim_enabled)
-			 VALUES ($1,$2,'oidc','okta',FALSE,'Okta Conn',$3,gen_random_uuid(),'active','sub','externalId',FALSE)`,
-			connID, ws, issuer,
+			    client_id, encrypted_client_secret, secret_nonce,
+			    status, subject_claim, scim_identifier, scim_enabled)
+			 VALUES ($1,$2,'oidc','okta',FALSE,'Okta Conn',$3,gen_random_uuid(),$4,$5,
+			         'active','sub','externalId',FALSE)`,
+			connID, ws, issuer, seededSecretCiphertext, seededSecretNonce,
 		); err != nil {
 			t.Fatalf("seed connection: %v", err)
 		}
@@ -191,6 +198,7 @@ func TestIdpConnection_DoesNotPersistScimEnabled(t *testing.T) {
 				"jwks_uri":               issuerURL + "/jwks",
 			})
 		})
+		registerCredentialProbeToken(mux)
 		srv := httptest.NewServer(mux)
 		defer srv.Close()
 		issuerURL = srv.URL

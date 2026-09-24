@@ -2,31 +2,108 @@ package shield
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// setupHeartbeatTestDB migrates a throwaway database rather than the one
+// SHIELD_TEST_DATABASE_URL names. That database is shared with other
+// packages' integration tests, which `go test ./...` runs in parallel, and
+// (unlike this package's other DB-backed tests) these seed rows directly
+// against it with no migration step of their own — so it must already carry
+// the full schema, which nothing here can assume. Create a uniquely named
+// shield_test_<id> database, migrate that, and drop it afterwards — the
+// pattern the scim, idp, permission and identity integration tests use.
+func setupHeartbeatTestDB(t *testing.T) (*pgxpool.Pool, context.Context) {
+	t.Helper()
+	adminDSN := os.Getenv("SHIELD_TEST_DATABASE_URL")
+	if adminDSN == "" {
+		t.Skip("SHIELD_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	dbName := "shield_test_" + uuid.NewString()[:8]
+
+	adminPool := mustConnectHeartbeatPool(t, ctx, adminDSN)
+	t.Cleanup(adminPool.Close)
+	if _, err := adminPool.Exec(ctx, "CREATE DATABASE "+dbName); err != nil {
+		t.Fatalf("create test database: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := adminPool.Exec(context.Background(), "DROP DATABASE IF EXISTS "+dbName); err != nil {
+			t.Logf("drop test database: %v", err)
+		}
+	})
+
+	testDSN, err := withHeartbeatDBName(adminDSN, dbName)
+	if err != nil {
+		t.Fatalf("build test dsn: %v", err)
+	}
+	pool := mustConnectHeartbeatPool(t, ctx, testDSN)
+	t.Cleanup(pool.Close)
+	if err := applyHeartbeatMigrations(ctx, pool); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	return pool, ctx
+}
+
+func mustConnectHeartbeatPool(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("pgxpool.New: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping: %v", err)
+	}
+	return pool
+}
+
+func withHeartbeatDBName(dsn, dbName string) (string, error) {
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = "/" + dbName
+	return parsed.String(), nil
+}
+
+func applyHeartbeatMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
+	if err != nil {
+		return err
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+		if _, err := pool.Exec(ctx, string(b)); err != nil {
+			return fmt.Errorf("execute %s: %w", filepath.Base(f), err)
+		}
+	}
+	return nil
+}
 
 // TestUpdateShieldHealthResyncsResourceHostOnLanIPChange exercises the shield-sync
 // fix against a real Postgres (migrations applied): when a shield's LAN IP changes
 // on heartbeat, the resources bound to it that were tracking the old IP are
 // re-pointed to the new IP, lanIPChanged is reported, and unrelated hosts
-// (127.0.0.1) are preserved. Gated on SHIELD_TEST_DATABASE_URL; skipped otherwise.
+// (127.0.0.1) are preserved. Skips cleanly when no DB is configured.
 func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
-	dsn := os.Getenv("SHIELD_TEST_DATABASE_URL")
-	if dsn == "" {
-		t.Skip("SHIELD_TEST_DATABASE_URL not set")
-	}
-	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	// Defensive: clear any leftover from a crashed prior run (slug is UNIQUE).
-	_, _ = db.Exec(ctx, `DELETE FROM workspaces WHERE slug = 'shieldsync-test'`)
+	db, ctx := setupHeartbeatTestDB(t)
 
 	must := func(q string, args ...any) string {
 		t.Helper()
@@ -37,9 +114,7 @@ func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
 		return id
 	}
 
-	// Seed the FK chain; everything cascades from the workspace on cleanup.
 	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shieldsync-test','shieldsync','shieldsync.example.com','active') RETURNING id`)
-	t.Cleanup(func() { _, _ = db.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, wsID) })
 
 	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
 	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
@@ -119,5 +194,126 @@ func TestUpdateShieldHealthResyncsResourceHostOnLanIPChange(t *testing.T) {
 	}
 	if got := hostOf(trackResID); got != "10.0.0.9" {
 		t.Fatalf("resource host wrongly wiped on empty lan_ip heartbeat: got %q want 10.0.0.9", got)
+	}
+}
+
+// TestUpdateShieldHealth_RevokedShieldIgnored tests that heartbeat updates are ignored
+// when the shield row has status='revoked', preserving the shield row and associated resource hosts.
+func TestUpdateShieldHealth_RevokedShieldIgnored(t *testing.T) {
+	db, ctx := setupHeartbeatTestDB(t)
+
+	must := func(q string, args ...any) string {
+		t.Helper()
+		var id string
+		if err := db.QueryRow(ctx, q, args...).Scan(&id); err != nil {
+			t.Fatalf("seed (%s): %v", q, err)
+		}
+		return id
+	}
+
+	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shield-revoked-test','shieldrev','shieldrev.example.com','active') RETURNING id`)
+
+	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
+	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
+	shieldID := must(`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, lan_ip)
+		VALUES ($1,$2,$3,'sh','revoked','10.0.0.5') RETURNING id`, wsID, rnID, connID)
+
+	trackResID := must(`INSERT INTO resources (tenant_id, remote_network_id, shield_id, name, host, protocol, port_from, port_to, status, pending_action)
+		VALUES ($1,$2,$3,'db','10.0.0.5','tcp',5432,5432,'protected','apply') RETURNING id`, wsID, rnID, shieldID)
+
+	svc := &service{db: db}
+
+	hostOf := func(id string) string {
+		t.Helper()
+		var h string
+		if err := db.QueryRow(ctx, `SELECT host FROM resources WHERE id = $1`, id).Scan(&h); err != nil {
+			t.Fatalf("read host: %v", err)
+		}
+		return h
+	}
+
+	connectorChanged, lanIPChanged, err := svc.UpdateShieldHealth(ctx, shieldID, connID, "active", "v1", "10.0.0.99", 1000)
+	if err != nil {
+		t.Fatalf("UpdateShieldHealth: %v", err)
+	}
+	if connectorChanged {
+		t.Errorf("expected connectorChanged=false, got true")
+	}
+	if lanIPChanged {
+		t.Errorf("expected lanIPChanged=false, got true")
+	}
+
+	// Assert shields row still status=revoked and lan_ip still 10.0.0.5
+	var shStatus, shLanIP string
+	if err := db.QueryRow(ctx, `SELECT status, lan_ip FROM shields WHERE id = $1`, shieldID).Scan(&shStatus, &shLanIP); err != nil {
+		t.Fatalf("read shield: %v", err)
+	}
+	if shStatus != "revoked" {
+		t.Errorf("shield status became %q, want 'revoked'", shStatus)
+	}
+	if shLanIP != "10.0.0.5" {
+		t.Errorf("shield lan_ip became %q, want '10.0.0.5'", shLanIP)
+	}
+
+	// Assert resource host is still 10.0.0.5
+	if got := hostOf(trackResID); got != "10.0.0.5" {
+		t.Fatalf("resource host wrongly re-synced: got %q want 10.0.0.5", got)
+	}
+}
+
+// TestUpdateShieldHealth_ActiveShieldStillUpdates verifies regression: active shield updates successfully.
+func TestUpdateShieldHealth_ActiveShieldStillUpdates(t *testing.T) {
+	db, ctx := setupHeartbeatTestDB(t)
+
+	must := func(q string, args ...any) string {
+		t.Helper()
+		var id string
+		if err := db.QueryRow(ctx, q, args...).Scan(&id); err != nil {
+			t.Fatalf("seed (%s): %v", q, err)
+		}
+		return id
+	}
+
+	wsID := must(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ('shield-active-test','shieldact','shieldact.example.com','active') RETURNING id`)
+
+	rnID := must(`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1,'rn','office') RETURNING id`, wsID)
+	connID := must(`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1,$2,'conn','active') RETURNING id`, wsID, rnID)
+	shieldID := must(`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, lan_ip)
+		VALUES ($1,$2,$3,'sh','active','10.0.0.5') RETURNING id`, wsID, rnID, connID)
+
+	trackResID := must(`INSERT INTO resources (tenant_id, remote_network_id, shield_id, name, host, protocol, port_from, port_to, status, pending_action)
+		VALUES ($1,$2,$3,'db','10.0.0.5','tcp',5432,5432,'protected','apply') RETURNING id`, wsID, rnID, shieldID)
+
+	svc := &service{db: db}
+
+	hostOf := func(id string) string {
+		t.Helper()
+		var h string
+		if err := db.QueryRow(ctx, `SELECT host FROM resources WHERE id = $1`, id).Scan(&h); err != nil {
+			t.Fatalf("read host: %v", err)
+		}
+		return h
+	}
+
+	_, lanIPChanged, err := svc.UpdateShieldHealth(ctx, shieldID, connID, "active", "v1", "10.0.0.99", 1000)
+	if err != nil {
+		t.Fatalf("UpdateShieldHealth: %v", err)
+	}
+	if !lanIPChanged {
+		t.Fatalf("expected lanIPChanged=true on IP change")
+	}
+
+	// Assert shields row lan_ip becomes 10.0.0.99
+	var shLanIP string
+	if err := db.QueryRow(ctx, `SELECT lan_ip FROM shields WHERE id = $1`, shieldID).Scan(&shLanIP); err != nil {
+		t.Fatalf("read shield lan_ip: %v", err)
+	}
+	if shLanIP != "10.0.0.99" {
+		t.Errorf("shield lan_ip became %q, want '10.0.0.99'", shLanIP)
+	}
+
+	// Assert resource host becomes 10.0.0.99
+	if got := hostOf(trackResID); got != "10.0.0.99" {
+		t.Fatalf("resource host not re-synced: got %q want 10.0.0.99", got)
 	}
 }

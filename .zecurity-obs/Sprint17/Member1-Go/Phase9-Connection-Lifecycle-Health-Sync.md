@@ -43,3 +43,76 @@ Give a SCIM connection a safe lifecycle, surface sync health, and make disable�
 
 ## Build gate
 `go build ./...` + `go vet ./...` + `lifecycle_integration_test.go` (10 subtests) + full `go test ./internal/scim/... ./internal/idp/... ./graph/...` green on live Postgres.
+
+## Post-Phase Fixes
+
+### Fix: soft-delete left orphaned SCIM groups, tokens and sync instances (2026-09-07)
+**Issue:** After deleting an Okta connection and creating a fresh one for the same Okta org, group
+operations from Okta failed with `404 group not found`. The SCIM-managed `hermes` group was still
+present in Zecurity, `origin='scim'`, `connection_id` pointing at the **deleted** connection.
+
+**Root Cause:** Phase 9's `SoftDeleteConnection` (`controller/internal/idp/store.go`) only flipped
+`identity_connections.status` to `'deleted'`. Everything keyed on `connection_id` survived:
+
+| Orphaned state | Consequence |
+|---|---|
+| `groups` (`origin='scim'`) | unreachable by the replacement connection — it carries a different `connection_id`, so Okta's group updates 404 |
+| `group_members` | frozen membership still resolvable by the ACL compiler |
+| `scim_tokens` | still active against a deleted connection |
+| `scim_sync_instances` | orphaned sync metadata |
+
+`groups.connection_id` is `ON DELETE CASCADE`, so these vanish on a **hard** delete but survive the
+**soft** delete that ADR-025 §12 mandates whenever linked users exist.
+
+**Fix applied** (`ba68e24`) — `SoftDeleteConnection` now runs the status flip plus cleanup in a single
+transaction:
+
+```go
+// BEFORE: single UPDATE, no cleanup.
+tag, err := s.pool.Exec(ctx,
+    `UPDATE identity_connections SET status = 'deleted', updated_at = NOW()
+      WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
+return nil
+
+// AFTER: tx { status flip → delete scim groups → revoke tokens → purge sync instances }
+tx, err := s.pool.Begin(ctx)
+defer tx.Rollback(ctx)
+// … UPDATE identity_connections … (ErrConnectionNotFound when 0 rows)
+`DELETE FROM groups WHERE workspace_id = $1 AND origin = 'scim' AND connection_id = $2`
+`UPDATE scim_tokens SET revoked_at = COALESCE(revoked_at, NOW())
+   WHERE workspace_id = $1 AND connection_id = $2 AND revoked_at IS NULL`
+`DELETE FROM scim_sync_instances WHERE workspace_id = $1 AND connection_id = $2`
+return tx.Commit(ctx)
+```
+
+`group_members` rows are removed by the database, not by this code: `group_members.group_id
+REFERENCES groups(id) ON DELETE CASCADE` (`controller/migrations/012_groups_acl.sql:18`) — verified.
+
+**Related files also changed:**
+- `controller/graph/resolvers/idp.resolvers.go` — delete path simplified to call the unified
+  `SoftDeleteConnection`.
+- `controller/internal/scim/group_cleanup_integration_test.go` — **new**, ~500 lines, covers the full
+  delete → re-provision lifecycle.
+
+**Scope guard (ADR-025 §12).** Only SCIM-owned metadata is removed. Manually-created users and
+groups, `external_identities` links, roles, policies, devices and audit history are all untouched.
+
+> ⚠️ **Unratified ADR reading — to verify.** `path.md` and
+> [[Sprint17/Member1-Frontend/Phase7-SCIM-Config-Missing-Fields]] both recorded orphaned SCIM groups
+> as an **open product decision**, and Phase 7 states plainly that deleting them is *"forbidden by
+> ADR-025 §12"*. This fix deletes them. It does so on the reading that §12's preservation list
+> (user, external identity link, local roles, resources/policies/access rules, device assignments,
+> audit history) **does not include groups**, so groups are SCIM-owned metadata rather than protected
+> identity data. That reading is asserted in commit `ba68e24` and in the working note it came from —
+> **it is not recorded in ADR-025 itself.** Treat the product decision as *made in code, not
+> ratified*: confirm against ADR-025 §12 (and, if it holds, amend the ADR) before relying on it.
+> The alternative Phase 7 proposed — reconcile groups onto the new connection by `external_id` under
+> the same admin-approval rule as users — was not implemented and was not explicitly rejected.
+
+**Verified:**
+```bash
+cd controller && go test ./internal/scim/... \
+  -run "TestGroupCleanupOnConnectionDelete_Integration|TestReprovisionAfterConnectionDelete_Integration"
+```
+Requires a live Postgres via `PKI_TEST_DATABASE_URL` (see `agent.md` for the dev DSN — do not inline
+credentials here).

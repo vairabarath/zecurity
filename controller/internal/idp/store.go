@@ -412,19 +412,55 @@ func (s *Store) LinkedUserCount(ctx context.Context, tenantID, connectionID stri
 
 // SoftDeleteConnection marks a connection terminal (status='deleted') without
 // removing the row or any user data (ADR-025 §12). Callers must have already
-// flipped affected users to provisioning_owner='unmanaged'. The tenant_id guard
-// prevents touching a platform connection.
+// flipped affected users to provisioning_owner='unmanaged'.
+//
+// Additionally cleans up SCIM-managed groups, tokens, and sync instances
+// to prevent orphaned state from blocking re-provisioning with a replacement
+// connection. Groups are SCIM-owned metadata, not core identity data, so
+// they can be cleaned up independently of users.
 func (s *Store) SoftDeleteConnection(ctx context.Context, tenantID, connectionID string) error {
-	tag, err := s.pool.Exec(ctx,
+	// Use a transaction to ensure atomicity of status update and cleanup.
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Mark the connection as deleted.
+	tag, err := tx.Exec(ctx,
 		`UPDATE identity_connections SET status = 'deleted', updated_at = NOW()
-		  WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
+		 WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
 	if err != nil {
 		return fmt.Errorf("soft-delete connection: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrConnectionNotFound
 	}
-	return nil
+
+	// Clean up SCIM-groups: CASCADE to group_members via ON DELETE CASCADE.
+	// Groups are SCIM-owned metadata that must not block reprovisioning.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM groups WHERE workspace_id = $1 AND origin = 'scim' AND connection_id = $2`,
+		tenantID, connectionID); err != nil {
+		return fmt.Errorf("delete scim groups: %w", err)
+	}
+
+	// Revoke all SCIM tokens for this connection.
+	if _, err := tx.Exec(ctx,
+		`UPDATE scim_tokens SET revoked_at = COALESCE(revoked_at, NOW())
+		 WHERE workspace_id = $1 AND connection_id = $2 AND revoked_at IS NULL`,
+		tenantID, connectionID); err != nil {
+		return fmt.Errorf("revoke scim tokens: %w", err)
+	}
+
+	// Purge sync instances created during provisioning.
+	if _, err := tx.Exec(ctx,
+		`DELETE FROM scim_sync_instances WHERE workspace_id = $1 AND connection_id = $2`,
+		tenantID, connectionID); err != nil {
+		return fmt.Errorf("purge scim sync instances: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }
 
 // UpdateInput is the mutable field set for updating a workspace connection.

@@ -57,7 +57,13 @@ type groupPatch struct {
 
 // memberFilterRe matches a targeted-removal path of the form
 // members[value eq "user-id"] (case-insensitive on the path).
-var memberFilterRe = regexp.MustCompile(`^members\[value eq "([^"]*)"\]$`)
+// The attribute name is matched case-INSENSITIVELY (SCIM attribute names are
+// case-insensitive, RFC 7644 §3.10) and whitespace is tolerated, but the
+// CAPTURED VALUE keeps the case of the original path — it is an opaque provider
+// id compared byte-for-byte against external_identities.subject. Okta user ids
+// are mixed case (e.g. "00u16w7qu5saDn60H698"), so folding the value's case
+// makes every targeted removal unresolvable.
+var memberFilterRe = regexp.MustCompile(`(?i)^members\[\s*value\s+eq\s+"([^"]*)"\s*\]$`)
 
 // DeriveGroupExternalID builds a fallback Canonical Identity Key for a SCIM
 // group from its displayName, for IdPs that push groups without an externalId.
@@ -613,6 +619,9 @@ func OriginAwareID(id, origin, externalID string) string {
 // supported. Each operation keeps its own op so mixed add/remove/replace PATCHes
 // are preserved.
 func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
+	if len(ops) == 0 {
+		return nil, fmt.Errorf("no membership operations in PATCH")
+	}
 	p := &groupPatch{}
 	for _, op := range ops {
 		opType, _ := op["op"].(string)
@@ -624,6 +633,25 @@ func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
 			if err != nil {
 				return nil, err
 			}
+			// A NIL values slice means the op carried NO membership information
+			// at all — e.g. Okta's group metadata sync,
+			// {"op":"replace","value":{"displayName":"hermes","id":"…"}}. Such an
+			// op MUST be dropped, not recorded.
+			//
+			// Recording it was a membership-WIPE bug: PatchGroup's REPLACE branch
+			// resets the working set and then adds this op's members, so a
+			// REPLACE carrying zero members emptied the entire group. A rename
+			// pushed from the IdP silently deleted every member in Zecurity.
+			//
+			// This is distinct from an EXPLICIT empty list
+			// ({"op":"replace","path":"members","value":[]}), which is a
+			// legitimate "clear all members": groupMemberValues returns a
+			// non-nil, zero-length slice for that, so it is still recorded and
+			// still clears. nil vs empty is the whole distinction — do not
+			// collapse it to len(values) == 0.
+			if values == nil {
+				continue
+			}
 			// Preserve the operation boundary: all values of one PATCH op stay
 			// together so PatchGroup applies them as a single add/remove/replace.
 			p.Ops = append(p.Ops, patchOp{Op: opType, Values: values})
@@ -631,15 +659,20 @@ func patchGroupFromOps(ops []map[string]any) (*groupPatch, error) {
 			return nil, fmt.Errorf("unsupported PATCH op %q", opType)
 		}
 	}
-	if len(p.Ops) == 0 {
-		return nil, fmt.Errorf("no membership operations in PATCH")
-	}
+	// Every op was metadata-only. That is a well-formed PATCH that simply does
+	// not change membership: PatchGroup short-circuits to GetGroup and returns
+	// the group unchanged (200), which is what the IdP expects. Erroring here
+	// would 400 a routine directory rename.
 	return p, nil
 }
 
 // groupMemberValues extracts member reference values from a single SCIM PATCH op.
 func groupMemberValues(opType, path string, value any) ([]string, error) {
-	normed := strings.ToLower(strings.TrimSpace(path))
+	// trimmed keeps the ORIGINAL CASE for the member-filter match below, whose
+	// capture group is an opaque provider id. normed is only ever compared
+	// against known path keywords, never used to extract a value.
+	trimmed := strings.TrimSpace(path)
+	normed := strings.ToLower(trimmed)
 
 	// No path: value may be a full resource object carrying a "members" key
 	// (e.g. {"op":"add","value":{"members":[{"value":"id"}]}}), a bare array
@@ -663,8 +696,9 @@ func groupMemberValues(opType, path string, value any) ([]string, error) {
 		return nil, fmt.Errorf("group PATCH requires a members path or a members value object")
 	}
 
-	// Targeted removal: members[value eq "user-id"].
-	if m := memberFilterRe.FindStringSubmatch(normed); m != nil {
+	// Targeted removal: members[value eq "user-id"]. Matched on `trimmed`, NOT
+	// `normed` — see memberFilterRe: the captured id must keep its case.
+	if m := memberFilterRe.FindStringSubmatch(trimmed); m != nil {
 		if opType != "REMOVE" {
 			return nil, fmt.Errorf("filtered path %q is only valid for remove", path)
 		}

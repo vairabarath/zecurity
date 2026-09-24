@@ -1,6 +1,9 @@
 package identity
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // ProvisionInput carries what a Provisioner needs to JIT-create a canonical
 // user for a never-seen external identity. Email is an invite-matching hint
@@ -14,7 +17,34 @@ type ProvisionInput struct {
 	ConnectionID  string
 	Issuer        string
 	WorkspaceName string
+	// ConnectionTenantID is the workspace that OWNS the connection this login
+	// came through: set for an ENTERPRISE (BYO) connection, nil for the shared
+	// platform tier.
+	//
+	// It decides whether a first-seen identity may be provisioned at all. On the
+	// platform tier a first-time signup legitimately creates a workspace. On an
+	// enterprise connection it must NOT: the connection already belongs to one
+	// workspace, so anyone in the customer's IdP directory would otherwise get a
+	// brand-new Zecurity workspace (as its ADMIN) just by signing in. Such a
+	// user joins the owning workspace if invited/provisioned, else is refused
+	// with ErrNotInvited.
+	ConnectionTenantID *string
+	// EmailVerified is TRUE only when the IdP explicitly asserted it. Most
+	// enterprise IdPs omit the claim entirely, so FALSE means "not vouched
+	// for", NOT "the IdP said unverified" — an explicit false never gets this
+	// far (providers/oidc.go rejects it at token verification).
+	//
+	// It is not an access decision here; it is recorded because Email IS the
+	// key the invite lookup matches on, and claiming an invite with an
+	// unvouched email is worth an audit trail.
+	EmailVerified bool
 }
+
+// ErrNotInvited is returned when a cryptographically proven identity arrives
+// through an ENTERPRISE connection but has no user in that workspace and no
+// pending invite. The IdP vouched for who they are; it does not follow that
+// this workspace has granted them access.
+var ErrNotInvited = errors.New("identity is not a member of this workspace and has no pending invitation")
 
 // Provisioner JIT-creates a canonical user (and its external_identities link, in
 // one transaction) for an identity the Resolver did not find. Implemented by
