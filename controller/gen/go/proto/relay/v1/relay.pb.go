@@ -22,16 +22,19 @@ const (
 
 type ProvisionRequest struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
-	ProvisioningToken string                 `protobuf:"bytes,1,opt,name=provisioning_token,json=provisioningToken,proto3" json:"provisioning_token,omitempty"` // reserved for future authenticated provisioning; currently ignored
+	ProvisioningToken string                 `protobuf:"bytes,1,opt,name=provisioning_token,json=provisioningToken,proto3" json:"provisioning_token,omitempty"` // single-use token minted by POST /provider/relays; required
 	RelayId           string                 `protobuf:"bytes,2,opt,name=relay_id,json=relayId,proto3" json:"relay_id,omitempty"`                               // canonical lowercase UUID; must match the requested SPIFFE URI
 	CsrDer            []byte                 `protobuf:"bytes,3,opt,name=csr_der,json=csrDer,proto3" json:"csr_der,omitempty"`                                  // DER-encoded PKCS#10 CSR; Relay private key never leaves the host
 	Version           string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`                                              // CARGO_PKG_VERSION
 	Hostname          string                 `protobuf:"bytes,5,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	// Operator-confirmed SAN allowlist. The Controller enforces that every DNS
-	// and IP SAN in the CSR is present in these lists. Pass empty lists to
-	// forbid that SAN type entirely (SPIFFE URI only).
+	// SANs the Relay requests. Each entry, and every DNS/IP SAN in the CSR,
+	// must be in the allowlist registered on the relay row at
+	// POST /provider/relays; the certificate is bound to that stored allowlist.
+	// An empty stored list forbids that SAN type (SPIFFE URI only). DNS names
+	// are compared case-insensitively; CSR DNS SANs must be lowercase with no
+	// trailing dot.
 	DnsSans       []string `protobuf:"bytes,6,rep,name=dns_sans,json=dnsSans,proto3" json:"dns_sans,omitempty"`
-	IpSans        []string `protobuf:"bytes,7,rep,name=ip_sans,json=ipSans,proto3" json:"ip_sans,omitempty"` // IPv4 / IPv6 in textual form (e.g. "10.0.0.5", "2001:db8::1")
+	IpSans        []string `protobuf:"bytes,7,rep,name=ip_sans,json=ipSans,proto3" json:"ip_sans,omitempty"` // IPv4 / IPv6 in textual form (e.g. "10.0.0.5", "2001:db8::1"); compared as parsed addresses
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

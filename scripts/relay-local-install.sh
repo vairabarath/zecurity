@@ -22,8 +22,12 @@
 #
 # Optional environment variables (forwarded into relay.conf if set):
 #   RELAY_BIND                       (default 0.0.0.0:9093)
-#   RELAY_DNS_SANS                   (comma-separated, e.g. relay.example.com)
+#   RELAY_DNS_SANS                   (comma-separated, lowercase, e.g. relay.example.com)
 #   RELAY_IP_SANS                    (comma-separated, e.g. 10.0.0.50)
+#                                     Both must be a subset of the dns_allowlist /
+#                                     ip_allowlist registered at POST /provider/relays;
+#                                     otherwise provisioning is rejected (the token
+#                                     is NOT consumed, so fix the SANs and retry).
 #   RELAY_STATE_DIR                  (default /var/lib/zecurity-relay/pki)
 #   RELAY_PROVISIONING_TOKEN         single-use token returned by
 #                                     POST /provider/relays; required on first boot

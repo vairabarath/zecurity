@@ -159,13 +159,14 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase2-Relay-SAN-Allowlist]]. Depends on Phase A (M2 sequencing).
 
-- [ ] **M2-C1** `provision.go` — load the relay row **before** burning the token; require `pending`.
-- [ ] **M2-C2** `provision.go` — allowed SANs = stored `dns_allowlist` / `ip_allowlist`; request `dns_sans`/`ip_sans` must be ⊆ stored.
-- [ ] **M2-C3** Every SAN / status rejection happens **before** `BurnProvisioningJTI`.
-- [ ] **M2-C4** `proto/relay/v1/relay.proto` — fix stale comments only (no field changes).
-- [ ] **M2-C5** `scripts/relay-local-install*.sh`, `scripts/run-relay-local.sh` — document that `RELAY_DNS_SANS`/`RELAY_IP_SANS` must match the allowlists registered at `POST /provider/relays`.
-- [ ] **M2-C6** Tests: `provision_test.go`.
-- [ ] **Build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... ./internal/pki/...`
+- [x] **M2-C1** `provision.go` — load the relay row **before** burning the token; require `pending`.
+- [x] **M2-C2** `provision.go` — allowed SANs = stored `dns_allowlist` / `ip_allowlist`; request `dns_sans`/`ip_sans` must be ⊆ stored.
+- [x] **M2-C3** Every SAN / status rejection happens **before** `BurnProvisioningJTI` (incl. a pre-check of every `SignRelayCert` CSR check: signature, SPIFFE URI, P-384, SANs).
+- [x] **M2-C4** `proto/relay/v1/relay.proto` — fix stale comments only (no field changes; generated diff comment-only).
+- [x] **M2-C5** `scripts/relay-local-install*.sh`, `scripts/run-relay-local.sh` — document that `RELAY_DNS_SANS`/`RELAY_IP_SANS` must match the allowlists registered at `POST /provider/relays`.
+- [x] **M2-C6** Tests: `provision_test.go` (updated), `provision_allowlist_test.go` (allowlist + canonicalization).
+- [x] **Build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... ./internal/pki/...` (0 skips with DB env; also `go test ./...` and relay `cargo build`, after rebase onto Phase B)
+- [ ] **Live acceptance — PENDING / NOT YET RUN:** relay created with `ip_allowlist: []` + `RELAY_IP_SANS=127.0.0.1` is rejected, token still usable; retry without the IP SAN succeeds with the same token (AT-C.2, AT-C.5). Needs a running controller + provider token.
 
 ### Phase D — M1: Disconnect Watcher → Transport Plane
 
@@ -230,7 +231,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A relay that stops heartbeating becomes `inactive` within expiry + sweep interval (≤ 150 s) and returns to `active` on its first heartbeat after recovery. *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A revoked connector remains `revoked` after its stream closes, after reconnect attempts, after `Goodbye`, and after `RenewCert` attempts.
 - [ ] A revoked shield remains `revoked` while its connector keeps sending shield status batches.
-- [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token.
+- [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Phase C code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
 - [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`.
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke.

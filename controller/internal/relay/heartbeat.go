@@ -33,6 +33,9 @@ const (
 type heartbeatStore interface {
 	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
+	// LoadRelayByID lets Provision validate the operator-registered row
+	// (status + SAN allowlists) before the provisioning token is burned.
+	LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
 	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
