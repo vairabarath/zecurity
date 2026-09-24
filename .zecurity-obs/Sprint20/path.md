@@ -171,11 +171,11 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member1-Go/Phase2-Disconnect-Watcher-Transport-Notify]]. Depends on Phase B.
 
-- [ ] **M1-D1** `disconnect_watcher.go` `markDisconnected` — return affected connector IDs grouped by workspace.
-- [ ] **M1-D2** `RunDisconnectWatcher` — accept a topology notifier; call `NotifyTopologyChange(ws, connectorIDs)` alongside `NotifyPolicyChange`.
-- [ ] **M1-D3** `cmd/server/main.go` — pass `transportNotifier`.
-- [ ] **M1-D4** Tests: disconnect watcher (DB).
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/...`
+- [x] **M1-D1** `disconnect_watcher.go` `markDisconnected` — return affected connector IDs grouped by workspace.
+- [x] **M1-D2** `RunDisconnectWatcher` — accept a topology notifier; call `NotifyTopologyChange(ws, connectorIDs)` alongside `NotifyPolicyChange`.
+- [x] **M1-D3** `cmd/server/main.go` — pass `transportNotifier`.
+- [x] **M1-D4** Tests: disconnect watcher (DB).
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/...`
 
 ### Phase E — M1: Controller gRPC Certificate Rotation
 

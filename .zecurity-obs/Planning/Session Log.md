@@ -10,6 +10,28 @@ tags:
 
 ---
 
+## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 2 (D): Disconnect Watcher → Transport Plane + M2-A worktree restoration
+
+**What was done:**
+- Implemented Phase D (depends on Phase B, done) end-to-end via the Antigravity CLI (`agy`) through the Orca terminal, one task at a time, each independently verified before the next; `feat/sprint20-m1-phase1`.
+- **D1 (`disconnect_watcher.go`):** `markDisconnected` now `RETURNING tenant_id::text, id::text` and returns `map[string][]string` (workspace → affected connector IDs), de-duplicated per workspace; `workspaces.status='active'` and `WHERE status='active'` predicates untouched (I3/I5).
+- **D2 (`RunDisconnectWatcher`):** signature `(ctx, pool, cfg, policy PolicyChangeNotifier, topology TransportChangeNotifier)` — reuses the existing `TransportChangeNotifier` from `control_stream.go` (no duplicate interface); per-workspace `NotifyPolicyChange` + `NotifyTopologyChange(ws, connectorIDs)`; both nil-safe, an error from one never skips the other.
+- **D3 (`main.go`):** `connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier, transportNotifier)` — `transportNotifier` in scope from `transport.NewNotifier(transportCache)`.
+- **D4 (tests, `disconnect_watcher_test.go`, DB-backed, none skipped):** `TestDisconnectWatcher_MarksStaleAndNotifiesBothPlanes` (two stale + one fresh in W1, one stale in W2; exact map + DB statuses + both planes notified with exact IDs), `_RevokedUntouchedNoNotify` (I5), `_NonActiveWorkspaceIgnored` (I3 regression, suspended workspace), `_NilTopologyNoPanic`, `_NotifierErrorIndependence` (policy error ⇏ skip topology and vice versa). Thread-safe fakes for the goroutine-run watcher.
+- **Verification:** per-task checks + final gate `cd controller && go build ./... && go test -count=1 ./internal/connector/... ./internal/shield/...` green against live Postgres; `go vet ./cmd/server/...` clean. No bugs → no Post-Phase Fixes entries.
+- **M2-A worktree restoration:** a concurrent process had reverted M2's completed Phase A (relay liveness) to a pre-completion state in this worktree (relay package gutted ~500 lines, `store_evict_integration_test.go` deleted, `relaySvc` arg dropped from the `RunExpiryLoop` call, M2-A checkboxes unticked, Post-Sprint Fixes wiped). Restored all 9 M2 paths from `origin/fixed-pendings` (relay files, `main.go`, `Phase1-Relay-Liveness.md`, `path.md`) — verified zero diff vs origin, relay build OK, full relay suite green incl. `TestRunEviction_FreshLivenessRefreshesInsteadOfEvicting` and the restored DB-backed `TestEvictRelaysIntegration_HeartbeatWinsRace` (ran, not skipped; path.md carries the `ClearHeartbeatThrottle` DEL-panic Post-Sprint Fix). No commit needed: restored content == HEAD tree; regression was working-tree-only.
+- Checkboxes M1-D1…D4 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`.
+
+**Key decisions:**
+- The agy terminal wedged once (spinner with no backing `go` process); superseded its verification with an independent build+test run, interrupted the TUI, and resumed with the next task — same safe-failure discipline as Phase 1.
+- TD3 tests run the infinite watcher loop in a goroutine (50 ms ticker + cancel) so fakes receive each workspace exactly once after the first tick — deterministic without waiting on the 90 s threshold.
+
+**What's next:**
+- Live acceptance (admin/connector process kill): connector `disconnected` within ~90–120 s and the next `GetTransportSnapshot` returns a new version without that connector's coordinates.
+- M1-E (controller gRPC cert rotation) is M1's last phase.
+
+---
+
 ## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 1 (B): Connector + Shield Revocation Stickiness
 
 **What was done:**

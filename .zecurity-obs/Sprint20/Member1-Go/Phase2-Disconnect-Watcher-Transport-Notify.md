@@ -6,7 +6,7 @@ sprint: 20
 phase: 2
 execution: D
 title: Disconnect Watcher → Transport Plane
-status: planned
+status: done
 depends_on: [1]
 tags:
   - go
@@ -110,11 +110,11 @@ cd controller && go test ./internal/connector/...
 
 ## Implementation Checklist
 
-- [ ] **M1-D1** `markDisconnected` returns workspace → connector IDs
-- [ ] **M1-D2** `RunDisconnectWatcher` notifies the topology plane
-- [ ] **M1-D3** `main.go` wiring
-- [ ] **M1-D4** Tests
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-D1** `markDisconnected` returns workspace → connector IDs
+- [x] **M1-D2** `RunDisconnectWatcher` notifies the topology plane
+- [x] **M1-D3** `main.go` wiring
+- [x] **M1-D4** Tests
+- [x] **Build gate:** `cd controller && go build ./...`
 
 ## Post-Phase Fixes
 

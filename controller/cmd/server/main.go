@@ -568,7 +568,7 @@ func main() {
 
 	go func() {
 		defer wg.Done()
-		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier)
+		connector.RunDisconnectWatcher(ctx, db.Pool, connectorCfg, policyNotifier, transportNotifier)
 	}()
 
 	wg.Add(1)
