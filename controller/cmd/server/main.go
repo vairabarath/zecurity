@@ -576,7 +576,7 @@ func main() {
 
 	go func() {
 		defer wg.Done()
-		relay.RunExpiryLoop(ctx, relayStore, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
+		relay.RunExpiryLoop(ctx, relayStore, relaySvc, transportNotifier, 60*time.Second, 90*time.Second, broadcastRelayList)
 	}()
 
 	retentionDays := envOrInt(

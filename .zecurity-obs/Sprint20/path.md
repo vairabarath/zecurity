@@ -133,13 +133,14 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]]. Depends on nothing — Day 1.
 
-- [ ] **M2-A1** `internal/relay/expiry.go` — liveness-aware eviction: DB-stale candidates are checked against Valkey `relay:heartbeat:last:<id>` before eviction.
-- [ ] **M2-A2** `internal/relay/store.go` — split eviction into select-candidates, refresh-from-liveness and guarded evict (`status='active' AND last_heartbeat_at < threshold`).
-- [ ] **M2-A3** `internal/relay/heartbeat.go` — expose a liveness reader and a "clear throttle markers" helper on `Service`.
-- [ ] **M2-A4** On eviction, delete `relay:heartbeat:db-write:<id>` and `relay:heartbeat:metadata:<id>` so the next heartbeat writes the DB and re-activates.
-- [ ] **M2-A5** `cmd/server/main.go` — pass the liveness source to `RunExpiryLoop`.
-- [ ] **M2-A6** Tests: `expiry_test.go`, `heartbeat_test.go`.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/relay/...`
+- [x] **M2-A1** `internal/relay/expiry.go` — liveness-aware eviction: DB-stale candidates are checked against Valkey `relay:heartbeat:last:<id>` before eviction.
+- [x] **M2-A2** `internal/relay/store.go` — split eviction into select-candidates, refresh-from-liveness and guarded evict (`status='active' AND last_heartbeat_at < threshold`).
+- [x] **M2-A3** `internal/relay/heartbeat.go` — expose a liveness reader and a "clear throttle markers" helper on `Service`.
+- [x] **M2-A4** On eviction, delete `relay:heartbeat:db-write:<id>` and `relay:heartbeat:metadata:<id>` so the next heartbeat writes the DB and re-activates.
+- [x] **M2-A5** `cmd/server/main.go` — pass the liveness source to `RunExpiryLoop`.
+- [x] **M2-A6** Tests: `expiry_test.go`, `heartbeat_test.go`, `store_evict_integration_test.go` (race; ran against Postgres, not skipped).
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/relay/...`
+- [ ] **Live acceptance — PENDING / NOT YET RUN:** relay stays `active` ≥ 10 min with unchanged metadata; stopped relay → `inactive` ≤ 150 s; restarted relay → `active` on first heartbeat (AT-CORE-2, AT-A.2, AT-A.3). Needs a running relay.
 
 ### Phase B — M1: Connector + Shield Revocation Stickiness
 
@@ -225,8 +226,8 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 
 ## Acceptance Criteria (sprint level)
 
-- [ ] A relay heartbeating normally with unchanged metadata stays `active` across ≥ 2 DB-write intervals (≥ 10 min).
-- [ ] A relay that stops heartbeating becomes `inactive` within expiry + sweep interval (≤ 150 s) and returns to `active` on its first heartbeat after recovery.
+- [ ] A relay heartbeating normally with unchanged metadata stays `active` across ≥ 2 DB-write intervals (≥ 10 min). *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
+- [ ] A relay that stops heartbeating becomes `inactive` within expiry + sweep interval (≤ 150 s) and returns to `active` on its first heartbeat after recovery. *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A revoked connector remains `revoked` after its stream closes, after reconnect attempts, after `Goodbye`, and after `RenewCert` attempts.
 - [ ] A revoked shield remains `revoked` while its connector keeps sending shield status batches.
 - [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token.
@@ -264,4 +265,4 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 
 ## Post-Sprint Fixes
 
-_None yet._
+- **Phase A — `ClearHeartbeatThrottle` multi-key DEL panic** (caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit). valkey-go panics on a multi-key `DEL` whose keys hash to different slots, so the markers are now deleted one key at a time. Details: [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]] → Post-Phase Fixes.

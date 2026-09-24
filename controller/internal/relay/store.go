@@ -402,28 +402,74 @@ func (s *Store) ListConnectorsForRelay(ctx context.Context, relayID string) (map
 	return out, rows.Err()
 }
 
-// EvictExpiredRelays marks active relays whose last heartbeat is older than
-// before as inactive. Returns the IDs of relays that were evicted so the
-// caller can notify affected workspaces.
-func (s *Store) EvictExpiredRelays(ctx context.Context, before time.Time) ([]string, error) {
+// ListEvictionCandidates returns active relays whose persisted heartbeat is
+// older than before. Postgres writes are throttled (RELAY_HEARTBEAT_DB_WRITE_INTERVAL),
+// so a candidate is not necessarily dead — the expiry loop confirms against the
+// Valkey liveness key before evicting.
+func (s *Store) ListEvictionCandidates(ctx context.Context, before time.Time) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id::text
+		   FROM relays
+		  WHERE status = 'active'
+		    AND last_heartbeat_at < $1`,
+		before,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list relay eviction candidates: %w", err)
+	}
+	defer rows.Close()
+	return scanRelayIDs(rows)
+}
+
+// RefreshLastHeartbeat advances an active relay's persisted heartbeat to seenAt
+// (the Valkey liveness timestamp). It never moves the timestamp backwards and
+// never touches a relay that is not active.
+func (s *Store) RefreshLastHeartbeat(ctx context.Context, relayID string, seenAt time.Time) error {
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE relays
+		    SET last_heartbeat_at = $2,
+		        updated_at        = NOW()
+		  WHERE id = $1
+		    AND status = 'active'
+		    AND last_heartbeat_at < $2`,
+		relayID, seenAt,
+	); err != nil {
+		return fmt.Errorf("refresh relay heartbeat: %w", err)
+	}
+	return nil
+}
+
+// EvictRelays marks the given relays inactive. The predicate is re-checked
+// (still active, heartbeat still older than before) so a heartbeat DB write
+// that lands between candidate selection and eviction wins. Returns the IDs
+// actually evicted so the caller can notify affected workspaces.
+func (s *Store) EvictRelays(ctx context.Context, relayIDs []string, before time.Time) ([]string, error) {
+	if len(relayIDs) == 0 {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx,
 		`UPDATE relays
 		    SET status     = 'inactive',
 		        updated_at = NOW()
-		  WHERE status = 'active'
-		    AND last_heartbeat_at < $1
+		  WHERE id = ANY($1::uuid[])
+		    AND status = 'active'
+		    AND last_heartbeat_at < $2
 		 RETURNING id::text`,
-		before,
+		relayIDs, before,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("evict expired relays: %w", err)
+		return nil, fmt.Errorf("evict relays: %w", err)
 	}
 	defer rows.Close()
+	return scanRelayIDs(rows)
+}
+
+func scanRelayIDs(rows pgx.Rows) ([]string, error) {
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan evicted relay id: %w", err)
+			return nil, fmt.Errorf("scan relay id: %w", err)
 		}
 		ids = append(ids, id)
 	}

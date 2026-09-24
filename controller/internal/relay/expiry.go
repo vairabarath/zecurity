@@ -7,8 +7,18 @@ import (
 )
 
 type expiryStore interface {
-	EvictExpiredRelays(ctx context.Context, before time.Time) ([]string, error)
+	ListEvictionCandidates(ctx context.Context, before time.Time) ([]string, error)
+	RefreshLastHeartbeat(ctx context.Context, relayID string, seenAt time.Time) error
+	EvictRelays(ctx context.Context, relayIDs []string, before time.Time) ([]string, error)
 	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
+}
+
+// livenessSource exposes the Valkey heartbeat state (implemented by *Service).
+// Postgres heartbeat writes are throttled, so the persisted timestamp alone
+// cannot tell a live relay from a dead one — the liveness key can.
+type livenessSource interface {
+	LastHeartbeat(ctx context.Context, relayID string) (time.Time, bool, error)
+	ClearHeartbeatThrottle(ctx context.Context, relayID string) error
 }
 
 // RunExpiryLoop periodically marks relays inactive when their heartbeat has
@@ -17,12 +27,13 @@ type expiryStore interface {
 // drops the dead relay — without recompiling the ACL (Track B invariant).
 //
 // interval     — how often to run the sweep (default: 60s)
+// liveness     — Valkey liveness source; nil = Postgres-only eviction
 // expiry       — how long since last heartbeat before a relay is evicted (default: 90s = 3× heartbeat interval)
 // onPoolChange — optional ADR-016 callback fired once per sweep that evicted
 //
 //	at least one relay, so connectors receive a fresh
 //	LabelledRelayList without the dead relay. Nil-safe.
-func RunExpiryLoop(ctx context.Context, store expiryStore, notifier topologyChangeNotifier, interval, expiry time.Duration, onPoolChange func(ctx context.Context)) {
+func RunExpiryLoop(ctx context.Context, store expiryStore, liveness livenessSource, notifier topologyChangeNotifier, interval, expiry time.Duration, onPoolChange func(ctx context.Context)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -30,20 +41,54 @@ func RunExpiryLoop(ctx context.Context, store expiryStore, notifier topologyChan
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			runEviction(ctx, store, notifier, expiry, onPoolChange)
+			runEviction(ctx, store, liveness, notifier, expiry, onPoolChange)
 		}
 	}
 }
 
-func runEviction(ctx context.Context, store expiryStore, notifier topologyChangeNotifier, expiry time.Duration, onPoolChange func(ctx context.Context)) {
+func runEviction(ctx context.Context, store expiryStore, liveness livenessSource, notifier topologyChangeNotifier, expiry time.Duration, onPoolChange func(ctx context.Context)) {
 	threshold := time.Now().UTC().Add(-expiry)
-	relayIDs, err := store.EvictExpiredRelays(ctx, threshold)
+	candidates, err := store.ListEvictionCandidates(ctx, threshold)
+	if err != nil {
+		log.Printf("relay expiry: list candidates: %v", err)
+		return
+	}
+
+	// A Postgres-stale relay whose Valkey liveness key is fresh is alive — its
+	// DB write was merely throttled. Refresh the persisted timestamp instead of
+	// evicting. Without a liveness signal (key absent, Valkey error, no cache)
+	// fall back to Postgres: while Valkey is failing, Heartbeat forces a DB
+	// write on every beat, so the persisted timestamp is authoritative.
+	toEvict := make([]string, 0, len(candidates))
+	for _, relayID := range candidates {
+		if liveness != nil {
+			seenAt, ok, err := liveness.LastHeartbeat(ctx, relayID)
+			if err != nil {
+				log.Printf("relay expiry: read liveness for relay %s (falling back to Postgres): %v", relayID, err)
+			} else if ok && !seenAt.Before(threshold) {
+				if err := store.RefreshLastHeartbeat(ctx, relayID, seenAt); err != nil {
+					log.Printf("relay expiry: refresh heartbeat for relay %s: %v", relayID, err)
+				}
+				continue
+			}
+		}
+		toEvict = append(toEvict, relayID)
+	}
+
+	relayIDs, err := store.EvictRelays(ctx, toEvict, threshold)
 	if err != nil {
 		log.Printf("relay expiry: evict: %v", err)
 		return
 	}
 	for _, relayID := range relayIDs {
 		log.Printf("relay expiry: evicted relay %s", relayID)
+		// Clear the write-throttling markers so the relay's first heartbeat
+		// after it returns persists to Postgres and re-activates it at once.
+		if liveness != nil {
+			if err := liveness.ClearHeartbeatThrottle(ctx, relayID); err != nil {
+				log.Printf("relay expiry: clear heartbeat throttle for relay %s: %v", relayID, err)
+			}
+		}
 		byWorkspace, err := store.ListConnectorsForRelay(ctx, relayID)
 		if err != nil {
 			log.Printf("relay expiry: list connectors for relay %s: %v", relayID, err)

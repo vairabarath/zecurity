@@ -6,7 +6,7 @@ sprint: 20
 phase: 1
 execution: A
 title: Relay Liveness Truth
-status: planned
+status: implemented   # code + tests done; live acceptance PENDING
 depends_on: []
 tags:
   - go
@@ -149,10 +149,14 @@ Store integration (same DB env as `store_revoke_integration_test.go`):
 
 ## Acceptance Criteria
 
-- [ ] With default config, a relay heartbeating every 30 s with unchanged metadata stays `active` for ≥ 10 min (manual or integration run; watch `relays.status`).
-- [ ] Stopping the relay process → `inactive` within ≤ 150 s; connectors receive a relay list without it.
-- [ ] Restarting it within 5 min → `active` on its first heartbeat (no 5-min lag).
-- [ ] No change in DB write rate for a healthy relay beyond one `RefreshLastHeartbeat` per sweep when stale.
+> **Status: PENDING / NOT YET RUN.** These are live checks against a running relay. The behaviour
+> is covered by unit/integration tests (see Implementation Checklist), but the live run has not
+> been done yet.
+
+- [ ] **PENDING** — With default config, a relay heartbeating every 30 s with unchanged metadata stays `active` for ≥ 10 min (manual or integration run; watch `relays.status`).
+- [ ] **PENDING** — Stopping the relay process → `inactive` within ≤ 150 s; connectors receive a relay list without it.
+- [ ] **PENDING** — Restarting it within 5 min → `active` on its first heartbeat (no 5-min lag).
+- [ ] **PENDING** — No change in DB write rate for a healthy relay beyond one `RefreshLastHeartbeat` per sweep when stale.
 
 ## Build Check
 
@@ -163,14 +167,33 @@ cd controller && go test ./internal/relay/...
 
 ## Implementation Checklist
 
-- [ ] **M2-A1** `expiry.go` — `livenessSource`; liveness-aware `runEviction`
-- [ ] **M2-A2** `store.go` — `ListEvictionCandidates`, `RefreshLastHeartbeat`, guarded `EvictRelays`
-- [ ] **M2-A3** `heartbeat.go` — `LastHeartbeat`, `ClearHeartbeatThrottle` on `Service`
-- [ ] **M2-A4** Clear throttle markers after eviction
-- [ ] **M2-A5** `main.go` — wire `relaySvc` into `RunExpiryLoop`
-- [ ] **M2-A6** Tests (expiry, store integration, heartbeat)
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-A1** `expiry.go` — `livenessSource`; liveness-aware `runEviction`
+- [x] **M2-A2** `store.go` — `ListEvictionCandidates`, `RefreshLastHeartbeat`, guarded `EvictRelays` (replaces `EvictExpiredRelays`, which had no other callers)
+- [x] **M2-A3** `heartbeat.go` — `LastHeartbeat`, `ClearHeartbeatThrottle` on `Service`
+- [x] **M2-A4** Clear throttle markers after eviction (`db-write` + `metadata`; the liveness key is never deleted)
+- [x] **M2-A5** `main.go` — wire `relaySvc` into `RunExpiryLoop`
+- [x] **M2-A6** Tests:
+  - `expiry_test.go`: `TestRunEviction_FreshLivenessRefreshesInsteadOfEvicting`, `TestRunEviction_StaleEverywhereEvictsAndClearsThrottle`, `TestRunEviction_LivenessErrorFallsBackToPostgres`; the 4 existing tests were updated to the new signature
+  - `heartbeat_test.go`: `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` (miniredis)
+  - `store_evict_integration_test.go`: `TestEvictRelaysIntegration_HeartbeatWinsRace`, which ran against Postgres (`PKI_TEST_DATABASE_URL`), not skipped
+- [x] **Build gate:** `cd controller && go build ./...` and `go test ./internal/relay/...` pass (0 skips with the DB env set)
+- [ ] **Live acceptance — PENDING / NOT YET RUN** (see Acceptance Criteria)
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: `ClearHeartbeatThrottle` multi-key DEL panic
+**Issue:** The first implementation deleted both throttle markers with one `DEL`. valkey-go panicked (`multi key command with different key slots are not allowed`), which would have crashed the expiry sweep on the first eviction.
+
+**Root Cause:** valkey-go checks cluster slots on the client side and rejects multi-key commands whose keys hash to different slots. `relay:heartbeat:db-write:<id>` and `relay:heartbeat:metadata:<id>` hash to different slots.
+
+**Fix Applied (`controller/internal/relay/heartbeat.go`, `ClearHeartbeatThrottle`):**
+```go
+// BEFORE:
+s.redis.Del(ctx, relayHeartbeatDBWritePrefix+relayID, relayHeartbeatMetadataPrefix+relayID)
+
+// AFTER: one DEL per key
+for _, key := range []string{relayHeartbeatDBWritePrefix + relayID, relayHeartbeatMetadataPrefix + relayID} {
+    if err := s.redis.Del(ctx, key).Err(); err != nil { ... }
+}
+```
+Caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit. No other files affected.
