@@ -8,21 +8,32 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
 
-**Sprint 13 is the active sprint.** Decoupling transport from the ACL (Track B / PENDING-03 Option A): a first-class `TransportSnapshot` plane so relay routing propagates independently of authorization. **Solo sprint — M3 (Yogesh).** Executes the already-approved design in `Decisions/ADR-015`, `ADR-017`, `ADR-018` (Phases 1 & 3 only; the breaking ADR-018 Phase 4 removal is deferred). Sprint 12 (provider identity tier + authenticated relay provisioning, now `ADR-020`/`ADR-021`) just completed.
+**Sprint 20 is the active sprint: Provider Dashboard Phase 1, "Backend Truth".** Before any provider dashboard reads controller state, make that state true:
+- relay liveness (no false `inactive`);
+- connector/shield revocation is terminal;
+- relay SAN allowlist enforcement;
+- the disconnect watcher notifies the transport plane;
+- controller gRPC cert rotation;
+- relay in-band `RenewCert` (D-19);
+- connector renewal trigger plus cert hot-swap.
+
+Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → **"Decision record — 2026-09-23"** (D-01 … D-23). Evidence: `docs/provider-dashboard-architecture-discovery.md`. This sprint introduces **no** architectural decisions and **no** migrations.
+
+**Team: two members only.** **M1 = Sathiya** (Go: lifecycle guards, disconnect watcher, controller cert rotation). **M2 = Barath** (Go + Rust: relay liveness, SAN allowlist, relay renewal, connector renewal).
 
 ---
 
 ## Your First Step
 
-When a team member starts a session, they will tell you their member number (M1, M2, M3, or M4). When they do:
+When a team member starts a session, they will tell you who they are (Sathiya / M1 or Barath / M2). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint13/path.md` — dependency map and progress checkboxes (Sprint 13 is solo M3; other members: ask what they're picking up)
-3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked
+2. Read `.zecurity-obs/Sprint20/path.md` — dependency map, conflict zones and progress checkboxes
+3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (`Sprint20/Member1-Go/*` for Sathiya, `Sprint20/Member2-Go-Rust/*` for Barath)
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 
-If they don't give you a member number, ask: *"Which team member are you? (M1 Frontend / M2 Go / M3 Go+Rust / M4 Rust)"*
+If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 
 ---
 
@@ -31,8 +42,11 @@ If they don't give you a member number, ask: *"Which team member are you? (M1 Fr
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint13/path.md` | Dependency map + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint13/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint20/path.md` | Dependency map + conflict zones + progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint20/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint20/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-A … AT-G) |
+| `docs/provider-dashboard-architecture-decisions.md` | Provider dashboard Decision Record (binding) |
+| `docs/provider-dashboard-architecture-discovery.md` | Current-architecture discovery report |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
 
 ---
@@ -96,6 +110,16 @@ cd admin && npm run codegen                                  # Frontend TS hooks
 ---
 
 ## Rules (non-negotiable)
+
+Sprint 20 specific:
+- Build gate passes before proceeding to next phase (DB-backed tests must run, not skip)
+- The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
+- Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.
+- No migrations this sprint. Proto change is additive only (`RelayService.RenewCert`) plus comment fixes; never renumber fields.
+- `revoked` (and connector `revoked_at IS NOT NULL`) is terminal: no status write path may leave it.
+- Don't change `workspaces.status='active'` predicates (SPIFFE validator, disconnect watchers, enrollment); suspension (D-07/D-08) is a later sprint.
+- Relay/connectivity changes notify the transport plane, never the ACL (ADR-017).
+- Respect the `path.md` conflict-zone order: M2-A before M1-D before M1-E in `main.go`; M1-B before M2-G in `control_stream.go`.
 
 Sprint 8 specific:
 - Build gate passes before proceeding to next phase
