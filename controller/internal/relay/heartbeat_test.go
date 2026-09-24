@@ -85,6 +85,10 @@ func (s *fakeHeartbeatStore) MarkProvisioned(context.Context, string, string, ti
 	return s.err
 }
 
+func (s *fakeHeartbeatStore) LoadRelayByID(context.Context, string) (*RelayRow, error) {
+	return nil, ErrRelayNotFound
+}
+
 func (s *fakeHeartbeatStore) ListConnectorsForRelay(_ context.Context, _ string) (map[string][]string, error) {
 	if s.err != nil {
 		return nil, s.err

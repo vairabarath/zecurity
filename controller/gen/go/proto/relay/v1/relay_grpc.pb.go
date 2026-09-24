@@ -29,7 +29,8 @@ const (
 type RelayServiceClient interface {
 	// Called once during Relay provisioning.
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
-	// Provisioning-token authentication is reserved for a future implementation.
+	// Authenticated by the single-use provisioning token (ADR-020), which is
+	// consumed only after every other check passes.
 	Provision(ctx context.Context, in *ProvisionRequest, opts ...grpc.CallOption) (*ProvisionResponse, error)
 	// Sent periodically after provisioning.
 	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
@@ -70,7 +71,8 @@ func (c *relayServiceClient) Heartbeat(ctx context.Context, in *HeartbeatRequest
 type RelayServiceServer interface {
 	// Called once during Relay provisioning.
 	// Uses server-authenticated TLS because the Relay has no certificate yet.
-	// Provisioning-token authentication is reserved for a future implementation.
+	// Authenticated by the single-use provisioning token (ADR-020), which is
+	// consumed only after every other check passes.
 	Provision(context.Context, *ProvisionRequest) (*ProvisionResponse, error)
 	// Sent periodically after provisioning.
 	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
