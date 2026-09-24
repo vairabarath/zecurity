@@ -10,6 +10,32 @@ tags:
 
 ---
 
+## 2026-09-24 — Big Pickle — Sprint 20 M1 Phase 1 (B): Connector + Shield Revocation Stickiness
+
+**What was done:**
+- Implemented Phase B (Day-1, independent, no deps) end-to-end on `feat/sprint20-m1-phase1` (created from post-`fixed-pendings` HEAD `e72925d`), with code written by the Google Antigravity CLI (`agy`, Gemini 3.8 Flash Low) driven one small task at a time through an Orca terminal, each verified before the next.
+- **B1/B2 (`control_stream.go`):** `Control` now reads `revoked_at` and rejects (`PermissionDenied "connector is revoked"`) when `status='revoked'` **or** `revoked_at IS NOT NULL`; the activation UPDATE is guarded (`AND status <> 'revoked' AND revoked_at IS NULL`) and moved **before** `Registry.add` — `pgx.ErrNoRows` → deny without registering or arming the disconnect defer. Stream-close defer guarded (`AND status = 'active'`). (A spec-aligned Control revocation reject pre-existed as an uncommitted external edit; kept and folded in.)
+- **B3 (`goodbye.go`):** guarded `AND status = 'active'` + `RETURNING tenant_id`; `ErrNoRows` → no notify, still `Ok:true`; real transition fires `PolicyNotifier` + `TransportNotifier` (both planes).
+- **B4 (`enrollment.go` `RenewCert`):** reject on `status='revoked'` or `revoked_at IS NOT NULL` **before** signing; guarded cert UPDATE; 0 rows → `PermissionDenied`, no signed cert returned.
+- **B5 (`control_stream.go` `handleConnectorHealth`):** guard adds `AND revoked_at IS NULL`; no-match behaviour unchanged (close stream).
+- **B6 (`shield/heartbeat.go` `UpdateShieldHealth`):** `updated` CTE adds `AND sh.status <> 'revoked'`; revoked shield → row untouched, `synced` resource re-point skipped, `(false,false,nil)`, logged "ignored status report for revoked shield".
+- **Tests (DB-backed, all gated on set DSNs; none skipped in the run):**
+  - `controller/internal/connector/revocation_test.go` (new): `TestControl_RejectsRevokedConnector`, `TestControl_RejectsRevokedAtLegacyStatus`, `TestGoodbye_RevokedStaysRevoked`, `TestGoodbye_ActiveGoesDisconnectedAndNotifies`, `TestRenewCert_RevokedStatusDenied`, `TestRenewCert_RevokedAtLegacyDenied`, `TestRenewCert_RaceRevokeReturnsNoCert` (stub PKI revokes mid-sign as a deterministic race), `TestHandleConnectorHealth_RevokedClosesStream`.
+  - `controller/internal/shield/heartbeat_test.go` (extended): `TestUpdateShieldHealth_RevokedShieldIgnored`, `TestUpdateShieldHealth_ActiveShieldStillUpdates` (regression).
+- **Verification:** per-task and final gate `cd controller && go build ./... && go test -count=1 ./internal/connector/... ./internal/shield/...` green against live Postgres (`ENROLLMENT/SHIELD/PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL`); gofmt clean.
+- No bugs required Post-Phase Fixes. Checkboxes M1-B1…B7 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`.
+
+**Key decisions:**
+- Orchestration `worker-start` could not supervise the agy terminal (created via raw `terminal create --command`, so Orca has no registered agent process); fell back to the `terminal send`/`terminal read` supervised loop with independent re-verification after each task (safe-failure route per orchestration skill).
+- `RenewCert` race test made deterministic by a stub `pki.Service` that revokes the row inside `RenewConnectorCert` before returning a dummy result — exercises the guarded-0-rows path exactly.
+- No migrations (Sprint 20 rule); `revoked`/`revoked_at` terminality preserved; `workspaces.status='active'` predicates untouched; no shield CRL/`revoked_at` added (I6).
+
+**What's next:**
+- Live acceptance criteria (admin UI E2E) still outstanding per phase spec: revoke a running connector → stream closes ≤15 s, row stays `revoked` across ≥3 reconnects, UI shows REVOKED; revoke a running shield → UI still shows REVOKED after 2 min of heartbeats.
+- M2-G (connector renewal trigger + cert hot-swap) can now rebase onto M1-B's `control_stream.go` + `RenewCert` guard.
+
+---
+
 ## 2026-08-26 — Claude Code (Opus 5) — Sprint 17 audit, tenant-isolation fix, GraphQL exposure
 
 **What was done:**

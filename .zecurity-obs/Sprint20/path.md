@@ -146,13 +146,13 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member1-Go/Phase1-Connector-Shield-Revocation-Stickiness]]. Depends on nothing — Day 1.
 
-- [ ] **M1-B1** `control_stream.go` `Control` — reject when `status='revoked'` **or** `revoked_at IS NOT NULL`; guarded activation before registry add.
-- [ ] **M1-B2** `control_stream.go` stream-close defer — only `active → disconnected`.
-- [ ] **M1-B3** `goodbye.go` — only `active → disconnected`; notify both planes on a real transition.
-- [ ] **M1-B4** `enrollment.go` `RenewCert` — reject on `revoked_at`; guarded cert UPDATE; zero rows ⇒ deny, no cert returned.
-- [ ] **M1-B5** `control_stream.go` `handleConnectorHealth` — add `revoked_at IS NULL` to the guard.
-- [ ] **M1-B6** `shield/heartbeat.go` `UpdateShieldHealth` — never overwrite a `revoked` shield.
-- [ ] **M1-B7** Tests: `enrollment_test.go` / `control_stream_test.go` (DB), `shield/heartbeat_test.go`.
+- [x] **M1-B1** `control_stream.go` `Control` — reject when `status='revoked'` **or** `revoked_at IS NOT NULL`; guarded activation before registry add.
+- [x] **M1-B2** `control_stream.go` stream-close defer — only `active → disconnected`.
+- [x] **M1-B3** `goodbye.go` — only `active → disconnected`; notify both planes on a real transition.
+- [x] **M1-B4** `enrollment.go` `RenewCert` — reject on `revoked_at`; guarded cert UPDATE; zero rows ⇒ deny, no cert returned.
+- [x] **M1-B5** `control_stream.go` `handleConnectorHealth` — add `revoked_at IS NULL` to the guard.
+- [x] **M1-B6** `shield/heartbeat.go` `UpdateShieldHealth` — never overwrite a `revoked` shield.
+- [x] **M1-B7** Tests: `revocation_test.go` (Control/Goodbye/RenewCert/health, DB) + `shield/heartbeat_test.go` revoked-shield + regression.
 - [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./internal/shield/...`
 
 ### Phase C — M2: Relay SAN Allowlist Enforcement

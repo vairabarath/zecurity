@@ -301,14 +301,48 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}
 
 	var connStatus, tenantID string
+	var revokedAt *time.Time
+
 	if err := h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id FROM connectors WHERE id = $1 AND trust_domain = $2`,
+		`SELECT status, tenant_id, revoked_at FROM connectors WHERE id = $1 AND trust_domain = $2`,
 		connectorID, trustDomain,
-	).Scan(&connStatus, &tenantID); err != nil {
+	).Scan(&connStatus, &tenantID, &revokedAt); err != nil {
 		return status.Errorf(codes.NotFound, "connector not found: %v", err)
 	}
-	if connStatus == "revoked" {
+	if connStatus == "revoked" || revokedAt != nil {
 		return status.Error(codes.PermissionDenied, "connector is revoked")
+	}
+
+	var becameActive bool
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (SELECT status FROM connectors WHERE id = $1),
+		     updated AS (
+		       UPDATE connectors
+		          SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW()
+		        WHERE id = $1
+		          AND status <> 'revoked'
+		          AND revoked_at IS NULL
+		       RETURNING id)
+		SELECT current.status IS DISTINCT FROM 'active' FROM current, updated;`,
+		connectorID,
+	).Scan(&becameActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return status.Error(codes.PermissionDenied, "connector is revoked")
+		}
+		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
+	} else if becameActive {
+		if h.PolicyNotifier != nil {
+			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
+				log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
+			}
+		}
+		// The connector now appears in the transport snapshot (with its tunnel
+		// address), so refresh the transport plane too — not just the ACL.
+		if h.TransportNotifier != nil {
+			if err := h.TransportNotifier.NotifyTopologyChange(ctx, tenantID, []string{connectorID}); err != nil {
+				log.Printf("control stream: notify topology after connector active connector=%s: %v", connectorID, err)
+			}
+		}
 	}
 
 	client := &connectorStreamClient{
@@ -326,40 +360,6 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	// unblocks when ctx is cancelled (handler returns) or the Send fails.
 	go client.runWriter(ctx)
 
-	var becameActive bool
-	if err := h.Pool.QueryRow(ctx,
-		`WITH current AS (
-			     SELECT status
-			       FROM connectors
-			      WHERE id = $1
-			   ),
-			   updated AS (
-			     UPDATE connectors
-			        SET status = 'active',
-			            last_heartbeat_at = NOW(),
-			            updated_at = NOW()
-			      WHERE id = $1
-			      RETURNING id
-			   )
-			   SELECT current.status IS DISTINCT FROM 'active'
-			     FROM current, updated`,
-		connectorID,
-	).Scan(&becameActive); err != nil {
-		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
-	} else if becameActive {
-		if h.PolicyNotifier != nil {
-			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
-				log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
-			}
-		}
-		// The connector now appears in the transport snapshot (with its tunnel
-		// address), so refresh the transport plane too — not just the ACL.
-		if h.TransportNotifier != nil {
-			if err := h.TransportNotifier.NotifyTopologyChange(ctx, tenantID, []string{connectorID}); err != nil {
-				log.Printf("control stream: notify topology after connector active connector=%s: %v", connectorID, err)
-			}
-		}
-	}
 	defer func() {
 		// Use background context — stream context is already cancelled at this point.
 		bg := context.Background()
@@ -375,6 +375,7 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 				        SET status = 'disconnected',
 				            updated_at = NOW()
 				      WHERE id = $1
+				        AND status = 'active'
 				      RETURNING id
 				   )
 				   SELECT current.status IS DISTINCT FROM 'disconnected'
@@ -583,6 +584,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		            updated_at        = NOW()
 		      WHERE id = $5
 		        AND status NOT IN ('revoked', 'deleted')
+		        AND revoked_at IS NULL
 		      RETURNING id
 		   )
 		   SELECT current.status IS DISTINCT FROM 'active'
@@ -698,7 +700,7 @@ func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, clien
 }
 
 func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connectorStreamClient, connectorVersion uint64) error {
-	if h.PolicyStore == nil || h.PolicyCache == nil ||h.PostureStore == nil || h.PolicyNotifier == nil {
+	if h.PolicyStore == nil || h.PolicyCache == nil || h.PostureStore == nil || h.PolicyNotifier == nil {
 		return nil
 	}
 
@@ -710,7 +712,7 @@ func (h *EnrollmentHandler) pushACLSnapshot(ctx context.Context, client *connect
 		return nil
 	}
 	snap, err := h.PolicyCache.GetOrCompile(client.tenantID, func() (*policy.CompiledACL, error) {
-		return policy.CompileACLSnapshot(ctx, h.PolicyStore,h.PostureStore, pn, client.tenantID)
+		return policy.CompileACLSnapshot(ctx, h.PolicyStore, h.PostureStore, pn, client.tenantID)
 	})
 	if err != nil {
 		return fmt.Errorf("compile ACL snapshot: %w", err)

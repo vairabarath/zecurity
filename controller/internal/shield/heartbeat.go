@@ -46,6 +46,7 @@ func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID,
 		        AND c.tenant_id = sh.tenant_id
 		        AND c.remote_network_id = sh.remote_network_id
 		        AND c.status = 'active'
+		        AND sh.status <> 'revoked'
 		      RETURNING
 		        (SELECT current.connector_id FROM current) IS DISTINCT FROM $5             AS connector_changed,
 		        (SELECT current.lan_ip FROM current)       IS DISTINCT FROM NULLIF($6, '') AS lan_ip_changed
@@ -63,6 +64,10 @@ func (s *service) UpdateShieldHealth(ctx context.Context, shieldID, connectorID,
 		lastHeartbeatAt, status, version, shieldID, connectorID, lanIP,
 	).Scan(&connectorChanged, &lanIPChanged)
 	if errors.Is(err, pgx.ErrNoRows) {
+		var shieldStatus string
+		if qErr := s.db.QueryRow(ctx, `SELECT status FROM shields WHERE id = $1`, shieldID).Scan(&shieldStatus); qErr == nil && shieldStatus == "revoked" {
+			log.Printf("shield health: ignored status report for revoked shield %s", shieldID)
+		}
 		return false, false, nil
 	}
 	if err != nil {
