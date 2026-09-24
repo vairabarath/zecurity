@@ -219,6 +219,49 @@ func (s *Service) markRelayHeartbeatDBWritten(ctx context.Context, relayID strin
 	return s.redis.Set(ctx, relayHeartbeatDBWritePrefix+relayID, strconv.FormatInt(time.Now().UTC().Unix(), 10), interval).Err()
 }
 
+// LastHeartbeat reads the Valkey liveness key written on EVERY heartbeat
+// (relay:heartbeat:last:<id>). ok=false means no liveness signal: the key is
+// absent, or no cache is configured (then every heartbeat writes Postgres, so
+// the persisted timestamp is authoritative).
+func (s *Service) LastHeartbeat(ctx context.Context, relayID string) (time.Time, bool, error) {
+	if s.redis == nil {
+		return time.Time{}, false, nil
+	}
+	raw, err := s.redis.Get(ctx, relayHeartbeatLastPrefix+relayID).Result()
+	if err == valkeycompat.Nil {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("get liveness key: %w", err)
+	}
+	unix, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse liveness key %q: %w", raw, err)
+	}
+	return time.Unix(unix, 0).UTC(), true, nil
+}
+
+// ClearHeartbeatThrottle deletes the write-throttling markers for an evicted
+// relay so its next heartbeat persists to Postgres (RecordHeartbeat re-activates
+// it) and is treated as a metadata change (the relay list is re-broadcast so
+// connectors see the relay again). The liveness key is deliberately left alone.
+func (s *Service) ClearHeartbeatThrottle(ctx context.Context, relayID string) error {
+	if s.redis == nil {
+		return nil
+	}
+	// One DEL per key: valkey-go rejects (panics on) a multi-key command whose
+	// keys hash to different cluster slots.
+	for _, key := range []string{
+		relayHeartbeatDBWritePrefix + relayID,
+		relayHeartbeatMetadataPrefix + relayID,
+	} {
+		if err := s.redis.Del(ctx, key).Err(); err != nil {
+			return fmt.Errorf("clear heartbeat throttle marker %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
 func relayHeartbeatMetadataValue(certSerial string, certNotAfter time.Time, version, hostname string, addr relayAddressObservation) string {
 	parts := []string{
 		certSerial,

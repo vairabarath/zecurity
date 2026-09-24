@@ -293,3 +293,61 @@ func TestHeartbeat_NoNotifierDoesNotPanic(t *testing.T) {
 		t.Fatalf("Heartbeat with nil notifier: %v", err)
 	}
 }
+
+// countingHeartbeatStore counts Postgres heartbeat writes.
+type countingHeartbeatStore struct {
+	*fakeHeartbeatStore
+	recordCalls int
+}
+
+func (s *countingHeartbeatStore) RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error {
+	s.recordCalls++
+	return s.fakeHeartbeatStore.RecordHeartbeat(ctx, id, certSerial, certNotAfter, version, hostname, observedIP, observedPort, addressScope, publicAddr, connectionCount, maxConnections)
+}
+
+// TestHeartbeat_FirstHeartbeatAfterEvictionPersists — a relay evicted while its
+// Valkey throttle markers are still alive must be re-activated by its FIRST
+// heartbeat after returning, not up to RELAY_HEARTBEAT_DB_WRITE_INTERVAL later.
+// ClearHeartbeatThrottle (called by the expiry sweep on eviction) removes the
+// write-throttling markers but leaves the liveness key intact.
+func TestHeartbeat_FirstHeartbeatAfterEvictionPersists(t *testing.T) {
+	ctx := context.Background()
+	rdb := newProvisionTestValkey(t)
+	store := &countingHeartbeatStore{fakeHeartbeatStore: &fakeHeartbeatStore{}}
+	poolChanges := 0
+	service := NewService(nil, store, time.Hour).
+		WithHeartbeatCache(rdb, 5*time.Minute).
+		WithRelayPoolBroadcaster(func(context.Context) { poolChanges++ })
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	beat := func() {
+		t.Helper()
+		if _, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0", Hostname: "relay-a"}); err != nil {
+			t.Fatalf("Heartbeat: %v", err)
+		}
+	}
+
+	beat() // first ever: metadata unknown → persisted + broadcast
+	if store.recordCalls != 1 || poolChanges != 1 {
+		t.Fatalf("after first beat: recordCalls=%d poolChanges=%d, want 1/1", store.recordCalls, poolChanges)
+	}
+	beat() // unchanged metadata inside the 5-min window → throttled (Valkey only)
+	if store.recordCalls != 1 || poolChanges != 1 {
+		t.Fatalf("throttled beat wrote Postgres: recordCalls=%d poolChanges=%d, want 1/1", store.recordCalls, poolChanges)
+	}
+
+	// The expiry sweep evicts the relay and clears its throttle markers.
+	if err := service.ClearHeartbeatThrottle(ctx, testRelayID); err != nil {
+		t.Fatalf("ClearHeartbeatThrottle: %v", err)
+	}
+	if _, ok, err := service.LastHeartbeat(ctx, testRelayID); err != nil || !ok {
+		t.Fatalf("liveness key must survive throttle cleanup: ok=%v err=%v", ok, err)
+	}
+
+	beat() // first beat after eviction → persisted (re-activates) + relay list re-broadcast
+	if store.recordCalls != 2 {
+		t.Fatalf("first beat after eviction did not persist: recordCalls=%d, want 2", store.recordCalls)
+	}
+	if poolChanges != 2 {
+		t.Fatalf("first beat after eviction did not re-broadcast the relay list: poolChanges=%d, want 2", poolChanges)
+	}
+}
