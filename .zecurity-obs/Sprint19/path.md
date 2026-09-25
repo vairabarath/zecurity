@@ -167,7 +167,7 @@ P9  Testing                                              [ ]
  └── P10 Final verification / documentation / build gates [ ]
 ```
 
-## Progress — Phases 1–7 complete (P1–P4 2026-09-05, P5 2026-09-09, P6 2026-09-13, P7 2026-09-22)
+## Progress — Phases 1–10 complete, Track A done (P1–P4 2026-09-05, P5 2026-09-09, P6 2026-09-13, P7 2026-09-22, P8 2026-09-23, P9 2026-09-24, P10 2026-09-25)
 
 **The cutover has happened.** As of Phase 5 the ACL compiler resolves
 `Resource → Resource Policy → Device Profile(s)`; it no longer reads
@@ -187,6 +187,9 @@ the Device Profiles page shows which Resource Policies require a profile instead
 | P7 | done | Admin UI, `admin/` only — no backend change. New Resource Policies tab (list, create, edit, delete, resource assignment), profile picker, posture-visibility panel. The misleading `boundResources` column is replaced by "Required By". Sign In Policy deliberately omitted: no backend exists. 86 tests pass. The eight "Admin can…" boxes rest on component tests, not a live pass — Phase 8 must re-confirm them. |
 | P6 | done | Verification only — **no production code changed**. 8 boxes satisfied by pre-existing tests (cited in `Member02/Phase6-*`), 7 by new tests: 4 end-to-end convergence tests in `graph/resolvers/resourcepolicy_propagation_test.go` and 2 in `internal/connector/acl_push_test.go` (Connector disconnect → heartbeat catch-up, gate edges). |
 | P5 | done | `internal/posture/resource_policy_store.go` (`ListPolicyProfilesForWorkspace`) + `internal/policy/compiler.go` profile-source swap. 97 insertions / 34 deletions, no migration, no proto change, compiler signature unchanged. Matrix proven both directly against `applyPosture` and through full `CompileACLSnapshot` output. |
+| P10 | done | Final verification. 21 of 22 boxes at executed/manual evidence; box 18 qualified rather than ticked. **The Shield half of the enforcement split finally has evidence**: `proto/`, `shield/` and `connector/` are byte-identical to `fixed-pendings`, and the first-ever shield-routed compiled entry (`route_type=shield`) was produced and shown to be posture-gated exactly like a connector-routed one. The 4 newly-unlocked `resource_acl_coherence` failures were proven pre-existing by running the same tests on a `fixed-pendings` worktree. Scope/authorship audited: 53 files, all PENDING-16 or docs, one self-reverted off-scope commit, no Track B code. Cleanup verified-only by decision. |
+| P9 | done | Evidence phase, not a writing phase: 41 of 43 boxes already had tests, but every DB-backed one silently skipped — `go test ./...` was green while running none of them. Provisioned Postgres, executed all 7 Phase-9 files for the first time: **all pass, zero Phase 9 failures**. New code was only where nothing was covered: an ACL wire-contract guard (box 24) and 4 frontend mutation tests (no admin test had ever executed a mutation). The 2 migration boxes are N/A with reasons; the 7 `TestGroupOrigin_*` failures and the `createGroup` bug are recorded as out-of-scope and proven unable to affect Phase 9. |
+| P8 | done | Live two-machine run: controller/connector on `192.168.1.34`, the Linux device under test on `192.168.1.42`. All 22 boxes resolved — 21 on real hardware, 1 (unsupported-check semantics) by test because the device has EFI and can never emit an `UNSUPPORTED` observation. Both traces captured at the Connector: `access allowed` and `access denied reason="no_acl_match"`. **No Shield needed** — an `unprotected` resource routes via the connector. No client/controller/connector source changed; harness in `controller/cmd/phase8/`. |
 | P4 | done | Decision record + verification method in `Member02/Phase4-*`. No code retained: the database is empty, so a backfill would move zero rows. Implemented and verified on 2026-09-05 (9 synthetic shapes, 7 tests, `LegacySet == NewSet` for every case), then deliberately withdrawn. |
 
 ### Post-Sprint Fixes (P1–P3)
@@ -234,12 +237,15 @@ These were merged in, are **not** caused by P1–P3, and are deliberately left a
 
 ### Not started
 
-P5 onwards. **No legacy binding has been migrated** — the two models still
-coexist and `compiler.go` reads only `resource_profile_bindings`.
+P9 (full test conversion) and P10 (final verification).
 
-**Phase 5 must handle two hazards recorded in `Member02/Phase4-*`:** a `NULL`
-policy silently ungates a resource (zero enforced profiles = allow everyone), and
-`internal/resource` never assigns a policy, so new resources always start `NULL`.
+**Carried forward from Phase 4/5, confirmed live in Phase 8:** a resource with no
+Resource Policy is ungated — `applyPosture` takes its Any Device branch and every
+enrolled device is allowed. `internal/resource` never assigns a policy, so every
+newly created resource starts `NULL` and is therefore open. This is consistent
+with the Phase 4 decision that zero profiles means Any Device, but it means
+"unassigned" and "deliberately open" are indistinguishable. Worth an explicit
+decision in Phase 10.
 
 ## Team assignment
 
@@ -274,7 +280,7 @@ Member02 owns the change and must keep it surgical and compatible with existing 
   `REVOKED` / `RE_ENROLL_REQUIRED` / `RENEW_SOON` / `NONE`, with the client daemon
   reacting (wipe key, stop tunnels, surface the right message). See
   `Member2-Go/Track2-Device-Trust-Directive.md` (all acceptance criteria checked).
-- Track 3 (next): `RenewCert` RPC + daemon renewal scheduler, riding the
+- Track 3 (DONE — all acceptance criteria checked): `RenewCert` RPC + daemon renewal scheduler, riding the
   `RENEW_SOON` channel defined in Track 2. See
   `Member2-Go/Track3-Renew-Reenroll.md`.
 

@@ -1,6 +1,6 @@
 ---
 type: adr
-status: in-progress
+status: done
 id: PENDING-16
 domain: policy
 priority: P1
