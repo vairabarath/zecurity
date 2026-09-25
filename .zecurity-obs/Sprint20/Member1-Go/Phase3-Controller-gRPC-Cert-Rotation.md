@@ -6,7 +6,7 @@ sprint: 20
 phase: 3
 execution: E
 title: Controller gRPC Certificate Rotation
-status: planned
+status: done
 depends_on: [2]
 tags:
   - go
@@ -53,6 +53,7 @@ type ControllerCertRotator struct {
 func (r *ControllerCertRotator) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
 // Run regenerates when now >= notBefore + 2/3*(notAfter-notBefore).
+// (Superseded by PF-1: measured from issuance, since notBefore is backdated 1h.)
 // On generation failure: log loudly, retry with capped backoff (e.g. 30s → 10m),
 // keep serving the current cert. Never swap in a nil/invalid cert.
 func (r *ControllerCertRotator) Run(ctx context.Context)
@@ -82,8 +83,9 @@ Handshake:
 
 ## Acceptance Criteria
 
-- [ ] With `CONNECTOR_CERT_TTL=10m` in a dev stack, the controller runs > 15 min and connectors/relays reconnect successfully after the first cert's `NotAfter`. The logs show exactly one rotation per ~6m40s.
-- [ ] `go test -race ./internal/pki/...` passes.
+- [x] Built and unit-tested; handshake test proves the controller accepts new gRPC handshakes past the original cert's `NotAfter` with a rotated cert (TestRotatorHandshakeRotation, 4s TTL). Rotation timing correct under the real 1 h `NotBefore` backdate (PF-1, `TestNeedsRotationBackdatedNotBefore`).
+- [ ] Live `CONNECTOR_CERT_TTL=10m` dev stack: controller up > 15 min, connectors/relays reconnect after the first cert's `NotAfter`, logs show ~1 rotation per ~6m40s. **PENDING / NOT YET RUN.**
+- [x] `go test -race ./internal/pki/...` passes.
 
 ## Build Check
 
@@ -94,12 +96,18 @@ cd controller && go test -race ./internal/pki/... ./cmd/server/...
 
 ## Implementation Checklist
 
-- [ ] **M1-E1** `ControllerCertRotator` with `GetCertificate`
-- [ ] **M1-E2** `Run`: rotate at 2/3 lifetime, retry with backoff, keep current on failure
-- [ ] **M1-E3** `main.go`: `GetCertificate` in `tls.Config`; start `Run` under `wg`/`ctx`
-- [ ] **M1-E4** Tests (unit, race, handshake)
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M1-E1** `ControllerCertRotator` with `GetCertificate`
+- [x] **M1-E2** `Run`: rotate at 2/3 lifetime, retry with backoff, keep current on failure
+- [x] **M1-E3** `main.go`: `GetCertificate` in `tls.Config`; start `Run` under `wg`/`ctx`
+- [x] **M1-E4** Tests (unit, race, handshake)
+- [x] **Build gate:** `cd controller && go build ./...` (+ `go test -race ./internal/pki/... ./cmd/server/...`)
 
 ## Post-Phase Fixes
 
-_None yet._
+### PF-1 (2026-09-25) — rotation threshold measured from the backdated `NotBefore`
+
+- **Bug:** `GenerateControllerServerTLS` backdates `NotBefore` by 1 h (clock skew, `internal/pki/controller.go:39-41`). The rotator applied the Design formula literally, `notBefore + 2/3·(notAfter − notBefore)`, so the hour of backdating counted toward the threshold. Result: for any `CONNECTOR_CERT_TTL` ≤ 30m, every freshly issued cert was already due, so the rotator reissued once per `checkInterval` (1 min) for as long as the process ran. With 10m the threshold fell 13m20s *before* issuance, not 6m40s after. The default 7 d TTL was only 20 min early. Unit tests missed it because every fake/test-CA cert used a non-backdated `NotBefore`.
+- **Fix:** `rotatedCert.issuedAt` stores the rotator clock at store time (constructor + `rotate`). New `rotationDue()` = `start + 2/3·(notAfter − start)` with `start = max(notBefore, issuedAt)`; `needsRotation` and `nextDue` both use it. No config, API or `main.go` change.
+- **Regression test:** `TestNeedsRotationBackdatedNotBefore` (10m / 30m / 2h / 7d, 1 h backdate, constructor and `rotate` paths). It failed on the old code for all four TTLs and passes now.
+- **Gate:** `go build ./...`, `go vet ./cmd/server/... ./internal/pki/...`, `go test -race ./internal/pki/... ./cmd/server/...`: green.
+- Live expectation with `CONNECTOR_CERT_TTL=10m` is now correct: one rotation about every 6m40s.

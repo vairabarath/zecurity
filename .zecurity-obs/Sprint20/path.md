@@ -182,11 +182,11 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member1-Go/Phase3-Controller-gRPC-Cert-Rotation]]. Independent; sequenced after D.
 
-- [ ] **M1-E1** Rotating certificate holder with `GetCertificate`.
-- [ ] **M1-E2** Background rotation at 2/3 TTL with retry; keep serving the current cert on failure.
-- [ ] **M1-E3** `cmd/server/main.go` — `tls.Config{GetCertificate: …}`; start rotation loop under the existing `wg`/`ctx`.
-- [ ] **M1-E4** Tests: holder unit tests (short TTL, failure path), TLS handshake test.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/pki/... ./cmd/server/...`
+- [x] **M1-E1** Rotating certificate holder with `GetCertificate`.
+- [x] **M1-E2** Background rotation at 2/3 TTL with retry; keep serving the current cert on failure.
+- [x] **M1-E3** `cmd/server/main.go` — `tls.Config{GetCertificate: …}`; start rotation loop under the existing `wg`/`ctx`.
+- [x] **M1-E4** Tests: holder unit tests (short TTL, failure path), TLS handshake test.
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/pki/... ./cmd/server/...` (+ `-race`)
 
 ### Phase F — M2: Relay In-Band Certificate Renewal (D-19)
 
@@ -249,7 +249,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A revoked shield remains `revoked` while its connector keeps sending shield status batches.
 - [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Phase C code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
-- [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`.
+- [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Phase E code + tests done, incl. PF-1 threshold fix; `TestRotatorHandshakeRotation` proves it in-process; live dev-stack check PENDING / NOT YET RUN.)*
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
 - [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) done and tested; connector hot-swap (G-2) + live check pending.)*
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
@@ -284,3 +284,4 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 
 - **Phase G-2a — renewal wrote `connector.crt` as leaf only** (pre-existing in `connector/src/renewal.rs`). Enrollment stores leaf + Workspace CA; renewal overwrote it with the bare leaf. `CertHolder::install_renewed` now writes the enrollment shape. Details: [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]] → Post-Phase Fixes.
 - **Phase A — `ClearHeartbeatThrottle` multi-key DEL panic** (caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit). valkey-go panics on a multi-key `DEL` whose keys hash to different slots, so the markers are now deleted one key at a time. Details: [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]] → Post-Phase Fixes.
+- **Phase E — rotation threshold measured from the backdated `NotBefore` (PF-1).** `GenerateControllerServerTLS` backdates `NotBefore` by 1 h (`internal/pki/controller.go:39-41`), so a threshold computed from `NotBefore` made every cert due at issuance for any `CONNECTOR_CERT_TTL` ≤ 30m — the rotator reissued once per minute instead of once per 2/3 lifetime. Fix: `rotatedCert.issuedAt` records the rotator clock at store time; `rotationDue()` = `start + 2/3·(notAfter − start)` with `start = max(notBefore, issuedAt)`; `needsRotation` and `nextDue` both use it. Regression test `TestNeedsRotationBackdatedNotBefore` (10m/30m/2h/7d) failed on the old code and passes now. Details: [[Sprint20/Member1-Go/Phase3-Controller-gRPC-Cert-Rotation]] → Post-Phase Fixes.

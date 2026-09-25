@@ -2507,3 +2507,27 @@ serves on `127.0.0.1:9102`.
 - If possession needs to be observable/pre-labelled (§4.2/§5.3), that requires a new
   ADMIN-scoped read query (schema + resolver + codegen) — deliberately deferred here.
 - path.md's FE-4 checkbox and stale "Also still open" note remain untouched per §0/§12.
+
+---
+
+## 2026-09-25 — Big Pickle — Sprint 20 M1 Phase 3 (E): Controller gRPC Cert Rotation (via Orca orchestration + agy)
+
+**What was done:**
+- Implemented Phase E (depends on Phase D, done) end-to-end through the Orca orchestration run `run_82f529ffcbac`, dispatched **one small task at a time** to the live Antigravity terminal (`term_854e5b6e…`, "agy"), each task verified independently before the next (6 tasks):
+  - **T1 (E1):** new `controller/internal/pki/controller_rotator.go` — `rotatedCert` + `ControllerCertRotator{gen, cur atomic.Pointer, clock}`, `NewControllerCertRotator` (panics on nil/zero → never serves nil after startup, I2), `GetCertificate` (never `(nil,nil)`), `current()`.
+  - **T2 (E2a):** `rotationRatio` (2/3 lifetime), `needsRotation(now)`, `rotate(ctx)` — validates (nil cert / zero NotBefore / NotAfter < now ⇒ error, cur untouched) then atomic swap.
+  - **T3 (E2b):** `Run(ctx)` — rotate at 2/3 lifetime; on failure `log.Printf` loud + capped exponential backoff 30s→10m, keep serving current; success resets; `nextDue()`; all sleeps select on `ctx.Done()`; state kept local.
+  - **T4 (E3):** constructor made main-usable (`cert, notBefore, notAfter` params); `main.go` wiring — same `controllerCertHosts(...)` + `CONNECTOR_CERT_TTL` (I5), `regen` closure, `GetCertificate` in `tls.Config` (I4: ClientAuth/MinVersion/interceptors untouched), removed static `Certificates`, `wg.Add` + goroutine `rotator.Run(ctx)`.
+  - **T5 (E4a):** `controller_rotator_test.go` unit tests — ctor panics, `needsRotation` table (before/at/after threshold, nil), rotate swap + keep-old on all failure modes, `Run` rotates at threshold (fake clock) + keeps current on gen failure + prompt shutdown, 8 readers × 200 swaps under `-race`.
+  - **T6 (E4b):** `TestRotatorHandshakeRotation` — local test CA, leaf with DNS SAN `controller.test` + SPIFFE `spiffe://zecurity.in/controller/global` (I1), `tls.Server{GetCertificate}`, client verifies vs CA: OK before rotation (initial serial), OK with new serial after rotation, **OK past the original `NotAfter`** with the rotated serial (proves sprint acceptance "controller keeps accepting new gRPC handshakes past the original cert's NotAfter").
+- **Verification:** per-task build/vet/race gates; final gate `cd controller && go build ./... && go test -race ./internal/pki/... ./cmd/server/...` green; scope = exactly 3 files (`main.go` M, rotator + test new).
+- **Post-review fix PF-1 (same day):** an independent review found the 2/3 threshold was measured from the backdated `NotBefore` (`GenerateControllerServerTLS` backdates 1 h), so any TTL ≤ 30m was due at issuance and the rotator reissued every `checkInterval` (1 min). The tests missed it because the fakes never backdate. Fixed with `rotatedCert.issuedAt` + `rotationDue()` (`start = max(notBefore, issuedAt)`). Regression test `TestNeedsRotationBackdatedNotBefore` (10m/30m/2h/7d) failed before the fix and passes after; the full `-race` gate is green again. Details in the phase file under Post-Phase Fixes → PF-1.
+- Checkboxes M1-E1…E4 + Build gate ticked in `path.md` and phase file; phase frontmatter `status: done`; sprint-level acceptance item marked with live-check still PENDING / NOT YET RUN.
+
+**Key decisions:**
+- Orchestration notes: `worker-start` needs `--from <coordinator-handle>` when `ORCA_TERMINAL_HANDLE` is unset (else `consumer_fenced`); `check` identifies the caller via `--terminal`. Long `check --wait` loops were unreliable (aborted / missed prompts) — replaced with a short poll loop reading the terminal preview and answering permission prompts immediately (option 2); prompt detection must match signatures like `No, cancel` / `esc to cancel` / `settings.json` — the preview wraps mid-phrase, so `"Persist to settings.json"` as one string misses prompts.
+- No `worker-release` needed at close: the reused terminal is externally owned (`retainedReason: external_terminal`); `worker-list --terminal-state reclaimable` returned 0.
+
+**What's next:**
+- `git add`/commit/`git push origin feat/sprint20-m1-phase2` (not yet done — awaiting instruction).
+- Live acceptance: `CONNECTOR_CERT_TTL=10m` dev stack → controller runs > 15 min, connectors/relays reconnect after the first cert's `NotAfter`, logs show ~1 rotation per ~6m40s (valid only after PF-1; before it, the stack would have rotated every minute). Also the remaining Phase F live checks and Phase G (M2).
