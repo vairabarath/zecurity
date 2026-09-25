@@ -1,9 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MockedProvider } from "@apollo/client/testing/react";
 import { EditResourcePolicyModal } from "./EditResourcePolicyModal";
-import { GetDeviceProfilesDocument } from "@/generated/graphql";
+import {
+  AddProfileToResourcePolicyDocument,
+  GetDeviceProfilesDocument,
+  RemoveProfileFromResourcePolicyDocument,
+  UpdateResourcePolicyDocument,
+} from "@/generated/graphql";
 
 const PROFILES = [
   {
@@ -102,5 +107,121 @@ describe("EditResourcePolicyModal", () => {
     expect(
       screen.getByText("No profiles selected — this policy allows Any Device."),
     ).toBeInTheDocument();
+  });
+
+  // The tests above stop at the wording. These two cross into the write path:
+  // every mock matches on variables, so Save can only succeed if the component
+  // sent exactly these mutations with exactly these arguments.
+
+  it("renames the policy only when the name actually changed", async () => {
+    const onSuccess = vi.fn();
+
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetDeviceProfilesDocument },
+            result: { data: { deviceProfiles: PROFILES } },
+            maxUsageCount: Infinity,
+          },
+          {
+            request: {
+              query: UpdateResourcePolicyDocument,
+              variables: { id: "rp-1", name: "Platform" },
+            },
+            result: {
+              data: {
+                updateResourcePolicy: {
+                  __typename: "ResourcePolicy" as const,
+                  id: "rp-1",
+                  name: "Platform",
+                },
+              },
+            },
+          },
+        ]}
+      >
+        <EditResourcePolicyModal
+          open
+          policy={POLICY}
+          onOpenChange={vi.fn()}
+          onSuccess={onSuccess}
+        />
+      </MockedProvider>,
+    );
+
+    const nameInput = await screen.findByDisplayValue("Engineering");
+    await userEvent.clear(nameInput);
+    await userEvent.type(nameInput, "Platform");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // No profile mocks are supplied: the selection was untouched, so a stray
+    // add/remove would fail the test rather than pass unnoticed.
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+  });
+
+  it("diffs the profile selection into add and remove mutations", async () => {
+    const onSuccess = vi.fn();
+
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetDeviceProfilesDocument },
+            result: { data: { deviceProfiles: PROFILES } },
+            maxUsageCount: Infinity,
+          },
+          {
+            request: {
+              query: AddProfileToResourcePolicyDocument,
+              variables: { policyId: "rp-1", profileId: "profile-2" },
+            },
+            result: {
+              data: {
+                addProfileToResourcePolicy: {
+                  __typename: "ResourcePolicy" as const,
+                  id: "rp-1",
+                  deviceProfiles: [],
+                },
+              },
+            },
+          },
+          {
+            request: {
+              query: RemoveProfileFromResourcePolicyDocument,
+              variables: { policyId: "rp-1", profileId: "profile-1" },
+            },
+            result: {
+              data: {
+                removeProfileFromResourcePolicy: {
+                  __typename: "ResourcePolicy" as const,
+                  id: "rp-1",
+                  deviceProfiles: [],
+                },
+              },
+            },
+          },
+        ]}
+      >
+        <EditResourcePolicyModal
+          open
+          policy={POLICY}
+          onOpenChange={vi.fn()}
+          onSuccess={onSuccess}
+        />
+      </MockedProvider>,
+    );
+
+    // Swap the selection: Windows in (an add), Linux out (a remove). The name
+    // is left alone, so no update mock is offered.
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Corporate Windows/ }),
+    );
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: /Corporate Linux/ }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
   });
 });

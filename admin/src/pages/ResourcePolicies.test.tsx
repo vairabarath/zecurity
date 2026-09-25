@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MockedProvider } from "@apollo/client/testing/react";
 import ResourcePolicies from "./ResourcePolicies";
 import {
+  DeleteResourcePolicyDocument,
   GetResourcePoliciesDocument,
   GetAllResourcesDocument,
 } from "@/generated/graphql";
@@ -128,6 +129,61 @@ describe("ResourcePolicies", () => {
         screen.queryByText("Delete resource policy"),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  // The Cancel branch above proves the guard exists; this proves the guard
+  // actually leads somewhere. The mock matches on the policy id, so the delete
+  // only resolves if the confirmed policy — not some other row — was sent.
+  //
+  // Deliberately NOT asserted on the dialog closing: the page closes it from
+  // onError as well as onCompleted, so a mutation that failed to match would
+  // look identical. Only the success path calls refetch(), so the list turning
+  // over to the empty state is the assertion that actually discriminates.
+  it("sends deleteResourcePolicy for the confirmed policy", async () => {
+    render(
+      <MockedProvider
+        mocks={[
+          {
+            request: { query: GetResourcePoliciesDocument },
+            result: {
+              data: {
+                resourcePolicies: [policy("rp-1", "Engineering", [LINUX_PROFILE])],
+              },
+            },
+          },
+          // Consumed by the post-delete refetch, so it only ever renders if the
+          // mutation completed.
+          {
+            request: { query: GetResourcePoliciesDocument },
+            result: { data: { resourcePolicies: [] } },
+            maxUsageCount: Infinity,
+          },
+          {
+            request: { query: GetAllResourcesDocument },
+            result: { data: { allResources: RESOURCES } },
+            maxUsageCount: Infinity,
+          },
+          {
+            request: {
+              query: DeleteResourcePolicyDocument,
+              variables: { id: "rp-1" },
+            },
+            result: { data: { deleteResourcePolicy: true } },
+          },
+        ]}
+      >
+        <ResourcePolicies />
+      </MockedProvider>,
+    );
+    await screen.findByText("Engineering");
+
+    await userEvent.click(screen.getByText("Delete"));
+    await screen.findByText("Delete resource policy");
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(
+      await screen.findByText("No resource policies defined"),
+    ).toBeInTheDocument();
   });
 
   it("opens the edit modal for the clicked policy", async () => {
