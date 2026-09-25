@@ -1,13 +1,16 @@
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ::time::OffsetDateTime;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
@@ -21,6 +24,7 @@ use crate::shield_proto::{
     RenewCertRequest, RenewCertResponse, ResourceAck, ResourceInstruction, ResourceSnapshot,
     ResourceStateReport, ShieldControlMessage,
 };
+use crate::tls::cert_holder::{CertHolder, CertMaterial};
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
@@ -71,7 +75,10 @@ pub struct ShieldRegistry {
     maps: Arc<Mutex<ShieldMaps>>,
     // Unified ack sink - consumed by control_stream.rs which forwards to controller
     pub ack_tx: mpsc::Sender<(String, ResourceAck)>,
-    controller_channel: Channel,
+    /// Channel used to proxy Shield RenewCert to the controller. Rebuilt with
+    /// the renewed identity whenever the CertHolder publishes (Sprint 20 G-2a).
+    controller_channel: Arc<RwLock<Channel>>,
+    controller_channel_swaps: Arc<AtomicU64>,
     trust_domain: String,
     connector_id: String,
     renewal_window_secs: u64,
@@ -102,13 +109,71 @@ impl ShieldRegistry {
                 pending_discovery: HashMap::new(),
             })),
             ack_tx,
-            controller_channel,
+            controller_channel: Arc::new(RwLock::new(controller_channel)),
+            controller_channel_swaps: Arc::new(AtomicU64::new(0)),
             trust_domain,
             connector_id,
             renewal_window_secs: DEFAULT_RENEWAL_WINDOW_SECS,
             tunnel_hub: crate::agent_tunnel::AgentTunnelHub::new(),
             policy_cache,
         }
+    }
+
+    /// The current controller channel (cheap clone).
+    pub fn controller_channel(&self) -> Channel {
+        self.controller_channel.read().clone()
+    }
+
+    /// Replace the controller channel (after a certificate renewal).
+    pub fn replace_controller_channel(&self, channel: Channel) {
+        *self.controller_channel.write() = channel;
+        self.controller_channel_swaps.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many times the controller channel has been replaced.
+    pub fn controller_channel_swaps(&self) -> u64 {
+        self.controller_channel_swaps.load(Ordering::SeqCst)
+    }
+
+    /// Rebuild the Shield-proxy controller channel with the renewed identity
+    /// as soon as the CertHolder publishes. A failed rebuild keeps the old
+    /// channel and retries (switching to a newer certificate if one lands).
+    pub fn spawn_controller_channel_refresh<F, Fut>(
+        &self,
+        certs: Arc<CertHolder>,
+        connect: F,
+    ) -> JoinHandle<()>
+    where
+        F: Fn(Arc<CertMaterial>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Channel>> + Send,
+    {
+        let registry = self.clone();
+        let mut rx = certs.subscribe();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                loop {
+                    let material = rx.borrow_and_update().clone();
+                    match connect(material.clone()).await {
+                        Ok(channel) => {
+                            registry.replace_controller_channel(channel);
+                            info!(serial = %material.serial_hex, "Shield-proxy controller channel rebuilt with renewed certificate");
+                            break;
+                        }
+                        Err(err) => {
+                            warn!(error = %err, serial = %material.serial_hex, "rebuild Shield-proxy controller channel failed; retrying");
+                            tokio::select! {
+                                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                                changed = rx.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Build the current peer-Connector list for this Connector's Remote
@@ -720,7 +785,7 @@ impl ShieldService for ShieldRegistry {
 
         info!(shield_id = %verified.shield_id, "proxying shield cert renewal to controller");
 
-        let mut client = ShieldServiceClient::new(self.controller_channel.clone());
+        let mut client = ShieldServiceClient::new(self.controller_channel());
         client.renew_cert(Request::new(req)).await.map_err(|err| {
             warn!(shield_id = %verified.shield_id, error = %err, "shield cert renewal proxy failed");
             Status::unavailable("failed to proxy shield cert renewal to controller")
@@ -829,6 +894,61 @@ mod tests {
             got,
             vec!["a1", "a2", "a3"],
             "instructions must arrive in push order"
+        );
+    }
+}
+
+#[cfg(test)]
+mod controller_channel_refresh_tests {
+    use super::*;
+    use crate::test_support::TestPki;
+
+    fn registry() -> ShieldRegistry {
+        let (ack_tx, _ack_rx) = mpsc::channel(8);
+        ShieldRegistry::new(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+            "ws-test.zecurity.in".to_string(),
+            crate::test_support::CONNECTOR_ID.to_string(),
+            ack_tx,
+            Arc::new(crate::policy::PolicyCache::new()),
+        )
+    }
+
+    /// When the CertHolder publishes a renewal, the Shield-proxy controller
+    /// channel is rebuilt immediately with the renewed certificate.
+    #[tokio::test]
+    async fn shield_proxy_channel_rebuilds_on_publish() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let registry = registry();
+        let built_with: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let recorder = built_with.clone();
+        let _task = registry.spawn_controller_channel_refresh(holder.clone(), move |material| {
+            recorder.lock().push(material.serial_hex.clone());
+            async move { Ok(Channel::from_static("http://127.0.0.1:1").connect_lazy()) }
+        });
+        assert_eq!(
+            registry.controller_channel_swaps(),
+            0,
+            "no rebuild before a renewal"
+        );
+
+        let renewed = pki.renew(&holder, 7200);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while registry.controller_channel_swaps() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "controller channel was not rebuilt"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(registry.controller_channel_swaps(), 1);
+        assert_eq!(
+            built_with.lock().as_slice(),
+            std::slice::from_ref(&renewed.serial_hex),
+            "rebuilt with the renewed certificate"
         );
     }
 }
