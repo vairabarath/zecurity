@@ -149,7 +149,10 @@ fn authenticated_identity_from_chain(chain: &[CertificateDer<'_>]) -> Result<Par
     Ok(identity)
 }
 
-fn validate_relay_certificate(cert: &CertificateDer<'_>, expected_relay_id: &str) -> Result<()> {
+pub(crate) fn validate_relay_certificate(
+    cert: &CertificateDer<'_>,
+    expected_relay_id: &str,
+) -> Result<()> {
     let spiffe_uri =
         extract_spiffe_uri(cert.as_ref()).context("Relay certificate has no exact SPIFFE URI")?;
     let identity =
