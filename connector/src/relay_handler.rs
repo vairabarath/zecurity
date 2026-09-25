@@ -7,7 +7,7 @@ use quinn::{Connection, RecvStream, SendStream};
 use rustls::pki_types::CertificateDer;
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
-use rustls_pemfile::{certs, private_key};
+use rustls_pemfile::certs;
 use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
@@ -20,7 +20,7 @@ use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
 use crate::session_registry::{SessionRegistry, SessionTransport};
-use crate::tls::cert_store::CertStore;
+use crate::tls::cert_holder::{CertHolder, HolderCertResolver};
 use crate::ControlMessage;
 
 const INNER_TUNNEL_ALPN: &[u8] = b"ztna-tunnel-v1";
@@ -100,7 +100,7 @@ pub struct RelayHandler {
 
 impl RelayHandler {
     pub fn new(
-        store: &CertStore,
+        certs: Arc<CertHolder>,
         acl: Arc<PolicyCache>,
         registry: Arc<SessionRegistry>,
         tunnel_hub: AgentTunnelHub,
@@ -111,7 +111,7 @@ impl RelayHandler {
         max_tunnel_streams: usize,
     ) -> Result<Self> {
         validate_runtime_limits(handshake_timeout_secs, max_tunnel_streams)?;
-        let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(store)?;
+        let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(certs)?;
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(tls_config)),
             workspace_trust_domain,
@@ -212,7 +212,16 @@ fn validate_runtime_limits(handshake_timeout_secs: u64, max_tunnel_streams: usiz
     Ok(())
 }
 
-fn build_inner_tls_server_config(store: &CertStore) -> Result<(ServerConfig, String)> {
+/// Inner Client-to-Connector mTLS config. The server certificate is resolved
+/// from the CertHolder on every handshake (Sprint 20 G-2a), so relayed
+/// streams opened after a renewal get the renewed certificate while streams
+/// already established keep theirs. The trust domain and Workspace CA are
+/// pinned across renewals by the holder, so they are read once.
+pub(crate) fn build_inner_tls_server_config(
+    certs: Arc<CertHolder>,
+) -> Result<(ServerConfig, String)> {
+    let material = certs.current();
+    let store = &material.store;
     let server_certs = parse_certificates(&store.cert_pem, "Connector certificate")?;
     let connector_leaf = server_certs
         .first()
@@ -233,13 +242,9 @@ fn build_inner_tls_server_config(store: &CertStore) -> Result<(ServerConfig, Str
         .build()
         .context("build inner mTLS Client verifier")?;
 
-    let server_key = private_key(&mut store.key_pem.as_slice())
-        .context("parse Connector private key PEM")?
-        .context("Connector private key PEM contains no private key")?;
     let mut config = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_client_cert_verifier(client_verifier)
-        .with_single_cert(server_certs, server_key)
-        .context("build inner mTLS server config; Connector certificate and key may not match")?;
+        .with_cert_resolver(HolderCertResolver::new(certs.clone()));
     config.alpn_protocols = vec![INNER_TUNNEL_ALPN.to_vec()];
     Ok((config, workspace_trust_domain))
 }
@@ -400,5 +405,35 @@ mod tests {
         validate_runtime_limits(10, 256).unwrap();
         assert!(validate_runtime_limits(0, 256).is_err());
         assert!(validate_runtime_limits(10, 0).is_err());
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+    use crate::test_support::{tls_handshake_serial, TestPki};
+
+    /// The Relay inner-TLS acceptor serves the renewed certificate to streams
+    /// opened after the renewal (TLS 1.3 only, as in production).
+    #[tokio::test]
+    async fn relay_inner_tls_serves_renewed_certificate() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let (config, trust_domain) = build_inner_tls_server_config(holder.clone()).unwrap();
+        assert_eq!(trust_domain, "ws-test.zecurity.in");
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let client = pki.client_tls_config(true);
+
+        let before = holder.current().serial_hex.clone();
+        assert_eq!(
+            tls_handshake_serial(&acceptor, client.clone()).await,
+            before
+        );
+
+        let renewed = pki.renew(&holder, 7200);
+        assert_eq!(
+            tls_handshake_serial(&acceptor, client).await,
+            renewed.serial_hex
+        );
     }
 }

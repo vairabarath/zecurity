@@ -27,7 +27,7 @@ use crate::proto::{
 use crate::relay_attachment::RelayAttachmentSlot;
 use crate::renewal;
 use crate::shield_proto::ResourceAck;
-use crate::tls::cert_store::CertStore;
+use crate::tls::cert_holder::CertHolder;
 use crate::util;
 
 const BACKOFF_INITIAL_SECS: u64 = 2;
@@ -46,6 +46,7 @@ pub async fn run_control_stream(
     registry: Arc<SessionRegistry>,
     relay_attachment_slot: RelayAttachmentSlot,
     relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
+    certs: Arc<CertHolder>,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -84,6 +85,7 @@ pub async fn run_control_stream(
             &registry,
             &relay_attachment_slot,
             &relay_list_tx,
+            &certs,
         )
         .await
         {
@@ -141,10 +143,11 @@ async fn run_once(
     registry: &Arc<SessionRegistry>,
     relay_attachment_slot: &RelayAttachmentSlot,
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
+    certs: &Arc<CertHolder>,
 ) -> Result<()> {
-    let cert_store = CertStore::load_async(&cfg.state_dir)
-        .await
-        .context("failed to load cert store for control stream")?;
+    // Always connect with the holder's CURRENT certificate (Sprint 20 G-2a):
+    // after a renewal the reconnect presents the renewed certificate.
+    let cert_store = certs.current().store.clone();
 
     info!("starting mTLS SPIFFE preflight check");
     verify_controller_spiffe_preflight(cfg, &cert_store)
@@ -210,7 +213,7 @@ async fn run_once(
                         return Ok(());
                     }
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, registry, relay_list_tx).await {
+                        if let Some(action) = handle_controller_msg(msg, shield_registry, state, cfg, &out_tx, policy_cache, registry, relay_list_tx, certs).await {
                             return action;
                         }
                     }
@@ -288,6 +291,7 @@ async fn handle_controller_msg(
     policy_cache: &Arc<PolicyCache>,
     registry: &Arc<SessionRegistry>,
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
+    certs: &Arc<CertHolder>,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(CBody::ResourceInstructions(batch)) => {
@@ -352,16 +356,19 @@ async fn handle_controller_msg(
         }
         Some(CBody::ReEnroll(_)) => {
             info!("controller requested cert renewal — starting renewal");
-            match renewal::renew_cert(state, cfg).await {
-                Ok(new_state) => {
+            match renewal::renew_cert(state, cfg, certs).await {
+                Ok(Some(new_state)) => {
                     info!(
                         "cert renewed successfully, new expiry: {}",
                         new_state.cert_not_after
                     );
                     *state = new_state;
-                    // Break the inner loop to reconnect with the fresh cert.
+                    // Break the inner loop to reconnect with the renewed cert
+                    // (run_once reads it from the CertHolder).
                     Some(Ok(()))
                 }
+                // Duplicate of an in-flight or just-completed renewal.
+                Ok(None) => None,
                 Err(e) => {
                     error!(error = %e, "cert renewal failed");
                     None

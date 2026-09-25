@@ -42,6 +42,7 @@ use crate::relay_client;
 use crate::relay_handler::{RelayDrainTracker, RelayHandler};
 use crate::relay_probe::{probe_relays, RelayProbeResult};
 use crate::relay_ranking::{now_unix_seconds, RankedEntry, RelayRanking};
+use crate::tls::cert_holder::CertHolder;
 
 const MIGRATION_IMPROVEMENT_RATIO: f64 = 0.15;
 const MIGRATION_IMPROVEMENT_MIN_MS: u64 = 10;
@@ -53,10 +54,10 @@ pub struct RelaySelectorConfig {
     pub state_dir: PathBuf,
     pub connector_id: String,
     pub connector_spiffe_id: String,
-    pub cert_pem: Vec<u8>,
-    pub key_pem: Vec<u8>,
-    pub workspace_ca_pem: Vec<u8>,
-    pub intermediate_ca_pem: Vec<u8>,
+    /// Single owner of the Connector certificate (Sprint 20 G-2a). Every probe
+    /// and session dial reads the CURRENT identity from here, so dials after
+    /// a renewal present the renewed certificate.
+    pub certs: Arc<CertHolder>,
     pub relay_crl_manager: crate::crl::CrlManager,
     pub max_incoming_bidi_streams: u32,
     pub idle_timeout: Duration,
@@ -67,6 +68,29 @@ pub struct RelaySelectorConfig {
     pub reconnect_max: Duration,
     pub reconnect_backoff_factor: f64,
     pub drain_timeout: Duration,
+}
+
+/// Connector mTLS identity used for Relay dials and probes.
+pub struct RelayIdentity {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+    pub workspace_ca_pem: Vec<u8>,
+    pub intermediate_ca_pem: Vec<u8>,
+}
+
+impl RelaySelectorConfig {
+    /// The CURRENT identity from the CertHolder. `workspace_ca.crt` holds the
+    /// Workspace CA + Platform Intermediate bundle; relay_client picks the
+    /// right anchor from it for each role.
+    pub fn current_identity(&self) -> RelayIdentity {
+        let material = self.certs.current();
+        RelayIdentity {
+            cert_pem: material.store.cert_pem.clone(),
+            key_pem: material.store.key_pem.clone(),
+            workspace_ca_pem: material.store.workspace_ca_pem.clone(),
+            intermediate_ca_pem: material.store.workspace_ca_pem.clone(),
+        }
+    }
 }
 
 /// In-flight relay session: which relay we're attached to, the spawned
@@ -309,13 +333,14 @@ async fn reprobe_and_maybe_migrate(
     attachment_slot: &RelayAttachmentSlot,
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
 ) -> State {
+    let identity = cfg.current_identity();
     let results = probe_relays(
         &list.relays,
         &cfg.connector_id,
-        &cfg.cert_pem,
-        &cfg.key_pem,
-        &cfg.workspace_ca_pem,
-        &cfg.intermediate_ca_pem,
+        &identity.cert_pem,
+        &identity.key_pem,
+        &identity.workspace_ca_pem,
+        &identity.intermediate_ca_pem,
         cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
@@ -568,13 +593,14 @@ async fn failover(
     }
 
     // No ranked entry worked — re-probe and use the best result.
+    let identity = cfg.current_identity();
     let results = probe_relays(
         &list.relays,
         &cfg.connector_id,
-        &cfg.cert_pem,
-        &cfg.key_pem,
-        &cfg.workspace_ca_pem,
-        &cfg.intermediate_ca_pem,
+        &identity.cert_pem,
+        &identity.key_pem,
+        &identity.workspace_ca_pem,
+        &identity.intermediate_ca_pem,
         cfg.relay_crl_manager.clone(),
         cfg.max_concurrent_probes,
         cfg.probe_timeout,
@@ -670,10 +696,14 @@ fn spawn_session(
     let relay_spiffe_id = info.spiffe_id;
     let connector_id = cfg_owned.connector_id.clone();
     let connector_spiffe_id = cfg_owned.connector_spiffe_id.clone();
-    let cert_pem = cfg_owned.cert_pem.clone();
-    let key_pem = cfg_owned.key_pem.clone();
-    let workspace_ca_pem = cfg_owned.workspace_ca_pem.clone();
-    let intermediate_ca_pem = cfg_owned.intermediate_ca_pem.clone();
+    // Identity read at dial time: a session started after a renewal presents
+    // the renewed certificate; an established session keeps the one it used.
+    let RelayIdentity {
+        cert_pem,
+        key_pem,
+        workspace_ca_pem,
+        intermediate_ca_pem,
+    } = cfg_owned.current_identity();
     let relay_crl_manager = cfg_owned.relay_crl_manager.clone();
     let max_streams = cfg_owned.max_incoming_bidi_streams;
     let idle_timeout = cfg_owned.idle_timeout;
@@ -1103,5 +1133,50 @@ mod tests {
             vec!["b"]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use crate::test_support::{leaf_serial, selector_config, TestPki};
+
+    fn first_cert_serial(pem: &[u8]) -> String {
+        let chain: Vec<_> = rustls_pemfile::certs(&mut &pem[..])
+            .collect::<Result<_, _>>()
+            .unwrap();
+        leaf_serial(&chain[0])
+    }
+
+    /// Relay probes and session dials read the identity at dial time: after a
+    /// renewal is published, the next dial presents the renewed certificate
+    /// (same key), not a copy captured at startup.
+    #[test]
+    fn relay_dials_use_the_renewed_identity() {
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let cfg = selector_config(holder.clone(), dir.path());
+
+        let before = cfg.current_identity();
+        assert_eq!(
+            first_cert_serial(&before.cert_pem),
+            holder.current().serial_hex
+        );
+
+        let renewed = pki.renew(&holder, 7200);
+        let after = cfg.current_identity();
+        assert_eq!(
+            first_cert_serial(&after.cert_pem),
+            renewed.serial_hex,
+            "dial must present the renewed certificate"
+        );
+        assert_ne!(
+            first_cert_serial(&after.cert_pem),
+            first_cert_serial(&before.cert_pem)
+        );
+        assert_eq!(after.key_pem, before.key_pem, "renewal keeps the key pair");
+        assert_eq!(
+            after.workspace_ca_pem, before.workspace_ca_pem,
+            "CA bundle is pinned across renewals"
+        );
     }
 }

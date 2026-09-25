@@ -84,9 +84,17 @@ async fn main() -> anyhow::Result<()> {
         state
     };
 
-    // Load cert/key material once — shared by the controller channel and device tunnels.
-    let cert_store =
-        tls::cert_store::CertStore::load(&cfg.state_dir).context("failed to load cert store")?;
+    // Single owner of the connector certificate (Sprint 20 G-2a). Every TLS
+    // consumer reads the CURRENT certificate from it and switches when a
+    // renewal is published (verify → atomic persist → publish).
+    let certs = tls::cert_holder::CertHolder::load(
+        &cfg.state_dir,
+        &appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &enrollment_state.connector_id),
+    )
+    .context("failed to load connector certificate")?;
+    // CA bundle (pinned across renewals) for CRL issuer checks and the
+    // initial controller channel.
+    let cert_store = certs.current().store.clone();
 
     // Build controller channel for ShieldRegistry (proxies RenewCert to controller).
     let controller_channel = controller_client::build_channel(&cfg, &cert_store)
@@ -110,6 +118,15 @@ async fn main() -> anyhow::Result<()> {
         ack_tx,
         policy_cache.clone(),
     );
+    // Rebuild the Shield-proxy controller channel with the renewed identity
+    // whenever the certificate holder publishes.
+    {
+        let refresh_cfg = cfg.clone();
+        shield_registry.spawn_controller_channel_refresh(certs.clone(), move |material| {
+            let cfg = refresh_cfg.clone();
+            async move { controller_client::build_channel(&cfg, &material.store).await }
+        });
+    }
 
     // Spawn shield-facing gRPC server on :9091.
     let reg_for_serve = shield_registry.clone();
@@ -198,7 +215,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn TLS/TCP device tunnel listener on :9092 (M4 implements; stub for now).
     {
-        let store = cert_store.clone();
+        let store = certs.clone();
         let acl = acl.clone();
         let registry = session_registry.clone();
         let hub = tunnel_hub.clone();
@@ -216,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn QUIC/UDP device tunnel listener on :9092.
     {
-        let store = cert_store.clone();
+        let store = certs.clone();
         let acl = acl.clone();
          let registry = session_registry.clone();
         let hub = tunnel_hub.clone();
@@ -252,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
 
     let relay_handler = Arc::new(
         relay_handler::RelayHandler::new(
-            &cert_store,
+            certs.clone(),
             acl.clone(),
             session_registry.clone(),
             tunnel_hub.clone(),
@@ -266,15 +283,11 @@ async fn main() -> anyhow::Result<()> {
     );
     let connector_spiffe_id =
         appmeta::connector_spiffe_id(&enrollment_state.trust_domain, &connector_id);
-    let ca_bundle = cert_store.workspace_ca_pem.clone();
     let selector_cfg = relay_selector::RelaySelectorConfig {
         state_dir: std::path::PathBuf::from(&cfg.state_dir),
         connector_id: connector_id.clone(),
         connector_spiffe_id,
-        cert_pem: cert_store.cert_pem.clone(),
-        key_pem: cert_store.key_pem.clone(),
-        workspace_ca_pem: ca_bundle.clone(),
-        intermediate_ca_pem: ca_bundle,
+        certs: certs.clone(),
         relay_crl_manager,
         max_incoming_bidi_streams: cfg.relay_max_tunnel_streams,
         idle_timeout: std::time::Duration::from_secs(cfg.relay_idle_timeout_secs),
@@ -314,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
         session_registry,
         relay_attachment_slot,
         relay_list_tx,
+        certs,
     )
     .await
 }

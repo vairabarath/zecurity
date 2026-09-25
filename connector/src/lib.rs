@@ -25,7 +25,11 @@ pub mod relay_probe;
 pub mod relay_ranking;
 pub mod relay_selector;
 pub mod renewal;
+#[cfg(test)]
+mod renewal_consumers_tests;
 pub mod session_registry;
+#[cfg(test)]
+pub mod test_support;
 pub mod tls;
 pub mod updater;
 pub mod util;

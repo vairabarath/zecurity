@@ -212,16 +212,19 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]]. Depends on M1 Phase B (merged).
 
-**G-1 (controller trigger) — done. G-2 (connector Rust cert hot-swap) — next.**
+**G-1 (controller trigger) — done. G-2a (cert holder + consumers) — done. G-2b (`:9091` shield server) — next.**
 
 - [x] **M2-G1** `control_stream.go` `handleConnectorHealth` — send `ReEnroll` when `cert_not_after < now + Cfg.RenewalWindow`; throttle per stream (10 min, recorded only on a successful enqueue). Runs only after the revocation-guarded health UPDATE succeeds.
-- [ ] **M2-G2** `connector/src` — shared reloadable certificate holder; renewal publishes the new cert. *(G-2)*
-- [ ] **M2-G3** `connector/src` — every TLS consumer (device-tunnel listener, shield-proxy controller channel, relay client) uses the renewed cert. *(G-2)*
+- [x] **M2-G2** `connector/src/tls/cert_holder.rs` (new) — single cert owner (`watch` channel); `install_renewed` = verify → atomic persist (temp → fsync → rename → fsync dir) → publish; key never rewritten. `renewal.rs` — single-flight + 60 s debounce, CSR from existing key.
+- [x] **M2-G3 (G-2a)** Consumers switched: control stream (holder), device TLS `:9092` (holder resolver), device QUIC `:9092` (`set_server_config`), Relay inner TLS (holder resolver), Relay dials/probes (identity at dial time), Shield-proxy controller channel (rebuilt on publish).
+- [ ] **M2-G3 (G-2b)** Shield-facing server `:9091` — own TLS accept + `serve_with_incoming` so live shield streams survive a renewal. *(G-2b)*
 - [x] **M2-G4 (Go)** Tests: `reenroll_test.go`. Unit: `renewalDue`, exactly-one inside window, throttle, per-stream, outside window / NULL / disabled, full mailbox retries. Through `handleConnectorHealth` with a throwaway DB: inside window → one then throttled; outside / NULL → none; revoked (status or `revoked_at`) → none.
-- [ ] **M2-G4 (Rust)** Tests: holder swap + consumers. *(G-2)*
+- [x] **M2-G4 (Rust, G-2a)** Tests: holder notify/verify/persist/single-flight, atomic write + crash-before-rename, device TLS new serial, real-QUIC swap keeps existing connections, Relay inner TLS new cert, Relay dials new identity, Shield-proxy rebuild, rapid ReEnroll → one renewal, all six consumers see the same serial (109 lib + 4 integration pass).
+- [ ] **M2-G4 (Rust, G-2b)** Tests: `:9091` pre-swap shield stays connected, new shield sees new cert, shield identity check through custom TLS. *(G-2b)*
 - [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...` (connector DB tests run; the only skip is the pre-existing unconditional `TestEnroll_CSRSignatureInvalid`).
-- [ ] **Full build gate:** `… && cd ../connector && cargo build && cargo test` with the G-2 runtime. *(G-2)*
-- [ ] **Live acceptance — NOT YET RUN** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). Needs G-2, and Phase E: the controller gRPC cert shares `CONNECTOR_CERT_TTL`.
+- [x] **G-2a build gate:** `cd connector && cargo build && cargo test` (109 + 4, stable over 5 runs); controller `go build ./... && go test ./...`; clippy clean for new G-2a code.
+- [ ] **Full build gate** with G-2b. *(G-2b)*
+- [ ] **Live acceptance — NOT YET RUN** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). Needs G-2b, and Phase E: the controller gRPC cert shares `CONNECTOR_CERT_TTL`.
 
 ## Final Build Gates
 
@@ -279,4 +282,5 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 
 ## Post-Sprint Fixes
 
+- **Phase G-2a — renewal wrote `connector.crt` as leaf only** (pre-existing in `connector/src/renewal.rs`). Enrollment stores leaf + Workspace CA; renewal overwrote it with the bare leaf. `CertHolder::install_renewed` now writes the enrollment shape. Details: [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]] → Post-Phase Fixes.
 - **Phase A — `ClearHeartbeatThrottle` multi-key DEL panic** (caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit). valkey-go panics on a multi-key `DEL` whose keys hash to different slots, so the markers are now deleted one key at a time. Details: [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]] → Post-Phase Fixes.

@@ -1,3 +1,4 @@
+pub mod cert_holder;
 pub mod cert_store;
 pub mod server_cfg;
 
