@@ -6,7 +6,7 @@ sprint: 20
 phase: 4
 execution: G
 title: Connector Renewal Trigger + Cert Hot-Swap
-status: planned
+status: in-progress   # G-1 (controller trigger) done; G-2 (connector Rust hot-swap) next
 depends_on: [3, "M1-Phase1"]
 tags:
   - go
@@ -137,7 +137,7 @@ Rust (`cargo test` in `connector/`):
 - [ ] Dev stack with `CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`: within ~5 min the controller logs a `ReEnroll`, the connector logs a renewal, and `connectors.cert_serial` changes.
 - [ ] After the **original** cert's `NotAfter`, without restarting the connector: a client opens a direct tunnel (`:9092`) successfully; a relayed tunnel works; a shield completes its own renewal through the connector.
 - [ ] No established tunnel is dropped at the swap (watch session logs).
-- [ ] Revoked connector: no `ReEnroll`, `RenewCert` denied.
+- [ ] Revoked connector: no `ReEnroll`, `RenewCert` denied. *(Controller side covered by tests: G-1 `TestHandleConnectorHealth_RevokedNeverGetsReEnroll`, Phase B `TestRenewCert_Revoked*`. Live check pending.)*
 
 ## Build Check
 
@@ -150,11 +150,23 @@ cargo build --manifest-path shield/Cargo.toml    # unchanged; must still build
 
 ## Implementation Checklist
 
-- [ ] **M2-G1** Controller: `ReEnroll` trigger in `handleConnectorHealth` with per-stream throttle
+**G-1 — controller trigger (done)**
+
+- [x] **M2-G1** Controller: `ReEnroll` trigger in `handleConnectorHealth` with per-stream throttle
+  - The guarded health UPDATE also returns `cert_not_after`. The trigger runs only when that UPDATE succeeded, so a revoked connector returns earlier and never gets `ReEnroll`.
+  - `renewalDue`: due when `cert_not_after - now < CONNECTOR_RENEWAL_WINDOW`. A NULL expiry or a disabled window never triggers.
+  - Throttle: `connectorStreamClient.lastReEnrollAt`, re-ask at most every `reEnrollResendInterval` (10 min), recorded only on a successful enqueue (a full mailbox retries next report). Per stream, so a reconnect gets a fresh throttle.
+  - Reuses `ConnectorControlMessage_ReEnroll{ReEnroll: &shieldpb.ReEnrollSignal{}}`. No proto change; `enrollment.go` / `RenewCert` untouched (Phase B owns those guards).
+- [x] **M2-G4 (Go)** Tests (`reenroll_test.go`): `TestRenewalDue`; `TestMaybeSendReEnroll_{InsideWindowSendsExactlyOne, ThrottleSuppressesDuplicates, ThrottleIsPerStream, OutsideWindowOrNullSendsNothing, FullMailboxRetriesOnNextReport}`; `TestHandleConnectorHealth_{SendsReEnrollInsideWindow, NoReEnrollOutsideWindowOrNull, RevokedNeverGetsReEnroll}` (throwaway DB)
+- [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...`
+
+**G-2 — connector Rust cert hot-swap (next)**
+
 - [ ] **M2-G2** Connector: shared cert holder; atomic renewal writes; publish on renew
 - [ ] **M2-G3** Connector: consumers #1–#6 read from the holder (servers via resolver; clients rebuilt)
-- [ ] **M2-G4** Tests (Go trigger/throttle; Rust holder + consumers)
-- [ ] **Build gate:** `cd controller && go build ./... && cd ../connector && cargo build`
+- [ ] **M2-G4 (Rust)** Tests: holder swap + consumers
+- [ ] **Full build gate:** `cd controller && go build ./... && cd ../connector && cargo build && cargo test`
+- [ ] **Live acceptance — NOT YET RUN** (see Acceptance Criteria). Needs G-2 and Phase E (the controller gRPC cert uses the same `CONNECTOR_CERT_TTL`).
 
 ## Post-Phase Fixes
 

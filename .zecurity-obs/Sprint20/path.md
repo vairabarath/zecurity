@@ -212,11 +212,16 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]]. Depends on M1 Phase B (merged).
 
-- [ ] **M2-G1** `control_stream.go` `handleConnectorHealth` — send `ReEnroll` when `cert_not_after < now + Cfg.RenewalWindow`; throttle per stream.
-- [ ] **M2-G2** `connector/src` — shared reloadable certificate holder; renewal publishes the new cert.
-- [ ] **M2-G3** `connector/src` — every TLS consumer (device-tunnel listener, shield-proxy controller channel, relay client) uses the renewed cert.
-- [ ] **M2-G4** Tests: Go ReEnroll trigger/throttle; Rust holder swap + consumers.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/... && cd ../connector && cargo build && cargo test`
+**G-1 (controller trigger) — done. G-2 (connector Rust cert hot-swap) — next.**
+
+- [x] **M2-G1** `control_stream.go` `handleConnectorHealth` — send `ReEnroll` when `cert_not_after < now + Cfg.RenewalWindow`; throttle per stream (10 min, recorded only on a successful enqueue). Runs only after the revocation-guarded health UPDATE succeeds.
+- [ ] **M2-G2** `connector/src` — shared reloadable certificate holder; renewal publishes the new cert. *(G-2)*
+- [ ] **M2-G3** `connector/src` — every TLS consumer (device-tunnel listener, shield-proxy controller channel, relay client) uses the renewed cert. *(G-2)*
+- [x] **M2-G4 (Go)** Tests: `reenroll_test.go`. Unit: `renewalDue`, exactly-one inside window, throttle, per-stream, outside window / NULL / disabled, full mailbox retries. Through `handleConnectorHealth` with a throwaway DB: inside window → one then throttled; outside / NULL → none; revoked (status or `revoked_at`) → none.
+- [ ] **M2-G4 (Rust)** Tests: holder swap + consumers. *(G-2)*
+- [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...` (connector DB tests run; the only skip is the pre-existing unconditional `TestEnroll_CSRSignatureInvalid`).
+- [ ] **Full build gate:** `… && cd ../connector && cargo build && cargo test` with the G-2 runtime. *(G-2)*
+- [ ] **Live acceptance — NOT YET RUN** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). Needs G-2, and Phase E: the controller gRPC cert shares `CONNECTOR_CERT_TTL`.
 
 ## Final Build Gates
 
@@ -243,7 +248,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
 - [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`.
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
-- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`.
+- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) done and tested; connector hot-swap (G-2) + live check pending.)*
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
