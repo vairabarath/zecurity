@@ -1,4 +1,5 @@
 mod appmeta;
+mod cert_manager;
 mod config;
 mod crl;
 mod csr;
@@ -6,9 +7,12 @@ mod heartbeat;
 mod listener;
 mod protocol;
 mod provision;
+mod renewal;
 mod session;
 mod spiffe;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod tls;
 
 pub mod relay {
@@ -19,7 +23,6 @@ pub mod relay {
 
 use anyhow::Result;
 use config::RelayConfig;
-use std::fs;
 use tracing::info;
 
 #[tokio::main]
@@ -41,33 +44,28 @@ async fn main() -> Result<()> {
     );
 
     let material = provision::ensure_provisioned(&cfg).await?;
-    let relay_certificate = fs::read(&material.certificate_path)?;
-    let relay_key = fs::read(&material.key_path)?;
-    let intermediate_ca = fs::read(&material.intermediate_ca_path)?;
-    let server_config = tls::build_server_config(
-        &relay_certificate,
-        &relay_key,
-        &intermediate_ca,
+    // Single owner of the current certificate: listener, heartbeat and the
+    // renewal scheduler all read from and subscribe to it (Phase F-2).
+    let certs = cert_manager::CertManager::load(
         &cfg.relay_id,
-        cfg.runtime_limits.max_bidi_streams,
-        cfg.runtime_limits.idle_timeout,
+        cert_manager::CertPaths {
+            key_path: material.key_path.clone(),
+            certificate_path: material.certificate_path.clone(),
+            intermediate_ca_path: material.intermediate_ca_path.clone(),
+        },
     )?;
     info!(
         certificate = %material.certificate_path.display(),
         intermediate_ca = %material.intermediate_ca_path.display(),
+        serial = %certs.current().serial_hex,
         bind_addr = %cfg.bind_addr,
         "Relay provisioned; starting multi-workspace mTLS QUIC listener"
     );
 
     let state = state::RelayState::new();
-    tokio::spawn(heartbeat::run(
-        cfg.clone(),
-        relay_certificate.clone(),
-        relay_key.clone(),
-        intermediate_ca.clone(),
-        state.clone(),
-    ));
+    tokio::spawn(heartbeat::run(cfg.clone(), certs.clone(), state.clone()));
+    renewal::spawn(certs.clone(), &cfg)?;
     let crl = crl::WorkspaceCrlManager::new(cfg.controller_http_addr.clone());
     crl.clone().spawn_refresh(60, 15);
-    listener::run_listener(cfg.bind_addr, server_config, state, cfg.runtime_limits, crl).await
+    listener::run_listener(cfg.bind_addr, certs, state, cfg.runtime_limits, crl).await
 }

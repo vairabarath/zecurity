@@ -6,7 +6,7 @@ sprint: 20
 phase: 3
 execution: F
 title: Relay In-Band Certificate Renewal (D-19)
-status: in-progress   # F-1 (controller) done; F-2 (relay Rust runtime) next
+status: implemented   # F-1 + F-2 done; live acceptance PENDING
 depends_on: [2]
 tags:
   - go
@@ -161,8 +161,8 @@ Rust (`cargo test` in `relay/`):
 
 ## Acceptance Criteria
 
-- [ ] Dev stack with `RELAY_CERT_TTL=15m`: the relay renews by itself around the 9-minute mark, the `relays.cert_serial` changes, `relay_certificates` has two rows, and the relay keeps serving connectors and clients past the first cert's `NotAfter` **without a restart**.
-- [ ] Revoke that relay → both serials revoked; `/relay.crl` lists both; connectors drop it (existing CRL monitor).
+- [ ] **PENDING / NOT YET RUN** — Dev stack with `RELAY_CERT_TTL=15m`: the relay renews by itself around the 9-minute mark, the `relays.cert_serial` changes, `relay_certificates` has two rows, and the relay keeps serving connectors and clients past the first cert's `NotAfter` **without a restart**.
+- [ ] **PENDING / NOT YET RUN** — Revoke that relay → both serials revoked; `/relay.crl` lists both; connectors drop it (existing CRL monitor).
 - [x] `buf generate` diff for `relay.proto` is additive only (verified in F-1: no removed or changed lines).
 
 ## Build Check
@@ -187,23 +187,37 @@ cd connector && cargo build                    # proto consumer; must still buil
   - `store_renew_integration_test.go`: record, retry supersede (exactly 2 unrevoked certs), renewal chain, refused states, renew-vs-revoke race (25 iterations; both lock orderings observed across 3 runs; never a live cert for a revoked relay; renewed serial on the revoked list)
 - [x] **F-1 build gate:** `buf generate`, `go build ./...`, `go vet`, `go test ./internal/relay/... ./internal/pki/...` (0 skips with `PKI_TEST_DATABASE_URL`), `go test ./...`, relay `cargo build` with the additive proto
 
-**F-2 — relay Rust runtime (next)**
+**F-2 — relay Rust runtime (done)**
 
-- [ ] **M2-F4** `relay/src/renewal.rs`: scheduler, CSR from existing key, atomic write, response validation
-- [ ] **M2-F5** Relay hot swap: listener resolver + heartbeat identity
-- [ ] **M2-F6 (Rust)** Tests: scheduler, atomic write, resolver swap, response validation
-- [ ] **Full build gate:** `cd controller && go build ./... && cd ../relay && cargo build && cargo test`
-- [ ] **Live acceptance — NOT YET RUN** (see Acceptance Criteria)
+- [x] **M2-F4** `relay/src/renewal.rs`: scheduler (renew at ≤ 2/5 remaining; jitter ±min(15 min, 5% of lifetime); exponential backoff 1 min → 30 min capped at ¼ of remaining; `Aborted` retried after 5 s; single instance via `CertManager::claim_scheduler`), CSR from existing key (`csr::relay_csr_from_key`), reply verification (`verify_reply`). `relay/src/cert_manager.rs`: single owner of the current certificate; `install_renewed` = verify → atomic persist → publish
+- [x] **M2-F5** Relay hot swap: `listener::spawn_server_config_updates` calls `quinn::Endpoint::set_server_config()` on publish (new handshakes only; established connections keep running); `heartbeat::run_with` reconnects immediately with the renewed identity
+- [x] **M2-F6 (Rust)** Tests (65 relay tests pass, stable over 5 runs): `plan_*`, `jitter_*`, `backoff_*`, `scheduler_renews_in_window_and_rejects_second_instance`, `renewal_csr_reuses_the_existing_key`, `already_expired_certificate_never_calls_renewcert`, `expired_scheduler_run_stops_without_calling_renewcert`, `aborted_is_reported_as_retryable`, `bad_replies_are_rejected_and_nothing_changes`, `write_atomic_*`, `install_*`, `restart_after_crash_between_rename_and_swap_uses_persisted_certificate`, `only_one_scheduler_can_be_claimed`, `heartbeat_reconnects_with_renewed_certificate`, `listener_swap_serves_new_cert_without_dropping_existing_connections` (real QUIC)
+- [x] **Full build gate:** `cd relay && cargo build && cargo test`; controller regression `go build ./... && go test ./...`; clippy clean for F-2 code; F-2 files rustfmt-clean (legacy `main.rs` / `provision.rs` not reformatted)
+- [ ] **Live acceptance — NOT YET RUN:** 15-minute self-renewal without restart (see Acceptance Criteria)
+- [ ] **Operational CRL verification — NOT YET RUN:** revoke after renewal → both serials on `/relay.crl`
 
 ## F-1 → F-2 Contract (binding for the relay runtime)
 
 The controller's retry guarantees depend on the relay behaving as follows:
 
+0. **Save before publish.** A renewed certificate is published to runtime consumers only after it has been atomically persisted; the runtime never presents a certificate that is not on disk.
 1. **Never keep presenting the old certificate after persisting the renewed one.** Once the renewed certificate is atomically written to disk, every consumer must switch to it: the QUIC listener, the heartbeat channel, and subsequent `RenewCert` calls.
 2. **Why:** `RecordRenewedCert` revokes any unrevoked successor issued *after* the presented certificate (reason `superseded by renewal retry`). That is only safe because a relay still presenting certificate *P* has, by contract, not put P's successor into use.
 3. **Retries are cheap and safe.** Retrying `RenewCert` while still presenting *P*, e.g. after a lost response, returns the **same** certificate for up to 1 h (Valkey result cache keyed by relay + presented serial). After that, the retry supersedes the unused successor and issues a new one. `codes.Aborted` means an identical attempt is in flight: back off and retry.
 4. **Same key only (D-19).** The CSR must be signed by the relay's existing private key. The key file is never rewritten.
 5. **Expired means replace (D-20).** If the certificate has already expired, don't call `RenewCert`. The relay must be replaced.
+
+### How F-2 implements the contract
+
+| Contract point | Where |
+|---|---|
+| 0. Save before publish | `CertManager::install_renewed` → `persist_renewed` (atomic write) **then** `send_replace` |
+| 1. Switch every consumer | publish over a `watch` channel: listener `set_server_config`, heartbeat reconnect, next `RenewCert` uses `CertManager::current()` |
+| 3. `Aborted` = retry | `RenewError::Aborted` → retry after 5 s; other failures → exponential backoff |
+| 4. Same key only | `relay_csr_from_key` loads `relay.key`; `verify_reply` + `install_renewed` both require the cert's SPKI to equal the key's SPKI |
+| 5. Expired → replace | `plan()` returns `Expired` and `renew_once` returns `RenewError::Expired` **before** any RPC |
+
+Atomic write (`cert_manager::write_atomic`): temp file (`create_new`) → `fsync(file)` → `rename` → `fsync(parent directory)`; the temp file is removed on any failure.
 
 ## Implementation Notes (F-1)
 

@@ -125,7 +125,7 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
     Ok(pem)
 }
 
-fn certificate_fingerprint(ca_pem: &[u8]) -> Result<String> {
+pub(crate) fn certificate_fingerprint(ca_pem: &[u8]) -> Result<String> {
     let mut pem = ca_pem;
     let certificates = certs(&mut pem)
         .collect::<Result<Vec<_>, _>>()
@@ -181,7 +181,7 @@ async fn send_provision_request(
         .into_inner())
 }
 
-fn controller_host(controller_addr: &str) -> Result<String> {
+pub(crate) fn controller_host(controller_addr: &str) -> Result<String> {
     let uri = format!("https://{controller_addr}")
         .parse::<http::Uri>()
         .context("invalid CONTROLLER_ADDR")?;
