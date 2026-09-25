@@ -6,7 +6,7 @@ sprint: 20
 phase: 4
 execution: G
 title: Connector Renewal Trigger + Cert Hot-Swap
-status: planned
+status: in-progress   # G-1 + G-2a done; G-2b (:9091 shield server) next
 depends_on: [3, "M1-Phase1"]
 tags:
   - go
@@ -137,7 +137,7 @@ Rust (`cargo test` in `connector/`):
 - [ ] Dev stack with `CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`: within ~5 min the controller logs a `ReEnroll`, the connector logs a renewal, and `connectors.cert_serial` changes.
 - [ ] After the **original** cert's `NotAfter`, without restarting the connector: a client opens a direct tunnel (`:9092`) successfully; a relayed tunnel works; a shield completes its own renewal through the connector.
 - [ ] No established tunnel is dropped at the swap (watch session logs).
-- [ ] Revoked connector: no `ReEnroll`, `RenewCert` denied.
+- [ ] Revoked connector: no `ReEnroll`, `RenewCert` denied. *(Controller side covered by tests: G-1 `TestHandleConnectorHealth_RevokedNeverGetsReEnroll`, Phase B `TestRenewCert_Revoked*`. Live check pending.)*
 
 ## Build Check
 
@@ -150,12 +150,53 @@ cargo build --manifest-path shield/Cargo.toml    # unchanged; must still build
 
 ## Implementation Checklist
 
-- [ ] **M2-G1** Controller: `ReEnroll` trigger in `handleConnectorHealth` with per-stream throttle
-- [ ] **M2-G2** Connector: shared cert holder; atomic renewal writes; publish on renew
-- [ ] **M2-G3** Connector: consumers #1–#6 read from the holder (servers via resolver; clients rebuilt)
-- [ ] **M2-G4** Tests (Go trigger/throttle; Rust holder + consumers)
-- [ ] **Build gate:** `cd controller && go build ./... && cd ../connector && cargo build`
+**G-1 — controller trigger (done)**
+
+- [x] **M2-G1** Controller: `ReEnroll` trigger in `handleConnectorHealth` with per-stream throttle
+  - The guarded health UPDATE also returns `cert_not_after`. The trigger runs only when that UPDATE succeeded, so a revoked connector returns earlier and never gets `ReEnroll`.
+  - `renewalDue`: due when `cert_not_after - now < CONNECTOR_RENEWAL_WINDOW`. A NULL expiry or a disabled window never triggers.
+  - Throttle: `connectorStreamClient.lastReEnrollAt`, re-ask at most every `reEnrollResendInterval` (10 min), recorded only on a successful enqueue (a full mailbox retries next report). Per stream, so a reconnect gets a fresh throttle.
+  - Reuses `ConnectorControlMessage_ReEnroll{ReEnroll: &shieldpb.ReEnrollSignal{}}`. No proto change; `enrollment.go` / `RenewCert` untouched (Phase B owns those guards).
+- [x] **M2-G4 (Go)** Tests (`reenroll_test.go`): `TestRenewalDue`; `TestMaybeSendReEnroll_{InsideWindowSendsExactlyOne, ThrottleSuppressesDuplicates, ThrottleIsPerStream, OutsideWindowOrNullSendsNothing, FullMailboxRetriesOnNextReport}`; `TestHandleConnectorHealth_{SendsReEnrollInsideWindow, NoReEnrollOutsideWindowOrNull, RevokedNeverGetsReEnroll}` (throwaway DB)
+- [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...`
+
+**G-2a — connector cert holder + consumers (done)**
+
+- [x] **M2-G2** Connector: shared cert holder; atomic renewal writes; publish on renew
+  - `tls/cert_holder.rs` (new): `CertHolder` is the single owner of the current certificate (`watch` channel; `CertMaterial` = `CertStore` + serial + expiry + pre-built rustls `CertifiedKey`).
+  - `install_renewed` verifies (exactly one leaf; this connector's SPIFFE ID; existing key's SPKI; signed by the Workspace CA; Workspace CA and Platform Intermediate pinned to the ones on disk; new serial; not expired), then atomically persists `workspace_ca.crt` and `connector.crt` (temp → fsync(file) → rename → fsync(parent dir)), then publishes. `connector.key` is never rewritten.
+  - `renewal.rs`: `renew_with` is single-flight (`try_begin_renewal`) with a 60 s debounce (`REENROLL_DEBOUNCE`), so rapid/duplicate `ReEnroll` messages produce one renewal. A failure does not arm the debounce. The CSR comes from the existing key. `CertRenewer` trait (gRPC or fake).
+- [x] **M2-G3 (G-2a)** Consumers read from the holder:
+  - #7 Control stream: `run_once` uses `certs.current().store`; a duplicate `ReEnroll` keeps the stream.
+  - #3 Device TLS `:9092`: `build_device_tunnel_tls_dynamic` with `HolderCertResolver`.
+  - #4 Device QUIC `:9092`: `spawn_quic_config_updates` calls `quinn::Endpoint::set_server_config()` on publish.
+  - #5 Relay inner TLS: `build_inner_tls_server_config` with `HolderCertResolver`.
+  - #6 Relay dials/probes: `RelaySelectorConfig.certs` + `current_identity()` read at each probe sweep and session dial (`relay_client` / `relay_probe` signatures unchanged).
+  - #1 Shield-proxy controller channel: `ShieldRegistry::spawn_controller_channel_refresh` rebuilds on publish (keeps the old channel and retries on failure).
+- [ ] **M2-G3 (G-2b)** #2 Shield-facing server `:9091`: own TLS accept (holder resolver + `WebPkiClientVerifier`) + `serve_with_incoming`; the custom stream must expose peer certs for `verify_shield_identity`. *(next)*
+- [x] **M2-G4 (Rust, G-2a)** Tests (109 lib + 4 integration pass, stable over 5 runs): `install_verifies_persists_then_notifies`, `install_rejects_bad_replies_without_touching_disk_or_memory` (6 cases), `write_atomic_*`, `renewal_is_single_flight`, `rapid_reenroll_messages_produce_one_renewal`, `failed_renewal_allows_retry`, `renewal_reuses_the_existing_key`, `device_tls_new_handshakes_use_renewed_serial`, `quic_swap_serves_new_cert_and_preserves_existing_connections` (real QUIC), `relay_inner_tls_serves_renewed_certificate`, `relay_dials_use_the_renewed_identity`, `shield_proxy_channel_rebuilds_on_publish`, `every_consumer_observes_the_same_serial_after_publication` (all six G-2a consumers)
+- [x] **G-2a build gate:** `cd connector && cargo build && cargo test`; controller `go build ./... && go test ./...`; clippy clean for new G-2a code (remaining `too_many_arguments` notes pre-exist; each function gained one parameter); new and previously rustfmt-clean files formatted, legacy non-clean files not reformatted
+
+**G-2b — `:9091` shield server (next)**
+
+- [ ] **M2-G4 (Rust, G-2b)** Tests: pre-swap shield stays connected, new shield sees the new certificate, `verify_shield_identity` works through the custom TLS stream
+- [ ] **Full build gate** with G-2b
+- [ ] **Live acceptance — NOT YET RUN** (see Acceptance Criteria). Needs G-2b and Phase E (the controller gRPC cert uses the same `CONNECTOR_CERT_TTL`).
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: renewal wrote `connector.crt` as leaf only
+**Issue:** Enrollment stores `connector.crt` as leaf + Workspace CA (the controller needs the Workspace CA to build the chain; `enrollment.rs` "saved connector certificate chain"). The pre-sprint `renewal.rs` overwrote it with only `resp.certificate_pem` (the bare leaf), so after any renewal the stored chain shape changed.
+
+**Root Cause:** `renewal.rs` wrote the RPC response verbatim instead of rebuilding the enrollment chain.
+
+**Fix Applied (G-2a, `connector/src/tls/cert_holder.rs` `verify_renewed` / `install_renewed`):**
+```rust
+// BEFORE (renewal.rs):
+tokio::fs::write(&cert_path, &resp.certificate_pem)          // leaf only, not atomic
+
+// AFTER:
+cert_pem: format!("{}\n{}", leaf_pem.trim_end(), workspace_pem.trim_end())  // leaf + Workspace CA
+write_atomic(&state_dir.join("connector.crt"), &material.store.cert_pem, 0o644)
+```
+Found while designing G-2a. The new install path writes the same shape as enrollment, atomically.

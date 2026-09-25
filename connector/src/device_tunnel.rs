@@ -19,8 +19,7 @@ use crate::agent_tunnel::AgentTunnelHub;
 use crate::crl::{CrlManager, RevocationStatus};
 use crate::policy::PolicyCache;
 use crate::session_registry::{SessionRegistry, SessionTransport};
-use crate::tls::cert_store::CertStore;
-use crate::tls::server_cfg::build_device_tunnel_tls;
+use crate::tls::server_cfg::build_device_tunnel_tls_dynamic;
 use crate::ControlMessage;
 
 const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
@@ -61,7 +60,7 @@ struct TunnelResponse {
 
 pub async fn listen(
     addr: &str,
-    store: CertStore,
+    certs: std::sync::Arc<crate::tls::cert_holder::CertHolder>,
     acl: Arc<PolicyCache>,
     registry: Arc<SessionRegistry>,
     tunnel_hub: AgentTunnelHub,
@@ -73,7 +72,9 @@ pub async fn listen(
     use tokio::net::TcpListener;
     use tokio_rustls::TlsAcceptor;
 
-    let tls_config = build_device_tunnel_tls(&store)?;
+    // Server certificate resolved from the CertHolder per handshake, so a
+    // renewal is served to new connections without dropping live ones.
+    let tls_config = build_device_tunnel_tls_dynamic(certs)?;
     let acceptor = TlsAcceptor::from(StdArc::new(tls_config));
 
     let listener = TcpListener::bind(addr).await?;

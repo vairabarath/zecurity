@@ -212,11 +212,19 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]]. Depends on M1 Phase B (merged).
 
-- [ ] **M2-G1** `control_stream.go` `handleConnectorHealth` — send `ReEnroll` when `cert_not_after < now + Cfg.RenewalWindow`; throttle per stream.
-- [ ] **M2-G2** `connector/src` — shared reloadable certificate holder; renewal publishes the new cert.
-- [ ] **M2-G3** `connector/src` — every TLS consumer (device-tunnel listener, shield-proxy controller channel, relay client) uses the renewed cert.
-- [ ] **M2-G4** Tests: Go ReEnroll trigger/throttle; Rust holder swap + consumers.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/... && cd ../connector && cargo build && cargo test`
+**G-1 (controller trigger) — done. G-2a (cert holder + consumers) — done. G-2b (`:9091` shield server) — next.**
+
+- [x] **M2-G1** `control_stream.go` `handleConnectorHealth` — send `ReEnroll` when `cert_not_after < now + Cfg.RenewalWindow`; throttle per stream (10 min, recorded only on a successful enqueue). Runs only after the revocation-guarded health UPDATE succeeds.
+- [x] **M2-G2** `connector/src/tls/cert_holder.rs` (new) — single cert owner (`watch` channel); `install_renewed` = verify → atomic persist (temp → fsync → rename → fsync dir) → publish; key never rewritten. `renewal.rs` — single-flight + 60 s debounce, CSR from existing key.
+- [x] **M2-G3 (G-2a)** Consumers switched: control stream (holder), device TLS `:9092` (holder resolver), device QUIC `:9092` (`set_server_config`), Relay inner TLS (holder resolver), Relay dials/probes (identity at dial time), Shield-proxy controller channel (rebuilt on publish).
+- [ ] **M2-G3 (G-2b)** Shield-facing server `:9091` — own TLS accept + `serve_with_incoming` so live shield streams survive a renewal. *(G-2b)*
+- [x] **M2-G4 (Go)** Tests: `reenroll_test.go`. Unit: `renewalDue`, exactly-one inside window, throttle, per-stream, outside window / NULL / disabled, full mailbox retries. Through `handleConnectorHealth` with a throwaway DB: inside window → one then throttled; outside / NULL → none; revoked (status or `revoked_at`) → none.
+- [x] **M2-G4 (Rust, G-2a)** Tests: holder notify/verify/persist/single-flight, atomic write + crash-before-rename, device TLS new serial, real-QUIC swap keeps existing connections, Relay inner TLS new cert, Relay dials new identity, Shield-proxy rebuild, rapid ReEnroll → one renewal, all six consumers see the same serial (109 lib + 4 integration pass).
+- [ ] **M2-G4 (Rust, G-2b)** Tests: `:9091` pre-swap shield stays connected, new shield sees new cert, shield identity check through custom TLS. *(G-2b)*
+- [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...` (connector DB tests run; the only skip is the pre-existing unconditional `TestEnroll_CSRSignatureInvalid`).
+- [x] **G-2a build gate:** `cd connector && cargo build && cargo test` (109 + 4, stable over 5 runs); controller `go build ./... && go test ./...`; clippy clean for new G-2a code.
+- [ ] **Full build gate** with G-2b. *(G-2b)*
+- [ ] **Live acceptance — NOT YET RUN** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). Needs G-2b, and Phase E: the controller gRPC cert shares `CONNECTOR_CERT_TTL`.
 
 ## Final Build Gates
 
@@ -243,7 +251,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
 - [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Phase E code + tests done, incl. PF-1 threshold fix; `TestRotatorHandshakeRotation` proves it in-process; live dev-stack check PENDING / NOT YET RUN.)*
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
-- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`.
+- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) done and tested; connector hot-swap (G-2) + live check pending.)*
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
@@ -274,5 +282,6 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 
 ## Post-Sprint Fixes
 
+- **Phase G-2a — renewal wrote `connector.crt` as leaf only** (pre-existing in `connector/src/renewal.rs`). Enrollment stores leaf + Workspace CA; renewal overwrote it with the bare leaf. `CertHolder::install_renewed` now writes the enrollment shape. Details: [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]] → Post-Phase Fixes.
 - **Phase A — `ClearHeartbeatThrottle` multi-key DEL panic** (caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit). valkey-go panics on a multi-key `DEL` whose keys hash to different slots, so the markers are now deleted one key at a time. Details: [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]] → Post-Phase Fixes.
 - **Phase E — rotation threshold measured from the backdated `NotBefore` (PF-1).** `GenerateControllerServerTLS` backdates `NotBefore` by 1 h (`internal/pki/controller.go:39-41`), so a threshold computed from `NotBefore` made every cert due at issuance for any `CONNECTOR_CERT_TTL` ≤ 30m — the rotator reissued once per minute instead of once per 2/3 lifetime. Fix: `rotatedCert.issuedAt` records the rotator clock at store time; `rotationDue()` = `start + 2/3·(notAfter − start)` with `start = max(notBefore, issuedAt)`; `needsRotation` and `nextDue` both use it. Regression test `TestNeedsRotationBackdatedNotBefore` (10m/30m/2h/7d) failed on the old code and passes now. Details: [[Sprint20/Member1-Go/Phase3-Controller-gRPC-Cert-Rotation]] → Post-Phase Fixes.
