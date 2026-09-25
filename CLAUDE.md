@@ -6,20 +6,24 @@
 
 ## Project
 
-**Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Admin UI (React).
+**Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 20 is the active sprint: Provider Dashboard Phase 1, "Backend Truth".** Before any provider dashboard reads controller state, make that state true:
-- relay liveness (no false `inactive`);
-- connector/shield revocation is terminal;
-- relay SAN allowlist enforcement;
-- the disconnect watcher notifies the transport plane;
-- controller gRPC cert rotation;
-- relay in-band `RenewCert` (D-19);
-- connector renewal trigger plus cert hot-swap.
+**Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Secure Read-Only Console".** Expose the state Sprint 20 made true, behind hardened provider auth:
+- provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
+- provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
+- a separate, read-only provider console (D-18), `provider-console/`;
+- Sprint 20 cleanup: KI-1 (relay renewal scheduling), KI-2 (shield renewal window), KI-3 (dev redirect URI), JWTs removed from `.env.example`;
+- Sprint 20 live verification (`docs/sprint20-live-acceptance-runbook.md`).
 
-Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → **"Decision record — 2026-09-23"** (D-01 … D-23). Evidence: `docs/provider-dashboard-architecture-discovery.md`. This sprint introduces **no** architectural decisions and **no** migrations.
+Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → **"Decision record — 2026-09-23"** (D-01 … D-23). The plan is in `.zecurity-obs/Sprint21/path.md`. This sprint introduces **no** architectural decisions.
 
-**Team: two members only.** **M1 = Sathiya** (Go: lifecycle guards, disconnect watcher, controller cert rotation). **M2 = Barath** (Go + Rust: relay liveness, SAN allowlist, relay renewal, connector renewal).
+**Database (pre-production rule):**
+- Schema changes are new numbered SQL files in `controller/migrations/`, run by Postgres only when its volume is first created.
+- There is **no migration framework** and nothing upgrades an existing database. Don't add one.
+- After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
+- Details: `docs/database-development.md` (Sprint 21 DEV-1).
+
+**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider read actions and read APIs, provider console). **M2 = Barath** (Go + Rust: provider identity hardening, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
 
 ---
 
@@ -28,8 +32,8 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → *
 When a team member starts a session, they will tell you who they are (Sathiya / M1 or Barath / M2). When they do:
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
-2. Read `.zecurity-obs/Sprint20/path.md` — dependency map, conflict zones and progress checkboxes
-3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (`Sprint20/Member1-Go/*` for Sathiya, `Sprint20/Member2-Go-Rust/*` for Barath)
+2. Read `.zecurity-obs/Sprint21/path.md` — development rule, dependency map, conflict zones, open questions and progress checkboxes
+3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (`Sprint21/Member1-Go/*` for Sathiya, `Sprint21/Member2-Go-Rust/*` for Barath)
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 
@@ -42,9 +46,12 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | File | Purpose |
 |------|---------|
 | `agent.md` | Full conventions, build commands, code style |
-| `.zecurity-obs/Sprint20/path.md` | Dependency map + conflict zones + progress tracker (checkboxes) |
-| `.zecurity-obs/Sprint20/Member{N}-*/Phase*.md` | Detailed spec per phase |
-| `.zecurity-obs/Sprint20/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-A … AT-G) |
+| `.zecurity-obs/Sprint21/path.md` | Development rule, dependency map, conflict zones, open questions, progress tracker (checkboxes) |
+| `.zecurity-obs/Sprint21/Member{N}-*/Phase*.md` | Detailed spec per phase |
+| `.zecurity-obs/Sprint21/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-H, AT-R, AT-P, AT-K, AT-DEV, AT-V) |
+| `docs/database-development.md` | Local database workflow: schema files, reset rule (lands with Sprint 21 DEV-1) |
+| `docs/sprint20-live-acceptance-runbook.md` + `.zecurity-obs/Sprint20/Live-Acceptance-Run-Sheet.md` | Sprint 20 live verification (Sprint 21 Phase V) |
+| `.zecurity-obs/Sprint20/path.md` | Sprint 20 record, incl. **Known Issues** KI-1 … KI-3 |
 | `docs/provider-dashboard-architecture-decisions.md` | Provider dashboard Decision Record (binding) |
 | `docs/provider-dashboard-architecture-discovery.md` | Current-architecture discovery report |
 | `.zecurity-obs/Planning/Session Log.md` | Append a session entry when done |
@@ -105,21 +112,29 @@ cd client && cargo build                                   # Rust client CLI
 buf generate                                                 # Proto → Go stubs (from repo root)
 cd controller && go generate ./graph/...                     # GraphQL codegen
 cd admin && npm run codegen                                  # Frontend TS hooks
+cd provider-console && npm run build                         # Provider console (Sprint 21)
+cd controller && docker compose down -v && docker compose up -d   # Recreate local DB after any schema change
 ```
 
 ---
 
 ## Rules (non-negotiable)
 
-Sprint 20 specific:
+Sprint 21 specific:
 - Build gate passes before proceeding to next phase (DB-backed tests must run, not skip)
-- The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code.
+- The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code. Open questions OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
+- **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
+- Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
+- The provider console is **read-only**: its only non-GET call is logout. Don't modify `admin/`.
+- Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04).
+- Proto changes (KI-2 option A only) are additive; never renumber fields.
+- Respect the `path.md` conflict-zone order: M2-H lands before M1-R wires routes in `main.go`.
+
+Sprint 20 (invariants still in force):
 - Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.
-- No migrations this sprint. Proto change is additive only (`RelayService.RenewCert`) plus comment fixes; never renumber fields.
 - `revoked` (and connector `revoked_at IS NOT NULL`) is terminal: no status write path may leave it.
 - Don't change `workspaces.status='active'` predicates (SPIFFE validator, disconnect watchers, enrollment); suspension (D-07/D-08) is a later sprint.
 - Relay/connectivity changes notify the transport plane, never the ACL (ADR-017).
-- Respect the `path.md` conflict-zone order: M2-A before M1-D before M1-E in `main.go`; M1-B before M2-G in `control_stream.go`.
 
 Sprint 8 specific:
 - Build gate passes before proceeding to next phase
