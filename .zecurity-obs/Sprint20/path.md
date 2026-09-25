@@ -182,11 +182,11 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member1-Go/Phase3-Controller-gRPC-Cert-Rotation]]. Independent; sequenced after D.
 
-- [ ] **M1-E1** Rotating certificate holder with `GetCertificate`.
-- [ ] **M1-E2** Background rotation at 2/3 TTL with retry; keep serving the current cert on failure.
-- [ ] **M1-E3** `cmd/server/main.go` — `tls.Config{GetCertificate: …}`; start rotation loop under the existing `wg`/`ctx`.
-- [ ] **M1-E4** Tests: holder unit tests (short TTL, failure path), TLS handshake test.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/pki/... ./cmd/server/...`
+- [x] **M1-E1** Rotating certificate holder with `GetCertificate`.
+- [x] **M1-E2** Background rotation at 2/3 TTL with retry; keep serving the current cert on failure.
+- [x] **M1-E3** `cmd/server/main.go` — `tls.Config{GetCertificate: …}`; start rotation loop under the existing `wg`/`ctx`.
+- [x] **M1-E4** Tests: holder unit tests (short TTL, failure path), TLS handshake test.
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/pki/... ./cmd/server/...` (+ `-race`)
 
 ### Phase F — M2: Relay In-Band Certificate Renewal (D-19)
 
@@ -241,7 +241,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A revoked shield remains `revoked` while its connector keeps sending shield status batches.
 - [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Phase C code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
-- [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`.
+- [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Phase E code + tests done, incl. PF-1 threshold fix; `TestRotatorHandshakeRotation` proves it in-process; live dev-stack check PENDING / NOT YET RUN.)*
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
 - [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`.
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.

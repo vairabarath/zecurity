@@ -460,7 +460,8 @@ func main() {
 	}
 
 	connectorStore := connectorWorkspaceStore{pool: db.Pool}
-	controllerTLS, err := pkiService.GenerateControllerServerTLS(ctx, controllerCertHosts(connectorCfg.GRPCPort), connectorCfg.CertTTL)
+	hostNames := controllerCertHosts(connectorCfg.GRPCPort)
+	controllerTLS, err := pkiService.GenerateControllerServerTLS(ctx, hostNames, connectorCfg.CertTTL)
 	if err != nil {
 		log.Fatalf("generate controller gRPC TLS cert: %v", err)
 	}
@@ -469,17 +470,36 @@ func main() {
 		log.Fatalf("load controller gRPC TLS keypair: %v", err)
 	}
 
+	regen := func(ctx context.Context) (*tls.Certificate, time.Time, time.Time, error) {
+		res, err := pkiService.GenerateControllerServerTLS(ctx, hostNames, connectorCfg.CertTTL)
+		if err != nil {
+			return nil, time.Time{}, time.Time{}, err
+		}
+		cert, err := tls.X509KeyPair([]byte(res.CertificatePEM), []byte(res.PrivateKeyPEM))
+		if err != nil {
+			return nil, time.Time{}, time.Time{}, err
+		}
+		return &cert, res.NotBefore, res.NotAfter, nil
+	}
+	controllerRotator := pki.NewControllerCertRotator(regen, &controllerCert, controllerTLS.NotBefore, controllerTLS.NotAfter, nil)
+
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
 
 	grpcServer := grpc.NewServer(
 		grpc.Creds(credentials.NewTLS(&tls.Config{
-			Certificates: []tls.Certificate{controllerCert},
-			ClientAuth:   tls.RequestClientCert,
-			MinVersion:   tls.VersionTLS13,
+			GetCertificate: controllerRotator.GetCertificate,
+			ClientAuth:     tls.RequestClientCert,
+			MinVersion:     tls.VersionTLS13,
 		})),
 		grpc.UnaryInterceptor(connector.UnarySPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
 		grpc.StreamInterceptor(connector.StreamSPIFFEInterceptor(validator, connectorStore, relayRevChecker)),
 	)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		controllerRotator.Run(ctx)
+	}()
 
 	connectorSvc := &connector.EnrollmentHandler{
 		Cfg:               connectorCfg,
