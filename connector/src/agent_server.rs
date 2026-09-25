@@ -2,19 +2,22 @@ use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ::time::OffsetDateTime;
 use anyhow::{Context, Result};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Certificate, Channel, Identity, Server, ServerTlsConfig};
+use tokio_stream::StreamExt;
+use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use x509_parser::prelude::*;
 
 use crate::shield_proto::shield_service_client::ShieldServiceClient;
@@ -25,9 +28,18 @@ use crate::shield_proto::{
     ResourceStateReport, ShieldControlMessage,
 };
 use crate::tls::cert_holder::{CertHolder, CertMaterial};
+use crate::tls::server_cfg::build_shield_server_tls;
 
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
+
+/// A Shield must finish its TLS handshake on :9091 within this long; a
+/// stalled client is dropped without affecting other connections.
+const SHIELD_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Handshaken connections waiting for tonic to pick them up. Only
+/// per-connection handshake tasks wait on it, never the accept loop.
+const SHIELD_ACCEPTED_QUEUE_CAP: usize = 64;
 
 /// Capacity of a connected shield's instruction forwarding channel. Sized with
 /// generous headroom so push_instructions' non-blocking try_send effectively never
@@ -363,41 +375,55 @@ impl ShieldRegistry {
         })
     }
 
-    pub async fn serve(self, addr: SocketAddr, state_dir: impl AsRef<Path>) -> Result<()> {
-        let state_dir = state_dir.as_ref();
-        let cert_pem = std::fs::read(state_dir.join("connector.crt")).with_context(|| {
-            format!(
-                "failed to read {}",
-                state_dir.join("connector.crt").display()
-            )
-        })?;
-        let key_pem = std::fs::read(state_dir.join("connector.key")).with_context(|| {
-            format!(
-                "failed to read {}",
-                state_dir.join("connector.key").display()
-            )
-        })?;
-        let ca_pem = std::fs::read(state_dir.join("workspace_ca.crt")).with_context(|| {
-            format!(
-                "failed to read {}",
-                state_dir.join("workspace_ca.crt").display()
-            )
-        })?;
-
-        let tls = ServerTlsConfig::new()
-            .identity(Identity::from_pem(cert_pem, key_pem))
-            .client_ca_root(Certificate::from_pem(ca_pem))
-            .client_auth_optional(false);
-
-        info!(addr = %addr, "starting Shield-facing Connector gRPC server");
-
-        Server::builder()
-            .tls_config(tls)
-            .context("failed to configure Shield server mTLS")?
-            .add_service(ShieldServiceServer::new(self))
-            .serve(addr)
+    /// Serve the Shield-facing gRPC API on `addr` (Sprint 20 G-2b).
+    ///
+    /// TLS is terminated here instead of by tonic's `ServerTlsConfig`, which
+    /// reads the certificate once and cannot switch it. The server certificate
+    /// is resolved from `certs` on every handshake: after a renewal, new Shield
+    /// connections see the renewed certificate, while established ones —
+    /// long-lived Control streams that carry shield-routed tunnels — keep
+    /// running. The server is never restarted.
+    pub async fn serve(self, addr: SocketAddr, certs: Arc<CertHolder>) -> Result<()> {
+        let listener = TcpListener::bind(addr)
             .await
-            .context("Shield-facing Connector gRPC server failed")
+            .with_context(|| format!("failed to bind Shield-facing server on {addr}"))?;
+        info!(addr = %addr, "starting Shield-facing Connector gRPC server");
+        self.serve_on(listener, certs, SHIELD_TLS_HANDSHAKE_TIMEOUT)
+            .await
+    }
+
+    /// `serve` on an already-bound listener (tests bind port 0).
+    pub(crate) async fn serve_on(
+        self,
+        listener: TcpListener,
+        certs: Arc<CertHolder>,
+        handshake_timeout: Duration,
+    ) -> Result<()> {
+        let tls =
+            build_shield_server_tls(certs).context("failed to configure Shield server mTLS")?;
+        let acceptor = TlsAcceptor::from(Arc::new(tls));
+
+        let (conn_tx, conn_rx) = mpsc::channel(SHIELD_ACCEPTED_QUEUE_CAP);
+        let accept_loop = tokio::spawn(accept_shield_connections(
+            listener,
+            acceptor,
+            handshake_timeout,
+            conn_tx,
+        ));
+
+        // The raw tokio-rustls `TlsStream<TcpStream>` goes to tonic unwrapped:
+        // tonic's `Connected` impl for exactly that type records the peer
+        // certificate chain that `request.peer_certs()` returns, which
+        // extract_shield_identity / verify_shield_identity depend on. Wrapping
+        // it in another stream type would silently drop the client certificate.
+        let incoming = ReceiverStream::new(conn_rx).map(Ok::<_, std::io::Error>);
+        let result = Server::builder()
+            .add_service(ShieldServiceServer::new(self))
+            .serve_with_incoming(incoming)
+            .await
+            .context("Shield-facing Connector gRPC server failed");
+        accept_loop.abort();
+        result
     }
 
     /// Extract and verify shield identity purely from the peer certificate SPIFFE URI.
@@ -542,6 +568,56 @@ pub(crate) fn derive_grpc_addr(tunnel_addr: &str) -> String {
     } else {
         // No port present; append :9091 as a best effort.
         format!("{tunnel_addr}:9091")
+    }
+}
+
+/// Accept loop for the Shield-facing server (Sprint 20 G-2b).
+///
+/// It never awaits a TLS handshake itself: each accepted socket gets its own
+/// task, bounded by `handshake_timeout`, so a stalled or hostile client cannot
+/// hold up anyone else. It never waits on `conn_tx` either — only the
+/// per-connection task does, after its handshake — so a momentarily slow gRPC
+/// server cannot stop new TCP accepts.
+async fn accept_shield_connections(
+    listener: TcpListener,
+    acceptor: TlsAcceptor,
+    handshake_timeout: Duration,
+    conn_tx: mpsc::Sender<TlsStream<TcpStream>>,
+) {
+    loop {
+        let (tcp, peer) = tokio::select! {
+            accepted = listener.accept() => match accepted {
+                Ok(pair) => pair,
+                Err(err) => {
+                    // e.g. EMFILE: back off briefly instead of spinning.
+                    warn!(error = %err, "Shield-facing server accept failed");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            },
+            // The gRPC server stopped consuming connections.
+            _ = conn_tx.closed() => return,
+        };
+        // Same as tonic's own listener default.
+        let _ = tcp.set_nodelay(true);
+
+        let acceptor = acceptor.clone();
+        let conn_tx = conn_tx.clone();
+        tokio::spawn(async move {
+            match tokio::time::timeout(handshake_timeout, acceptor.accept(tcp)).await {
+                Ok(Ok(tls)) => {
+                    // Err only if the gRPC server has stopped; the connection
+                    // is dropped with it.
+                    let _ = conn_tx.send(tls).await;
+                }
+                Ok(Err(err)) => {
+                    debug!(peer = %peer, error = %err, "Shield TLS handshake failed");
+                }
+                Err(_) => {
+                    debug!(peer = %peer, "Shield TLS handshake timed out");
+                }
+            }
+        });
     }
 }
 
@@ -950,5 +1026,332 @@ mod controller_channel_refresh_tests {
             std::slice::from_ref(&renewed.serial_hex),
             "rebuilt with the renewed certificate"
         );
+    }
+}
+
+#[cfg(test)]
+mod shield_server_tls_tests {
+    //! Sprint 20 G-2b: the :9091 server terminates TLS itself with the
+    //! CertHolder resolver and hands raw tokio-rustls streams to tonic.
+
+    use super::*;
+    use crate::shield_proto::shield_control_message::Body;
+    use crate::shield_proto::ShieldHealthReport;
+    use crate::test_support::{leaf_serial, TestPki, CONNECTOR_ID, TRUST_DOMAIN};
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+
+    const SHIELD_ID: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
+    const OTHER_SHIELD_ID: &str = "c2a9e4b1-7d3f-4a8e-b6c5-0f1e2d3c4b5a";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn registry() -> ShieldRegistry {
+        let (ack_tx, _ack_rx) = mpsc::channel(8);
+        ShieldRegistry::new(
+            Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+            TRUST_DOMAIN.to_string(),
+            CONNECTOR_ID.to_string(),
+            ack_tx,
+            Arc::new(crate::policy::PolicyCache::new()),
+        )
+    }
+
+    /// Aborts the server task when the test ends.
+    struct Running {
+        addr: SocketAddr,
+        task: JoinHandle<Result<()>>,
+    }
+
+    impl Drop for Running {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn start(certs: Arc<CertHolder>, handshake_timeout: Duration) -> Running {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(registry().serve_on(listener, certs, handshake_timeout));
+        Running { addr, task }
+    }
+
+    /// A tonic channel to the server, presenting `identity` (None = no client cert).
+    async fn channel(
+        pki: &TestPki,
+        addr: SocketAddr,
+        identity: Option<(String, String)>,
+    ) -> std::result::Result<Channel, tonic::transport::Error> {
+        let mut tls = ClientTlsConfig::new()
+            .ca_certificate(Certificate::from_pem(&pki.workspace_ca_pem))
+            .domain_name("localhost");
+        if let Some((chain, key)) = identity {
+            tls = tls.identity(Identity::from_pem(chain, key));
+        }
+        Endpoint::from_shared(format!("https://{addr}"))
+            .unwrap()
+            .tls_config(tls)?
+            .connect_timeout(WAIT)
+            .timeout(WAIT)
+            .connect()
+            .await
+    }
+
+    async fn shield_channel(pki: &TestPki, addr: SocketAddr) -> Channel {
+        channel(pki, addr, Some(pki.shield_identity_pem(SHIELD_ID)))
+            .await
+            .expect("valid Shield connects")
+    }
+
+    async fn goodbye(
+        channel: Channel,
+        claimed_shield_id: &str,
+    ) -> std::result::Result<GoodbyeResponse, Status> {
+        ShieldServiceClient::new(channel)
+            .goodbye(GoodbyeRequest {
+                shield_id: claimed_shield_id.to_string(),
+            })
+            .await
+            .map(Response::into_inner)
+    }
+
+    /// Shield-style rustls client config (ALPN h2).
+    fn shield_tls_client(pki: &TestPki) -> Arc<rustls::ClientConfig> {
+        let (chain, key) = pki.shield_chain(SHIELD_ID);
+        let mut cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(pki.workspace_roots())
+            .with_client_auth_cert(chain, key)
+            .unwrap();
+        cfg.alpn_protocols = vec![b"h2".to_vec()];
+        Arc::new(cfg)
+    }
+
+    /// A raw TLS handshake to `addr`; returns the server leaf serial.
+    async fn handshake_serial(client: Arc<rustls::ClientConfig>, addr: SocketAddr) -> String {
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let tls = tokio::time::timeout(
+            WAIT,
+            tokio_rustls::TlsConnector::from(client).connect(
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                tcp,
+            ),
+        )
+        .await
+        .expect("handshake within timeout")
+        .expect("TLS handshake");
+        leaf_serial(&tls.get_ref().1.peer_certificates().unwrap()[0])
+    }
+
+    fn health_report() -> ShieldControlMessage {
+        ShieldControlMessage {
+            body: Some(Body::HealthReport(ShieldHealthReport {
+                version: "test".into(),
+                hostname: "shield-host".into(),
+                public_ip: String::new(),
+                lan_ip: "10.0.0.9".into(),
+            })),
+        }
+    }
+
+    /// Send a health report on an open Control stream and wait for the reply.
+    /// The test Shield certificate (1 h) is inside the 48 h renewal window, so
+    /// every report is answered with ReEnroll — a round trip that proves the
+    /// stream is alive.
+    async fn health_round_trip(
+        out: &mpsc::Sender<ShieldControlMessage>,
+        replies: &mut Streaming<ShieldControlMessage>,
+    ) {
+        out.send(health_report())
+            .await
+            .expect("Control stream open");
+        let reply = tokio::time::timeout(WAIT, replies.message())
+            .await
+            .expect("reply within timeout")
+            .expect("Control stream healthy")
+            .expect("Control stream not closed");
+        assert!(
+            matches!(reply.body, Some(Body::ReEnroll(_))),
+            "unexpected reply: {reply:?}"
+        );
+    }
+
+    /// A Shield connected before the renewal keeps its Control stream (the
+    /// server is not restarted), while a new handshake presents the renewed
+    /// certificate.
+    #[tokio::test]
+    async fn existing_shield_stream_survives_renewal() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let server = start(holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+
+        let (out, out_rx) = mpsc::channel(8);
+        let mut replies = ShieldServiceClient::new(shield_channel(&pki, server.addr).await)
+            .control(ReceiverStream::new(out_rx))
+            .await
+            .expect("Control stream accepted")
+            .into_inner();
+        health_round_trip(&out, &mut replies).await;
+
+        let renewed = pki.renew(&holder, 7200);
+        assert_eq!(
+            handshake_serial(shield_tls_client(&pki), server.addr).await,
+            renewed.serial_hex,
+            "new handshakes present the renewed certificate"
+        );
+
+        // The pre-renewal stream is still the same live connection.
+        health_round_trip(&out, &mut replies).await;
+        health_round_trip(&out, &mut replies).await;
+    }
+
+    /// Each new handshake presents whatever certificate the holder has at
+    /// that moment, with no rebuild of the server.
+    #[tokio::test]
+    async fn new_shield_handshakes_present_renewed_serial() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let server = start(holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let client = shield_tls_client(&pki);
+
+        let before = holder.current().serial_hex.clone();
+        assert_eq!(handshake_serial(client.clone(), server.addr).await, before);
+
+        let first = pki.renew(&holder, 7200);
+        assert_ne!(first.serial_hex, before);
+        assert_eq!(
+            handshake_serial(client.clone(), server.addr).await,
+            first.serial_hex
+        );
+
+        let second = pki.renew(&holder, 7200);
+        assert_eq!(
+            handshake_serial(client, server.addr).await,
+            second.serial_hex
+        );
+    }
+
+    /// Peer certificates reach the handlers through the custom TLS stream:
+    /// verify_shield_identity accepts the matching Shield and denies a
+    /// mismatched claim; clients without a trusted certificate are refused.
+    #[tokio::test]
+    async fn shield_identity_is_verified_through_custom_tls() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let server = start(holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let shield = shield_channel(&pki, server.addr).await;
+
+        let ok = goodbye(shield.clone(), SHIELD_ID)
+            .await
+            .expect("matching Shield identity accepted");
+        assert!(ok.ok);
+
+        let denied = goodbye(shield, OTHER_SHIELD_ID)
+            .await
+            .expect_err("mismatched Shield identity must be denied");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied, "{denied:?}");
+
+        // No client certificate: refused during the TLS handshake.
+        let no_cert = match channel(&pki, server.addr, None).await {
+            Ok(ch) => goodbye(ch, SHIELD_ID).await.is_err(),
+            Err(_) => true,
+        };
+        assert!(no_cert, "a client without a certificate must be refused");
+
+        // Certificate from a different CA: refused during the TLS handshake.
+        let foreign = TestPki::new();
+        let untrusted = match channel(
+            &pki,
+            server.addr,
+            Some(foreign.shield_identity_pem(SHIELD_ID)),
+        )
+        .await
+        {
+            Ok(ch) => goodbye(ch, SHIELD_ID).await.is_err(),
+            Err(_) => true,
+        };
+        assert!(
+            untrusted,
+            "a certificate from an untrusted CA must be refused"
+        );
+
+        // The server kept serving after the refusals.
+        let again = goodbye(shield_channel(&pki, server.addr).await, SHIELD_ID).await;
+        assert!(again.is_ok(), "{again:?}");
+    }
+
+    /// Clients that open TCP and never start TLS do not block a legitimate
+    /// Shield: handshakes run in their own tasks, never inline in the accept loop.
+    #[tokio::test]
+    async fn stalled_clients_do_not_block_shields() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        // Long timeout: the stalled sockets stay open for the whole test.
+        let server = start(holder, Duration::from_secs(60)).await;
+
+        let mut stalled = Vec::new();
+        for _ in 0..8 {
+            stalled.push(TcpStream::connect(server.addr).await.unwrap());
+        }
+
+        let result = tokio::time::timeout(WAIT, async {
+            goodbye(shield_channel(&pki, server.addr).await, SHIELD_ID).await
+        })
+        .await
+        .expect("a Shield must not wait behind stalled clients");
+        assert!(result.is_ok(), "{result:?}");
+        drop(stalled);
+    }
+
+    /// A client that never completes its handshake is dropped after the
+    /// handshake timeout.
+    #[tokio::test]
+    async fn stalled_handshake_is_closed_after_timeout() {
+        use tokio::io::AsyncReadExt;
+
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let server = start(holder, Duration::from_millis(200)).await;
+
+        let mut stalled = TcpStream::connect(server.addr).await.unwrap();
+        let mut buf = [0u8; 16];
+        let read = tokio::time::timeout(WAIT, stalled.read(&mut buf))
+            .await
+            .expect("stalled socket must be closed by the server");
+        assert!(
+            matches!(read, Ok(0) | Err(_)),
+            "expected EOF/reset, got {read:?}"
+        );
+    }
+
+    /// Accepted connections waiting for tonic never stop the accept loop:
+    /// with the hand-off queue full and nobody reading it, further clients
+    /// still complete their TLS handshakes.
+    #[tokio::test]
+    async fn full_handoff_queue_does_not_stop_accepts() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(build_shield_server_tls(holder).unwrap()));
+        let (conn_tx, mut conn_rx) = mpsc::channel(1);
+        let accept_loop = tokio::spawn(accept_shield_connections(
+            listener,
+            acceptor,
+            SHIELD_TLS_HANDSHAKE_TIMEOUT,
+            conn_tx,
+        ));
+
+        // Nobody drains conn_rx: after the first connection the queue is full.
+        let client = shield_tls_client(&pki);
+        for _ in 0..4 {
+            handshake_serial(client.clone(), addr).await;
+        }
+
+        // All four were handshaken and are waiting for hand-off.
+        for _ in 0..4 {
+            tokio::time::timeout(WAIT, conn_rx.recv())
+                .await
+                .expect("queued connection delivered")
+                .expect("accept loop alive");
+        }
+        accept_loop.abort();
     }
 }

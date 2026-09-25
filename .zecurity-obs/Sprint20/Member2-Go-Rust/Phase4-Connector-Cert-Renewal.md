@@ -6,7 +6,7 @@ sprint: 20
 phase: 4
 execution: G
 title: Connector Renewal Trigger + Cert Hot-Swap
-status: in-progress   # G-1 + G-2a done; G-2b (:9091 shield server) next
+status: in-progress   # G-1 + G-2a + G-2b done; live acceptance pending (needs Phase E)
 depends_on: [3, "M1-Phase1"]
 tags:
   - go
@@ -173,15 +173,20 @@ cargo build --manifest-path shield/Cargo.toml    # unchanged; must still build
   - #5 Relay inner TLS: `build_inner_tls_server_config` with `HolderCertResolver`.
   - #6 Relay dials/probes: `RelaySelectorConfig.certs` + `current_identity()` read at each probe sweep and session dial (`relay_client` / `relay_probe` signatures unchanged).
   - #1 Shield-proxy controller channel: `ShieldRegistry::spawn_controller_channel_refresh` rebuilds on publish (keeps the old channel and retries on failure).
-- [ ] **M2-G3 (G-2b)** #2 Shield-facing server `:9091`: own TLS accept (holder resolver + `WebPkiClientVerifier`) + `serve_with_incoming`; the custom stream must expose peer certs for `verify_shield_identity`. *(next)*
+- [x] **M2-G3 (G-2b)** #2 Shield-facing server `:9091`: own TLS accept (holder resolver + `WebPkiClientVerifier`) + `serve_with_incoming`; the custom stream must expose peer certs for `verify_shield_identity`. *(done in G-2b — see below)*
 - [x] **M2-G4 (Rust, G-2a)** Tests (109 lib + 4 integration pass, stable over 5 runs): `install_verifies_persists_then_notifies`, `install_rejects_bad_replies_without_touching_disk_or_memory` (6 cases), `write_atomic_*`, `renewal_is_single_flight`, `rapid_reenroll_messages_produce_one_renewal`, `failed_renewal_allows_retry`, `renewal_reuses_the_existing_key`, `device_tls_new_handshakes_use_renewed_serial`, `quic_swap_serves_new_cert_and_preserves_existing_connections` (real QUIC), `relay_inner_tls_serves_renewed_certificate`, `relay_dials_use_the_renewed_identity`, `shield_proxy_channel_rebuilds_on_publish`, `every_consumer_observes_the_same_serial_after_publication` (all six G-2a consumers)
 - [x] **G-2a build gate:** `cd connector && cargo build && cargo test`; controller `go build ./... && go test ./...`; clippy clean for new G-2a code (remaining `too_many_arguments` notes pre-exist; each function gained one parameter); new and previously rustfmt-clean files formatted, legacy non-clean files not reformatted
 
-**G-2b — `:9091` shield server (next)**
+**G-2b — `:9091` shield server (done)**
 
-- [ ] **M2-G4 (Rust, G-2b)** Tests: pre-swap shield stays connected, new shield sees the new certificate, `verify_shield_identity` works through the custom TLS stream
-- [ ] **Full build gate** with G-2b
-- [ ] **Live acceptance — NOT YET RUN** (see Acceptance Criteria). Needs G-2b and Phase E (the controller gRPC cert uses the same `CONNECTOR_CERT_TTL`).
+- [x] **M2-G3 (G-2b)** `agent_server.rs` `ShieldRegistry::serve(addr, certs: Arc<CertHolder>)`:
+  - `tls/server_cfg.rs` `build_shield_server_tls(holder)`: `HolderCertResolver` (same holder as `:9092`) + workspace-CA `WebPkiClientVerifier` (client cert required), ALPN `h2`.
+  - `accept_shield_connections`: `TcpListener` accept loop; each socket gets its own handshake task (`SHIELD_TLS_HANDSHAKE_TIMEOUT` = 10 s); the loop never awaits a handshake or the hand-off queue (`SHIELD_ACCEPTED_QUEUE_CAP` = 64, awaited only by handshake tasks); accept errors back off 100 ms; `TCP_NODELAY` set (tonic's former default).
+  - The raw `tokio_rustls::server::TlsStream<TcpStream>` goes to `serve_with_incoming` unwrapped, so tonic's `Connected` impl supplies `peer_certs()` to `extract_shield_identity` / `verify_shield_identity` (unchanged).
+  - `main.rs` passes `certs.clone()`. The server is never restarted; established shield streams keep their session.
+- [x] **M2-G4 (Rust, G-2b)** Tests (`agent_server.rs` `shield_server_tls_tests`, real TLS over localhost through `serve_on`; 115 lib + 4 integration pass, stable over 5 runs): `existing_shield_stream_survives_renewal`, `new_shield_handshakes_present_renewed_serial`, `shield_identity_is_verified_through_custom_tls` (accept / `PermissionDenied` / no-cert / untrusted CA), `stalled_clients_do_not_block_shields`, `stalled_handshake_is_closed_after_timeout`, `full_handoff_queue_does_not_stop_accepts`. Mutation check: an inline handshake in the accept loop fails the stall and hand-off tests.
+- [x] **Full build gate** with G-2b: `cd connector && cargo build && cargo test` (0 build warnings; clippy clean for touched files; touched rustfmt-clean files formatted, `main.rs` not reformatted); `cargo build --manifest-path shield/Cargo.toml` (unchanged, builds); controller `go build ./... && go test ./...` (connector DB tests run on throwaway DBs; only skip is the pre-existing `TestEnroll_CSRSignatureInvalid`)
+- [ ] **Live acceptance — PENDING / NOT YET RUN** (see Acceptance Criteria). G-2b is done; still needs Phase E (the controller gRPC cert uses the same `CONNECTOR_CERT_TTL`).
 
 ## Post-Phase Fixes
 
@@ -200,3 +205,18 @@ cert_pem: format!("{}\n{}", leaf_pem.trim_end(), workspace_pem.trim_end())  // l
 write_atomic(&state_dir.join("connector.crt"), &material.store.cert_pem, 0o644)
 ```
 Found while designing G-2a. The new install path writes the same shape as enrollment, atomically.
+
+### Note: `:9091` TLS approach (G-2b)
+**Issue:** The spec left open how the tonic `:9091` server switches certificates: a rustls acceptor with the holder resolver, or rebuilding tonic's TLS config on change. It asked for the choice to be recorded here.
+
+**Choice:** own rustls acceptor + `serve_with_incoming`. Rebuilding `ServerTlsConfig` means restarting the tonic server, which drops every live shield Control stream (and the shield-routed tunnels on them).
+
+**Constraint for future edits (`connector/src/agent_server.rs` `serve_on`):**
+```rust
+// The stream handed to tonic MUST stay the raw tokio-rustls type:
+let incoming = ReceiverStream::new(conn_rx).map(Ok::<_, std::io::Error>); // Item = TlsStream<TcpStream>
+// tonic's `Connected for TlsStream<T>` fills TlsConnectInfo<TcpConnectInfo>,
+// which `request.peer_certs()` reads. A wrapper type loses it and every
+// shield gets PermissionDenied("missing mTLS peer certificate").
+```
+Guarded by `shield_identity_is_verified_through_custom_tls`.

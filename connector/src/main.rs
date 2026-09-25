@@ -130,10 +130,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn shield-facing gRPC server on :9091.
     let reg_for_serve = shield_registry.clone();
-    let shield_state_dir = cfg.state_dir.clone();
+    let shield_certs = certs.clone();
     let shield_addr: SocketAddr = "0.0.0.0:9091".parse().unwrap();
     tokio::spawn(async move {
-        if let Err(e) = reg_for_serve.serve(shield_addr, &shield_state_dir).await {
+        if let Err(e) = reg_for_serve.serve(shield_addr, shield_certs).await {
             error!(error = %e, "Shield gRPC server on :9091 failed");
         }
     });

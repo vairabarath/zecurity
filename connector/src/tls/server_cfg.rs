@@ -10,8 +10,8 @@ use super::cert_store::CertStore;
 
 const DEVICE_TUNNEL_ALPN: &[u8] = b"ztna-tunnel-v1";
 
-/// Client verifier for device mTLS: trusts only the CA bundle on disk
-/// (devices are signed by the workspace CA).
+/// Client verifier for device and Shield mTLS: trusts only the CA bundle on
+/// disk (devices and Shields are signed by the workspace CA).
 fn device_client_verifier(store: &CertStore) -> Result<Arc<dyn ClientCertVerifier>> {
     let mut roots = RootCertStore::empty();
     let ca_certs: Vec<_> = certs(&mut store.workspace_ca_pem.as_slice())
@@ -66,6 +66,20 @@ pub fn build_device_tunnel_tls_dynamic(holder: Arc<CertHolder>) -> Result<rustls
         .with_client_cert_verifier(client_verifier)
         .with_cert_resolver(HolderCertResolver::new(holder));
     cfg.alpn_protocols = vec![DEVICE_TUNNEL_ALPN.to_vec()];
+    Ok(cfg)
+}
+
+/// Build the TLS config for the Shield-facing gRPC server on :9091
+/// (Sprint 20 G-2b). Same shape as the device config: server certificate
+/// resolved from the CertHolder per handshake, client certificate required and
+/// verified against the workspace CA bundle. ALPN is `h2` (gRPC), matching what
+/// tonic's built-in `ServerTlsConfig` advertised and what Shields offer.
+pub fn build_shield_server_tls(holder: Arc<CertHolder>) -> Result<rustls::ServerConfig> {
+    let client_verifier = device_client_verifier(&holder.current().store)?;
+    let mut cfg = rustls::ServerConfig::builder()
+        .with_client_cert_verifier(client_verifier)
+        .with_cert_resolver(HolderCertResolver::new(holder));
+    cfg.alpn_protocols = vec![b"h2".to_vec()];
     Ok(cfg)
 }
 
