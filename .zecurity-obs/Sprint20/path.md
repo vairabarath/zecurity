@@ -241,6 +241,31 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 `PKI_TEST_DATABASE_URL`, `AUTH_TEST_VALKEY_URL`; see `.github/workflows/ci.yml`). A DB test that
 **skips** does not count toward acceptance.
 
+## Live Acceptance
+
+All code phases (A–G) are merged. The remaining unchecked boxes are **live dev-stack checks**:
+- **Runbook:** `docs/sprint20-live-acceptance-runbook.md`, one ~95 min sitting that covers A, B, C, D, E, F and G.
+- **Run sheet** to fill in: [[Sprint20/Live-Acceptance-Run-Sheet]]. Each row names the box below that it closes.
+- **Operator:** Sathiya (M1).
+
+Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
+
+## Known Issues (found preparing live acceptance — not fixed)
+
+- **KI-1 — relay short-TTL renewal loop (Phase F-2).** The controller issues relay certs with `NotBefore = now − 1h` (`controller/internal/pki/relay.go:61`). The relay scheduler takes the lifetime as `not_after − not_before` (`relay/src/renewal.rs` `plan`), so renewal lands at `0.6·TTL − 24 min` after issue.
+  - For `RELAY_CERT_TTL` ≤ 40 min the relay renews immediately and back to back. The default 30 d is unaffected (renewal at about 18 d).
+  - Same class of bug as PF-1 (fixed only for the controller rotator).
+  - The AT-F.8 "~9 min at 15m" expectation is wrong; the live run uses `RELAY_CERT_TTL=1h`.
+  - Candidate fix: measure the lifetime from the relay's install time, as PF-1 does with `issuedAt`, or stop backdating.
+- **KI-2 — shield ReEnroll every ~15 s when `SHIELD_CERT_TTL` ≤ 48h (pre-existing).**
+  - The connector's shield renewal window is a hard-coded 48 h (`connector/src/agent_server.rs` `DEFAULT_RENEWAL_WINDOW_SECS`). The controller's `SHIELD_RENEWAL_WINDOW` is parsed but unused, and the shield has no debounce.
+  - Harmless at the 7 d default. Needs the window plumbed through, plus a shield-side debounce.
+- **KI-3 — dev `PROVIDER_GOOGLE_REDIRECT_URI` points at the tenant callback** (`/auth/callback`, in `controller/.env` and `.env.example`). Provider login needs `/provider/auth/callback`.
+- Smaller items (runbook §2):
+  - No success log for controller cert rotation, or for the `:9091` / `:9092` TLS swaps.
+  - The client can't force TLS or the relay path.
+  - Stale "every 5 minutes" comment in `connector/src/crl.rs:30`.
+
 ## Acceptance Criteria (sprint level)
 
 - [ ] A relay heartbeating normally with unchanged metadata stays `active` across ≥ 2 DB-write intervals (≥ 10 min). *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
@@ -251,7 +276,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
 - [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Phase E code + tests done, incl. PF-1 threshold fix; `TestRotatorHandshakeRotation` proves it in-process; live dev-stack check PENDING / NOT YET RUN.)*
 - [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
-- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) done and tested; connector hot-swap (G-2) + live check pending.)*
+- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) and connector hot-swap (G-2a, G-2b) done and tested; live check PENDING / NOT YET RUN.)*
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
