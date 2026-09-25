@@ -80,6 +80,52 @@ type connectorStreamClient struct {
 	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
+
+	// lastReEnrollAt is when a ReEnroll was last enqueued on this stream (zero =
+	// never). Only the stream's recv loop (handleConnectorHealth) touches it.
+	lastReEnrollAt time.Time
+}
+
+// reEnrollResendInterval throttles the renewal trigger: a connector inside its
+// renewal window gets at most one ReEnroll per stream per interval, so a slow or
+// failing renewal is re-asked without being spammed on every 15 s health report.
+// A successful renewal reconnects the stream with a fresh cert_not_after, which
+// clears the condition.
+const reEnrollResendInterval = 10 * time.Minute
+
+// renewalDue reports whether a connector certificate expiring at certNotAfter is
+// inside the renewal window. Unknown expiry (NULL) or a disabled window never
+// triggers.
+func renewalDue(certNotAfter *time.Time, now time.Time, window time.Duration) bool {
+	if certNotAfter == nil || window <= 0 {
+		return false
+	}
+	return certNotAfter.Sub(now) < window
+}
+
+// maybeSendReEnroll asks the connector to renew (existing ReEnrollSignal; the
+// connector then calls RenewCert) when its certificate is inside
+// CONNECTOR_RENEWAL_WINDOW, throttled per stream. The throttle is recorded only
+// when the message was actually enqueued, so a full mailbox retries on the next
+// health report. Callers invoke it only after the revocation-guarded health
+// UPDATE succeeded, so a revoked connector never receives ReEnroll.
+func (h *EnrollmentHandler) maybeSendReEnroll(client *connectorStreamClient, certNotAfter *time.Time, now time.Time) bool {
+	if !renewalDue(certNotAfter, now, h.Cfg.RenewalWindow) {
+		return false
+	}
+	if !client.lastReEnrollAt.IsZero() && now.Sub(client.lastReEnrollAt) < reEnrollResendInterval {
+		return false
+	}
+	if err := client.send(&pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_ReEnroll{ReEnroll: &shieldpb.ReEnrollSignal{}},
+	}); err != nil {
+		log.Printf("control stream: enqueue ReEnroll for connector %s: %v", client.connectorID, err)
+		return false
+	}
+	client.lastReEnrollAt = now
+	log.Printf("control stream: connector %s cert expires %s (inside renewal window %s) — ReEnroll sent",
+		client.connectorID, certNotAfter.UTC().Format(time.RFC3339), h.Cfg.RenewalWindow)
+	return true
 }
 
 // send enqueues a message for the writer goroutine. It never blocks the caller: if
@@ -567,6 +613,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	connectorID := client.connectorID
 	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
 	var connectorChanged bool
+	var certNotAfter *time.Time
 	err := h.Pool.QueryRow(ctx,
 		`WITH current AS (
 		     SELECT status, COALESCE(lan_addr, '') AS lan_addr
@@ -585,12 +632,13 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		      WHERE id = $5
 		        AND status NOT IN ('revoked', 'deleted')
 		        AND revoked_at IS NULL
-		      RETURNING id
+		      RETURNING id, cert_not_after
 		   )
 		   SELECT current.status IS DISTINCT FROM 'active'
-		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), '')
+		       OR current.lan_addr IS DISTINCT FROM COALESCE(NULLIF($4, ''), ''),
+		          updated.cert_not_after
 		     FROM current, updated`,
-		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged)
+		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged, &certNotAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Guarded UPDATE matched nothing → connector revoked/deleted while its
 		// stream was open. Stop serving it and signal the caller to close.
@@ -613,6 +661,11 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 				log.Printf("control stream: notify topology after connector health connector=%s: %v", connectorID, err)
 			}
 		}
+	}
+	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
+	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
+	if err == nil {
+		h.maybeSendReEnroll(client, certNotAfter, time.Now())
 	}
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
 	// connector claims to be attached; empty means detached. The UPSERT returns
