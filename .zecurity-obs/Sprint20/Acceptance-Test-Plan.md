@@ -106,7 +106,7 @@ If either core case fails, the sprint has not achieved its goal, whatever else p
 | AT-F.5 | CSR SAN outside allowlist | refused |
 | AT-F.6 | Concurrent `RevokeRelay` + `RecordRenewedCert` (many iterations) | no unrevoked `relay_certificates` row remains for the relay |
 | AT-F.7 | Revoke after renewal | both serials on `/relay.crl`; connectors drop the relay |
-| AT-F.8 | Dev stack `RELAY_CERT_TTL=15m` | relay renews by itself (~9 min) and serves past the first cert's `NotAfter` without restart |
+| AT-F.8 | Dev stack `RELAY_CERT_TTL=1h` *(not 15m, because of KI-1 in `path.md`: at ≤ 40 min the backdated `NotBefore` causes a renewal loop)* | relay renews by itself (6–18 min after each issue) and serves past the first cert's `NotAfter` (+60 min) without restart |
 | AT-F.9 | Relay with already-expired cert | no `RenewCert` call; error log says replace the relay (D-20) |
 
 ## 8. Phase G — Connector renewal (M2)

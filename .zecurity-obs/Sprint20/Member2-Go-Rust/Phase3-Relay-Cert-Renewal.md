@@ -225,6 +225,17 @@ Atomic write (`cert_manager::write_atomic`): temp file (`create_new`) → `fsync
 - The signed certificate is discarded, never returned or cached, if the locked write refuses it (relay revoked or deleted between the pre-checks and the write).
 - There is no server-side "too early" renewal window. Scheduling is the relay's job (D-19); every renewal is recorded and revocable.
 
+## Known Issues (not fixed)
+
+### KI-1: short-TTL renewal loop (found 2026-09-25 while preparing live acceptance)
+**Issue:** At `RELAY_CERT_TTL` ≤ 40 min the relay renews immediately after every install, in a continuous `RenewCert` loop.
+
+**Root Cause:** `controller/internal/pki/relay.go:61` issues with `NotBefore = now − 1h`. `relay/src/renewal.rs` `plan()` computes `lifetime = not_after − not_before` and renews when 2/5 of it remains, so `renew_at = issue + 0.6·TTL − 24 min`. The unit test at `renewal.rs` (the ~9 min case) assumes no backdate.
+
+**Impact:** Dev and test only. The 30 d default renews at about 18 d. AT-F.8 is run with `RELAY_CERT_TTL=1h` (renewal 6–18 min after issue).
+
+**Candidate fix (next sprint):** measure the lifetime from the relay's install/receipt time (like PF-1's `issuedAt` in the controller rotator), or stop backdating relay certs.
+
 ## Post-Phase Fixes
 
 _None yet._
