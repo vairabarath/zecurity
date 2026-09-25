@@ -21,6 +21,7 @@ const _ = grpc.SupportPackageIsVersion8
 const (
 	RelayService_Provision_FullMethodName = "/relay.v1.RelayService/Provision"
 	RelayService_Heartbeat_FullMethodName = "/relay.v1.RelayService/Heartbeat"
+	RelayService_RenewCert_FullMethodName = "/relay.v1.RelayService/RenewCert"
 )
 
 // RelayServiceClient is the client API for RelayService service.
@@ -35,6 +36,13 @@ type RelayServiceClient interface {
 	// Sent periodically after provisioning.
 	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
 	Heartbeat(ctx context.Context, in *HeartbeatRequest, opts ...grpc.CallOption) (*HeartbeatResponse, error)
+	// Renews the Relay's own certificate over mTLS (D-19). The CSR must be
+	// signed by the Relay's EXISTING private key (proof of possession, same
+	// key); SANs must stay within the relay's registered allowlist. A relay
+	// whose certificate has already expired cannot renew and must be replaced
+	// (D-20). Retries while still presenting the same certificate are
+	// idempotent: they return the same renewed certificate.
+	RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error)
 }
 
 type relayServiceClient struct {
@@ -65,6 +73,16 @@ func (c *relayServiceClient) Heartbeat(ctx context.Context, in *HeartbeatRequest
 	return out, nil
 }
 
+func (c *relayServiceClient) RenewCert(ctx context.Context, in *RenewCertRequest, opts ...grpc.CallOption) (*RenewCertResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewCertResponse)
+	err := c.cc.Invoke(ctx, RelayService_RenewCert_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // RelayServiceServer is the server API for RelayService service.
 // All implementations must embed UnimplementedRelayServiceServer
 // for forward compatibility
@@ -77,6 +95,13 @@ type RelayServiceServer interface {
 	// Sent periodically after provisioning.
 	// Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
 	Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error)
+	// Renews the Relay's own certificate over mTLS (D-19). The CSR must be
+	// signed by the Relay's EXISTING private key (proof of possession, same
+	// key); SANs must stay within the relay's registered allowlist. A relay
+	// whose certificate has already expired cannot renew and must be replaced
+	// (D-20). Retries while still presenting the same certificate are
+	// idempotent: they return the same renewed certificate.
+	RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error)
 	mustEmbedUnimplementedRelayServiceServer()
 }
 
@@ -89,6 +114,9 @@ func (UnimplementedRelayServiceServer) Provision(context.Context, *ProvisionRequ
 }
 func (UnimplementedRelayServiceServer) Heartbeat(context.Context, *HeartbeatRequest) (*HeartbeatResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Heartbeat not implemented")
+}
+func (UnimplementedRelayServiceServer) RenewCert(context.Context, *RenewCertRequest) (*RenewCertResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenewCert not implemented")
 }
 func (UnimplementedRelayServiceServer) mustEmbedUnimplementedRelayServiceServer() {}
 
@@ -139,6 +167,24 @@ func _RelayService_Heartbeat_Handler(srv interface{}, ctx context.Context, dec f
 	return interceptor(ctx, in, info, handler)
 }
 
+func _RelayService_RenewCert_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewCertRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(RelayServiceServer).RenewCert(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: RelayService_RenewCert_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(RelayServiceServer).RenewCert(ctx, req.(*RenewCertRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // RelayService_ServiceDesc is the grpc.ServiceDesc for RelayService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -153,6 +199,10 @@ var RelayService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Heartbeat",
 			Handler:    _RelayService_Heartbeat_Handler,
+		},
+		{
+			MethodName: "RenewCert",
+			Handler:    _RelayService_RenewCert_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
