@@ -16,6 +16,13 @@ use crate::tls::cert_holder::{serial_hex, CertHolder};
 
 pub const CONNECTOR_ID: &str = "0b7e6a2c-4f1d-4c3a-9e2b-8f5d7a1c3e90";
 
+/// Trust domain of the test PKI's SPIFFE IDs.
+pub const TRUST_DOMAIN: &str = "ws-test.zecurity.in";
+
+fn shield_spiffe_id(shield_id: &str) -> String {
+    format!("spiffe://{TRUST_DOMAIN}/shield/{shield_id}")
+}
+
 pub fn install_crypto_provider() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {
@@ -141,14 +148,39 @@ impl TestPki {
 
     /// Device/client chain accepted by the connector's mTLS listeners.
     pub fn client_chain(&self) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        self.chain_for("spiffe://ws-test.zecurity.in/client/9b2d5cae-5820-4702-adf4-231680852b11")
+    }
+
+    /// Shield client chain (leaf + Workspace CA) for the :9091 server.
+    pub fn shield_chain(
+        &self,
+        shield_id: &str,
+    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        self.chain_for(&shield_spiffe_id(shield_id))
+    }
+
+    /// Shield client identity as PEM (chain, key), for tonic's ClientTlsConfig.
+    pub fn shield_identity_pem(&self, shield_id: &str) -> (String, String) {
+        let (leaf_pem, key) = self.client_leaf(&shield_spiffe_id(shield_id));
+        (
+            format!(
+                "{}\n{}",
+                leaf_pem.trim_end(),
+                self.workspace_ca_pem.trim_end()
+            ),
+            key.serialize_pem(),
+        )
+    }
+
+    /// A client-auth leaf with a fresh key.
+    fn client_leaf(&self, spiffe_id: &str) -> (String, KeyPair) {
         let key = new_key();
-        let leaf_pem = self.leaf(
-            &key,
-            "spiffe://ws-test.zecurity.in/client/9b2d5cae-5820-4702-adf4-231680852b11",
-            true,
-            -60,
-            3600,
-        );
+        let leaf_pem = self.leaf(&key, spiffe_id, true, -60, 3600);
+        (leaf_pem, key)
+    }
+
+    fn chain_for(&self, spiffe_id: &str) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+        let (leaf_pem, key) = self.client_leaf(spiffe_id);
         let mut chain: Vec<CertificateDer<'static>> =
             rustls_pemfile::certs(&mut leaf_pem.as_bytes())
                 .collect::<Result<_, _>>()
