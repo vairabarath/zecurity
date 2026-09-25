@@ -14,6 +14,14 @@ service RelayService {
   // Sent periodically after provisioning.
   // Uses mTLS; Relay identity comes from the presented SPIFFE certificate.
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Renews the Relay's own certificate over mTLS (D-19). The CSR must be
+  // signed by the Relay's EXISTING private key (proof of possession, same
+  // key); SANs must stay within the relay's registered allowlist. A relay
+  // whose certificate has already expired cannot renew and must be replaced
+  // (D-20). Retries while still presenting the same certificate are
+  // idempotent: they return the same renewed certificate.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 }
 
 message ProvisionRequest {
@@ -40,6 +48,17 @@ message ProvisionResponse {
   string spiffe_id = 4; // confirmed global Relay SPIFFE identity
   int64 cert_not_after_unix = 5;
   int64 cert_not_before_unix = 6;
+}
+
+message RenewCertRequest {
+  bytes csr_der = 1; // DER-encoded PKCS#10 CSR signed by the Relay's CURRENT private key
+}
+
+message RenewCertResponse {
+  bytes certificate_pem = 1; // renewed Intermediate-signed Relay leaf
+  bytes intermediate_ca_pem = 2; // Platform Intermediate CA trust bundle
+  int64 cert_not_after_unix = 3;
+  int64 cert_not_before_unix = 4;
 }
 
 message HeartbeatRequest {

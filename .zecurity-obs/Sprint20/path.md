@@ -192,13 +192,20 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint20/Member2-Go-Rust/Phase3-Relay-Cert-Renewal]]. Depends on Phase C.
 
-- [ ] **M2-F1** `proto/relay/v1/relay.proto` — additive `rpc RenewCert(RenewCertRequest) returns (RenewCertResponse)` + new messages; `buf generate`.
-- [ ] **M2-F2** `internal/relay/renew.go` (new) — identity checks, row status, presented-serial check, same-key CSR, stored-allowlist SANs, sign.
-- [ ] **M2-F3** `internal/relay/store.go` — transactional `RecordRenewedCert` (lock relay row `FOR UPDATE`, insert `relay_certificates`, update `relays.cert_*`, guarded on status).
-- [ ] **M2-F4** `relay/src/renewal.rs` (new) — scheduler, CSR from existing key, atomic cert write.
-- [ ] **M2-F5** `relay/src/tls.rs` + `listener.rs` — swappable server cert resolver; `heartbeat.rs` — rebuild channel with renewed identity.
-- [ ] **M2-F6** Tests: Go handler + store integration (incl. renew-vs-revoke race); Rust scheduler, atomic write, resolver swap.
-- [ ] **Build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... && cd ../relay && cargo build && cargo test`
+**F-1 (controller) — done. F-2 (relay Rust runtime) — next.**
+
+- [x] **M2-F1** `proto/relay/v1/relay.proto` — additive `rpc RenewCert(RenewCertRequest) returns (RenewCertResponse)` + new messages; `buf generate`.
+- [x] **M2-F2** `internal/relay/renew.go` (new) — identity checks, row status, presented-serial check, same-key CSR, stored-allowlist SANs, sign. Plus idempotent retries (Valkey result cache + per-attempt lock).
+- [x] **M2-F3** `internal/relay/store.go` — transactional `RecordRenewedCert` (lock relay row `FOR UPDATE`, insert `relay_certificates`, update `relays.cert_*`, guarded on status; supersedes an earlier unused successor on retry).
+- [ ] **M2-F4** `relay/src/renewal.rs` (new) — scheduler, CSR from existing key, atomic cert write. *(F-2)*
+- [ ] **M2-F5** `relay/src/tls.rs` + `listener.rs` — swappable server cert resolver; `heartbeat.rs` — rebuild channel with renewed identity. *(F-2)*
+- [x] **M2-F6 (Go)** Tests: handler (`renew_test.go`) + store integration incl. renew-vs-revoke race, 25 iterations × 3 runs, both lock orderings observed (`store_renew_integration_test.go`).
+- [ ] **M2-F6 (Rust)** Tests: scheduler, atomic write, resolver swap. *(F-2)*
+- [x] **F-1 build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... ./internal/pki/...` (0 skips with DB env); also `go test ./...` and relay `cargo build` with the additive proto.
+- [ ] **Full build gate:** `… && cd ../relay && cargo build && cargo test` with the F-2 runtime. *(F-2)*
+- [ ] **Live acceptance — NOT YET RUN** (`RELAY_CERT_TTL=15m` self-renewal without restart; revoke → both serials on `/relay.crl`). Needs F-2.
+
+> **F-1 → F-2 contract:** the relay must not keep presenting its old certificate after successfully persisting the renewed one. The controller supersedes an unrevoked successor only while the relay still presents the certificate that successor replaced (such a successor was never put into use). See the phase file.
 
 ### Phase G — M2: Connector Renewal Trigger + Cert Hot-Swap
 
@@ -234,7 +241,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Phase C code + tests done; live check PENDING / NOT YET RUN.)*
 - [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
 - [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`.
-- [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke.
+- [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller side proved by F-1 tests; relay runtime (F-2) + live check pending.)*
 - [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`.
 - [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
 

@@ -89,6 +89,14 @@ func (s *fakeHeartbeatStore) LoadRelayByID(context.Context, string) (*RelayRow, 
 	return nil, ErrRelayNotFound
 }
 
+func (s *fakeHeartbeatStore) RelayCertStatus(context.Context, string, string) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (s *fakeHeartbeatStore) RecordRenewedCert(context.Context, string, string, string, time.Time) (int, error) {
+	return 0, ErrRelayNotFound
+}
+
 func (s *fakeHeartbeatStore) ListConnectorsForRelay(_ context.Context, _ string) (map[string][]string, error) {
 	if s.err != nil {
 		return nil, s.err

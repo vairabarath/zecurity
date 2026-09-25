@@ -206,6 +206,14 @@ func (f *fakeProvisionStore) MarkProvisioned(_ context.Context, id, _ string, _ 
 	return f.markErr
 }
 
+func (f *fakeProvisionStore) RelayCertStatus(context.Context, string, string) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (f *fakeProvisionStore) RecordRenewedCert(context.Context, string, string, string, time.Time) (int, error) {
+	return 0, ErrRelayNotFound
+}
+
 func (f *fakeProvisionStore) RecordHeartbeat(context.Context, string, string, time.Time, string, string, string, int, string, string, uint32, uint32) error {
 	return nil
 }
