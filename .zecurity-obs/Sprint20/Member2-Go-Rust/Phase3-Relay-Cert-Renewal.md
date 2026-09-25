@@ -6,7 +6,7 @@ sprint: 20
 phase: 3
 execution: F
 title: Relay In-Band Certificate Renewal (D-19)
-status: planned
+status: in-progress   # F-1 (controller) done; F-2 (relay Rust runtime) next
 depends_on: [2]
 tags:
   - go
@@ -163,7 +163,7 @@ Rust (`cargo test` in `relay/`):
 
 - [ ] Dev stack with `RELAY_CERT_TTL=15m`: the relay renews by itself around the 9-minute mark, the `relays.cert_serial` changes, `relay_certificates` has two rows, and the relay keeps serving connectors and clients past the first cert's `NotAfter` **without a restart**.
 - [ ] Revoke that relay → both serials revoked; `/relay.crl` lists both; connectors drop it (existing CRL monitor).
-- [ ] `buf generate` diff for `relay.proto` is additive only.
+- [x] `buf generate` diff for `relay.proto` is additive only (verified in F-1: no removed or changed lines).
 
 ## Build Check
 
@@ -177,13 +177,39 @@ cd connector && cargo build                    # proto consumer; must still buil
 
 ## Implementation Checklist
 
-- [ ] **M2-F1** Proto: additive `RenewCert` + messages; `buf generate`
-- [ ] **M2-F2** `renew.go`: handler (identity, status, presented serial, same key, SANs, sign)
-- [ ] **M2-F3** `store.go`: transactional `RecordRenewedCert`
+**F-1 — controller half (done)**
+
+- [x] **M2-F1** Proto: additive `RenewCert` + `RenewCertRequest{csr_der}` / `RenewCertResponse{certificate_pem, intermediate_ca_pem, cert_not_after_unix, cert_not_before_unix}`; `buf generate`
+- [x] **M2-F2** `renew.go`: handler (identity via shared `authenticatedRelay`, expiry → replace (D-20), same key (D-19), status active/inactive, presented serial known + unrevoked, Phase C `newRelaySANAllowlist` + `precheckRelayCSR` reused, signer gets stored allowlists)
+- [x] **M2-F3** `store.go`: transactional `RecordRenewedCert` (`FOR UPDATE` on the relay row, the same lock `RevokeRelay` takes) + `RelayCertStatus`; typed errors `ErrRelayNotRenewable`, `ErrPresentedCertInvalid`
+- [x] **M2-F6 (Go)** Tests:
+  - `renew_test.go` (12): happy path, inactive, different key, expired, pending/revoked/deleted, unknown/revoked presented cert, Phase C rules, wrong identity, idempotent retry, revoked cached renewal not replayed, concurrent attempt aborted, revoked mid-renewal returns no cert
+  - `store_renew_integration_test.go`: record, retry supersede (exactly 2 unrevoked certs), renewal chain, refused states, renew-vs-revoke race (25 iterations; both lock orderings observed across 3 runs; never a live cert for a revoked relay; renewed serial on the revoked list)
+- [x] **F-1 build gate:** `buf generate`, `go build ./...`, `go vet`, `go test ./internal/relay/... ./internal/pki/...` (0 skips with `PKI_TEST_DATABASE_URL`), `go test ./...`, relay `cargo build` with the additive proto
+
+**F-2 — relay Rust runtime (next)**
+
 - [ ] **M2-F4** `relay/src/renewal.rs`: scheduler, CSR from existing key, atomic write, response validation
 - [ ] **M2-F5** Relay hot swap: listener resolver + heartbeat identity
-- [ ] **M2-F6** Tests (Go unit + integration race; Rust)
-- [ ] **Build gate:** `cd controller && go build ./... && cd ../relay && cargo build`
+- [ ] **M2-F6 (Rust)** Tests: scheduler, atomic write, resolver swap, response validation
+- [ ] **Full build gate:** `cd controller && go build ./... && cd ../relay && cargo build && cargo test`
+- [ ] **Live acceptance — NOT YET RUN** (see Acceptance Criteria)
+
+## F-1 → F-2 Contract (binding for the relay runtime)
+
+The controller's retry guarantees depend on the relay behaving as follows:
+
+1. **Never keep presenting the old certificate after persisting the renewed one.** Once the renewed certificate is atomically written to disk, every consumer must switch to it: the QUIC listener, the heartbeat channel, and subsequent `RenewCert` calls.
+2. **Why:** `RecordRenewedCert` revokes any unrevoked successor issued *after* the presented certificate (reason `superseded by renewal retry`). That is only safe because a relay still presenting certificate *P* has, by contract, not put P's successor into use.
+3. **Retries are cheap and safe.** Retrying `RenewCert` while still presenting *P*, e.g. after a lost response, returns the **same** certificate for up to 1 h (Valkey result cache keyed by relay + presented serial). After that, the retry supersedes the unused successor and issues a new one. `codes.Aborted` means an identical attempt is in flight: back off and retry.
+4. **Same key only (D-19).** The CSR must be signed by the relay's existing private key. The key file is never rewritten.
+5. **Expired means replace (D-20).** If the certificate has already expired, don't call `RenewCert`. The relay must be replaced.
+
+## Implementation Notes (F-1)
+
+- The idempotency cache and lock are optimizations. If Valkey is unavailable the lock fails open, and the database rule (at most one live successor) still holds.
+- The signed certificate is discarded, never returned or cached, if the locked write refuses it (relay revoked or deleted between the pre-checks and the write).
+- There is no server-side "too early" renewal window. Scheduling is the relay's job (D-19); every renewal is recorded and revocable.
 
 ## Post-Phase Fixes
 

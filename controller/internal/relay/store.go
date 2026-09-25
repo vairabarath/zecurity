@@ -18,6 +18,20 @@ import (
 
 var ErrRelayNotFound = errors.New("relay not found")
 
+// Renewal (D-19) errors returned by RecordRenewedCert.
+var (
+	// ErrRelayNotRenewable: the relay is not active/inactive (pending, revoked, deleted).
+	ErrRelayNotRenewable = errors.New("relay is not in a renewable state")
+	// ErrPresentedCertInvalid: the certificate presented on the renewal call is
+	// not a known, unrevoked certificate of this relay.
+	ErrPresentedCertInvalid = errors.New("presented relay certificate is unknown or revoked")
+)
+
+// supersededRenewalReason marks a renewed certificate that was replaced by a
+// later renewal attempt made while the relay still presented its previous
+// certificate (the earlier successor was never put into use).
+const supersededRenewalReason = "superseded by renewal retry"
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -163,6 +177,104 @@ func (s *Store) RecordIssuedCert(ctx context.Context, relayID, serial string, no
 		return fmt.Errorf("record issued relay cert: %w", err)
 	}
 	return nil
+}
+
+// RelayCertStatus reports whether serial is a certificate issued to relayID
+// and, if so, whether it has been revoked.
+func (s *Store) RelayCertStatus(ctx context.Context, relayID, serial string) (known, revoked bool, err error) {
+	var revokedAt *time.Time
+	err = s.pool.QueryRow(ctx,
+		`SELECT revoked_at FROM relay_certificates WHERE relay_id = $1 AND serial = $2`,
+		relayID, serial,
+	).Scan(&revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("relay cert status: %w", err)
+	}
+	return true, revokedAt != nil, nil
+}
+
+// RecordRenewedCert atomically records a certificate renewed (D-19) from the
+// certificate the relay presented on the renewal call.
+//
+// It locks the relay row FOR UPDATE — the same lock RevokeRelay takes — so a
+// renewal and a revoke of the same relay serialize: a renewal committed first
+// is revoked by the later revoke; a renewal attempted after a revoke is refused
+// (ErrRelayNotRenewable). A revoked relay can never end up holding a valid cert.
+//
+// Retry safety: any unrevoked certificate issued AFTER the presented one is a
+// successor from an earlier renewal attempt that the relay never put into use
+// (it is still presenting its previous certificate). Such successors are
+// revoked as superseded before the new one is inserted, so repeated renewal
+// attempts leave at most one live successor. Returns how many were superseded.
+func (s *Store) RecordRenewedCert(ctx context.Context, relayID, presentedSerial, newSerial string, notAfter time.Time) (int, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("begin record renewed cert: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var status string
+	if err := tx.QueryRow(ctx,
+		`SELECT status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
+	).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrRelayNotFound
+		}
+		return 0, fmt.Errorf("lock relay for renewal: %w", err)
+	}
+	if status != "active" && status != "inactive" {
+		return 0, ErrRelayNotRenewable
+	}
+
+	var presentedIssuedAt time.Time
+	var presentedRevokedAt *time.Time
+	if err := tx.QueryRow(ctx,
+		`SELECT issued_at, revoked_at FROM relay_certificates WHERE relay_id = $1 AND serial = $2`,
+		relayID, presentedSerial,
+	).Scan(&presentedIssuedAt, &presentedRevokedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrPresentedCertInvalid
+		}
+		return 0, fmt.Errorf("load presented relay cert: %w", err)
+	}
+	if presentedRevokedAt != nil {
+		return 0, ErrPresentedCertInvalid
+	}
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE relay_certificates
+		    SET revoked_at = NOW(), revocation_reason = $4
+		  WHERE relay_id = $1
+		    AND serial <> $2
+		    AND revoked_at IS NULL
+		    AND issued_at > $3`,
+		relayID, presentedSerial, presentedIssuedAt, supersededRenewalReason,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("supersede earlier renewal: %w", err)
+	}
+	superseded := int(tag.RowsAffected())
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO relay_certificates (relay_id, serial, not_after) VALUES ($1, $2, $3)`,
+		relayID, newSerial, notAfter,
+	); err != nil {
+		return 0, fmt.Errorf("record renewed relay cert: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`UPDATE relays SET cert_serial = $2, cert_not_after = $3, updated_at = NOW() WHERE id = $1`,
+		relayID, newSerial, notAfter,
+	); err != nil {
+		return 0, fmt.Errorf("update relay cert: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit record renewed cert: %w", err)
+	}
+	return superseded, nil
 }
 
 // RevokeAllForRelay marks every not-yet-revoked certificate of a relay revoked.

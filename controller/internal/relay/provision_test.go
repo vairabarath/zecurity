@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"net"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func TestProvisionValidToken(t *testing.T) {
 	rdb := newProvisionTestValkey(t)
 	token, _ := storeProvisioningToken(t, ctx, rdb, testRelayID)
 	fake := newFakePKI()
-	store := &fakeProvisionStore{}
+	store := defaultRelayStore()
 	service := newProvisionTestService(fake, store, rdb)
 	req := validProvisionRequest(t)
 	req.ProvisioningToken = token
@@ -70,8 +71,10 @@ func TestProvisionValidToken(t *testing.T) {
 	if store.markedRelayID != testRelayID {
 		t.Fatalf("marked relay = %q, want %q", store.markedRelayID, testRelayID)
 	}
-	if fake.relayID != testRelayID || fake.dnsSAN != "relay.example.com" || fake.ipSAN != "203.0.113.10" {
-		t.Fatalf("unexpected PKI request: relay=%q dns=%q ip=%q", fake.relayID, fake.dnsSAN, fake.ipSAN)
+	if fake.relayID != testRelayID ||
+		len(fake.dnsNames) != 1 || fake.dnsNames[0] != "relay.example.com" ||
+		len(fake.ipAddrs) != 1 || !fake.ipAddrs[0].Equal(net.ParseIP("203.0.113.10")) {
+		t.Fatalf("unexpected PKI request: relay=%q dns=%v ip=%v", fake.relayID, fake.dnsNames, fake.ipAddrs)
 	}
 	if response.RelayId != testRelayID || response.SpiffeId != appmeta.RelaySPIFFEID(testRelayID) {
 		t.Fatalf("unexpected Provision response identity: %+v", response)
@@ -110,7 +113,7 @@ func TestProvisionRejectsReplayedToken(t *testing.T) {
 	rdb := newProvisionTestValkey(t)
 	token, _ := storeProvisioningToken(t, ctx, rdb, testRelayID)
 	fake := newFakePKI()
-	service := newProvisionTestService(fake, &fakeProvisionStore{}, rdb)
+	service := newProvisionTestService(fake, defaultRelayStore(), rdb)
 	req := validProvisionRequest(t)
 	req.ProvisioningToken = token
 
@@ -124,20 +127,25 @@ func TestProvisionRejectsReplayedToken(t *testing.T) {
 	}
 }
 
+// TestProvisionRejectsUnregisteredRelay — an unregistered relay is rejected
+// BEFORE the token is burned (Phase C moved the row lookup ahead of the burn).
 func TestProvisionRejectsUnregisteredRelay(t *testing.T) {
 	ctx := context.Background()
 	rdb := newProvisionTestValkey(t)
-	token, _ := storeProvisioningToken(t, ctx, rdb, testRelayID)
+	token, jti := storeProvisioningToken(t, ctx, rdb, testRelayID)
 	fake := newFakePKI()
-	store := &fakeProvisionStore{markErr: ErrRelayNotFound}
+	store := &fakeProvisionStore{loadErr: ErrRelayNotFound}
 	service := newProvisionTestService(fake, store, rdb)
 	req := validProvisionRequest(t)
 	req.ProvisioningToken = token
 
 	_, err := service.Provision(ctx, req)
 	assertStatusCode(t, err, codes.FailedPrecondition)
-	if fake.signCalls != 1 {
-		t.Fatalf("SignRelayCert calls = %d, want 1", fake.signCalls)
+	if fake.signCalls != 0 {
+		t.Fatalf("SignRelayCert calls = %d, want 0", fake.signCalls)
+	}
+	if !jtiPresent(t, ctx, rdb, jti) {
+		t.Fatal("provisioning token was consumed by a rejected request")
 	}
 }
 
@@ -145,8 +153,8 @@ type fakePKI struct {
 	pki.Service
 	result    *pki.RelayCertResult
 	relayID   string
-	dnsSAN    string
-	ipSAN     string
+	dnsNames  []string // allowlist the signer received
+	ipAddrs   []net.IP // allowlist the signer received
 	signCalls int
 }
 
@@ -160,19 +168,50 @@ func (f *fakePKI) SignRelayCert(
 ) (*pki.RelayCertResult, error) {
 	f.signCalls++
 	f.relayID = relayID
-	f.dnsSAN = dnsNames[0]
-	f.ipSAN = ipAddresses[0].String()
+	f.dnsNames = append([]string(nil), dnsNames...)
+	f.ipAddrs = append([]net.IP(nil), ipAddresses...)
 	return f.result, nil
 }
 
 type fakeProvisionStore struct {
+	row           *RelayRow // returned by LoadRelayByID; nil + nil loadErr = not found
+	loadErr       error
 	markErr       error
 	markedRelayID string
+}
+
+// pendingRelayStore returns a store whose relay row is awaiting provisioning
+// with the given operator-registered SAN allowlists.
+func pendingRelayStore(dnsAllowlist, ipAllowlist []string) *fakeProvisionStore {
+	return &fakeProvisionStore{row: &RelayRow{
+		ID:           testRelayID,
+		Status:       "pending",
+		DNSAllowlist: dnsAllowlist,
+		IPAllowlist:  ipAllowlist,
+	}}
+}
+
+func (f *fakeProvisionStore) LoadRelayByID(_ context.Context, id string) (*RelayRow, error) {
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
+	if f.row == nil || f.row.ID != id {
+		return nil, ErrRelayNotFound
+	}
+	return f.row, nil
 }
 
 func (f *fakeProvisionStore) MarkProvisioned(_ context.Context, id, _ string, _ time.Time, _, _ string) error {
 	f.markedRelayID = id
 	return f.markErr
+}
+
+func (f *fakeProvisionStore) RelayCertStatus(context.Context, string, string) (bool, bool, error) {
+	return false, false, nil
+}
+
+func (f *fakeProvisionStore) RecordRenewedCert(context.Context, string, string, string, time.Time) (int, error) {
+	return 0, ErrRelayNotFound
 }
 
 func (f *fakeProvisionStore) RecordHeartbeat(context.Context, string, string, time.Time, string, string, string, int, string, string, uint32, uint32) error {
@@ -234,12 +273,27 @@ func validProvisionRequest(t *testing.T) *relaypb.ProvisionRequest {
 	t.Helper()
 	return &relaypb.ProvisionRequest{
 		RelayId:  testRelayID,
-		CsrDer:   makeCSRDER(t),
+		CsrDer:   makeRelayCSRDER(t, testRelayID, []string{"relay.example.com"}, []string{"203.0.113.10"}),
 		DnsSans:  []string{"relay.example.com"},
 		IpSans:   []string{"203.0.113.10"},
 		Version:  "1.0.0",
 		Hostname: "relay-test",
 	}
+}
+
+// defaultRelayStore matches validProvisionRequest's SANs.
+func defaultRelayStore() *fakeProvisionStore {
+	return pendingRelayStore([]string{"relay.example.com"}, []string{"203.0.113.10"})
+}
+
+// jtiPresent reports whether the provisioning token is still unused.
+func jtiPresent(t *testing.T, ctx context.Context, rdb valkeycompat.Cmdable, jti string) bool {
+	t.Helper()
+	n, err := rdb.Exists(ctx, provisioningJTIPrefix+jti).Result()
+	if err != nil {
+		t.Fatalf("check provisioning JTI: %v", err)
+	}
+	return n == 1
 }
 
 func assertStatusCode(t *testing.T, err error, want codes.Code) {
@@ -249,13 +303,30 @@ func assertStatusCode(t *testing.T, err error, want codes.Code) {
 	}
 }
 
-func makeCSRDER(t *testing.T) []byte {
+// makeRelayCSRDER builds a P-384 CSR carrying the relay SPIFFE URI SAN for
+// uriRelayID plus the given DNS names (verbatim) and IP SANs.
+func makeRelayCSRDER(t *testing.T, uriRelayID string, dnsNames, ips []string) []byte {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate CSR key: %v", err)
 	}
-	der, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	spiffeURI, err := url.Parse(appmeta.RelaySPIFFEID(uriRelayID))
+	if err != nil {
+		t.Fatalf("parse SPIFFE URI: %v", err)
+	}
+	template := &x509.CertificateRequest{
+		URIs:     []*url.URL{spiffeURI},
+		DNSNames: dnsNames,
+	}
+	for _, value := range ips {
+		ip := net.ParseIP(value)
+		if ip == nil {
+			t.Fatalf("bad test IP %q", value)
+		}
+		template.IPAddresses = append(template.IPAddresses, ip)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, template, key)
 	if err != nil {
 		t.Fatalf("create CSR: %v", err)
 	}

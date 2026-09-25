@@ -33,6 +33,12 @@ const (
 type heartbeatStore interface {
 	RecordHeartbeat(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname, observedIP string, observedPort int, addressScope, publicAddr string, connectionCount, maxConnections uint32) error
 	MarkProvisioned(ctx context.Context, id, certSerial string, certNotAfter time.Time, version, hostname string) error
+	// LoadRelayByID lets Provision validate the operator-registered row
+	// (status + SAN allowlists) before the provisioning token is burned.
+	LoadRelayByID(ctx context.Context, id string) (*RelayRow, error)
+	// RelayCertStatus and RecordRenewedCert back RenewCert (D-19).
+	RelayCertStatus(ctx context.Context, relayID, serial string) (known, revoked bool, err error)
+	RecordRenewedCert(ctx context.Context, relayID, presentedSerial, newSerial string, notAfter time.Time) (int, error)
 	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
@@ -55,20 +61,9 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	if spiffe.Role(ctx) != appmeta.SPIFFERoleRelay ||
-		spiffe.TrustDomain(ctx) != appmeta.SPIFFEGlobalTrustDomain {
-		return nil, status.Error(codes.PermissionDenied, "authenticated Relay identity required")
-	}
-	relayID, err := canonicalRelayID(spiffe.EntityID(ctx))
+	relayID, leaf, err := authenticatedRelay(ctx)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "authenticated Relay ID is invalid")
-	}
-	leaf, err := authenticatedLeaf(ctx)
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != appmeta.RelaySPIFFEID(relayID) {
-		return nil, status.Error(codes.Unauthenticated, "authenticated Relay certificate identity mismatch")
+		return nil, err
 	}
 	if s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Relay heartbeat store is not configured")
@@ -274,6 +269,30 @@ func relayHeartbeatMetadataValue(certSerial string, certNotAfter time.Time, vers
 		addr.PublicAddr,
 	}
 	return strings.Join(parts, "\x00")
+}
+
+// authenticatedRelay returns the relay ID and presented leaf for an mTLS relay
+// call (Heartbeat, RenewCert). The SPIFFE interceptor has already verified the
+// chain to the Platform Intermediate and the relay revocation list; this
+// re-checks role, trust domain, canonical ID and that the leaf's single URI SAN
+// is exactly this relay's SPIFFE ID. Errors are gRPC status errors.
+func authenticatedRelay(ctx context.Context) (string, *x509.Certificate, error) {
+	if spiffe.Role(ctx) != appmeta.SPIFFERoleRelay ||
+		spiffe.TrustDomain(ctx) != appmeta.SPIFFEGlobalTrustDomain {
+		return "", nil, status.Error(codes.PermissionDenied, "authenticated Relay identity required")
+	}
+	relayID, err := canonicalRelayID(spiffe.EntityID(ctx))
+	if err != nil {
+		return "", nil, status.Error(codes.Unauthenticated, "authenticated Relay ID is invalid")
+	}
+	leaf, err := authenticatedLeaf(ctx)
+	if err != nil {
+		return "", nil, status.Error(codes.Unauthenticated, err.Error())
+	}
+	if len(leaf.URIs) != 1 || leaf.URIs[0].String() != appmeta.RelaySPIFFEID(relayID) {
+		return "", nil, status.Error(codes.Unauthenticated, "authenticated Relay certificate identity mismatch")
+	}
+	return relayID, leaf, nil
 }
 
 func authenticatedLeaf(ctx context.Context) (*x509.Certificate, error) {

@@ -6,7 +6,7 @@ sprint: 20
 phase: 2
 execution: C
 title: Relay SAN Allowlist Enforcement
-status: planned
+status: implemented   # code + tests done; live acceptance PENDING
 depends_on: [1]
 tags:
   - go
@@ -110,9 +110,13 @@ No behavioural change to the scripts.
 
 ## Acceptance Criteria
 
-- [ ] A relay created with `ip_allowlist: []` that requests `RELAY_IP_SANS=10.0.0.5` fails to provision; re-running with the SAN removed succeeds **with the same token**.
-- [ ] A relay created with `dns_allowlist: ["relay1.example.com"]` provisions with that SAN and cannot obtain `relay2.example.com`.
-- [ ] `buf generate` diff is comment-only.
+> **Status:** the first two items are live checks against a running controller + relay and are
+> **PENDING / NOT YET RUN**. Their behaviour is covered by `provision_allowlist_test.go`
+> (see Implementation Checklist).
+
+- [ ] **PENDING** — A relay created with `ip_allowlist: []` that requests `RELAY_IP_SANS=10.0.0.5` fails to provision; re-running with the SAN removed succeeds **with the same token**.
+- [ ] **PENDING** — A relay created with `dns_allowlist: ["relay1.example.com"]` provisions with that SAN and cannot obtain `relay2.example.com`.
+- [x] `buf generate` diff is comment-only (verified: only two trailing field comments changed in `relay.pb.go`; tags identical).
 
 ## Build Check
 
@@ -125,13 +129,21 @@ cd relay && cargo build                   # regenerated comments only
 
 ## Implementation Checklist
 
-- [ ] **M2-C1** Load row before burn; require `pending`
-- [ ] **M2-C2** Allowlist check; stored lists passed to `SignRelayCert`
-- [ ] **M2-C3** All SAN/status rejections before `BurnProvisioningJTI` (incl. CSR SAN pre-check)
-- [ ] **M2-C4** Proto comment fixes
-- [ ] **M2-C5** Script usage text
-- [ ] **M2-C6** Tests
-- [ ] **Build gate:** `cd controller && go build ./...`
+- [x] **M2-C1** Load row before burn; require `pending` (`LoadRelayByID` added to the `heartbeatStore` interface; the `Store` method already existed, so `store.go` is unchanged)
+- [x] **M2-C2** Allowlist check; stored lists passed to `SignRelayCert`
+- [x] **M2-C3** All rejections before `BurnProvisioningJTI`. `precheckRelayCSR` mirrors every `SignRelayCert` check (signature, SPIFFE URI SAN, P-384, DNS/IP SANs); the signer still enforces them independently
+- [x] **M2-C4** Proto comment fixes
+- [x] **M2-C5** Script usage text
+- [x] **M2-C6** Tests:
+  - `provision_test.go`: fakes updated (`fakePKI` records allowlists, store `LoadRelayByID`, SPIFFE-URI CSR helper); unregistered relay now asserts **no** burn
+  - `provision_allowlist_test.go`: signer receives stored allowlists; request/CSR DNS/IP SAN outside allowlist; empty allowlist (URI-only OK, IP rejected); relay not pending (active/inactive/revoked/deleted); wrong CSR identity before burn; retry with same token; canonicalization (mixed-case/trailing-dot request DNS accepted, non-canonical CSR DNS rejected before burn, IPv6 parsed comparison, `canonicalDNSName`, dedupe across equivalent forms)
+- [x] **Build gate:** `buf generate`, `go build ./...`, `go test ./internal/relay/... ./internal/pki/...` (0 skips with `PKI_TEST_DATABASE_URL`), `go test ./...`, relay `cargo build`. Re-run after rebasing onto Phase B (`f882c3c`)
+- [ ] **Live acceptance — PENDING / NOT YET RUN** (see Acceptance Criteria)
+
+**Implementation notes** (implementation-level, within the Decision Record):
+- Request DNS SANs are normalized (lowercase, one trailing dot stripped); IPs are parsed and compared with `net.IP.Equal`.
+- CSR DNS SANs must already be canonical. `SignRelayCert` copies CSR names verbatim and matches them exactly, so a normalize-only pre-check would let a mixed-case name fail at the signer **after** the burn.
+- Admin relay creation keeps its strict `validateDNSSANs` / `validateIPSANs`, so stored allowlists are canonical by construction.
 
 ## Post-Phase Fixes
 
