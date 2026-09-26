@@ -26,6 +26,8 @@ import TeamUsers from '@/pages/TeamUsers'
 import AccessLog from '@/pages/AccessLog'
 import DeviceManagement from '@/pages/DeviceManagement'
 import Policies from '@/pages/Policies'
+import ResourcePolicies from '@/pages/ResourcePolicies'
+import DeviceProfiles from '@/pages/DeviceProfiles'
 import IdpConnections from '@/pages/IdpConnections'
 import IdpConnectionDetail from '@/pages/IdpConnectionDetail'
 import ScimConflicts from '@/pages/ScimConflicts'
@@ -95,7 +97,11 @@ export default function App() {
         <Route path="/groups/:id"        element={<GroupDetail />} />
         <Route path="/access-log"        element={<AccessLog />} />
         <Route path="/devices"           element={<DeviceManagement />} />
-        <Route path="/policies"          element={<Policies />} />
+        <Route path="/policies"          element={<Policies />}>
+          <Route index element={<Navigate to="resource-policies" replace />} />
+          <Route path="resource-policies" element={<ResourcePolicies />} />
+          <Route path="device-profiles"   element={<DeviceProfiles />} />
+        </Route>
         <Route path="/idp-connections"     element={<IdpConnections />} />
         <Route path="/idp-connections/:id" element={<IdpConnectionDetail />} />
         <Route path="/scim-conflicts" element={<ScimConflicts />} />

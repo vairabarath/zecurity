@@ -37,8 +37,14 @@ const teamItems = [
   { to: '/groups', label: 'Groups', icon: Users },
 ]
 
+// Each entry is its own route rather than a tab inside one page, so the sidebar
+// can show which section is open and a section can be linked to directly.
+//
+// No Sign In Policy / Device Policies entry: neither has a page behind it, and a
+// nav item that leads nowhere is worse than an absent one.
 const policyItems = [
-  { to: '/policies', label: 'Device Policies', icon: ShieldCheck },
+  { to: '/policies/resource-policies', label: 'Resource Policies', icon: Box },
+  { to: '/policies/device-profiles', label: 'Device Profiles', icon: Laptop },
 ]
 
 function NavItem({ to, label, icon: Icon }: { to: string; label: string; icon: React.ElementType }) {
