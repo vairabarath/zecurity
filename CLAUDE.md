@@ -8,10 +8,12 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Secure Read-Only Console".** Expose the state Sprint 20 made true, behind hardened provider auth:
+**Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Dedicated Provider Console: Login, Roles, Read-Only Fleet View".** A dedicated provider console with hardened login and a working role system, then read-only views of the state Sprint 20 made true. Order: H → C → U → R → P (K, V alongside):
 - provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
+- a dedicated provider console, `provider-console/` (Vite + React, D-18): Google login, logout, role-aware access (`super-admin` / `relay-ops`);
+- operator management: super-admins add operators, change roles, disable and re-enable (audited, lock-out-proof; bootstrap accounts pinned);
 - provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
-- a separate, read-only provider console (D-18), `provider-console/`;
+- read-only console pages for relays, tenants, audit and certificate health;
 - Sprint 20 cleanup: KI-1 (relay renewal scheduling), KI-2 (shield renewal window), KI-3 (dev redirect URI), JWTs removed from `.env.example`;
 - Sprint 20 live verification (`docs/sprint20-live-acceptance-runbook.md`).
 
@@ -23,7 +25,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider read actions and read APIs, provider console). **M2 = Barath** (Go + Rust: provider identity hardening, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
+**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider console foundation + Provider users page + read pages, provider read actions and read APIs). **M2 = Barath** (Go + Rust: provider identity hardening, operator management API, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
 
 ---
 
@@ -48,7 +50,7 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | `agent.md` | Full conventions, build commands, code style |
 | `.zecurity-obs/Sprint21/path.md` | Development rule, dependency map, conflict zones, open questions, progress tracker (checkboxes) |
 | `.zecurity-obs/Sprint21/Member{N}-*/Phase*.md` | Detailed spec per phase |
-| `.zecurity-obs/Sprint21/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-H, AT-R, AT-P, AT-K, AT-DEV, AT-V) |
+| `.zecurity-obs/Sprint21/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-H, AT-C, AT-U, AT-R, AT-P, AT-K, AT-DEV, AT-V) |
 | `docs/database-development.md` | Local database workflow: schema files, reset rule (lands with Sprint 21 DEV-1) |
 | `docs/sprint20-live-acceptance-runbook.md` + `.zecurity-obs/Sprint20/Live-Acceptance-Run-Sheet.md` | Sprint 20 live verification (Sprint 21 Phase V) |
 | `.zecurity-obs/Sprint20/path.md` | Sprint 20 record, incl. **Known Issues** KI-1 … KI-3 |
@@ -125,10 +127,11 @@ Sprint 21 specific:
 - The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code. Open questions OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
 - **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
-- The provider console is **read-only**: its only non-GET call is logout. Don't modify `admin/`.
+- The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
+- Operator management must stay lock-out-proof: no self-disable/demote, never zero active super-admins, bootstrap-pinned accounts can't be disabled or demoted.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04).
 - Proto changes (KI-2 option A only) are additive; never renumber fields.
-- Respect the `path.md` conflict-zone order: M2-H lands before M1-R wires routes in `main.go`.
+- Respect the `path.md` conflict-zone order in `main.go`: M2-H → M2-U → M1-R3.
 
 Sprint 20 (invariants still in force):
 - Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.

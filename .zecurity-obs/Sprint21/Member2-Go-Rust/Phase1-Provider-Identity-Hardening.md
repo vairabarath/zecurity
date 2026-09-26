@@ -21,7 +21,7 @@ tags:
 # Phase 1 (H) — Provider Identity Hardening (D-16)
 
 > **Decision Record:** D-16, with consequence #5 ("new provider-signing-key configuration, provider-specific verification in `VerifyProviderToken` / `RequireProvider`, a generation column on `provider_users`, `sub` and `hd` columns or checks, a logout endpoint; reconcile `PROVIDER_BOOTSTRAP_EMAILS` with `sub` binding").
-> **Blocks:** M1-R3 (route wiring) and M1-P (console login). Land it early.
+> **Blocks:** M1-C (console login and roles), M2-U (operator management) and M1-R3 (route wiring). Land it first.
 
 ## Problem (verified)
 
@@ -139,7 +139,7 @@ After `VerifyIDToken`, which already requires `email_verified` and a non-empty `
 - **CORS:** for `/provider/*`, answer preflight and add `Access-Control-Allow-Origin: <PROVIDER_CONSOLE_ORIGIN>` (exact match; never `*`), `Allow-Headers: Authorization, Content-Type`, `Allow-Methods: GET, POST, DELETE, OPTIONS`. No credentials (bearer only).
   - Other origins get no CORS headers.
   - Tenant routes are unchanged.
-- Document the contract in the phase notes for M1-P: fragment parameters, a 401 means re-login, and the logout call.
+- Document the contract in the phase notes for M1-C: fragment parameters, a 401 means re-login (expiry, logout, or a generation bump from role change or disable in Phase U), and the logout call.
 
 ### H7 — Tests
 

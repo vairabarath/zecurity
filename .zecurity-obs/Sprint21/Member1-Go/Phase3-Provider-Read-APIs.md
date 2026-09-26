@@ -3,11 +3,11 @@ type: phase
 member: M1
 person: Sathiya
 sprint: 21
-phase: 2
+phase: 3
 execution: R
 title: Provider Read Actions + Read APIs
 status: planned
-depends_on: ["M2-Phase1"]   # R1–R2 may start Day 1; R3 route wiring needs M2-H merged
+depends_on: ["M2-Phase1", "M2-Phase2"]   # R1–R2 may start Day 1; R3 route wiring after M2-H and M2-U are merged (main.go order H → U → R3)
 schema_change: false
 tags:
   - go
@@ -17,7 +17,7 @@ tags:
   - provider-dashboard
 ---
 
-# Phase 2 (R) — Provider Read Actions + Read APIs
+# Phase 3 (R) — Provider Read Actions + Read APIs
 
 > **Decision Record:** D-04 (REST under `/provider/*`; query services independent of HTTP), D-05 (read actions, no role migration), D-06 (`tenant.*` super-admin only via the prefix rule), D-15 (cross-tenant read APIs only), D-23 (existing telemetry only). This covers Q15 prerequisite #7, "Relay read endpoints".
 > **Open questions to settle before R3's tenant endpoints:** OQ-1 (audit tenant reads?) and OQ-2 (tenant admin PII in detail?). See `Sprint21/path.md`.
@@ -47,7 +47,7 @@ Correct, role-gated REST reads for relays, tenants, provider audit and certifica
 | `controller/internal/providerquery/` (new) | `relays.go`, `tenants.go`, `audit.go`, `certificates.go`: pgx queries plus DTOs, **no `net/http`** |
 | `controller/internal/provider/read_handlers.go` (new) | HTTP handlers: parse params → authz → providerquery → JSON |
 | `controller/internal/pki/controller_rotator.go` | Read-only `CurrentCertInfo() (serial string, notAfter time.Time)` |
-| `controller/cmd/server/main.go` | Route wiring (after M2-H merged) |
+| `controller/cmd/server/main.go` | Route wiring (after M2-H and M2-U merged) |
 | Tests | `authz_test.go`, `providerquery/*_test.go` (DB), `read_handlers_test.go` |
 
 ## Steps
@@ -95,7 +95,7 @@ All functions take `context.Context` plus a pool or `pgx` querier and return DTO
   - Revoked or deleted entities are excluded. `controller_grpc` comes from `CurrentCertInfo()` (process-local, D-02).
   - A **summary** gives counts per bucket: `expired`, `<24h`, `<7d`, `<30d`, `ok`.
 
-### R3 — Handlers + routes (after M2-H merged)
+### R3 — Handlers + routes (after M2-H and M2-U merged)
 
 | Route | Action | Notes |
 |-------|--------|-------|
@@ -157,7 +157,7 @@ cd controller && go build ./... && go vet ./... && go test ./internal/provider/.
 - [ ] R1 read actions + matrix test
 - [ ] R2 providerquery: relays, tenants, audit, certificates (+ rotator accessor)
 - [ ] OQ-1 / OQ-2 answered and recorded here
-- [ ] R3 handlers + routes (rebased on M2-H)
+- [ ] R3 handlers + routes (rebased on M2-H and M2-U)
 - [ ] R4 tests; build gate
 
 ## Post-Phase Fixes
