@@ -3,11 +3,11 @@ type: phase
 member: M2
 person: Barath
 sprint: 21
-phase: 2
+phase: 3
 execution: K
 title: Sprint 20 Cleanup (KI-1, KI-2, KI-3, .env.example JWTs)
 status: planned
-depends_on: [1]   # after H: both edit controller/.env.example
+depends_on: [1]   # after H (both edit controller/.env.example); scheduled after U
 schema_change: false
 tags:
   - rust
@@ -19,10 +19,10 @@ tags:
   - provider-dashboard
 ---
 
-# Phase 2 (K) — Sprint 20 Cleanup
+# Phase 3 (K) — Sprint 20 Cleanup
 
 > **Source:** `.zecurity-obs/Sprint20/path.md` → **Known Issues** (KI-1 … KI-3), and runbook §2 (`docs/sprint20-live-acceptance-runbook.md`).
-> **Ordering:** after Phase H, because both edit `controller/.env.example`. K1 and K2 don't depend on H and may start earlier on a separate branch if H is in review.
+> **Ordering:** Barath's third phase, after H and U. It depends only on H, because both edit `controller/.env.example`. K1 and K2 don't depend on H or U and can be picked up whenever there's a gap. **If the sprint runs short, K2 (KI-2) is the item that may move to Sprint 22.** It's low-risk and unrelated to the console.
 
 ## Problem (verified)
 

@@ -18,10 +18,12 @@
 | Admin UI | React | `admin/` | dev :5173 |
 | Provider Console | React | `provider-console/` (Sprint 21) | dev :5174 |
 
-**Sprint 21 is active: Provider Dashboard Phase 2, "Secure Read-Only Console".** Expose the state Sprint 20 made true, behind hardened provider auth:
+**Sprint 21 is active: Provider Dashboard Phase 2, "Dedicated Provider Console: Login, Roles, Read-Only Fleet View".** A dedicated provider console with hardened login and a working role system, then read-only views of the state Sprint 20 made true. Order: H → C → U → R → P (K, V alongside):
 - provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
+- a dedicated provider console, `provider-console/` (Vite + React, D-18): Google login, logout, role-aware access (`super-admin` / `relay-ops`);
+- operator management: super-admins add operators, change roles, disable and re-enable (audited, lock-out-proof; bootstrap accounts pinned);
 - provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
-- a separate, read-only provider console (D-18) in `provider-console/`;
+- read-only console pages for relays, tenants, audit and certificate health;
 - Sprint 20 cleanup: KI-1, KI-2, KI-3, JWTs removed from `.env.example`;
 - Sprint 20 live verification (`docs/sprint20-live-acceptance-runbook.md`).
 
@@ -33,7 +35,7 @@ The source of truth is `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members.** **M1 = Sathiya** (Go + React: live verification, provider read APIs, provider console), **M2 = Barath** (Go + Rust: provider identity hardening, Sprint 20 cleanup, database development guide). There is no M3/M4.
+**Team: two members.** **M1 = Sathiya** (Go + React: live verification, provider console foundation + Provider users page + read pages, provider read APIs), **M2 = Barath** (Go + Rust: provider identity hardening, operator management API, Sprint 20 cleanup, database development guide). There is no M3/M4.
 
 ---
 
@@ -71,9 +73,10 @@ Step 6: Brief the human: "Here's what you're building today..."
 - If a phase seems to need a new architectural choice, **stop and ask**. Answer OQ-1/OQ-2 (`path.md`) before the tenant read endpoints.
 - **No migration framework.** A schema change is a new numbered SQL file (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
-- The provider console is **read-only** (its only non-GET call is logout). Don't modify `admin/`.
+- The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
+- Operator management must stay lock-out-proof: no self-disable/demote, never zero active super-admins, bootstrap-pinned accounts can't be disabled or demoted.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies); `internal/providerquery/` doesn't import `net/http` (D-04).
-- Conflict-zone order (`path.md`): M2-H lands before M1-R wires routes in `main.go`.
+- Conflict-zone order in `main.go` (`path.md`): M2-H → M2-U → M1-R3.
 
 ## Sprint 20 invariants (still in force)
 
