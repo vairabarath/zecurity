@@ -880,3 +880,46 @@ These follow from the decisions above combined with current code. They are facts
 6. **Cross-tenant audit search** vs export/SIEM consumption (first release has provider audit query only).
 7. **CA rotation requirements** (deferred together with the relay intermediate CA).
 8. **Provider MFA contract** (deferred by D-16).
+
+---
+
+## Decision record amendment — 2026-09-26: provider authentication
+
+Made by the product/architecture owner before Sprint 21 Phase H was implemented. It **supersedes the authentication-method parts of D-16**. Everything else in the 2026-09-23 record stands.
+
+**Rationale:**
+- There are two different trust boundaries.
+  - The **tenant dashboard** is customer-facing: external organisations authenticate through OIDC, SCIM and their own identity providers.
+  - The **provider dashboard** is an internal operator control plane, used only by InkYank employees. It has no customer, partner or MSP logins.
+- The provider plane should own its identity instead of depending on an external login provider ("front office" vs "server room").
+- **Authentication is separate from authorization.** Authentication answers "who are you?" (password today; OIDC, Google, Azure AD or Okta later). Authorization answers "what can you do?" (`super-admin`, `relay-ops`).
+  - The console trusts Zecurity's own **Provider Identity Service**, never an external IdP directly.
+  - The service issues the provider JWT and owns roles and `session_generation`. Authentication methods plug into it.
+  - This is the model mature infrastructure products use (GitLab, Keycloak, Vault): a local admin account always exists, and external IdPs are pluggable rather than foundational.
+- The earlier options were both too extreme. "Google is mandatory" makes the control plane depend on an external provider. "Google is removed forever" leaves no path to SSO. The Provider Identity Service avoids both.
+
+### Decided
+
+| # | Topic | Decision | Supersedes |
+|---|---|---|---|
+| D-24 | Provider authentication method | A **Provider Identity Service** owned by Zecurity. Its first authentication method is **local accounts**: email + password, hashed with **Argon2id**. The current direct Google OAuth provider login is replaced: no Google `sub` or `hd` binding, no `PROVIDER_ALLOWED_HD`, no provider OAuth callback or redirect flow in the first release. | D-16 "bind provider users to Google `sub` and the corporate hosted domain (`hd`)" |
+| D-25 | Retained from D-16 | **Dedicated provider JWT signing key and issuer**, separate from tenant and enrollment tokens (startup refuses a reused tenant secret). **Session revocation and logout via a per-user generation counter** (`session_generation`), incremented on logout, disable, password reset and role change. | — (reaffirms D-16) |
+| D-26 | Bootstrap | The first `super-admin` is created from `PROVIDER_BOOTSTRAP_EMAIL` + `PROVIDER_BOOTSTRAP_PASSWORD`, **only if that account does not exist**. It must change its password at first login, and the bootstrap password is then removed from the environment. After that, only a super-admin creates operators. Normal onboarding needs no SQL. | D-16 consequence "reconcile `PROVIDER_BOOTSTRAP_EMAILS` with `sub` binding" |
+| D-27 | Operator lifecycle | A super-admin adds operators, changes roles, disables and re-enables them, and **resets passwords** (the replacement for account recovery). Nobody can disable or demote themselves, the last active super-admin can't be removed, and every action is audited in `provider_audit_logs`. | — (extends D-05, D-14) |
+| D-28 | MFA and deferred items | **TOTP MFA is mandatory for `super-admin` before Sprint 22's dangerous mutation features.** It takes priority over any external IdP. Backup recovery codes, password rotation policies and refresh tokens are deferred. | D-16 "MFA deferred" |
+| D-29 | Future external IdPs | Local authentication is the **bootstrap, break-glass and baseline** identity. External providers (OIDC, Google Workspace, Azure AD, Okta, Keycloak federation) may be added later as **optional authentication sources plugged into the Provider Identity Service**, alongside local accounts. They don't change provider roles, JWT issuance or `session_generation`. Not part of the first release, but it must not block them: a single session-issuing path, an `amr` claim, a nullable password hash, and the email as the stable operator key. | — |
+
+### Consequences for Sprint 21
+
+- **Phase H becomes "Provider Identity Foundation":**
+  - the Provider Identity Service seam: an `Authenticator` interface (local password first) and one session-issuing path that is the only place provider JWTs are minted, with an `amr` claim;
+  - Argon2id password storage;
+  - `POST /provider/auth/login` (JSON credentials → provider JWT), forced password change, logout;
+  - a login rate limiter (Valkey);
+  - the provider JWT key and issuer, and `session_generation`;
+  - bootstrap per D-26;
+  - removal of the provider Google OAuth routes and the required `PROVIDER_GOOGLE_REDIRECT_URI`.
+- **Phase U** adds password reset and drops the "bootstrap accounts pinned" rule: create-only bootstrap no longer re-activates accounts on restart.
+- **Phase C:** the console logs in with a credentials form and a change-password screen, instead of an OAuth redirect.
+- **The tenant Google/OIDC login is unchanged.**
+- **Before Sprint 22:** mandatory TOTP for `super-admin` (D-28), a separate follow-up after Sprint 21.

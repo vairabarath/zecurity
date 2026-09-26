@@ -35,7 +35,7 @@ cd ../zecurity-s20-live
 ```
 
 - Run everything from that worktree. It shares Docker volumes with your main checkout, so don't run both controllers at once.
-- **After the run, reset the local DB** before going back to Sprint 21 work. Phase H adds the schema file `037_provider_identity_binding.sql` (development rule in `Sprint21/path.md`).
+- **After the run, reset the local DB** before going back to Sprint 21 work. Phase H adds the schema file `037_provider_local_auth.sql` (development rule in `Sprint21/path.md`).
 
 ## Steps
 

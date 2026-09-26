@@ -9,9 +9,9 @@
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
 **Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Dedicated Provider Console: Login, Roles, Read-Only Fleet View".** A dedicated provider console with hardened login and a working role system, then read-only views of the state Sprint 20 made true. Order: H → C → U → R → P (K, V alongside):
-- provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
-- a dedicated provider console, `provider-console/` (Vite + React, D-18): Google login, logout, role-aware access (`super-admin` / `relay-ops`);
-- operator management: super-admins add operators, change roles, disable and re-enable (audited, lock-out-proof; bootstrap accounts pinned);
+- provider identity foundation (Decision Record amendment 2026-09-26, D-24…D-29): a Zecurity-owned Provider Identity Service (pluggable `Authenticator`, single token-minting path, `amr` claim); first method is email + password with Argon2id, rate-limited login, forced first password change, create-only bootstrap; dedicated provider signing key and issuer, `session_generation`, logout (D-25). **no direct Google OAuth for providers** (external IdPs may plug in later, D-29); tenant Google/OIDC is unchanged. **Mandatory TOTP for super-admin before Sprint 22** (D-28);
+- a dedicated provider console, `provider-console/` (Vite + React, D-18): email + password login, change password, logout, role-aware access (`super-admin` / `relay-ops`);
+- operator management (D-27): super-admins add operators, change roles, disable, re-enable and reset passwords (one-time temporary passwords; audited; lock-out-proof);
 - provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
 - read-only console pages for relays, tenants, audit and certificate health;
 - Sprint 20 cleanup: KI-1 (relay renewal scheduling), KI-2 (shield renewal window), KI-3 (dev redirect URI), JWTs removed from `.env.example`;
@@ -25,7 +25,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider console foundation + Provider users page + read pages, provider read actions and read APIs). **M2 = Barath** (Go + Rust: provider identity hardening, operator management API, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
+**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider console foundation + Provider users page + read pages, provider read actions and read APIs). **M2 = Barath** (Go + Rust: provider identity foundation, operator management API, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
 
 ---
 
@@ -128,7 +128,8 @@ Sprint 21 specific:
 - **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
 - The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
-- Operator management must stay lock-out-proof: no self-disable/demote, never zero active super-admins, bootstrap-pinned accounts can't be disabled or demoted.
+- Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Break-glass recovery is `PROVIDER_BOOTSTRAP_RESET` (Phase H).
+- Never log, audit or return passwords (incl. temporary ones) or `password_hash`. Provider login must stay rate-limited and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04).
 - Proto changes (KI-2 option A only) are additive; never renumber fields.
 - Respect the `path.md` conflict-zone order in `main.go`: M2-H → M2-U → M1-R3.

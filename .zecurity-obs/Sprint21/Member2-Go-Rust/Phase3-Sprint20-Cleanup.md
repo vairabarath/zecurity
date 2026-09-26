@@ -47,7 +47,7 @@ tags:
 ### KI-3 — Dev provider redirect URI
 
 - `controller/.env.example` sets `PROVIDER_GOOGLE_REDIRECT_URI=http://localhost:8080/auth/callback`. That is the **tenant** callback, so provider login never yields a token.
-- The provider callback is `/provider/auth/callback` (`main.go:348`).
+- **Superseded by D-24 (amendment 2026-09-26):** provider login is now local (email + password), and Phase H **removes** the provider Google OAuth path and the `PROVIDER_GOOGLE_REDIRECT_URI` variable. There's no redirect URI left to fix. K3 only confirms the variable is gone from `.env.example` and closes KI-3.
 
 ### Committed JWTs in `.env.example`
 
@@ -73,7 +73,7 @@ tags:
 | `connector/src/agent_server.rs` (K2) | Configurable window; per-shield `ReEnroll` throttle |
 | `shield/src/control_stream.rs` / `renewal.rs` (K2) | Renewal debounce |
 | `proto/connector/v1/connector.proto`, `controller/internal/connector/*` (K2 **option A only**) | Additive config message |
-| `controller/.env.example` (K3, K4) | Redirect fix; token scrub |
+| `controller/.env.example` (K3, K4) | Confirm `PROVIDER_GOOGLE_REDIRECT_URI` is gone (removed by H); token scrub |
 | `.github/workflows/ci.yml` (K4) | JWT grep guard |
 | `connector/src/crl.rs` (K5) | Comment |
 
@@ -117,16 +117,11 @@ Choose the wiring at phase start.
   - the shield debounce ignores a duplicate;
   - (option A) the proto message round-trips, and a default applies until received.
 
-### K3 — KI-3 redirect
+### K3 — KI-3 closed by Phase H
 
-`controller/.env.example`:
-
-```
-# Provider console login — must be the PROVIDER callback, not the tenant /auth/callback.
-PROVIDER_GOOGLE_REDIRECT_URI=http://localhost:8080/provider/auth/callback
-```
-
-Add a comment that this URI must also be registered on the Google OAuth client.
+- Phase H deletes the provider Google OAuth routes and stops reading `PROVIDER_GOOGLE_REDIRECT_URI` (D-24).
+- K3 confirms `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (H removes it) and records KI-3 as **resolved by removal** in `.zecurity-obs/Sprint20/path.md` Known Issues.
+- The tenant `GOOGLE_REDIRECT_URI` stays as it is.
 
 ### K4 — Remove committed JWTs
 
@@ -168,7 +163,7 @@ grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example &
 
 - [ ] K1 option chosen and recorded; implemented; tests
 - [ ] K2 option chosen and recorded; window + throttle + debounce; tests
-- [ ] K3 redirect fixed
+- [ ] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
 - [ ] K4 JWTs removed; CI guard
 - [ ] K5 comment
 - [ ] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
