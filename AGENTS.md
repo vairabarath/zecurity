@@ -35,7 +35,7 @@ The source of truth is `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members.** **M1 = Sathiya** (Go + React: live verification, provider console foundation + Provider users page + read pages, provider read APIs), **M2 = Barath** (Go + Rust: provider identity foundation, operator management API, Sprint 20 cleanup, database development guide). There is no M3/M4.
+**Team: two members.** **M1 = Sathiya** (testing: Sprint 20 live verification, Phase V; then Sprint 21 acceptance testing), **M2 = Barath** (all Sprint 21 development since 2026-09-28: H, U, K in `Sprint21/Member2-Go-Rust/*` and C, R, P in `Sprint21/Member1-Go/*`). There is no M3/M4.
 
 ---
 
@@ -47,7 +47,7 @@ The human will tell you who they are (Sathiya / M1 or Barath / M2). Do this imme
 Step 1: Read agent.md             → full project conventions
 Step 2: Read .zecurity-obs/Sprint21/path.md  → development rule, dependency map, conflict zones, open questions, checkboxes
 Step 3: Find first unchecked phase for this member where all depends_on are ✅
-        (Sathiya → Sprint21/Member1-Go/*, Barath → Sprint21/Member2-Go-Rust/*)
+        (Sathiya → Sprint21/Member1-Go/Phase1 (testing); Barath → Sprint21/Member2-Go-Rust/* + reassigned Member1-Go/Phase2…4, order per path.md)
 Step 4: Read that phase file      → exact spec, files, invariants, tests, build check
 Step 5: Check for "Post-Phase Fixes" section in the phase file → apply any fixes listed there
 Step 6: Brief the human: "Here's what you're building today..."

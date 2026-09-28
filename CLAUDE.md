@@ -25,7 +25,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider console foundation + Provider users page + read pages, provider read actions and read APIs). **M2 = Barath** (Go + Rust: provider identity foundation, operator management API, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
+**Team: two members only.** **M1 = Sathiya** (testing: Sprint 20 live verification, Phase V; then Sprint 21 acceptance testing). **M2 = Barath** (all Sprint 21 development since 2026-09-28: phases H, U, K in `Sprint21/Member2-Go-Rust/*` **and** C, R, P in `Sprint21/Member1-Go/*`; see `path.md` → Team Assignments).
 
 ---
 
@@ -35,7 +35,7 @@ When a team member starts a session, they will tell you who they are (Sathiya / 
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
 2. Read `.zecurity-obs/Sprint21/path.md` — development rule, dependency map, conflict zones, open questions and progress checkboxes
-3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (`Sprint21/Member1-Go/*` for Sathiya, `Sprint21/Member2-Go-Rust/*` for Barath)
+3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (Sathiya: `Sprint21/Member1-Go/Phase1-Sprint20-Live-Verification.md`; Barath: `Sprint21/Member2-Go-Rust/*` plus the reassigned `Sprint21/Member1-Go/Phase2…4`, following the order in `path.md`)
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 

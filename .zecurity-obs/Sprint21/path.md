@@ -134,12 +134,16 @@ Zecurity is **pre-production**. For this phase the team has chosen to **reset th
 
 | Member | Person | Role | Area |
 |--------|--------|------|------|
-| **M1** | Sathiya | Go + React | Sprint 20 live verification; **provider console** (foundation, login, roles, Provider users page, read pages); provider read actions and read APIs |
-| **M2** | Barath | Go + Rust | Provider identity foundation (D-24…D-26, D-29 seam), incl. the console login endpoints; **operator management API** (D-27); KI-1, KI-2, KI-3; `.env.example` JWT cleanup; DEV-1 docs |
+| **M1** | Sathiya | Testing | **Sprint 20 live verification (Phase V)**: the runbook, the run sheet, and closing the Sprint 20 boxes. Then Sprint 21 acceptance testing. |
+| **M2** | Barath | Go + Rust + React | **All Sprint 21 development:** provider identity foundation (H), operator management API (U), provider console (C, P), provider read APIs (R), Sprint 20 cleanup (K), DEV-1 docs |
 
-**Shared review** (both members approve): `internal/middleware/provider.go`, `decide()` read actions in `internal/provider/authz.go`, the operator-management guards, and the auth boundary tests (`AT-H`, `AT-U.1`, `AT-R.1`).
+> **Reassigned 2026-09-28.** Sathiya is on testing (Phase V), so Barath is the only developer and executes Phases C, R and P as well. The phase files stay in `Member1-Go/`, and the `M1-C…`, `M1-R…`, `M1-P…` item IDs are kept so links and history stay stable. Their `person:` is now Barath.
+
+**Review:** with one developer, Sathiya (or the ChatGPT review pass) reviews the auth boundary: `internal/middleware/provider.go`, `decide()` read actions in `internal/provider/authz.go`, the operator-management guards, and the tests `AT-H`, `AT-U.1`, `AT-R.1`.
 
 ## Critical Rule: Conflict Zones
+
+> **Single developer (since 2026-09-28).** Barath now owns every file below, so the M1/M2 split no longer causes conflicts. The **order** still matters, because each phase builds on the previous one's code: `main.go` changes land H → U → R3. The table is kept as the ownership record.
 
 | File | Who | Rule |
 |------|-----|------|
@@ -180,13 +184,13 @@ DEV-1 Database development guide                     (with H — H ships the fir
 All phases → Acceptance gate (Acceptance-Test-Plan.md)
 ```
 
-**Member order:**
-- **Barath:** H → U → K (+ DEV-1 with H).
-- **Sathiya:** V and R1–R2 (Day 1) → C1–C4 (after H) → C5 (after U) → R3–R4 → P.
+**Member order (since 2026-09-28):**
+- **Barath (all development):** H-a ✅ → **H-b** (CORS + DEV-1) → **U** → **C** (C1–C5, including the Provider users page) → **R** (OQ-1/OQ-2 answered first) → **P**. **K** fills gaps; K4 and K6 are quick wins.
+- **Sathiya (testing):** **V** (Sprint 20 live run on the `46ab87d` worktree), then Sprint 21 acceptance testing as phases land.
 
 **First demo (end of H + C + U):** the dedicated provider console, where the bootstrap super-admin signs in with email + password, changes the temporary password, adds a `relay-ops` operator (one-time temporary password), changes roles, disables, re-enables and resets passwords, and each person sees only what their role allows. This is the login-with-roles system required **before Sprint 22**.
 
-> **Day-1 parallelism:** M2-H, M1-V, and M1-R's query-service layer (R1–R2, no routing) all start immediately. **If the sprint runs short, M2-K2 (KI-2) is the item that may move to Sprint 22.**
+> **Parallelism:** development (Barath) and testing (Sathiya, Phase V) run in parallel; development is now sequential. **If the sprint runs short, M2-K2 (KI-2) is the item that may move to Sprint 22.**
 
 ## Execution Path
 
@@ -213,7 +217,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M2-H6b** CORS for `/provider/*` (`PROVIDER_CONSOLE_ORIGIN`). *(H-b)*
 - [x] **M2-H7** Tests (auth boundary, Argon2id, rate limit, no enumeration, `pwc` scope, bootstrap; DB-backed); build gate. *(H-a: 45 provider + 10 middleware tests, DB/Valkey suites ran; live smoke test on a throwaway DB passed. The one `go test ./...` failure is the pre-existing K6 auth-test defect.)*
 
-### Phase C — M1: Provider Console Foundation (D-18, D-05, D-24…D-27)
+### Phase C — M1 (executed by Barath): Provider Console Foundation (D-18, D-05, D-24…D-27)
 
 > See [[Sprint21/Member1-Go/Phase2-Provider-Console-Foundation]].
 
@@ -234,7 +238,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M2-U4** Audit: `provider_user.create`, `.role_change`, `.disable`, `.enable`.
 - [ ] **M2-U5** Tests (role matrix, guards incl. concurrency, audit only on success); build gate.
 
-### Phase R — M1: Provider Read Actions + Read APIs (D-04, D-05, D-06, D-15)
+### Phase R — M1 (executed by Barath): Provider Read Actions + Read APIs (D-04, D-05, D-06, D-15)
 
 > See [[Sprint21/Member1-Go/Phase3-Provider-Read-APIs]].
 
@@ -243,7 +247,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M1-R3** Handlers + routes (after M2-H and M2-U merged): `GET /provider/relays`, `/provider/relays/{id}`, `/provider/tenants`, `/provider/tenants/{id}` (needs OQ-1/OQ-2), `/provider/audit`, `/provider/certificates`.
 - [ ] **M1-R4** Tests: role matrix per endpoint, data correctness, pagination, no secret fields; build gate.
 
-### Phase P — M1: Provider Console Read Pages (D-18, D-23)
+### Phase P — M1 (executed by Barath): Provider Console Read Pages (D-18, D-23)
 
 > See [[Sprint21/Member1-Go/Phase4-Provider-Console-Read-Pages]].
 
