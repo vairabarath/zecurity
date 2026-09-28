@@ -213,7 +213,7 @@ func main() {
 	shieldSvc := shield.NewService(shieldCfg, db.Pool, pkiService, valkeycompat.NewAdapter(connectorValkey))
 	relayStore := relay.NewStore(db.Pool)
 	providerStore := provider.NewStore(db.Pool)
-	seedProviderUsers(ctx, providerStore)
+	bootstrapProviderAdmin(ctx, providerStore)
 	relaySvc := relay.NewService(pkiService, relayStore, mustDuration("RELAY_CERT_TTL", 30*24*time.Hour)).
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
@@ -335,23 +335,31 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	pInit, pCallback, err := auth.ProviderRoutes(
-		authSvc,
-		providerStore,
-		mustEnv("PROVIDER_GOOGLE_REDIRECT_URI"),
-		15*time.Minute,
-	)
-	if err != nil {
-		log.Fatalf("provider auth routes: %v", err)
-	}
-	mux.Handle("/provider/auth/initiate", pInit)
-	mux.Handle("/provider/auth/callback", pCallback)
+	// Provider login is local (Sprint 21 Phase H, D-24): the direct Google OAuth
+	// provider routes (/provider/auth/initiate, /provider/auth/callback) and
+	// PROVIDER_GOOGLE_REDIRECT_URI are gone. Tenant Google/OIDC is unchanged.
 	// Provider plane (PENDING-07a): routes behind RequireProvider — provider JWT
-	// (aud=provider) + active provider_users allowlist. NEVER WorkspaceGuard;
-	// provider identity has no tenant. M2 hangs POST /provider/relays here.
+	// (dedicated PROVIDER_JWT_SECRET, iss=zecurity-provider, aud=provider,
+	// session_generation) verified by the internal Provider Identity Service
+	// (ADR-029). NEVER WorkspaceGuard; provider identity has no tenant.
+	providerIdentity := mustProviderIdentity()
 	providerAuthz := provider.NewAuthz()
 	providerHandlers := provider.NewHandlers(providerStore, providerAuthz)
-	requireProvider := middleware.RequireProvider(mustEnv("JWT_SECRET"), providerStore)
+	requireProvider := middleware.RequireProvider(providerIdentity, providerStore)
+	// Provider auth (Sprint 21 Phase H): local email + password login
+	// (rate-limited in Valkey; fails closed), password change (the only route
+	// that accepts password-change-only tokens) and logout.
+	providerAuth := provider.NewAuthHandlers(
+		providerIdentity,
+		provider.NewLocalPasswordAuthenticator(providerStore),
+		providerStore,
+		provider.NewValkeyLoginLimiter(valkeycompat.NewAdapter(connectorValkey)),
+	)
+	mux.Handle("POST /provider/auth/login", http.HandlerFunc(providerAuth.Login))
+	mux.Handle("POST /provider/auth/password",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowPasswordChangeToken())(
+			http.HandlerFunc(providerAuth.ChangePassword)))
+	mux.Handle("POST /provider/auth/logout", requireProvider(http.HandlerFunc(providerAuth.Logout)))
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
@@ -874,6 +882,21 @@ func healthHandler() http.Handler {
 	})
 }
 
+// mustProviderIdentity builds the Provider Identity Service from
+// PROVIDER_JWT_SECRET, refusing to start if the key is missing, shorter than 32
+// bytes, or the tenant JWT_SECRET (D-25).
+func mustProviderIdentity() *provider.IdentityService {
+	key := os.Getenv("PROVIDER_JWT_SECRET")
+	if err := provider.ValidateProviderSigningKey(key, mustEnv("JWT_SECRET")); err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	ids, err := provider.NewIdentityService(key)
+	if err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	return ids
+}
+
 func mustEnv(key string) string {
 	v := os.Getenv(key)
 	if v == "" {
@@ -1128,25 +1151,36 @@ func parseBreakGlassEmails(raw string) map[string]bool {
 	return out
 }
 
-// seedProviderUsers upserts each email in PROVIDER_BOOTSTRAP_EMAILS as an active
-// super-admin. This is the ONLY way the first provider user comes into existence
-// — there is no self-registration. Idempotent: safe to run on every startup.
-func seedProviderUsers(ctx context.Context, store *provider.Store) {
-	raw := strings.TrimSpace(os.Getenv("PROVIDER_BOOTSTRAP_EMAILS"))
-	if raw == "" {
-		log.Printf("PROVIDER_BOOTSTRAP_EMAILS unset — no provider super-admins seeded")
-		return
+// bootstrapProviderAdmin runs the create-only provider bootstrap (D-26,
+// ADR-029): PROVIDER_BOOTSTRAP_EMAIL + PROVIDER_BOOTSTRAP_PASSWORD create the
+// first super-admin only while none exists; afterwards they are ignored. There
+// is no self-registration and no reset flag — break-glass recovery is a future
+// controller CLI command.
+func bootstrapProviderAdmin(ctx context.Context, store *provider.Store) {
+	for _, legacy := range []string{"PROVIDER_BOOTSTRAP_EMAILS", "PROVIDER_GOOGLE_REDIRECT_URI"} {
+		if os.Getenv(legacy) != "" {
+			log.Printf("%s is ignored — provider login is local (D-24); remove it from the environment", legacy)
+		}
 	}
-	for _, e := range strings.Split(raw, ",") {
-		email := strings.TrimSpace(e)
-		if email == "" {
-			continue
+	email := os.Getenv("PROVIDER_BOOTSTRAP_EMAIL")
+	passwordSet := os.Getenv("PROVIDER_BOOTSTRAP_PASSWORD") != ""
+
+	res, u, err := provider.Bootstrap(ctx, store, email, os.Getenv("PROVIDER_BOOTSTRAP_PASSWORD"))
+	if err != nil {
+		log.Fatalf("provider bootstrap: %v", err)
+	}
+	switch res {
+	case provider.BootstrapCreated:
+		log.Printf("created bootstrap provider super-admin %s — change the password at first login, then remove PROVIDER_BOOTSTRAP_PASSWORD", u.Email)
+	case provider.BootstrapSkippedAdminExists:
+		log.Printf("provider super-admin exists — PROVIDER_BOOTSTRAP_* ignored")
+		if passwordSet {
+			log.Printf("WARNING: remove PROVIDER_BOOTSTRAP_PASSWORD from the environment")
 		}
-		if err := store.UpsertSuperAdmin(ctx, email); err != nil {
-			log.Printf("seed provider super-admin %q: %v", email, err)
-			continue
-		}
-		log.Printf("seeded provider super-admin: %s", email)
+	case provider.BootstrapEmailTaken:
+		log.Printf("ERROR: provider bootstrap skipped: %s already exists as a non-super-admin account; bootstrap never promotes an existing account", strings.ToLower(strings.TrimSpace(email)))
+	case provider.BootstrapNotConfigured:
+		log.Printf("WARNING: no provider super-admin exists and PROVIDER_BOOTSTRAP_EMAIL is unset — nobody can sign in to the provider console")
 	}
 }
 

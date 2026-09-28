@@ -131,6 +131,18 @@ Choose the wiring at phase start.
 - **Don't rewrite git history.** The tokens are expired dev enrollment tokens; note this in the PR.
 - `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
 
+### K6 — Pre-existing auth integration test defect (found during Phase H-a; corrected 2026-09-28)
+
+`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` has three problems:
+
+1. **It never runs in CI, silently.** CI sets `AUTH_TEST_VALKEY_URL=redis://localhost:6379/15`. The test's `parseValkeyAddr` keeps the `/15` in the address (`localhost:6379/15`), the dial fails with "unknown port", and `mustConnectAuthTestValkey` calls `t.Skip`. So CI reports `ok` for `internal/auth` without running it, and the workflow's "verify integration tests actually ran" step doesn't catch the skip. Fix: parse `redis://host:port[/db]` properly, honouring the db index; make an unreachable Valkey a **failure** when the DB env var is set, not a skip; and extend the CI verification step to flag this test if it's skipped.
+2. **When forced to run, it fails:** `column "subject_claim" does not exist`. It applies a **hard-coded list** of schema files (`001`, `031`; `~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites (e.g. `internal/provider/store_test.go` `newTestStore`, `internal/resource/testdb_test.go` `newResourceTestDB` from #105).
+3. **It wipes Valkey when it does run.** It falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. With a URL the helper *can* parse (no `/db`), that flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+
+**How it was found:** run locally with `AUTH_TEST_VALKEY_URL=redis://localhost:6379` (no `/15`), it ran and failed. With CI's exact URL it skips. The failure is independent of Phase H.
+
+**Acceptance:** the test **runs** (not skips) in CI with the standard env vars and passes, and running the full gate leaves unrelated Valkey keys intact.
+
 ### K5 — Minor
 
 Fix the `crl.rs:30` comment to "every 60 s (+0–15 s jitter)".
@@ -166,6 +178,7 @@ grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example &
 - [ ] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
 - [ ] K4 JWTs removed; CI guard
 - [ ] K5 comment
+- [ ] K6 auth integration test: all schema files applied; no `FlushDB`; passes
 - [ ] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
 - [ ] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid)
 
