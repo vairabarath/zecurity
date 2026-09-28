@@ -109,7 +109,7 @@ The handler generates the temporary password and hashes it with Phase H's `passw
 | `provider_user.disable` / `provider_user.enable` | `provider_user/<id>` | `{email}` |
 | `provider_user.password_reset` | `provider_user/<id>` | `{email}`. **Never the password.** |
 
-`provider_session.login`, `provider_session.logout`, `provider_user.password_change`, `provider_user.bootstrap_create` and `provider_user.bootstrap_reset` come from Phase H.
+`provider_session.login`, `provider_session.logout`, `provider_user.password_change` and `provider_user.bootstrap_create` come from Phase H. The future recovery CLI will add `provider_user.recovery`.
 
 ### U5 — Tests
 

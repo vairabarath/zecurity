@@ -97,6 +97,7 @@ Zecurity is **pre-production**. For this phase the team has chosen to **reset th
 | **D-21 / D-03** | No relay drain, no pools or regions. The relay list stays global. |
 | **D-23** | Telemetry = **existing data only** (status, version, capacity label, `connection_count`/`max_connections`, last heartbeat, cert expiry). No new heartbeat fields. |
 | **D-07…D-13, D-17** | Suspension, deletion, audit immutability roles and destructive-action safeguards are **not in this sprint**. The console is **read-only except operator management** (Phase U/C5). Don't change the `workspaces.status='active'` predicates. |
+| **ADR-029** | Provider Identity stays an **internal controller module** (`controller/internal/provider`): same process, database and Valkey, served under `/provider/*`. It is not a separate service. |
 | **D-14** | Provider actions, incl. operator management, login, password changes, bootstrap and logout, are audited in `provider_audit_logs`. |
 
 ## Implementation choices made in this plan (not architectural — reviewable)
@@ -118,7 +119,7 @@ Zecurity is **pre-production**. For this phase the team has chosen to **reset th
 | Console stack | New top-level `provider-console/`: Vite, React 19, TypeScript, Tailwind 4, Radix (same versions as `admin/`). UI primitives are copied from `admin/src/components/ui/`, not extracted into a shared package. No Apollo: plain `fetch` against REST. | "Reuse admin UI where practical" without restructuring `admin/` into a workspace. |
 | Console token | Held in memory, plus `sessionStorage` so a reload keeps it. 15 min provider TTL; **no refresh token**, so the user logs in again on expiry. | Refresh tokens are deferred (D-28). |
 | Add operator / reset password | The server generates a random **temporary password**, stores only its hash with `must_change_password=true`, and returns it **once** (`Cache-Control: no-store`). The super-admin shares it out of band. | Super-admins never pick others' passwords, and there's no email infrastructure. |
-| Bootstrap | `PROVIDER_BOOTSTRAP_EMAIL` + `PROVIDER_BOOTSTRAP_PASSWORD` create the first super-admin **only if the account doesn't exist**. A restart never overwrites it. Break-glass: `PROVIDER_BOOTSTRAP_RESET=true` resets that account (audited, loud log). | D-26; replaces `PROVIDER_BOOTSTRAP_EMAILS`, whose upsert re-activated accounts on every start. |
+| Bootstrap | `PROVIDER_BOOTSTRAP_EMAIL` + `PROVIDER_BOOTSTRAP_PASSWORD` create the first super-admin **only if the account doesn't exist**. Once any super-admin exists, the bootstrap variables are **ignored**: no reset flag, and no env var can change an existing account. Break-glass recovery is a **future controller CLI command** (`zecurity-controller provider recover-admin`), documented in Phase H and not built in Sprint 21. | D-26 (amended 2026-09-28); replaces `PROVIDER_BOOTSTRAP_EMAILS`, whose upsert re-activated accounts on every start. |
 | Operator guards | No self-disable or self-demote; never zero active super-admins (checked under row locks); role, disable and enable changes bump `session_generation`; mutation + audit in one transaction. | Lock-out-proof, race-safe, and the console's cached role can't go stale. |
 | Console writes | The console's only non-GET calls are logout and the four operator-management calls (super-admin). Everything else is read-only. | Operator management is the one write Sprint 21 needs. Other mutations wait for D-17 safeguards (Sprint 22). |
 
@@ -205,7 +206,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M2-H2** Config: `PROVIDER_JWT_SECRET` (fatal if missing, < 32 bytes, or equal to `JWT_SECRET`), `PROVIDER_BOOTSTRAP_EMAIL`/`_PASSWORD`, `PROVIDER_CONSOLE_ORIGIN` (CORS only); warn if the removed `PROVIDER_GOOGLE_REDIRECT_URI` / `PROVIDER_BOOTSTRAP_EMAILS` are set. `appmeta.ProviderIssuer`.
 - [ ] **M2-H3** Provider Identity Service seam: an `Authenticator` interface (local password is the only method) and `IssueSession`, the **only** place provider JWTs are minted. Argon2id password hashing (PHC), policy, dummy-hash timing. Tokens use the provider key and issuer with `gen`, `pwc` and `amr` claims.
 - [ ] **M2-H4** `POST /provider/auth/login` (Valkey rate limit, no enumeration, audit on success), `POST /provider/auth/password` (forced and voluntary change → new token), `POST /provider/auth/logout`.
-- [ ] **M2-H5** `RequireProvider`: load by ID; check `gen`, email and active status; confine `pwc` tokens to the password route. Create-only bootstrap + `PROVIDER_BOOTSTRAP_RESET` break-glass. `Disable` bumps the generation.
+- [ ] **M2-H5** `RequireProvider`: load by ID; check `gen`, email and active status; confine `pwc` tokens to the password route. Create-only bootstrap (ignored once any super-admin exists). `Disable` bumps the generation.
 - [ ] **M2-H6** Delete the provider Google OAuth routes (`/provider/auth/initiate`, `/provider/auth/callback`, `provider_auth.go`) and the required `PROVIDER_GOOGLE_REDIRECT_URI`; add CORS for `/provider/*`.
 - [ ] **M2-H7** Tests (auth boundary, Argon2id, rate limit, no enumeration, `pwc` scope, bootstrap; DB-backed); build gate.
 
@@ -300,7 +301,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] **Operator management works and is lock-out-proof:**
   - super-admins add operators (any role, one-time temporary password), change roles, disable, re-enable and reset passwords;
   - every change is audited (never with a password) and ends the affected user's sessions;
-  - self-modification and removing the last super-admin are refused; `PROVIDER_BOOTSTRAP_RESET` is the break-glass path.
+  - self-modification and removing the last super-admin are refused; bootstrap is create-only and ignored once a super-admin exists.
 - [ ] The console **shows relays, tenants, audit and certificate health read-only**. Its only writes are the auth calls (login, change password, logout) and operator management.
 - [ ] **KI-1, KI-2, KI-3 are fixed**, each with a regression test.
 - [ ] **`controller/.env.example` contains no JWTs**, and a CI guard prevents re-adding them.
@@ -313,6 +314,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - Provider **mutations** in the console other than operator management (relay create, revoke or delete stay API-only; tenant suspend and delete are Sprint 22+). D-17 safeguards come with those mutations.
 - New provider roles or a finer role matrix (D-05 keeps two roles). `password_hash` is nullable so SSO-only operators can exist once an external IdP is added (D-29).
 - Suspension (D-07/D-08), deletion (D-09…D-11, D-13), audit immutability roles (D-12).
+- **Break-glass recovery CLI** (`zecurity-controller provider recover-admin --email …`): documented in Phase H, built later. Target: before production, at the latest with the TOTP follow-up. Until then, keep at least two active super-admins; in development a lost bootstrap account is recovered by a DB reset.
 - **Mandatory TOTP for `super-admin`**: required **before Sprint 22** (D-28). It's planned as the next step after Sprint 21, and takes priority over any external IdP. Backup recovery codes, password rotation policies and refresh tokens are deferred.
 - External IdP login (OIDC, Google Workspace, Azure AD, Okta, Keycloak): later, as optional `Authenticator`s plugged into the identity service (D-29).
 - A migration framework (**explicitly rejected** for the pre-production phase; see the development rule).
