@@ -690,10 +690,18 @@ func main() {
 		}
 	}()
 
+	// Provider console CORS (Sprint 21 H-b, D-18): only /provider/* and only
+	// the exact PROVIDER_CONSOLE_ORIGIN; unset = off (dev uses the Vite proxy).
+	// Wraps the whole mux so browser preflights reach it before method routing.
+	providerCORS, err := middleware.NewProviderCORS(strings.TrimSpace(os.Getenv("PROVIDER_CONSOLE_ORIGIN")))
+	if err != nil {
+		log.Fatalf("provider console CORS: %v", err)
+	}
+
 	addr := ":" + envOr("PORT", "8080")
 	httpServer := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: providerCORS(mux),
 	}
 	log.Printf("listening on %s", addr)
 
