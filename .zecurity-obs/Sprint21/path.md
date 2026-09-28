@@ -206,7 +206,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]].
 
-**H-a (identity system) — implemented 2026-09-28 on `sprint21/m2-h-provider-identity`. H-b (CORS + DEV-1 guide) — next.**
+**Phase H — done.** H-a (identity system) merged in #104; H-b (CORS + DEV-1 database development guide) on `sprint21/m2-h-b-cors-devguide`.
 
 - [x] **M2-H1** `037_provider_local_auth.sql`: `password_hash` (nullable), `must_change_password`, `password_changed_at`, `session_generation BIGINT NOT NULL DEFAULT 1`, `last_login_at`. `[schema: reset DB]`.
 - [x] **M2-H2** Config: `PROVIDER_JWT_SECRET` (fatal if missing, < 32 bytes, or equal to `JWT_SECRET`), `PROVIDER_BOOTSTRAP_EMAIL`/`_PASSWORD`, `PROVIDER_CONSOLE_ORIGIN` (CORS only); warn if the removed `PROVIDER_GOOGLE_REDIRECT_URI` / `PROVIDER_BOOTSTRAP_EMAILS` are set. `appmeta.ProviderIssuer`.
@@ -214,7 +214,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **M2-H4** `POST /provider/auth/login` (Valkey rate limit, no enumeration, audit on success), `POST /provider/auth/password` (forced and voluntary change → new token), `POST /provider/auth/logout`.
 - [x] **M2-H5** `RequireProvider`: load by ID; check `gen`, email and active status; confine `pwc` tokens to the password route. Create-only bootstrap (ignored once any super-admin exists). `Disable` bumps the generation.
 - [x] **M2-H6a** Delete the provider Google OAuth routes (`/provider/auth/initiate`, `/provider/auth/callback`, `provider_auth.go`) and the required `PROVIDER_GOOGLE_REDIRECT_URI`. *(H-a)*
-- [ ] **M2-H6b** CORS for `/provider/*` (`PROVIDER_CONSOLE_ORIGIN`). *(H-b)*
+- [x] **M2-H6b** CORS for `/provider/*` (`PROVIDER_CONSOLE_ORIGIN`). *(H-b: exact origin only, preflight answered before method routing, startup-validated origin, no credentials; tenant routes untouched)*
 - [x] **M2-H7** Tests (auth boundary, Argon2id, rate limit, no enumeration, `pwc` scope, bootstrap; DB-backed); build gate. *(H-a: 45 provider + 10 middleware tests, DB/Valkey suites ran; live smoke test on a throwaway DB passed. The one `go test ./...` failure is the pre-existing K6 auth-test defect.)*
 
 ### Phase C — M1 (executed by Barath): Provider Console Foundation (D-18, D-05, D-24…D-27)
@@ -269,7 +269,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 ### DEV-1 — Database development guide (M2, lands with M2-H)
 
-- [ ] **DEV-1a** `docs/database-development.md` (new), the database development guide. It covers:
+- [x] **DEV-1a** `docs/database-development.md` (new), the database development guide. It covers:
   - **How the local database is built:** Postgres runs every SQL file in `controller/migrations/`, in lexical order, only when the `ztna_postgres` volume is first created. There is **no migration framework**, no record of applied files, and no upgrade path for an existing database.
   - **The rule:** any schema change means recreating the local DB (`cd controller && docker compose down -v && docker compose up -d`). Local data is disposable.
   - **Adding a schema change:** a new file with the next free number (`037_` at the start of Sprint 21); never edit an existing file; the PR is labelled `[schema: reset DB]`.
@@ -277,8 +277,8 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
   - **How DB-backed Go tests get their schema:** throwaway databases, env vars; a skipped DB test fails acceptance.
   - **The existing duplicate prefixes** `016_`, `031_` and `034_`: they run in lexical order; leave them as they are.
   - **Scope:** this is a pre-production rule. Production upgrade strategy is out of scope and undecided.
-- [ ] **DEV-1b** `agent.md`: a short "Local database" section that states the reset rule and links the guide.
-- [ ] **DEV-1c** A one-line comment above the `./migrations` mount in `controller/docker-compose.yml` pointing to the guide.
+- [x] **DEV-1b** `agent.md`: a short "Local database" section that states the reset rule and links the guide.
+- [x] **DEV-1c** A one-line comment above the `./migrations` mount in `controller/docker-compose.yml` pointing to the guide.
 
 ## Final Build Gates
 
@@ -313,7 +313,7 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - [ ] The console **shows relays, tenants, audit and certificate health read-only**. Its only writes are the auth calls (login, change password, logout) and operator management.
 - [ ] **KI-1, KI-2, KI-3 are fixed**, each with a regression test.
 - [ ] **`controller/.env.example` contains no JWTs**, and a CI guard prevents re-adding them.
-- [ ] **Development docs state** that a schema change requires recreating the local DB with `docker compose down -v && docker compose up -d`. A fresh reset boots the controller with `037_provider_local_auth.sql` applied.
+- [x] **Development docs state** that a schema change requires recreating the local DB with `docker compose down -v && docker compose up -d`. A fresh reset boots the controller with `037_provider_local_auth.sql` applied.
 - [ ] The **Sprint 20 live acceptance run** is complete and recorded (the Sprint 20 run sheet), with failures filed.
 - [ ] All scenarios in [[Sprint21/Acceptance-Test-Plan]] pass.
 
