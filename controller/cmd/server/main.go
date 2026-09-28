@@ -339,11 +339,13 @@ func main() {
 	// provider routes (/provider/auth/initiate, /provider/auth/callback) and
 	// PROVIDER_GOOGLE_REDIRECT_URI are gone. Tenant Google/OIDC is unchanged.
 	// Provider plane (PENDING-07a): routes behind RequireProvider — provider JWT
-	// (aud=provider) + active provider_users allowlist. NEVER WorkspaceGuard;
-	// provider identity has no tenant. M2 hangs POST /provider/relays here.
+	// (dedicated PROVIDER_JWT_SECRET, iss=zecurity-provider, aud=provider,
+	// session_generation) verified by the internal Provider Identity Service
+	// (ADR-029). NEVER WorkspaceGuard; provider identity has no tenant.
+	providerIdentity := mustProviderIdentity()
 	providerAuthz := provider.NewAuthz()
 	providerHandlers := provider.NewHandlers(providerStore, providerAuthz)
-	requireProvider := middleware.RequireProvider(mustEnv("JWT_SECRET"), providerStore)
+	requireProvider := middleware.RequireProvider(providerIdentity, providerStore)
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
@@ -864,6 +866,21 @@ func healthHandler() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+}
+
+// mustProviderIdentity builds the Provider Identity Service from
+// PROVIDER_JWT_SECRET, refusing to start if the key is missing, shorter than 32
+// bytes, or the tenant JWT_SECRET (D-25).
+func mustProviderIdentity() *provider.IdentityService {
+	key := os.Getenv("PROVIDER_JWT_SECRET")
+	if err := provider.ValidateProviderSigningKey(key, mustEnv("JWT_SECRET")); err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	ids, err := provider.NewIdentityService(key)
+	if err != nil {
+		log.Fatalf("provider identity: %v", err)
+	}
+	return ids
 }
 
 func mustEnv(key string) string {
