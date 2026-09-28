@@ -227,6 +227,18 @@ func (s *Store) RecordLogin(ctx context.Context, id string) error {
 	return nil
 }
 
+// HasSuperAdmin reports whether any super-admin row exists (active or
+// disabled). Bootstrap uses it as a cheap early exit; the authoritative,
+// race-safe check is inside CreateBootstrapSuperAdminIfNone.
+func (s *Store) HasSuperAdmin(ctx context.Context) (bool, error) {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM provider_users WHERE role = 'super-admin')`).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check super-admin: %w", err)
+	}
+	return exists, nil
+}
+
 // BootstrapResult is the outcome of CreateBootstrapSuperAdminIfNone.
 type BootstrapResult int
 
@@ -310,27 +322,6 @@ func (s *Store) Disable(ctx context.Context, id string) error {
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrProviderUserNotFound
-	}
-	return nil
-}
-
-// UpsertSuperAdmin idempotently ensures an email exists as an active
-// super-admin. Used by the legacy PROVIDER_BOOTSTRAP_EMAILS seed on startup.
-//
-// Deprecated: replaced by the create-only CreateBootstrapSuperAdminIfNone
-// (D-26); removed when main.go switches bootstrap later in this PR.
-func (s *Store) UpsertSuperAdmin(ctx context.Context, email string) error {
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO provider_users (email, role)
-               VALUES ($1, 'super-admin')
-               ON CONFLICT (email) DO UPDATE
-                  SET role        = 'super-admin',
-                      disabled_at = NULL,
-                      updated_at  = NOW()`,
-		normalizeEmail(email),
-	)
-	if err != nil {
-		return fmt.Errorf("upsert super-admin %q: %w", email, err)
 	}
 	return nil
 }
