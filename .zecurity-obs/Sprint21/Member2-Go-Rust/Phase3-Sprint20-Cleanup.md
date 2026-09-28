@@ -131,13 +131,17 @@ Choose the wiring at phase start.
 - **Don't rewrite git history.** The tokens are expired dev enrollment tokens; note this in the PR.
 - `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
 
-### K6 — Pre-existing auth integration test defect (found during Phase H-a)
+### K6 — Pre-existing auth integration test defect (found during Phase H-a; corrected 2026-09-28)
 
-`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails on `fixed-pendings` with `column "subject_claim" does not exist`. Two problems:
-1. **Stale schema list:** it applies a **hard-coded list** of schema files (`~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites' helpers (e.g. `internal/provider/store_test.go` `newTestStore`).
-2. **Wipes dev Valkey:** it falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. The shared Valkey URL helper ignores the `/db` suffix, so this flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` has three problems:
 
-Acceptance: the test passes with the standard DB env vars set, and running the full gate leaves unrelated Valkey keys intact.
+1. **It never runs in CI, silently.** CI sets `AUTH_TEST_VALKEY_URL=redis://localhost:6379/15`. The test's `parseValkeyAddr` keeps the `/15` in the address (`localhost:6379/15`), the dial fails with "unknown port", and `mustConnectAuthTestValkey` calls `t.Skip`. So CI reports `ok` for `internal/auth` without running it, and the workflow's "verify integration tests actually ran" step doesn't catch the skip. Fix: parse `redis://host:port[/db]` properly, honouring the db index; make an unreachable Valkey a **failure** when the DB env var is set, not a skip; and extend the CI verification step to flag this test if it's skipped.
+2. **When forced to run, it fails:** `column "subject_claim" does not exist`. It applies a **hard-coded list** of schema files (`001`, `031`; `~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites (e.g. `internal/provider/store_test.go` `newTestStore`, `internal/resource/testdb_test.go` `newResourceTestDB` from #105).
+3. **It wipes Valkey when it does run.** It falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. With a URL the helper *can* parse (no `/db`), that flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+
+**How it was found:** run locally with `AUTH_TEST_VALKEY_URL=redis://localhost:6379` (no `/15`), it ran and failed. With CI's exact URL it skips. The failure is independent of Phase H.
+
+**Acceptance:** the test **runs** (not skips) in CI with the standard env vars and passes, and running the full gate leaves unrelated Valkey keys intact.
 
 ### K5 — Minor
 

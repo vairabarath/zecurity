@@ -387,6 +387,8 @@ Deviations from the commit plan, recorded for future contributors:
 
 ## Known existing issue (not introduced by H-a)
 
-- **`internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails** with `column "subject_claim" does not exist`. It fails identically on unmodified `fixed-pendings` (`a73876a`). The test applies a **hard-coded list** of schema files (`internal/auth/integration_test.go:~323`) that misses the one adding `subject_claim`.
-- **The same suite falls back to `PKI_TEST_DATABASE_URL` and calls `FlushDB` on Valkey.** The shared URL helper ignores the `/db` suffix, so this flushes **database 0**, the dev Valkey. Running the full controller gate with `PKI_TEST_DATABASE_URL` set therefore wipes local Valkey state.
-- **Deferred to Phase K** (item K6 in [[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]]).
+- **`internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` never runs in CI.** CI's `AUTH_TEST_VALKEY_URL` ends in `/15`, the test's address helper can't parse that ("unknown port"), and it **skips**. CI's `ok` for `internal/auth` doesn't include it.
+- **When forced to run, it fails** with `column "subject_claim" does not exist`. Its hard-coded schema-file list (`001`, `031`) misses the file that adds the column. It fails identically on unmodified `fixed-pendings` `a73876a`, so it's independent of H-a.
+- **When it runs, it `FlushDB`s Valkey database 0**, the developer's local Valkey, through the `PKI_TEST_DATABASE_URL` fallback.
+- **Tracked as Phase K item K6** ([[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]]).
+- **The two #104 CI failures were different.** `internal/resource` and `internal/outbox` were latent defects exposed when H-a's `go.mod` change invalidated the Go test cache. They're fixed separately in PR #105 (throwaway DB for the resource test; outbox shutdown race and shutdown hang).

@@ -260,7 +260,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M2-K3** KI-3: resolved by removal. Phase H deletes the provider Google login and `PROVIDER_GOOGLE_REDIRECT_URI` (D-24); confirm and close KI-3.
 - [ ] **M2-K4** Remove committed JWTs and install commands containing tokens from `controller/.env.example`; add a CI grep guard.
 - [ ] **M2-K5** Minor: stale "every 5 minutes" comment in `connector/src/crl.rs:30`.
-- [ ] **M2-K6** Pre-existing test defect (found in H-a): `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` applies a hard-coded schema-file list missing `subject_claim`, and `FlushDB`s Valkey db 0 via the `PKI_TEST_DATABASE_URL` fallback. Apply all schema files like the other suites; use unique Valkey keys instead of `FlushDB`.
+- [ ] **M2-K6** Pre-existing test defect (found in H-a): `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` **silently skips in CI** (the helper can't parse the `/15` in `AUTH_TEST_VALKEY_URL`); when forced to run it fails (a hard-coded schema list misses `subject_claim`) and `FlushDB`s Valkey db 0. Fix the URL parsing (and fail instead of skip), apply all schema files, drop `FlushDB`, and make CI flag the skip.
 - [ ] **M2-K7** Tests + build gate (relay, connector, shield, controller).
 
 ### DEV-1 — Database development guide (M2, lands with M2-H)
@@ -336,4 +336,5 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 ## Post-Sprint Fixes
 
 - **Phase H-a: dummy-hash failure was cached for the process lifetime** (found before the PR, while writing the login capacity test). `VerifyDummy` built its dummy Argon2id hash lazily through the hashing semaphore and cached the result. Under a login flood with all slots busy, the build failed and `ErrHashBusy` was cached, so every later unknown-email login returned 503. It's now a precomputed constant (commit `a3fca4a`). Details: [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]] → Post-Phase Fixes.
-- **Known existing issue (not from H-a), tracked as M2-K6:** `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails on `fixed-pendings` (a hard-coded schema list misses `subject_claim`), and it `FlushDB`s the dev Valkey (db 0) through the `PKI_TEST_DATABASE_URL` fallback.
+- **Known existing issue (not from H-a), tracked as M2-K6:** `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` never runs in CI (the `/15` Valkey URL isn't parsed, so it skips). When forced, it fails (a hard-coded schema list misses `subject_claim`) and `FlushDB`s dev Valkey db 0.
+- **CI on #104 exposed two latent defects** when H-a's `go.mod` change invalidated the Go test cache: `internal/resource` relied on a pre-provisioned schema (masked by `(cached)`), and `internal/outbox` had a shutdown race plus a shutdown hang. Both are fixed independently in PR #105.
