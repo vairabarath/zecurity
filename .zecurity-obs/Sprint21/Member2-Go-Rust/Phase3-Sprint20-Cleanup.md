@@ -131,6 +131,14 @@ Choose the wiring at phase start.
 - **Don't rewrite git history.** The tokens are expired dev enrollment tokens; note this in the PR.
 - `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
 
+### K6 — Pre-existing auth integration test defect (found during Phase H-a)
+
+`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails on `fixed-pendings` with `column "subject_claim" does not exist`. Two problems:
+1. **Stale schema list:** it applies a **hard-coded list** of schema files (`~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites' helpers (e.g. `internal/provider/store_test.go` `newTestStore`).
+2. **Wipes dev Valkey:** it falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. The shared Valkey URL helper ignores the `/db` suffix, so this flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+
+Acceptance: the test passes with the standard DB env vars set, and running the full gate leaves unrelated Valkey keys intact.
+
 ### K5 — Minor
 
 Fix the `crl.rs:30` comment to "every 60 s (+0–15 s jitter)".
@@ -166,6 +174,7 @@ grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example &
 - [ ] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
 - [ ] K4 JWTs removed; CI guard
 - [ ] K5 comment
+- [ ] K6 auth integration test: all schema files applied; no `FlushDB`; passes
 - [ ] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
 - [ ] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid)
 

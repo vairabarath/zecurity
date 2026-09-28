@@ -6,7 +6,7 @@ sprint: 21
 phase: 1
 execution: H
 title: Provider Identity Foundation (D-24…D-26, D-29 seam; D-16 retained parts)
-status: planned
+status: in-progress   # H-a (identity system) implemented 2026-09-28; H-b (CORS + DEV-1 guide) next
 depends_on: []
 schema_change: true   # [schema: reset DB] — 037_provider_local_auth.sql
 tags:
@@ -316,8 +316,8 @@ The existing `internal/provider/*_test.go`, `internal/middleware/provider_test.g
 
 ## Acceptance Criteria
 
-- [ ] AT-H.1 … AT-H.10 in [[Sprint21/Acceptance-Test-Plan]] pass.
-- [ ] Live, from a reset dev DB:
+- [ ] AT-H.1 … AT-H.11 in [[Sprint21/Acceptance-Test-Plan]] pass. *(H-a: every case covered by passing tests except the CORS half of AT-H.10, which lands in H-b. Tick after H-b.)*
+- [x] Live smoke test (2026-09-28, H-a). Run against a **throwaway database** on alternate ports (`:18080` / `:19090`) instead of resetting the dev DB; same schema files, same binary:
   - bootstrap creates the super-admin;
   - curl login → `password_change_required`;
   - change the password → full token;
@@ -335,18 +335,58 @@ cd controller && go build ./... && go vet ./... && go test ./internal/provider/.
 
 ## Implementation Checklist
 
-- [ ] H1 schema file `037_provider_local_auth.sql` (+ PR label `[schema: reset DB]`)
-- [ ] H2 config + fail-fast; ignored-var warnings
-- [ ] H3 Argon2id + policy + dummy hash
-- [ ] H3b identity service seam: `Authenticator`, `LocalPasswordAuthenticator`, `IssueSession` (only minting path)
-- [ ] H4 provider key/issuer; `gen`, `pwc`, `amr` claims
-- [ ] H5 login (rate-limited, no enumeration), change password, logout
-- [ ] H6 create-only bootstrap (ignored once any super-admin exists; single-statement insert; no reset flag)
-- [ ] H7 middleware (by ID, generation, disabled, `pwc` scope)
-- [ ] H8 provider Google OAuth removed; CORS
-- [ ] H9 tests; build gate
-- [ ] DEV-1 database development guide (`docs/database-development.md`) lands in the same PR or immediately after (see `path.md`)
+- [x] H1 schema file `037_provider_local_auth.sql` (+ PR label `[schema: reset DB]`)
+- [x] H2 config + fail-fast; ignored-var warnings
+- [x] H3 Argon2id + policy + dummy hash
+- [x] H3b identity service seam: `Authenticator`, `LocalPasswordAuthenticator`, `IssueSession` (only minting path)
+- [x] H4 provider key/issuer; `gen`, `pwc`, `amr` claims
+- [x] H5 login (rate-limited, no enumeration), change password, logout
+- [x] H6 create-only bootstrap (ignored once any super-admin exists; single-statement insert; no reset flag)
+- [x] H7 middleware (by ID, generation, disabled, `pwc` scope)
+- [x] H8a provider Google OAuth removed (H-a, commit 3)
+- [ ] H8b CORS for `PROVIDER_CONSOLE_ORIGIN` (**H-b**)
+- [x] H9 tests; build gate (H-a)
+- [ ] DEV-1 database development guide (`docs/database-development.md`), `agent.md` section, `docker-compose.yml` comment (**H-b**)
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: dummy-hash failure cached for the life of the process
+**Issue:** the dummy Argon2id hash used by `VerifyDummy` (equal-time rejection of unknown, disabled or no-password accounts) was built lazily through the hashing semaphore and cached in a `sync.Once`. If the first unknown-email login arrived while all `providerMaxConcurrentHashes` slots were busy, which is exactly the login flood the cap defends against, the build timed out. `ErrHashBusy` was then cached, and **every** later unknown-email login returned 503 until a restart.
+
+**Root Cause:** lazy initialization through a bounded resource, with the error cached alongside the value.
+
+**Fix Applied (`controller/internal/provider/password.go`, commit `a3fca4a`):**
+```go
+// BEFORE:
+dummyHashOnce.Do(func() { dummyHash, dummyHashErr = HashPassword(ctx, "…") })
+if dummyHashErr != nil { return dummyHashErr }
+
+// AFTER:
+const dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$…"   // precomputed, production parameters
+func VerifyDummy(ctx context.Context, password string) error {
+    _, err := VerifyPassword(ctx, password, dummyHash) // still takes a slot → same timing and memory cap
+    return err
+}
+```
+- **Guard tests:** `TestDummyHash_UsesProductionParameters` (fails if the Argon2id parameters change and the constant isn't regenerated) and `TestVerifyDummy_RecoversAfterSaturation`.
+- **Found by:** writing `TestLogin_HashCapacityExhausted_503`, before the PR.
+
+## Implementation notes (H-a, 2026-09-28)
+
+Deviations from the commit plan, recorded for future contributors:
+
+- **The Google provider login was removed in commit 3, not commit 8.** Making token minting private (`issueProviderToken`, callable only from `IdentityService.IssueSession`) meant the old Google callback could no longer mint tokens. Removing it together with the token change kept every commit compiling. Within the branch, provider login is unavailable from commit 3 until commit 8 wires the local endpoints; the PR merges as one unit.
+- **The identity service is built in `main.go` in commit 7** (`mustProviderIdentity()`), because `RequireProvider`'s new signature needs it. Commit 8 added bootstrap, routes and `.env.example`.
+- **Bootstrap logic lives in `provider.Bootstrap`**, not in `main.go`, so every outcome is unit-testable. `main.go` only logs. `Store.HasSuperAdmin` gives a cheap early exit, so normal restarts don't spend a 64 MiB Argon2id hash. The authoritative, race-safe check stays inside `CreateBootstrapSuperAdminIfNone`.
+- **Bootstrap serialization uses `pg_advisory_xact_lock` inside one transaction**, not the single `INSERT … WHERE NOT EXISTS` statement the spec suggested. Under READ COMMITTED, a single statement can't stop two concurrent bootstraps with **different** emails; the advisory lock can.
+- **Mutation-tested serialization.** The first concurrency test (`TestBootstrap_SingleStatement`, 8 goroutines) still passed with the lock removed, because the race window is too small to trigger reliably, so it proved nothing. `TestBootstrap_SerializedByAdvisoryLock` holds the lock on a second session and asserts that a bootstrap attempt **blocks** until it's released. It fails deterministically without the lock. Both tests are kept.
+- **Error surfaces:**
+  - A login audit failure fails the login (500), because the session was never delivered.
+  - Password-change and logout audit failures are logged only, because the state change already happened and failing the response would mislead the operator.
+  - Individual failed attempts are logged. Only a lockout start is audited (one `provider_auth.rate_limit` row).
+
+## Known existing issue (not introduced by H-a)
+
+- **`internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails** with `column "subject_claim" does not exist`. It fails identically on unmodified `fixed-pendings` (`a73876a`). The test applies a **hard-coded list** of schema files (`internal/auth/integration_test.go:~323`) that misses the one adding `subject_claim`.
+- **The same suite falls back to `PKI_TEST_DATABASE_URL` and calls `FlushDB` on Valkey.** The shared URL helper ignores the `/db` suffix, so this flushes **database 0**, the dev Valkey. Running the full controller gate with `PKI_TEST_DATABASE_URL` set therefore wipes local Valkey state.
+- **Deferred to Phase K** (item K6 in [[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]]).

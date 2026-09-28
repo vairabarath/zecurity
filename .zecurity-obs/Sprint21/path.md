@@ -202,13 +202,16 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]].
 
-- [ ] **M2-H1** `037_provider_local_auth.sql`: `password_hash` (nullable), `must_change_password`, `password_changed_at`, `session_generation BIGINT NOT NULL DEFAULT 1`, `last_login_at`. `[schema: reset DB]`.
-- [ ] **M2-H2** Config: `PROVIDER_JWT_SECRET` (fatal if missing, < 32 bytes, or equal to `JWT_SECRET`), `PROVIDER_BOOTSTRAP_EMAIL`/`_PASSWORD`, `PROVIDER_CONSOLE_ORIGIN` (CORS only); warn if the removed `PROVIDER_GOOGLE_REDIRECT_URI` / `PROVIDER_BOOTSTRAP_EMAILS` are set. `appmeta.ProviderIssuer`.
-- [ ] **M2-H3** Provider Identity Service seam: an `Authenticator` interface (local password is the only method) and `IssueSession`, the **only** place provider JWTs are minted. Argon2id password hashing (PHC), policy, dummy-hash timing. Tokens use the provider key and issuer with `gen`, `pwc` and `amr` claims.
-- [ ] **M2-H4** `POST /provider/auth/login` (Valkey rate limit, no enumeration, audit on success), `POST /provider/auth/password` (forced and voluntary change → new token), `POST /provider/auth/logout`.
-- [ ] **M2-H5** `RequireProvider`: load by ID; check `gen`, email and active status; confine `pwc` tokens to the password route. Create-only bootstrap (ignored once any super-admin exists). `Disable` bumps the generation.
-- [ ] **M2-H6** Delete the provider Google OAuth routes (`/provider/auth/initiate`, `/provider/auth/callback`, `provider_auth.go`) and the required `PROVIDER_GOOGLE_REDIRECT_URI`; add CORS for `/provider/*`.
-- [ ] **M2-H7** Tests (auth boundary, Argon2id, rate limit, no enumeration, `pwc` scope, bootstrap; DB-backed); build gate.
+**H-a (identity system) — implemented 2026-09-28 on `sprint21/m2-h-provider-identity`. H-b (CORS + DEV-1 guide) — next.**
+
+- [x] **M2-H1** `037_provider_local_auth.sql`: `password_hash` (nullable), `must_change_password`, `password_changed_at`, `session_generation BIGINT NOT NULL DEFAULT 1`, `last_login_at`. `[schema: reset DB]`.
+- [x] **M2-H2** Config: `PROVIDER_JWT_SECRET` (fatal if missing, < 32 bytes, or equal to `JWT_SECRET`), `PROVIDER_BOOTSTRAP_EMAIL`/`_PASSWORD`, `PROVIDER_CONSOLE_ORIGIN` (CORS only); warn if the removed `PROVIDER_GOOGLE_REDIRECT_URI` / `PROVIDER_BOOTSTRAP_EMAILS` are set. `appmeta.ProviderIssuer`.
+- [x] **M2-H3** Provider Identity Service seam: an `Authenticator` interface (local password is the only method) and `IssueSession`, the **only** place provider JWTs are minted. Argon2id password hashing (PHC), policy, dummy-hash timing. Tokens use the provider key and issuer with `gen`, `pwc` and `amr` claims.
+- [x] **M2-H4** `POST /provider/auth/login` (Valkey rate limit, no enumeration, audit on success), `POST /provider/auth/password` (forced and voluntary change → new token), `POST /provider/auth/logout`.
+- [x] **M2-H5** `RequireProvider`: load by ID; check `gen`, email and active status; confine `pwc` tokens to the password route. Create-only bootstrap (ignored once any super-admin exists). `Disable` bumps the generation.
+- [x] **M2-H6a** Delete the provider Google OAuth routes (`/provider/auth/initiate`, `/provider/auth/callback`, `provider_auth.go`) and the required `PROVIDER_GOOGLE_REDIRECT_URI`. *(H-a)*
+- [ ] **M2-H6b** CORS for `/provider/*` (`PROVIDER_CONSOLE_ORIGIN`). *(H-b)*
+- [x] **M2-H7** Tests (auth boundary, Argon2id, rate limit, no enumeration, `pwc` scope, bootstrap; DB-backed); build gate. *(H-a: 45 provider + 10 middleware tests, DB/Valkey suites ran; live smoke test on a throwaway DB passed. The one `go test ./...` failure is the pre-existing K6 auth-test defect.)*
 
 ### Phase C — M1: Provider Console Foundation (D-18, D-05, D-24…D-27)
 
@@ -257,7 +260,8 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [ ] **M2-K3** KI-3: resolved by removal. Phase H deletes the provider Google login and `PROVIDER_GOOGLE_REDIRECT_URI` (D-24); confirm and close KI-3.
 - [ ] **M2-K4** Remove committed JWTs and install commands containing tokens from `controller/.env.example`; add a CI grep guard.
 - [ ] **M2-K5** Minor: stale "every 5 minutes" comment in `connector/src/crl.rs:30`.
-- [ ] **M2-K6** Tests + build gate (relay, connector, shield, controller).
+- [ ] **M2-K6** Pre-existing test defect (found in H-a): `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` applies a hard-coded schema-file list missing `subject_claim`, and `FlushDB`s Valkey db 0 via the `PKI_TEST_DATABASE_URL` fallback. Apply all schema files like the other suites; use unique Valkey keys instead of `FlushDB`.
+- [ ] **M2-K7** Tests + build gate (relay, connector, shield, controller).
 
 ### DEV-1 — Database development guide (M2, lands with M2-H)
 
@@ -331,4 +335,5 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 
 ## Post-Sprint Fixes
 
-_None yet._
+- **Phase H-a: dummy-hash failure was cached for the process lifetime** (found before the PR, while writing the login capacity test). `VerifyDummy` built its dummy Argon2id hash lazily through the hashing semaphore and cached the result. Under a login flood with all slots busy, the build failed and `ErrHashBusy` was cached, so every later unknown-email login returned 503. It's now a precomputed constant (commit `a3fca4a`). Details: [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]] → Post-Phase Fixes.
+- **Known existing issue (not from H-a), tracked as M2-K6:** `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` fails on `fixed-pendings` (a hard-coded schema list misses `subject_claim`), and it `FlushDB`s the dev Valkey (db 0) through the `PKI_TEST_DATABASE_URL` fallback.
