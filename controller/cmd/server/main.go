@@ -335,17 +335,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	pInit, pCallback, err := auth.ProviderRoutes(
-		authSvc,
-		providerStore,
-		mustEnv("PROVIDER_GOOGLE_REDIRECT_URI"),
-		15*time.Minute,
-	)
-	if err != nil {
-		log.Fatalf("provider auth routes: %v", err)
-	}
-	mux.Handle("/provider/auth/initiate", pInit)
-	mux.Handle("/provider/auth/callback", pCallback)
+	// Provider login is local (Sprint 21 Phase H, D-24): the direct Google OAuth
+	// provider routes (/provider/auth/initiate, /provider/auth/callback) and
+	// PROVIDER_GOOGLE_REDIRECT_URI are gone. Tenant Google/OIDC is unchanged.
 	// Provider plane (PENDING-07a): routes behind RequireProvider — provider JWT
 	// (aud=provider) + active provider_users allowlist. NEVER WorkspaceGuard;
 	// provider identity has no tenant. M2 hangs POST /provider/relays here.

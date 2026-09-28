@@ -12,13 +12,20 @@ import (
 	"github.com/yourorg/ztna/controller/internal/provider"
 )
 
-const testSecret = "isolation-test-secret"
+// testSecret is deliberately used as BOTH the tenant secret and the provider
+// key: the walls below must hold even in that worst case.
+const testSecret = "isolation-test-secret-0123456789abcdef"
 
 // A provider token must be REJECTED by the tenant AuthMiddleware: it carries no
 // tenant_id, and AuthMiddleware requires one. This blocks a provider identity
 // from ever reaching a tenant (WorkspaceGuard-protected) handler.
 func TestTenantMiddlewareRejectsProviderToken(t *testing.T) {
-	tok, err := provider.IssueProviderToken(testSecret, "puid-1", provider.RoleSuperAdmin, "ops@corp.com", time.Minute)
+	ids, err := provider.NewIdentityService(testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := ids.IssueSession(&provider.ProviderUser{ID: "puid-1", Email: "ops@corp.com", Role: provider.RoleSuperAdmin, SessionGeneration: 1},
+		[]string{provider.AMRPassword}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +69,7 @@ func TestProviderVerifyRejectsTenantToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := provider.VerifyProviderToken(testSecret, signed); err == nil {
+	if _, err := provider.VerifyProviderToken([]byte(testSecret), signed); err == nil {
 		t.Fatal("tenant token accepted by VerifyProviderToken — audience wall is broken")
 	}
 }

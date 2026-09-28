@@ -30,7 +30,7 @@ func RequireProvider(secret string, store *provider.Store) func(http.Handler) ht
 				return
 			}
 
-			claims, err := provider.VerifyProviderToken(secret, parts[1])
+			claims, err := provider.VerifyProviderToken([]byte(secret), parts[1])
 			if err != nil {
 				writeProviderJSON(w, http.StatusUnauthorized, "invalid or expired provider token")
 				return

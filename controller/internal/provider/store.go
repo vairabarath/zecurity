@@ -25,6 +25,13 @@ type ProviderUser struct {
 	Role       string // "super-admin" | "relay-ops"
 	DisabledAt *time.Time
 	CreatedAt  time.Time
+
+	// Local-account fields (Sprint 21 Phase H, migration 037). PasswordHash and
+	// SessionGeneration are never serialized or returned by any API.
+	PasswordHash       string `json:"-"`
+	MustChangePassword bool   // login yields a password-change-only token
+	SessionGeneration  int64  `json:"-"` // embedded in every provider JWT; bump = revoke all
+	LastLoginAt        *time.Time
 }
 
 // AuditEntry is one append-only provider_audit_logs row. Details is a free-form
