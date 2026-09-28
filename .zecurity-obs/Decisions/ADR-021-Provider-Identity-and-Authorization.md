@@ -30,6 +30,11 @@ tags: [adr, operator, provider, identity, authz, rbac]
 > `PROVIDER_BOOTSTRAP_EMAILS`. Enterprise SSO/MFA and the React console are
 > deferred (PENDING-04/06, PENDING-07b). **Implemented in Sprint 12**
 > (see [[Sprint12/path]]).
+>
+> **Amended 2026-09-28 by [[ADR-029-Provider-Identity-Internal-Controller-Module]]:**
+> - Provider **authentication** is no longer the Google OIDC exchange. It's the controller's internal Provider Identity Service with local accounts (Decision Record amendment 2026-09-26, D-24…D-29).
+> - Super-admin #0 comes from a create-only `PROVIDER_BOOTSTRAP_EMAIL` / `PROVIDER_BOOTSTRAP_PASSWORD` bootstrap, not `PROVIDER_BOOTSTRAP_EMAILS`.
+> - The separate identity tier, `aud=provider`, `RequireProvider`, `/provider` routes, `decide()` and the two roles are unchanged.
 
 ## Context / Current State
 

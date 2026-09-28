@@ -128,7 +128,8 @@ Sprint 21 specific:
 - **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
 - The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
-- Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Break-glass recovery is `PROVIDER_BOOTSTRAP_RESET` (Phase H).
+- Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Bootstrap is **create-only** (ignored once any super-admin exists; no reset env flag). Break-glass recovery is a future controller CLI command (`zecurity-controller provider recover-admin`), not an env var.
+- Provider Identity is an **internal controller module** (`controller/internal/provider`, ADR-029), not a separate service.
 - Never log, audit or return passwords (incl. temporary ones) or `password_hash`. Provider login must stay rate-limited and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04).
 - Proto changes (KI-2 option A only) are additive; never renumber fields.

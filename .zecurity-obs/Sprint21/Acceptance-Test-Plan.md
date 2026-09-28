@@ -22,10 +22,12 @@ tags: [sprint21, tests, acceptance, provider-dashboard, provider-identity, provi
 - A tenant access JWT (signed with `JWT_SECRET`, `iss=zecurity-controller`), sent as `Authorization: Bearer` to **every** `/provider/*` read route → **401**.
 - A token signed with `PROVIDER_JWT_SECRET` but `iss=zecurity-controller`, or without `aud=provider` → **401**.
 
-### AT-CORE-2 — Logout is immediate and total
+### AT-CORE-2 — Logout, password change and password reset end every session immediately
 
-- A provider user holds two valid tokens (two browser sessions) and calls `POST /provider/auth/logout` with one.
-- **Both** tokens get **401** on the next request, well before their `exp`.
+- A provider user holds two valid tokens (two browser sessions) and calls `POST /provider/auth/logout` with one. **Both** tokens get **401** on the next request, well before their `exp`.
+- **Changing the password invalidates every existing session immediately:** after `POST /provider/auth/password`, both earlier tokens get 401 and only the newly returned token works.
+- **A super-admin password reset** (Phase U) does the same to all of the target's tokens.
+- The `session_generation` bump that enforces this is part of the password write itself. Removing it must fail these checks.
 
 ### AT-CORE-3 — The console writes only what Sprint 21 allows
 
@@ -38,7 +40,7 @@ tags: [sprint21, tests, acceptance, provider-dashboard, provider-identity, provi
 ### AT-CORE-4 — The provider plane can't be locked out
 
 - Across any sequence of operator-management calls, including concurrent ones, at least one **active super-admin** always remains.
-- If every super-admin loses access, `PROVIDER_BOOTSTRAP_RESET=true` with the bootstrap email and password restores the bootstrap account (the break-glass path) without SQL.
+- Bootstrap is create-only: once any super-admin exists, `PROVIDER_BOOTSTRAP_*` has no effect on any account (no reset, promotion or re-enable through the environment). Break-glass recovery is a future CLI command, out of Sprint 21 scope.
 
 ### AT-CORE-5 — Passwords never leak
 
@@ -53,10 +55,10 @@ tags: [sprint21, tests, acceptance, provider-dashboard, provider-identity, provi
 |----|----------|----------|
 | AT-H.1 | Controller started without `PROVIDER_JWT_SECRET`, with one under 32 bytes, or with it equal to `JWT_SECRET` | Startup fails with a clear fatal message |
 | AT-H.2 | Fresh DB, `PROVIDER_BOOTSTRAP_EMAIL` + a valid `PROVIDER_BOOTSTRAP_PASSWORD` | One `super-admin` created with `must_change_password=true`; `provider_user.bootstrap_create` audited; the log tells you to change the password and remove the variable |
-| AT-H.3 | Restart with a **different** `PROVIDER_BOOTSTRAP_PASSWORD` | The existing account is unchanged (hash, role, disabled state); a warning says to remove the variable |
+| AT-H.3 | Restart after the first super-admin exists, with a **different** `PROVIDER_BOOTSTRAP_PASSWORD` and/or a **different** `PROVIDER_BOOTSTRAP_EMAIL` | Bootstrap is ignored: no new account, no change to any existing account (hash, role, disabled state, generation); info log `PROVIDER_BOOTSTRAP_* ignored`; a warning if the password is still set. Two concurrent first starts create exactly one super-admin |
 | AT-H.4 | Bootstrap login → forced change | Login → `password_change_required: true` and a `pwc` token; `/provider/me` with it → 403 `password_change_required`; `POST /provider/auth/password` → new full token (`iss=zecurity-provider`, `aud=provider`, `gen` incremented); the old token → 401 |
 | AT-H.5 | Wrong password / unknown email / disabled account | Identical 401 `invalid_credentials` body, similar latency (dummy Argon2id verify) |
-| AT-H.6 | Brute force | The 6th failure for one email within 15 min → 429 + `Retry-After`, even with the correct password; 20 failures from one IP → 429; a success clears the email counter |
+| AT-H.6 | Brute force | The 6th failure for one email within 15 min → 429 + `Retry-After`, even with the correct password; 20 failures from one IP → 429; a success clears the email counter. Exactly **one** `provider_auth.rate_limit` audit row per lockout start (none for requests rejected while locked). More than 4 concurrent password hashes wait, and past 2 s → 503 |
 | AT-H.7 | Valkey down | Login → 503 `login_unavailable` (fails closed) |
 | AT-H.8 | Provider user disabled (via U) or logged out | Existing tokens → 403 / 401 on the next request; `session_generation` incremented |
 | AT-H.9 | Password storage | `provider_users.password_hash` is an Argon2id PHC string (`$argon2id$v=19$m=65536,t=3,p=2$…`); it verifies after a parameter bump |

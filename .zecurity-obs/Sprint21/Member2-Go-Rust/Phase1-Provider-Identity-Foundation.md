@@ -29,6 +29,8 @@ tags:
 > - **D-28:** TOTP is mandatory for `super-admin` **before Sprint 22** (a separate follow-up, not this phase); recovery codes, rotation policies and refresh tokens are deferred.
 > - **D-29:** external IdPs plug in later as optional authentication sources. This phase builds the seam they plug into.
 >
+> **ADR-029:** Provider Identity stays an **internal controller module** (`controller/internal/provider`) for now: same process, database and Valkey, served under `/provider/*`. It's not a separate service.
+>
 > **Blocks:** M1-C (console login), M2-U (operator management), M1-R3 (route wiring). Land it first.
 
 ## Problem (verified)
@@ -58,6 +60,16 @@ The provider plane owns its identity through a **Provider Identity Service**:
 
 The tenant Google/OIDC login is untouched.
 
+## Locked implementation decisions (2026-09-28)
+
+| # | Decision |
+|---|----------|
+| 1 | **Two PRs.** **H-a:** the identity system (schema `037`, identity service, passwords, tokens, store, rate limiter, auth endpoints, middleware, create-only bootstrap, provider Google OAuth removal, `.env.example` vars), labelled `[schema: reset DB]`. **H-b:** CORS for the console origin plus DEV-1 (`docs/database-development.md`, `agent.md`, `docker-compose.yml` comment). The H-a pieces must land together, or login breaks in between. |
+| 2 | **Argon2id memory cap:** `providerMaxConcurrentHashes = 4` (a constant, no env var), a 2 s wait, then 503. |
+| 3 | **Valkey down → login fails closed** with 503 `login_unavailable`. |
+| 4 | **Thresholds:** Argon2id `m=64 MiB, t=3, p=2`; 5 failures per email and 20 per IP per 15 min; `Retry-After` on 429; **one** `provider_auth.rate_limit` audit row when a lockout starts; passwords 12–128 characters. |
+| 5 | **Every password change and password reset invalidates every existing session immediately** (a `session_generation` bump in the same statement). This is an explicit acceptance criterion (AT-CORE-2), so the bump can't be removed quietly later. |
+
 ## Files
 
 | File | Change |
@@ -68,7 +80,7 @@ The tenant Google/OIDC login is untouched.
 | `controller/internal/provider/password.go` (new) | Argon2id hash/verify (PHC string), password policy, dummy hash for timing |
 | `controller/internal/provider/ratelimit.go` (new) | Valkey login-attempt limiter |
 | `controller/internal/provider/session.go` | Provider key + issuer; `gen`, `pwc` and `amr` claims; `issueProviderToken` **unexported** (only `IssueSession` calls it) |
-| `controller/internal/provider/store.go` | `GetByID`, `SetPassword`, `BumpSessionGeneration`, `RecordLogin`, `CreateBootstrapSuperAdmin`, `BootstrapReset`; `Disable` bumps the generation; **remove** `UpsertSuperAdmin` |
+| `controller/internal/provider/store.go` | `GetByID`, `SetPassword`, `BumpSessionGeneration`, `RecordLogin`, `CreateBootstrapSuperAdminIfNone` (single-statement, create-only); `Disable` bumps the generation; **remove** `UpsertSuperAdmin` |
 | `controller/internal/provider/auth_handlers.go` (new) | `Login`, `ChangePassword`, `Logout` |
 | `controller/internal/middleware/provider.go` | Provider key; load by ID; generation / disabled / `pwc` checks |
 | `controller/internal/auth/provider_auth.go` | **Delete** (provider Google OAuth). Tenant auth files are untouched. |
@@ -115,6 +127,10 @@ ALTER TABLE provider_users
   - not equal to the email;
   - on change, not equal to the current password.
 - **Timing:** unknown email, disabled account, or `password_hash IS NULL` → still run one verify against a fixed dummy hash, so response time doesn't reveal which accounts exist.
+- **Memory cap (locked 2026-09-28):**
+  - Each hash uses about 64 MiB, so unbounded parallel logins could exhaust memory (20 concurrent ≈ 1.3 GB).
+  - A semaphore allows at most `providerMaxConcurrentHashes = 4` hashes (a **constant**, not an env var), shared by hash and verify, including the dummy verify.
+  - A request waits up to 2 s for a slot, then gets **503** `login_unavailable`.
 
 ### H3b — Identity service seam (`identity.go`, D-24/D-29)
 
@@ -172,34 +188,65 @@ func VerifyProviderToken(key []byte, token string) (*ProviderClaims, error) // H
    - at ≥ 5 failures per email or ≥ 20 per IP → **429** `{"error":"too_many_attempts"}` with `Retry-After`, **without** checking the password;
    - a successful login clears the email counter.
    - The IP is `r.RemoteAddr`. `X-Forwarded-For` is **not** trusted unless a trusted-proxy setting is added later.
-   - If Valkey is down, fail **closed** for login: 503 `login_unavailable`.
+   - If Valkey is down, fail **closed** for login: 503 `login_unavailable`. *(Locked 2026-09-28: the limiter is a security control, so silently continuing without it would disable brute-force protection unnoticed.)*
+   - **Audit on lockout start:** when a counter first crosses its threshold (the failure that trips 5 per email or 20 per IP), write **one** `provider_auth.rate_limit` audit row:
+     - `provider_user_id` NULL;
+     - `provider_email` = the attempted email (lowercased);
+     - target `provider_login` / `email:<email>` or `ip:<ip>`;
+     - details `{scope, failures, window_seconds, retry_after_seconds}`;
+     - `ip_address` set.
+
+     Requests rejected **while** locked out are logged, not audited, so an attacker can't flood `provider_audit_logs`.
 2. **Load the user by email.** Unknown, disabled, NULL hash, or wrong password → the **same** 401 `{"error":"invalid_credentials"}` (the dummy verify from H3 keeps the timing equal). Increment the failure counters.
 3. **`must_change_password = true`** → 200 `{token (pwc=true, 10 min), expires_in, password_change_required: true}`.
 4. **Otherwise** → 200 `{token (15 min), expires_in, password_change_required: false}`. Update `last_login_at`. Audit `provider_session.login`.
-   - Failed attempts are **logged**, not audited, to keep `provider_audit_logs` meaningful. The limiter covers abuse.
+   - Individual failed attempts are **logged**, not audited, to keep `provider_audit_logs` meaningful. Only the lockout start above is audited.
 
 Passwords are never logged, returned or stored in audit `details`.
 
-### H6 — Bootstrap (D-26)
+### H6 — Bootstrap: create-only (D-26)
 
-On startup, if `PROVIDER_BOOTSTRAP_EMAIL` is set:
+Bootstrap exists **only to create the first super-admin**. On startup:
 
-- **The account doesn't exist:**
-  - `PROVIDER_BOOTSTRAP_PASSWORD` must be set and pass the policy, otherwise `log.Fatalf`.
-  - Create the account as `super-admin` with that hash and `must_change_password=true`.
-  - Audit `provider_user.bootstrap_create` (system actor).
-  - Log: `created bootstrap provider super-admin <email> — change the password at first login, then remove PROVIDER_BOOTSTRAP_PASSWORD`.
-- **The account exists:** do **nothing** to it (never overwrite the password, role or disabled state). If `PROVIDER_BOOTSTRAP_PASSWORD` is still set, log a warning to remove it.
+1. **A `super-admin` row already exists** (in any state: `SELECT EXISTS (SELECT 1 FROM provider_users WHERE role = 'super-admin')`):
+   - the bootstrap variables are **ignored entirely**, whatever email they name;
+   - log once at info: `provider super-admin exists — PROVIDER_BOOTSTRAP_* ignored`;
+   - if `PROVIDER_BOOTSTRAP_PASSWORD` is still set, also warn: `remove PROVIDER_BOOTSTRAP_PASSWORD from the environment`.
+2. **No super-admin exists and `PROVIDER_BOOTSTRAP_EMAIL` is set:**
+   - `PROVIDER_BOOTSTRAP_PASSWORD` must be set and pass the policy, otherwise `log.Fatalf`;
+   - create the account as `super-admin` with that hash and `must_change_password=true`;
+   - audit `provider_user.bootstrap_create` (system actor, `provider_email = "system:bootstrap"`);
+   - log: `created bootstrap provider super-admin <email> — change the password at first login, then remove PROVIDER_BOOTSTRAP_PASSWORD`.
+3. **No super-admin exists and no bootstrap email is set:** warn that no provider operator can sign in until one is bootstrapped.
 
-If there are no provider users at all and no bootstrap email is set, log a warning.
+**Implementation rules:**
+- Do the existence check and the insert in **one statement**: `INSERT … SELECT … WHERE NOT EXISTS (… role = 'super-admin')`. Two starts can then never create two bootstrap admins, even though D-02 means one instance.
+- If the bootstrap email already exists as a **non**-super-admin (only possible after manual DB edits), the insert conflicts on `email`. Log an error and do nothing: never promote, overwrite or re-enable an existing row.
+- There is **no reset flag** and no environment variable that changes an existing account. Once the first super-admin exists, the bootstrap environment has no effect.
 
-**Break-glass recovery (reviewable choice):**
-- Setting `PROVIDER_BOOTSTRAP_RESET=true` **together with** the bootstrap email and password resets that existing account:
-  - new hash, `must_change_password=true`;
-  - `disabled_at=NULL`, `role='super-admin'`;
-  - generation bumped.
-- It audits `provider_user.bootstrap_reset` and logs loudly on every start while the flag is set.
-- This is the only non-SQL recovery if every super-admin loses access. Remove the flag after use.
+**Recovery if every super-admin loses access** (not built in Sprint 21): a future controller CLI command. See **Future: break-glass recovery CLI** below.
+
+### Future: break-glass recovery CLI (documented, not built in Sprint 21)
+
+Recovery will be an explicit, operator-run **command**, not an environment flag that changes behaviour on every start. Planned shape:
+
+```bash
+# run on the controller host, with the controller's DATABASE_URL (shell access to the controller host is the trust boundary)
+zecurity-controller provider recover-admin --email ops@inkyank.com
+```
+
+- It prints a one-time temporary password to the terminal. Nothing is logged or stored in plaintext.
+- For that account it sets `must_change_password=true`, `role='super-admin'` and `disabled_at=NULL`, and bumps `session_generation`, so all existing tokens die.
+- It creates the account if it's missing.
+- It audits `provider_user.recovery` with the actor `system:cli` plus the OS user and hostname.
+- It needs an interactive confirmation (or `--yes`) and refuses to run against a database it can't reach.
+- It reuses Phase H's `password.go`, `Store` and audit helpers, so it's a thin subcommand.
+
+**Target:** before production, and at the latest alongside the mandatory super-admin TOTP follow-up (D-28), since TOTP adds a second way to be locked out.
+
+**Until then** (pre-production):
+- keep **at least two active super-admins** (Phase U already refuses to remove the last one);
+- in a development environment, a lost bootstrap account is recovered by resetting the local DB, which the pre-production rule already treats as disposable.
 
 ### H7 — Middleware (`RequireProvider`)
 
@@ -235,7 +282,7 @@ See **Tests** below. The auth boundary tests get shared review with M1.
 3. **No enumeration:** login responses and timing are identical for unknown email, disabled account, no password, and wrong password.
 4. **Brute force is bounded** per account and per IP. With Valkey down, login fails closed.
 5. **A `pwc` token can only change the password.**
-6. **Bootstrap never overwrites an existing account**, except through the explicit `PROVIDER_BOOTSTRAP_RESET` break-glass.
+6. **Bootstrap is create-only.** It creates the first super-admin and does nothing once any super-admin exists. No environment variable can change, reset, promote or re-enable an existing account.
 7. **Passwords and tokens are never logged, returned or audited.** Hashes are never returned by any API.
 8. **No change** to tenant auth, the tenant `JWT_SECRET`, tenant Google/OIDC, or relay provisioning tokens.
 
@@ -252,11 +299,16 @@ See **Tests** below. The auth boundary tests get shared review with M1.
 | `TestLogin_NoEnumeration` | DB | unknown / disabled / NULL-hash / wrong password → identical 401 body; the dummy verify runs |
 | `TestLogin_RateLimited` | DB + Valkey | the 6th failure for an email → 429 + `Retry-After`, even with the right password; success clears the counter; IP limit |
 | `TestLogin_ValkeyDown_FailsClosed` | unit | limiter error → 503 |
+| `TestLogin_RateLimitAuditedOnceOnTrip` | DB + fake limiter | the threshold-crossing failure writes exactly one `provider_auth.rate_limit` row (email scope, then IP scope); further 429s while locked write none |
+| `TestPasswordHash_ConcurrencyCap` | unit | at most `providerMaxConcurrentHashes` hashes run at once; a waiter past 2 s gets `login_unavailable` (503) |
+| `TestPasswordChange_InvalidatesAllSessions` | DB | two live full tokens → `POST /provider/auth/password` → both old tokens 401 at once; only the returned token works |
 | `TestForcedChange_PWCTokenScope` | DB | a `must_change` login → `pwc` token; `/provider/me` → 403 `password_change_required`; `/provider/auth/password` → new full token; old tokens 401 |
 | `TestLogout_RevokesAllTokens` | DB | two tokens → logout → both 401; audit row |
 | `TestRequireProvider_GenerationMismatch401` / `DisabledUser403` / `EmailMismatch401` | DB | as named |
-| `TestBootstrap_CreateOnly` | DB | first start creates a super-admin with `must_change`; a second start with a **different** password doesn't change the hash; warning when the password is still set |
-| `TestBootstrap_Reset_BreakGlass` | DB | `PROVIDER_BOOTSTRAP_RESET=true` resets the hash, re-enables, sets super-admin, bumps the generation, audits |
+| `TestBootstrap_CreateOnly` | DB | first start creates a super-admin with `must_change` and one `provider_user.bootstrap_create` row; a second start with a **different** password doesn't change the hash; warning when the password is still set |
+| `TestBootstrap_IgnoredOnceSuperAdminExists` | DB | with any super-admin present (including a disabled one), a bootstrap email naming a **new** address creates nothing, and naming an existing address changes nothing (hash, role, disabled state, generation) |
+| `TestBootstrap_NoPromotionOfExistingRow` | DB | no super-admin exists, and the bootstrap email belongs to a relay-ops row → error logged, the row is unchanged, no super-admin created |
+| `TestBootstrap_SingleStatement` | DB | two concurrent bootstrap runs create exactly one super-admin |
 | `TestProviderGoogleRoutesRemoved` | HTTP | `/provider/auth/initiate` and `/provider/auth/callback` → 404; controller starts without `PROVIDER_GOOGLE_REDIRECT_URI` |
 | `TestProviderCORS_OnlyConsoleOrigin` | unit | exact origin echoed; others get no header; tenant routes unaffected |
 
@@ -289,7 +341,7 @@ cd controller && go build ./... && go vet ./... && go test ./internal/provider/.
 - [ ] H3b identity service seam: `Authenticator`, `LocalPasswordAuthenticator`, `IssueSession` (only minting path)
 - [ ] H4 provider key/issuer; `gen`, `pwc`, `amr` claims
 - [ ] H5 login (rate-limited, no enumeration), change password, logout
-- [ ] H6 create-only bootstrap + break-glass reset
+- [ ] H6 create-only bootstrap (ignored once any super-admin exists; single-statement insert; no reset flag)
 - [ ] H7 middleware (by ID, generation, disabled, `pwc` scope)
 - [ ] H8 provider Google OAuth removed; CORS
 - [ ] H9 tests; build gate
