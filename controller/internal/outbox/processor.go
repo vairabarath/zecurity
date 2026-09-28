@@ -260,6 +260,22 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
+	// report records a loop error for Run's return value. Errors that occur
+	// because Run is shutting down (a query interrupted by the cancelled ctx)
+	// are not failures and are dropped. The send never blocks: with a small
+	// buffer, a blocking send after repeated errors (e.g. database down for a
+	// few ticks) would wedge the loop and make wg.Wait — and Run — hang forever.
+	report := func(err error) {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("outbox: %v", err)
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+
 	wg.Add(2)
 
 	go func() {
@@ -276,7 +292,7 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 			case <-ticker.C:
 				events, err := p.outbox.ClaimEvents(ctx, batchSize)
 				if err != nil {
-					errCh <- fmt.Errorf("claim outbox events: %w", err)
+					report(fmt.Errorf("claim outbox events: %w", err))
 					continue
 				}
 
@@ -304,7 +320,7 @@ func (p *Processor) Run(ctx context.Context, batchSize int) error {
 			case <-ticker.C:
 				reaped, err := p.outbox.ReapAbandoned(ctx, p.lockWindow)
 				if err != nil {
-					errCh <- fmt.Errorf("reap abandoned outbox events: %w", err)
+					report(fmt.Errorf("reap abandoned outbox events: %w", err))
 					continue
 				}
 				log.Printf("outbox: reaper recovered %d abandoned event(s)",
