@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"math/big"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -102,25 +101,18 @@ func VerifyPassword(ctx context.Context, password, phc string) (bool, error) {
 	return subtle.ConstantTimeCompare(key, p.key) == 1, nil
 }
 
-var (
-	dummyHashOnce sync.Once
-	dummyHash     string
-	dummyHashErr  error
-)
+// dummyHash is a fixed Argon2id hash with the production parameters (of an
+// irrelevant password). It is a constant rather than computed at runtime so
+// there is nothing to build or cache: a lazily computed hash would fail under
+// the very login flood it defends against (all hashing slots busy) and a
+// cached failure would break every later unknown-email login.
+const dummyHash = "$argon2id$v=19$m=65536,t=3,p=2$+G+pcGdA+jcHQWp+0FGfIQ$BRx1BFBjmjbNJXMW7rJHuEiBSO95yxl+ZidXfxhQr8I"
 
-// VerifyDummy spends the same work as a real verification against a fixed
-// hash. Login calls it when there is no real hash to check (unknown email,
-// disabled account, NULL password_hash) so response time does not reveal which
-// accounts exist. It returns only capacity/context errors.
+// VerifyDummy spends the same work as a real verification against dummyHash.
+// Login calls it when there is no real hash to check (unknown email, disabled
+// account, NULL password_hash) so response time does not reveal which accounts
+// exist. It returns only capacity/context errors.
 func VerifyDummy(ctx context.Context, password string) error {
-	dummyHashOnce.Do(func() {
-		// Background context: a cancelled first request must not cache an error
-		// for the life of the process.
-		dummyHash, dummyHashErr = HashPassword(context.Background(), "zecurity-provider-dummy-password")
-	})
-	if dummyHashErr != nil {
-		return dummyHashErr
-	}
 	_, err := VerifyPassword(ctx, password, dummyHash)
 	return err
 }

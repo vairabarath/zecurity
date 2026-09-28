@@ -117,6 +117,44 @@ func TestVerifyDummy(t *testing.T) {
 	}
 }
 
+// The dummy hash must cost the same as a real one: same parameters and key
+// length as HashPassword produces today.
+func TestDummyHash_UsesProductionParameters(t *testing.T) {
+	p, err := decodePHC(dummyHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.memory != argonMemoryKiB || p.time != argonTime || p.threads != argonThreads || len(p.key) != argonKeyLen || len(p.salt) != argonSaltLen {
+		t.Fatalf("dummyHash parameters %+v differ from production (update the constant)", p)
+	}
+}
+
+// A dummy verification that times out under saturation must not poison later
+// ones (regression: a lazily built, cached dummy hash would 503 forever).
+func TestVerifyDummy_RecoversAfterSaturation(t *testing.T) {
+	origWait := hashSlotWait
+	hashSlotWait = 20 * time.Millisecond
+	t.Cleanup(func() { hashSlotWait = origWait })
+
+	var releases []func()
+	for i := 0; i < providerMaxConcurrentHashes; i++ {
+		rel, err := acquireHashSlot(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases = append(releases, rel)
+	}
+	if err := VerifyDummy(context.Background(), "x"); !errors.Is(err, ErrHashBusy) {
+		t.Fatalf("saturated: want ErrHashBusy, got %v", err)
+	}
+	for _, rel := range releases {
+		rel()
+	}
+	if err := VerifyDummy(context.Background(), "x"); err != nil {
+		t.Fatalf("after saturation cleared: %v", err)
+	}
+}
+
 // With every slot taken, a hash waits hashSlotWait and then fails with
 // ErrHashBusy; once a slot frees up, hashing proceeds.
 func TestPasswordHash_ConcurrencyCap(t *testing.T) {
