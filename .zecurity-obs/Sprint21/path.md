@@ -230,13 +230,15 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 ### Phase U — M2: Provider Operator Management (API)
 
+**Phase U — done (2026-10-01)** on `sprint21/m2-u-operator-management`. Enable clears the old credential (reset-password restores access); reset on a disabled account → `account_disabled`; no-ops write no audit. Lock tests are mutation-proven.
+
 > See [[Sprint21/Member2-Go-Rust/Phase2-Provider-Operator-Management]].
 
-- [ ] **M2-U1** Store: `CreateOperator`, `ChangeRole`, `SetDisabled`, each transactional with an audit row and a `session_generation` bump.
-- [ ] **M2-U2** Guards: no self-disable/demote/reset; never zero active super-admins (row-locked).
-- [ ] **M2-U3** Routes (super-admin, `provider_user.manage`): `POST /provider/users` (returns a one-time temp password), `PATCH /provider/users/{id}`, `POST /provider/users/{id}/disable|enable|reset-password`; extend `GET /provider/users` (`last_login_at`, `must_change_password`, `has_password`; never `password_hash`).
-- [ ] **M2-U4** Audit: `provider_user.create`, `.role_change`, `.disable`, `.enable`.
-- [ ] **M2-U5** Tests (role matrix, guards incl. concurrency, audit only on success); build gate.
+- [x] **M2-U1** Store: `CreateOperator`, `ChangeRole`, `SetDisabled`, each transactional with an audit row and a `session_generation` bump.
+- [x] **M2-U2** Guards: no self-disable/demote/reset; never zero active super-admins (row-locked).
+- [x] **M2-U3** Routes (super-admin, `provider_user.manage`): `POST /provider/users` (returns a one-time temp password), `PATCH /provider/users/{id}`, `POST /provider/users/{id}/disable|enable|reset-password`; extend `GET /provider/users` (`last_login_at`, `must_change_password`, `has_password`; never `password_hash`).
+- [x] **M2-U4** Audit: `provider_user.create`, `.role_change`, `.disable`, `.enable`.
+- [x] **M2-U5** Tests (role matrix, guards incl. concurrency, audit only on success); build gate.
 
 ### Phase R — M1 (executed by Barath): Provider Read Actions + Read APIs (D-04, D-05, D-06, D-15)
 

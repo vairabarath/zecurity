@@ -60,7 +60,14 @@ func (h *Handlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 		writeHandlerJSON(w, http.StatusInternalServerError, map[string]string{"error": "list provider users failed"})
 		return
 	}
-	writeHandlerJSON(w, http.StatusOK, users)
+	// Explicit API shape (Phase U): snake_case, no password hash or session
+	// generation — never the raw ProviderUser struct.
+	views := make([]OperatorView, 0, len(users))
+	for i := range users {
+		views = append(views, operatorViewOf(&users[i]))
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeHandlerJSON(w, http.StatusOK, views)
 }
 
 func writeHandlerJSON(w http.ResponseWriter, status int, body any) {

@@ -362,6 +362,15 @@ func main() {
 	mux.Handle("POST /provider/auth/logout", requireProvider(http.HandlerFunc(providerAuth.Logout)))
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
+	// Operator management (Sprint 21 Phase U, D-27): super-admin only
+	// (provider_user.manage); every mutation is audited atomically and ends the
+	// affected operator's sessions.
+	operatorHandlers := provider.NewOperatorHandlers(providerStore, providerAuthz)
+	mux.Handle("POST /provider/users", requireProvider(http.HandlerFunc(operatorHandlers.Create)))
+	mux.Handle("PATCH /provider/users/{id}", requireProvider(http.HandlerFunc(operatorHandlers.ChangeRole)))
+	mux.Handle("POST /provider/users/{id}/disable", requireProvider(http.HandlerFunc(operatorHandlers.Disable)))
+	mux.Handle("POST /provider/users/{id}/enable", requireProvider(http.HandlerFunc(operatorHandlers.Enable)))
+	mux.Handle("POST /provider/users/{id}/reset-password", requireProvider(http.HandlerFunc(operatorHandlers.ResetPassword)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
 	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())
