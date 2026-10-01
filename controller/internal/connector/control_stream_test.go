@@ -97,9 +97,10 @@ func TestClientsForWorkspace_EmptyWhenNone(t *testing.T) {
 // not change the already-returned slice (callers send outside the lock).
 func TestClientsForWorkspace_ReturnsCopy(t *testing.T) {
 	r := NewConnectorRegistry()
-	r.add("c1", testClient("c1", "ws-A"))
+	c1 := testClient("c1", "ws-A")
+	r.add("c1", c1)
 	got := r.ClientsForWorkspace("ws-A")
-	r.remove("c1")
+	r.removeIfCurrent("c1", c1)
 	if len(got) != 1 {
 		t.Fatalf("returned slice changed after remove: got %d", len(got))
 	}
@@ -120,10 +121,11 @@ func TestRegistry_ConcurrentAddRemoveScan(t *testing.T) {
 			id := "c" + string(rune('a'+w))
 			ws := "ws-" + string(rune('a'+(w%3)))
 			for i := 0; i < iters; i++ {
-				r.add(id, testClient(id, ws))
+				c := testClient(id, ws)
+				r.add(id, c)
 				_ = r.get(id)
 				_ = r.ClientsForWorkspace(ws)
-				r.remove(id)
+				r.removeIfCurrent(id, c)
 			}
 		}(w)
 	}
