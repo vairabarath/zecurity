@@ -6,7 +6,7 @@ sprint: 21
 phase: 2
 execution: U
 title: Provider Operator Management (API)
-status: planned
+status: done   # implemented 2026-10-01 on sprint21/m2-u-operator-management
 depends_on: [1]   # needs H: local accounts, password hashing, session_generation, GetByID, provider key
 schema_change: false   # uses the columns added by 037 in Phase H
 tags:
@@ -58,7 +58,7 @@ All routes go behind `RequireProvider` and are authorised with `CanManageProvide
 | `POST /provider/users` | `{email, role}` | **201** `{user, temporary_password}`, with the password shown once. Email trimmed and lowercased, role validated. An active duplicate → **409 `already_exists`**. A disabled duplicate → **409 `exists_disabled`** (use enable). |
 | `PATCH /provider/users/{id}` | `{role}` | **200**. Same role → 200 no-op, not audited. |
 | `POST /provider/users/{id}/disable` | — | **204**; sets `disabled_at`, bumps the generation |
-| `POST /provider/users/{id}/enable` | — | **204**; clears `disabled_at`, bumps the generation |
+| `POST /provider/users/{id}/enable` | — | **204**; clears `disabled_at` **and `password_hash`** (the old credential is never trusted again), bumps the generation, issues **no** password. Sign-in needs an explicit reset-password. Already enabled → 204 no-op that never touches the password. |
 | `POST /provider/users/{id}/reset-password` | — | **200** `{temporary_password}`, shown once. New hash, `must_change_password=true`, generation bumped. |
 
 **Errors** are `{"error": "<code>"}`:
@@ -146,7 +146,7 @@ DB-backed tests use the throwaway-DB harness. **A skipped DB test fails acceptan
 
 ## Acceptance Criteria
 
-- [ ] AT-U.1 … AT-U.8 in [[Sprint21/Acceptance-Test-Plan]] pass.
+- [x] AT-U.1 … AT-U.8 in [[Sprint21/Acceptance-Test-Plan]] pass (store tests + end-to-end tests + live curl run, 2026-10-01).
 
 ## Build Check
 
@@ -156,12 +156,50 @@ cd controller && go build ./... && go vet ./... && go test ./internal/provider/.
 
 ## Implementation Checklist
 
-- [ ] U1 store functions (transactional, generation bump, audit)
-- [ ] U2 guards: self, last super-admin (locked), role values
-- [ ] U3 handlers + routes; temp-password generation + hashing in the handler
-- [ ] U4 audit actions
-- [ ] U5 tests; build gate
-- [ ] Tell M1 the API is merged (it unblocks M1-C5)
+- [x] U1 store functions (transactional, generation bump, audit)
+- [x] U2 guards: self, last super-admin (locked), role values
+- [x] U3 handlers + routes; temp-password generation + hashing in the handler
+- [x] U4 audit actions
+- [x] U5 tests; build gate
+- [x] API ready for C5 (Provider users page): it is executed by Barath too since the 2026-09-28 reassignment
+
+## Locked decisions (2026-10-01, before implementation)
+
+1. **Enable does not restore or trust the old credential.** It clears `password_hash` and issues no password. Restoring access is a separate, explicit `reset-password`.
+2. **No delete.** Operators are only disabled or enabled. A disabled email can't be re-added: `409 exists_disabled`, so enable the existing account instead.
+3. **Email validation:** trim, lowercase, no whitespace, exactly one `@` with non-empty parts, ≤ 254 characters. This is validation, not verification.
+4. **Reset-password on a disabled account** → `409 account_disabled`. Nothing is generated or stored; enable first, then reset.
+5. **Idempotent no-ops** (disable a disabled operator, enable an enabled one) → 204, no audit, no generation bump. Enabling an enabled operator never touches its password.
+
+## Implementation notes (2026-10-01)
+
+- **Enable reuses H unchanged.** H's `LocalPasswordAuthenticator` already rejects an empty `password_hash` with the same response and timing as a wrong password (`identity.go`). So clearing the hash on enable is enough to block sign-in until reset-password; no Phase H change was needed.
+- **Lock order.** Role change and disable lock the **active super-admin set first** (`ORDER BY id FOR UPDATE`), then the target row. A consistent order means two admins demoting each other serialize (the second sees the first's commit and gets `last_super_admin`) instead of deadlocking, which would have surfaced as a 500.
+- **Lock tests are mutation-proven.** The first versions of both lock tests **still passed with the set lock's `FOR UPDATE` removed**:
+  - the structural test locked every super-admin row, including the target, so the target-row lock alone made `ChangeRole` wait;
+  - the concurrent test's two transactions never actually overlapped.
+
+  They were rewritten:
+  - `TestGuard_LastSuperAdmin_SerializedByRowLock` locks only a **third** super-admin's row (neither actor nor target), so only the set lock can make a demotion wait;
+  - `TestGuard_LastSuperAdmin_Concurrent` uses `testHookAfterSuperAdminLock` (a package variable, **nil in production**) to pause the first transaction right after it takes the set lock, guaranteeing the overlap.
+
+  With the lock removed, both now fail (the concurrent one with `ok=2 … active super-admins=0`, the exact failure the lock prevents). With the lock, both pass on repeated runs.
+- **Defence in depth on reset.** The handler refuses self and disabled accounts **before** generating a temporary password. The store re-checks inside the transaction, so it stays authoritative under races.
+- **Credential hygiene.** Temporary passwords are generated and hashed in the handler, returned once (`Cache-Control: no-store`), and never logged, audited or passed to the store in plaintext. `TestOperatorResponses_NoSecrets` checks responses, audit rows **and the captured process log**.
+- **`GET /provider/users`** now returns an explicit `OperatorView` (snake_case, `has_password` instead of any hash, no session generation) instead of the raw struct, which used Go field names (`"ID"`, `"DisabledAt"`).
+- **Live run (real binary, throwaway DB, 2026-10-01):**
+  - create → 201, 20-character temporary password, `no-store`;
+  - relay-ops on `/provider/users` → 403;
+  - self-disable → 409 `cannot_modify_self`;
+  - disable → token rejected;
+  - reset on a disabled account → 409 `account_disabled`;
+  - enable → 204, and the **old password then fails**, with `has_password: false`;
+  - reset → the temporary login requires a change;
+  - promote → 200.
+
+  The audit log had exactly one row per real change (`credential_cleared: true` on enable). No temporary password appeared in the controller log.
+- **Test counts:** 13 store tests and 8 end-to-end tests. The provider suite totals 66, with no skips; the CI-style full gate passes.
+- **Phase H code: unchanged.**
 
 ## Post-Phase Fixes
 

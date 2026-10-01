@@ -121,7 +121,7 @@ This page is super-admin only.
   - The response's `temporary_password` is shown **once**, in a dialog with a copy button and the warning "shown once — share it securely; they must change it at first login".
   - Closing the dialog discards it from memory. It's never stored or re-fetchable.
 - **Change role:** a select → `PATCH /provider/users/{id}`, after a confirmation dialog that names the email and both roles.
-- **Disable / enable:** buttons → `POST …/disable` / `…/enable`, after a confirmation dialog.
+- **Disable / enable:** buttons → `POST …/disable` / `…/enable`, after a confirmation dialog. **Enable clears the operator's password** (Phase U): it returns 204 with no password, and the row then shows `has_password: false`. The page should offer **Reset password** straight away, because the operator can't sign in until a reset. Reset on a disabled row returns `409 account_disabled`, so show "enable first".
 - **Reset password:** a button → `POST …/reset-password`, after a confirmation dialog. The temporary password is shown once, the same way as on add.
 - **Guard UX:** mirror the server guards, but always rely on the server's answer.
   - Your own row has no disable, demote or reset controls (use Change password instead).
