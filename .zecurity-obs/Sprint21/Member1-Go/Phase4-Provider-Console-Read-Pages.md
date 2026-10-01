@@ -1,7 +1,7 @@
 ---
 type: phase
 member: M1
-person: Sathiya
+person: Barath   # reassigned 2026-09-28 (Sathiya on testing, Phase V)
 sprint: 21
 phase: 4
 execution: P

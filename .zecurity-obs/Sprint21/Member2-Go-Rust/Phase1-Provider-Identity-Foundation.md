@@ -6,7 +6,7 @@ sprint: 21
 phase: 1
 execution: H
 title: Provider Identity Foundation (D-24…D-26, D-29 seam; D-16 retained parts)
-status: in-progress   # H-a (identity system) implemented 2026-09-28; H-b (CORS + DEV-1 guide) next
+status: done   # H-a merged in #104 (2026-09-28); H-b (CORS + DEV-1) on sprint21/m2-h-b-cors-devguide
 depends_on: []
 schema_change: true   # [schema: reset DB] — 037_provider_local_auth.sql
 tags:
@@ -316,7 +316,7 @@ The existing `internal/provider/*_test.go`, `internal/middleware/provider_test.g
 
 ## Acceptance Criteria
 
-- [ ] AT-H.1 … AT-H.11 in [[Sprint21/Acceptance-Test-Plan]] pass. *(H-a: every case covered by passing tests except the CORS half of AT-H.10, which lands in H-b. Tick after H-b.)*
+- [x] AT-H.1 … AT-H.11 in [[Sprint21/Acceptance-Test-Plan]] pass. *(All covered by passing tests; the CORS half of AT-H.10 landed in H-b and was also verified live with curl against the real binary.)*
 - [x] Live smoke test (2026-09-28, H-a). Run against a **throwaway database** on alternate ports (`:18080` / `:19090`) instead of resetting the dev DB; same schema files, same binary:
   - bootstrap creates the super-admin;
   - curl login → `password_change_required`;
@@ -344,9 +344,9 @@ cd controller && go build ./... && go vet ./... && go test ./internal/provider/.
 - [x] H6 create-only bootstrap (ignored once any super-admin exists; single-statement insert; no reset flag)
 - [x] H7 middleware (by ID, generation, disabled, `pwc` scope)
 - [x] H8a provider Google OAuth removed (H-a, commit 3)
-- [ ] H8b CORS for `PROVIDER_CONSOLE_ORIGIN` (**H-b**)
+- [x] H8b CORS for `PROVIDER_CONSOLE_ORIGIN` (H-b)
 - [x] H9 tests; build gate (H-a)
-- [ ] DEV-1 database development guide (`docs/database-development.md`), `agent.md` section, `docker-compose.yml` comment (**H-b**)
+- [x] DEV-1 database development guide (`docs/database-development.md`), `agent.md` section, `docker-compose.yml` comment (H-b)
 
 ## Post-Phase Fixes
 
@@ -384,6 +384,14 @@ Deviations from the commit plan, recorded for future contributors:
   - A login audit failure fails the login (500), because the session was never delivered.
   - Password-change and logout audit failures are logged only, because the state change already happened and failing the response would mislead the operator.
   - Individual failed attempts are logged. Only a lockout start is audited (one `provider_auth.rate_limit` row).
+
+## Implementation notes (H-b, 2026-09-28)
+
+- **CORS wraps the whole mux, not individual routes.** Provider routes use method patterns (`POST /provider/auth/login`), so a browser `OPTIONS` preflight matches none of them and the mux would answer 405 before any route-level middleware ran. `NewProviderCORS` wraps the mux and acts only on paths under `/provider/`.
+- **Preflights are answered by the wrapper**: 204 for the console origin, 403 for any other. They're never passed on, because a preflight carries no token and `RequireProvider` would reject it.
+- **Real requests from a foreign origin still reach the handler** and its auth, but get no CORS headers, so the browser withholds the response. There's no `Access-Control-Allow-Credentials` (bearer tokens only), and responses under `/provider/` carry `Vary: Origin`.
+- **`PROVIDER_CONSOLE_ORIGIN` is validated at startup.** It must be exactly `scheme://host[:port]`, http or https, with no wildcard, path, trailing slash, query or userinfo, otherwise the controller refuses to start. An origin with a trailing slash would silently never match what browsers send.
+- **Verified live** with curl against the real binary (throwaway DB): console preflight 204 with the headers; console login 200 with `Access-Control-Allow-Origin`; foreign preflight 403; foreign request with no ACAO; tenant route with no ACAO; no-Origin clients unaffected.
 
 ## Known existing issue (not introduced by H-a)
 
