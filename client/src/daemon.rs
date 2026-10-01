@@ -14,8 +14,8 @@ use crate::config;
 use crate::grpc::{
     self,
     client_v1::{
-        AclConnector, AclEntry, AclRemoteNetwork, DeviceDirective, DevicePostureReport,
-        GetAclSnapshotRequest, GetTransportSnapshotRequest, RenewCertRequest,
+        AclConnector, AclEntry, AclRemoteNetwork, AclSnapshot, DeviceDirective,
+        DevicePostureReport, GetAclSnapshotRequest, GetTransportSnapshotRequest, RenewCertRequest,
         ReportDevicePostureRequest, TransportConnector, TransportRemoteNetwork, TransportSnapshot,
     },
 };
@@ -26,8 +26,8 @@ use crate::login::LoginResult;
 use crate::net_stack;
 use crate::relay_pool::RelayPool;
 use crate::runtime::{
-    self, DeviceInfo, DeviceState, SessionInfo, SharedState, TunHandle, TunnelRestartCoordinator,
-    UserInfo, WorkspaceInfo,
+    self, AppliedConfig, AppliedCoords, AppliedEntry, DeviceInfo, DeviceState, SessionInfo,
+    SharedState, TunHandle, TunnelRestartCoordinator, UserInfo, WorkspaceInfo,
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
@@ -625,6 +625,8 @@ async fn handle_up(
         Some(d) => d,
     };
 
+    let applied = effective_config(&acl, transport.as_ref(), &device);
+
     // Filter to only entries this device is permitted to access.
     let my_spiffe = device.spiffe_id.clone();
     let allowed_entries: Vec<AclEntry> = acl
@@ -758,7 +760,7 @@ async fn handle_up(
 
     // Store TunManager (for route cleanup) and AbortHandle (for task cancel).
     *tun_slot.lock().await = Some(mgr);
-    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count }));
+    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count, applied }));
 
     info!(routes = route_count, "zecurity0 up");
     IpcResponse {
@@ -821,9 +823,61 @@ async fn restart_tunnel_if_running(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// One down→up restart pass. Extracted so `run_restart_worker` can drive it
-/// through the queued-oneshot coordinator, and so tests can drive the
-/// coordination logic itself against a fake `work` closure.
+/// Phase 1 only skips restarts for an effective no-op. Any effective change,
+/// including the transient vN+1 connector-absent snapshot, still does a full restart.
+pub(crate) fn needs_full_restart(
+    applied: Option<&AppliedConfig>,
+    acl: Option<&AclSnapshot>,
+    transport: Option<&TransportSnapshot>,
+    device: Option<&DeviceInfo>,
+) -> bool {
+    let (Some(applied), Some(acl), Some(device)) = (applied, acl, device) else {
+        return true;
+    };
+    effective_config(acl, transport, device) != *applied
+}
+
+/// Evaluates the Fix 01 Phase 1 restart decision against the current runtime state.
+/// Skips restart when effective config is unchanged and data plane is alive, or invokes
+/// `down_up` if a full restart is needed.
+async fn run_restart_decision<F, Fut>(state: &SharedState, down_up: F) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let (task_dead, restart) = {
+        let s = state.read().await;
+        let task_dead = s
+            .tun_handle
+            .as_ref()
+            .map(|h| h.abort.is_finished())
+            .unwrap_or(false);
+        let restart = task_dead
+            || needs_full_restart(
+                s.tun_handle.as_ref().map(|h| &h.applied),
+                s.acl_snapshot.as_ref(),
+                s.transport_snapshot.as_ref(),
+                s.device.as_ref(),
+            );
+        (task_dead, restart)
+    };
+
+    if !restart {
+        info!("effective config unchanged, keeping tunnel");
+        Ok(())
+    } else {
+        if task_dead {
+            warn!("net_stack task is not running, restarting VPN");
+        }
+        info!("snapshot changed, restarting VPN");
+        down_up().await
+    }
+}
+
+/// Runs the Fix 01 Phase 1 restart decision (run_restart_decision), performing a
+/// full down→up only on an effective change or a dead net_stack task. Extracted so
+/// `run_restart_worker` can drive it through the queued-oneshot coordinator, and so
+/// tests can drive the coordination logic itself against a fake `work` closure.
 async fn perform_tunnel_restart(
     state: &SharedState,
     conf: &config::ClientConf,
@@ -833,25 +887,26 @@ async fn perform_tunnel_restart(
         return Ok(());
     }
 
-    info!("snapshot changed, restarting VPN");
+    run_restart_decision(state, || async {
+        let down = handle_down(state, tun_slot).await;
+        if !down.ok {
+            anyhow::bail!(
+                "{}",
+                down.error.unwrap_or_else(|| "failed to stop VPN".into())
+            );
+        }
 
-    let down = handle_down(state, tun_slot).await;
-    if !down.ok {
-        anyhow::bail!(
-            "{}",
-            down.error.unwrap_or_else(|| "failed to stop VPN".into())
-        );
-    }
+        let up = handle_up(state, conf, tun_slot).await;
+        if !up.ok {
+            anyhow::bail!(
+                "{}",
+                up.error.unwrap_or_else(|| "failed to start VPN".into())
+            );
+        }
 
-    let up = handle_up(state, conf, tun_slot).await;
-    if !up.ok {
-        anyhow::bail!(
-            "{}",
-            up.error.unwrap_or_else(|| "failed to start VPN".into())
-        );
-    }
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Runs restart passes for one `TunnelRestartCoordinator` until its `pending`
@@ -1245,6 +1300,316 @@ mod tunnel_restart_coordinator_tests {
         wait_until(|| fake.calls.load(Ordering::SeqCst) >= 1).await;
         fake.release();
         assert!(r2.await.unwrap().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod restart_decision_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn make_test_device() -> DeviceInfo {
+        DeviceInfo {
+            id: "d1".to_string(),
+            spiffe_id: "spiffe://t/d1".to_string(),
+            certificate_pem: "-----BEGIN CERTIFICATE-----\nCERT1\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            private_key_pem: "-----BEGIN PRIVATE KEY-----\nKEY1\n-----END PRIVATE KEY-----\n"
+                .to_string(),
+            tpm_key_material: None,
+            ca_cert_pem: "-----BEGIN CERTIFICATE-----\nCA1\n-----END CERTIFICATE-----\n"
+                .to_string(),
+            cert_expires_at: i64::MAX,
+            hostname: "test-host".to_string(),
+            os: "linux".to_string(),
+        }
+    }
+
+    fn make_test_acl(device: &DeviceInfo) -> AclSnapshot {
+        AclSnapshot {
+            version: 1,
+            workspace_id: "ws1".to_string(),
+            generated_at: 1000,
+            relay_addr: "relay:9093".to_string(),
+            relay_spiffe_id: "spiffe://r".to_string(),
+            entries: vec![AclEntry {
+                resource_id: "res1".to_string(),
+                name: "res1".to_string(),
+                address: "10.0.0.1".to_string(),
+                port: 80,
+                protocol: "tcp".to_string(),
+                allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+                remote_network_id: "rn1".to_string(),
+                preferred_connector_id: String::new(),
+                ..Default::default()
+            }],
+            remote_networks: vec![AclRemoteNetwork {
+                remote_network_id: "rn1".to_string(),
+                name: "rn1".to_string(),
+                connectors: vec![AclConnector {
+                    connector_id: "c1".to_string(),
+                    connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://t/c1".to_string(),
+                    relay_addr: "relay:9093".to_string(),
+                    relay_spiffe_id: "spiffe://r".to_string(),
+                }],
+            }],
+        }
+    }
+
+    fn make_test_transport() -> TransportSnapshot {
+        TransportSnapshot {
+            version: 1,
+            remote_networks: vec![TransportRemoteNetwork {
+                remote_network_id: "rn1".to_string(),
+                connectors: vec![TransportConnector {
+                    connector_id: "c1".to_string(),
+                    connector_tunnel_addr: "10.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://t/c1".to_string(),
+                    relay_addr: "relay:9093".to_string(),
+                    relay_spiffe_id: "spiffe://r".to_string(),
+                }],
+            }],
+        }
+    }
+
+    async fn setup_state() -> (SharedState, Arc<AtomicUsize>) {
+        let state = crate::runtime::new_shared();
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let transport = make_test_transport();
+        let applied = effective_config(&acl, Some(&transport), &device);
+
+        {
+            let mut s = state.write().await;
+            s.device = Some(device);
+            s.acl_snapshot = Some(acl);
+            s.transport_snapshot = Some(transport);
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+                route_count: 1,
+                applied,
+            }));
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        (state, call_count)
+    }
+
+    #[tokio::test]
+    async fn restart_decision_nothing_changed_skips() {
+        let (state, count) = setup_state().await;
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_dead_task_restarts_even_if_unchanged() {
+        let (state, count) = setup_state().await;
+        let finished_task = tokio::spawn(async {});
+        let dead_abort = finished_task.abort_handle();
+        finished_task.await.unwrap();
+
+        {
+            let mut s = state.write().await;
+            let current = s.tun_handle.as_ref().unwrap();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead_abort,
+                route_count: current.route_count,
+                applied: current.applied.clone(),
+            }));
+        }
+
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_version_and_timestamp_bumps_skip() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            if let Some(ref mut acl) = s.acl_snapshot {
+                acl.version = 2;
+                acl.generated_at = 2000;
+            }
+            if let Some(ref mut tr) = s.transport_snapshot {
+                tr.version = 2;
+            }
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_vn_plus_1_connector_absent_restarts() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            if let Some(ref mut tr) = s.transport_snapshot {
+                tr.version = 2;
+                tr.remote_networks[0].connectors.clear();
+            }
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_entry_added_restarts() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            let spiffe = s.device.as_ref().unwrap().spiffe_id.clone();
+            if let Some(ref mut acl) = s.acl_snapshot {
+                acl.entries.push(AclEntry {
+                    resource_id: "res2".to_string(),
+                    name: "res2".to_string(),
+                    address: "10.0.0.2".to_string(),
+                    port: 443,
+                    protocol: "tcp".to_string(),
+                    allowed_spiffe_ids: vec![spiffe],
+                    remote_network_id: "rn1".to_string(),
+                    preferred_connector_id: String::new(),
+                    ..Default::default()
+                });
+            }
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_resource_access_removed_restarts() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            if let Some(ref mut acl) = s.acl_snapshot {
+                acl.entries[0].allowed_spiffe_ids.clear();
+            }
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_identity_change_restarts() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            if let Some(ref mut dev) = s.device {
+                dev.certificate_pem =
+                    "-----BEGIN CERTIFICATE-----\nNEW_CERT\n-----END CERTIFICATE-----\n"
+                        .to_string();
+            }
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_tun_handle_none_restarts() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            s.tun_handle = None;
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_error_propagates() {
+        let (state, count) = setup_state().await;
+        {
+            let mut s = state.write().await;
+            s.tun_handle = None; // force restart
+        }
+        let c = count.clone();
+        let res = run_restart_decision(&state, || async {
+            c.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("down_up failed"))
+        })
+        .await;
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "down_up failed");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn needs_full_restart_acl_none_returns_true() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+
+        assert!(needs_full_restart(
+            Some(&applied),
+            None,
+            None,
+            Some(&device),
+        ));
+    }
+
+    #[test]
+    fn needs_full_restart_device_none_returns_true() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+
+        assert!(needs_full_restart(
+            Some(&applied),
+            Some(&acl),
+            None,
+            None,
+        ));
     }
 }
 
@@ -2831,6 +3196,97 @@ pub(crate) fn resolve_entry_coords(
                 .collect(),
             None => Vec::new(),
         },
+    }
+}
+
+pub(crate) fn effective_config(
+    acl: &AclSnapshot,
+    transport: Option<&TransportSnapshot>,
+    device: &DeviceInfo,
+) -> AppliedConfig {
+    let my_spiffe = device.spiffe_id.as_str();
+    let allowed_entries = acl
+        .entries
+        .iter()
+        .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe));
+
+    let mut rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
+    for rn in &acl.remote_networks {
+        rn_by_id.insert(rn.remote_network_id.as_str(), rn);
+    }
+    let mut trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
+    if let Some(t) = transport {
+        for trn in &t.remote_networks {
+            trn_by_id.insert(trn.remote_network_id.as_str(), trn);
+        }
+    }
+
+    let mut entries = Vec::new();
+    for entry in allowed_entries {
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
+        let mut applied_coords: Vec<AppliedCoords> = coords
+            .into_iter()
+            .map(|c| AppliedCoords {
+                connector_id: c.connector_id,
+                connector_tunnel_addr: c.connector_tunnel_addr,
+                connector_spiffe: c.connector_spiffe,
+                relay_addr: c.relay_addr,
+                relay_spiffe_id: c.relay_spiffe_id,
+            })
+            .collect();
+
+        let preferred = entry.preferred_connector_id.as_str();
+        if !preferred.is_empty()
+            && !applied_coords.is_empty()
+            && applied_coords[0].connector_id == preferred
+        {
+            if applied_coords.len() > 1 {
+                applied_coords[1..].sort_by(|a, b| {
+                    (&a.connector_id, &a.connector_tunnel_addr, &a.relay_addr)
+                        .cmp(&(&b.connector_id, &b.connector_tunnel_addr, &b.relay_addr))
+                });
+            }
+        } else {
+            applied_coords.sort_by(|a, b| {
+                (&a.connector_id, &a.connector_tunnel_addr, &a.relay_addr)
+                    .cmp(&(&b.connector_id, &b.connector_tunnel_addr, &b.relay_addr))
+            });
+        }
+
+        entries.push(AppliedEntry {
+            address: entry.address.clone(),
+            port: entry.port,
+            protocol: entry.protocol.clone(),
+            remote_network_id: entry.remote_network_id.clone(),
+            preferred_connector_id: entry.preferred_connector_id.clone(),
+            coords: applied_coords,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        (
+            &a.address,
+            a.port,
+            &a.protocol,
+            &a.remote_network_id,
+            &a.preferred_connector_id,
+        )
+            .cmp(&(
+                &b.address,
+                b.port,
+                &b.protocol,
+                &b.remote_network_id,
+                &b.preferred_connector_id,
+            ))
+    });
+
+    AppliedConfig {
+        spiffe_id: device.spiffe_id.clone(),
+        certificate_pem: device.certificate_pem.clone(),
+        private_key_pem: device.private_key_pem.clone(),
+        tpm_key_material: device.tpm_key_material.clone(),
+        ca_cert_pem: device.ca_cert_pem.clone(),
+        entries,
     }
 }
 
