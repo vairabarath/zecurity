@@ -3,7 +3,7 @@ type: fix
 sprint: 20
 fix: connector-control-stream
 title: Connector control-stream drop during certificate renewal
-status: implemented-pending-live-acceptance
+status: implemented-live-accepted
 component: connector + controller (control plane only)
 related: [[Fix01-Client-Tunnel-Restart-On-Snapshot-Change]]
 source_rows: [U5, G9]
@@ -21,7 +21,8 @@ tags:
 > certificate renewal.
 >
 > Status: implemented (Option A, make-before-break + switch-and-drop); unit/integration tests green;
-> **live acceptance not yet run**. See §Implementation at the end. Nothing committed.
+> **live acceptance run 2026-10-02 — PASS** (see §Live Acceptance at the end). Committed locally
+> (`6362d1f`), not pushed.
 
 ## 1. Problem Statement
 
@@ -1234,3 +1235,62 @@ None in the architecture. Implementation details worth recording:
   `controller_client.rs` changes.
 - **No live acceptance performed.** Next task: §11 tests 1–8, O-1, O-2, O-3, R-1/R-2 if available.
 - **Nothing committed.**
+
+## Live Acceptance (2026-10-02)
+
+`STATUS: LIVE ACCEPTED — 38 RENEWALS, 0 RENEWAL-CAUSED DISCONNECTS — COMMITTED LOCALLY (6362d1f), NOT PUSHED`
+
+### Lab
+- Controller: the fix-connector build `controller-fixconn` (sha `3e52e994…`) on .164, run as user unit `s20-controller`
+  with `CONNECTOR_CERT_TTL=15m CONNECTOR_RENEWAL_WINDOW=10m SHIELD_CERT_TTL=168h RELAY_CERT_TTL=1h`.
+- Connectors on the branch build `970bfa02…`, update timers `disabled/inactive` on every host:
+  - `s20fc-conn-inkyank` `9beadebf` (.75);
+  - `s20fc-conn-udaya` `1ff5bcaa` (.42);
+  - `s20fc-conn-manoj` `c3c88536` (.44, joined at 11:23).
+  The 2026-10-01 connectors had expired while the hosts were off, so they had to be re-created (Finding 17).
+- Shield: `s20fc-shield-nika` `ce92211f` (.38, branch shield `0b2944dd…`), attached to **inkyank** (`shields.connector_id=9beadebf`).
+  The admin UI shield page showed "connected via udaya", but the token JWT and the DB both said inkyank (UI label bug, see below).
+- Resource: `s20fc-nika-summa` `a9b2c2d3` (192.168.1.38:5173), protected, granted to `s20-summa-users`.
+  Client on .164 (Fix 01 build).
+- Samplers:
+  - DB status/serial every 100 ms;
+  - `:9092` serial every 100 ms;
+  - socket + PID every 200 ms on each connector and on the shield;
+  - keep-alive holds (single socket, no reconnect).
+  Logs are in `~/s20-run/logs/fc-*.log` and `/tmp/fc-sock*.log` on the hosts.
+
+### Results
+
+| # | Row | Result | Evidence |
+|---|---|---|---|
+| 1 | Normal renewal | **PASS** | Every renewal: connector `certificate renewed — opening replacement Control stream (old stream stays active)` → `Control stream established` → `switched to renewed Control stream — old stream dropped`, ~20–50 ms after `persisted and published`. Controller: `connected` then `superseded stream closed (newer stream is authoritative)`, **no `disconnected`**. No `closed cleanly, reconnecting`. PIDs unchanged, NRestarts=0 |
+| 2 | Repeated renewals | **PASS** | 10:49–12:10: inkyank 15, udaya 15, manoj 8 renewals = **38**. 38 `superseded`, **0 `disconnected`**, 0 stream errors. The DB sampler never saw a non-`active` row for any s20fc connector |
+| 3 | Long-lived client flow | **PASS** | Hold 11:04:10–11:44:12: **1194 requests on one socket (local port 48394), 2401 s, no reset**. It spanned 8 renewals of the shield's connector (inkyank) and 8 of udaya. Client: 0 `snapshot changed, restarting VPN` |
+| 4 | Controller status | **PASS** | `connectors.status` stayed `active` throughout. `cert_serial` changed every cycle (DB sampler), and `:9091`/`:9092` served the new serial each time |
+| 5 | ACL/transport versions | **PASS** | All 15 ACL versions (v1–v15) line up with admin actions: enrollments, shield enroll, resource delete/create/Protect/Unprotect, grant assign/unassign, manoj joining (v11 `connectors=3`). **None lines up with a ReEnroll.** 0 `notify topology` lines from renewals |
+| 6 | Shield link continuity | **PASS** | A single shield socket `.38:38992 ↔ .75:9091` from 10:56 to the end. Shield PID 13575, NRestarts=0, no reconnect or failover. `shields.connector_id` unchanged. The `:9092` probe never failed (0 FAIL lines) |
+| 7 | New-stream failure (test 7) | **PASS** | On inkyank, at the 12:08:09 renewal, a self-reverting nft rule allowed 1 new SYN to `:9090` and reset the rest for 50 s. RenewCert succeeded; the replacement open failed (`controller SPIFFE preflight failed`) and the connector logged `replacement Control stream failed — keeping current stream, retrying with backoff`. Retries came at +0, +2, +4, +8, +16 s, so **`BACKOFF_*` doubling was preserved**. The old stream kept working: the controller recorded no `disconnected`, health reports continued, and the DB stayed `active`. After the block expired, the next retry switched at 12:09:11.88 (`switched to renewed Control stream`), followed by controller `connected` + `superseded`. In the socket sampler the new `:9090` socket appeared before the old one disappeared. The Shield-proxy channel kept the old channel and rebuilt at 12:08:49 (its own 5 s retry) |
+| 7b | Fallback: old cert expiry | not exercised live | Covered by unit tests. Live, it would need a block longer than the old cert's remaining ~10 min |
+| 8 | Connector crash during renewal | not run | Out of this task's scope; unchanged path |
+| O-1 | Two `Control` streams coexist | **PASS** | Inkyank socket sampler, e.g. at 10:59:54.862 three controller sockets, 245 ms later two: the new pair `:46500/:46520` came up before the old `:42262` closed. That pattern repeated on every renewal. The controller logged one `connected` and one `superseded` per renewal, never a `disconnected` |
+| O-2 | Resource change around a renewal | **PASS, with caveat** | Unprotect applied at 11:46:03 (renewal 11:41:54); Protect applied at 11:47:51 (renewal 11:47:09). Both reached the shield over the replacement stream (`resource removed`/`resource applied`, DB `applied_at` advanced, nft `tcp dport 5173 drop` removed and restored). At 11:47:09.857 the shield logged `ignoring stale resource snapshot generation=3 last_applied=3`, meaning the new stream's connect-time snapshot replay was deduplicated by the generation gate (the replay-safety in Pre-Implementation §1). **Caveat:** the dialog clicks landed 8–40 s after the ReEnroll, not inside the ~20–250 ms stream overlap. A human click can't hit that window |
+| O-3 | ACL revoke around a renewal | **PASS, with caveat** | Unassign confirmed 8 s after the 12:02:54.8 renewal: ACL v15 pushed at 12:03:03, and in the same millisecond the connector logged `ACL diff: revoked sessions torn down count=5` and `session cancelled — authorization revoked mid-session`. The hold was cut at 12:03:04 and a new connection returned `000` (fail closed). An earlier attempt (11:53:01) gave the same result. **Caveat:** as with O-2, the revoke reached the new stream after the switch, not during the overlap |
+| R-1/R-2 | Relay | not run | No relay in this lab (empty `LabelledRelayList`) |
+
+### Findings during the run
+- **F-A (low, UI):** the shield detail page showed "CONNECTED VIA s20fc-conn-udaya" while the enrollment
+  token's `connector_id`, and afterwards `shields.connector_id`, were inkyank. The first token then failed
+  with `shield connector mismatch` (`internal/shield/enrollment.go:66`) and burned its JTI. Reloading minted
+  a token matching the DB row, and that one enrolled. **Not caused by this fix** (shield token path untouched).
+- **F-B (test validity):** before reinstall, nika ran a non-branch shield binary (`0131b3a8…`), very likely
+  from the auto-updater (Finding 7). It was replaced with the branch build `0b2944dd…`.
+- **F-C (lab/ops):** Hermes background processes are killed whenever a turn is interrupted. Running the
+  controller, admin UI, samplers and holds as `systemd-run --user` units keeps them up.
+
+### Remaining / not covered live
+- Fallback at the old cert's `not_after` (unit-tested only).
+- Crash during renewal (§11 #8).
+- Relay rows R-1/R-2 (need a relay lab).
+- O-2/O-3 inside the sub-second overlap window. The window is too short for manual UI actions. The
+  ordering guarantee (the old stream is never read after the switch) is unit-tested
+  (`stale_acl_on_old_stream_cannot_overwrite_after_switch`).
