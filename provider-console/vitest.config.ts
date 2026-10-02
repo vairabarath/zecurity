@@ -14,5 +14,9 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     css: true,
+    // Node 22+ ships its own (experimental) localStorage global, which hides
+    // jsdom's and is undefined without --localstorage-file. Turn it off so the
+    // tests see the browser's Web Storage (the no-persistence tests need it).
+    execArgv: ['--no-experimental-webstorage'],
   },
 })
