@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 )
 
 // Handlers serves the provider-plane REST endpoints that sit behind
@@ -22,6 +23,10 @@ func NewHandlers(store *Store, authz *Authz) *Handlers {
 // Me returns the calling provider's own identity. No authz beyond
 // RequireProvider: any authenticated provider user may see who they are.
 //
+// last_login_at (Sprint 21 C-a) is the timestamp of the CURRENT successful
+// sign-in — the login handler records it when the session is issued — so the
+// provider console shows it as "Signed in at", not as a previous login.
+//
 // GET /provider/me
 func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 	actor, ok := ActorFromContext(r.Context())
@@ -29,11 +34,27 @@ func (h *Handlers) Me(w http.ResponseWriter, r *http.Request) {
 		writeHandlerJSON(w, http.StatusInternalServerError, map[string]string{"error": "no provider actor in context"})
 		return
 	}
-	writeHandlerJSON(w, http.StatusOK, map[string]string{
-		"user_id": actor.UserID,
-		"email":   actor.Email,
-		"role":    actor.Role,
+	// The Actor carries only id/email/role; read the timestamp from the row.
+	u, err := h.store.GetByID(r.Context(), actor.UserID)
+	if err != nil {
+		writeHandlerJSON(w, http.StatusInternalServerError, map[string]string{"error": "provider lookup failed"})
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeHandlerJSON(w, http.StatusOK, meResponse{
+		UserID:      actor.UserID,
+		Email:       actor.Email,
+		Role:        actor.Role,
+		LastLoginAt: u.LastLoginAt,
 	})
+}
+
+// meResponse is the GET /provider/me body.
+type meResponse struct {
+	UserID      string     `json:"user_id"`
+	Email       string     `json:"email"`
+	Role        string     `json:"role"`
+	LastLoginAt *time.Time `json:"last_login_at"`
 }
 
 // ListUsers returns the provider user roster. Guarded by CanManageProviderUser,
