@@ -317,7 +317,8 @@ function OperatorsTable({
                 <RoleBadge role={op.role} />
               </TableCell>
               <TableCell>
-                <div className="flex flex-wrap gap-1.5">
+                {/* Badges never break mid-label; a narrow screen scrolls the table instead. */}
+                <div className="flex gap-1.5 whitespace-nowrap">
                   {disabled ? <Badge variant="secondary">Disabled</Badge> : <Badge variant="outline">Active</Badge>}
                   {!disabled && !op.has_password && <Badge variant="warning">No password</Badge>}
                   {!disabled && op.has_password && op.must_change_password && (
@@ -330,7 +331,7 @@ function OperatorsTable({
               </TableCell>
               <TableCell className="text-right">
                 {self ? (
-                  <span className="text-xs text-muted-foreground">Use the account menu</span>
+                  <span className="whitespace-nowrap text-xs text-muted-foreground">Use the account menu</span>
                 ) : (
                   // modal={false}: the menu opens dialogs, and a modal menu
                   // would leave the page inert after it closes.
