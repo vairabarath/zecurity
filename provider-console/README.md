@@ -2,17 +2,30 @@
 
 The provider operators' console (Sprint 21, Decision Record D-18): its own Vite + React app, with its own build and its own domain. It is separate from the tenant admin dashboard in `admin/`, which it never touches or imports from. It talks only to the controller's `/provider/*` API.
 
-What it does today (Phase C-a):
+What it does today (Phase C):
 - email + password sign-in;
 - the forced first password change and voluntary password changes;
 - sign-out;
 - a session countdown;
 - role-aware navigation (`super-admin`, `relay-ops`);
-- a Home page.
+- a Home page;
+- **Provider users** (`/users`, super-admin only): list operators, add an operator, change a role, disable, enable and reset a password.
 
 Still to come:
-- **C-b:** operator management (the Provider users page);
 - **Phase P:** the read-only fleet pages (relays, tenants, audit, certificates).
+
+## Operator management (Provider users)
+
+- **Who:** super-admins only. relay-ops has no nav entry, `/users` shows Forbidden, and the controller answers 403 anyway.
+- **Every change is confirmed in a dialog first.** After a success the list is re-read from the controller; nothing is updated optimistically.
+- **Your own row has no controls.** The controller refuses changes to yourself (`cannot_modify_self`) and never allows zero active super-admins (`last_super_admin`). Change your own password from the account menu.
+- **Temporary passwords** (after Add or Reset password):
+  - shown once, in a dialog, and discarded from memory when it closes;
+  - never stored, logged or put in the URL;
+  - copied only when you click Copy (the browser Clipboard API). If copying fails, the password stays visible so you can copy it by hand. The console doesn't touch the clipboard afterwards.
+- **Enable clears the password.** An enabled operator can't sign in until you reset their password. After Enable, the console offers **Reset password now**, but never resets by itself.
+- **Error codes** from the controller (`already_exists`, `exists_disabled`, `account_disabled`, `last_super_admin`, `cannot_modify_self`, …) are shown as plain-language messages (`src/lib/operator-errors.ts`).
+- **Effect on the operator:** a role change, disable or reset signs that operator out everywhere on their next request.
 
 ## Development
 
@@ -89,18 +102,19 @@ The build gate is `npm ci && npm run lint && npm test && npm run build`.
 
   All of this lives in `src/api/client.ts`.
 - **Authorization happens on the server.** Route guards and the role-filtered nav only hide what the controller would refuse. The controller authorizes every request.
-- **Allowed writes:** the console's only non-GET calls are login, change password and logout. C-b adds the five operator-management calls. `src/api/api-surface.test.ts` fails if a new write appears.
+- **Allowed writes:** the console's only non-GET calls are login, change password and logout, plus the five operator-management calls (create, change role, disable, enable, reset password). `src/api/api-surface.test.ts` fails if a new write appears.
 
 ## Layout
 
 ```text
 src/
-  api/          client.ts (the only fetch), auth.ts, types.ts
+  api/          client.ts (the only fetch), auth.ts, operators.ts, types.ts
   auth/         session.ts (zustand store), flows.ts (sign in/out, change password, refresh),
                 guards.tsx, roles.ts (the single role matrix)
-  components/   Layout, SessionCountdown, RoleBadge, AuthCard, ProviderBrand; ui/ (primitives copied from admin/)
-  pages/        Login, ChangePassword, Home, Forbidden, NotFound
-  lib/          formatting and password-policy hints
+  components/   Layout, SessionCountdown, RoleBadge, AuthCard, ProviderBrand, OperatorDialogs,
+                TemporaryPasswordDialog; ui/ (primitives: copied from admin/, plus table and select)
+  pages/        Login, ChangePassword, Home, ProviderUsers, Forbidden, NotFound
+  lib/          formatting, password-policy hints, operator error messages
   test/         setup, fetch stub, render helpers, source guards
 ```
 
@@ -112,6 +126,8 @@ src/
 
 - Vitest + Testing Library on jsdom, with `fetch` stubbed (`src/test/fetch.ts`).
 - Beyond the behaviour tests, two guard tests protect the invariants:
-  - **`src/test/static-guards.test.ts`** checks that only the API client calls `fetch`, nothing uses `localStorage` or the console, only the session store touches `sessionStorage`, and there are no tenant endpoints.
+  - **`src/test/static-guards.test.ts`** checks that only the API client calls `fetch`, nothing uses `localStorage` or the console, only the session store touches `sessionStorage`, only the temporary-password dialog uses the clipboard, and there are no tenant endpoints.
   - **`api-surface.test.ts`** checks the allowed writes.
 - `vitest.config.ts` runs the test workers with `--no-experimental-webstorage`. Without it, Node's own `localStorage` global would hide jsdom's.
+- `src/test/setup.ts` stubs the pointer-capture and `scrollIntoView` APIs that jsdom lacks and Radix Select calls (tests only).
+- jsdom doesn't do layout, so narrow-screen behaviour is checked in a real browser: no page-level horizontal scroll at 375, 640, 768 and 1024px.

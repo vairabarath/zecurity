@@ -1,4 +1,4 @@
-import { ChevronDown, KeyRound, LogOut } from 'lucide-react'
+import { ChevronDown, CircleUser, KeyRound, LogOut } from 'lucide-react'
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { signOut } from '@/auth/flows'
 import { SECTIONS, sectionsFor, type Section } from '@/auth/roles'
@@ -27,11 +27,17 @@ export function Layout({ sections = SECTIONS }: { sections?: readonly Section[] 
   return (
     <div className="flex min-h-screen flex-col">
       <header className="border-b border-border/40 bg-card/40 backdrop-blur-xl">
-        <div className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4">
-          <Link to="/" aria-label="Provider Console home">
+        {/* Below md the nav moves to its own row (and scrolls sideways if it
+            ever has to), so the header never pushes the page wider than the
+            screen. */}
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-1 px-4 py-2 md:h-14 md:flex-nowrap md:py-0">
+          <Link to="/" aria-label="Provider Console home" className="shrink-0">
             <ProviderBrand />
           </Link>
-          <nav aria-label="Sections" className="flex items-center gap-1">
+          <nav
+            aria-label="Sections"
+            className="order-last -mx-1 flex w-full items-center gap-1 overflow-x-auto md:order-none md:mx-0 md:w-auto"
+          >
             {visible.map((s) => (
               <NavLink
                 key={s.key}
@@ -39,7 +45,7 @@ export function Layout({ sections = SECTIONS }: { sections?: readonly Section[] 
                 end={s.path === '/'}
                 className={({ isActive }) =>
                   cn(
-                    'rounded-md px-3 py-1.5 text-sm transition-colors',
+                    'whitespace-nowrap rounded-md px-3 py-1.5 text-sm transition-colors',
                     isActive ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:text-foreground',
                   )
                 }
@@ -48,14 +54,18 @@ export function Layout({ sections = SECTIONS }: { sections?: readonly Section[] 
               </NavLink>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-3">
-            <SessionCountdown />
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            {/* Home also shows the countdown, so phones can do without it here. */}
+            <SessionCountdown className="hidden sm:inline-flex" />
             {me && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="sm" className="gap-2" aria-label="Account menu">
-                    <span className="hidden max-w-48 truncate sm:inline">{me.email}</span>
-                    <RoleBadge role={me.role} />
+                    <span className="hidden max-w-48 truncate lg:inline">{me.email}</span>
+                    <span className="hidden sm:inline-flex">
+                      <RoleBadge role={me.role} />
+                    </span>
+                    <CircleUser className="size-4 sm:hidden" aria-hidden />
                     <ChevronDown className="size-4" aria-hidden />
                   </Button>
                 </DropdownMenuTrigger>

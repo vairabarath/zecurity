@@ -2579,3 +2579,35 @@ serves on `127.0.0.1:9102`.
 - **AT-C status** is recorded in the Phase C file.
 - **Found, not fixed:** a resolver test teardown leaks 15 `resolvers_updsc_*` databases per run (it drops the DB through its own connection). Candidate for K.
 - **Next:** C-b (C5 Provider users page).
+
+---
+
+## 2026-10-05 — Claude Code (Barath / M2) — Sprint 21 Phase C-b: Provider users page
+
+**What was done:**
+- Branch `sprint21/c-b-provider-users` (from `fixed-pendings` after #108), 5 commits; not pushed yet:
+  1. Operator API module and types; the API surface is now 3 auth + 5 operator writes.
+  2. Dialog (copied from admin), table and select primitives; `@radix-ui/react-dialog` and `@radix-ui/react-select`.
+  3. Provider users page at `/users` (super-admin only):
+     - confirmations for every mutation, and a list reload after each success;
+     - change-role dialog with a select;
+     - enable that offers "Reset password now" without resetting by itself;
+     - a show-once temporary password dialog with click-only Copy;
+     - readable 409 messages.
+  4. Narrow-screen layout fix (found in the browser check).
+  5. README and closeout docs.
+- **Gates:**
+  - `npm ci`, lint, `npm test` (169) and the build pass.
+  - `admin/` is unchanged and builds; no controller changes.
+  - Mutation checks for the C-b invariants: the suite failed every time.
+- **Browser check in Orca (throwaway DB, two tabs):** add, show-once password and Copy, the new operator's first sign-in, relay-ops Forbidden (and the backend's 403), role change, disable, enable → reset offer, reset, session revocation in the other tab, self-protection. All passed.
+
+**Key decisions:**
+- The page matches operator 403s by status, because the list and mutation 403 bodies differ.
+- Clicking outside the temporary-password dialog doesn't dismiss it; Close and Escape do.
+- Disabled rows offer Change role and Enable; active rows offer Change role, Reset password and Disable.
+
+**What's next:**
+- Push and open the C-b PR.
+- Phase R (OQ-1/OQ-2 first), then P and K.
+- Formal AT-C acceptance by Sathiya, including the AT-C.7 network capture.

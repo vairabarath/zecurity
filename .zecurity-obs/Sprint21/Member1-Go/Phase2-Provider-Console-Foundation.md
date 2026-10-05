@@ -6,7 +6,7 @@ sprint: 21
 phase: 2
 execution: C
 title: Provider Console Foundation (dedicated app, local login, roles, operator management UI)
-status: in-progress   # C-a (C1–C4) done 2026-10-02; C-b (C5, C6 rest) next
+status: done   # C-a (C1–C4) 2026-10-02, PR #108; C-b (C5, C6) 2026-10-05
 depends_on: ["M2-Phase1"]   # C1–C4 need M2-H (local auth endpoints); C5 also needs M2-U (operator API)
 schema_change: false
 tags:
@@ -153,7 +153,7 @@ This page is super-admin only.
 
 ## Acceptance Criteria
 
-- [ ] AT-C.1 … AT-C.7 in [[Sprint21/Acceptance-Test-Plan]] pass. *(C-a: AT-C.1–C.3 met, C.7 met for storage/URL, C.4/C.5 partly; C.6 and the rest with C-b. See "C-a closeout" above.)*
+- [x] AT-C.1 … AT-C.7 in [[Sprint21/Acceptance-Test-Plan]] pass. *(Verified in development: unit tests plus browser checks; see "C-a closeout" and "C-b closeout" above. Formal acceptance testing is M1's; AT-C.7's network capture is left to it.)*
 
 ## Build Check
 
@@ -168,8 +168,8 @@ cd admin && npm run build     # unchanged; must still build
 - [x] C2 login form, forced change password, 401/403/429 handling, logout, expiry
 - [x] C3 role matrix (`roles.ts`), `RequireRole`, role-aware nav
 - [x] C4 Home
-- [ ] C5 Provider users page (after M2-U merged), incl. show-once temporary passwords
-- [ ] C6 tests; README with deployment and network-lock notes; build gate
+- [x] C5 Provider users page (after M2-U merged), incl. show-once temporary passwords
+- [x] C6 tests; README with deployment and network-lock notes; build gate
 
 ## C-a implementation notes (2026-10-02)
 
@@ -250,6 +250,75 @@ Branch `sprint21/c-a-provider-console-foundation`, 5 commits: `/provider/me` + `
 - C5, the Provider users page: list, add operator, change role, disable/enable, reset password, show-once temporary passwords, confirmations, 409 messages.
 - The rest of C6: C5 tests, and the five operator calls added to `ALLOWED_WRITES`.
 - New primitives: Dialog, Table, Select.
+
+## C-b implementation notes and closeout (2026-10-05)
+
+Branch `sprint21/c-b-provider-users`, 5 commits: operator API module; dialog, table and select primitives; Provider users page; narrow-screen layout fix; closeout docs. No controller changes, and no H, U or `admin/` changes. These are implementation choices within the spec, not new architectural decisions.
+
+- **API (`src/api/operators.ts`):** list, create, change role, disable, enable, reset password. Ids are path-encoded. `ALLOWED_WRITES` in the API-surface test is now the three auth calls plus these five mutations.
+- **List 403 body:** `GET /provider/users` answers 403 with `"provider action forbidden: …"`, while the mutations answer `"forbidden"`. The page matches on status 403, so the backend needed no change.
+- **Page behaviour:**
+  - every mutation is confirmed in a dialog;
+  - after a success the list is re-read from the controller (no optimistic edits);
+  - errors keep the dialog open with a readable message; `not_found` also refreshes the list.
+- **Row actions:**
+  - your own row has no controls ("Use the account menu");
+  - active rows: Change role, Reset password, Disable;
+  - disabled rows: Change role, Enable. The controller allows role changes on disabled accounts; reset on a disabled account would be `account_disabled`.
+- **Change role:** the dialog shows the email, the current role and a new-role select (super-admin / relay-ops only). Confirming is disabled while the selection equals the current role.
+- **Enable vs reset:** Enable warns that the password is cleared. On success it reloads and shows an "Operator enabled" dialog offering **Reset password now** or **Later**. It never resets by itself; the reset is a separate, explicit call.
+- **Temporary password dialog:**
+  - shown once;
+  - Copy only on click (Clipboard API, no dependency), with a brief "Copied";
+  - if the clipboard fails, the password stays visible for manual copy;
+  - clicking outside doesn't dismiss it (so it isn't lost by accident), but Close and Escape do;
+  - closing drops it from React state;
+  - never stored, logged or put in the URL;
+  - the OS clipboard is not touched afterwards.
+- **Source guard:** only `TemporaryPasswordDialog.tsx` references the clipboard.
+- **Test environment:** `setup.ts` stubs the jsdom-missing pointer-capture and `scrollIntoView` APIs that Radix Select calls (tests only).
+- **Layout fix (found in the browser check):** below 1024px the header pushed the page wider than the screen. That was a C-a issue made worse by the second nav entry. Labels and badges also wrapped mid-word.
+  - Now the nav gets its own row below md, labels and badges don't wrap, the header countdown hides on phones (Home still shows it), and the table scrolls inside its container.
+  - Measured afterwards at 375/640/768/1024px: no page-level horizontal scroll, no header overflow, no wrapped labels. Dialogs fit at 375px.
+
+**Browser check (2026-10-05, Orca's embedded browser, throwaway DB):** everything passed, using two tabs (super-admin and a new operator).
+- **Add:** the role defaults to Relay ops. The temporary password was shown once; after closing it was absent from the DOM, storage and the URL. Copy showed "Copied", and reading the clipboard back matched the password.
+- **New operator:** first sign-in forced a password change. As relay-ops: no nav entry, `/users` → Forbidden, and direct API calls with that token returned 403 for both list and disable.
+- **Change role:** the confirm button was disabled while the role was unchanged. After promoting, the operator's other tab went to Login with "Your session has ended".
+- **Disable:** the operator's sign-in then got the generic error.
+- **Enable:** warned the password is cleared, then offered Reset password now. There was no automatic reset, the old password no longer worked, and the row showed "No password".
+- **Reset password now:** issued a working temporary password. A later reset from the menu ended the operator's session in the other tab.
+- **Self-protection:** your own row had no controls; a direct self-disable via the API returned `409 cannot_modify_self`.
+- **Storage:** `localStorage` was empty and there were no cookies in either tab.
+- **Not reachable in the UI:** the `last_super_admin` message (it needs acting on yourself, and your own row has no controls). Unit tests cover the message; Phase U tests cover the server rule.
+- **Cleanup:** the DB and the limiter keys were cleaned up afterwards.
+
+**Final gates (C-b branch):**
+- `provider-console`: `npm ci` (0 vulnerabilities), lint (0 problems), `npm test` (15 files, 169 tests), `npm run build` all pass.
+- `admin/` is unchanged and builds.
+- No files outside `provider-console/` changed on the branch, so the controller gates are unaffected; the C-a run stands.
+- **Mutation checks**, each caught by the suite:
+  - no reload after an action;
+  - controls on your own row;
+  - auto-reset after enable;
+  - auto-copy on open;
+  - password kept after close;
+  - confirming the same role;
+  - `/users` without its role guard.
+
+**Acceptance status (Phase C complete, verified in development):**
+
+| Case | Status |
+|---|---|
+| AT-C.1 Dedicated app | Met |
+| AT-C.2 Login | Met |
+| AT-C.3 Forced change | Met |
+| AT-C.4 Session end | Met. Logout, revocation, role change, disable and reset all end the session (live); expiry (unit) |
+| AT-C.5 Role guard | Met. relay-ops → Forbidden on `/users`, no nav entry (live and unit) |
+| AT-C.6 Provider users page | Met (live and unit) |
+| AT-C.7 No leaks, no tenant calls | Met for storage and the URL (live) and by the source guards. The formal network capture is left to M1's acceptance run |
+
+**Next:** Phase R, the provider read APIs. OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
 
 ## Post-Phase Fixes
 
