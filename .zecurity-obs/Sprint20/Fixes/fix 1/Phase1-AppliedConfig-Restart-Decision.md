@@ -4,7 +4,7 @@ sprint: 20
 fix: 1
 phase: 1
 title: AppliedConfig / Restart Decision
-status: implemented-live-pending
+status: done
 depends_on: []
 blocks: [2]
 component: client
@@ -18,8 +18,8 @@ tags:
 
 > Parent: [[Fix01-Client-Tunnel-Restart-On-Snapshot-Change]] (finding, evidence, version lifecycle,
 > client architecture facts).
-> Status: **planned, not implemented.** Phase 1 is the first implementation stage. It must be
-> completed **and live-validated** before Phase 2 begins.
+> Status: **done**: implemented (`6d26479`) and live-validated 2026-10-01/02 (see end of file). Phase 2 may begin;
+> read Finding P1-A first.
 
 Phase 1 is intentionally not a full hot-apply implementation. It only prevents unnecessary full
 tunnel restarts when the effective configuration has not changed.
@@ -126,3 +126,93 @@ tests and reuse the `UpToDateAcl`/`NewAcl`/transport fetchers and the coordinato
 - [ ] No `snapshot changed, restarting VPN` for renewal-only effective no-op changes.
 - [ ] Record whether vN+1 was actually observed/applied during renewal, and what it did to the
       long-lived flow. This is the evidence needed to resolve Q3 before Phase 2.
+
+## Live evidence so far (2026-10-01 / 2026-10-02) — acceptance still open
+
+| Run | What it shows | Counts for Phase 1? |
+|---|---|---|
+| 2026-10-01 hold #1 (port 41098) | 589 requests, then reset at 11:22:35: the 60 s sync landed inside the renewal's connector-absent gap (vN+1), so the effective config really changed and Phase 1 restarted as designed | Expected Phase 1 limit (Q3), not a Phase 1 bug |
+| 2026-10-01 hold #2 (port 56056) | 270 × 200 across 2 renewals; the journal shows `effective config unchanged, keeping tunnel` on each version bump | Yes, but only **2** renewals (G9 asks for ≥ 3) |
+| 2026-10-02 fix-connector hold (port 48394) | 1194 × 200 / 40 min, 0 resets | **No.** After 11:19 every client sync failed with `session expired; re-login required` (39×), so the client made only 1 restart decision (11:03, `keeping tunnel`). The hold mostly proves the connector fix, not this phase |
+
+**Session-expiry cause (likely, not proven):** the refresh session is one Valkey key per user
+(`refresh:<user_id>`, `controller/internal/auth/valkey.go:131`), and it rotates on every use
+(`refresh.go`). The admin UI (browser) and the client daemon were signed in as the same Google user, so
+they share and overwrite one refresh slot. For the re-run, keep the admin UI closed, or use a
+different user, while the client hold runs.
+
+**Q3 input:** with the connector fix (`6362d1f`), a renewal no longer produces the connector-absent
+vN+1 at all (0 renewal-caused ACL/transport versions across 38 renewals). So Q3's renewal case
+mostly goes away. Q3 still applies to real connector disconnects and revocations.
+
+**To close Phase 1:** one hold of ≥ 3 shield-connector renewals with client syncs succeeding:
+≥ 3 `keeping tunnel`, 0 `snapshot changed, restarting VPN`, 0 resets. Then tick the boxes above and
+set `status: done`.
+
+## Live run 2026-10-02 (afternoon): closing hold + connector offline/return
+
+### Closing hold, 12:30:43–12:55:43
+- A single socket (local port 33430) served 746 × 200 for 1500 s with 0 FAIL. Client syncs ran every 60 s and never
+  failed.
+- Admin UI was kept closed and the client logged in fresh, so the refresh-slot collision did not occur.
+- Shield connector inkyank renewed 5×, all `superseded`, 0 renewal-caused versions. **With fix-connector, renewals
+  no longer change the ACL/transport version, so they no longer exercise the Phase 1 decision.** The closing
+  criterion written above ("≥ 3 `keeping tunnel` across renewals") is unreachable and is replaced by the two cases below.
+- I forced version bumps by restarting the controller (12:40:35, 12:44:35, 12:48:35). At 12:41:17 the client logged
+  `version changed` → **`effective config unchanged, keeping tunnel`**, and the hold was unaffected. After the
+  12:44 and 12:48 restarts the version came back unchanged (v3), so the client made no decision.
+
+### Connector offline → return (user-requested), 12:57:05–13:02
+inkyank (the shield's connector) was stopped at 12:58:57.850 and started at 13:00:27.862.
+
+| Time | Controller | Shield | Client |
+|---|---|---|---|
+| 12:58:57 | inkyank `disconnected`, ACL **v4** (`connectors=2`) | stream error | hold socket (via inkyank) dies (FAIL at 12:59:08, expected) |
+| 12:59:02–03 | | fails over to manoj in 5 s, `Control stream established` | new connections: each takes **5 s** (`tunnel handshake timed out after 5s` → next connector → `tunnel opened` via manoj) |
+| 12:59:08 | `shield moved to connector c3c88536`, ACL **v5** | | |
+| 12:59:17 | | | sync v5 → **`snapshot changed, restarting VPN`** (real change: connector set) |
+| 12:59:23 | | | new connections immediate again (200) |
+| 13:00:28 | inkyank `connected`, ACL **v6** (`connectors=3`) | stays on manoj (no fail-back) | |
+| 13:01:17 | | | sync v6 → **`snapshot changed, restarting VPN`** (real change) |
+
+**Phase 1 verdict:** correct. It kept the tunnel when the effective config was unchanged (12:41:17, plus 10-01 hold #2)
+and restarted on real connector-set changes (12:59:17, 13:01:17). Both restarts on connector loss/return are the
+expected Phase 1 limit and are Phase 2's (hot-apply) job. **Phase 1 is done.**
+
+### Finding P1-A: the ~20 s window of "failed" new connections is a 5 s per-connection delay, not an outage (client)
+Evidence:
+- manoj logged `tunnel_opened ok` for every attempt. The client logged `tunnel handshake timed out after 5s`,
+  then `tunnel opened` ~4 ms later on the next transport.
+- The sampler (`curl -m 4`) gave up before the 5 s timeout, so it recorded 000 from 12:59:03 to 12:59:23.
+
+Root cause, from the code (`client/src/net_stack.rs:480-546`, `transport.rs:112-138`, `tunnel_pool.rs:361-390`):
+1. The stopped connector did not send a QUIC CONNECTION_CLOSE; the process just exited and connector/src/main.rs
+   has no signal-handled endpoint close. So the client's pooled quinn connection to .75:9092 stayed
+   `close_reason() == None` until quinn's idle timeout (default 30 s; only `keep_alive_interval(10s)` is set).
+2. `open_authenticated_stream()` on that stale connection succeeds locally (opening a bi stream needs no round trip),
+   so `mark_direct_success()` runs and the direct-path cooldown never engages.
+3. The tunnel handshake then waits the full `TUNNEL_HANDSHAKE_TIMEOUT` = 5 s. The handshake timeout neither evicts the
+   pooled connection nor marks the direct path failed, and because the next connector accepts, no `resync` fires.
+   So **every** new connection pays 5 s until the connection idles out, or the VPN restart at 12:59:17 rebuilds the
+   transport list without inkyank (that is what ended it here).
+
+Impact: after an ungraceful connector loss, new connections take an extra 5 s each, for up to ~30 s or until the
+next sync. Existing flows through the dead connector die (unavoidable).
+
+**Relevance to Phase 2:** once hot-apply removes the VPN restart, the restart will no longer accidentally flush the
+dead transport, so the only bound left is the quinn idle timeout. Phase 2 must drop transports for removed connectors
+on apply, and should evict or mark-failed a pooled connection when the tunnel handshake times out. Not fixed here
+(no approval for a code change); recorded for Phase 2 planning.
+
+### Finding P1-B: ACL/transport version restarts from a low number after a controller restart (low, informational)
+- v20 before the controller restart, v3 after. The client accepted v3 because it compares with `!=`
+  (`daemon.rs:2941`, `daemon.rs:3058`), not `>`, so it converges.
+- The connector also converged (`connector ACL already current`/pushes after reconnect).
+- Theoretical edge: a client holding vN from the previous controller process could coincidentally match a new vN
+  with different content and skip the update until the next bump. That is single-instance (D-02) process-local
+  state. **Not observed**; not investigated further.
+
+### Other observations
+- Shield failover took 5 s (stream error, then backoff, then next peer). It did not fail back when inkyank returned,
+  and the DB `shields.connector_id` followed (manoj). That is the existing design.
+- At 12:48:37 there was one `posture submission failed … transport error`, during my controller restart.
