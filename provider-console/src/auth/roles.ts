@@ -9,6 +9,12 @@
 export const PROVIDER_ROLES = ['super-admin', 'relay-ops'] as const
 export type ProviderRole = (typeof PROVIDER_ROLES)[number]
 
+/** Display names; an unknown role is shown as its raw value. */
+export const ROLE_LABELS: Record<string, string> = {
+  'super-admin': 'Super-admin',
+  'relay-ops': 'Relay ops',
+}
+
 export interface Section {
   key: string
   path: string
@@ -18,7 +24,15 @@ export interface Section {
 
 export const SECTIONS: readonly Section[] = [
   { key: 'home', path: '/', label: 'Home', roles: PROVIDER_ROLES },
+  { key: 'users', path: '/users', label: 'Provider users', roles: ['super-admin'] },
 ]
+
+/** The roles a section needs, for wrapping its route in RequireRole. */
+export function rolesFor(key: string): readonly ProviderRole[] {
+  const section = SECTIONS.find((s) => s.key === key)
+  if (!section) throw new Error(`unknown section ${key}`)
+  return section.roles
+}
 
 export function isProviderRole(role: unknown): role is ProviderRole {
   return typeof role === 'string' && (PROVIDER_ROLES as readonly string[]).includes(role)
