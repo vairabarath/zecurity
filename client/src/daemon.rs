@@ -628,17 +628,7 @@ async fn handle_up(
     let applied = effective_config(&acl, transport.as_ref(), &device);
 
     // Filter to only entries this device is permitted to access.
-    let my_spiffe = device.spiffe_id.clone();
-    let allowed_entries: Vec<AclEntry> = acl
-        .entries
-        .iter()
-        .filter(|e| {
-            e.allowed_spiffe_ids
-                .iter()
-                .any(|id| id == my_spiffe.as_str())
-        })
-        .cloned()
-        .collect();
+    let allowed_entries = allowed_entries_for(&acl, &device);
 
     if allowed_entries.is_empty() {
         return IpcResponse {
@@ -679,7 +669,7 @@ async fn handle_up(
         &device,
         relay_crl,
     ) {
-        Ok(t) => Arc::new(t),
+        Ok(t) => t,
         Err(e) => {
             return IpcResponse {
                 ok: false,
@@ -689,6 +679,10 @@ async fn handle_up(
             }
         }
     };
+    // Fix 01 Phase 2-A: the running net_stack reads the transport map through
+    // this watch channel, so a connector-topology change can publish a new map
+    // without a VPN restart. The sender lives in TunHandle.
+    let (transport_tx, transport_rx) = tokio::sync::watch::channel(Arc::new(transports));
 
     // Create TUN device.
     let mut mgr = match TunManager::create().await {
@@ -752,7 +746,7 @@ async fn handle_up(
 
     let relay_resync = { state.read().await.relay_resync.clone() };
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, allowed_entries, transports, relay_resync).await {
+        if let Err(e) = net_stack::run(dev, allowed_entries, transport_rx, relay_resync).await {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -760,7 +754,12 @@ async fn handle_up(
 
     // Store TunManager (for route cleanup) and AbortHandle (for task cancel).
     *tun_slot.lock().await = Some(mgr);
-    state.write().await.tun_handle = Some(Arc::new(TunHandle { abort, route_count, applied }));
+    state.write().await.tun_handle = Some(Arc::new(TunHandle {
+        abort,
+        route_count,
+        applied,
+        transport_tx: Arc::new(transport_tx),
+    }));
 
     info!(routes = route_count, "zecurity0 up");
     IpcResponse {
@@ -823,61 +822,293 @@ async fn restart_tunnel_if_running(
         .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Phase 1 only skips restarts for an effective no-op. Any effective change,
-/// including the transient vN+1 connector-absent snapshot, still does a full restart.
+/// Fix 01 three-way restart decision (Phase 2-A).
+///
+/// * `NoChange`      — effective config identical → keep the tunnel.
+/// * `TransportOnly` — ONLY connector topology changed (connector added/removed,
+///   preferred connector changed, connector coords changed) → hot-apply the
+///   transport map into the running net_stack.
+/// * `Structural`    — anything else (resource set/IP/port/protocol/remote
+///   network, identity, missing inputs) → full VPN restart, as in Phase 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigDelta {
+    NoChange,
+    TransportOnly,
+    Structural,
+}
+
+/// The applied config with every connector-topology field blanked. Two configs
+/// whose structural views are equal differ ONLY in connector topology.
+///
+/// Fail-closed by construction: this clears an explicit set of connector
+/// fields and compares EVERYTHING else (identity + every other entry field),
+/// so any field added to `AppliedConfig`/`AppliedEntry` later is treated as
+/// structural until someone deliberately classifies it here.
+fn structural_view(cfg: &AppliedConfig) -> AppliedConfig {
+    let mut view = cfg.clone();
+    for entry in &mut view.entries {
+        entry.preferred_connector_id.clear();
+        entry.coords.clear();
+    }
+    // effective_config sorts entries with preferred_connector_id in the key;
+    // re-sort after blanking so ordering can't create a false difference.
+    view.entries.sort_by(|a, b| {
+        (&a.address, a.port, &a.protocol, &a.remote_network_id).cmp(&(
+            &b.address,
+            b.port,
+            &b.protocol,
+            &b.remote_network_id,
+        ))
+    });
+    view
+}
+
+/// Pure classifier over two effective configs.
+pub(crate) fn classify_applied(applied: &AppliedConfig, candidate: &AppliedConfig) -> ConfigDelta {
+    if candidate == applied {
+        ConfigDelta::NoChange
+    } else if structural_view(candidate) == structural_view(applied) {
+        ConfigDelta::TransportOnly
+    } else {
+        ConfigDelta::Structural
+    }
+}
+
+/// Classify the current snapshots against the config the running tunnel was
+/// built from. Missing inputs can't be proven connector-only → `Structural`
+/// (fail closed; `handle_up` then fails exactly as before).
+pub(crate) fn classify_delta(
+    applied: Option<&AppliedConfig>,
+    acl: Option<&AclSnapshot>,
+    transport: Option<&TransportSnapshot>,
+    device: Option<&DeviceInfo>,
+) -> ConfigDelta {
+    let (Some(applied), Some(acl), Some(device)) = (applied, acl, device) else {
+        return ConfigDelta::Structural;
+    };
+    classify_applied(applied, &effective_config(acl, transport, device))
+}
+
+/// True only for a Structural delta (kept for the Phase 1 tests' vocabulary).
+#[cfg(test)]
 pub(crate) fn needs_full_restart(
     applied: Option<&AppliedConfig>,
     acl: Option<&AclSnapshot>,
     transport: Option<&TransportSnapshot>,
     device: Option<&DeviceInfo>,
 ) -> bool {
-    let (Some(applied), Some(acl), Some(device)) = (applied, acl, device) else {
-        return true;
-    };
-    effective_config(acl, transport, device) != *applied
+    classify_delta(applied, acl, transport, device) == ConfigDelta::Structural
 }
 
-/// Evaluates the Fix 01 Phase 1 restart decision against the current runtime state.
-/// Skips restart when effective config is unchanged and data plane is alive, or invokes
-/// `down_up` if a full restart is needed.
-async fn run_restart_decision<F, Fut>(state: &SharedState, down_up: F) -> Result<()>
+/// Entries this device may access (SPIFFE-filtered). Shared by `handle_up`
+/// and the Phase 2-A hot-apply so both build transports from the same set.
+fn allowed_entries_for(acl: &AclSnapshot, device: &DeviceInfo) -> Vec<AclEntry> {
+    let my_spiffe = device.spiffe_id.as_str();
+    acl.entries
+        .iter()
+        .filter(|e| e.allowed_spiffe_ids.iter().any(|id| id == my_spiffe))
+        .cloned()
+        .collect()
+}
+
+/// Outcome of a Phase 2-A transport-map hot-apply attempt.
+#[derive(Debug)]
+enum HotApplyOutcome {
+    /// New map published into the running net_stack; `applied` updated.
+    Applied,
+    /// The tunnel was stopped or replaced by another path while we built the
+    /// map (IPC Down, device directive). Nothing to apply to; restarting here
+    /// could undo a user's Down, so do nothing.
+    TunnelGone,
+    /// The new map could not be built. Nothing was published; the old map and
+    /// `applied` are untouched (D2: keep the working VPN).
+    BuildFailed(anyhow::Error),
+    /// Hot-apply is not safe; fall back to the existing full restart.
+    Fallback(&'static str),
+}
+
+/// Fix 01 Phase 2-A: build a complete new connector transport map off to the
+/// side, then publish it atomically into the running net_stack.
+///
+/// Runs inside the restart coordinator pass (via `run_restart_decision`), so
+/// it is serialized against every other restart/apply. `build` is injectable
+/// for tests; production passes `build_transports_by_resource_with_crl`.
+async fn hot_apply_transport_map<B>(state: &SharedState, build: B) -> HotApplyOutcome
 where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
+{
+    // 1. Snapshot inputs.
+    let (handle, acl, transport, device, relay_crl) = {
+        let s = state.read().await;
+        let Some(handle) = s.tun_handle.clone() else {
+            return HotApplyOutcome::TunnelGone;
+        };
+        let (Some(acl), Some(device)) = (s.acl_snapshot.clone(), s.device.clone()) else {
+            return HotApplyOutcome::Fallback("ACL snapshot or device identity missing");
+        };
+        let Some(relay_crl) = s.relay_crl.clone() else {
+            return HotApplyOutcome::Fallback("relay CRL manager not initialised");
+        };
+        (handle, acl, s.transport_snapshot.clone(), device, relay_crl)
+    };
+    let candidate = effective_config(&acl, transport.as_ref(), &device);
+    if classify_applied(&handle.applied, &candidate) != ConfigDelta::TransportOnly {
+        return HotApplyOutcome::Fallback("delta is no longer transport-only");
+    }
+
+    // 2. Build the COMPLETE new map. All-or-nothing: on error nothing is
+    //    published and the running map/applied config are untouched.
+    let allowed_entries = allowed_entries_for(&acl, &device);
+    let map = match build(
+        &allowed_entries,
+        &acl,
+        transport.as_ref(),
+        &device,
+        relay_crl,
+    ) {
+        Ok(map) => map,
+        Err(e) => return HotApplyOutcome::BuildFailed(e),
+    };
+    let resources = map.len();
+    let reachable = map.values().filter(|slot| slot.is_some()).count();
+
+    // 3. Publish under the state write lock, only if nothing moved underneath.
+    let mut s = state.write().await;
+    match s.tun_handle.as_ref() {
+        Some(current) if Arc::ptr_eq(current, &handle) => {}
+        _ => return HotApplyOutcome::TunnelGone,
+    }
+    let still_current = match (s.acl_snapshot.as_ref(), s.device.as_ref()) {
+        (Some(acl_now), Some(device_now)) => {
+            effective_config(acl_now, s.transport_snapshot.as_ref(), device_now) == candidate
+        }
+        _ => false,
+    };
+    if !still_current {
+        return HotApplyOutcome::Fallback(
+            "configuration changed while the transport map was built",
+        );
+    }
+    if handle.transport_tx.send(Arc::new(map)).is_err() {
+        // Receiver gone ⇒ net_stack::run has exited; the data plane is dead.
+        return HotApplyOutcome::Fallback("net_stack is not receiving transport updates");
+    }
+
+    // 4. Only after a successful publish: record the new applied config. Same
+    //    abort handle / routes / channel — the data plane was not restarted.
+    s.tun_handle = Some(Arc::new(TunHandle {
+        abort: handle.abort.clone(),
+        route_count: handle.route_count,
+        applied: candidate,
+        transport_tx: handle.transport_tx.clone(),
+    }));
+    info!(
+        resources,
+        reachable, "transport map hot-applied successfully"
+    );
+    HotApplyOutcome::Applied
+}
+
+/// True when the running tunnel has a pending TransportOnly change that was
+/// not applied (e.g. a transport-map build failed — D2). The 60 s sync tick
+/// uses this to retry even when no snapshot version changed. Structural
+/// pendings (e.g. a renewed device cert) are deliberately NOT retried here —
+/// Phase 1 behaviour (wait for the next version bump) is preserved for them.
+async fn transport_apply_pending(state: &SharedState) -> bool {
+    let s = state.read().await;
+    let Some(handle) = s.tun_handle.as_ref() else {
+        return false;
+    };
+    classify_delta(
+        Some(&handle.applied),
+        s.acl_snapshot.as_ref(),
+        s.transport_snapshot.as_ref(),
+        s.device.as_ref(),
+    ) == ConfigDelta::TransportOnly
+}
+
+/// Evaluates the Fix 01 decision against the current runtime state:
+/// dead data plane or Structural → `down_up` (full restart); NoChange → keep;
+/// TransportOnly → hot-apply the connector transport map (`build`), falling
+/// back to `down_up` only where hot-apply is unsafe.
+async fn run_restart_decision<B, F, Fut>(state: &SharedState, build: B, down_up: F) -> Result<()>
+where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
-    let (task_dead, restart) = {
+    let (task_dead, delta) = {
         let s = state.read().await;
         let task_dead = s
             .tun_handle
             .as_ref()
             .map(|h| h.abort.is_finished())
             .unwrap_or(false);
-        let restart = task_dead
-            || needs_full_restart(
-                s.tun_handle.as_ref().map(|h| &h.applied),
-                s.acl_snapshot.as_ref(),
-                s.transport_snapshot.as_ref(),
-                s.device.as_ref(),
-            );
-        (task_dead, restart)
+        let delta = classify_delta(
+            s.tun_handle.as_ref().map(|h| &h.applied),
+            s.acl_snapshot.as_ref(),
+            s.transport_snapshot.as_ref(),
+            s.device.as_ref(),
+        );
+        (task_dead, delta)
     };
 
-    if !restart {
-        info!("effective config unchanged, keeping tunnel");
-        Ok(())
-    } else {
-        if task_dead {
-            warn!("net_stack task is not running, restarting VPN");
+    if task_dead {
+        warn!("net_stack task is not running, restarting VPN");
+        return down_up().await;
+    }
+
+    match delta {
+        ConfigDelta::NoChange => {
+            info!("effective config unchanged, keeping tunnel");
+            Ok(())
         }
-        info!("snapshot changed, restarting VPN");
-        down_up().await
+        ConfigDelta::Structural => {
+            info!("structural configuration change, restarting VPN");
+            down_up().await
+        }
+        ConfigDelta::TransportOnly => {
+            info!("transport-only change, hot-applying connector map");
+            match hot_apply_transport_map(state, build).await {
+                HotApplyOutcome::Applied => Ok(()),
+                HotApplyOutcome::TunnelGone => {
+                    info!("tunnel stopped or replaced during hot-apply; nothing to apply");
+                    Ok(())
+                }
+                HotApplyOutcome::BuildFailed(e) => {
+                    warn!(error = %e, "transport map build failed, retaining existing map");
+                    Err(e.context("transport map build failed, retaining existing map"))
+                }
+                HotApplyOutcome::Fallback(reason) => {
+                    warn!(
+                        reason,
+                        "hot-apply not possible, falling back to full restart"
+                    );
+                    info!("structural configuration change, restarting VPN");
+                    down_up().await
+                }
+            }
+        }
     }
 }
 
-/// Runs the Fix 01 Phase 1 restart decision (run_restart_decision), performing a
-/// full down→up only on an effective change or a dead net_stack task. Extracted so
-/// `run_restart_worker` can drive it through the queued-oneshot coordinator, and so
-/// tests can drive the coordination logic itself against a fake `work` closure.
+/// Runs the Fix 01 decision (run_restart_decision): full down→up only on a
+/// Structural change, a dead net_stack task, or an unsafe hot-apply; a
+/// connector-only change is hot-applied. Extracted so `run_restart_worker`
+/// can drive it through the queued-oneshot coordinator, and so tests can
+/// drive the coordination logic itself against a fake `work` closure.
 async fn perform_tunnel_restart(
     state: &SharedState,
     conf: &config::ClientConf,
@@ -887,25 +1118,37 @@ async fn perform_tunnel_restart(
         return Ok(());
     }
 
-    run_restart_decision(state, || async {
-        let down = handle_down(state, tun_slot).await;
-        if !down.ok {
-            anyhow::bail!(
-                "{}",
-                down.error.unwrap_or_else(|| "failed to stop VPN".into())
-            );
-        }
+    run_restart_decision(
+        state,
+        |entries, acl, transport, device, relay_crl| {
+            build_transports_by_resource_with_crl(
+                entries,
+                &acl.remote_networks,
+                transport,
+                device,
+                relay_crl,
+            )
+        },
+        || async {
+            let down = handle_down(state, tun_slot).await;
+            if !down.ok {
+                anyhow::bail!(
+                    "{}",
+                    down.error.unwrap_or_else(|| "failed to stop VPN".into())
+                );
+            }
 
-        let up = handle_up(state, conf, tun_slot).await;
-        if !up.ok {
-            anyhow::bail!(
-                "{}",
-                up.error.unwrap_or_else(|| "failed to start VPN".into())
-            );
-        }
+            let up = handle_up(state, conf, tun_slot).await;
+            if !up.ok {
+                anyhow::bail!(
+                    "{}",
+                    up.error.unwrap_or_else(|| "failed to start VPN".into())
+                );
+            }
 
-        Ok(())
-    })
+            Ok(())
+        },
+    )
     .await
 }
 
@@ -1373,40 +1616,208 @@ mod restart_decision_tests {
         }
     }
 
-    async fn setup_state() -> (SharedState, Arc<AtomicUsize>) {
+    // ---- Fix 01 Phase 2-A harness -------------------------------------------------
+    //
+    // A real watch channel stands in for the running net_stack: `rx` is what
+    // net_stack::run would hold. A fake builder (counts calls, can fail) stands
+    // in for build_transports_by_resource_with_crl, and a counting down_up
+    // closure stands in for the full VPN restart.
+
+    struct NoopDirect;
+
+    #[async_trait::async_trait]
+    impl crate::transport::DirectOpener for NoopDirect {
+        async fn open(
+            &self,
+            _addr: std::net::SocketAddr,
+        ) -> std::result::Result<
+            crate::tunnel_pool::AuthenticatedStream,
+            crate::tunnel_pool::TunnelOpenError,
+        > {
+            Err(crate::tunnel_pool::TunnelOpenError::Connect(
+                anyhow::anyhow!("noop"),
+            ))
+        }
+    }
+
+    /// Fake map: one ClientTransport per resolved connector, in resolve order.
+    fn fake_map(
+        entries: &[AclEntry],
+        acl: &AclSnapshot,
+        transport: Option<&TransportSnapshot>,
+    ) -> net_stack::TransportMap {
+        let rn_by_id: HashMap<&str, &AclRemoteNetwork> = acl
+            .remote_networks
+            .iter()
+            .map(|rn| (rn.remote_network_id.as_str(), rn))
+            .collect();
+        let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = transport
+            .map(|t| {
+                t.remote_networks
+                    .iter()
+                    .map(|rn| (rn.remote_network_id.as_str(), rn))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut map = net_stack::TransportMap::new();
+        for e in entries {
+            let ip: Ipv4Addr = e.address.parse().unwrap();
+            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id);
+            let ts: Vec<Arc<crate::transport::ClientTransport>> = coords
+                .iter()
+                .map(|_| {
+                    Arc::new(crate::transport::ClientTransport::new(
+                        Arc::new(NoopDirect),
+                        "127.0.0.1:9092".parse().unwrap(),
+                        None,
+                    ))
+                })
+                .collect();
+            map.insert(
+                (ip, e.port as u16),
+                if ts.is_empty() { None } else { Some(ts) },
+            );
+        }
+        map
+    }
+
+    fn tconn(id: &str) -> TransportConnector {
+        TransportConnector {
+            connector_id: id.to_string(),
+            connector_tunnel_addr: format!("10.0.9.{}:9092", id.len()),
+            connector_spiffe: format!("spiffe://t/{id}"),
+            relay_addr: "relay:9093".to_string(),
+            relay_spiffe_id: "spiffe://r".to_string(),
+        }
+    }
+
+    struct Harness {
+        state: SharedState,
+        rx: tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>,
+        initial_map: Arc<net_stack::TransportMap>,
+        builds: Arc<AtomicUsize>,
+        down_ups: Arc<AtomicUsize>,
+    }
+
+    /// Running tunnel built from `connectors` (transport plane) with the
+    /// resource's preferred connector `preferred`.
+    async fn harness_with(connectors: &[&str], preferred: &str) -> Harness {
         let state = crate::runtime::new_shared();
         let device = make_test_device();
-        let acl = make_test_acl(&device);
-        let transport = make_test_transport();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].preferred_connector_id = preferred.to_string();
+        let mut transport = make_test_transport();
+        transport.remote_networks[0].connectors = connectors.iter().map(|c| tconn(c)).collect();
         let applied = effective_config(&acl, Some(&transport), &device);
-
+        let initial_map = Arc::new(fake_map(
+            &allowed_entries_for(&acl, &device),
+            &acl,
+            Some(&transport),
+        ));
+        let (tx, rx) = tokio::sync::watch::channel(initial_map.clone());
         {
             let mut s = state.write().await;
             s.device = Some(device);
             s.acl_snapshot = Some(acl);
             s.transport_snapshot = Some(transport);
+            s.relay_crl = Some(crate::crl::CrlManager::new());
             s.tun_handle = Some(Arc::new(TunHandle {
                 abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
                 route_count: 1,
                 applied,
+                transport_tx: Arc::new(tx),
             }));
         }
-
-        let call_count = Arc::new(AtomicUsize::new(0));
-        (state, call_count)
+        Harness {
+            state,
+            rx,
+            initial_map,
+            builds: Arc::new(AtomicUsize::new(0)),
+            down_ups: Arc::new(AtomicUsize::new(0)),
+        }
     }
+
+    async fn setup_state() -> (SharedState, Arc<AtomicUsize>) {
+        let h = harness_with(&["c1"], "").await;
+        // Keep the receiver alive for the whole test (net_stack "running").
+        std::mem::forget(h.rx);
+        (h.state, h.down_ups)
+    }
+
+    /// Run the real decision with the fake builder (optionally failing) and a
+    /// counting down_up.
+    async fn decide(h: &Harness, fail_build: bool) -> Result<()> {
+        let builds = h.builds.clone();
+        let down_ups = h.down_ups.clone();
+        run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _device, _crl| {
+                builds.fetch_add(1, Ordering::SeqCst);
+                if fail_build {
+                    anyhow::bail!("resolve connector tunnel address bogus: invalid socket address");
+                }
+                Ok(fake_map(entries, acl, transport))
+            },
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await
+    }
+
+    /// Counting-only decision used by the Phase 1 tests (builder must not run
+    /// for NoChange/Structural).
+    async fn decide_counting(
+        state: &SharedState,
+        count: &Arc<AtomicUsize>,
+        result: Result<()>,
+    ) -> Result<()> {
+        let c = count.clone();
+        run_restart_decision(
+            state,
+            |_, _, _, _, _| panic!("builder must not run for this delta"),
+            || async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                result
+            },
+        )
+        .await
+    }
+
+    async fn applied_coord_ids(state: &SharedState) -> Vec<String> {
+        let s = state.read().await;
+        s.tun_handle.as_ref().unwrap().applied.entries[0]
+            .coords
+            .iter()
+            .map(|c| c.connector_id.clone())
+            .collect()
+    }
+
+    fn current_slot_len(h: &Harness) -> Option<usize> {
+        let map = h.rx.borrow().clone();
+        map.get(&("10.0.0.1".parse().unwrap(), 80))
+            .cloned()
+            .flatten()
+            .map(|v| v.len())
+    }
+
+    async fn set_transport_connectors(h: &Harness, connectors: &[&str]) {
+        let mut s = h.state.write().await;
+        let tr = s.transport_snapshot.as_mut().unwrap();
+        tr.version += 1;
+        tr.remote_networks[0].connectors = connectors.iter().map(|c| tconn(c)).collect();
+    }
+
+    // ---- Phase 1 behaviour (unchanged) ----------------------------------------------
 
     #[tokio::test]
     async fn restart_decision_nothing_changed_skips() {
-        let (state, count) = setup_state().await;
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(count.load(Ordering::SeqCst), 0);
+        let h = harness_with(&["c1"], "").await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0, "no transport build");
+        assert!(!h.rx.has_changed().unwrap(), "no transport swap");
     }
 
     #[tokio::test]
@@ -1423,17 +1834,39 @@ mod restart_decision_tests {
                 abort: dead_abort,
                 route_count: current.route_count,
                 applied: current.applied.clone(),
+                transport_tx: current.transport_tx.clone(),
             }));
         }
 
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
+        let res = decide_counting(&state, &count, Ok(())).await;
         assert!(res.is_ok());
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn restart_decision_dead_task_restarts_even_on_transport_only_change() {
+        let h = harness_with(&["c1"], "").await;
+        let finished_task = tokio::spawn(async {});
+        let dead_abort = finished_task.abort_handle();
+        finished_task.await.unwrap();
+        {
+            let mut s = h.state.write().await;
+            let current = s.tun_handle.as_ref().unwrap();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead_abort,
+                route_count: current.route_count,
+                applied: current.applied.clone(),
+                transport_tx: current.transport_tx.clone(),
+            }));
+        }
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            1,
+            "dead data plane → full restart"
+        );
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1449,119 +1882,248 @@ mod restart_decision_tests {
                 tr.version = 2;
             }
         }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
+        let res = decide_counting(&state, &count, Ok(())).await;
         assert!(res.is_ok());
         assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 
+    // ---- Phase 2-A: TransportOnly → hot-apply ---------------------------------------
+
+    /// Existing test, meaning flipped by Phase 2-A: the vN+1 connector-absent
+    /// snapshot is a connector-only change, so it is hot-applied (no restart).
+    /// With every connector gone the new map's slot is None → NEW flows fail
+    /// closed (net_stack `Some(None)` arm); existing flows are not touched.
     #[tokio::test]
-    async fn restart_decision_vn_plus_1_connector_absent_restarts() {
-        let (state, count) = setup_state().await;
+    async fn restart_decision_vn_plus_1_connector_absent_hot_applies() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &[]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap(), "new map published");
+        assert_eq!(current_slot_len(&h), None, "new flows fail closed");
+        assert!(applied_coord_ids(&h.state).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn connector_added_hot_applies_without_restart() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap());
+        assert_eq!(
+            current_slot_len(&h),
+            Some(2),
+            "new map contains the added connector"
+        );
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn connector_removed_hot_applies_and_new_flows_cannot_select_it() {
+        let h = harness_with(&["c1", "c2"], "").await;
+        set_transport_connectors(&h, &["c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(current_slot_len(&h), Some(1));
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c2"]);
+        // The map the old flows were handed is untouched by the swap.
+        assert_eq!(
+            h.initial_map
+                .get(&("10.0.0.1".parse().unwrap(), 80))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_returns_hot_applies_with_preferred_first() {
+        // c1 (preferred, e.g. the shield's connector) gone; c2 carries traffic.
+        let h = harness_with(&["c2"], "c1").await;
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c2"]);
+        set_transport_connectors(&h, &["c2", "c1"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(current_slot_len(&h), Some(2));
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    #[tokio::test]
+    async fn preferred_connector_change_hot_applies() {
+        let h = harness_with(&["c1", "c2"], "c1").await;
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
         {
-            let mut s = state.write().await;
-            if let Some(ref mut tr) = s.transport_snapshot {
-                tr.version = 2;
-                tr.remote_networks[0].connectors.clear();
-            }
+            let mut s = h.state.write().await;
+            let acl = s.acl_snapshot.as_mut().unwrap();
+            acl.version += 1;
+            acl.entries[0].preferred_connector_id = "c2".to_string();
         }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            applied_coord_ids(&h.state).await,
+            vec!["c2", "c1"],
+            "new flows prefer c2"
+        );
+    }
+
+    #[tokio::test]
+    async fn connector_coords_change_hot_applies() {
+        let h = harness_with(&["c1"], "").await;
+        {
+            let mut s = h.state.write().await;
+            let tr = s.transport_snapshot.as_mut().unwrap();
+            tr.version += 1;
+            tr.remote_networks[0].connectors[0].relay_addr = "relay2:9093".to_string();
+        }
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(h.rx.has_changed().unwrap());
+    }
+
+    #[tokio::test]
+    async fn hot_apply_keeps_same_data_plane_handle() {
+        let h = harness_with(&["c1"], "").await;
+        let (abort_before, tx_before) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            (th.abort.id(), th.transport_tx.clone())
+        };
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        decide(&h, false).await.unwrap();
+        let s = h.state.read().await;
+        let th = s.tun_handle.as_ref().unwrap();
+        assert_eq!(th.abort.id(), abort_before, "same net_stack task");
+        assert!(Arc::ptr_eq(&th.transport_tx, &tx_before), "same channel");
+        assert!(!th.abort.is_finished());
+    }
+
+    // ---- Structural → full restart (must NOT hot-apply) -----------------------------
+
+    async fn assert_structural(h: &Harness) {
+        assert!(decide(h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "full restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0, "no hot-apply build");
+        assert!(!h.rx.has_changed().unwrap(), "no transport swap");
     }
 
     #[tokio::test]
     async fn restart_decision_entry_added_restarts() {
-        let (state, count) = setup_state().await;
+        let h = harness_with(&["c1"], "").await;
         {
-            let mut s = state.write().await;
+            let mut s = h.state.write().await;
             let spiffe = s.device.as_ref().unwrap().spiffe_id.clone();
-            if let Some(ref mut acl) = s.acl_snapshot {
-                acl.entries.push(AclEntry {
-                    resource_id: "res2".to_string(),
-                    name: "res2".to_string(),
-                    address: "10.0.0.2".to_string(),
-                    port: 443,
-                    protocol: "tcp".to_string(),
-                    allowed_spiffe_ids: vec![spiffe],
-                    remote_network_id: "rn1".to_string(),
-                    preferred_connector_id: String::new(),
-                    ..Default::default()
-                });
-            }
+            s.acl_snapshot.as_mut().unwrap().entries.push(AclEntry {
+                resource_id: "res2".to_string(),
+                name: "res2".to_string(),
+                address: "10.0.0.2".to_string(),
+                port: 443,
+                protocol: "tcp".to_string(),
+                allowed_spiffe_ids: vec![spiffe],
+                remote_network_id: "rn1".to_string(),
+                preferred_connector_id: String::new(),
+                ..Default::default()
+            });
         }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_structural(&h).await;
     }
 
     #[tokio::test]
     async fn restart_decision_resource_access_removed_restarts() {
-        let (state, count) = setup_state().await;
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0]
+            .allowed_spiffe_ids
+            .clear();
+        assert_structural(&h).await;
+    }
+
+    #[tokio::test]
+    async fn resource_ip_change_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+            "10.0.0.9".to_string();
+        assert_structural(&h).await;
+    }
+
+    #[tokio::test]
+    async fn resource_port_change_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8080;
+        assert_structural(&h).await;
+    }
+
+    #[tokio::test]
+    async fn resource_protocol_change_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].protocol =
+            "udp".to_string();
+        assert_structural(&h).await;
+    }
+
+    /// D3: a resource moving to another remote network is Structural even when
+    /// the connector set would otherwise be identical.
+    #[tokio::test]
+    async fn resource_remote_network_change_is_structural() {
+        let h = harness_with(&["c1"], "").await;
         {
-            let mut s = state.write().await;
-            if let Some(ref mut acl) = s.acl_snapshot {
-                acl.entries[0].allowed_spiffe_ids.clear();
-            }
+            let mut s = h.state.write().await;
+            let acl = s.acl_snapshot.as_mut().unwrap();
+            acl.entries[0].remote_network_id = "rn2".to_string();
+            let mut rn2 = acl.remote_networks[0].clone();
+            rn2.remote_network_id = "rn2".to_string();
+            acl.remote_networks.push(rn2);
+            let tr = s.transport_snapshot.as_mut().unwrap();
+            let mut trn2 = tr.remote_networks[0].clone();
+            trn2.remote_network_id = "rn2".to_string();
+            tr.remote_networks.push(trn2);
         }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        assert_structural(&h).await;
+    }
+
+    /// Resource change AND connector change together → Structural (never a
+    /// partial hot-apply of only the connector part).
+    #[tokio::test]
+    async fn resource_and_connector_change_together_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8443;
+        assert_structural(&h).await;
     }
 
     #[tokio::test]
     async fn restart_decision_identity_change_restarts() {
-        let (state, count) = setup_state().await;
-        {
-            let mut s = state.write().await;
-            if let Some(ref mut dev) = s.device {
-                dev.certificate_pem =
-                    "-----BEGIN CERTIFICATE-----\nNEW_CERT\n-----END CERTIFICATE-----\n"
-                        .to_string();
-            }
-        }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
-        assert!(res.is_ok());
-        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let h = harness_with(&["c1"], "").await;
+        h.state
+            .write()
+            .await
+            .device
+            .as_mut()
+            .unwrap()
+            .certificate_pem =
+            "-----BEGIN CERTIFICATE-----\nNEW_CERT\n-----END CERTIFICATE-----\n".to_string();
+        assert_structural(&h).await;
+    }
+
+    /// D4: identity + connector change together → Structural.
+    #[tokio::test]
+    async fn identity_and_connector_change_together_is_structural() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        h.state.write().await.device.as_mut().unwrap().ca_cert_pem = "CA2".to_string();
+        assert_structural(&h).await;
     }
 
     #[tokio::test]
     async fn restart_decision_tun_handle_none_restarts() {
         let (state, count) = setup_state().await;
-        {
-            let mut s = state.write().await;
-            s.tun_handle = None;
-        }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .await;
+        state.write().await.tun_handle = None;
+        let res = decide_counting(&state, &count, Ok(())).await;
         assert!(res.is_ok());
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
@@ -1569,19 +2131,61 @@ mod restart_decision_tests {
     #[tokio::test]
     async fn restart_decision_error_propagates() {
         let (state, count) = setup_state().await;
-        {
-            let mut s = state.write().await;
-            s.tun_handle = None; // force restart
-        }
-        let c = count.clone();
-        let res = run_restart_decision(&state, || async {
-            c.fetch_add(1, Ordering::SeqCst);
-            Err(anyhow::anyhow!("down_up failed"))
-        })
-        .await;
+        state.write().await.tun_handle = None; // force restart
+        let res = decide_counting(&state, &count, Err(anyhow::anyhow!("down_up failed"))).await;
         assert!(res.is_err());
         assert_eq!(res.unwrap_err().to_string(), "down_up failed");
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn classify_unknown_inputs_are_structural() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+        assert_eq!(
+            classify_delta(None, Some(&acl), None, Some(&device)),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), None, None, Some(&device)),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), Some(&acl), None, None),
+            ConfigDelta::Structural
+        );
+        assert_eq!(
+            classify_delta(Some(&applied), Some(&acl), None, Some(&device)),
+            ConfigDelta::NoChange
+        );
+    }
+
+    /// Fail-closed: any difference outside the connector fields is Structural,
+    /// even one the classifier has no specific rule for (here: spiffe_id,
+    /// tpm_key_material, and an entry's protocol letter case).
+    #[test]
+    fn classify_non_connector_field_differences_are_structural() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let applied = effective_config(&acl, None, &device);
+
+        let mut c = applied.clone();
+        c.spiffe_id = "spiffe://t/other".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+
+        let mut c = applied.clone();
+        c.tpm_key_material = Some("tpm".to_string());
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+
+        let mut c = applied.clone();
+        c.entries[0].protocol = "TCP".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+
+        let mut c = applied.clone();
+        c.entries[0].coords.clear();
+        c.entries[0].preferred_connector_id = "cX".to_string();
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::TransportOnly);
     }
 
     #[test]
@@ -1589,12 +2193,11 @@ mod restart_decision_tests {
         let device = make_test_device();
         let acl = make_test_acl(&device);
         let applied = effective_config(&acl, None, &device);
-
         assert!(needs_full_restart(
             Some(&applied),
             None,
             None,
-            Some(&device),
+            Some(&device)
         ));
     }
 
@@ -1603,13 +2206,147 @@ mod restart_decision_tests {
         let device = make_test_device();
         let acl = make_test_acl(&device);
         let applied = effective_config(&acl, None, &device);
+        assert!(needs_full_restart(Some(&applied), Some(&acl), None, None));
+    }
 
-        assert!(needs_full_restart(
-            Some(&applied),
-            Some(&acl),
-            None,
-            None,
-        ));
+    // ---- Phase 2-A failure safety ---------------------------------------------------
+
+    /// D2: build failure keeps the working VPN and map; applied unchanged; the
+    /// change stays pending so the next 60 s tick retries.
+    #[tokio::test]
+    async fn map_build_failure_retains_existing_map_and_vpn() {
+        let h = harness_with(&["c1"], "").await;
+        let applied_before = h
+            .state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .clone();
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+
+        let res = decide(&h, true).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("transport map build failed, retaining existing map"));
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "VPN not restarted");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert!(!h.rx.has_changed().unwrap(), "no partial swap");
+        assert!(
+            Arc::ptr_eq(&h.rx.borrow(), &h.initial_map),
+            "old map still live"
+        );
+        let s = h.state.read().await;
+        assert!(s.tun_handle.as_ref().unwrap().applied == applied_before);
+        drop(s);
+        assert!(transport_apply_pending(&h.state).await, "retry pending");
+
+        // Retry succeeds on the next pass.
+        assert!(decide(&h, false).await.is_ok());
+        assert!(h.rx.has_changed().unwrap());
+        assert!(!transport_apply_pending(&h.state).await);
+    }
+
+    #[tokio::test]
+    async fn transport_apply_pending_ignores_structural_and_nochange() {
+        let h = harness_with(&["c1"], "").await;
+        assert!(!transport_apply_pending(&h.state).await);
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 1;
+        assert!(!transport_apply_pending(&h.state).await);
+    }
+
+    /// net_stack exited (receiver dropped) → hot-apply impossible → full restart.
+    #[tokio::test]
+    async fn receiver_gone_falls_back_to_full_restart() {
+        let h = harness_with(&["c1"], "").await;
+        let Harness {
+            state,
+            rx,
+            builds,
+            down_ups,
+            ..
+        } = h;
+        drop(rx);
+        let h = Harness {
+            state,
+            rx: tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new())).1,
+            initial_map: Arc::new(net_stack::TransportMap::new()),
+            builds,
+            down_ups,
+        };
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            1,
+            "fallback full restart"
+        );
+    }
+
+    /// The tunnel is replaced (e.g. IPC Down + Up) while the map is built →
+    /// do not publish into the stale handle, and do not restart.
+    #[tokio::test]
+    async fn tunnel_replaced_during_build_is_not_published() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                state
+                    .try_write()
+                    .expect("no lock held during build")
+                    .tun_handle = None;
+                Ok(fake_map(entries, acl, transport))
+            },
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        // tun_handle = None dropped the last Sender (channel closed), so check
+        // the receiver's current value rather than has_changed().
+        assert!(
+            Arc::ptr_eq(&h.rx.borrow(), &h.initial_map),
+            "nothing published"
+        );
+    }
+
+    /// Configuration moved again while the map was built → the built map is
+    /// stale → do not publish it; fall back to the full restart.
+    #[tokio::test]
+    async fn config_changed_during_build_falls_back() {
+        let h = harness_with(&["c1"], "").await;
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                let mut s = state.try_write().expect("no lock held during build");
+                s.transport_snapshot.as_mut().unwrap().remote_networks[0]
+                    .connectors
+                    .push(tconn("c33"));
+                Ok(fake_map(entries, acl, transport))
+            },
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert!(!h.rx.has_changed().unwrap(), "stale map not published");
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "safe fallback");
     }
 }
 
@@ -2691,10 +3428,15 @@ async fn sync_and_restart_if_changed(
         }
     };
 
-    if acl_changed || transport_changed {
+    // Fix 01 Phase 2-A (D2): a transport-map build that failed earlier left a
+    // pending connector-only change; retry it on this tick even without a bump.
+    let transport_pending = !acl_changed && !transport_changed && transport_apply_pending(state).await;
+    if acl_changed || transport_changed || transport_pending {
         info!(
             acl_changed,
-            transport_changed, "background sync: version changed, restarting tunnel"
+            transport_changed,
+            transport_pending,
+            "background sync: version changed, restarting tunnel"
         );
         if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
             warn!(error = %e, "background sync: tunnel restart failed");

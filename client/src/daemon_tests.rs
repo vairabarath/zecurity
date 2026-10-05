@@ -811,3 +811,53 @@ fn effective_config_debug_omits_private_key() {
     assert!(!debug_repr.contains("private_key_pem"));
     assert!(debug_repr.contains(&device.spiffe_id));
 }
+
+// Fix 01 Phase 2-A (Test 8, real builder): one connector with invalid coords
+// makes the whole transport-map build fail (all-or-nothing). Hot-apply relies
+// on this: a failed build publishes nothing, so no partial map can reach the
+// running net_stack.
+#[tokio::test]
+async fn build_transports_is_all_or_nothing_on_invalid_connector_coords() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res1".to_string(),
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let good = TransportConnector {
+        connector_id: "good".to_string(),
+        connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+        connector_spiffe: "spiffe://test.example/connector/good".to_string(),
+        ..Default::default()
+    };
+    let bad = TransportConnector {
+        connector_id: "bad".to_string(),
+        connector_tunnel_addr: "not-an-address".to_string(),
+        connector_spiffe: "spiffe://test.example/connector/bad".to_string(),
+        ..Default::default()
+    };
+    let transport = TransportSnapshot {
+        version: 2,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn1".to_string(),
+            connectors: vec![good.clone(), bad],
+        }],
+    };
+    let result = build_transports_by_resource(&[entry.clone()], &[], Some(&transport), &device);
+    assert!(result.is_err(), "one invalid connector must fail the whole build");
+
+    let ok_transport = TransportSnapshot {
+        version: 3,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "rn1".to_string(),
+            connectors: vec![good],
+        }],
+    };
+    let map = build_transports_by_resource(&[entry], &[], Some(&ok_transport), &device).unwrap();
+    let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    assert_eq!(map[&key].as_ref().map(|v| v.len()), Some(1));
+}

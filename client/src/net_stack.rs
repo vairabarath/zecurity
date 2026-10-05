@@ -12,7 +12,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{mpsc, watch, Notify};
 use tokio::time::timeout;
 use tun::AsyncDevice;
 
@@ -207,10 +207,31 @@ struct ActiveRelay {
 
 // --- Main entry point ---
 
+/// Connector transport map keyed by managed resource (ip, port).
+///   Some(Some(t)) — managed resource, connector(s) online → tunnel via QUIC
+///   Some(None)    — managed resource, no connector       → fail closed
+///   None          — not a managed resource               → fail closed
+pub type TransportMap = HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>;
+
+/// Fix 01 Phase 2-A: read the CURRENT transport map for a newly accepted flow.
+///
+/// The map is published by the daemon through a `watch` channel, so a
+/// connector-topology change swaps it without restarting the data plane.
+/// Called once per accepted connection: the `borrow()` guard is held only for
+/// the HashMap lookup + Arc clones (never across an `.await`). Existing flows
+/// are unaffected by later swaps — their relay task owns the cloned Vec and,
+/// after selection, only the authenticated stream.
+fn transports_for(
+    transports: &watch::Receiver<Arc<TransportMap>>,
+    key: (Ipv4Addr, u16),
+) -> Option<Option<Vec<Arc<ClientTransport>>>> {
+    transports.borrow().get(&key).cloned()
+}
+
 pub async fn run(
     dev: AsyncDevice,
     allowed_entries: Vec<AclEntry>,
-    transports: Arc<HashMap<(Ipv4Addr, u16), Option<Vec<Arc<ClientTransport>>>>>,
+    transports: watch::Receiver<Arc<TransportMap>>,
     relay_resync: Arc<Notify>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -323,11 +344,10 @@ pub async fn run(
 
                 let dest = ip.to_string();
                 tracing::info!(dest = %dest, port, "new TCP connection");
-                match transports.get(&(ip, port)) {
+                match transports_for(&transports, (ip, port)) {
                     Some(Some(transports)) => {
                         // Managed resource, connector online → tunnel via QUIC.
                         if !transports.is_empty() {
-                            let transports = transports.clone();
                             let resync = relay_resync.clone();
                             tokio::spawn(async move {
                                 // relay_tcp_to_quic fires `resync` itself at the
@@ -765,5 +785,220 @@ mod tests {
             FramedJsonError::FrameTooLarge(value) if value == size
         ));
         assert!(!error.is_transport_failure());
+    }
+
+    // ---- Fix 01 Phase 2-A: transport-map swap vs flows ----------------------------
+
+    use crate::transport::{ClientTransport, DirectOpener};
+    use crate::tunnel_pool::{AuthenticatedStream, TunnelOpenError};
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, DuplexStream};
+
+    /// Opener that hands the far end of each opened stream to the test, so the
+    /// test plays the connector.
+    struct PipeOpener {
+        peers: mpsc::UnboundedSender<DuplexStream>,
+        opens: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl DirectOpener for PipeOpener {
+        async fn open(
+            &self,
+            _addr: SocketAddr,
+        ) -> std::result::Result<AuthenticatedStream, TunnelOpenError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let (near, far) = duplex(64 * 1024);
+            let _ = self.peers.send(far);
+            Ok(Box::new(near))
+        }
+    }
+
+    fn pipe_transport() -> (
+        Arc<ClientTransport>,
+        mpsc::UnboundedReceiver<DuplexStream>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let t = Arc::new(ClientTransport::new(
+            Arc::new(PipeOpener {
+                peers: tx,
+                opens: opens.clone(),
+            }),
+            "127.0.0.1:9092".parse().unwrap(),
+            None,
+        ));
+        (t, rx, opens)
+    }
+
+    fn key() -> (Ipv4Addr, u16) {
+        ("10.0.0.1".parse().unwrap(), 80)
+    }
+
+    /// Connector side of the tunnel handshake: read the request, answer ok.
+    async fn accept_tunnel(peer: &mut DuplexStream) {
+        let req: serde_json::Value = read_framed_json(peer).await.unwrap();
+        assert_eq!(req["destination"], "10.0.0.1");
+        let body = br#"{"ok":true,"error":null}"#;
+        peer.write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        peer.write_all(body).await.unwrap();
+    }
+
+    /// New flows read the CURRENT map: after a swap, the accept path returns
+    /// the new connector list (and a resource whose connectors all vanished
+    /// reads as Some(None) → fail closed).
+    #[test]
+    fn new_flows_read_the_latest_published_map() {
+        let (a, _ra, _) = pipe_transport();
+        let (b, _rb, _) = pipe_transport();
+        let mut m1 = TransportMap::new();
+        m1.insert(key(), Some(vec![a.clone()]));
+        let (tx, rx) = watch::channel(Arc::new(m1));
+
+        let first = transports_for(&rx, key()).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first[0], &a));
+
+        let mut m2 = TransportMap::new();
+        m2.insert(key(), Some(vec![b.clone(), a.clone()]));
+        tx.send(Arc::new(m2)).unwrap();
+        let second = transports_for(&rx, key()).unwrap().unwrap();
+        assert_eq!(second.len(), 2);
+        assert!(Arc::ptr_eq(&second[0], &b), "new preferred first");
+
+        let mut m3 = TransportMap::new();
+        m3.insert(key(), None);
+        tx.send(Arc::new(m3)).unwrap();
+        assert!(
+            matches!(transports_for(&rx, key()), Some(None)),
+            "fail closed"
+        );
+
+        // The Vec handed to the first flow is unaffected by later swaps.
+        assert!(Arc::ptr_eq(&first[0], &a));
+        assert_eq!(first.len(), 1);
+    }
+
+    /// An established flow keeps relaying in both directions after the
+    /// transport map is swapped to one WITHOUT its connector and every map
+    /// reference (old map, sender) is dropped: the relay task owns only its
+    /// stream, not the map.
+    #[tokio::test]
+    async fn established_flow_survives_map_swap_that_removes_its_connector() {
+        let (manoj, mut manoj_peers, manoj_opens) = pipe_transport();
+        let (other, _other_peers, other_opens) = pipe_transport();
+        let mut m1 = TransportMap::new();
+        m1.insert(key(), Some(vec![manoj.clone()]));
+        let (tx, rx) = watch::channel(Arc::new(m1));
+        drop(manoj); // only the map holds it now
+
+        // Flow A accepted under map 1.
+        let flow_transports = transports_for(&rx, key()).unwrap().unwrap();
+        let (tcp_tx, tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let (quic_tx, mut quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let resync = Arc::new(Notify::new());
+        let flow = tokio::spawn(relay_tcp_to_quic(
+            flow_transports,
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            resync,
+        ));
+        let mut peer = manoj_peers.recv().await.unwrap();
+        accept_tunnel(&mut peer).await;
+
+        // Swap: the connector disappears; drop the old map and the sender.
+        let mut m2 = TransportMap::new();
+        m2.insert(key(), Some(vec![other.clone()]));
+        tx.send(Arc::new(m2)).unwrap();
+        assert!(Arc::ptr_eq(
+            &transports_for(&rx, key()).unwrap().unwrap()[0],
+            &other
+        ));
+        drop(tx);
+        drop(rx);
+
+        // Flow A still relays both ways.
+        tcp_tx.send(b"GET / HTTP/1.1\r\n".to_vec()).await.unwrap();
+        let mut buf = [0u8; 16];
+        peer.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"GET / HTTP/1.1\r\n");
+        peer.write_all(b"HTTP/1.1 200 OK").await.unwrap();
+        assert_eq!(quic_rx.recv().await.unwrap(), b"HTTP/1.1 200 OK".to_vec());
+        assert!(!flow.is_finished());
+
+        assert_eq!(manoj_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            other_opens.load(Ordering::SeqCst),
+            0,
+            "existing flow not moved"
+        );
+
+        // Normal close still ends the task cleanly.
+        drop(tcp_tx);
+        flow.await.unwrap().unwrap();
+    }
+
+    /// Flows A and B on one connector are undisturbed when a second connector
+    /// is added; a NEW flow accepted after the swap tries the new order.
+    #[tokio::test]
+    async fn connector_added_leaves_existing_flows_and_new_flow_uses_new_map() {
+        let (manoj, mut manoj_peers, manoj_opens) = pipe_transport();
+        let (inkyank, mut ink_peers, ink_opens) = pipe_transport();
+        let mut m1 = TransportMap::new();
+        m1.insert(key(), Some(vec![manoj.clone()]));
+        let (tx, rx) = watch::channel(Arc::new(m1));
+
+        let mut flows = Vec::new();
+        for _ in 0..2 {
+            let (tcp_tx, tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+            let (quic_tx, quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+            let task = tokio::spawn(relay_tcp_to_quic(
+                transports_for(&rx, key()).unwrap().unwrap(),
+                "10.0.0.1".into(),
+                80,
+                tcp_rx,
+                quic_tx,
+                Arc::new(Notify::new()),
+            ));
+            let mut peer = manoj_peers.recv().await.unwrap();
+            accept_tunnel(&mut peer).await;
+            flows.push((tcp_tx, quic_rx, peer, task));
+        }
+
+        // inkyank added (and preferred) → new map.
+        let mut m2 = TransportMap::new();
+        m2.insert(key(), Some(vec![inkyank.clone(), manoj.clone()]));
+        tx.send(Arc::new(m2)).unwrap();
+
+        for (tcp_tx, quic_rx, peer, task) in flows.iter_mut() {
+            tcp_tx.send(b"ping".to_vec()).await.unwrap();
+            let mut buf = [0u8; 4];
+            peer.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            peer.write_all(b"pong").await.unwrap();
+            assert_eq!(quic_rx.recv().await.unwrap(), b"pong".to_vec());
+            assert!(!task.is_finished());
+        }
+
+        // New flow C after the swap goes to inkyank first.
+        let (_c_tcp_tx, c_tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let (c_quic_tx, _c_quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let _c = tokio::spawn(relay_tcp_to_quic(
+            transports_for(&rx, key()).unwrap().unwrap(),
+            "10.0.0.1".into(),
+            80,
+            c_tcp_rx,
+            c_quic_tx,
+            Arc::new(Notify::new()),
+        ));
+        let mut c_peer = ink_peers.recv().await.unwrap();
+        accept_tunnel(&mut c_peer).await;
+        assert_eq!(ink_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(manoj_opens.load(Ordering::SeqCst), 2, "A and B only");
     }
 }

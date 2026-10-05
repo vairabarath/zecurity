@@ -11,6 +11,10 @@ pub struct TunHandle {
     pub route_count: usize,
     /// Effective config this tunnel was built from; Fix 01 Phase 1 restart decision.
     pub applied: AppliedConfig,
+    /// Fix 01 Phase 2-A: publishes a new connector transport map into the
+    /// running net_stack (read once per accepted flow). Shared via Arc so a
+    /// hot-apply can replace this TunHandle while keeping the same channel.
+    pub transport_tx: Arc<tokio::sync::watch::Sender<Arc<crate::net_stack::TransportMap>>>,
 }
 
 impl std::fmt::Debug for TunHandle {

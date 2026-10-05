@@ -22,6 +22,10 @@ tags:
 
 Phase 2 is the larger architectural change. It must **not** be implemented as part of Phase 1.
 
+> **Split (2026-10-05):** Phase 2 runs in slices. **2-A — connector topology hot-apply
+> (transport-map swap only)** → [[Phase2A-Connector-Topology-Hot-Apply]] (status: live-accepted 2026-10-05, [[Phase2A-Live-Acceptance-2026-10-05]]). Resource/route/listener hot-apply, flow ownership/selective close and the P1-A
+> handshake-timeout fix stay in this umbrella doc for later slices.
+
 Goal: keep unaffected long-lived flows alive even when the configuration genuinely changes.
 
 ## Preconditions
@@ -94,3 +98,7 @@ These go in the `client/src/net_stack.rs` tests and need the device-agnostic loo
 - [ ] A failed hot-apply falls back safely to a full restart.
 - [ ] Phase 2 unit tests pass (`cd client && cargo build && cargo test`).
 - [ ] **Live, PENDING / NOT YET RUN:** U5 and G9 pass after Phase 2.
+
+## Input from Phase 1 live run (2026-10-02)
+
+Read `Phase1-AppliedConfig-Restart-Decision.md` → **Finding P1-A** first. When a connector is lost without a clean shutdown, its pooled QUIC connection stays "open" for up to the quinn idle timeout, and every new tunnel pays the 5 s `TUNNEL_HANDSHAKE_TIMEOUT` before falling through to the next connector. Today the full VPN restart flushes that dead transport as a side effect. Hot-apply removes the restart, so Phase 2 must explicitly drop the transports for removed connectors when it applies a change, and should evict or mark-failed a pooled connection after a handshake timeout. Fix-connector (`6362d1f`) means renewals no longer bump versions; connector loss/return (v+1 on disconnect, v+1 on shield move, v+1 on return) is now the main restart trigger Phase 2 must handle.
