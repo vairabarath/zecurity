@@ -3,6 +3,7 @@ package pki
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"log"
 	"sync/atomic"
@@ -84,6 +85,31 @@ func (r *ControllerCertRotator) GetCertificate(*tls.ClientHelloInfo) (*tls.Certi
 		return nil, errNoCertificateConfigured
 	}
 	return current.cert, nil
+}
+
+// CurrentCertInfo reports the serial (lowercase hex, the same SerialNumber.Text(16)
+// form stored for relay certificates) and validity of the certificate this
+// process is serving right now. Read-only and process-local (D-02): it
+// reflects the in-memory certificate, never persists anything, and never
+// exposes key material. ok is false if no certificate is loaded or the leaf
+// can't be parsed.
+func (r *ControllerCertRotator) CurrentCertInfo() (serial string, notBefore, notAfter time.Time, ok bool) {
+	c := r.cur.Load()
+	if c == nil || c.cert == nil {
+		return "", time.Time{}, time.Time{}, false
+	}
+	leaf := c.cert.Leaf
+	if leaf == nil {
+		if len(c.cert.Certificate) == 0 {
+			return "", time.Time{}, time.Time{}, false
+		}
+		parsed, err := x509.ParseCertificate(c.cert.Certificate[0])
+		if err != nil {
+			return "", time.Time{}, time.Time{}, false
+		}
+		leaf = parsed
+	}
+	return leaf.SerialNumber.Text(16), leaf.NotBefore.UTC(), leaf.NotAfter.UTC(), true
 }
 
 // current returns the current rotatedCert container.
