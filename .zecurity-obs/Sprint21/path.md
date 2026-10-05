@@ -221,14 +221,14 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member1-Go/Phase2-Provider-Console-Foundation]].
 
-**Phase C — C-a done (2026-10-02)** on `sprint21/c-a-provider-console-foundation`: C1–C4 plus their tests and the README. `GET /provider/me` also returns `last_login_at` (the console labels it "Signed in at"). Gate: `npm ci`/lint/test (116)/build all pass, and `admin/` is unchanged. The live API check through the dev proxy and the browser check (sign in, forced change, Home, reload/rehydrate, revocation, sign-out) both passed. Final gates (2026-10-05): frontend 116 tests; controller `go build`/`vet` and CI-style `go test ./...` (24 packages, 0 failures) pass; `admin/` builds. AT-C.1–C.3 met; AT-C.4/C.5 partly (finished with C-b); AT-C.6 is C-b. **C-b next:** C5 (Provider users page) and the rest of C6.
+**Phase C — done (2026-10-05).** C-a (C1–C4, `GET /provider/me` + `last_login_at`) merged in #108. C-b (C5 Provider users page, the rest of C6, and a narrow-screen layout fix) is on `sprint21/c-b-provider-users`, with no controller changes. Gates: `npm ci`/lint/test (169)/build pass, and `admin/` is unchanged and builds. Browser checks passed for both parts. AT-C.1–C.7 are verified in development; formal acceptance and the AT-C.7 network capture are M1's. **Next: Phase R** (answer OQ-1/OQ-2 before the tenant read endpoints).
 
 - [x] **M1-C1** `provider-console/`: a dedicated Vite + React 19 + TS + Tailwind 4 project; UI primitives copied from `admin/`; dev proxy `/provider` → `:8080` on port 5174.
 - [x] **M1-C2** Email + password login form (`POST /provider/auth/login`); forced Change password flow; 401 → Login; 403 → Forbidden / Change password; 429 message; logout; session countdown.
 - [x] **M1-C3** Roles: a single role matrix (`roles.ts`), `RequireRole` guard, role-aware nav.
 - [x] **M1-C4** Home: signed-in identity, role, last login, session expiry.
-- [ ] **M1-C5** Provider users page (after M2-U): list, add operator, change role, disable/enable, confirmations, 409 messages.
-- [ ] **M1-C6** Vitest tests (incl. API-surface test); README (own domain, network lock); build gate. *(C-a: tests for C1–C4, API-surface and no-persistence tests, README and gate done; C5 tests come with C-b.)*
+- [x] **M1-C5** Provider users page (after M2-U): list, add operator, change role, disable/enable, confirmations, 409 messages.
+- [x] **M1-C6** Vitest tests (incl. API-surface test); README (own domain, network lock); build gate. *(169 tests; API-surface pins the 3 auth + 5 operator writes.)*
 
 ### Phase U — M2: Provider Operator Management (API)
 
