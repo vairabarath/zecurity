@@ -6,7 +6,7 @@ sprint: 21
 phase: 2
 execution: C
 title: Provider Console Foundation (dedicated app, local login, roles, operator management UI)
-status: planned
+status: in-progress   # C-a (C1–C4) done 2026-10-02; C-b (C5, C6 rest) next
 depends_on: ["M2-Phase1"]   # C1–C4 need M2-H (local auth endpoints); C5 also needs M2-U (operator API)
 schema_change: false
 tags:
@@ -153,7 +153,7 @@ This page is super-admin only.
 
 ## Acceptance Criteria
 
-- [ ] AT-C.1 … AT-C.7 in [[Sprint21/Acceptance-Test-Plan]] pass.
+- [ ] AT-C.1 … AT-C.7 in [[Sprint21/Acceptance-Test-Plan]] pass. *(C-a: AT-C.1–C.3 met, C.7 met for storage/URL, C.4/C.5 partly; C.6 and the rest with C-b. See "C-a closeout" above.)*
 
 ## Build Check
 
@@ -164,12 +164,92 @@ cd admin && npm run build     # unchanged; must still build
 
 ## Implementation Checklist
 
-- [ ] C1 scaffold + primitives copied
-- [ ] C2 login form, forced change password, 401/403/429 handling, logout, expiry
-- [ ] C3 role matrix (`roles.ts`), `RequireRole`, role-aware nav
-- [ ] C4 Home
+- [x] C1 scaffold + primitives copied
+- [x] C2 login form, forced change password, 401/403/429 handling, logout, expiry
+- [x] C3 role matrix (`roles.ts`), `RequireRole`, role-aware nav
+- [x] C4 Home
 - [ ] C5 Provider users page (after M2-U merged), incl. show-once temporary passwords
 - [ ] C6 tests; README with deployment and network-lock notes; build gate
+
+## C-a implementation notes (2026-10-02)
+
+Branch `sprint21/c-a-provider-console-foundation`, 5 commits: `/provider/me` + `last_login_at`; scaffold; API client, session store, guards, roles; pages, layout and wiring; README and closeout. These are implementation choices within the spec, not new architectural decisions.
+
+- **`/provider/me` adds `last_login_at`.** H stamps it at the login that starts the session, so Home labels it **"Signed in at"**, not "last login". A true previous-login time would need an H change.
+- **401 handling depends on the call.**
+  - `401 invalid_credentials` from login or change password is a form error. A wrong *current* password must not sign the operator out.
+  - Every other 401 ends the session.
+  - `403 not a provider user` (disabled) ends the session.
+  - `403 password_change_required` opens Change password.
+  - Any other 403 shows Forbidden and keeps the session. All of this lives in `src/api/client.ts`.
+- **Refresh:** a token restored from `sessionStorage` is trusted only after `GET /provider/me` accepts it. If the controller rejects it or can't be reached, the session is dropped (end reason `unverified`).
+- **Failures right after a token is issued:** if `/provider/me` fails for a non-session reason right after login or a password change, the page ends the session as `unverified` rather than leaving it stuck in loading.
+- **Change password** checks the session itself rather than sitting under `RequireToken`. `RequireToken` would unmount the page during the `/me` reload after a successful change, and the redirect to Home would be lost. `RequireToken` is kept, and tested, for future use.
+- **Token lifetimes:** a password-change-only token lasts 10 minutes (`PasswordChangeTokenTTL`) and a full session 15. The console always uses `expires_in` from the response.
+- **Allowed writes:** the API-surface test pins the non-GET calls to the three auth writes. C-b adds the five operator calls to `ALLOWED_WRITES`.
+- **Source guards** (`src/test/static-guards.test.ts`): only the client calls `fetch`; there is no `localStorage`, no console output and no tenant endpoints; only the session store touches `sessionStorage`.
+- **Tests:** `vitest.config.ts` passes `--no-experimental-webstorage`, because Node 22+'s own `localStorage` global hides jsdom's.
+- **Live check (2026-10-02):** throwaway DB, controller on `:8080`, `npm run dev`, all calls through the `:5174` proxy.
+  - The SPA was served, and a bad login returned `401 invalid_credentials`.
+  - The bootstrap login returned `password_change_required`, and `/me` with that token returned `403 password_change_required`.
+  - A wrong current password returned a form-error 401. A successful change made the old token `401 provider session revoked`, and `/me` with the new token returned 200 with `last_login_at`.
+  - Logout returned 204, and the token then returned 401.
+  - The DB and the limiter keys were cleaned up afterwards.
+- **Browser check (2026-10-05, Orca's embedded browser, throwaway DB):** every step passed.
+  - An anonymous visit to `/` redirected to Login, and a wrong password showed the generic message.
+  - The bootstrap sign-in went to "Set a new password". A full navigation to `/` stayed there, which exercises `rehydrate()` with a password-change-only token.
+  - After the change, Home showed the email, the Super-admin badge, "Signed in at", the expiry and a 15-minute countdown. Storage held only `zecurity.provider.session` in `sessionStorage`, with no password; `localStorage` was empty and there were no cookies.
+  - A reload kept the session. After the token was revoked server-side, a reload went to Login with "Your session has ended" and storage was cleared, which proves `rehydrate()` checks `/provider/me`.
+  - Signing in with the new password, then account menu → Sign out, led to Login with "You have signed out", and storage was empty.
+  - The DB and the limiter keys were cleaned up afterwards.
+
+### C-a closeout (2026-10-05)
+
+**Final gates (branch head before this docs commit, `7a24888`):**
+
+| Gate | Result |
+|---|---|
+| `provider-console`: `npm ci` | Pass, 0 vulnerabilities |
+| `provider-console`: `npm run lint` | 0 problems |
+| `provider-console`: `npm test` | 12 files, 116 tests, all passing |
+| `provider-console`: `npm run build` | Pass (`tsc -b` + Vite) |
+| `controller`: `go build ./...` and `go vet ./...` | Pass (after `buf generate`) |
+| `controller`: `go test -count=1 ./...`, CI-style | 24 packages pass; 932 PASS, 0 FAIL, 33 SKIP |
+| `admin/` | No changes on the branch; `npm run build` passes |
+
+- **CI-style setup:** the CI test env vars point at an empty `ci_empty_admin` database (each test makes its own throwaway DB), with an isolated Valkey on `:6390/15`.
+- **The 33 skips are pre-existing and outside C-a:**
+  - 31 resolver/resource tests need `RESOURCE_TEST_SHIELD_ID`, which CI doesn't set either;
+  - `TestAuthIntegration_LoginBootstrapAndJWTIssue` is K6;
+  - one connector enrollment test also skips.
+- **`TestMe_IncludesCurrentSignInTime` and `TestMe_ResponseShape` ran.**
+- **H and U:** C-a's only controller change is `Me` in `handler.go`, plus `me_e2e_test.go`. No H or U files changed.
+- **Pre-existing test-hygiene defect, not fixed (outside C-a scope):** `graph/resolvers/idp_update_scim_config_enable_test.go` `teardown()` runs `DROP DATABASE` through a pool connected to that same database. The drop always fails and the error is ignored, so each run leaks 15 `resolvers_updsc_*` databases on the test server. The fix is to drop from the admin pool after closing `h.pool`. A candidate for K.
+
+**`/provider/me` semantics:** `last_login_at` is stamped by H at the successful login that starts the current session. By the time `/me` runs, it is the current sign-in time, so the console labels it **"Signed in at"**. A true "previous login" would need an H change, and is deliberately not done.
+
+**Session rehydration and revocation (validated in the browser, 2026-10-05):**
+- A stored token is trusted only after `GET /provider/me` accepts it.
+- With a valid token, a reload stays signed in.
+- After the token was revoked server-side (logout from another client), a reload went to Login with "Your session has ended. Sign in again." and `sessionStorage` was cleared. The stored session is validated, not trusted blindly.
+- Reloading with a password-change-only token stays on Change password.
+
+**Acceptance status for C-a.** Formal acceptance is M1's (Sathiya). "Live" means the browser check or the live API check; "unit" means Vitest.
+
+| Case | C-a status |
+|---|---|
+| AT-C.1 Dedicated app | **Met.** Own Vite project; gates pass; `admin/` unchanged and builds; dev on :5174; no OAuth or callback route |
+| AT-C.2 Login | **Met.** Home shows email, role, "Signed in at" and expiry (live); generic wrong-password message (live); 429 wait time (unit) |
+| AT-C.3 Forced change | **Met** (live). No other page is reachable until the change succeeds; the new token is used afterwards |
+| AT-C.4 Session end | **Partly live.** Logout and server-side revocation → Login with a notice (live). Expiry and 401 / disabled-403 handling (unit). The role-change, disable and reset triggers come from U and are exercised end to end with C-b |
+| AT-C.5 Role guard | **Mechanism done.** `RequireRole` sends relay-ops to Forbidden and the nav follows `roles.ts` (unit, with a Phase-P-shaped matrix). `/users` itself arrives in C-b |
+| AT-C.6 Provider users page | **C-b** |
+| AT-C.7 No leaks, no tenant calls | **Met** for storage and URL: only the token in `sessionStorage`, no password, empty `localStorage`, no cookies (live), plus the source guards. No tenant endpoints exist in the source (static guard). A formal network capture is left to acceptance testing |
+
+**Next phase: C-b.**
+- C5, the Provider users page: list, add operator, change role, disable/enable, reset password, show-once temporary passwords, confirmations, 409 messages.
+- The rest of C6: C5 tests, and the five operator calls added to `ALLOWED_WRITES`.
+- New primitives: Dialog, Table, Select.
 
 ## Post-Phase Fixes
 

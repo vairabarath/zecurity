@@ -2531,3 +2531,51 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - `git add`/commit/`git push origin feat/sprint20-m1-phase2` (not yet done — awaiting instruction).
 - Live acceptance: `CONNECTOR_CERT_TTL=10m` dev stack → controller runs > 15 min, connectors/relays reconnect after the first cert's `NotAfter`, logs show ~1 rotation per ~6m40s (valid only after PF-1; before it, the stack would have rotated every minute). Also the remaining Phase F live checks and Phase G (M2).
+
+---
+
+## 2026-10-02 — Claude Code (Barath / M2) — Sprint 21 Phase C-a: Provider Console foundation
+
+**What was done:**
+- Branch `sprint21/c-a-provider-console-foundation`, 5 commits; nothing pushed yet:
+  1. `GET /provider/me` returns `last_login_at`, with a new e2e test (`me_e2e_test.go`). H and U are untouched.
+  2. The `provider-console/` scaffold:
+     - Vite 8, React 19, TS, Tailwind 4, Vitest;
+     - port 5174, with a `/provider` proxy to `:8080`;
+     - a subtle violet accent;
+     - primitives copied from `admin/`, with their inherited lint errors fixed in the copies only.
+  3. API client and session:
+     - the API client is the only `fetch`, and handles each 401/403 by the call it came from;
+     - a zustand session store keeps the token in memory and `sessionStorage` only;
+     - flows for sign-in, change password, sign-out, and refresh (validated by `/me`);
+     - guards with same-app return paths only, and the `roles.ts` matrix.
+  4. Pages and wiring:
+     - Login, Change password (forced and voluntary), Home ("Signed in at"), Forbidden, NotFound;
+     - Layout with a role-filtered nav, account menu and countdown;
+     - route wiring, with `rehydrate()` before the first render.
+  5. README (dev, production on its own domain, network lock, `PROVIDER_CONSOLE_ORIGIN`, security model) and closeout docs.
+- **Gate:**
+  - `npm ci`, lint, `npm test` (12 files, 116 tests) and the build all pass, and `admin/` is unchanged.
+  - Mutation checks for the auth classification, storage, refresh and the UI invariants: the suite failed every time.
+- **Live API check through the dev proxy (throwaway DB, controller on `:8080`):** every call matched the client's handling. The DB and limiter keys were cleaned up afterwards.
+
+**Key decisions:**
+- **"Signed in at":** `last_login_at` is the time of the current sign-in, so Home uses that label.
+- **Fail closed:** if `/me` fails right after a token is issued, the session ends as `unverified`.
+- **Change password** checks the session itself, so the page isn't unmounted mid-submit.
+- **Tests:** they run with `--no-experimental-webstorage`, because Node's own `localStorage` hides jsdom's.
+
+**What's next:**
+- ~~Manual browser check~~ done 2026-10-05 in Orca's embedded browser: sign in, forced change, Home and countdown, reload (`rehydrate`), revoked-token reload, sign-out. All passed.
+- Push and open the C-a PR.
+- C-b: C5 Provider users page (dialog, table, select; show-once temporary passwords), plus the rest of C6.
+- Then R (OQ-1/OQ-2 first), P and K.
+
+**Closeout addendum (2026-10-05):**
+- **Final gates:**
+  - `provider-console`: `npm ci`, lint, test (116) and build pass.
+  - `controller`: `go build`, `go vet` and CI-style `go test -count=1 ./...` (24 packages, 932 pass, 0 fail, 33 pre-existing skips) pass.
+  - `admin/` is unchanged and builds.
+- **AT-C status** is recorded in the Phase C file.
+- **Found, not fixed:** a resolver test teardown leaks 15 `resolvers_updsc_*` databases per run (it drops the DB through its own connection). Candidate for K.
+- **Next:** C-b (C5 Provider users page).
