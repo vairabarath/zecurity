@@ -24,6 +24,10 @@ export interface Section {
 
 export const SECTIONS: readonly Section[] = [
   { key: 'home', path: '/', label: 'Home', roles: PROVIDER_ROLES },
+  { key: 'relays', path: '/relays', label: 'Relays', roles: PROVIDER_ROLES },
+  { key: 'tenants', path: '/tenants', label: 'Tenants', roles: ['super-admin'] },
+  { key: 'audit', path: '/audit', label: 'Audit', roles: ['super-admin'] },
+  { key: 'certificates', path: '/certificates', label: 'Certificates', roles: ['super-admin'] },
   { key: 'users', path: '/users', label: 'Provider users', roles: ['super-admin'] },
 ]
 

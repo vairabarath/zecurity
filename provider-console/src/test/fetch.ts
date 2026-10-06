@@ -13,6 +13,8 @@ export interface FakeResponse {
 export interface RecordedCall {
   method: string
   path: string
+  /** Raw query string without "?" ("" when none). */
+  search: string
   headers: Record<string, string>
   body?: unknown
 }
@@ -26,6 +28,7 @@ export function mockFetch(routes: Record<string, Route>) {
     const call: RecordedCall = {
       method: init?.method ?? 'GET',
       path: url.pathname,
+      search: url.search.replace(/^\?/, ''),
       headers: { ...(init?.headers as Record<string, string> | undefined) },
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     }

@@ -257,9 +257,11 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member1-Go/Phase4-Provider-Console-Read-Pages]].
 
-- [ ] **M1-P1** Role-matrix entries: Relays (both roles); Tenants, Audit, Certificates (super-admin).
-- [ ] **M1-P2** Read-only pages: Relays (list + detail), Tenants (list + detail), Audit, Certificates.
-- [ ] **M1-P3** Vitest tests; build gate.
+**Phase P — done (2026-10-06)** on `sprint21/p-provider-read-pages` (8 commits, not yet pushed). Read-only Relays, Tenants, Audit and Certificates pages in the provider console, with no controller changes. Tenant detail is fetched once per visit: the live dev build (StrictMode) wrote exactly one `tenant.read` row per visit and per Refresh. Gates: `npm ci`/lint/test (374)/build pass; `admin/` is unchanged. AT-P.1–P.4 are verified in development. **Remaining Sprint 21 work:** Phase K (Sprint 20 cleanup) and Phase V (M1).
+
+- [x] **M1-P1** Role-matrix entries: Relays (both roles); Tenants, Audit, Certificates (super-admin).
+- [x] **M1-P2** Read-only pages: Relays (list + detail), Tenants (list + detail), Audit, Certificates.
+- [x] **M1-P3** Vitest tests; build gate.
 
 ### Phase K — M2: Sprint 20 Cleanup
 

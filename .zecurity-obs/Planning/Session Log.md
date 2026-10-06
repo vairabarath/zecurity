@@ -2644,3 +2644,36 @@ serves on `127.0.0.1:9102`.
 - Push and open the Phase R PR.
 - Then Phase P (console read pages).
 - Open question: root/intermediate are outside the 8760h `within` cap, so they show in the summary only.
+
+---
+
+## 2026-10-06 — Claude Code (Barath / M2) — Sprint 21 Phase P: Provider console read pages
+
+**What was done:**
+- Branch `sprint21/p-provider-read-pages` (from `fixed-pendings` after #110), 8 commits; not pushed:
+  1. Read wrappers and types.
+  2. Shared paging/expiry/state pieces.
+  3. Relays.
+  4. Tenants (audited detail).
+  5. Audit.
+  6. Certificates.
+  7. Certificates narrow-screen fix.
+  8. Closeout.
+- **Gates:** `npm ci`, lint, `npm test` (374) and build pass; mutation checks caught everything across P1–P6; `admin/` and the controller are untouched.
+- **Live check in Orca** (real controller, throwaway DB and Valkey, dev build with StrictMode):
+  - nav per role;
+  - Relays, Tenants, Audit and Certificates match the API;
+  - tenant detail wrote exactly 1 audit row per visit, per Refresh and per away-and-back, and 0 for the list, hover or focus;
+  - relay-ops Forbidden;
+  - layout clean at 375–1024px after one fix.
+
+**Key decisions:**
+- Home stays the landing page; tenant detail has the "Refresh (records an audit entry)" button; the platform CA note is shown.
+- `bucketFor()` mirrors the server; URL filters are allowlisted; cursors reset on any filter change or navigation.
+- The certificates API has no current or revoked fields, so none is shown.
+- The paging hook is keyed on the history entry so a reset always refetches.
+
+**What's next:**
+- Push and open the Phase P PR.
+- Then Phase K (Sprint 20 cleanup).
+- Formal AT-C/AT-R/AT-P acceptance by Sathiya.

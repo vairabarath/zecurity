@@ -2,17 +2,37 @@
 
 The provider operators' console (Sprint 21, Decision Record D-18): its own Vite + React app, with its own build and its own domain. It is separate from the tenant admin dashboard in `admin/`, which it never touches or imports from. It talks only to the controller's `/provider/*` API.
 
-What it does today (Phase C):
+What it does today (Phases C and P):
 - email + password sign-in;
 - the forced first password change and voluntary password changes;
 - sign-out;
 - a session countdown;
 - role-aware navigation (`super-admin`, `relay-ops`);
 - a Home page;
-- **Provider users** (`/users`, super-admin only): list operators, add an operator, change a role, disable, enable and reset a password.
+- **Provider users** (`/users`, super-admin only): list operators, add an operator, change a role, disable, enable and reset a password;
+- read-only fleet pages (Phase P):
+  - **Relays** (`/relays`, `/relays/:id`): super-admin and relay-ops;
+  - **Tenants** (`/tenants`, `/tenants/:id`): super-admin;
+  - **Audit** (`/audit`): super-admin;
+  - **Certificates** (`/certificates`): super-admin.
 
-Still to come:
-- **Phase P:** the read-only fleet pages (relays, tenants, audit, certificates).
+## Read pages (Phase P)
+
+- **Read-only.** The only controls are filters, paging, Refresh and Retry. The pages add GETs only; the write surface above is unchanged (`api-surface.test.ts` pins both).
+- **Filters live in the URL**, through each page's allowlist (never tokens, passwords or audit details), so reload, back/forward and shared links restore them. Any filter change or navigation restarts paging at page 1: a cursor is never reused under other filters.
+- **Requests only on explicit actions.** One request when a page opens (StrictMode included), then only on filter/page changes, Refresh or Retry. No polling, no refetch on focus/visibility/reconnect, no automatic retry, no prefetch.
+- **Tenant detail is an audited read.** Every successful `GET /provider/tenants/{id}` writes a provider audit row (OQ-1). So:
+  - the page fetches once per visit;
+  - a malformed id is rejected in the browser and never sent;
+  - the button is labelled **"Refresh (records an audit entry)"**;
+  - nothing prefetches it.
+
+  Tenant ids elsewhere are plain text, or a link followed only on an explicit click.
+- **No tenant identities.** Tenant users appear only as counts (OQ-2).
+- **Certificate expiry:**
+  - the Certificates page shows the API's summary and per-row buckets verbatim;
+  - relay and tenant certificate dates use `bucketFor()` (`src/lib/expiry.ts`), which mirrors the server's boundaries exactly;
+  - root and intermediate CAs outlive the 8760h listing window, so they appear only in the summary (the page says so).
 
 ## Operator management (Provider users)
 
@@ -108,13 +128,16 @@ The build gate is `npm ci && npm run lint && npm test && npm run build`.
 
 ```text
 src/
-  api/          client.ts (the only fetch), auth.ts, operators.ts, types.ts
+  api/          client.ts (the only fetch), auth.ts, operators.ts, reads.ts, types.ts
   auth/         session.ts (zustand store), flows.ts (sign in/out, change password, refresh),
                 guards.tsx, roles.ts (the single role matrix)
   components/   Layout, SessionCountdown, RoleBadge, AuthCard, ProviderBrand, OperatorDialogs,
-                TemporaryPasswordDialog; ui/ (primitives: copied from admin/, plus table and select)
-  pages/        Login, ChangePassword, Home, ProviderUsers, Forbidden, NotFound
-  lib/          formatting, password-policy hints, operator error messages
+                TemporaryPasswordDialog, StatusBadge, ExpiryBadge, DataState, Pager;
+                ui/ (primitives: copied from admin/, plus table and select)
+  pages/        Login, ChangePassword, Home, ProviderUsers, Relays, RelayDetail, Tenants, TenantDetail,
+                Audit, Certificates, Forbidden, NotFound
+  lib/          formatting, password-policy hints, operator error messages, expiry buckets,
+                usePagedQuery (list pages), useDetailQuery (detail pages)
   test/         setup, fetch stub, render helpers, source guards
 ```
 

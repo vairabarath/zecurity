@@ -1,16 +1,19 @@
 import { render } from '@testing-library/react'
+import { StrictMode } from 'react'
 import { MemoryRouter } from 'react-router-dom'
 import { AppRoutes } from '@/App'
 import { useSessionStore } from '@/auth/session'
 import type { Me } from '@/api/types'
 
-/** Renders the real route table at `path`. */
-export function renderApp(path = '/', state?: unknown) {
-  return render(
-    <MemoryRouter initialEntries={[{ pathname: path, state }]}>
+/** Renders the real route table at `path` (which may carry a ?query). */
+export function renderApp(path = '/', state?: unknown, opts: { strict?: boolean } = {}) {
+  const [pathname, search = ''] = path.split('?')
+  const tree = (
+    <MemoryRouter initialEntries={[{ pathname, search: search ? `?${search}` : '', state }]}>
       <AppRoutes />
-    </MemoryRouter>,
+    </MemoryRouter>
   )
+  return render(opts.strict ? <StrictMode>{tree}</StrictMode> : tree)
 }
 
 /** A full, verified session for `me`. */
