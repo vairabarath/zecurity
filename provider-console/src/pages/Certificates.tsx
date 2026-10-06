@@ -178,10 +178,10 @@ function TenantFilter({ applied, onApply }: { applied: string; onApply: (v: stri
     onApply(draft.trim())
   }
   return (
-    <form aria-label="Tenant filter" onSubmit={submit} className="flex items-end gap-2">
-      <div className="grid gap-1.5">
+    <form aria-label="Tenant filter" onSubmit={submit} className="flex w-full items-end gap-2 sm:w-auto">
+      <div className="grid min-w-0 flex-1 gap-1.5">
         <Label htmlFor="cert-tenant">Tenant ID</Label>
-        <Input id="cert-tenant" className="w-80 font-mono text-xs" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="any tenant" autoComplete="off" />
+        <Input id="cert-tenant" className="w-full font-mono text-xs sm:w-80" value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="any tenant" autoComplete="off" />
       </div>
       <Button type="submit" variant="outline">
         Apply
