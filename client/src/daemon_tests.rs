@@ -5,8 +5,8 @@ use std::sync::Once;
 use rcgen::{CertificateParams, KeyPair, SanType};
 
 use crate::daemon::{
-    build_transports_by_resource, effective_config, ordered_connectors_for_entry,
-    resolve_entry_coords,
+    build_transports_by_resource, classify_applied, effective_config,
+    ordered_connectors_for_entry, resolve_entry_coords, ConfigDelta,
 };
 use crate::grpc::client_v1::{
     AclConnector, AclEntry, AclRemoteNetwork, AclSnapshot, TransportConnector,
@@ -344,6 +344,157 @@ fn resolve_honors_preferred_connector_in_transport() {
     let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
     assert_eq!(coords.len(), 2);
     assert_eq!(coords[0].connector_id, "c2");
+}
+
+// ── Empty-network delivery (Fix05-Empty-Network-Transport-Delivery) ─────────
+// The controller now emits a remote network with zero active connectors as a
+// PRESENT transport RN with an empty connector list. The client must read that
+// as "no reachable connector" — never fall back to the (stale) ACL list.
+
+#[test]
+fn resolve_present_empty_transport_rn_does_not_fall_back() {
+    let e = tp_entry("rn1", "c1");
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", "relay-old:9093")], // stale ACL still lists c1
+    };
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![], // explicit: no active connector
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+
+    assert!(
+        resolve_entry_coords(&e, &rn_by_id, &trn_by_id).is_empty(),
+        "present-but-empty transport RN must resolve to no connector, not the ACL fallback"
+    );
+}
+
+#[tokio::test]
+async fn build_map_present_empty_rn_is_unreachable_and_others_unaffected() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entries = vec![
+        AclEntry {
+            address: "10.7.0.1".to_string(),
+            port: 80,
+            remote_network_id: "rn-empty".to_string(),
+            protocol: "tcp".to_string(),
+            ..Default::default()
+        },
+        AclEntry {
+            address: "10.8.0.1".to_string(),
+            port: 80,
+            remote_network_id: "rn-live".to_string(),
+            protocol: "tcp".to_string(),
+            ..Default::default()
+        },
+    ];
+    let acl_conn = |id: &str| AclConnector {
+        connector_id: id.to_string(),
+        connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+        connector_spiffe: format!("spiffe://test.example/connector/{id}"),
+        ..Default::default()
+    };
+    // Stale ACL: both networks still list a connector.
+    let acl_rns = vec![
+        AclRemoteNetwork {
+            remote_network_id: "rn-empty".to_string(),
+            connectors: vec![acl_conn("c-gone")],
+            ..Default::default()
+        },
+        AclRemoteNetwork {
+            remote_network_id: "rn-live".to_string(),
+            connectors: vec![acl_conn("c-live")],
+            ..Default::default()
+        },
+    ];
+    let transport = TransportSnapshot {
+        version: 6,
+        remote_networks: vec![
+            TransportRemoteNetwork {
+                remote_network_id: "rn-empty".to_string(),
+                connectors: vec![],
+            },
+            TransportRemoteNetwork {
+                remote_network_id: "rn-live".to_string(),
+                connectors: vec![TransportConnector {
+                    connector_id: "c-live".to_string(),
+                    connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+                    connector_spiffe: "spiffe://test.example/connector/c-live".to_string(),
+                    ..Default::default()
+                }],
+            },
+        ],
+    };
+
+    let map = build_transports_by_resource(&entries, &acl_rns, Some(&transport), &device)
+        .expect("map builds");
+    let empty_key = ("10.7.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    let live_key = ("10.8.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
+    assert!(
+        map.get(&empty_key).expect("entry kept").is_none(),
+        "resource behind an empty network must have no transport (fail closed)"
+    );
+    assert!(
+        map.get(&live_key).expect("entry kept").is_some(),
+        "unrelated network must keep its transport"
+    );
+}
+
+/// The L3 sequence from the 2026-10-06 run, as seen by the early transport
+/// resync (which refreshes transport only — the cached ACL is stale).
+#[test]
+fn classify_last_connector_leaves_then_returns_with_stale_acl() {
+    let device = fake_device_info();
+    let acl_stale = AclSnapshot {
+        version: 14,
+        entries: vec![AclEntry {
+            address: "192.168.1.39".to_string(),
+            port: 51711,
+            protocol: "tcp".to_string(),
+            allowed_spiffe_ids: vec![device.spiffe_id.clone()],
+            remote_network_id: "palace".to_string(),
+            preferred_connector_id: "manoj".to_string(),
+            ..Default::default()
+        }],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "palace".to_string(),
+            connectors: vec![tp_acl_conn("manoj", "")],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let tp = |version: u64, conns: Vec<TransportConnector>| TransportSnapshot {
+        version,
+        remote_networks: vec![TransportRemoteNetwork {
+            remote_network_id: "palace".to_string(),
+            connectors: conns,
+        }],
+    };
+    // v5: manoj is the only active connector (what the tunnel is running).
+    let applied = effective_config(&acl_stale, Some(&tp(5, vec![tp_transport_conn("manoj", "")])), &device);
+
+    // v6 from a FIXED controller: palace present, empty → hot-apply now.
+    let fixed = effective_config(&acl_stale, Some(&tp(6, vec![])), &device);
+    assert_eq!(classify_applied(&applied, &fixed), ConfigDelta::TransportOnly);
+    assert!(fixed.entries[0].coords.is_empty(), "no connector after the last one left");
+
+    // v6 from a PRE-FIX controller: palace absent → stale ACL fallback →
+    // NoChange (the 43 s bug). Pinned so the difference stays explicit.
+    let prefix = effective_config(
+        &acl_stale,
+        Some(&TransportSnapshot { version: 6, remote_networks: vec![] }),
+        &device,
+    );
+    assert_eq!(classify_applied(&applied, &prefix), ConfigDelta::NoChange);
+
+    // v7: manoj returns → TransportOnly back to exactly the original config.
+    let back = effective_config(&acl_stale, Some(&tp(7, vec![tp_transport_conn("manoj", "")])), &device);
+    assert_eq!(classify_applied(&fixed, &back), ConfigDelta::TransportOnly);
+    assert_eq!(back, applied);
 }
 
 // ── Fix 01 Phase 1: effective_config ───────────────────────────────────────

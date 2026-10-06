@@ -107,6 +107,109 @@ func TestCompileTransportSnapshot(t *testing.T) {
 			t.Fatalf("tunnel_addr: want 10.2.0.1:9092 got %q", c.ConnectorTunnelAddr)
 		}
 	})
+
+	// ── Empty-network delivery (Fix05-Empty-Network-Transport-Delivery) ──────
+
+	rnsByID := func(t *testing.T, wsID string) map[string]int {
+		t.Helper()
+		snap, err := CompileTransportSnapshot(ctx, store, notifier, wsID)
+		if err != nil {
+			t.Fatalf("compile: %v", err)
+		}
+		out := make(map[string]int, len(snap.RemoteNetworks))
+		for _, rn := range snap.RemoteNetworks {
+			if _, dup := out[rn.RemoteNetworkId]; dup {
+				t.Fatalf("remote network %q emitted twice", rn.RemoteNetworkId)
+			}
+			out[rn.RemoteNetworkId] = len(rn.Connectors)
+		}
+		return out
+	}
+
+	t.Run("remote network with no active connector is emitted empty", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, pool, "ws-tp-3")
+		rnNone := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-3-none")
+		rnDisc := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-3-disc")
+		c := mustInsertConnector(t, ctx, pool, wsID, rnDisc, "td-3", "10.3.0.1")
+		mustSetConnectorStatus(t, ctx, pool, c, "disconnected")
+
+		got := rnsByID(t, wsID)
+		if n, ok := got[rnNone]; !ok || n != 0 {
+			t.Fatalf("RN with no connectors: want present+empty, got present=%v n=%d", ok, n)
+		}
+		if n, ok := got[rnDisc]; !ok || n != 0 {
+			t.Fatalf("RN with only a disconnected connector: want present+empty, got present=%v n=%d", ok, n)
+		}
+	})
+
+	t.Run("multiple remote networks are independent", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, pool, "ws-tp-4")
+		rnA := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-4-a")
+		rnB := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-4-b")
+		_ = mustInsertConnector(t, ctx, pool, wsID, rnB, "td-4", "10.4.0.1")
+		_ = mustInsertConnector(t, ctx, pool, wsID, rnB, "td-4", "10.4.0.2")
+
+		got := rnsByID(t, wsID)
+		if len(got) != 2 || got[rnA] != 0 || got[rnB] != 2 {
+			t.Fatalf("want {A:0, B:2}, got %v", got)
+		}
+	})
+
+	t.Run("last connector leaving empties only its network; return repopulates", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, pool, "ws-tp-5")
+		rnA := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-5-a")
+		rnB := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-5-b")
+		cA := mustInsertConnector(t, ctx, pool, wsID, rnA, "td-5", "10.5.0.1")
+		_ = mustInsertConnector(t, ctx, pool, wsID, rnB, "td-5", "10.5.0.2")
+
+		if got := rnsByID(t, wsID); got[rnA] != 1 || got[rnB] != 1 {
+			t.Fatalf("before: want {A:1, B:1}, got %v", got)
+		}
+
+		mustSetConnectorStatus(t, ctx, pool, cA, "disconnected")
+		got := rnsByID(t, wsID)
+		if n, ok := got[rnA]; !ok || n != 0 {
+			t.Fatalf("after last connector left: A must be present+empty, got present=%v n=%d", ok, n)
+		}
+		if got[rnB] != 1 {
+			t.Fatalf("unrelated B must keep its connector, got %d", got[rnB])
+		}
+
+		mustSetConnectorStatus(t, ctx, pool, cA, "active")
+		if got := rnsByID(t, wsID); got[rnA] != 1 || got[rnB] != 1 {
+			t.Fatalf("after return: want {A:1, B:1}, got %v", got)
+		}
+	})
+
+	t.Run("deleted remote network without connectors stays absent", func(t *testing.T) {
+		wsID := mustInsertWorkspace(t, ctx, pool, "ws-tp-6")
+		rnDel := mustInsertRemoteNetwork(t, ctx, pool, wsID, "rn-6-del")
+		if _, err := pool.Exec(ctx, `UPDATE remote_networks SET status = 'deleted' WHERE id = $1`, rnDel); err != nil {
+			t.Fatalf("mark rn deleted: %v", err)
+		}
+		if got := rnsByID(t, wsID); len(got) != 0 {
+			t.Fatalf("deleted RN must not be emitted, got %v", got)
+		}
+	})
+
+	t.Run("other workspaces' networks are not emitted", func(t *testing.T) {
+		wsX := mustInsertWorkspace(t, ctx, pool, "ws-tp-7x")
+		wsY := mustInsertWorkspace(t, ctx, pool, "ws-tp-7y")
+		rnX := mustInsertRemoteNetwork(t, ctx, pool, wsX, "rn-7-x")
+		_ = mustInsertRemoteNetwork(t, ctx, pool, wsY, "rn-7-y")
+
+		got := rnsByID(t, wsX)
+		if len(got) != 1 || got[rnX] != 0 {
+			t.Fatalf("want only {X:0}, got %v", got)
+		}
+	})
+}
+
+func mustSetConnectorStatus(t *testing.T, ctx context.Context, pool *pgxpool.Pool, connectorID, status string) {
+	t.Helper()
+	if _, err := pool.Exec(ctx, `UPDATE connectors SET status = $1 WHERE id = $2`, status, connectorID); err != nil {
+		t.Fatalf("set connector status: %v", err)
+	}
 }
 
 // ── minimal DB harness (mirrors policy integration helpers) ──────────────────
