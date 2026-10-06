@@ -3,6 +3,7 @@ import { RedirectIfAuthenticated, RequireRole, RequireSession } from '@/auth/gua
 import { rolesFor } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
+import { Audit } from '@/pages/Audit'
 import { ChangePassword } from '@/pages/ChangePassword'
 import { Forbidden } from '@/pages/Forbidden'
 import { Home } from '@/pages/Home'
@@ -40,6 +41,9 @@ export function AppRoutes() {
           <Route element={<RequireRole roles={rolesFor('tenants')} />}>
             <Route path="tenants" element={<Tenants />} />
             <Route path="tenants/:id" element={<TenantDetail />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('audit')} />}>
+            <Route path="audit" element={<Audit />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('users')} />}>
             <Route path="users" element={<ProviderUsers />} />

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useLocation, useSearchParams } from 'react-router-dom'
 import { ApiError } from '@/api/client'
 
 // Shared state for the paginated read pages (relays, tenants, audit,
@@ -72,7 +72,12 @@ export function usePagedQuery<R extends { next_cursor: string | null }>(opts: Pa
   const { filterKeys, validate, fetchPage } = opts
   const [searchParams, setSearchParams] = useSearchParams()
   const filters = useMemo(() => readFilters(searchParams, filterKeys), [searchParams, filterKeys])
-  const fkey = filtersKey(filters)
+  // The history entry is part of the identity: every navigation (Apply,
+  // Clear, Reset, back/forward) is one fresh request from page 1, even when
+  // it lands on filters seen before. StrictMode's second render sees the
+  // same entry, so it never duplicates a request.
+  const { key: locationKey } = useLocation()
+  const fkey = `${locationKey}|${filtersKey(filters)}`
   const valid = validate ? validate(filters) : true
 
   // The cursor stack is tagged with the filter set it belongs to; under any

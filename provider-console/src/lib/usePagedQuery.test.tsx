@@ -158,6 +158,20 @@ describe('usePagedQuery', () => {
     expect(calls(f)).toHaveLength(1)
   })
 
+  it('returning to filters seen before (invalid → reset) loads fresh, exactly once', async () => {
+    const user = userEvent.setup()
+    const f = dataset()
+    renderHarness(f, '/x?status=bogus', { validate: (fl) => !fl.status || ['active', 'inactive'].includes(fl.status) })
+    await user.click(screen.getByText('reset'))
+    await screen.findByText('{} page 1')
+    await user.click(screen.getByText('filter inactive'))
+    await screen.findByText('{"status":"inactive"} page 1')
+    await user.click(screen.getByText('reset'))
+    await screen.findByText('{} page 1')
+    await new Promise((r) => setTimeout(r, 30))
+    expect(calls(f).map(([fl]) => JSON.stringify(fl))).toEqual(['{}', '{"status":"inactive"}', '{}'])
+  })
+
   it.each([
     ['a 400', new ApiError({ status: 400, code: 'invalid_cursor' }), 'invalid'],
     ['a role 403', new ApiError({ status: 403, code: 'forbidden' }), 'forbidden'],
