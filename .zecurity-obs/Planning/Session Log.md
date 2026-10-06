@@ -2611,3 +2611,36 @@ serves on `127.0.0.1:9102`.
 - Push and open the C-b PR.
 - Phase R (OQ-1/OQ-2 first), then P and K.
 - Formal AT-C acceptance by Sathiya, including the AT-C.7 network capture.
+
+---
+
+## 2026-10-06 — Claude Code (Barath / M2) — Sprint 21 Phase R: Provider read APIs
+
+**What was done:**
+- Branch `sprint21/r-provider-read-apis` (from `fixed-pendings` after #109), 7 commits; not pushed:
+  1. R1 read actions and matrix tests.
+  2. `providerquery` base and relays.
+  3. Tenants.
+  4. Provider audit query.
+  5. Certificate expiry and `CurrentCertInfo()`.
+  6. The six HTTP routes with the fail-closed tenant detail audit.
+  7. Closeout docs.
+- **Decisions:**
+  - OQ-1: tenant detail reads are audited, fail-closed (a single REPEATABLE READ transaction; the response is written only after the audit row commits).
+  - OQ-2: no tenant admin identities.
+- **Gates:**
+  - Full CI-style `go test ./...`: 25 packages, 1,023 pass, 0 fail, 33 pre-existing skips.
+  - R packages: 0 skips.
+  - Mutation checks caught every case, including all the fail-closed ones.
+- **Real-binary live check** (throwaway DB and Valkey): auth matrix (30), relay liveness from Valkey, exact `tenant.read` deltas, no identity or secret leaks, controller cert matching `openssl s_client`, bad-input codes. All passed. Cleaned up afterwards.
+
+**Key decisions:**
+- Detail lists keep deleted/revoked items with their status.
+- Audit time window `[since, until)`; case-insensitive email filter.
+- Client device certificate rows have no name; `controller_grpc` entity id is `"controller"`; serials are lowercase hex.
+- Test-only import cycle fixed with an external test package.
+
+**What's next:**
+- Push and open the Phase R PR.
+- Then Phase P (console read pages).
+- Open question: root/intermediate are outside the 8760h `within` cap, so they show in the summary only.
