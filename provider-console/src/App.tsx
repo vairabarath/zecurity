@@ -4,6 +4,7 @@ import { rolesFor } from '@/auth/roles'
 import { Layout } from '@/components/Layout'
 import { Toaster } from '@/components/ui/toaster'
 import { Audit } from '@/pages/Audit'
+import { Certificates } from '@/pages/Certificates'
 import { ChangePassword } from '@/pages/ChangePassword'
 import { Forbidden } from '@/pages/Forbidden'
 import { Home } from '@/pages/Home'
@@ -44,6 +45,9 @@ export function AppRoutes() {
           </Route>
           <Route element={<RequireRole roles={rolesFor('audit')} />}>
             <Route path="audit" element={<Audit />} />
+          </Route>
+          <Route element={<RequireRole roles={rolesFor('certificates')} />}>
+            <Route path="certificates" element={<Certificates />} />
           </Route>
           <Route element={<RequireRole roles={rolesFor('users')} />}>
             <Route path="users" element={<ProviderUsers />} />
