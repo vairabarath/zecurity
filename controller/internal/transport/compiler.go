@@ -21,14 +21,35 @@ const (
 // active connector grouped by remote_network_id, with its tunnel + relay
 // coordinates. It is the transport-plane analogue of policy.CompileACLSnapshot's
 // connector section — same derivation of tunnel addr, SPIFFE, and relay addr so
-// both planes resolve connectivity identically. Returns an error on any DB
-// failure; never returns a partial snapshot.
+// both planes resolve connectivity identically. Every active remote network is
+// present: one with zero active connectors is emitted with an empty connector
+// list (see assembleTransportSnapshot). Returns an error on any DB failure;
+// never returns a partial snapshot.
 func CompileTransportSnapshot(ctx context.Context, store *Store, notifier *Notifier, workspaceID string) (*clientv1.TransportSnapshot, error) {
 	rows, err := store.GetWorkspaceConnectors(ctx, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("compile transport: connector lookup: %w", err)
 	}
+	activeRNIDs, err := store.GetWorkspaceRemoteNetworkIDs(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("compile transport: remote network lookup: %w", err)
+	}
+	return assembleTransportSnapshot(rows, activeRNIDs, notifier.Version(workspaceID)), nil
+}
 
+// assembleTransportSnapshot is the pure part of the compile.
+//
+//  1. Remote networks that have active connector rows are built exactly as
+//     before, in row order (remote_network_id, freshest heartbeat first).
+//  2. Every active remote network that has no connector row is appended with an
+//     EMPTY connector list, in activeRNIDs order.
+//
+// Step 2 makes "this network has no reachable connector" explicit. Without it
+// the network is simply absent, and the client treats an absent network as "not
+// covered by the transport plane" and falls back to the connector list in its
+// cached ACL snapshot — which still lists the departed connector until the next
+// ACL poll (Fix05-Connector-State-Delivery-Latency-Investigation).
+func assembleTransportSnapshot(rows []*WorkspaceConnectorRow, activeRNIDs []string, version uint64) *clientv1.TransportSnapshot {
 	rnMap := make(map[string]*clientv1.TransportRemoteNetwork)
 	order := make([]string, 0) // preserve query order for deterministic output
 	for _, row := range rows {
@@ -65,14 +86,26 @@ func CompileTransportSnapshot(ctx context.Context, store *Store, notifier *Notif
 		})
 	}
 
+	// Active remote networks with no active connector: present, explicitly empty.
+	for _, id := range activeRNIDs {
+		if _, ok := rnMap[id]; ok {
+			continue
+		}
+		rnMap[id] = &clientv1.TransportRemoteNetwork{
+			RemoteNetworkId: id,
+			Connectors:      []*clientv1.TransportConnector{},
+		}
+		order = append(order, id)
+	}
+
 	remoteNetworks := make([]*clientv1.TransportRemoteNetwork, 0, len(order))
 	for _, id := range order {
 		remoteNetworks = append(remoteNetworks, rnMap[id])
 	}
 	return &clientv1.TransportSnapshot{
 		RemoteNetworks: remoteNetworks,
-		Version:        notifier.Version(workspaceID),
-	}, nil
+		Version:        version,
+	}
 }
 
 // resolveConnectorRelayAddr mirrors policy/compiler.go's helper (kept local so

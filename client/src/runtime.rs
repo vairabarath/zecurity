@@ -9,12 +9,59 @@ pub struct TunHandle {
     pub abort: tokio::task::AbortHandle,
     /// Resource IPs added as /32 routes (for cleanup logging).
     pub route_count: usize,
+    /// Effective config this tunnel was built from; Fix 01 Phase 1 restart decision.
+    pub applied: AppliedConfig,
+    /// Fix 01 Phase 2-A: publishes a new connector transport map into the
+    /// running net_stack (read once per accepted flow). Shared via Arc so a
+    /// hot-apply can replace this TunHandle while keeping the same channel.
+    pub transport_tx: Arc<tokio::sync::watch::Sender<Arc<crate::net_stack::TransportMap>>>,
 }
 
 impl std::fmt::Debug for TunHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TunHandle")
             .field("route_count", &self.route_count)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedCoords {
+    pub connector_id: String,
+    pub connector_tunnel_addr: String,
+    pub connector_spiffe: String,
+    pub relay_addr: String,
+    pub relay_spiffe_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedEntry {
+    pub address: String,
+    pub port: u32,
+    pub protocol: String,
+    pub remote_network_id: String,
+    pub preferred_connector_id: String,
+    pub coords: Vec<AppliedCoords>,
+}
+
+/// The effective config the running tunnel was built from (Fix 01 Phase 1).
+/// It deliberately excludes version, generated_at, workspace_id, names,
+/// top-level relay_addr/relay_spiffe_id, and non-preferred connector order.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AppliedConfig {
+    pub spiffe_id: String,
+    pub certificate_pem: String,
+    pub private_key_pem: String,
+    pub tpm_key_material: Option<String>,
+    pub ca_cert_pem: String,
+    pub entries: Vec<AppliedEntry>,
+}
+
+impl std::fmt::Debug for AppliedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppliedConfig")
+            .field("spiffe_id", &self.spiffe_id)
+            .field("entries_len", &self.entries.len())
             .finish()
     }
 }

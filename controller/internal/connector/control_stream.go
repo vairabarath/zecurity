@@ -62,6 +62,15 @@ type PolicyChangeNotifier interface {
 type ConnectorRegistry struct {
 	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
+
+	// lifecycleMu serialises each Control stream's ownership transition —
+	// (activation UPDATE + add) on open, (ownership check + remove +
+	// disconnect UPDATE) on close — so an old stream closing after a
+	// replacement stream registered can never remove the replacement or mark
+	// the connector disconnected (make-before-break certificate renewal).
+	// Separate from mu so readers (get, ClientsForWorkspace, broadcasts) never
+	// wait on a DB round-trip. Never held across notifications.
+	lifecycleMu sync.Mutex
 }
 
 // NewConnectorRegistry creates an empty registry.
@@ -166,10 +175,18 @@ func (r *ConnectorRegistry) add(connectorID string, c *connectorStreamClient) {
 	r.clients[connectorID] = c
 }
 
-func (r *ConnectorRegistry) remove(connectorID string) {
+// removeIfCurrent deletes connectorID's entry only when it is still c (stream
+// identity is the *connectorStreamClient pointer). It reports whether c was the
+// authoritative stream. A stream that was superseded by a newer one for the same
+// connector returns false and leaves the newer registration untouched.
+func (r *ConnectorRegistry) removeIfCurrent(connectorID string, c *connectorStreamClient) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.clients[connectorID] != c {
+		return false
+	}
 	delete(r.clients, connectorID)
+	return true
 }
 
 func (r *ConnectorRegistry) get(connectorID string) *connectorStreamClient {
@@ -359,24 +376,21 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Error(codes.PermissionDenied, "connector is revoked")
 	}
 
-	var becameActive bool
-	if err := h.Pool.QueryRow(ctx,
-		`WITH current AS (SELECT status FROM connectors WHERE id = $1),
-		     updated AS (
-		       UPDATE connectors
-		          SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW()
-		        WHERE id = $1
-		          AND status <> 'revoked'
-		          AND revoked_at IS NULL
-		       RETURNING id)
-		SELECT current.status IS DISTINCT FROM 'active' FROM current, updated;`,
-		connectorID,
-	).Scan(&becameActive); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return status.Error(codes.PermissionDenied, "connector is revoked")
-		}
-		log.Printf("control stream: mark connector %s active: %v", connectorID, err)
-	} else if becameActive {
+	client := &connectorStreamClient{
+		stream:      stream,
+		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID: connectorID,
+		tenantID:    tenantID,
+	}
+
+	// Activation UPDATE + registration happen atomically under lifecycleMu, so
+	// an older stream for this connector closing concurrently either retires
+	// before this stream exists (a real gap) or finds it is no longer current.
+	becameActive, err := h.activateStream(ctx, client)
+	if err != nil {
+		return err
+	}
+	if becameActive {
 		if h.PolicyNotifier != nil {
 			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
 				log.Printf("control stream: notify policy change after connector active connector=%s: %v", connectorID, err)
@@ -391,15 +405,6 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		}
 	}
 
-	client := &connectorStreamClient{
-		stream:      stream,
-		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
-		connectorID: connectorID,
-		tenantID:    tenantID,
-	}
-	h.Registry.add(connectorID, client)
-	defer h.Registry.remove(connectorID)
-
 	// A single writer goroutine owns stream.Send; every send goes through
 	// client.send (enqueue). This decouples resolvers and the reconciler from the
 	// socket write, so a wedged connector can block only this goroutine — which
@@ -409,27 +414,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	defer func() {
 		// Use background context — stream context is already cancelled at this point.
 		bg := context.Background()
-		var becameDisconnected bool
-		if err := h.Pool.QueryRow(bg,
-			`WITH current AS (
-				     SELECT status
-				       FROM connectors
-				      WHERE id = $1
-				   ),
-				   updated AS (
-				     UPDATE connectors
-				        SET status = 'disconnected',
-				            updated_at = NOW()
-				      WHERE id = $1
-				        AND status = 'active'
-				      RETURNING id
-				   )
-				   SELECT current.status IS DISTINCT FROM 'disconnected'
-				     FROM current, updated`,
-			connectorID,
-		).Scan(&becameDisconnected); err != nil {
-			log.Printf("control stream: mark connector %s disconnected: %v", connectorID, err)
-		} else if becameDisconnected {
+		current, becameDisconnected := h.retireStream(bg, client)
+		if !current {
+			// Superseded by a newer stream for the same connector (e.g. a
+			// make-before-break certificate renewal): the newer stream owns the
+			// registry entry and the connector's status — leave both alone.
+			log.Printf("control stream: connector %s superseded stream closed (newer stream is authoritative)", connectorID)
+			return
+		}
+		if becameDisconnected {
 			if h.PolicyNotifier != nil {
 				if err := h.PolicyNotifier.NotifyPolicyChange(bg, tenantID); err != nil {
 					log.Printf("control stream: notify policy change after connector disconnect connector=%s: %v", connectorID, err)
@@ -528,6 +521,79 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 			log.Printf("control stream: connector %s UNKNOWN case: %T", connectorID, msg.Body)
 		}
 	}
+}
+
+// activateStream makes client the authoritative Control stream for its
+// connector: under the registry's lifecycleMu it marks the connector active
+// (revocation-guarded) and registers client. It reports whether the connector
+// transitioned into 'active' (the caller notifies, after the lock is
+// released). A revoked connector is never registered. A non-revocation DB error
+// is logged and the stream is still registered — unchanged from the
+// pre-ownership behaviour.
+func (h *EnrollmentHandler) activateStream(ctx context.Context, client *connectorStreamClient) (bool, error) {
+	h.Registry.lifecycleMu.Lock()
+	defer h.Registry.lifecycleMu.Unlock()
+
+	var becameActive bool
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (SELECT status FROM connectors WHERE id = $1),
+		     updated AS (
+		       UPDATE connectors
+		          SET status = 'active', last_heartbeat_at = NOW(), updated_at = NOW()
+		        WHERE id = $1
+		          AND status <> 'revoked'
+		          AND revoked_at IS NULL
+		       RETURNING id)
+		SELECT current.status IS DISTINCT FROM 'active' FROM current, updated;`,
+		client.connectorID,
+	).Scan(&becameActive); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, status.Error(codes.PermissionDenied, "connector is revoked")
+		}
+		log.Printf("control stream: mark connector %s active: %v", client.connectorID, err)
+		becameActive = false
+	}
+	h.Registry.add(client.connectorID, client)
+	return becameActive, nil
+}
+
+// retireStream runs when client's Control stream ends. Under lifecycleMu it
+// checks whether client is still the authoritative stream; only then does it
+// remove the registry entry and mark the connector disconnected (only an
+// 'active' row transitions, so 'revoked' stays revoked). current=false means a
+// newer stream replaced client and nothing was changed. becameDisconnected
+// tells the caller to notify, after the lock is released.
+func (h *EnrollmentHandler) retireStream(ctx context.Context, client *connectorStreamClient) (current, becameDisconnected bool) {
+	h.Registry.lifecycleMu.Lock()
+	defer h.Registry.lifecycleMu.Unlock()
+
+	if !h.Registry.removeIfCurrent(client.connectorID, client) {
+		return false, false
+	}
+	if err := h.Pool.QueryRow(ctx,
+		`WITH current AS (
+			     SELECT status
+			       FROM connectors
+			      WHERE id = $1
+			   ),
+			   updated AS (
+			     UPDATE connectors
+			        SET status = 'disconnected',
+			            updated_at = NOW()
+			      WHERE id = $1
+			        AND status = 'active'
+			      RETURNING id
+			   )
+			   SELECT current.status IS DISTINCT FROM 'disconnected'
+			     FROM current, updated`,
+		client.connectorID,
+	).Scan(&becameDisconnected); err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			log.Printf("control stream: mark connector %s disconnected: %v", client.connectorID, err)
+		}
+		return true, false
+	}
+	return true, becameDisconnected
 }
 
 // pushPendingInstructions sends any DB-pending instructions to a freshly connected connector.

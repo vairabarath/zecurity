@@ -244,9 +244,10 @@ func TestPusher_ConcurrentPushAndDisconnect(t *testing.T) {
 			id := "c" + string(rune('a'+w))
 			ws := "ws-" + string(rune('a'+(w%2)))
 			for i := 0; i < iters; i++ {
-				reg.add(id, testClient(id, ws))
+				c := testClient(id, ws)
+				reg.add(id, c)
 				p.PushWorkspace(ws)
-				reg.remove(id)
+				reg.removeIfCurrent(id, c)
 			}
 		}(w)
 	}

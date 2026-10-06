@@ -77,3 +77,33 @@ func (s *Store) GetWorkspaceConnectors(ctx context.Context, workspaceID string) 
 	}
 	return out, rows.Err()
 }
+
+// GetWorkspaceRemoteNetworkIDs returns the id of every active remote network in
+// the workspace, ordered by id. The compiler uses it to emit remote networks
+// that currently have zero active connectors as explicitly empty entries, so a
+// client can tell "no connector is reachable" apart from "not covered by the
+// transport plane" (which makes it fall back to the cached ACL's connector list).
+func (s *Store) GetWorkspaceRemoteNetworkIDs(ctx context.Context, workspaceID string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id::text
+		   FROM remote_networks
+		  WHERE tenant_id = $1
+		    AND status = 'active'
+		  ORDER BY id`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get workspace remote networks: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan workspace remote network row: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
