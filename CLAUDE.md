@@ -8,10 +8,12 @@
 
 **Zecurity** — ZTNA platform. Controller (Go), Connector (Rust), Shield (Rust), Relay (Rust), Client (Rust), Admin UI (React), Provider Console (React, new in Sprint 21).
 
-**Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Secure Read-Only Console".** Expose the state Sprint 20 made true, behind hardened provider auth:
-- provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
+**Sprint 21 is the active sprint: Provider Dashboard Phase 2, "Dedicated Provider Console: Login, Roles, Read-Only Fleet View".** A dedicated provider console with hardened login and a working role system, then read-only views of the state Sprint 20 made true. Order: H → C → U → R → P (K, V alongside):
+- provider identity foundation (Decision Record amendment 2026-09-26, D-24…D-29): a Zecurity-owned Provider Identity Service (pluggable `Authenticator`, single token-minting path, `amr` claim); first method is email + password with Argon2id, rate-limited login, forced first password change, create-only bootstrap; dedicated provider signing key and issuer, `session_generation`, logout (D-25). **no direct Google OAuth for providers** (external IdPs may plug in later, D-29); tenant Google/OIDC is unchanged. **Mandatory TOTP for super-admin before Sprint 22** (D-28);
+- a dedicated provider console, `provider-console/` (Vite + React, D-18): email + password login, change password, logout, role-aware access (`super-admin` / `relay-ops`);
+- operator management (D-27): super-admins add operators, change roles, disable, re-enable and reset passwords (one-time temporary passwords; audited; lock-out-proof);
 - provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
-- a separate, read-only provider console (D-18), `provider-console/`;
+- read-only console pages for relays, tenants, audit and certificate health;
 - Sprint 20 cleanup: KI-1 (relay renewal scheduling), KI-2 (shield renewal window), KI-3 (dev redirect URI), JWTs removed from `.env.example`;
 - Sprint 20 live verification (`docs/sprint20-live-acceptance-runbook.md`).
 
@@ -23,7 +25,7 @@ Scope source of truth: `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change, recreate the local DB: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members only.** **M1 = Sathiya** (Go + React: Sprint 20 live verification, provider read actions and read APIs, provider console). **M2 = Barath** (Go + Rust: provider identity hardening, KI-1, KI-2, KI-3, `.env.example` JWT cleanup, database development guide).
+**Team: two members only.** **M1 = Sathiya** (testing: Sprint 20 live verification, Phase V; then Sprint 21 acceptance testing). **M2 = Barath** (all Sprint 21 development since 2026-09-28: phases H, U, K in `Sprint21/Member2-Go-Rust/*` **and** C, R, P in `Sprint21/Member1-Go/*`; see `path.md` → Team Assignments).
 
 ---
 
@@ -33,7 +35,7 @@ When a team member starts a session, they will tell you who they are (Sathiya / 
 
 1. Read `agent.md` (project root) — full conventions, code style, build commands
 2. Read `.zecurity-obs/Sprint21/path.md` — development rule, dependency map, conflict zones, open questions and progress checkboxes
-3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (`Sprint21/Member1-Go/*` for Sathiya, `Sprint21/Member2-Go-Rust/*` for Barath)
+3. Read the phase file for their **first unchecked phase** where all `depends_on` items are checked (Sathiya: `Sprint21/Member1-Go/Phase1-Sprint20-Live-Verification.md`; Barath: `Sprint21/Member2-Go-Rust/*` plus the reassigned `Sprint21/Member1-Go/Phase2…4`, following the order in `path.md`)
 4. **Check for "Post-Phase Fixes" section** in the phase file — apply any fixes listed there
 5. Brief them: what they're building, which files to touch, and the build check command
 
@@ -48,7 +50,7 @@ If they don't say who they are, ask: *"Are you Sathiya (M1) or Barath (M2)?"*
 | `agent.md` | Full conventions, build commands, code style |
 | `.zecurity-obs/Sprint21/path.md` | Development rule, dependency map, conflict zones, open questions, progress tracker (checkboxes) |
 | `.zecurity-obs/Sprint21/Member{N}-*/Phase*.md` | Detailed spec per phase |
-| `.zecurity-obs/Sprint21/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-H, AT-R, AT-P, AT-K, AT-DEV, AT-V) |
+| `.zecurity-obs/Sprint21/Acceptance-Test-Plan.md` | Sprint acceptance cases (AT-CORE, AT-H, AT-C, AT-U, AT-R, AT-P, AT-K, AT-DEV, AT-V) |
 | `docs/database-development.md` | Local database workflow: schema files, reset rule (lands with Sprint 21 DEV-1) |
 | `docs/sprint20-live-acceptance-runbook.md` + `.zecurity-obs/Sprint20/Live-Acceptance-Run-Sheet.md` | Sprint 20 live verification (Sprint 21 Phase V) |
 | `.zecurity-obs/Sprint20/path.md` | Sprint 20 record, incl. **Known Issues** KI-1 … KI-3 |
@@ -125,10 +127,13 @@ Sprint 21 specific:
 - The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code. Open questions OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
 - **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
-- The provider console is **read-only**: its only non-GET call is logout. Don't modify `admin/`.
+- The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
+- Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Bootstrap is **create-only** (ignored once any super-admin exists; no reset env flag). Break-glass recovery is a future controller CLI command (`zecurity-controller provider recover-admin`), not an env var.
+- Provider Identity is an **internal controller module** (`controller/internal/provider`, ADR-029), not a separate service.
+- Never log, audit or return passwords (incl. temporary ones) or `password_hash`. Provider login must stay rate-limited and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies). Query services in `internal/providerquery/` don't import `net/http` (D-04).
 - Proto changes (KI-2 option A only) are additive; never renumber fields.
-- Respect the `path.md` conflict-zone order: M2-H lands before M1-R wires routes in `main.go`.
+- Respect the `path.md` conflict-zone order in `main.go`: M2-H → M2-U → M1-R3.
 
 Sprint 20 (invariants still in force):
 - Single controller instance (D-02): process-local notify, caches and registry are acceptable. Don't build cross-replica machinery.

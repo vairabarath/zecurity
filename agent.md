@@ -228,6 +228,23 @@ Produces: `shield-linux-amd64` + `shield-linux-arm64` (musl static)
 
 ---
 
+## Local Database (pre-production rule)
+
+Full guide: **`docs/database-development.md`**.
+
+- Schema files in `controller/migrations/` run **only when the Postgres volume is first created**. There is **no migration framework** and nothing upgrades an existing database. Don't add one.
+- **After any schema change:** `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable. Then re-create the first provider super-admin with `PROVIDER_BOOTSTRAP_EMAIL` / `PROVIDER_BOOTSTRAP_PASSWORD`.
+- **Adding a schema change:**
+  - a new numbered file (next: `038_`);
+  - never edit an existing file;
+  - label the PR `[schema: reset DB]`.
+- **DB-backed tests:**
+  - create a throwaway database and apply every schema file; never depend on the shared DB's schema;
+  - never `FlushDB` Valkey;
+  - gate runs use `-count=1`, and a skipped DB test counts as failed.
+
+---
+
 ## Quick Reference
 
 | Task | Command |

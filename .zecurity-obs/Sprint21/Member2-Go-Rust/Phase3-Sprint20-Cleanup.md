@@ -3,11 +3,11 @@ type: phase
 member: M2
 person: Barath
 sprint: 21
-phase: 2
+phase: 3
 execution: K
 title: Sprint 20 Cleanup (KI-1, KI-2, KI-3, .env.example JWTs)
 status: planned
-depends_on: [1]   # after H: both edit controller/.env.example
+depends_on: [1]   # after H (both edit controller/.env.example); scheduled after U
 schema_change: false
 tags:
   - rust
@@ -19,10 +19,10 @@ tags:
   - provider-dashboard
 ---
 
-# Phase 2 (K) — Sprint 20 Cleanup
+# Phase 3 (K) — Sprint 20 Cleanup
 
 > **Source:** `.zecurity-obs/Sprint20/path.md` → **Known Issues** (KI-1 … KI-3), and runbook §2 (`docs/sprint20-live-acceptance-runbook.md`).
-> **Ordering:** after Phase H, because both edit `controller/.env.example`. K1 and K2 don't depend on H and may start earlier on a separate branch if H is in review.
+> **Ordering:** Barath's third phase, after H and U. It depends only on H, because both edit `controller/.env.example`. K1 and K2 don't depend on H or U and can be picked up whenever there's a gap. **If the sprint runs short, K2 (KI-2) is the item that may move to Sprint 22.** It's low-risk and unrelated to the console.
 
 ## Problem (verified)
 
@@ -47,7 +47,7 @@ tags:
 ### KI-3 — Dev provider redirect URI
 
 - `controller/.env.example` sets `PROVIDER_GOOGLE_REDIRECT_URI=http://localhost:8080/auth/callback`. That is the **tenant** callback, so provider login never yields a token.
-- The provider callback is `/provider/auth/callback` (`main.go:348`).
+- **Superseded by D-24 (amendment 2026-09-26):** provider login is now local (email + password), and Phase H **removes** the provider Google OAuth path and the `PROVIDER_GOOGLE_REDIRECT_URI` variable. There's no redirect URI left to fix. K3 only confirms the variable is gone from `.env.example` and closes KI-3.
 
 ### Committed JWTs in `.env.example`
 
@@ -73,7 +73,7 @@ tags:
 | `connector/src/agent_server.rs` (K2) | Configurable window; per-shield `ReEnroll` throttle |
 | `shield/src/control_stream.rs` / `renewal.rs` (K2) | Renewal debounce |
 | `proto/connector/v1/connector.proto`, `controller/internal/connector/*` (K2 **option A only**) | Additive config message |
-| `controller/.env.example` (K3, K4) | Redirect fix; token scrub |
+| `controller/.env.example` (K3, K4) | Confirm `PROVIDER_GOOGLE_REDIRECT_URI` is gone (removed by H); token scrub |
 | `.github/workflows/ci.yml` (K4) | JWT grep guard |
 | `connector/src/crl.rs` (K5) | Comment |
 
@@ -117,16 +117,11 @@ Choose the wiring at phase start.
   - the shield debounce ignores a duplicate;
   - (option A) the proto message round-trips, and a default applies until received.
 
-### K3 — KI-3 redirect
+### K3 — KI-3 closed by Phase H
 
-`controller/.env.example`:
-
-```
-# Provider console login — must be the PROVIDER callback, not the tenant /auth/callback.
-PROVIDER_GOOGLE_REDIRECT_URI=http://localhost:8080/provider/auth/callback
-```
-
-Add a comment that this URI must also be registered on the Google OAuth client.
+- Phase H deletes the provider Google OAuth routes and stops reading `PROVIDER_GOOGLE_REDIRECT_URI` (D-24).
+- K3 confirms `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (H removes it) and records KI-3 as **resolved by removal** in `.zecurity-obs/Sprint20/path.md` Known Issues.
+- The tenant `GOOGLE_REDIRECT_URI` stays as it is.
 
 ### K4 — Remove committed JWTs
 
@@ -135,6 +130,18 @@ Add a comment that this URI must also be registered on the Google OAuth client.
 - **CI guard:** add a step that fails if `grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example` matches, so the scrub can't regress.
 - **Don't rewrite git history.** The tokens are expired dev enrollment tokens; note this in the PR.
 - `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
+
+### K6 — Pre-existing auth integration test defect (found during Phase H-a; corrected 2026-09-28)
+
+`internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` has three problems:
+
+1. **It never runs in CI, silently.** CI sets `AUTH_TEST_VALKEY_URL=redis://localhost:6379/15`. The test's `parseValkeyAddr` keeps the `/15` in the address (`localhost:6379/15`), the dial fails with "unknown port", and `mustConnectAuthTestValkey` calls `t.Skip`. So CI reports `ok` for `internal/auth` without running it, and the workflow's "verify integration tests actually ran" step doesn't catch the skip. Fix: parse `redis://host:port[/db]` properly, honouring the db index; make an unreachable Valkey a **failure** when the DB env var is set, not a skip; and extend the CI verification step to flag this test if it's skipped.
+2. **When forced to run, it fails:** `column "subject_claim" does not exist`. It applies a **hard-coded list** of schema files (`001`, `031`; `~line 323`) that misses the file adding `subject_claim`. Fix: apply every file in `controller/migrations/` in lexical order, like the other suites (e.g. `internal/provider/store_test.go` `newTestStore`, `internal/resource/testdb_test.go` `newResourceTestDB` from #105).
+3. **It wipes Valkey when it does run.** It falls back to `PKI_TEST_DATABASE_URL` and calls `valkeyClient.FlushDB`. With a URL the helper *can* parse (no `/db`), that flushes **database 0**, the developer's local Valkey. Fix: drop `FlushDB`, and use unique key prefixes cleaned up per test.
+
+**How it was found:** run locally with `AUTH_TEST_VALKEY_URL=redis://localhost:6379` (no `/15`), it ran and failed. With CI's exact URL it skips. The failure is independent of Phase H.
+
+**Acceptance:** the test **runs** (not skips) in CI with the standard env vars and passes, and running the full gate leaves unrelated Valkey keys intact.
 
 ### K5 — Minor
 
@@ -168,9 +175,10 @@ grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example &
 
 - [ ] K1 option chosen and recorded; implemented; tests
 - [ ] K2 option chosen and recorded; window + throttle + debounce; tests
-- [ ] K3 redirect fixed
+- [ ] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
 - [ ] K4 JWTs removed; CI guard
 - [ ] K5 comment
+- [ ] K6 auth integration test: all schema files applied; no `FlushDB`; passes
 - [ ] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
 - [ ] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid)
 

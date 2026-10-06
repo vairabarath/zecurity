@@ -21,6 +21,14 @@ const (
 	ActionProviderUserManage = "provider_user.manage"
 	ActionAuditView          = "audit.view"
 	ActionRelayRevoke        = "relay.revoke"
+
+	// Read actions (Sprint 21 Phase R, D-05). decide()'s prefix rule gives
+	// relay-ops relay.read only; tenant.* is super-admin only (D-06) and
+	// cert.read spans every tenant's certificates, so it is super-admin only
+	// too. Provider audit reads reuse ActionAuditView above.
+	ActionRelayRead  = "relay.read"
+	ActionTenantRead = "tenant.read"
+	ActionCertRead   = "cert.read"
 )
 
 // ErrForbidden is returned by decide() when the actor may not perform the
@@ -70,6 +78,21 @@ func (a *Authz) CanManageProviderUser(actor Actor, target Target) error {
 
 func (a *Authz) CanViewProviderAudit(actor Actor) error {
 	return decide(actor, ActionAuditView, Target{Type: "audit"})
+}
+
+// CanReadRelays gates GET /provider/relays and /provider/relays/{id}.
+func (a *Authz) CanReadRelays(actor Actor, target Target) error {
+	return decide(actor, ActionRelayRead, target)
+}
+
+// CanReadTenants gates GET /provider/tenants and /provider/tenants/{id}.
+func (a *Authz) CanReadTenants(actor Actor, target Target) error {
+	return decide(actor, ActionTenantRead, target)
+}
+
+// CanReadCertificates gates GET /provider/certificates.
+func (a *Authz) CanReadCertificates(actor Actor) error {
+	return decide(actor, ActionCertRead, Target{Type: "certificate"})
 }
 
 // decide is the ONE policy function. Alpha matrix:

@@ -6,6 +6,12 @@ const (
 
 	ControllerIssuer = "zecurity-controller"
 
+	// ProviderIssuer is the `iss` of provider-plane JWTs, minted only by the
+	// controller's internal Provider Identity Service (Sprint 21 Phase H,
+	// D-25, ADR-029). Distinct from ControllerIssuer so a tenant token can never
+	// pass provider verification (and vice versa), independent of the aud wall.
+	ProviderIssuer = "zecurity-provider"
+
 	PKIPlatformOrganization   = ProductName + " Platform"
 	PKIWorkspaceOrganization  = ProductName + " Workspace"
 	PKIRootCACommonName       = ProductName + " Root CA"

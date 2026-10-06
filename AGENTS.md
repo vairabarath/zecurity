@@ -18,10 +18,12 @@
 | Admin UI | React | `admin/` | dev :5173 |
 | Provider Console | React | `provider-console/` (Sprint 21) | dev :5174 |
 
-**Sprint 21 is active: Provider Dashboard Phase 2, "Secure Read-Only Console".** Expose the state Sprint 20 made true, behind hardened provider auth:
-- provider identity hardening (D-16): dedicated provider signing key and issuer, Google `sub` + `hd` binding, `session_generation`, logout;
+**Sprint 21 is active: Provider Dashboard Phase 2, "Dedicated Provider Console: Login, Roles, Read-Only Fleet View".** A dedicated provider console with hardened login and a working role system, then read-only views of the state Sprint 20 made true. Order: H → C → U → R → P (K, V alongside):
+- provider identity foundation (Decision Record amendment 2026-09-26, D-24…D-29): a Zecurity-owned Provider Identity Service (pluggable `Authenticator`, single token-minting path, `amr` claim); first method is email + password with Argon2id, rate-limited login, forced first password change, create-only bootstrap; dedicated provider signing key and issuer, `session_generation`, logout (D-25). **no direct Google OAuth for providers** (external IdPs may plug in later, D-29); tenant Google/OIDC is unchanged. **Mandatory TOTP for super-admin before Sprint 22** (D-28);
+- a dedicated provider console, `provider-console/` (Vite + React, D-18): email + password login, change password, logout, role-aware access (`super-admin` / `relay-ops`);
+- operator management (D-27): super-admins add operators, change roles, disable, re-enable and reset passwords (one-time temporary passwords; audited; lock-out-proof);
 - provider read APIs under `/provider/*` (D-04/D-05/D-06/D-15): relays, tenants, provider audit, certificate expiry;
-- a separate, read-only provider console (D-18) in `provider-console/`;
+- read-only console pages for relays, tenants, audit and certificate health;
 - Sprint 20 cleanup: KI-1, KI-2, KI-3, JWTs removed from `.env.example`;
 - Sprint 20 live verification (`docs/sprint20-live-acceptance-runbook.md`).
 
@@ -33,7 +35,7 @@ The source of truth is `docs/provider-dashboard-architecture-decisions.md` → *
 - After any schema change: `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable.
 - Details: `docs/database-development.md` (Sprint 21 DEV-1).
 
-**Team: two members.** **M1 = Sathiya** (Go + React: live verification, provider read APIs, provider console), **M2 = Barath** (Go + Rust: provider identity hardening, Sprint 20 cleanup, database development guide). There is no M3/M4.
+**Team: two members.** **M1 = Sathiya** (testing: Sprint 20 live verification, Phase V; then Sprint 21 acceptance testing), **M2 = Barath** (all Sprint 21 development since 2026-09-28: H, U, K in `Sprint21/Member2-Go-Rust/*` and C, R, P in `Sprint21/Member1-Go/*`). There is no M3/M4.
 
 ---
 
@@ -45,7 +47,7 @@ The human will tell you who they are (Sathiya / M1 or Barath / M2). Do this imme
 Step 1: Read agent.md             → full project conventions
 Step 2: Read .zecurity-obs/Sprint21/path.md  → development rule, dependency map, conflict zones, open questions, checkboxes
 Step 3: Find first unchecked phase for this member where all depends_on are ✅
-        (Sathiya → Sprint21/Member1-Go/*, Barath → Sprint21/Member2-Go-Rust/*)
+        (Sathiya → Sprint21/Member1-Go/Phase1 (testing); Barath → Sprint21/Member2-Go-Rust/* + reassigned Member1-Go/Phase2…4, order per path.md)
 Step 4: Read that phase file      → exact spec, files, invariants, tests, build check
 Step 5: Check for "Post-Phase Fixes" section in the phase file → apply any fixes listed there
 Step 6: Brief the human: "Here's what you're building today..."
@@ -71,9 +73,12 @@ Step 6: Brief the human: "Here's what you're building today..."
 - If a phase seems to need a new architectural choice, **stop and ask**. Answer OQ-1/OQ-2 (`path.md`) before the tenant read endpoints.
 - **No migration framework.** A schema change is a new numbered SQL file (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
-- The provider console is **read-only** (its only non-GET call is logout). Don't modify `admin/`.
+- The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
+- Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Bootstrap is **create-only** (ignored once any super-admin exists; no reset env flag). Break-glass recovery is a future controller CLI command (`zecurity-controller provider recover-admin`), not an env var.
+- Provider Identity is an **internal controller module** (`controller/internal/provider`, ADR-029), not a separate service.
+- Never log, audit or return passwords (incl. temporary ones) or `password_hash`. Provider login must stay rate-limited and must not reveal whether an account exists.
 - Provider read APIs never return secrets (`encrypted_*`, keys, tokens, `enrollment_token_jti`, CA PEM bodies); `internal/providerquery/` doesn't import `net/http` (D-04).
-- Conflict-zone order (`path.md`): M2-H lands before M1-R wires routes in `main.go`.
+- Conflict-zone order in `main.go` (`path.md`): M2-H → M2-U → M1-R3.
 
 ## Sprint 20 invariants (still in force)
 
