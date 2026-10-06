@@ -9,6 +9,8 @@ import { Home } from '@/pages/Home'
 import { Login } from '@/pages/Login'
 import { NotFound } from '@/pages/NotFound'
 import { ProviderUsers } from '@/pages/ProviderUsers'
+import { RelayDetail } from '@/pages/RelayDetail'
+import { Relays } from '@/pages/Relays'
 
 // Route table. Guards steer navigation only; the controller authorizes every
 // request. Sections behind a role use <RequireRole roles={...}> with the
@@ -29,6 +31,10 @@ export function AppRoutes() {
       <Route element={<RequireSession />}>
         <Route element={<Layout />}>
           <Route index element={<Home />} />
+          <Route element={<RequireRole roles={rolesFor('relays')} />}>
+            <Route path="relays" element={<Relays />} />
+            <Route path="relays/:id" element={<RelayDetail />} />
+          </Route>
           <Route element={<RequireRole roles={rolesFor('users')} />}>
             <Route path="users" element={<ProviderUsers />} />
           </Route>
