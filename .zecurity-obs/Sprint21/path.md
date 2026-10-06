@@ -127,8 +127,8 @@ Zecurity is **pre-production**. For this phase the team has chosen to **reset th
 
 | # | Question | Needed by | Recommendation |
 |---|----------|-----------|----------------|
-| OQ-1 | Are **provider reads of tenant data** audited in `provider_audit_logs`? D-14 says "provider actions on tenants" are audited there, but doesn't say whether reads count. | M1-R3 (tenant endpoints) | Audit **tenant detail** reads (`tenant.read`, target = tenant) but not list pages. Detail is where support access happens (D-15). |
-| OQ-2 | Does tenant detail include **tenant admin identities** (emails), or only counts and agents? | M1-R3 | Counts and agents only in Sprint 21. Add PII fields later, once OQ-1 is settled. |
+| OQ-1 | Are **provider reads of tenant data** audited in `provider_audit_logs`? D-14 says "provider actions on tenants" are audited there, but doesn't say whether reads count. | M1-R3 (tenant endpoints) | **Decided 2026-10-05:** audit tenant **detail** reads only (`tenant.read`, target `tenant/<uuid>`, details exactly `{"view":"detail"}`), **fail-closed**: no detail is returned unless the audit row commits. Lists and every other provider GET are not audited. |
+| OQ-2 | Does tenant detail include **tenant admin identities** (emails), or only counts and agents? | M1-R3 | **Decided 2026-10-05:** no tenant administrator identities or emails in any provider response. Users appear only as counts by status; no identity lookup endpoint. |
 
 ## Team Assignments
 
@@ -246,10 +246,12 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member1-Go/Phase3-Provider-Read-APIs]].
 
-- [ ] **M1-R1** `decide()` read actions: `relay.read`, `tenant.read`, `cert.read` (+ reuse `audit.view`); `Can…` methods; authz tests.
-- [ ] **M1-R2** `internal/providerquery/`: relay list/detail, tenant list/detail, provider audit query, certificate expiry. DB-backed tests.
-- [ ] **M1-R3** Handlers + routes (after M2-H and M2-U merged): `GET /provider/relays`, `/provider/relays/{id}`, `/provider/tenants`, `/provider/tenants/{id}` (needs OQ-1/OQ-2), `/provider/audit`, `/provider/certificates`.
-- [ ] **M1-R4** Tests: role matrix per endpoint, data correctness, pagination, no secret fields; build gate.
+**Phase R — done (2026-10-06)** on `sprint21/r-provider-read-apis` (7 commits, not yet pushed). Six read routes; the tenant detail audit is fail-closed (OQ-1); no tenant identities (OQ-2). No schema change. Gates: CI-style `go test ./...` (25 packages, 1,023 pass, 0 fail, 33 pre-existing skips outside R's packages); real-binary live check passed. AT-R.1–AT-R.8 are verified in development. **Next: Phase P** (console read pages on these APIs).
+
+- [x] **M1-R1** `decide()` read actions: `relay.read`, `tenant.read`, `cert.read` (+ reuse `audit.view`); `Can…` methods; authz tests.
+- [x] **M1-R2** `internal/providerquery/`: relay list/detail, tenant list/detail, provider audit query, certificate expiry. DB-backed tests.
+- [x] **M1-R3** Handlers + routes (after M2-H and M2-U merged): `GET /provider/relays`, `/provider/relays/{id}`, `/provider/tenants`, `/provider/tenants/{id}` (needs OQ-1/OQ-2), `/provider/audit`, `/provider/certificates`.
+- [x] **M1-R4** Tests: role matrix per endpoint, data correctness, pagination, no secret fields; build gate.
 
 ### Phase P — M1 (executed by Barath): Provider Console Read Pages (D-18, D-23)
 

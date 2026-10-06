@@ -500,6 +500,19 @@ func main() {
 	}
 	controllerRotator := pki.NewControllerCertRotator(regen, &controllerCert, controllerTLS.NotBefore, controllerTLS.NotAfter, nil)
 
+	// Provider read APIs (Sprint 21 Phase R). Registered here because the
+	// certificate report needs the controller rotator; the HTTP server starts
+	// later. relaySvc supplies Valkey relay liveness, controllerRotator the
+	// process-local controller_grpc certificate. Tenant detail reads are
+	// audited fail-closed inside the handler.
+	providerReads := provider.NewReadHandlers(db.Pool, providerAuthz, providerStore, relaySvc, controllerRotator)
+	mux.Handle("GET /provider/relays", requireProvider(http.HandlerFunc(providerReads.ListRelays)))
+	mux.Handle("GET /provider/relays/{id}", requireProvider(http.HandlerFunc(providerReads.GetRelay)))
+	mux.Handle("GET /provider/tenants", requireProvider(http.HandlerFunc(providerReads.ListTenants)))
+	mux.Handle("GET /provider/tenants/{id}", requireProvider(http.HandlerFunc(providerReads.GetTenant)))
+	mux.Handle("GET /provider/audit", requireProvider(http.HandlerFunc(providerReads.QueryAudit)))
+	mux.Handle("GET /provider/certificates", requireProvider(http.HandlerFunc(providerReads.Certificates)))
+
 	validator := connector.NewTrustDomainValidator(appmeta.SPIFFEGlobalTrustDomain, connectorStore)
 
 	grpcServer := grpc.NewServer(

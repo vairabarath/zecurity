@@ -714,3 +714,59 @@ func TestRotatorHandshakeRotation(t *testing.T) {
 		t.Fatalf("rotator.Run did not stop within 1s after cancel")
 	}
 }
+
+func TestCurrentCertInfo(t *testing.T) {
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	first := makeTestCert(t, now.Add(-time.Hour), now.Add(10*time.Minute))
+	second := makeTestCert(t, now, now.Add(20*time.Minute))
+	leafOf := func(c *tls.Certificate) *x509.Certificate {
+		l, err := x509.ParseCertificate(c.Certificate[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l
+	}
+	gen := func(context.Context) (*tls.Certificate, time.Time, time.Time, error) {
+		return second, now, now.Add(20 * time.Minute), nil
+	}
+	r := NewControllerCertRotator(gen, first, now.Add(-time.Hour), now.Add(10*time.Minute), func() time.Time { return now })
+
+	serial, nb, na, ok := r.CurrentCertInfo()
+	if !ok || serial != leafOf(first).SerialNumber.Text(16) || !nb.Equal(now.Add(-time.Hour)) || !na.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("initial = %q %v %v %v", serial, nb, na, ok)
+	}
+	if na.Location() != time.UTC || nb.Location() != time.UTC {
+		t.Fatal("times not UTC")
+	}
+
+	// After an in-memory rotation the info follows the served certificate.
+	if err := r.rotate(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	serial, _, na, ok = r.CurrentCertInfo()
+	if !ok || serial != leafOf(second).SerialNumber.Text(16) || !na.Equal(now.Add(20*time.Minute)) {
+		t.Fatalf("after rotation = %q %v %v", serial, na, ok)
+	}
+	served, _ := r.GetCertificate(nil)
+	if leafOf(served).SerialNumber.Text(16) != serial {
+		t.Fatal("CurrentCertInfo disagrees with the certificate GetCertificate serves")
+	}
+
+	// A pre-parsed Leaf is used as-is.
+	second.Leaf = leafOf(second)
+	if s2, _, _, _ := r.CurrentCertInfo(); s2 != serial {
+		t.Fatalf("with Leaf = %q, want %q", s2, serial)
+	}
+}
+
+func TestCurrentCertInfo_UnparseableLeaf(t *testing.T) {
+	now := time.Now()
+	r := NewControllerCertRotator(nil, &tls.Certificate{Certificate: [][]byte{[]byte("not der")}}, now, now.Add(time.Hour), nil)
+	if _, _, _, ok := r.CurrentCertInfo(); ok {
+		t.Fatal("ok for an unparseable certificate")
+	}
+	empty := NewControllerCertRotator(nil, &tls.Certificate{}, now, now.Add(time.Hour), nil)
+	if _, _, _, ok := empty.CurrentCertInfo(); ok {
+		t.Fatal("ok for a certificate with no DER")
+	}
+}
