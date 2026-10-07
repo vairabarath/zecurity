@@ -9,7 +9,7 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use crate::relay_pool::RelayPool;
-use crate::tunnel_pool::{AuthenticatedStream, TunnelOpenError, TunnelPool};
+use crate::tunnel_pool::{AuthenticatedStream, PathProbe, TunnelOpenError, TunnelPool};
 
 pub const DIRECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const RELAY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -19,6 +19,23 @@ pub const DIRECT_RETRY_MAX_COOLDOWN: Duration = Duration::from_secs(2 * 60 * 60)
 #[async_trait]
 pub trait DirectOpener: Send + Sync + 'static {
     async fn open(&self, addr: SocketAddr) -> Result<AuthenticatedStream, TunnelOpenError>;
+
+    /// Fix 05-B: open and also return a [`PathProbe`] for the pooled
+    /// connection the stream rides on. Openers without a connection pool
+    /// (test doubles) return `None`, which disables stall eviction for them.
+    async fn open_probed(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(AuthenticatedStream, Option<PathProbe>), TunnelOpenError> {
+        self.open(addr).await.map(|stream| (stream, None))
+    }
+
+    /// Fix 05-B: evict the pooled connection named by `probe` if its peer has
+    /// been silent since the probe was taken. Returns `true` only on eviction.
+    /// Must never close the connection.
+    async fn evict_if_silent(&self, _addr: SocketAddr, _probe: &PathProbe) -> bool {
+        false
+    }
 }
 
 #[async_trait]
@@ -30,6 +47,19 @@ pub trait RelayOpener: Send + Sync + 'static {
 impl DirectOpener for TunnelPool {
     async fn open(&self, addr: SocketAddr) -> Result<AuthenticatedStream, TunnelOpenError> {
         self.open_authenticated_stream(addr).await
+    }
+
+    async fn open_probed(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(AuthenticatedStream, Option<PathProbe>), TunnelOpenError> {
+        self.open_probed_stream(addr)
+            .await
+            .map(|(stream, probe)| (stream, Some(probe)))
+    }
+
+    async fn evict_if_silent(&self, addr: SocketAddr, probe: &PathProbe) -> bool {
+        TunnelPool::evict_if_silent(self, addr, probe).await
     }
 }
 
@@ -109,16 +139,34 @@ impl ClientTransport {
     /// attempt times out or fails for a transport-layer reason. Identity /
     /// authentication failures surface verbatim and never trigger relay
     /// retry — the relay path would just fail the same way.
+    ///
+    /// Fix 05-B: production callers (`net_stack`) use
+    /// [`Self::open_authenticated_stream_probed`]; this probe-less wrapper is
+    /// kept for the transport unit tests.
+    #[cfg(test)]
     pub async fn open_authenticated_stream(&self) -> Result<AuthenticatedStream> {
+        self.open_authenticated_stream_probed()
+            .await
+            .map(|(stream, _probe)| stream)
+    }
+
+    /// Fix 05-B: `open_authenticated_stream`, plus the [`PathProbe`] of the
+    /// pooled direct connection the stream was opened on (`None` for relay
+    /// streams and for openers without a pool). Pass it back to
+    /// [`Self::report_handshake_stall`] if the tunnel handshake on this stream
+    /// times out.
+    pub async fn open_authenticated_stream_probed(
+        &self,
+    ) -> Result<(AuthenticatedStream, Option<PathProbe>)> {
       let direct_err: anyhow::Error = if self.direct_is_in_cooldown() {
           anyhow!("direct path is in cooldown")
       } else {
-          let attempt = timeout(DIRECT_TIMEOUT, self.direct.open(self.direct_addr)).await;
+          let attempt = timeout(DIRECT_TIMEOUT, self.direct.open_probed(self.direct_addr)).await;
 
           match attempt {
-              Ok(Ok(stream)) => {
+              Ok(Ok(opened)) => {
                   self.mark_direct_success();
-                  return Ok(stream);
+                  return Ok(opened);
               }
               Ok(Err(err)) => match err {
                   TunnelOpenError::Authenticate(_) => {
@@ -145,7 +193,7 @@ impl ClientTransport {
                       relay_addr = %r.relay_addr,
                       "direct path failed; used relay fallback"
                   );
-                  Ok(stream)
+                  Ok((stream, None))
               }
               Ok(Err(relay_err)) => Err(anyhow::Error::new(relay_err)
                   .context(format!("direct attempt: {direct_err}"))),
@@ -157,6 +205,32 @@ impl ClientTransport {
           None => Err(direct_err),
       }
   }
+
+    /// Fix 05-B: the tunnel handshake on a stream from
+    /// [`Self::open_authenticated_stream_probed`] hit `TUNNEL_HANDSHAKE_TIMEOUT`.
+    ///
+    /// If the pooled direct connection it ran on is still pooled (same
+    /// `stable_id`) and has received no datagram since the stream was opened,
+    /// the connector is silent: the connection is removed from the pool (NOT
+    /// closed, so other flows on it are untouched) and the direct path is put
+    /// into the existing cooldown, so later flows stop paying the timeout on
+    /// it. Otherwise (relay stream, a replacement is already pooled, or the
+    /// peer is alive and only the resource/shield is slow) nothing changes.
+    /// Returns `true` when the connection was evicted.
+    pub async fn report_handshake_stall(&self, probe: Option<&PathProbe>) -> bool {
+        let Some(probe) = probe else {
+            return false;
+        };
+        if !self.direct.evict_if_silent(self.direct_addr, probe).await {
+            return false;
+        }
+        self.mark_direct_failure();
+        warn!(
+            direct_addr = %self.direct_addr,
+            "connector silent since stream open: stale pooled QUIC connection evicted (not closed), direct path cooling down"
+        );
+        true
+    }
 }
 
 #[cfg(test)]

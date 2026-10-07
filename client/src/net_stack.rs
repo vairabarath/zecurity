@@ -856,8 +856,8 @@ async fn relay_tcp_to_quic(
     let mut saw_transport_failure = false;
 
     for transport in transports {
-        let candidate = match transport.open_authenticated_stream().await {
-            Ok(stream) => stream,
+        let (candidate, probe) = match transport.open_authenticated_stream_probed().await {
+            Ok(opened) => opened,
 
             Err(e) => {
                 if is_auth_failure(&e) {
@@ -917,6 +917,8 @@ async fn relay_tcp_to_quic(
                     dest = %destination, port,
                     "tunnel handshake timed out after {:?}", TUNNEL_HANDSHAKE_TIMEOUT
                 );
+                // Fix 05-B: evict the pooled connection if its connector went silent.
+                transport.report_handshake_stall(probe.as_ref()).await;
                 // Timeout means the selected relay/connector path is unusable.
                 saw_transport_failure = true;
                 continue;
@@ -1379,6 +1381,200 @@ mod tests {
         accept_tunnel(&mut c_peer).await;
         assert_eq!(ink_opens.load(Ordering::SeqCst), 1);
         assert_eq!(manoj_opens.load(Ordering::SeqCst), 2, "A and B only");
+    }
+
+    // ---- Fix 05-B: handshake-stall hook ---------------------------------------
+
+    use crate::tunnel_pool::PathProbe;
+    use std::sync::Mutex as StdMutex;
+
+    const STALL_PROBE: PathProbe = PathProbe {
+        stable_id: 7,
+        rx_at_open: 42,
+    };
+
+    /// A direct opener whose streams never answer (the connector is silent),
+    /// that hands out a `PathProbe` and records every stall report. `evicts`
+    /// is what the pool would answer (true = connection was silent).
+    struct StallOpener {
+        evicts: bool,
+        opens: Arc<AtomicUsize>,
+        reports: Arc<StdMutex<Vec<(SocketAddr, PathProbe)>>>,
+        // Far ends kept alive so reads pend (a timeout, not an EOF), unless
+        // `eof` is set, in which case the far end is dropped (an I/O failure).
+        held: StdMutex<Vec<DuplexStream>>,
+        eof: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl DirectOpener for StallOpener {
+        async fn open(
+            &self,
+            addr: SocketAddr,
+        ) -> std::result::Result<AuthenticatedStream, TunnelOpenError> {
+            self.open_probed(addr).await.map(|(s, _)| s)
+        }
+        async fn open_probed(
+            &self,
+            _addr: SocketAddr,
+        ) -> std::result::Result<(AuthenticatedStream, Option<PathProbe>), TunnelOpenError>
+        {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let (near, far) = duplex(64 * 1024);
+            if !self.eof {
+                self.held.lock().unwrap().push(far);
+            }
+            Ok((Box::new(near), Some(STALL_PROBE)))
+        }
+        async fn evict_if_silent(&self, addr: SocketAddr, probe: &PathProbe) -> bool {
+            self.reports.lock().unwrap().push((addr, *probe));
+            self.evicts
+        }
+    }
+
+    type Reports = Arc<StdMutex<Vec<(SocketAddr, PathProbe)>>>;
+
+    fn stall_transport(
+        evicts: bool,
+        eof: bool,
+    ) -> (Arc<ClientTransport>, Arc<AtomicUsize>, Reports) {
+        let opens = Arc::new(AtomicUsize::new(0));
+        let reports: Reports = Arc::new(StdMutex::new(Vec::new()));
+        let t = Arc::new(ClientTransport::new(
+            Arc::new(StallOpener {
+                evicts,
+                opens: opens.clone(),
+                reports: reports.clone(),
+                held: StdMutex::new(Vec::new()),
+                eof,
+            }),
+            "127.0.0.2:9092".parse().unwrap(),
+            None,
+        ));
+        (t, opens, reports)
+    }
+
+    type FlowHandles = (
+        tokio::task::JoinHandle<Result<RelayEnd>>,
+        mpsc::Sender<Vec<u8>>,
+        mpsc::Receiver<Vec<u8>>,
+    );
+
+    fn spawn_flow(transports: Vec<Arc<ClientTransport>>, resync: Arc<Notify>) -> FlowHandles {
+        let (tcp_tx, tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let (quic_tx, quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
+        let task = tokio::spawn(relay_tcp_to_quic(
+            transports,
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            resync,
+        ));
+        (task, tcp_tx, quic_rx)
+    }
+
+    async fn notified(resync: &Notify) -> bool {
+        tokio::time::timeout(Duration::from_millis(1), resync.notified())
+            .await
+            .is_ok()
+    }
+
+    /// (6) The handshake-timeout arm reports the stall, once, for the
+    /// transport and probe it timed out on; the flow still fails and the
+    /// early resync is still signalled exactly as before.
+    #[tokio::test]
+    async fn handshake_timeout_reports_stall_for_the_stalled_transport() {
+        let (a, opens, reports) = stall_transport(true, false);
+        let resync = Arc::new(Notify::new());
+        let (task, _tcp_tx, _quic_rx) = spawn_flow(vec![a], resync.clone());
+        let started = tokio::time::Instant::now();
+        assert!(
+            task.await.unwrap().is_err(),
+            "the flow fails (no candidate left)"
+        );
+        assert!(
+            started.elapsed() >= TUNNEL_HANDSHAKE_TIMEOUT,
+            "it was the 5 s timeout"
+        );
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *reports.lock().unwrap(),
+            vec![("127.0.0.2:9092".parse().unwrap(), STALL_PROBE)],
+            "one report, for this transport's address and this stream's probe"
+        );
+        assert!(
+            notified(&resync).await,
+            "transport failure still signals the resync"
+        );
+    }
+
+    /// (6b) Gate 1: only the TIMEOUT reports. A handshake that fails with an
+    /// I/O error (the connection is already known dead) does not.
+    #[tokio::test]
+    async fn handshake_io_failure_does_not_report_stall() {
+        let (a, _opens, reports) = stall_transport(true, true);
+        let resync = Arc::new(Notify::new());
+        let (task, _tcp_tx, _quic_rx) = spawn_flow(vec![a], resync.clone());
+        assert!(task.await.unwrap().is_err());
+        assert!(
+            reports.lock().unwrap().is_empty(),
+            "no stall report on I/O failure"
+        );
+        assert!(notified(&resync).await);
+    }
+
+    /// (7) Partial loss: connector A is silent, B is healthy. The first flow
+    /// pays one timeout on A, A is evicted and cooled down, the flow
+    /// falls through to B and works (no resync, no restart). The next flow
+    /// goes straight to B without touching A or waiting 5 s, and the first
+    /// flow's B stream is unaffected.
+    #[tokio::test]
+    async fn partial_loss_evicts_silent_connector_and_falls_through_to_healthy_one() {
+        let (a, a_opens, a_reports) = stall_transport(true, false);
+        let (b, mut b_peers, b_opens) = pipe_transport();
+        let resync = Arc::new(Notify::new());
+
+        let (flow1, tcp1, mut quic1) = spawn_flow(vec![a.clone(), b.clone()], resync.clone());
+        let mut peer1 = b_peers.recv().await.unwrap();
+        accept_tunnel(&mut peer1).await;
+        assert_eq!(a_opens.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            a_reports.lock().unwrap().len(),
+            1,
+            "A's stall reported once"
+        );
+        assert_eq!(b_opens.load(Ordering::SeqCst), 1);
+
+        let started = tokio::time::Instant::now();
+        let (flow2, tcp2, mut quic2) = spawn_flow(vec![a.clone(), b.clone()], resync.clone());
+        let mut peer2 = b_peers.recv().await.unwrap();
+        accept_tunnel(&mut peer2).await;
+        assert!(
+            started.elapsed() < TUNNEL_HANDSHAKE_TIMEOUT,
+            "the second flow did not wait on the evicted connector"
+        );
+        assert_eq!(a_opens.load(Ordering::SeqCst), 1, "A skipped (cooldown)");
+        assert_eq!(a_reports.lock().unwrap().len(), 1);
+        assert_eq!(b_opens.load(Ordering::SeqCst), 2);
+        assert!(
+            !notified(&resync).await,
+            "partial loss: no resync, no restart"
+        );
+
+        // Both flows relay through B; flow 1's B stream is intact.
+        for (tcp, quic, peer) in [
+            (&tcp1, &mut quic1, &mut peer1),
+            (&tcp2, &mut quic2, &mut peer2),
+        ] {
+            tcp.send(b"ping".to_vec()).await.unwrap();
+            let mut buf = [0u8; 4];
+            peer.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"ping");
+            peer.write_all(b"pong").await.unwrap();
+            assert_eq!(quic.recv().await.unwrap(), b"pong".to_vec());
+        }
+        assert!(!flow1.is_finished() && !flow2.is_finished());
     }
 
     // ---- Fix 05-A: socket lifecycle -----------------------------------------
