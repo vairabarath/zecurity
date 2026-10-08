@@ -151,6 +151,19 @@ jobs:
             echo "::error::Expected integration test did not run or did not pass."
             exit 1
           fi
+          # Sprint 21 K6: the auth integration test silently skipped in CI for
+          # months (it could not parse the /15 in AUTH_TEST_VALKEY_URL). It
+          # must run, against CI's real /15 URL, and pass.
+          out=$(go test ./internal/auth/... -run TestAuthIntegration_LoginBootstrapAndJWTIssue -count=1 -v 2>&1) || true
+          echo "$out" | tail -15
+          if echo "$out" | grep -q -- "--- SKIP: TestAuthIntegration_LoginBootstrapAndJWTIssue"; then
+            echo "::error::TestAuthIntegration_LoginBootstrapAndJWTIssue SKIPPED — it must run in CI."
+            exit 1
+          fi
+          if ! echo "$out" | grep -q -- "--- PASS: TestAuthIntegration_LoginBootstrapAndJWTIssue"; then
+            echo "::error::TestAuthIntegration_LoginBootstrapAndJWTIssue did not run or did not pass."
+            exit 1
+          fi
 
   rust:
     name: ${{ matrix.crate }} (rust)

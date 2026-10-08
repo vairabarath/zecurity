@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 )
 
 func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
@@ -37,8 +39,22 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
-	valkeyClient.FlushDB(ctx)
+	// The database env var is set, so this test is meant to run: an
+	// unparseable URL or unreachable Valkey FAILS it rather than skipping
+	// (CI once reported "ok" here for months without running it).
+	valkeyOpts, valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
+
+	// Never FlushDB: this may be a developer's shared Valkey. The service only
+	// writes pkce:<random state> (consumed at callback) and refresh:<user id>
+	// (a fresh UUID in this run's throwaway database); the test deletes exactly
+	// its own keys, and a sentinel under a unique prefix proves nothing else
+	// in the database was touched.
+	keyPrefix := fmt.Sprintf("authtest:%d:%d:", os.Getpid(), time.Now().UnixNano())
+	sentinel := keyPrefix + "sentinel"
+	if err := valkeyClient.Set(ctx, sentinel, "keep", 10*time.Minute).Err(); err != nil {
+		t.Fatalf("set sentinel: %v", err)
+	}
+	t.Cleanup(func() { _ = valkeyClient.Del(context.Background(), sentinel).Err() })
 
 	dbName := uniqueAuthTestDatabaseName(t)
 	adminPool := mustConnectAuthTestPool(t, ctx, adminDSN)
@@ -168,6 +184,8 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected first callback to create user without last_login_at")
 	}
 
+	t.Cleanup(func() { _ = valkeyClient.Del(context.Background(), refreshKey(userID)).Err() })
+
 	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
@@ -177,6 +195,19 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	}
 	if storedRefresh.Token != firstRefreshCookie.Value {
 		t.Fatalf("expected refresh cookie to match Redis refresh token")
+	}
+
+	// The URL's database index is honoured: the service wrote the refresh key
+	// into that database (read here through the test's own client, which
+	// selected the same index), and not into database 0.
+	if n, err := valkeyClient.Exists(ctx, refreshKey(userID)).Result(); err != nil || n != 1 {
+		t.Fatalf("refresh key not found in db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
+	}
+	if valkeyOpts.DB != 0 {
+		db0 := mustConnectAuthTestValkeyDB(t, ctx, valkeyOpts.Addr, 0)
+		if n, err := db0.Exists(ctx, refreshKey(userID)).Result(); err != nil || n != 0 {
+			t.Fatalf("refresh key leaked into db 0 although the URL selects db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
+		}
 	}
 
 	secondToken, _ := runAuthRoundTrip(t, svc, "code-2")
@@ -215,6 +246,11 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	if workspaceCountAfter != 1 || userCountAfter != 1 || keyCountAfter != 1 {
 		t.Fatalf("expected returning login to avoid duplicate rows; got workspaces=%d users=%d keys=%d",
 			workspaceCountAfter, userCountAfter, keyCountAfter)
+	}
+
+	// Nothing outside this run's keys was disturbed.
+	if v, err := valkeyClient.Get(ctx, sentinel).Result(); err != nil || v != "keep" {
+		t.Fatalf("sentinel key %s was removed or changed (value=%q, err=%v)", sentinel, v, err)
 	}
 }
 
@@ -274,28 +310,30 @@ func runAuthRoundTrip(t *testing.T, svc *serviceImpl, code string) (string, *htt
 	return token, refreshCookie
 }
 
-func mustConnectAuthTestValkey(t *testing.T, ctx context.Context, valkeyURL string) valkeycompat.Cmdable {
+// mustConnectAuthTestValkey parses the URL with the production parser and
+// connects to the database it names. Any failure is fatal: the caller only
+// gets here when the database env var says this test should run.
+func mustConnectAuthTestValkey(t *testing.T, ctx context.Context, valkeyURL string) (valkeyurl.Options, valkeycompat.Cmdable) {
 	t.Helper()
-
-	addr, err := parseValkeyAddr(valkeyURL)
+	opts, err := valkeyurl.Parse(valkeyURL)
 	if err != nil {
-		t.Skipf("valkey: bad URL %s: %v", valkeyURL, err)
+		t.Fatalf("AUTH_TEST_VALKEY_URL %q: %v", valkeyURL, err)
 	}
+	return opts, mustConnectAuthTestValkeyDB(t, ctx, opts.Addr, opts.DB)
+}
 
-	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{addr},
-	})
+func mustConnectAuthTestValkeyDB(t *testing.T, ctx context.Context, addr string, db int) valkeycompat.Cmdable {
+	t.Helper()
+	client, err := valkey.NewClient(valkey.ClientOption{InitAddress: []string{addr}, SelectDB: db})
 	if err != nil {
-		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
+		t.Fatalf("valkey not available at %s (db %d): %v", addr, db, err)
 	}
-
 	pingCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	if err := client.Do(pingCtx, client.B().Ping().Build()).Error(); err != nil {
 		client.Close()
-		t.Skipf("valkey not available at %s: %v", valkeyURL, err)
+		t.Fatalf("valkey not available at %s (db %d): %v", addr, db, err)
 	}
-
 	t.Cleanup(client.Close)
 	return valkeycompat.NewAdapter(client)
 }
@@ -316,20 +354,25 @@ func mustConnectAuthTestPool(t *testing.T, ctx context.Context, dsn string) *pgx
 	return pool
 }
 
+// applyAuthMigration applies every schema file in lexical order, like the
+// other DB-backed suites. A hand-picked list went stale (it missed the file
+// adding subject_claim) and the test failed whenever it actually ran.
 func applyAuthMigration(ctx context.Context, pool *pgxpool.Pool) error {
-	// 001 = base schema; 031 = identity federation (identity_connections seed,
-	// external_identities, users.identity_generation) that the pipeline needs.
-	for _, name := range []string{"001_schema.sql", "031_identity_federation.sql"} {
-		path, err := filepath.Abs(filepath.Join("..", "..", "migrations", name))
+	files, err := filepath.Glob(filepath.Join("..", "..", "migrations", "*.sql"))
+	if err != nil {
+		return err
+	}
+	if len(files) == 0 {
+		return fmt.Errorf("no migrations found")
+	}
+	sort.Strings(files)
+	for _, f := range files {
+		sqlBytes, err := os.ReadFile(f)
 		if err != nil {
-			return err
-		}
-		sqlBytes, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read migration %s: %w", name, err)
+			return fmt.Errorf("read migration %s: %w", filepath.Base(f), err)
 		}
 		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
-			return fmt.Errorf("execute migration %s: %w", name, err)
+			return fmt.Errorf("execute migration %s: %w", filepath.Base(f), err)
 		}
 	}
 	return nil

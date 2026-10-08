@@ -62,6 +62,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/scim"
 	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/transport"
+	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 	// "golang.org/x/text/cases"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -959,13 +960,14 @@ func mustDuration(key string, fallback time.Duration) time.Duration {
 }
 
 func newConnectorValkeyClient(ctx context.Context, valkeyURL string) (valkey.Client, error) {
-	addr, err := parseValkeyAddr(valkeyURL)
+	opts, err := valkeyurl.Parse(valkeyURL)
 	if err != nil {
 		return nil, fmt.Errorf("parse valkey URL: %w", err)
 	}
 
 	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress: []string{addr},
+		InitAddress: []string{opts.Addr},
+		SelectDB:    opts.DB,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create valkey client: %w", err)
@@ -1028,17 +1030,6 @@ func versionAtLeast(version string, major, minor int) bool {
 		return false
 	}
 	return maj > major || (maj == major && min >= minor)
-}
-
-func parseValkeyAddr(rawURL string) (string, error) {
-	after, found := strings.CutPrefix(rawURL, "redis://")
-	if !found {
-		return "", fmt.Errorf("expected redis:// URL, got: %s", rawURL)
-	}
-	if idx := strings.LastIndex(after, "@"); idx != -1 {
-		after = after[idx+1:]
-	}
-	return after, nil
 }
 
 type connectorWorkspaceStore struct {
