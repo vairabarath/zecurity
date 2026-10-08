@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
@@ -31,11 +31,19 @@ use crate::runtime::{
 };
 use crate::state_store::{self, save_workspace_state, StoredWorkspaceState};
 use crate::transport::{ClientTransport, RelayContext};
-use crate::tun::{AllowedFlow, TunManager};
+use crate::tun::{AllowedFlow, ResourceKernel, TunManager};
 use crate::tunnel_pool::TunnelPool;
 
 type TunSlot = Arc<Mutex<Option<TunManager>>>;
 const ACL_REFRESH_TTL_SECS: i64 = 60;
+/// Fix 05 Phase 5-C (H4): how long a resource command may take to be
+/// acknowledged by the net_stack loop. For a removal (R1) the ack means every
+/// affected socket was reset AND reaped. Exceeding it is a post-mutation
+/// failure → recovery restart.
+const RESOURCE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Queue depth of the resource command channel (the apply sends one command
+/// at a time and awaits its ack).
+const RESOURCE_CMD_QUEUE_CAP: usize = 16;
 // Early-resync backoff after a relay transport failure. The connector may still
 // be re-homing, so the controller's ACL may not carry the new relay yet — retry
 // with exponential backoff until the version changes, then fall back to the
@@ -701,16 +709,8 @@ async fn handle_up(
     // Other ports on the same IP stay on the normal kernel route.
     let allowed_flows: Vec<AllowedFlow> = allowed_entries
         .iter()
-        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
-        .filter_map(|e| {
-            let IpAddr::V4(ip) = e.address.parse::<IpAddr>().ok()? else {
-                return None;
-            };
-            Some(AllowedFlow {
-                ip,
-                port: e.port as u16,
-            })
-        })
+        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
+        .map(|(ip, port)| AllowedFlow { ip, port })
         .collect();
 
     if allowed_flows.is_empty() {
@@ -745,8 +745,18 @@ async fn handle_up(
     };
 
     let relay_resync = { state.read().await.relay_resync.clone() };
+    // Fix 05 Phase 5-C: resource hot-apply commands into the running net_stack.
+    let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
     let task = tokio::spawn(async move {
-        if let Err(e) = net_stack::run(dev, allowed_entries, transport_rx, relay_resync).await {
+        if let Err(e) = net_stack::run(
+            dev,
+            allowed_entries,
+            transport_rx,
+            resource_rx,
+            relay_resync,
+        )
+        .await
+        {
             error!(error = %e, "net_stack exited with error");
         }
     });
@@ -759,6 +769,7 @@ async fn handle_up(
         route_count,
         applied,
         transport_tx: Arc::new(transport_tx),
+        resource_tx: Arc::new(resource_tx),
     }));
 
     info!(routes = route_count, "zecurity0 up");
@@ -828,12 +839,19 @@ async fn restart_tunnel_if_running(
 /// * `TransportOnly` — ONLY connector topology changed (connector added/removed,
 ///   preferred connector changed, connector coords changed) → hot-apply the
 ///   transport map into the running net_stack.
-/// * `Structural`    — anything else (resource set/IP/port/protocol/remote
-///   network, identity, missing inputs) → full VPN restart, as in Phase 1.
+/// * `ResourceDelta` — Fix 05 Phase 5-C: identity unchanged and no resource
+///   moved to another remote network; resource entries were added/removed/
+///   changed (IP, port, protocol, access, non-routable entries), possibly
+///   together with connector changes → ordered resource hot-apply with one
+///   transport-map publication.
+/// * `Structural`    — the only classification-level restart boundaries:
+///   a resource's `remote_network_id` changed (D3) or the device identity
+///   changed (D4); plus missing inputs (fail closed) → full VPN restart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConfigDelta {
     NoChange,
     TransportOnly,
+    ResourceDelta,
     Structural,
 }
 
@@ -869,9 +887,72 @@ pub(crate) fn classify_applied(applied: &AppliedConfig, candidate: &AppliedConfi
         ConfigDelta::NoChange
     } else if structural_view(candidate) == structural_view(applied) {
         ConfigDelta::TransportOnly
+    } else if resource_delta_allowed(applied, candidate) {
+        ConfigDelta::ResourceDelta
     } else {
         ConfigDelta::Structural
     }
+}
+
+/// Fix 05 Phase 5-C: the only classification-level restart boundaries.
+/// Returns false (→ Structural) when the device identity changed (D4) or an
+/// entry key `(address, port, protocol)` present in both configs has a
+/// different remote-network set (D3). Every other difference is a resource
+/// add/remove plus connector fields, which the resource hot-apply handles.
+///
+/// Fail-closed by construction: `AppliedConfig` and `AppliedEntry` are
+/// destructured exhaustively, so a field added later won't compile here
+/// until someone classifies it.
+fn resource_delta_allowed(applied: &AppliedConfig, candidate: &AppliedConfig) -> bool {
+    let AppliedConfig {
+        spiffe_id: a_spiffe,
+        certificate_pem: a_cert,
+        private_key_pem: a_key,
+        tpm_key_material: a_tpm,
+        ca_cert_pem: a_ca,
+        entries: a_entries,
+    } = applied;
+    let AppliedConfig {
+        spiffe_id: c_spiffe,
+        certificate_pem: c_cert,
+        private_key_pem: c_key,
+        tpm_key_material: c_tpm,
+        ca_cert_pem: c_ca,
+        entries: c_entries,
+    } = candidate;
+    // D4: device identity is baked into every connection pool.
+    if (a_spiffe, a_cert, a_key, a_tpm, a_ca) != (c_spiffe, c_cert, c_key, c_tpm, c_ca) {
+        return false;
+    }
+    // D3: a resource that moved to another remote network.
+    let a_rns = remote_networks_by_entry_key(a_entries);
+    let c_rns = remote_networks_by_entry_key(c_entries);
+    a_rns
+        .iter()
+        .all(|(key, a_set)| c_rns.get(key).is_none_or(|c_set| c_set == a_set))
+}
+
+type EntryKey<'a> = (&'a str, u32, &'a str);
+
+fn remote_networks_by_entry_key(
+    entries: &[AppliedEntry],
+) -> BTreeMap<EntryKey<'_>, BTreeSet<&str>> {
+    let mut out: BTreeMap<EntryKey<'_>, BTreeSet<&str>> = BTreeMap::new();
+    for entry in entries {
+        let AppliedEntry {
+            address,
+            port,
+            protocol,
+            remote_network_id,
+            // Connector fields: handled by the transport-map rebuild.
+            preferred_connector_id: _,
+            coords: _,
+        } = entry;
+        out.entry((address.as_str(), *port, protocol.as_str()))
+            .or_default()
+            .insert(remote_network_id.as_str());
+    }
+    out
 }
 
 /// Classify the current snapshots against the config the running tunnel was
@@ -1007,6 +1088,7 @@ where
         route_count: handle.route_count,
         applied: candidate,
         transport_tx: handle.transport_tx.clone(),
+        resource_tx: handle.resource_tx.clone(),
     }));
     info!(
         resources,
@@ -1033,11 +1115,218 @@ async fn transport_apply_pending(state: &SharedState) -> bool {
     ) == ConfigDelta::TransportOnly
 }
 
-/// Evaluates the Fix 01 decision against the current runtime state:
-/// dead data plane or Structural → `down_up` (full restart); NoChange → keep;
-/// TransportOnly → hot-apply the connector transport map (`build`), falling
-/// back to `down_up` only where hot-apply is unsafe.
-async fn run_restart_decision<B, F, Fut>(state: &SharedState, build: B, down_up: F) -> Result<()>
+/// True when the running tunnel has a pending ResourceDelta that was not (fully)
+/// applied: an earlier apply failed before mutation, or additions are waiting
+/// for smoltcp address capacity (H1). The 60 s tick retries it without a
+/// version bump. (`transport_apply_pending` keeps its frozen 2-A meaning.)
+async fn resource_apply_pending(state: &SharedState) -> bool {
+    let s = state.read().await;
+    let Some(handle) = s.tun_handle.as_ref() else {
+        return false;
+    };
+    classify_delta(
+        Some(&handle.applied),
+        s.acl_snapshot.as_ref(),
+        s.transport_snapshot.as_ref(),
+        s.device.as_ref(),
+    ) == ConfigDelta::ResourceDelta
+}
+
+// ---- Fix 05 Phase 5-C: resource hot-apply -------------------------------------------
+
+type ResourceKey = (Ipv4Addr, u16);
+
+/// The pure plan for one resource apply (Phase 5-C, H1).
+#[derive(Debug, Clone)]
+pub(crate) struct ResourcePlan {
+    /// Routable keys to stop serving (their flows are reset).
+    pub(crate) removed: BTreeSet<ResourceKey>,
+    /// Routable keys applied by this pass (existing-IP + admitted new-IP).
+    pub(crate) added: BTreeSet<ResourceKey>,
+    /// Additions that don't fit the smoltcp address capacity: NOT applied,
+    /// not in `target`, retried on later ticks.
+    pub(crate) unapplied: BTreeSet<ResourceKey>,
+    /// Interface addresses / table-105 routes to remove.
+    pub(crate) addr_del: BTreeSet<Ipv4Addr>,
+    /// Interface addresses / table-105 routes to add (admitted new IPs).
+    pub(crate) addr_add: BTreeSet<Ipv4Addr>,
+    /// Capture rules after the remove side (= kept keys).
+    pub(crate) flows_after_removal: BTreeSet<ResourceKey>,
+    /// Capture rules after the whole apply.
+    pub(crate) flows_after: BTreeSet<ResourceKey>,
+    /// What `AppliedConfig` becomes on success: the candidate minus every
+    /// entry whose key is unapplied.
+    pub(crate) target: AppliedConfig,
+}
+
+fn routable_keys(cfg: &AppliedConfig) -> BTreeSet<ResourceKey> {
+    cfg.entries
+        .iter()
+        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
+        .collect()
+}
+
+fn ips_of(keys: &BTreeSet<ResourceKey>) -> BTreeSet<Ipv4Addr> {
+    keys.iter().map(|(ip, _)| *ip).collect()
+}
+
+/// Number of smoltcp interface addresses reserved for the tunnel itself
+/// (`100.64.0.1/32`).
+const RESERVED_IFACE_ADDRS: usize = 1;
+
+/// Plan a resource apply (pure; Phase 5-C H1):
+/// * removals free capacity first;
+/// * an addition whose IP already has an address always applies;
+/// * new IPs are admitted in ascending IPv4 order until the capacity
+///   (`addr_capacity` − the reserved tunnel address) is full;
+/// * the rest stay unapplied/pending — never silently dropped;
+/// * removals, connector changes and non-routable changes never depend on
+///   capacity.
+pub(crate) fn plan_resource_apply(
+    applied: &AppliedConfig,
+    candidate: &AppliedConfig,
+    addr_capacity: usize,
+) -> ResourcePlan {
+    let applied_keys = routable_keys(applied);
+    let cand_keys = routable_keys(candidate);
+    let kept: BTreeSet<ResourceKey> = applied_keys.intersection(&cand_keys).copied().collect();
+    let removed: BTreeSet<ResourceKey> = applied_keys.difference(&cand_keys).copied().collect();
+    let added_all: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
+
+    let current_ips = ips_of(&applied_keys);
+    let (existing_ip_adds, new_ip_adds): (BTreeSet<ResourceKey>, BTreeSet<ResourceKey>) = added_all
+        .iter()
+        .partition(|(ip, _)| current_ips.contains(ip));
+
+    let mut retained_ips = ips_of(&kept);
+    retained_ips.extend(ips_of(&existing_ip_adds));
+    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&retained_ips).copied().collect();
+
+    let free = addr_capacity.saturating_sub(RESERVED_IFACE_ADDRS + retained_ips.len());
+    // BTreeSet<Ipv4Addr> iterates in ascending numeric order.
+    let addr_add: BTreeSet<Ipv4Addr> = ips_of(&new_ip_adds).into_iter().take(free).collect();
+
+    let mut added = existing_ip_adds;
+    added.extend(new_ip_adds.iter().filter(|(ip, _)| addr_add.contains(ip)));
+    let unapplied: BTreeSet<ResourceKey> = added_all.difference(&added).copied().collect();
+
+    let mut flows_after = kept.clone();
+    flows_after.extend(added.iter().copied());
+
+    let mut target = candidate.clone();
+    target.entries.retain(|e| {
+        net_stack::routable_key(&e.address, &e.protocol, e.port)
+            .is_none_or(|key| !unapplied.contains(&key))
+    });
+
+    ResourcePlan {
+        removed,
+        added,
+        unapplied,
+        addr_del,
+        addr_add,
+        flows_after_removal: kept,
+        flows_after,
+        target,
+    }
+}
+
+fn to_flows(keys: &BTreeSet<ResourceKey>) -> BTreeSet<AllowedFlow> {
+    keys.iter()
+        .map(|(ip, port)| AllowedFlow {
+            ip: *ip,
+            port: *port,
+        })
+        .collect()
+}
+
+/// Logs the capacity-pending set once per distinct set (rate limit).
+static LAST_CAPACITY_PENDING: std::sync::Mutex<Option<BTreeSet<ResourceKey>>> =
+    std::sync::Mutex::new(None);
+
+fn log_capacity_pending(unapplied: &BTreeSet<ResourceKey>) {
+    let Ok(mut last) = LAST_CAPACITY_PENDING.lock() else {
+        return;
+    };
+    if unapplied.is_empty() {
+        *last = None;
+        return;
+    }
+    if last.as_ref() != Some(unapplied) {
+        let pending: Vec<String> = unapplied
+            .iter()
+            .map(|(ip, port)| format!("{ip}:{port}"))
+            .collect();
+        warn!(
+            pending = ?pending,
+            "resource additions pending: address capacity"
+        );
+        *last = Some(unapplied.clone());
+    }
+}
+
+/// Send one resource command and wait (bounded, H4) for the loop's ack.
+async fn send_resource_cmd(
+    tx: &tokio::sync::mpsc::Sender<net_stack::ResourceCmd>,
+    what: &'static str,
+    make: impl FnOnce(tokio::sync::oneshot::Sender<Result<()>>) -> net_stack::ResourceCmd,
+) -> Result<()> {
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let cmd = make(ack_tx);
+    let exchange = async {
+        tx.send(cmd)
+            .await
+            .map_err(|_| anyhow::anyhow!("{what}: net_stack is not receiving resource commands"))?;
+        match ack_rx.await {
+            Ok(res) => res.with_context(|| what),
+            Err(_) => Err(anyhow::anyhow!(
+                "{what}: net_stack dropped the acknowledgement"
+            )),
+        }
+    };
+    match tokio::time::timeout(RESOURCE_ACK_TIMEOUT, exchange).await {
+        Ok(res) => res,
+        Err(_) => Err(anyhow::anyhow!(
+            "{what}: no acknowledgement within {:?}",
+            RESOURCE_ACK_TIMEOUT
+        )),
+    }
+}
+
+/// Outcome of a Phase 5-C resource hot-apply attempt.
+#[derive(Debug)]
+enum ResourceApplyOutcome {
+    /// Applied; `applied` now equals the plan target.
+    Applied,
+    /// Nothing applicable (only capacity-pending additions remain).
+    NothingToApply,
+    /// The configuration moved between the decision and this apply; the
+    /// coordinator's next pass (requested by whoever stored it) re-evaluates.
+    Superseded,
+    /// The tunnel was stopped/replaced (IPC Down, device directive).
+    TunnelGone,
+    /// Failed BEFORE any mutation: the working VPN is untouched; retry.
+    PreMutationFailed(anyhow::Error),
+    /// Failed AFTER mutation began: recovery restart required.
+    MutationFailed(anyhow::Error),
+}
+
+/// Fix 05 Phase 5-C: apply a ResourceDelta (possibly combined with connector
+/// changes) to the running tunnel without a restart.
+///
+/// Pre-mutation: snapshot → plan (H1 capacity) → build the full transport map
+/// for the plan target → lock `tun_slot` (serialises against `handle_down`)
+/// → re-check the tunnel handle.
+/// Mutation (H2 order): R1 close flows + remove listeners (ack after reset +
+/// reap) → nft desired state → remove smoltcp addresses → delete routes →
+/// ONE transport-map publish → fwmark ensure → add addresses + listeners →
+/// add routes → nft desired state LAST.
+/// Commit: `applied = plan.target` only after every step succeeded.
+async fn hot_apply_resources<B, K>(
+    state: &SharedState,
+    kernel_slot: &Mutex<Option<K>>,
+    build: B,
+) -> ResourceApplyOutcome
 where
     B: FnOnce(
         &[AclEntry],
@@ -1046,6 +1335,170 @@ where
         &DeviceInfo,
         crate::crl::CrlManager,
     ) -> Result<net_stack::TransportMap>,
+    K: ResourceKernel,
+{
+    // ---- pre-mutation ----
+    let (handle, acl, transport, device, relay_crl) = {
+        let s = state.read().await;
+        let Some(handle) = s.tun_handle.clone() else {
+            return ResourceApplyOutcome::TunnelGone;
+        };
+        let (Some(acl), Some(device)) = (s.acl_snapshot.clone(), s.device.clone()) else {
+            return ResourceApplyOutcome::Superseded;
+        };
+        let Some(relay_crl) = s.relay_crl.clone() else {
+            return ResourceApplyOutcome::PreMutationFailed(anyhow::anyhow!(
+                "relay CRL manager not initialised"
+            ));
+        };
+        (handle, acl, s.transport_snapshot.clone(), device, relay_crl)
+    };
+    let candidate = effective_config(&acl, transport.as_ref(), &device);
+    if classify_applied(&handle.applied, &candidate) != ConfigDelta::ResourceDelta {
+        return ResourceApplyOutcome::Superseded;
+    }
+    let addr_capacity = match kernel_slot.lock().await.as_ref() {
+        Some(kernel) => kernel.addr_capacity(),
+        None => return ResourceApplyOutcome::TunnelGone,
+    };
+    let plan = plan_resource_apply(&handle.applied, &candidate, addr_capacity);
+    log_capacity_pending(&plan.unapplied);
+    if plan.target == handle.applied {
+        return ResourceApplyOutcome::NothingToApply;
+    }
+    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device)
+        .into_iter()
+        .filter(|e| {
+            net_stack::routable_key(&e.address, &e.protocol, e.port)
+                .is_none_or(|key| !plan.unapplied.contains(&key))
+        })
+        .collect();
+    let map = match build(&entries, &acl, transport.as_ref(), &device, relay_crl) {
+        Ok(map) => map,
+        Err(e) => {
+            return ResourceApplyOutcome::PreMutationFailed(
+                e.context("resource map build failed, retaining current state"),
+            )
+        }
+    };
+    let mut kernel_guard = kernel_slot.lock().await;
+    let Some(kernel) = kernel_guard.as_mut() else {
+        return ResourceApplyOutcome::TunnelGone;
+    };
+    {
+        let s = state.read().await;
+        match s.tun_handle.as_ref() {
+            Some(current) if Arc::ptr_eq(current, &handle) => {}
+            _ => return ResourceApplyOutcome::TunnelGone,
+        }
+    }
+    info!(
+        removed = plan.removed.len(),
+        added = plan.added.len(),
+        pending = plan.unapplied.len(),
+        "resource change, hot-applying"
+    );
+
+    // ---- mutation (any failure from here on → recovery restart) ----
+    let applied: Result<()> = async {
+        // Remove side (H2): close + listeners → nft → addresses → routes.
+        if !plan.removed.is_empty() {
+            let keys: Vec<ResourceKey> = plan.removed.iter().copied().collect();
+            send_resource_cmd(&handle.resource_tx, "close removed resources", |ack| {
+                net_stack::ResourceCmd::Remove { keys, ack }
+            })
+            .await?;
+            kernel
+                .apply_nft_desired(&to_flows(&plan.flows_after_removal))
+                .context("nft desired state (remove side)")?;
+        }
+        if !plan.addr_del.is_empty() {
+            let ips: Vec<Ipv4Addr> = plan.addr_del.iter().copied().collect();
+            send_resource_cmd(&handle.resource_tx, "remove interface addresses", |ack| {
+                net_stack::ResourceCmd::RemoveAddrs { ips, ack }
+            })
+            .await?;
+            kernel
+                .del_routes(&plan.addr_del)
+                .context("delete resource routes")?;
+        }
+        // ONE publication: connector changes + slots for admitted additions.
+        handle
+            .transport_tx
+            .send(Arc::new(map))
+            .map_err(|_| anyhow::anyhow!("net_stack is not receiving transport updates"))?;
+        // Add side: fwmark → addresses + listeners → routes → nft LAST.
+        if !plan.added.is_empty() {
+            kernel.ensure_fwmark_rule().context("ensure fwmark rule")?;
+            let addrs: Vec<Ipv4Addr> = plan.addr_add.iter().copied().collect();
+            let keys: Vec<ResourceKey> = plan.added.iter().copied().collect();
+            send_resource_cmd(&handle.resource_tx, "add addresses and listeners", |ack| {
+                net_stack::ResourceCmd::Add { addrs, keys, ack }
+            })
+            .await?;
+            if !plan.addr_add.is_empty() {
+                kernel
+                    .add_routes(&plan.addr_add)
+                    .context("add resource routes")?;
+            }
+            kernel
+                .apply_nft_desired(&to_flows(&plan.flows_after))
+                .context("nft desired state (add side)")?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = applied {
+        return ResourceApplyOutcome::MutationFailed(e);
+    }
+
+    // ---- commit ----
+    let mut s = state.write().await;
+    match s.tun_handle.as_ref() {
+        Some(current) if Arc::ptr_eq(current, &handle) => {}
+        _ => return ResourceApplyOutcome::TunnelGone,
+    }
+    s.tun_handle = Some(Arc::new(TunHandle {
+        abort: handle.abort.clone(),
+        route_count: plan.flows_after.len(),
+        applied: plan.target.clone(),
+        transport_tx: handle.transport_tx.clone(),
+        resource_tx: handle.resource_tx.clone(),
+    }));
+    drop(s);
+    drop(kernel_guard);
+    info!(
+        resources = plan.flows_after.len(),
+        removed = plan.removed.len(),
+        added = plan.added.len(),
+        pending = plan.unapplied.len(),
+        "resources hot-applied"
+    );
+    if plan.flows_after.is_empty() {
+        info!("no routable resources; tunnel kept up, nothing captured");
+    }
+    ResourceApplyOutcome::Applied
+}
+
+/// Evaluates the Fix 01 decision against the current runtime state:
+/// dead data plane or Structural → `down_up` (full restart); NoChange → keep;
+/// TransportOnly → hot-apply the connector transport map (`build`), falling
+/// back to `down_up` only where hot-apply is unsafe.
+async fn run_restart_decision<B, K, F, Fut>(
+    state: &SharedState,
+    build: B,
+    kernel: &Mutex<Option<K>>,
+    down_up: F,
+) -> Result<()>
+where
+    B: FnOnce(
+        &[AclEntry],
+        &AclSnapshot,
+        Option<&TransportSnapshot>,
+        &DeviceInfo,
+        crate::crl::CrlManager,
+    ) -> Result<net_stack::TransportMap>,
+    K: ResourceKernel,
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
@@ -1101,6 +1554,28 @@ where
                 }
             }
         }
+        ConfigDelta::ResourceDelta => match hot_apply_resources(state, kernel, build).await {
+            ResourceApplyOutcome::Applied | ResourceApplyOutcome::NothingToApply => Ok(()),
+            ResourceApplyOutcome::Superseded => {
+                info!("configuration changed during resource apply; next pass re-evaluates");
+                Ok(())
+            }
+            ResourceApplyOutcome::TunnelGone => {
+                info!("tunnel stopped or replaced during resource apply; nothing to apply");
+                Ok(())
+            }
+            ResourceApplyOutcome::PreMutationFailed(e) => {
+                warn!(error = %e, "resource apply failed before mutation, retaining current state");
+                Err(e)
+            }
+            ResourceApplyOutcome::MutationFailed(e) => {
+                warn!(
+                    error = %e,
+                    "resource apply failed after mutation, recovering with full restart"
+                );
+                down_up().await
+            }
+        },
     }
 }
 
@@ -1129,6 +1604,7 @@ async fn perform_tunnel_restart(
                 relay_crl,
             )
         },
+        tun_slot.as_ref(),
         || async {
             let down = handle_down(state, tun_slot).await;
             if !down.ok {
@@ -1697,6 +2173,208 @@ mod restart_decision_tests {
         initial_map: Arc<net_stack::TransportMap>,
         builds: Arc<AtomicUsize>,
         down_ups: Arc<AtomicUsize>,
+        /// Phase 5-C: ordered log of every loop command and kernel call.
+        log: Log,
+        /// Phase 5-C: fake kernel (`tun_slot` stand-in).
+        kernel: Mutex<Option<FakeKernel>>,
+        /// Phase 5-C: how the fake net_stack loop answers each command kind.
+        loop_ctl: Arc<std::sync::Mutex<LoopCtl>>,
+        published_rx: PublishedRx,
+        published: Published,
+    }
+
+    // ---- Fix 05 Phase 5-C harness ---------------------------------------------------
+    //
+    // A fake net_stack loop consumes `ResourceCmd`s (logging them, acking per
+    // `LoopCtl`) and a fake `ResourceKernel` logs nft/route/fwmark calls into
+    // the same ordered log. Every entry records whether the transport map had
+    // been published at that point (`pub=0/1`), which pins the single publish
+    // between the remove side and the add side.
+
+    type Log = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Address capacity of the fake kernel: room for several resource IPs so
+    /// the non-capacity tests are not affected by H1 admission.
+    const TEST_ADDR_CAPACITY: usize = 8;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Reply {
+        Ack,
+        Fail,
+        /// Never answer (keeps the ack sender alive) → H4 timeout.
+        Hang,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct LoopCtl {
+        remove: Reply,
+        remove_addrs: Reply,
+        add: Reply,
+    }
+
+    impl Default for LoopCtl {
+        fn default() -> Self {
+            Self {
+                remove: Reply::Ack,
+                remove_addrs: Reply::Ack,
+                add: Reply::Ack,
+            }
+        }
+    }
+
+    /// Observer of the transport channel. Shared and clearable, so a test can
+    /// drop it to simulate the net_stack receiver being gone.
+    type PublishedRx =
+        Arc<std::sync::Mutex<Option<tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>>>>;
+
+    /// The map the `pub=` flag compares against (re-baselined between applies).
+    type Baseline = Arc<std::sync::Mutex<Arc<net_stack::TransportMap>>>;
+
+    #[derive(Clone)]
+    struct Published {
+        rx: PublishedRx,
+        baseline: Baseline,
+    }
+
+    impl Published {
+        fn flag(&self) -> u8 {
+            let baseline = self.baseline.lock().unwrap().clone();
+            match self.rx.lock().unwrap().as_ref() {
+                Some(rx) => u8::from(!Arc::ptr_eq(&rx.borrow(), &baseline)),
+                None => 9,
+            }
+        }
+    }
+
+    /// Start a new apply window: clear the log and make the currently
+    /// published map the `pub=0` baseline.
+    fn rebaseline(h: &Harness) {
+        h.log.lock().unwrap().clear();
+        let current = h
+            .published_rx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .borrow()
+            .clone();
+        *h.published.baseline.lock().unwrap() = current;
+    }
+
+    fn keys_str(keys: &[(Ipv4Addr, u16)]) -> String {
+        keys.iter()
+            .map(|(ip, port)| format!("{ip}:{port}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn ips_str<'a>(ips: impl IntoIterator<Item = &'a Ipv4Addr>) -> String {
+        ips.into_iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    struct FakeKernel {
+        log: Log,
+        published: Published,
+        capacity: usize,
+        /// Fail the first call whose log entry starts with this prefix.
+        fail_on: Option<&'static str>,
+        /// Number of fwmark rules "installed" (starts at 1: the tunnel is up).
+        fwmark_rules: usize,
+        routes: BTreeSet<Ipv4Addr>,
+        nft: BTreeSet<AllowedFlow>,
+    }
+
+    impl FakeKernel {
+        fn record(&mut self, entry: String) -> Result<()> {
+            let entry = format!("{entry} pub={}", self.published.flag());
+            let fail = self.fail_on.is_some_and(|p| entry.starts_with(p));
+            self.log.lock().unwrap().push(entry.clone());
+            if fail {
+                self.fail_on = None;
+                anyhow::bail!("injected kernel failure at `{entry}`");
+            }
+            Ok(())
+        }
+    }
+
+    impl ResourceKernel for FakeKernel {
+        fn apply_nft_desired(&mut self, flows: &BTreeSet<AllowedFlow>) -> Result<()> {
+            let keys: Vec<_> = flows.iter().map(|f| (f.ip, f.port)).collect();
+            self.record(format!("nft [{}]", keys_str(&keys)))?;
+            self.nft = flows.clone();
+            Ok(())
+        }
+        fn add_routes(&mut self, ips: &BTreeSet<Ipv4Addr>) -> Result<()> {
+            self.record(format!("route+ [{}]", ips_str(ips)))?;
+            self.routes.extend(ips.iter().copied());
+            Ok(())
+        }
+        fn del_routes(&mut self, ips: &BTreeSet<Ipv4Addr>) -> Result<()> {
+            self.record(format!("route- [{}]", ips_str(ips)))?;
+            self.routes.retain(|ip| !ips.contains(ip));
+            Ok(())
+        }
+        fn ensure_fwmark_rule(&mut self) -> Result<()> {
+            self.record("fwmark".to_string())?;
+            if self.fwmark_rules == 0 {
+                self.fwmark_rules = 1;
+            }
+            Ok(())
+        }
+        fn addr_capacity(&self) -> usize {
+            self.capacity
+        }
+    }
+
+    /// Fake net_stack loop: logs and answers resource commands.
+    fn spawn_fake_loop(
+        mut cmd_rx: tokio::sync::mpsc::Receiver<net_stack::ResourceCmd>,
+        log: Log,
+        published: Published,
+        ctl: Arc<std::sync::Mutex<LoopCtl>>,
+    ) {
+        tokio::spawn(async move {
+            let mut hung = Vec::new();
+            while let Some(cmd) = cmd_rx.recv().await {
+                let ctl = *ctl.lock().unwrap();
+                let (entry, reply, ack) = match cmd {
+                    net_stack::ResourceCmd::Remove { keys, ack } => (
+                        format!("loop:remove [{}]", keys_str(&keys)),
+                        ctl.remove,
+                        ack,
+                    ),
+                    net_stack::ResourceCmd::RemoveAddrs { ips, ack } => (
+                        format!("loop:addr- [{}]", ips_str(&ips)),
+                        ctl.remove_addrs,
+                        ack,
+                    ),
+                    net_stack::ResourceCmd::Add { addrs, keys, ack } => (
+                        format!(
+                            "loop:add addrs=[{}] keys=[{}]",
+                            ips_str(&addrs),
+                            keys_str(&keys)
+                        ),
+                        ctl.add,
+                        ack,
+                    ),
+                };
+                log.lock()
+                    .unwrap()
+                    .push(format!("{entry} pub={}", published.flag()));
+                match reply {
+                    Reply::Ack => {
+                        let _ = ack.send(Ok(()));
+                    }
+                    Reply::Fail => {
+                        let _ = ack.send(Err(anyhow::anyhow!("injected loop failure")));
+                    }
+                    Reply::Hang => hung.push(ack),
+                }
+            }
+        });
     }
 
     /// Running tunnel built from `connectors` (transport plane) with the
@@ -1715,6 +2393,31 @@ mod restart_decision_tests {
             Some(&transport),
         ));
         let (tx, rx) = tokio::sync::watch::channel(initial_map.clone());
+        let log: Log = Arc::default();
+        let loop_ctl: Arc<std::sync::Mutex<LoopCtl>> = Arc::default();
+        let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
+        let published_rx: PublishedRx = Arc::new(std::sync::Mutex::new(Some(rx.clone())));
+        let published = Published {
+            rx: published_rx.clone(),
+            baseline: Arc::new(std::sync::Mutex::new(initial_map.clone())),
+        };
+        spawn_fake_loop(
+            resource_rx,
+            log.clone(),
+            published.clone(),
+            loop_ctl.clone(),
+        );
+        let route_ips: BTreeSet<Ipv4Addr> = ips_of(&routable_keys(&applied));
+        let nft: BTreeSet<AllowedFlow> = to_flows(&routable_keys(&applied));
+        let kernel = FakeKernel {
+            log: log.clone(),
+            published: published.clone(),
+            capacity: TEST_ADDR_CAPACITY,
+            fail_on: None,
+            fwmark_rules: 1,
+            routes: route_ips,
+            nft,
+        };
         {
             let mut s = state.write().await;
             s.device = Some(device);
@@ -1726,6 +2429,7 @@ mod restart_decision_tests {
                 route_count: 1,
                 applied,
                 transport_tx: Arc::new(tx),
+                resource_tx: Arc::new(resource_tx),
             }));
         }
         Harness {
@@ -1734,6 +2438,11 @@ mod restart_decision_tests {
             initial_map,
             builds: Arc::new(AtomicUsize::new(0)),
             down_ups: Arc::new(AtomicUsize::new(0)),
+            log,
+            kernel: Mutex::new(Some(kernel)),
+            loop_ctl,
+            published_rx,
+            published,
         }
     }
 
@@ -1758,6 +2467,7 @@ mod restart_decision_tests {
                 }
                 Ok(fake_map(entries, acl, transport))
             },
+            &h.kernel,
             move || async move {
                 down_ups.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -1777,6 +2487,7 @@ mod restart_decision_tests {
         run_restart_decision(
             state,
             |_, _, _, _, _| panic!("builder must not run for this delta"),
+            &Mutex::new(None::<FakeKernel>),
             || async move {
                 c.fetch_add(1, Ordering::SeqCst);
                 result
@@ -1835,6 +2546,7 @@ mod restart_decision_tests {
                 route_count: current.route_count,
                 applied: current.applied.clone(),
                 transport_tx: current.transport_tx.clone(),
+                resource_tx: current.resource_tx.clone(),
             }));
         }
 
@@ -1857,6 +2569,7 @@ mod restart_decision_tests {
                 route_count: current.route_count,
                 applied: current.applied.clone(),
                 transport_tx: current.transport_tx.clone(),
+                resource_tx: current.resource_tx.clone(),
             }));
         }
         set_transport_connectors(&h, &["c1", "c2"]).await;
@@ -2013,57 +2726,193 @@ mod restart_decision_tests {
         assert!(!h.rx.has_changed().unwrap(), "no transport swap");
     }
 
+    // ---- Fix 05 Phase 5-C: ResourceDelta → resource hot-apply ----------------------
+    //
+    // These tests previously asserted Structural (full restart). Phase 5-C
+    // changes their meaning: every one is now a ResourceDelta, hot-applied in
+    // the approved order with one transport-map publish and no restart.
+
+    fn log_of(h: &Harness) -> Vec<String> {
+        h.log.lock().unwrap().clone()
+    }
+
+    async fn applied_now(h: &Harness) -> AppliedConfig {
+        h.state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .clone()
+    }
+
+    async fn candidate_now(h: &Harness) -> AppliedConfig {
+        let s = h.state.read().await;
+        effective_config(
+            s.acl_snapshot.as_ref().unwrap(),
+            s.transport_snapshot.as_ref(),
+            s.device.as_ref().unwrap(),
+        )
+    }
+
+    /// Resource hot-applied: no restart, one build, map published, the
+    /// command/kernel log is exactly `expected`, and applied == candidate.
+    async fn assert_resource_hot_applied(h: &Harness, expected: &[&str]) {
+        assert_eq!(
+            classify_applied(&applied_now(h).await, &candidate_now(h).await),
+            ConfigDelta::ResourceDelta
+        );
+        assert!(decide(h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(h.builds.load(Ordering::SeqCst), 1, "one map build");
+        assert!(h.rx.has_changed().unwrap(), "map published");
+        assert_eq!(log_of(h), expected, "ordered apply");
+        assert!(
+            applied_now(h).await == candidate_now(h).await,
+            "applied = target"
+        );
+    }
+
+    fn push_entry(acl: &mut AclSnapshot, spiffe: &str, addr: &str, port: u32, protocol: &str) {
+        acl.entries.push(AclEntry {
+            resource_id: format!("res-{addr}-{port}"),
+            name: format!("res-{addr}-{port}"),
+            address: addr.to_string(),
+            port,
+            protocol: protocol.to_string(),
+            allowed_spiffe_ids: vec![spiffe.to_string()],
+            remote_network_id: "rn1".to_string(),
+            preferred_connector_id: String::new(),
+            ..Default::default()
+        });
+    }
+
+    async fn add_entry(h: &Harness, addr: &str, port: u32, protocol: &str) {
+        let mut s = h.state.write().await;
+        let spiffe = s.device.as_ref().unwrap().spiffe_id.clone();
+        push_entry(
+            s.acl_snapshot.as_mut().unwrap(),
+            &spiffe,
+            addr,
+            port,
+            protocol,
+        );
+    }
+
     #[tokio::test]
     async fn restart_decision_entry_added_restarts() {
+        // Name kept for traceability; meaning flipped by Phase 5-C: an added
+        // resource is hot-applied (add side only, nft last).
         let h = harness_with(&["c1"], "").await;
-        {
-            let mut s = h.state.write().await;
-            let spiffe = s.device.as_ref().unwrap().spiffe_id.clone();
-            s.acl_snapshot.as_mut().unwrap().entries.push(AclEntry {
-                resource_id: "res2".to_string(),
-                name: "res2".to_string(),
-                address: "10.0.0.2".to_string(),
-                port: 443,
-                protocol: "tcp".to_string(),
-                allowed_spiffe_ids: vec![spiffe],
-                remote_network_id: "rn1".to_string(),
-                preferred_connector_id: String::new(),
-                ..Default::default()
-            });
-        }
-        assert_structural(&h).await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "fwmark pub=1",
+                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1",
+                "route+ [10.0.0.2] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:443] pub=1",
+            ],
+        )
+        .await;
+        assert_eq!(
+            h.rx.borrow()
+                .get(&("10.0.0.2".parse().unwrap(), 443))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(1),
+            "new flows to the added resource find its connector"
+        );
     }
 
     #[tokio::test]
     async fn restart_decision_resource_access_removed_restarts() {
+        // Meaning flipped by Phase 5-C: access lost → removal side only; the
+        // last resource goes, the tunnel stays up with nothing captured.
         let h = harness_with(&["c1"], "").await;
         h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0]
             .allowed_spiffe_ids
             .clear();
-        assert_structural(&h).await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "loop:addr- [10.0.0.1] pub=0",
+                "route- [10.0.0.1] pub=0",
+            ],
+        )
+        .await;
+        assert!(applied_now(&h).await.entries.is_empty());
+        assert!(
+            h.rx.borrow()
+                .get(&("10.0.0.1".parse().unwrap(), 80))
+                .is_none(),
+            "no slot for the removed resource"
+        );
     }
 
     #[tokio::test]
     async fn resource_ip_change_is_structural() {
+        // Meaning flipped by Phase 5-C: IP change = remove old K + add new K.
         let h = harness_with(&["c1"], "").await;
         h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
             "10.0.0.9".to_string();
-        assert_structural(&h).await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "loop:addr- [10.0.0.1] pub=0",
+                "route- [10.0.0.1] pub=0",
+                "fwmark pub=1",
+                "loop:add addrs=[10.0.0.9] keys=[10.0.0.9:80] pub=1",
+                "route+ [10.0.0.9] pub=1",
+                "nft [10.0.0.9:80] pub=1",
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resource_port_change_is_structural() {
+        // Meaning flipped by Phase 5-C: (ip, 80) flows are closed by R1, the
+        // address/route stay (same IP), the new port is served.
         let h = harness_with(&["c1"], "").await;
         h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8080;
-        assert_structural(&h).await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "fwmark pub=1",
+                "loop:add addrs=[] keys=[10.0.0.1:8080] pub=1",
+                "nft [10.0.0.1:8080] pub=1",
+            ],
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn resource_protocol_change_is_structural() {
+        // Meaning flipped by Phase 5-C: tcp→udp leaves the client data plane
+        // (= removal); the udp entry is kept in applied as non-routable.
         let h = harness_with(&["c1"], "").await;
         h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].protocol =
             "udp".to_string();
-        assert_structural(&h).await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "loop:addr- [10.0.0.1] pub=0",
+                "route- [10.0.0.1] pub=0",
+            ],
+        )
+        .await;
+        assert_eq!(applied_now(&h).await.entries[0].protocol, "udp");
     }
 
     /// D3: a resource moving to another remote network is Structural even when
@@ -2086,14 +2935,553 @@ mod restart_decision_tests {
         assert_structural(&h).await;
     }
 
-    /// Resource change AND connector change together → Structural (never a
-    /// partial hot-apply of only the connector part).
+    /// Phase 5-C (meaning flipped): resource + connector change together is
+    /// ONE combined apply with ONE publish, placed between the remove side and
+    /// the add side; the new key's slot carries the new connector set.
     #[tokio::test]
     async fn resource_and_connector_change_together_is_structural() {
         let h = harness_with(&["c1"], "").await;
         set_transport_connectors(&h, &["c1", "c2"]).await;
         h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8443;
-        assert_structural(&h).await;
+        assert_resource_hot_applied(
+            &h,
+            &[
+                "loop:remove [10.0.0.1:80] pub=0",
+                "nft [] pub=0",
+                "fwmark pub=1",
+                "loop:add addrs=[] keys=[10.0.0.1:8443] pub=1",
+                "nft [10.0.0.1:8443] pub=1",
+            ],
+        )
+        .await;
+        let map = h.rx.borrow().clone();
+        assert_eq!(
+            map.get(&("10.0.0.1".parse().unwrap(), 8443))
+                .cloned()
+                .flatten()
+                .map(|v| v.len()),
+            Some(2),
+            "connector change applied in the same publish"
+        );
+        assert!(map.get(&("10.0.0.1".parse().unwrap(), 80)).is_none());
+        assert_eq!(applied_coord_ids(&h.state).await, vec!["c1", "c2"]);
+    }
+
+    // ---- Phase 5-C: classification boundaries -------------------------------------
+
+    fn applied_with(entries: &[(&str, u32, &str, &str)]) -> AppliedConfig {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries.clear();
+        for (addr, port, proto, rn) in entries {
+            push_entry(&mut acl, &device.spiffe_id, addr, *port, proto);
+            acl.entries.last_mut().unwrap().remote_network_id = rn.to_string();
+        }
+        let mut rn2 = acl.remote_networks[0].clone();
+        rn2.remote_network_id = "rn2".to_string();
+        acl.remote_networks.push(rn2);
+        effective_config(&acl, None, &device)
+    }
+
+    #[test]
+    fn resource_changes_classify_as_resource_delta() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cases: [&[(&str, u32, &str, &str)]; 6] = [
+            &[
+                ("10.0.0.1", 80, "tcp", "rn1"),
+                ("10.0.0.2", 443, "tcp", "rn1"),
+            ], // add
+            &[],                               // remove / access lost (zero K)
+            &[("10.0.0.9", 80, "tcp", "rn1")], // IP
+            &[("10.0.0.1", 81, "tcp", "rn1")], // port
+            &[("10.0.0.1", 80, "udp", "rn1")], // protocol
+            &[
+                ("10.0.0.1", 80, "tcp", "rn1"),
+                ("10.0.0.5", 53, "udp", "rn2"),
+            ], // non-routable add
+        ];
+        for entries in cases {
+            assert_eq!(
+                classify_applied(&base, &applied_with(entries)),
+                ConfigDelta::ResourceDelta,
+                "{entries:?}"
+            );
+        }
+        // Access gained from zero.
+        assert_eq!(
+            classify_applied(&applied_with(&[]), &base),
+            ConfigDelta::ResourceDelta
+        );
+    }
+
+    /// D3 dominates: a remote-network move is Structural even when the same
+    /// snapshot also contains a hot-appliable resource change.
+    #[test]
+    fn remote_network_move_with_other_resource_changes_stays_structural() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let moved = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn2"),
+            ("10.0.0.2", 443, "tcp", "rn1"),
+        ]);
+        assert_eq!(classify_applied(&base, &moved), ConfigDelta::Structural);
+    }
+
+    /// D4 dominates: identity change + resource change is Structural.
+    #[test]
+    fn identity_change_with_resource_change_stays_structural() {
+        let base = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let mut c = applied_with(&[("10.0.0.2", 80, "tcp", "rn1")]);
+        c.private_key_pem = "other".to_string();
+        assert_eq!(classify_applied(&base, &c), ConfigDelta::Structural);
+    }
+
+    /// Metadata (name, resource id) is not part of AppliedConfig → NoChange.
+    #[tokio::test]
+    async fn metadata_only_change_is_no_change() {
+        let h = harness_with(&["c1"], "").await;
+        {
+            let mut s = h.state.write().await;
+            let e = &mut s.acl_snapshot.as_mut().unwrap().entries[0];
+            e.name = "renamed".to_string();
+            e.resource_id = "res1-renamed".to_string();
+        }
+        assert_eq!(
+            classify_applied(&applied_now(&h).await, &candidate_now(&h).await),
+            ConfigDelta::NoChange
+        );
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(h.builds.load(Ordering::SeqCst), 0);
+        assert!(log_of(&h).is_empty());
+    }
+
+    /// A non-routable-only change (udp entry added; tcp→TCP spelling) has
+    /// no data-plane work: no loop command, no kernel call; publish + commit.
+    #[tokio::test]
+    async fn non_routable_only_change_does_no_dataplane_work() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.5", 53, "udp").await;
+        assert_resource_hot_applied(&h, &[]).await;
+
+        let h = harness_with(&["c1"], "").await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].protocol =
+            "TCP".to_string();
+        assert_resource_hot_applied(&h, &[]).await;
+    }
+
+    // ---- Phase 5-C: zero resources + invariants -------------------------------------
+
+    #[tokio::test]
+    async fn zero_resources_keeps_tunnel_then_readd_without_restart() {
+        let h = harness_with(&["c1"], "").await;
+        let (abort_id, transport_tx, resource_tx) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            (
+                th.abort.id(),
+                th.transport_tx.clone(),
+                th.resource_tx.clone(),
+            )
+        };
+        let original = h.state.read().await.acl_snapshot.as_ref().unwrap().entries[0].clone();
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .clear();
+        assert!(decide(&h, false).await.is_ok());
+        {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            assert_eq!(th.abort.id(), abort_id, "same net_stack task");
+            assert!(!th.abort.is_finished());
+            assert!(Arc::ptr_eq(&th.transport_tx, &transport_tx));
+            assert!(Arc::ptr_eq(&th.resource_tx, &resource_tx));
+            assert_eq!(th.route_count, 0);
+            assert!(th.applied.entries.is_empty(), "zero-K target is a success");
+        }
+        {
+            let k = h.kernel.lock().await;
+            let k = k.as_ref().unwrap();
+            assert!(k.routes.is_empty(), "table 105 empty");
+            assert!(k.nft.is_empty(), "empty chain");
+            assert_eq!(k.fwmark_rules, 1, "fwmark rule never removed");
+        }
+        assert!(!resource_apply_pending(&h.state).await);
+
+        // Re-add after zero: normal add side, fwmark re-ensured (no duplicate).
+        rebaseline(&h);
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(original);
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            0,
+            "no restart either way"
+        );
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "fwmark pub=1",
+                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "route+ [10.0.0.1] pub=1",
+                "nft [10.0.0.1:80] pub=1",
+            ]
+        );
+        assert_eq!(h.kernel.lock().await.as_ref().unwrap().fwmark_rules, 1);
+        let s = h.state.read().await;
+        assert_eq!(s.tun_handle.as_ref().unwrap().abort.id(), abort_id);
+    }
+
+    #[tokio::test]
+    async fn kernel_desired_state_matches_after_each_step() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        decide(&h, false).await.unwrap();
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].port = 8080;
+        decide(&h, false).await.unwrap();
+        {
+            let guard = h.kernel.lock().await;
+            let k = guard.as_ref().unwrap();
+            let ips: Vec<String> = k.routes.iter().map(|ip| ip.to_string()).collect();
+            assert_eq!(ips, vec!["10.0.0.1", "10.0.0.2"]);
+            let flows: Vec<(String, u16)> =
+                k.nft.iter().map(|f| (f.ip.to_string(), f.port)).collect();
+            assert_eq!(
+                flows,
+                vec![
+                    ("10.0.0.1".to_string(), 8080),
+                    ("10.0.0.2".to_string(), 443)
+                ]
+            );
+        }
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- Phase 5-C: capacity (H1) ----------------------------------------------------
+
+    fn keys(v: &BTreeSet<ResourceKey>) -> Vec<String> {
+        v.iter().map(|(ip, p)| format!("{ip}:{p}")).collect()
+    }
+
+    #[test]
+    fn plan_admits_new_ips_ascending_and_keeps_overflow_pending() {
+        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.7", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+            ("10.0.0.5", 80, "tcp", "rn1"),
+        ]);
+        // capacity 4 = 100.64.0.1 + 10.0.0.1 + two new IPs.
+        let plan = plan_resource_apply(&applied, &cand, 4);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.5:80"]);
+        assert_eq!(keys(&plan.unapplied), vec!["10.0.0.7:80"]);
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5");
+        assert!(
+            !plan.target.entries.iter().any(|e| e.address == "10.0.0.7"),
+            "pending is not in applied"
+        );
+        assert_eq!(plan.target.entries.len(), 3);
+    }
+
+    #[test]
+    fn plan_existing_ip_addition_always_applies() {
+        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.1", 443, "tcp", "rn1"),
+        ]);
+        // capacity 2: no free slot, but the IP already has its address.
+        let plan = plan_resource_apply(&applied, &cand, 2);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.1:443"]);
+        assert!(plan.unapplied.is_empty());
+        assert!(plan.addr_add.is_empty());
+    }
+
+    #[test]
+    fn plan_removals_free_capacity_first() {
+        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let cand = applied_with(&[("10.0.0.2", 80, "tcp", "rn1")]);
+        let plan = plan_resource_apply(&applied, &cand, 2);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:80"]);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.2:80"]);
+        assert!(
+            plan.unapplied.is_empty(),
+            "freed slot reused in the same pass"
+        );
+    }
+
+    #[test]
+    fn plan_removals_never_blocked_by_capacity() {
+        // Startup already over capacity (silent drop at handle_up): removal still plans.
+        let applied = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.2", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+        ]);
+        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let plan = plan_resource_apply(&applied, &cand, 2);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80", "10.0.0.3:80"]);
+        assert!(plan.added.is_empty() && plan.unapplied.is_empty());
+    }
+
+    async fn set_capacity(h: &Harness, cap: usize) {
+        h.kernel.lock().await.as_mut().unwrap().capacity = cap;
+    }
+
+    /// Overflow + removal + connector change in one delta: removal and
+    /// connector change apply, admitted additions apply, the rest stays
+    /// pending (not in applied), retried without mutation while it can't fit.
+    #[tokio::test]
+    async fn capacity_overflow_applies_the_rest_and_keeps_pending() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.4", 80, "tcp").await;
+        set_capacity(&h, 8).await;
+        decide(&h, false).await.unwrap(); // applied: .1, .4
+        rebaseline(&h);
+        let builds_before = h.builds.load(Ordering::SeqCst);
+        set_capacity(&h, 3).await; // 100.64.0.1 + two resource IPs
+        set_transport_connectors(&h, &["c1", "c2"]).await;
+        {
+            let mut s = h.state.write().await;
+            let acl = s.acl_snapshot.as_mut().unwrap();
+            acl.entries.retain(|e| e.address != "10.0.0.4"); // removal
+        }
+        add_entry(&h, "10.0.0.3", 80, "tcp").await;
+        add_entry(&h, "10.0.0.2", 80, "tcp").await;
+        decide(&h, false).await.unwrap();
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            h.builds.load(Ordering::SeqCst),
+            builds_before + 1,
+            "one publish"
+        );
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "loop:remove [10.0.0.4:80] pub=0",
+                "nft [10.0.0.1:80] pub=0",
+                "loop:addr- [10.0.0.4] pub=0",
+                "route- [10.0.0.4] pub=0",
+                "fwmark pub=1",
+                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:80] pub=1",
+                "route+ [10.0.0.2] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:80] pub=1",
+            ]
+        );
+        let applied = applied_now(&h).await;
+        let addrs: Vec<&str> = applied.entries.iter().map(|e| e.address.as_str()).collect();
+        assert!(addrs.contains(&"10.0.0.2") && !addrs.contains(&"10.0.0.3"));
+        assert!(!addrs.contains(&"10.0.0.4"));
+        assert_eq!(
+            applied_coord_ids(&h.state).await,
+            vec!["c1", "c2"],
+            "connector change applied"
+        );
+        assert!(
+            h.rx.borrow()
+                .get(&("10.0.0.3".parse().unwrap(), 80))
+                .is_none(),
+            "no slot for the pending key"
+        );
+        assert!(
+            resource_apply_pending(&h.state).await,
+            "pending retried on the tick"
+        );
+
+        // Next tick, still no room: no mutation, no publish, no restart.
+        rebaseline(&h);
+        let builds = h.builds.load(Ordering::SeqCst);
+        decide(&h, false).await.unwrap();
+        assert!(log_of(&h).is_empty());
+        assert_eq!(h.builds.load(Ordering::SeqCst), builds);
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
+
+        // Room appears (another resource removed) → the pending one applies.
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .retain(|e| e.address != "10.0.0.2");
+        decide(&h, false).await.unwrap();
+        let applied = applied_now(&h).await;
+        assert!(applied.entries.iter().any(|e| e.address == "10.0.0.3"));
+        assert!(!resource_apply_pending(&h.state).await);
+    }
+
+    // ---- Phase 5-C: failure / recovery -----------------------------------------------
+
+    async fn assert_recovered_by_restart(h: &Harness, applied_before: &AppliedConfig) {
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1, "recovery restart");
+        assert!(
+            applied_now(h).await == *applied_before,
+            "partial state never recorded as applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_build_failure_is_pre_mutation_and_retries() {
+        let h = harness_with(&["c1"], "").await;
+        let before = applied_now(&h).await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        let res = decide(&h, true).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("resource map build failed, retaining current state"));
+        assert_eq!(
+            h.down_ups.load(Ordering::SeqCst),
+            0,
+            "working VPN untouched"
+        );
+        assert!(log_of(&h).is_empty(), "no mutation");
+        assert!(!h.rx.has_changed().unwrap(), "no publish");
+        assert!(applied_now(&h).await == before);
+        assert!(resource_apply_pending(&h.state).await, "retried next tick");
+        assert!(decide(&h, false).await.is_ok());
+        assert!(!resource_apply_pending(&h.state).await);
+    }
+
+    async fn loop_failure_case(set: impl FnOnce(&mut LoopCtl), port_change: bool) -> Harness {
+        let h = harness_with(&["c1"], "").await;
+        set(&mut h.loop_ctl.lock().unwrap());
+        let before = applied_now(&h).await;
+        if port_change {
+            h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+                "10.0.0.9".to_string();
+        } else {
+            add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        }
+        assert!(decide(&h, false).await.is_ok());
+        assert_recovered_by_restart(&h, &before).await;
+        h
+    }
+
+    #[tokio::test]
+    async fn loop_error_on_remove_triggers_recovery_restart() {
+        let h = loop_failure_case(|c| c.remove = Reply::Fail, true).await;
+        assert_eq!(
+            log_of(&h),
+            vec!["loop:remove [10.0.0.1:80] pub=0"],
+            "stopped at R1"
+        );
+    }
+
+    #[tokio::test]
+    async fn loop_error_on_address_removal_triggers_recovery_restart() {
+        let h = loop_failure_case(|c| c.remove_addrs = Reply::Fail, true).await;
+        assert_eq!(log_of(&h).last().unwrap(), "loop:addr- [10.0.0.1] pub=0");
+    }
+
+    #[tokio::test]
+    async fn loop_error_on_add_triggers_recovery_restart() {
+        let h = loop_failure_case(|c| c.add = Reply::Fail, false).await;
+        assert_eq!(
+            log_of(&h).last().unwrap(),
+            "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1"
+        );
+        assert!(
+            !log_of(&h).iter().any(|l| l.starts_with("nft")),
+            "nft never reached"
+        );
+    }
+
+    /// H4: a removal not acknowledged (reset + reap) within 2 s is a
+    /// post-mutation failure → recovery restart.
+    #[tokio::test]
+    async fn remove_ack_timeout_triggers_recovery_restart() {
+        let started = std::time::Instant::now();
+        let h = loop_failure_case(|c| c.remove = Reply::Hang, true).await;
+        let took = started.elapsed();
+        assert!(
+            took >= RESOURCE_ACK_TIMEOUT,
+            "waited the full H4 timeout ({took:?})"
+        );
+        assert!(took < RESOURCE_ACK_TIMEOUT * 3);
+        assert_eq!(log_of(&h), vec!["loop:remove [10.0.0.1:80] pub=0"]);
+    }
+
+    async fn kernel_failure_case(fail_on: &'static str) -> Harness {
+        let h = harness_with(&["c1"], "").await;
+        h.kernel.lock().await.as_mut().unwrap().fail_on = Some(fail_on);
+        let before = applied_now(&h).await;
+        h.state.write().await.acl_snapshot.as_mut().unwrap().entries[0].address =
+            "10.0.0.9".to_string();
+        assert!(decide(&h, false).await.is_ok());
+        assert_recovered_by_restart(&h, &before).await;
+        h
+    }
+
+    #[tokio::test]
+    async fn kernel_failures_after_mutation_trigger_recovery_restart() {
+        for step in ["nft [] ", "route- ", "fwmark", "route+ ", "nft [10.0.0.9"] {
+            let h = kernel_failure_case(step).await;
+            assert!(log_of(&h).last().unwrap().starts_with(step), "{step}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tunnel_replaced_during_resource_build_is_not_applied() {
+        let h = harness_with(&["c1"], "").await;
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        let state = h.state.clone();
+        let down_ups = h.down_ups.clone();
+        let res = run_restart_decision(
+            &h.state,
+            move |entries, acl, transport, _d, _c| {
+                state
+                    .try_write()
+                    .expect("no lock held during build")
+                    .tun_handle = None;
+                Ok(fake_map(entries, acl, transport))
+            },
+            &h.kernel,
+            move || async move {
+                down_ups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
+        assert!(log_of(&h).is_empty(), "no mutation");
+    }
+
+    #[tokio::test]
+    async fn dead_task_with_resource_change_restarts() {
+        let h = harness_with(&["c1"], "").await;
+        let finished = tokio::spawn(async {});
+        let dead = finished.abort_handle();
+        finished.await.unwrap();
+        {
+            let mut s = h.state.write().await;
+            let cur = s.tun_handle.as_ref().unwrap().clone();
+            s.tun_handle = Some(Arc::new(TunHandle {
+                abort: dead,
+                route_count: cur.route_count,
+                applied: cur.applied.clone(),
+                transport_tx: cur.transport_tx.clone(),
+                resource_tx: cur.resource_tx.clone(),
+            }));
+        }
+        add_entry(&h, "10.0.0.2", 443, "tcp").await;
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 1);
+        assert!(log_of(&h).is_empty());
     }
 
     #[tokio::test]
@@ -2178,9 +3566,11 @@ mod restart_decision_tests {
         c.tpm_key_material = Some("tpm".to_string());
         assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
 
+        // Phase 5-C: a protocol letter-case change is a ResourceDelta (both
+        // spellings map to the same routable key → a data-plane no-op).
         let mut c = applied.clone();
         c.entries[0].protocol = "TCP".to_string();
-        assert_eq!(classify_applied(&applied, &c), ConfigDelta::Structural);
+        assert_eq!(classify_applied(&applied, &c), ConfigDelta::ResourceDelta);
 
         let mut c = applied.clone();
         c.entries[0].coords.clear();
@@ -2268,15 +3658,27 @@ mod restart_decision_tests {
             rx,
             builds,
             down_ups,
+            log,
+            kernel,
+            loop_ctl,
+            published_rx,
+            published,
             ..
         } = h;
         drop(rx);
+        // The Phase 5-C observers' receiver clone would keep the channel open.
+        published_rx.lock().unwrap().take();
         let h = Harness {
             state,
             rx: tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new())).1,
             initial_map: Arc::new(net_stack::TransportMap::new()),
             builds,
             down_ups,
+            log,
+            kernel,
+            loop_ctl,
+            published_rx,
+            published,
         };
         set_transport_connectors(&h, &["c1", "c2"]).await;
         assert!(decide(&h, false).await.is_ok());
@@ -2305,6 +3707,7 @@ mod restart_decision_tests {
                     .tun_handle = None;
                 Ok(fake_map(entries, acl, transport))
             },
+            &h.kernel,
             move || async move {
                 down_ups.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -2338,6 +3741,7 @@ mod restart_decision_tests {
                     .push(tconn("c33"));
                 Ok(fake_map(entries, acl, transport))
             },
+            &h.kernel,
             move || async move {
                 down_ups.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -3431,11 +4835,18 @@ async fn sync_and_restart_if_changed(
     // Fix 01 Phase 2-A (D2): a transport-map build that failed earlier left a
     // pending connector-only change; retry it on this tick even without a bump.
     let transport_pending = !acl_changed && !transport_changed && transport_apply_pending(state).await;
-    if acl_changed || transport_changed || transport_pending {
+    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (pre-mutation
+    // failure, or additions waiting for address capacity — H1).
+    let resource_pending = !acl_changed
+        && !transport_changed
+        && !transport_pending
+        && resource_apply_pending(state).await;
+    if acl_changed || transport_changed || transport_pending || resource_pending {
         info!(
             acl_changed,
             transport_changed,
             transport_pending,
+            resource_pending,
             "background sync: version changed, restarting tunnel"
         );
         if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
