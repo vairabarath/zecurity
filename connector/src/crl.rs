@@ -27,7 +27,8 @@ pub enum RevocationStatus {
 /// Caches revoked certificate serials fetched from the controller's /ca.crl endpoint.
 ///
 /// The controller serves `GET /ca.crl?workspace_id=<uuid>` → DER-encoded CRL signed
-/// by the workspace CA. Connector fetches on startup then refreshes every 5 minutes.
+/// by the workspace CA. Connector fetches on startup then refreshes every 60 s plus
+/// 0–15 s of jitter (see `spawn_refresh` calls in main.rs).
 ///
 /// M4 calls `check(serial_bytes)` inside `device_tunnel::handle_stream` after
 /// extracting the peer cert serial from the TLS handshake.

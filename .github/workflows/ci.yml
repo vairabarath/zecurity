@@ -42,6 +42,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  hygiene:
+    name: repo hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sprint 21 K4: controller/.env.example once carried real enrollment
+      # JWTs in pasted install commands. Fail if any JWT-shaped value comes
+      # back. Only line numbers are printed, never the token itself.
+      - name: No JWTs in controller/.env.example
+        run: |
+          pattern='eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.'
+          if grep -qE "$pattern" controller/.env.example; then
+            lines=$(grep -nE "$pattern" controller/.env.example | cut -d: -f1 | paste -sd, -)
+            echo "::error file=controller/.env.example::JWT-shaped value on line(s): $lines — use a placeholder such as <paste token from admin UI>"
+            exit 1
+          fi
+          echo "no JWTs found"
+
   controller:
     name: controller (go)
     runs-on: ubuntu-latest
