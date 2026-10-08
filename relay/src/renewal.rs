@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use tokio::task::JoinHandle;
@@ -25,7 +25,9 @@ use tracing::{error, info, warn};
 use x509_parser::certificate::X509Certificate;
 use x509_parser::prelude::FromDer;
 
-use crate::cert_manager::{key_spki_der, serial_hex, single_leaf, CertManager, CertMaterial};
+use crate::cert_manager::{
+    key_spki_der, now_unix, serial_hex, single_leaf, CertManager, CertMaterial,
+};
 use crate::config::RelayConfig;
 use crate::csr::relay_csr_from_key;
 use crate::provision::{certificate_fingerprint, controller_host};
@@ -57,14 +59,41 @@ pub enum Plan {
     RenewIn(Duration),
 }
 
-/// Pure scheduling decision.
-pub fn plan(now: i64, not_before: i64, not_after: i64, jitter_secs: i64) -> Plan {
+/// Where the certificate's lifetime starts for scheduling (Sprint 21 K1,
+/// KI-1): the later of `NotBefore` and the time this relay installed it. The
+/// controller backdates relay `NotBefore` by an hour for clock skew; measured
+/// from `NotBefore`, a certificate with a TTL of 40 minutes or less was
+/// already inside its renewal window when installed, so the relay renewed in
+/// a loop. Same principle as the controller rotator's `issuedAt` (Sprint 20
+/// PF-1).
+///
+/// Without an install time (`None`: a relay provisioned before K1, or no
+/// usable record) this is `NotBefore`, i.e. the pre-K1 schedule. An install
+/// time outside `[not_before, not_after)` is ignored the same way.
+pub fn schedule_start(not_before: i64, not_after: i64, installed_at: Option<i64>) -> i64 {
+    match installed_at {
+        Some(at) if at < not_after => at.max(not_before),
+        _ => not_before,
+    }
+}
+
+/// Pure scheduling decision: renew when 2/5 of the lifetime measured from
+/// `schedule_start` remains (± jitter). Expired certificates are never
+/// renewed (D-20).
+pub fn plan(
+    now: i64,
+    not_before: i64,
+    not_after: i64,
+    installed_at: Option<i64>,
+    jitter_secs: i64,
+) -> Plan {
     if now >= not_after {
         return Plan::Expired;
     }
-    let lifetime = (not_after - not_before).max(0);
+    let start = schedule_start(not_before, not_after, installed_at);
+    let lifetime = (not_after - start).max(0);
     let renew_at = (not_after - lifetime * RENEW_REMAINING_NUM / RENEW_REMAINING_DEN + jitter_secs)
-        .clamp(not_before, not_after - 1);
+        .clamp(start, not_after - 1);
     Plan::RenewIn(Duration::from_secs((renew_at - now).max(0) as u64))
 }
 
@@ -96,13 +125,6 @@ pub fn backoff(failures: u32, remaining_secs: i64) -> Duration {
     let exp = BACKOFF_BASE.saturating_mul(1u32 << failures.saturating_sub(1).min(16));
     let by_remaining = Duration::from_secs((remaining_secs.max(0) / 4) as u64);
     exp.min(BACKOFF_MAX).min(by_remaining).max(BACKOFF_MIN)
-}
-
-fn now_unix() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
 }
 
 /// Controller call used by the scheduler (real gRPC or a test fake).
@@ -285,7 +307,7 @@ pub async fn renew_once<R: Renewer>(
 /// Scheduler loop. Runs until the certificate has expired (then logs that the
 /// relay must be replaced and stops).
 pub async fn run<R: Renewer>(manager: Arc<CertManager>, renewer: R, settings: RenewalSettings) {
-    let mut jitter = random_jitter(manager.current().lifetime_secs());
+    let mut jitter = random_jitter(manager.current().schedule_lifetime_secs());
     let mut failures: u32 = 0;
     loop {
         let current = manager.current();
@@ -293,6 +315,7 @@ pub async fn run<R: Renewer>(manager: Arc<CertManager>, renewer: R, settings: Re
             now_unix(),
             current.not_before_unix,
             current.not_after_unix,
+            current.installed_at_unix,
             jitter,
         ) {
             Plan::Expired => {
@@ -320,7 +343,7 @@ pub async fn run<R: Renewer>(manager: Arc<CertManager>, renewer: R, settings: Re
                     "Relay certificate renewed and installed"
                 );
                 failures = 0;
-                jitter = random_jitter(renewed.lifetime_secs());
+                jitter = random_jitter(renewed.schedule_lifetime_secs());
             }
             Err(RenewError::Expired) => continue, // next plan() logs and stops
             Err(RenewError::Aborted) => {
@@ -368,37 +391,162 @@ mod tests {
         let day = 86_400;
         let (nb, na) = (0, 30 * day);
         assert_eq!(
-            plan(0, nb, na, 0),
+            plan(0, nb, na, None, 0),
             Plan::RenewIn(Duration::from_secs(18 * day as u64))
         );
         assert_eq!(
-            plan(10 * day, nb, na, 0),
+            plan(10 * day, nb, na, None, 0),
             Plan::RenewIn(Duration::from_secs(8 * day as u64))
         );
         // Inside the window: renew now.
-        assert_eq!(plan(20 * day, nb, na, 0), Plan::RenewIn(Duration::ZERO));
+        assert_eq!(
+            plan(20 * day, nb, na, None, 0),
+            Plan::RenewIn(Duration::ZERO)
+        );
     }
 
     #[test]
     fn plan_applies_jitter_and_stays_inside_validity() {
         let (nb, na) = (0, 1000);
-        assert_eq!(plan(0, nb, na, 25), Plan::RenewIn(Duration::from_secs(625)));
         assert_eq!(
-            plan(0, nb, na, -25),
+            plan(0, nb, na, None, 25),
+            Plan::RenewIn(Duration::from_secs(625))
+        );
+        assert_eq!(
+            plan(0, nb, na, None, -25),
             Plan::RenewIn(Duration::from_secs(575))
         );
         // Huge jitter is clamped into [not_before, not_after).
         assert_eq!(
-            plan(0, nb, na, 10_000),
+            plan(0, nb, na, None, 10_000),
             Plan::RenewIn(Duration::from_secs(999))
         );
-        assert_eq!(plan(0, nb, na, -10_000), Plan::RenewIn(Duration::ZERO));
+        assert_eq!(
+            plan(0, nb, na, None, -10_000),
+            Plan::RenewIn(Duration::ZERO)
+        );
     }
 
     #[test]
     fn plan_expired_certificate_never_renews() {
-        assert_eq!(plan(1000, 0, 1000, 0), Plan::Expired);
-        assert_eq!(plan(5000, 0, 1000, 0), Plan::Expired);
+        assert_eq!(plan(1000, 0, 1000, None, 0), Plan::Expired);
+        assert_eq!(plan(5000, 0, 1000, None, 0), Plan::Expired);
+    }
+
+    // ---- K1: lifetime measured from install, not the backdated NotBefore -----
+
+    /// The controller backdates relay NotBefore by an hour
+    /// (controller/internal/pki/relay.go).
+    const BACKDATE: i64 = 3600;
+    const T: i64 = 1_791_441_726; // an arbitrary "now" (install time)
+
+    /// Delay plan() gives a cert installed at T with `ttl`, NotBefore = T - 1h.
+    fn delay_after_install(ttl: i64, installed_at: Option<i64>, jitter: i64) -> Plan {
+        plan(T, T - BACKDATE, T + ttl, installed_at, jitter)
+    }
+
+    fn secs(s: i64) -> Plan {
+        Plan::RenewIn(Duration::from_secs(s as u64))
+    }
+
+    #[test]
+    fn schedule_start_is_later_of_not_before_and_install() {
+        assert_eq!(schedule_start(100, 1000, None), 100);
+        assert_eq!(schedule_start(100, 1000, Some(400)), 400);
+        // Earlier than NotBefore: NotBefore wins (max, not min).
+        assert_eq!(schedule_start(100, 1000, Some(50)), 100);
+        // At or after NotAfter is not a usable install time: NotBefore.
+        assert_eq!(schedule_start(100, 1000, Some(1000)), 100);
+        assert_eq!(schedule_start(100, 1000, Some(5000)), 100);
+    }
+
+    #[test]
+    fn backdated_15m_cert_renews_9m_after_install_not_immediately() {
+        // 15 min measured from install: renew when 6 min (2/5) remain, i.e.
+        // 9 min after install. Jitter for a 15-min lifetime is ±45 s.
+        assert_eq!(delay_after_install(900, Some(T), 0), secs(540));
+        let j = max_jitter_secs(900);
+        assert_eq!(j, 45);
+        assert_eq!(delay_after_install(900, Some(T), -j), secs(495));
+        assert_eq!(delay_after_install(900, Some(T), j), secs(585));
+    }
+
+    #[test]
+    fn backdated_1h_cert_renews_36m_after_install() {
+        // 24 min (2/5) remaining = 36 min after install; jitter ±180 s.
+        assert_eq!(delay_after_install(3600, Some(T), 0), secs(2160));
+        let j = max_jitter_secs(3600);
+        assert_eq!(j, 180);
+        assert_eq!(delay_after_install(3600, Some(T), -j), secs(1980));
+        assert_eq!(delay_after_install(3600, Some(T), j), secs(2340));
+    }
+
+    #[test]
+    fn thirty_day_cert_schedule_is_unchanged_without_metadata() {
+        // Pre-K1 formula, bit for bit: renew when 2/5 of (NotAfter - NotBefore)
+        // remains.
+        let ttl = 30 * 86_400;
+        let lifetime = ttl + BACKDATE;
+        let legacy = T + ttl - lifetime * 2 / 5 - T;
+        assert_eq!(delay_after_install(ttl, None, 0), secs(legacy));
+        assert_eq!(delay_after_install(ttl, None, 900), secs(legacy + 900));
+        assert_eq!(delay_after_install(ttl, None, -900), secs(legacy - 900));
+        // With metadata the hour of backdate no longer counts: renewal moves
+        // 2/5 h = 24 min later, still 12 days before expiry.
+        assert_eq!(
+            delay_after_install(ttl, Some(T), 0),
+            secs(legacy + BACKDATE * 2 / 5)
+        );
+        assert_eq!(delay_after_install(ttl, Some(T), 0), secs(18 * 86_400));
+    }
+
+    #[test]
+    fn missing_metadata_keeps_the_pre_k1_schedule() {
+        // Without metadata a backdated short cert behaves exactly as before
+        // K1 (renew now) — no new behaviour is forced on upgrade; the next
+        // install writes metadata. A 1h cert issued long ago is not forced
+        // to renew merely because metadata is missing.
+        assert_eq!(
+            delay_after_install(900, None, 0),
+            Plan::RenewIn(Duration::ZERO)
+        );
+        assert_eq!(plan(T, T - 60, T + 3600, None, 0), secs(3600 - 1464));
+    }
+
+    #[test]
+    fn expired_certificate_never_renews_even_with_metadata() {
+        for installed in [None, Some(T - 100), Some(T + 10_000)] {
+            assert_eq!(
+                plan(T + 900, T - BACKDATE, T + 900, installed, 0),
+                Plan::Expired
+            );
+            assert_eq!(
+                plan(T + 5000, T - BACKDATE, T + 900, installed, 0),
+                Plan::Expired
+            );
+        }
+    }
+
+    #[test]
+    fn short_ttl_install_cycles_do_not_renew_immediately() {
+        // KI-1 regression: install a backdated 15-min cert, plan, sleep, renew,
+        // install the next one, ... Before K1 every plan() said "renew now".
+        let mut now = T;
+        for cycle in 0..10 {
+            let (nb, na) = (now - BACKDATE, now + 900);
+            let jitter = jitter_from(cycle * 7919, na - now);
+            let Plan::RenewIn(delay) = plan(now, nb, na, Some(now), jitter) else {
+                panic!("cycle {cycle}: fresh certificate reported expired");
+            };
+            assert!(
+                (495..=585).contains(&delay.as_secs()),
+                "cycle {cycle}: renewal {}s after install, expected ~540s",
+                delay.as_secs()
+            );
+            now += delay.as_secs() as i64; // renew; the next install happens now
+        }
+        // Ten 15-minute certificates lasted ~90 minutes, not ten instant loops.
+        assert!(now - T >= 10 * 495);
     }
 
     #[test]
@@ -432,6 +580,7 @@ mod tests {
         reply: Mutex<Option<std::result::Result<RenewCertResponse, tonic::Status>>>,
         calls: AtomicUsize,
         presented: Mutex<Vec<String>>,
+        csrs: Mutex<Vec<Vec<u8>>>,
     }
 
     impl FakeRenewer {
@@ -440,6 +589,7 @@ mod tests {
                 reply: Mutex::new(Some(reply)),
                 calls: AtomicUsize::new(0),
                 presented: Mutex::new(vec![]),
+                csrs: Mutex::new(vec![]),
             }
         }
     }
@@ -448,9 +598,10 @@ mod tests {
         async fn renew(
             &self,
             current: &CertMaterial,
-            _csr_der: Vec<u8>,
+            csr_der: Vec<u8>,
         ) -> std::result::Result<RenewCertResponse, tonic::Status> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.csrs.lock().unwrap().push(csr_der);
             self.presented
                 .lock()
                 .unwrap()
@@ -547,6 +698,27 @@ mod tests {
             renewed.as_bytes()
         );
         assert_eq!(f.manager.current().serial_hex, installed.serial_hex);
+
+        // Same key (D-19): the CSR carries the existing key, the key file is
+        // untouched and the installed certificate is for that key.
+        let key_spki = key_spki_der(&f.manager.current().key_pem).unwrap();
+        assert_eq!(key_spki, f.key.public_key_der());
+        let csrs = renewer.csrs.lock().unwrap();
+        let (_, csr) =
+            x509_parser::certification_request::X509CertificationRequest::from_der(&csrs[0])
+                .unwrap();
+        assert_eq!(
+            csr.certification_request_info.subject_pki.raw,
+            key_spki.as_slice(),
+            "renewal CSR must use the relay's existing key"
+        );
+        assert_eq!(
+            std::fs::read(f.dir.join("relay.key")).unwrap(),
+            f.key.serialize_pem().as_bytes()
+        );
+        let leaf = single_leaf(&installed.certificate_pem).unwrap();
+        let (_, cert) = X509Certificate::from_der(leaf.as_ref()).unwrap();
+        assert_eq!(cert.public_key().raw, key_spki.as_slice());
     }
 
     #[tokio::test]
@@ -682,5 +854,105 @@ mod tests {
 
         // A second scheduler cannot be started for the same manager.
         assert!(!f.manager.claim_scheduler());
+    }
+
+    #[tokio::test]
+    async fn scheduler_does_not_loop_after_installing_a_backdated_short_cert() {
+        // KI-1 end to end. A pre-K1 relay (no metadata) holds a backdated
+        // 15-min cert: the legacy schedule renews it at once (one call). The
+        // renewed cert is backdated too, but now its install time is
+        // recorded, so the scheduler must sleep ~9 min instead of calling
+        // RenewCert again. FakeRenewer has exactly one reply.
+        let f = fixture(-BACKDATE, BACKDATE + 900);
+        assert_eq!(f.manager.current().installed_at_unix, None);
+        let renewed = f
+            .pki
+            .relay_cert(RELAY_ID, &f.key, -BACKDATE, BACKDATE + 900);
+        let renewer = Arc::new(FakeRenewer::new(Ok(f.reply(renewed))));
+        let mut rx = f.manager.subscribe();
+
+        let task = tokio::spawn(run(
+            f.manager.clone(),
+            ArcRenewer(renewer.clone()),
+            f.settings.clone(),
+        ));
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("legacy schedule renews the backdated cert promptly")
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let calls = renewer.calls.load(Ordering::SeqCst);
+        task.abort();
+
+        assert_eq!(calls, 1, "RenewCert loop: called {calls} times");
+        let current = f.manager.current();
+        let meta = crate::cert_manager::read_install_meta(&f.dir.join("relay.crt"))
+            .unwrap()
+            .expect("renewal must record the install time");
+        assert_eq!(meta.serial_hex, current.serial_hex);
+        assert_eq!(current.installed_at_unix, Some(meta.installed_at_unix));
+        let Plan::RenewIn(next) = plan(
+            meta.installed_at_unix,
+            current.not_before_unix,
+            current.not_after_unix,
+            current.installed_at_unix,
+            0,
+        ) else {
+            panic!("fresh certificate reported expired");
+        };
+        assert!(
+            (535..=545).contains(&next.as_secs()),
+            "next renewal in {next:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_certificate_with_metadata_still_never_renews() {
+        let f = fixture(-7200, 3600); // expired an hour ago
+        crate::cert_manager::record_install(
+            &f.dir.join("relay.crt"),
+            f.original_pem.as_bytes(),
+            now_unix() - 7000,
+        )
+        .unwrap();
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: f.dir.join("relay.key"),
+                certificate_path: f.dir.join("relay.crt"),
+                intermediate_ca_path: f.dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        assert!(manager.current().installed_at_unix.is_some());
+        let renewer = FakeRenewer::new(Err(tonic::Status::internal("must not be called")));
+        let err = renew_once(&manager, &renewer, &f.settings)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RenewError::Expired), "got {err}");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            run(
+                manager.clone(),
+                FakeRenewer::new(Err(tonic::Status::internal("x"))),
+                f.settings.clone(),
+            ),
+        )
+        .await
+        .expect("scheduler must stop for an expired certificate");
+        assert_eq!(renewer.calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Lets a test keep a handle on the FakeRenewer the scheduler owns.
+    struct ArcRenewer(Arc<FakeRenewer>);
+
+    impl Renewer for ArcRenewer {
+        async fn renew(
+            &self,
+            current: &CertMaterial,
+            csr_der: Vec<u8>,
+        ) -> std::result::Result<RenewCertResponse, tonic::Status> {
+            self.0.renew(current, csr_der).await
+        }
     }
 }

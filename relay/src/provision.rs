@@ -7,9 +7,10 @@ use reqwest::Client;
 use rustls_pemfile::certs;
 use sha2::{Digest, Sha256};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::appmeta;
+use crate::cert_manager::{now_unix, record_install};
 use crate::config::RelayConfig;
 use crate::csr::generate_relay_csr;
 use crate::relay::v1::relay_service_client::RelayServiceClient;
@@ -36,9 +37,9 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
     info!("verified controller Intermediate CA fingerprint");
 
     let material = generate_relay_csr(&cfg.relay_id, &cfg.dns_sans, &cfg.ip_sans)?; /*RelayCsr {
-                                                                                                    private_key_pem,
-                                                                                                    csr_der,
-                                                                                                } */
+                                                                                        private_key_pem,
+                                                                                        csr_der,
+                                                                                    } */
 
     let response =
         send_provision_request(cfg, provisioning_token, &ca_pem, material.csr_der).await?;
@@ -100,6 +101,12 @@ impl ProvisionedRelay {
             .with_context(|| format!("failed to write {}", self.certificate_path.display()))?;
         fs::write(&self.intermediate_ca_path, intermediate_ca)
             .with_context(|| format!("failed to write {}", self.intermediate_ca_path.display()))?;
+        // K1: record when this certificate was installed, for renewal
+        // scheduling only, so a failure here does not fail provisioning (the
+        // scheduler then falls back to NotBefore).
+        if let Err(e) = record_install(&self.certificate_path, certificate, now_unix()) {
+            warn!(error = %format!("{e:#}"), "could not record Relay certificate install time");
+        }
         Ok(())
     }
 }
@@ -300,6 +307,44 @@ mod tests {
     fn validates_response_identity() {
         let (response, fingerprint) = provision_response();
         validate_response(RELAY_ID, &fingerprint, &response).unwrap();
+    }
+
+    #[test]
+    fn store_records_the_install_time_of_the_provisioned_certificate() {
+        let pki = crate::test_support::TestPki::new();
+        let key = pki.relay_key();
+        let cert = pki.relay_cert(RELAY_ID, &key, -3600, 4500);
+        let dir =
+            std::env::temp_dir().join(format!("relay-prov-{}", uuid::Uuid::new_v4().simple()));
+        let paths = ProvisionedRelay::new(dir.to_str().unwrap());
+
+        let before = now_unix();
+        paths
+            .store(
+                key.serialize_pem().as_bytes(),
+                cert.as_bytes(),
+                pki.ca_pem.as_bytes(),
+            )
+            .unwrap();
+
+        let meta = crate::cert_manager::read_install_meta(&paths.certificate_path)
+            .unwrap()
+            .expect("provisioning must record the install time");
+        assert!((before..=now_unix()).contains(&meta.installed_at_unix));
+        let manager = crate::cert_manager::CertManager::load(
+            RELAY_ID,
+            crate::cert_manager::CertPaths {
+                key_path: paths.key_path.clone(),
+                certificate_path: paths.certificate_path.clone(),
+                intermediate_ca_path: paths.intermediate_ca_path.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(manager.current().serial_hex, meta.serial_hex);
+        assert_eq!(
+            manager.current().installed_at_unix,
+            Some(meta.installed_at_unix)
+        );
     }
 
     #[test]
