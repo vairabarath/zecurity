@@ -93,6 +93,11 @@ type connectorStreamClient struct {
 	// lastReEnrollAt is when a ReEnroll was last enqueued on this stream (zero =
 	// never). Only the stream's recv loop (handleConnectorHealth) touches it.
 	lastReEnrollAt time.Time
+
+	// presentedCertNotAfter is the NotAfter of the certificate this stream
+	// authenticated with (verified by StreamSPIFFEInterceptor before Control
+	// runs); nil when unavailable. Set once when the stream opens.
+	presentedCertNotAfter *time.Time
 }
 
 // reEnrollResendInterval throttles the renewal trigger: a connector inside its
@@ -101,6 +106,38 @@ type connectorStreamClient struct {
 // A successful renewal reconnects the stream with a fresh cert_not_after, which
 // clears the condition.
 const reEnrollResendInterval = 10 * time.Minute
+
+// presentedCertNotAfter returns the NotAfter of the leaf certificate the peer
+// authenticated this stream with, or nil when it is unavailable. It reads the
+// TLS peer state — the certificate StreamSPIFFEInterceptor verified against the
+// workspace CA — never a value the connector reports about itself.
+func presentedCertNotAfter(ctx context.Context) *time.Time {
+	certs, err := peerFromContext(ctx)
+	if err != nil || certs[0].NotAfter.IsZero() {
+		return nil
+	}
+	notAfter := certs[0].NotAfter
+	return &notAfter
+}
+
+// renewalExpiry is the expiry the renewal trigger acts on (Sprint 21 B2): the
+// earlier of the stored cert_not_after and the presented certificate's
+// NotAfter. RenewCert stores the new expiry before the connector has installed
+// anything, so after a lost or rejected response, or a connector crash before
+// it saved the certificate, the DB says "fresh" while the connector still
+// presents its old certificate. Using the earlier one keeps asking that
+// connector to renew. An unknown presented expiry is never taken as proof of
+// a renewal: the trigger then uses the stored expiry alone (pre-B2 behaviour).
+func renewalExpiry(stored, presented *time.Time) *time.Time {
+	switch {
+	case presented == nil:
+		return stored
+	case stored == nil || presented.Before(*stored):
+		return presented
+	default:
+		return stored
+	}
+}
 
 // renewalDue reports whether a connector certificate expiring at certNotAfter is
 // inside the renewal window. Unknown expiry (NULL) or a disabled window never
@@ -404,10 +441,14 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}
 
 	client := &connectorStreamClient{
-		stream:      stream,
-		outbound:    make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
-		connectorID: connectorID,
-		tenantID:    tenantID,
+		stream:                stream,
+		outbound:              make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
+		connectorID:           connectorID,
+		tenantID:              tenantID,
+		presentedCertNotAfter: presentedCertNotAfter(ctx),
+	}
+	if client.presentedCertNotAfter == nil {
+		log.Printf("control stream: connector %s: presented certificate expiry unavailable; renewal trigger uses the stored cert_not_after only", connectorID)
 	}
 
 	// Activation UPDATE + registration happen atomically under lifecycleMu, so
@@ -761,7 +802,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
 	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
 	if err == nil {
-		h.maybeSendReEnroll(client, certNotAfter, time.Now())
+		h.maybeSendReEnroll(client, renewalExpiry(certNotAfter, client.presentedCertNotAfter), time.Now())
 	}
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
 	// connector claims to be attached; empty means detached. The UPSERT returns
