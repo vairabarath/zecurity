@@ -6,9 +6,9 @@ use std::path::Path;
 use std::sync::Once;
 
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType, SerialNumber,
-    PKCS_ECDSA_P384_SHA384,
+    BasicConstraints, Certificate, CertificateParams, CertificateRevocationListParams,
+    DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, KeyIdMethod, KeyPair,
+    KeyUsagePurpose, RevokedCertParams, SanType, SerialNumber, PKCS_ECDSA_P384_SHA384,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -201,10 +201,102 @@ impl TestPki {
         (vec![leaf.der().clone(), ws_cert.der().clone()], leaf_key)
     }
 
+    /// A Workspace CA shaped like the controller's `GenerateWorkspaceCA`
+    /// (CN `workspace-<tenant>`, CA with path length 0, CertSign + CRLSign,
+    /// `tenant:<id>` URI SAN), issued by this Intermediate. Its key id is
+    /// pinned so CRLs it signs carry a matching Authority Key Identifier.
+    pub fn workspace_ca(&self, tenant_id: &str) -> TestWorkspaceCa {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let key_id = format!("kid-{tenant_id}").into_bytes();
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, format!("workspace-{tenant_id}"));
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.subject_alt_names = vec![SanType::URI(
+            format!("tenant:{tenant_id}").try_into().unwrap(),
+        )];
+        params.key_identifier_method = KeyIdMethod::PreSpecified(key_id.clone());
+        params.serial_number = Some(random_serial());
+        let cert = params.signed_by(&key, &self.ca_cert, &self.ca_key).unwrap();
+        TestWorkspaceCa {
+            tenant_id: tenant_id.to_owned(),
+            cert,
+            key,
+            key_id,
+        }
+    }
+
     /// Write relay.key / relay.crt / intermediate-ca.crt into `dir`.
     pub fn write_state(&self, dir: &Path, key: &KeyPair, certificate_pem: &str) {
         fs::write(dir.join("relay.key"), key.serialize_pem()).unwrap();
         fs::write(dir.join("relay.crt"), certificate_pem).unwrap();
         fs::write(dir.join("intermediate-ca.crt"), &self.ca_pem).unwrap();
+    }
+}
+
+/// A Workspace CA under a [`TestPki`] Intermediate (see `TestPki::workspace_ca`).
+pub struct TestWorkspaceCa {
+    pub tenant_id: String,
+    cert: Certificate,
+    key: KeyPair,
+    key_id: Vec<u8>,
+}
+
+impl TestWorkspaceCa {
+    pub fn der(&self) -> rustls::pki_types::CertificateDer<'static> {
+        self.cert.der().clone()
+    }
+
+    /// A client leaf (`spiffe://<tenant>.zecurity.in/client/<id>`) issued by
+    /// this CA with the given serial (high bit clear, so the DER INTEGER
+    /// content octets equal `serial` exactly, as the relay reads them).
+    pub fn client_leaf(
+        &self,
+        serial: &[u8],
+    ) -> (rustls::pki_types::CertificateDer<'static>, KeyPair) {
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = CertificateParams::default();
+        params.subject_alt_names = vec![SanType::URI(
+            format!(
+                "spiffe://{}.zecurity.in/client/9b2d5cae-5820-4702-adf4-231680852b11",
+                self.tenant_id
+            )
+            .try_into()
+            .unwrap(),
+        )];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.serial_number = Some(SerialNumber::from_slice(serial));
+        let leaf = params.signed_by(&key, &self.cert, &self.key).unwrap();
+        (leaf.der().clone(), key)
+    }
+
+    /// A DER CRL signed by this CA, valid from 1 min ago for 10 min, listing
+    /// `revoked` serials.
+    pub fn crl(&self, revoked: &[&[u8]]) -> Vec<u8> {
+        let now = OffsetDateTime::now_utc();
+        let params = CertificateRevocationListParams {
+            this_update: now - Duration::minutes(1),
+            next_update: now + Duration::minutes(10),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: revoked
+                .iter()
+                .map(|serial| RevokedCertParams {
+                    serial_number: SerialNumber::from_slice(serial),
+                    revocation_time: now - Duration::minutes(1),
+                    reason_code: None,
+                    invalidity_date: None,
+                })
+                .collect(),
+            key_identifier_method: KeyIdMethod::PreSpecified(self.key_id.clone()),
+        };
+        params
+            .signed_by(&self.cert, &self.key)
+            .unwrap()
+            .der()
+            .as_ref()
+            .to_vec()
     }
 }
