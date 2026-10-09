@@ -14,6 +14,77 @@ use time::{Duration, OffsetDateTime};
 
 pub const RELAY_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
+/// Set in a child process started by [`run_in_subprocess`]; holds the test
+/// that child must run in-process.
+const SUBPROCESS_TEST_ENV: &str = "ZECURITY_RELAY_SUBPROCESS_TEST";
+
+/// Run `body` for test `test_path` (e.g. `"renewal::tests::foo"`) in a child
+/// process of this test binary, under a hard wall-clock `limit`.
+///
+/// For tests whose code under test could spin without ever yielding (the
+/// relay renewal scheduler): `tokio::time::timeout` only fires at an
+/// `.await`, and a Rust thread cannot be killed, so neither can stop a
+/// runaway loop in-process. A child process can be: on expiry it is killed
+/// (SIGKILL) and reaped, and the test fails with a diagnostic.
+///
+/// The parent re-runs this binary filtered to exactly `test_path`, with
+/// `SUBPROCESS_TEST_ENV` set; in that child the same test calls `body`
+/// directly. The child must report exactly one passed test.
+pub fn run_in_subprocess(test_path: &str, limit: std::time::Duration, body: impl FnOnce()) {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    if std::env::var(SUBPROCESS_TEST_ENV).as_deref() == Ok(test_path) {
+        body();
+        return;
+    }
+
+    // Output goes to a file, not a pipe: a chatty runaway child must not
+    // block on a full pipe buffer (and a file needs no reader thread).
+    let log_path = std::env::temp_dir().join(format!(
+        "relay-subprocess-{}.log",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let log = fs::File::create(&log_path).expect("create subprocess log");
+    let mut child = Command::new(std::env::current_exe().expect("current test binary"))
+        .args([test_path, "--exact", "--nocapture", "--test-threads=1"])
+        .env(SUBPROCESS_TEST_ENV, test_path)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().expect("clone subprocess log"))
+        .stderr(log)
+        .spawn()
+        .expect("spawn test subprocess");
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll test subprocess") {
+            break Some(status);
+        }
+        if started.elapsed() >= limit {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let Some(status) = status else {
+        let pid = child.id();
+        let _ = child.kill();
+        let _ = child.wait(); // reap: no zombie or orphan is left behind
+        let output = fs::read_to_string(&log_path).unwrap_or_default();
+        let _ = fs::remove_file(&log_path);
+        panic!(
+            "{test_path} did not finish within the hard limit of {limit:?}; child pid {pid} \
+             was killed. The code under test is likely stuck in a loop that never yields \
+             (tokio::time::timeout cannot interrupt that). Child output:\n{output}"
+        );
+    };
+    let output = fs::read_to_string(&log_path).unwrap_or_default();
+    let _ = fs::remove_file(&log_path);
+    assert!(
+        status.success() && output.contains("test result: ok. 1 passed"),
+        "{test_path} failed in its subprocess ({status}). Child output:\n{output}"
+    );
+}
+
 pub fn install_crypto_provider() {
     static INSTALL: Once = Once::new();
     INSTALL.call_once(|| {

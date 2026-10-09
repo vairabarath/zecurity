@@ -739,16 +739,38 @@ mod tests {
         f.assert_unchanged();
     }
 
-    #[tokio::test]
-    async fn expired_scheduler_run_stops_without_calling_renewcert() {
-        let f = fixture(-7200, 3600);
-        let renewer = FakeRenewer::new(Err(tonic::Status::internal("must not be called")));
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            run(f.manager.clone(), renewer, f.settings.clone()),
-        )
-        .await
-        .expect("scheduler must stop for an expired certificate");
+    /// Hard wall-clock limit for scheduler tests that run in a subprocess.
+    const SUBPROCESS_LIMIT: Duration = Duration::from_secs(30);
+
+    /// `body` on a current-thread runtime (as `#[tokio::test]`), inside a
+    /// killable subprocess: a scheduler regression that spins without
+    /// yielding fails the test instead of hanging it.
+    fn isolated_tokio_test<F: Future<Output = ()>>(name: &str, body: impl FnOnce() -> F) {
+        let test_path = format!("renewal::tests::{name}");
+        crate::test_support::run_in_subprocess(&test_path, SUBPROCESS_LIMIT, || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(body())
+        });
+    }
+
+    #[test]
+    fn expired_scheduler_run_stops_without_calling_renewcert() {
+        isolated_tokio_test(
+            "expired_scheduler_run_stops_without_calling_renewcert",
+            || async {
+                let f = fixture(-7200, 3600);
+                let renewer = FakeRenewer::new(Err(tonic::Status::internal("must not be called")));
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run(f.manager.clone(), renewer, f.settings.clone()),
+                )
+                .await
+                .expect("scheduler must stop for an expired certificate");
+            },
+        );
     }
 
     #[tokio::test]
@@ -906,41 +928,46 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn expired_certificate_with_metadata_still_never_renews() {
-        let f = fixture(-7200, 3600); // expired an hour ago
-        crate::cert_manager::record_install(
-            &f.dir.join("relay.crt"),
-            f.original_pem.as_bytes(),
-            now_unix() - 7000,
-        )
-        .unwrap();
-        let manager = CertManager::load(
-            RELAY_ID,
-            CertPaths {
-                key_path: f.dir.join("relay.key"),
-                certificate_path: f.dir.join("relay.crt"),
-                intermediate_ca_path: f.dir.join("intermediate-ca.crt"),
+    #[test]
+    fn expired_certificate_with_metadata_still_never_renews() {
+        isolated_tokio_test(
+            "expired_certificate_with_metadata_still_never_renews",
+            || async {
+                let f = fixture(-7200, 3600); // expired an hour ago
+                crate::cert_manager::record_install(
+                    &f.dir.join("relay.crt"),
+                    f.original_pem.as_bytes(),
+                    now_unix() - 7000,
+                )
+                .unwrap();
+                let manager = CertManager::load(
+                    RELAY_ID,
+                    CertPaths {
+                        key_path: f.dir.join("relay.key"),
+                        certificate_path: f.dir.join("relay.crt"),
+                        intermediate_ca_path: f.dir.join("intermediate-ca.crt"),
+                    },
+                )
+                .unwrap();
+                assert!(manager.current().installed_at_unix.is_some());
+                let renewer = FakeRenewer::new(Err(tonic::Status::internal("must not be called")));
+                let err = renew_once(&manager, &renewer, &f.settings)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(err, RenewError::Expired), "got {err}");
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    run(
+                        manager.clone(),
+                        FakeRenewer::new(Err(tonic::Status::internal("x"))),
+                        f.settings.clone(),
+                    ),
+                )
+                .await
+                .expect("scheduler must stop for an expired certificate");
+                assert_eq!(renewer.calls.load(Ordering::SeqCst), 0);
             },
-        )
-        .unwrap();
-        assert!(manager.current().installed_at_unix.is_some());
-        let renewer = FakeRenewer::new(Err(tonic::Status::internal("must not be called")));
-        let err = renew_once(&manager, &renewer, &f.settings)
-            .await
-            .unwrap_err();
-        assert!(matches!(err, RenewError::Expired), "got {err}");
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            run(
-                manager.clone(),
-                FakeRenewer::new(Err(tonic::Status::internal("x"))),
-                f.settings.clone(),
-            ),
-        )
-        .await
-        .expect("scheduler must stop for an expired certificate");
-        assert_eq!(renewer.calls.load(Ordering::SeqCst), 0);
+        );
     }
 
     /// Lets a test keep a handle on the FakeRenewer the scheduler owns.
