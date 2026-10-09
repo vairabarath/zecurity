@@ -99,10 +99,22 @@ message ConnectorControlMessage {
     // it. See message-level `reserved 16` below.
     // Controller → Connector — eligible relay pool with capacity labels (ADR-016).
     LabelledRelayList relay_list = 17;
+    // Controller → Connector — agent policy, sent when the Control stream
+    // opens (Sprint 21 K2 / Sprint 20 KI-2).
+    AgentPolicy agent_policy = 18;
   }
   // Reserve the retired TransportSnapshot field number so it is never reused.
   // (reserved must be at message scope, not inside the oneof.)
   reserved 16;
+}
+
+// Controller-owned settings the Connector applies to the Shields it manages.
+message AgentPolicy {
+  // A Shield whose certificate expires within this many seconds is asked to
+  // renew (ReEnroll). Already clamped by the controller to
+  // min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL). 0 = not set: the
+  // Connector keeps its current window (48 h default).
+  uint64 shield_renewal_window_secs = 1;
 }
 
 message ConnectorLog {

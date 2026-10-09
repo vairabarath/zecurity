@@ -205,6 +205,9 @@ func main() {
 		DisconnectThreshold: mustDuration("SHIELD_DISCONNECT_THRESHOLD", 120*time.Second),
 		JWTSecret:           mustEnv("JWT_SECRET"),
 	}
+	connectorCfg.ShieldRenewalWindow = shieldCfg.EffectiveRenewalWindow()
+	log.Printf("shield renewal window: %s (SHIELD_RENEWAL_WINDOW=%s, SHIELD_CERT_TTL=%s)",
+		connectorCfg.ShieldRenewalWindow, shieldCfg.RenewalWindow, shieldCfg.CertTTL)
 
 	connectorValkey, err := newConnectorValkeyClient(ctx, mustEnv("VALKEY_URL"))
 	if err != nil {

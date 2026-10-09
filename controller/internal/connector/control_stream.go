@@ -141,6 +141,33 @@ func (h *EnrollmentHandler) maybeSendReEnroll(client *connectorStreamClient, cer
 // the mailbox is full (connector not draining) it fails fast, so a wedged connector
 // can't stall a GraphQL resolver or the reconciler on the socket write. gRPC permits
 // only one concurrent Send, which runWriter (the sole sender) guarantees.
+// agentPolicyMessage is the AgentPolicy for this controller's configuration,
+// or nil when no shield renewal window is configured (a whole second or more);
+// the connector then keeps its default window.
+func (h *EnrollmentHandler) agentPolicyMessage() *pb.ConnectorControlMessage {
+	secs := int64(h.Cfg.ShieldRenewalWindow / time.Second)
+	if secs <= 0 {
+		return nil
+	}
+	return &pb.ConnectorControlMessage{
+		Body: &pb.ConnectorControlMessage_AgentPolicy{
+			AgentPolicy: &pb.AgentPolicy{ShieldRenewalWindowSecs: uint64(secs)},
+		},
+	}
+}
+
+// sendAgentPolicy enqueues the AgentPolicy on a newly opened Control stream.
+func (h *EnrollmentHandler) sendAgentPolicy(client *connectorStreamClient) {
+	msg := h.agentPolicyMessage()
+	if msg == nil {
+		log.Printf("control stream: no shield renewal window configured; connector %s keeps its default", client.connectorID)
+		return
+	}
+	if err := client.send(msg); err != nil {
+		log.Printf("control stream: send agent policy to connector %s: %v", client.connectorID, err)
+	}
+}
+
 func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
 	select {
 	case c.outbound <- msg:
@@ -450,6 +477,9 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}); err != nil {
 		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
 	}
+
+	// Sprint 21 K2: tell the connector the shield renewal window.
+	h.sendAgentPolicy(client)
 
 	// ADR-016 C4: push the current eligible relay pool so the connector can
 	// pick a Tier 1 relay at startup without waiting for the next pool change.
