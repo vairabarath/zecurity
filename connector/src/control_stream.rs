@@ -1192,3 +1192,323 @@ mod renewal_switch_tests {
             .is_err());
     }
 }
+
+#[cfg(test)]
+mod acl_diff_session_tests {
+    //! F-3: a resource tuple edit (same `resource_id`, new port) pushed on the
+    //! controller Control stream must cancel live connector sessions bound to
+    //! the old tuple. Drives the production ACL arm (`handle_controller_msg`)
+    //! and the production data path (`device_tunnel::handle_stream`, connector
+    //! route, real `TcpStream::connect` to local listeners) over in-memory
+    //! client streams.
+
+    use super::*;
+    use crate::agent_tunnel::AgentTunnelHub;
+    use crate::client::v1::{AclEntry, AclSnapshot};
+    use crate::crl::CrlManager;
+    use crate::session_registry::SessionTransport;
+    use ::time::{Duration as TimeDuration, OffsetDateTime};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateRevocationListParams, CertifiedIssuer,
+        DistinguishedName, DnType, IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
+        PKCS_ECDSA_P256_SHA256,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tonic::transport::Channel;
+
+    const SPIFFE: &str = "spiffe://ws-test.zecurity.in/client/device-1";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A CrlManager holding a valid, empty, signed CRL: `check` → NotRevoked.
+    fn valid_crl() -> CrlManager {
+        const KEY_ID: &[u8] = b"f3-test-key-id";
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, "f3-workspace-ca");
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.key_identifier_method = KeyIdMethod::PreSpecified(KEY_ID.to_vec());
+        let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+        let issuer = CertifiedIssuer::self_signed(params, key).unwrap();
+        let now = OffsetDateTime::now_utc();
+        let der = CertificateRevocationListParams {
+            this_update: now - TimeDuration::minutes(1),
+            next_update: now + TimeDuration::hours(1),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![],
+            key_identifier_method: KeyIdMethod::PreSpecified(KEY_ID.to_vec()),
+        }
+        .signed_by(&issuer)
+        .unwrap()
+        .der()
+        .to_vec();
+        let crl = CrlManager::new();
+        crl.install_verified_der(&der, issuer.pem().as_bytes())
+            .unwrap();
+        crl
+    }
+
+    fn entry(resource_id: &str, port: u16) -> AclEntry {
+        AclEntry {
+            resource_id: resource_id.into(),
+            name: resource_id.into(),
+            address: "127.0.0.1".into(),
+            port: port as u32,
+            protocol: "tcp".into(),
+            allowed_spiffe_ids: vec![SPIFFE.into()],
+            route_type: "connector".into(),
+            ..Default::default()
+        }
+    }
+
+    fn acl(version: u64, entries: Vec<AclEntry>) -> ConnectorControlMessage {
+        ConnectorControlMessage {
+            body: Some(CBody::AclSnapshot(AclSnapshot {
+                version,
+                workspace_id: "ws-test".into(),
+                entries,
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// Local echo server standing in for the internal application.
+    async fn echo_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    loop {
+                        match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                if sock.write_all(&buf[..n]).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    struct Env {
+        policy: Arc<PolicyCache>,
+        registry: Arc<SessionRegistry>,
+        hub: AgentTunnelHub,
+        crl: CrlManager,
+        log_tx: mpsc::Sender<crate::ControlMessage>,
+        _log_rx: mpsc::Receiver<crate::ControlMessage>,
+        shield_registry: ShieldRegistry,
+        out_tx: mpsc::Sender<ConnectorControlMessage>,
+        _out_rx: mpsc::Receiver<ConnectorControlMessage>,
+        relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
+    }
+
+    fn env() -> Env {
+        let policy = Arc::new(PolicyCache::new());
+        let (shield_ack_tx, _) = mpsc::channel(8);
+        let (log_tx, log_rx) = mpsc::channel(1024);
+        let (out_tx, out_rx) = mpsc::channel(64);
+        Env {
+            shield_registry: ShieldRegistry::new(
+                Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+                crate::test_support::TRUST_DOMAIN.to_string(),
+                crate::test_support::CONNECTOR_ID.to_string(),
+                shield_ack_tx,
+                policy.clone(),
+            ),
+            policy,
+            registry: Arc::new(SessionRegistry::new()),
+            hub: AgentTunnelHub::new(),
+            crl: valid_crl(),
+            log_tx,
+            _log_rx: log_rx,
+            out_tx,
+            _out_rx: out_rx,
+            relay_list_tx: watch::channel(None).0,
+        }
+    }
+
+    /// Feeds one controller message through the production ACL arm.
+    async fn push(e: &Env, msg: ConnectorControlMessage) {
+        let action = handle_controller_msg(
+            msg,
+            &e.shield_registry,
+            &e.out_tx,
+            &e.policy,
+            &e.registry,
+            &e.relay_list_tx,
+        )
+        .await;
+        assert!(matches!(action, MsgAction::Continue));
+    }
+
+    async fn write_frame(s: &mut DuplexStream, v: serde_json::Value) {
+        let body = serde_json::to_vec(&v).unwrap();
+        s.write_all(&(body.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        s.write_all(&body).await.unwrap();
+    }
+
+    async fn read_frame(s: &mut DuplexStream) -> serde_json::Value {
+        let mut len = [0u8; 4];
+        s.read_exact(&mut len).await.unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        s.read_exact(&mut body).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// One client flow: spawns the production `handle_stream`, sends the
+    /// tunnel request and returns (client end, handler task, response).
+    async fn open(
+        e: &Env,
+        port: u16,
+    ) -> (
+        DuplexStream,
+        JoinHandle<anyhow::Result<()>>,
+        serde_json::Value,
+    ) {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (acl, reg, hub, crl, log_tx) = (
+            e.policy.clone(),
+            e.registry.clone(),
+            e.hub.clone(),
+            e.crl.clone(),
+            e.log_tx.clone(),
+        );
+        let task = tokio::spawn(async move {
+            crate::device_tunnel::handle_stream(
+                server,
+                SPIFFE.to_string(),
+                vec![0x01, 0x02],
+                acl,
+                reg,
+                SessionTransport::Quic,
+                hub,
+                crl,
+                crate::test_support::CONNECTOR_ID,
+                &log_tx,
+            )
+            .await
+        });
+        write_frame(
+            &mut client,
+            serde_json::json!({"destination": "127.0.0.1", "port": port, "protocol": "tcp"}),
+        )
+        .await;
+        let resp = tokio::time::timeout(WAIT, read_frame(&mut client))
+            .await
+            .expect("tunnel response");
+        (client, task, resp)
+    }
+
+    async fn echo_ok(client: &mut DuplexStream, msg: &[u8]) {
+        client.write_all(msg).await.unwrap();
+        let mut buf = vec![0u8; msg.len()];
+        tokio::time::timeout(WAIT, client.read_exact(&mut buf))
+            .await
+            .expect("echo within WAIT")
+            .expect("echo read");
+        assert_eq!(buf, msg);
+    }
+
+    #[tokio::test]
+    async fn port_edit_cancels_old_tuple_session_keeps_unrelated() {
+        crate::test_support::install_crypto_provider();
+        let old_port = echo_server().await;
+        let new_port = echo_server().await;
+        let other_port = echo_server().await;
+        let e = env();
+
+        push(
+            &e,
+            acl(
+                1,
+                vec![entry("res-a", old_port), entry("res-b", other_port)],
+            ),
+        )
+        .await;
+
+        // 1. A client flow opens a session to the allowed destination.
+        let (mut old_client, old_task, resp) = open(&e, old_port).await;
+        assert_eq!(resp["ok"], true, "old port admitted: {resp}");
+        echo_ok(&mut old_client, b"old-before").await;
+
+        // An unrelated resource's session.
+        let (mut other_client, other_task, resp) = open(&e, other_port).await;
+        assert_eq!(resp["ok"], true, "unrelated admitted: {resp}");
+        echo_ok(&mut other_client, b"other-before").await;
+
+        // 2. Same resource identity, new port.
+        push(
+            &e,
+            acl(
+                2,
+                vec![entry("res-a", new_port), entry("res-b", other_port)],
+            ),
+        )
+        .await;
+
+        // 3. The old session is cancelled by the connector: the handler
+        //    returns and the client side sees EOF.
+        let joined = tokio::time::timeout(WAIT, old_task)
+            .await
+            .expect("old-tuple session must be cancelled by the ACL diff");
+        assert!(joined.unwrap().is_ok(), "cancel is a clean session end");
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(WAIT, old_client.read(&mut buf))
+            .await
+            .expect("EOF within WAIT")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "old client sees EOF after cancel");
+
+        // 4. A new connection to the old port is rejected.
+        let (_c, t, resp) = open(&e, old_port).await;
+        assert_eq!(resp["ok"], false, "old port denied: {resp}");
+        assert_eq!(resp["error"], "access denied");
+        assert!(t.await.unwrap().is_err());
+
+        // 5. A new connection to the new port succeeds.
+        let (mut new_client, _new_task, resp) = open(&e, new_port).await;
+        assert_eq!(resp["ok"], true, "new port admitted: {resp}");
+        echo_ok(&mut new_client, b"new-after").await;
+
+        // 6. The unrelated resource's session is still alive.
+        echo_ok(&mut other_client, b"other-after").await;
+        assert!(!other_task.is_finished());
+    }
+
+    #[tokio::test]
+    async fn name_only_edit_keeps_session() {
+        crate::test_support::install_crypto_provider();
+        let port = echo_server().await;
+        let e = env();
+        push(&e, acl(1, vec![entry("res-a", port)])).await;
+
+        let (mut client, task, resp) = open(&e, port).await;
+        assert_eq!(resp["ok"], true);
+        echo_ok(&mut client, b"before").await;
+
+        let renamed = AclEntry {
+            name: "renamed".into(),
+            ..entry("res-a", port)
+        };
+        push(&e, acl(2, vec![renamed])).await;
+
+        echo_ok(&mut client, b"after").await;
+        assert!(!task.is_finished(), "name-only edit must not cancel");
+    }
+}
