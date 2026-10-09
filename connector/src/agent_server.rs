@@ -577,6 +577,32 @@ fn reenroll_due(last_sent: Option<std::time::Instant>, now: std::time::Instant) 
     }
 }
 
+/// Queue a ReEnroll on a Shield Control stream if the Shield needs renewal
+/// and the per-stream throttle allows it. Only a ReEnroll that was actually
+/// queued starts the throttle: a failed send leaves `last_sent` unchanged.
+/// Returns whether one was queued.
+async fn send_reenroll_if_due(
+    out_tx: &mpsc::Sender<Result<ShieldControlMessage, Status>>,
+    needs_renewal: bool,
+    last_sent: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    use crate::shield_proto::shield_control_message::Body;
+    if !needs_renewal || !reenroll_due(*last_sent, now) {
+        return false;
+    }
+    let sent = out_tx
+        .send(Ok(ShieldControlMessage {
+            body: Some(Body::ReEnroll(ReEnrollSignal {})),
+        }))
+        .await
+        .is_ok();
+    if sent {
+        *last_sent = Some(now);
+    }
+    sent
+}
+
 #[derive(Debug, Clone)]
 struct VerifiedShieldIdentity {
     shield_id: String,
@@ -802,19 +828,13 @@ impl ShieldService for ShieldRegistry {
                                                 }))
                                                 .await;
                                         }
-                                        let now = std::time::Instant::now();
-                                        if registry.cert_needs_renewal(cert_not_after)
-                                            && reenroll_due(last_reenroll_sent, now)
-                                            && out_tx
-                                                .send(Ok(ShieldControlMessage {
-                                                    body: Some(Body::ReEnroll(ReEnrollSignal {})),
-                                                }))
-                                                .await
-                                                .is_ok()
-                                        {
-                                            // Only a delivered ReEnroll starts the throttle.
-                                            last_reenroll_sent = Some(now);
-                                        }
+                                        send_reenroll_if_due(
+                                            &out_tx,
+                                            registry.cert_needs_renewal(cert_not_after),
+                                            &mut last_reenroll_sent,
+                                            std::time::Instant::now(),
+                                        )
+                                        .await;
                                     }
                                     Some(Body::ResourceAck(ack)) => {
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
@@ -1353,6 +1373,40 @@ mod shield_server_tls_tests {
         let (out2, mut replies2) = open_control(&pki, server.addr).await;
         health_round_trip(&out2, &mut replies2, true).await;
         health_round_trip(&out2, &mut replies2, false).await;
+    }
+
+    /// K2: a ReEnroll that could not be queued does not consume the 10-min
+    /// throttle; the next due report sends one, which then does.
+    #[tokio::test]
+    async fn failed_reenroll_send_does_not_start_the_throttle() {
+        let t0 = std::time::Instant::now();
+        let mut last = None;
+
+        // Outbound queue closed: the send fails, the throttle is untouched.
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        assert!(!send_reenroll_if_due(&closed_tx, true, &mut last, t0).await);
+        assert_eq!(last, None);
+
+        // A later report one second on: sent, and now the throttle runs.
+        let (tx, mut rx) = mpsc::channel(4);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(send_reenroll_if_due(&tx, true, &mut last, t1).await);
+        assert_eq!(last, Some(t1));
+        assert!(matches!(
+            rx.try_recv().unwrap().unwrap().body,
+            Some(Body::ReEnroll(_))
+        ));
+
+        // Throttled for 10 min after the successful send, then due again.
+        assert!(!send_reenroll_if_due(&tx, true, &mut last, t1 + Duration::from_secs(599)).await);
+        assert!(rx.try_recv().is_err());
+        assert!(send_reenroll_if_due(&tx, true, &mut last, t1 + Duration::from_secs(600)).await);
+
+        // Outside the renewal window nothing is sent or recorded.
+        let mut untouched = None;
+        assert!(!send_reenroll_if_due(&tx, false, &mut untouched, t0).await);
+        assert_eq!(untouched, None);
     }
 
     #[test]

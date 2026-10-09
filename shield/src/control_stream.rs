@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
+// Tokio's clock (identical to std's unless a test pauses time).
 use tokio::time::interval;
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tracing::{error, info, warn};
@@ -55,12 +57,52 @@ pub async fn run_control_stream(
     cfg: ShieldConfig,
     resource_state: Arc<SharedResourceState>,
 ) -> Result<()> {
+    reconnect_loop(
+        state,
+        LiveSession {
+            cfg,
+            resource_state,
+        },
+    )
+    .await
+}
+
+/// One Control-stream connection: run until the stream ends.
+trait ControlSession {
+    fn run(
+        &mut self,
+        state: &mut ShieldState,
+        debounce: &mut RenewalDebounce,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+}
+
+/// The real connection to the Connector.
+struct LiveSession {
+    cfg: ShieldConfig,
+    resource_state: Arc<SharedResourceState>,
+}
+
+impl ControlSession for LiveSession {
+    fn run(
+        &mut self,
+        state: &mut ShieldState,
+        debounce: &mut RenewalDebounce,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        run_once(state, &self.cfg, &self.resource_state, debounce)
+    }
+}
+
+/// Run `session` forever, reconnecting after each connection ends. The
+/// renewal debounce is created once, here, so it survives the reconnect that
+/// follows a successful renewal (K2); a per-connection debounce would let the
+/// reconnected stream's first ReEnroll renew again.
+async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -> Result<()> {
     let mut current_state = state;
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     let mut debounce = RenewalDebounce::default();
 
     loop {
-        match run_once(&mut current_state, &cfg, &resource_state, &mut debounce).await {
+        match session.run(&mut current_state, &mut debounce).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 info!("control stream closed cleanly, reconnecting");
@@ -588,6 +630,121 @@ mod tests {
                 Err(anyhow::anyhow!("controller unreachable"))
             })
         }
+    }
+
+    /// What one scripted ReEnroll did.
+    #[derive(Debug, PartialEq)]
+    enum Reenroll {
+        Renewed,
+        Ignored,
+    }
+
+    /// A fake Control connection: delivers ReEnrolls through the real
+    /// `handle_reenroll` (with a counting fake renewal) on a script, and
+    /// returns `Ok(())` after a successful renewal — the reconnect `run_once`
+    /// performs.
+    struct ScriptedSession {
+        connection: usize,
+        renewals: Arc<std::sync::atomic::AtomicU32>,
+        log: Arc<std::sync::Mutex<Vec<(usize, u64, Reenroll)>>>,
+        started: tokio::time::Instant,
+        done: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ScriptedSession {
+        async fn reenroll(
+            &mut self,
+            state: &mut ShieldState,
+            debounce: &mut RenewalDebounce,
+        ) -> bool {
+            let renewals = self.renewals.clone();
+            let outcome = handle_reenroll(state, debounce, move |current| {
+                renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Ok(ShieldState {
+                    cert_not_after: current.cert_not_after + 3600,
+                    ..current
+                }))
+            })
+            .await;
+            let renewed = matches!(outcome, Some(Ok(())));
+            self.log.lock().unwrap().push((
+                self.connection,
+                self.started.elapsed().as_secs(),
+                if renewed {
+                    Reenroll::Renewed
+                } else {
+                    Reenroll::Ignored
+                },
+            ));
+            renewed
+        }
+    }
+
+    impl ControlSession for ScriptedSession {
+        async fn run(
+            &mut self,
+            state: &mut ShieldState,
+            debounce: &mut RenewalDebounce,
+        ) -> Result<()> {
+            self.connection += 1;
+            match self.connection {
+                // Connection 1: ReEnroll → renewal → reconnect.
+                1 => assert!(self.reenroll(state, debounce).await),
+                // Connection 2 (after the 1 s reconnect delay): the
+                // connector repeats ReEnroll at once, at 58 s and at 60 s
+                // after the renewal.
+                2 => {
+                    while !self.reenroll(state, debounce).await {
+                        let since_renewal = self.started.elapsed();
+                        let next = if since_renewal < Duration::from_secs(58) {
+                            Duration::from_secs(58)
+                        } else {
+                            Duration::from_secs(60)
+                        };
+                        tokio::time::sleep(next - since_renewal).await;
+                    }
+                }
+                // Connection 3: done.
+                _ => {
+                    if let Some(done) = self.done.take() {
+                        let _ = done.send(());
+                    }
+                    std::future::pending::<()>().await;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// K2: the debounce survives the reconnect that follows a successful
+    /// renewal — the reconnected stream's ReEnrolls are ignored until 60 s
+    /// after the renewal, then honoured. Paused Tokio time: deterministic.
+    #[tokio::test(start_paused = true)]
+    async fn debounce_survives_reconnect_for_sixty_seconds() {
+        let renewals = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let session = ScriptedSession {
+            connection: 0,
+            renewals: renewals.clone(),
+            log: log.clone(),
+            started: tokio::time::Instant::now(),
+            done: Some(done_tx),
+        };
+        let task = tokio::spawn(reconnect_loop(test_state(), session));
+        done_rx.await.expect("reached the third connection");
+        task.abort();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                (1, 0, Reenroll::Renewed),
+                (2, 1, Reenroll::Ignored),  // right after reconnect
+                (2, 58, Reenroll::Ignored), // still inside 60 s
+                (2, 60, Reenroll::Renewed), // window over
+            ]
+        );
+        assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     /// The K2 scenario: renew, then a duplicate ReEnroll (e.g. on the

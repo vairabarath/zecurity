@@ -40,3 +40,7 @@ nftables           = { version = "0.6", features = ["tokio"] }
 [build-dependencies]
 tonic-build       = "0.14"
 tonic-prost-build = "0.14"
+
+[dev-dependencies]
+# Paused Tokio time for deterministic reconnect-loop tests.
+tokio = { version = "1", features = ["test-util"] }
