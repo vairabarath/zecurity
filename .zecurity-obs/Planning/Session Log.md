@@ -2677,3 +2677,32 @@ serves on `127.0.0.1:9102`.
 - Push and open the Phase P PR.
 - Then Phase K (Sprint 20 cleanup).
 - Formal AT-C/AT-R/AT-P acceptance by Sathiya.
+
+---
+
+## 2026-10-09 — Claude Code (Barath / M2) — Sprint 21 Phase K: Sprint 20 cleanup, certificate audit, S1 security fix
+
+**What was done:**
+- Branch `sprint21/k-sprint20-cleanup`, 9 commits; local, not pushed:
+  1. `8e55a36` K4/K5: `.env.example` scrubbed, CI JWT guard, CRL comment.
+  2. `411e216` K6: `/db` Valkey URLs (test and production), auth integration test runs in CI.
+  3. `7fb0fb7` K1: relay schedules renewal from install time (`relay.crt.meta`).
+  4. `fd8b6d7` K1 test safety: scheduler tests in a killable subprocess.
+  5. `276fb4f` S1 regression test.
+  6. `735d485` S1 fix: relay revocation uses the leaf's real issuer.
+  7. `2c3dda0` K2: `AgentPolicy` (field 18), connector throttle, shield debounce.
+  8. `657fdd0` K2 tests: debounce across reconnect, throttle after send.
+  9. Closeout docs (this entry).
+- K3 confirmed resolved by Phase H.
+- **Certificate lifecycle audit** (read-only; relay, connector, shield, client, controller cert, CAs): found S1 (fixed) plus five unfixed bugs and the CA-expiry question, listed in `Sprint21/path.md` → Post-Sprint Fixes.
+- **Gates:** controller `go test ./...` CI-style 1047 pass / 32 pre-existing skips; relay 90, connector 132, shield 19, client 157 pass; `buf breaking` clean; build and clippy at baseline; every mutation check caught, apart from one residual noted in the phase file.
+
+**Key decisions:**
+- K1 option A; metadata also written at provisioning; missing or bad metadata falls back to `NotBefore`.
+- K2 option A, refined: the controller sends `min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL)` so the backdated `NotBefore` never matters.
+- Runbook §2 keeps the Sprint 20 workarounds, because the live run is pinned to `46ab87d`.
+
+**What's next:**
+- Push and open the Phase K PR (when Barath says so).
+- Sathiya: Phase V live run, then AT-K acceptance.
+- Schedule the open audit findings; CA rotation needs an architectural decision.

@@ -51,6 +51,8 @@ All commands run from the repository root unless a step says otherwise. Every co
 
 These came up while preparing this runbook. None of them blocks the run, but each one changes a step, and **ignoring them produces false failures**. Where a step depends on one, it says so.
 
+> **Update (Sprint 21 Phase K, 2026-10-09):** KI-1 and KI-2 are fixed in Sprint 21, and KI-3 no longer exists there (provider login is email + password). **This run uses the Sprint 20 commit `46ab87d`, so keep every workaround below as written.** Only on code that includes Sprint 21 Phase K: `RELAY_CERT_TTL=15m` is valid (renewal ~9 min after install, no loop), and shields no longer churn with `SHIELD_CERT_TTL=24h`.
+
 ### KI-1 — A 15-minute relay certificate renews in a tight loop. Use `RELAY_CERT_TTL=1h`.
 
 - **Where:** the controller issues relay certificates with `NotBefore = now − 1h` (`controller/internal/pki/relay.go:61`). The relay treats the lifetime as `not_after − not_before` and renews when 2/5 of that remains (`relay/src/renewal.rs:67-73`, `cert_manager.rs:43,174`).
@@ -59,14 +61,14 @@ These came up while preparing this runbook. None of them blocks the run, but eac
   - Production (30-day default) is unaffected: renewal happens about 18 days in.
 - **Workaround for this run:** use `RELAY_CERT_TTL=1h`. The relay then renews 6–18 min after each issue (12 min ± 6 min jitter). Its first certificate expires at +60 min.
 - **Consequence:** the relay part of the run takes about 65 minutes. The ~9 min expectation in AT-F.8 was calculated without the 1-hour backdate, so ignore it.
-- This is the same class of bug as PF-1 (Phase E), which was fixed only in the controller rotator. **Not fixed; it is a follow-up** (see `path.md` → Known issues).
+- This is the same class of bug as PF-1 (Phase E), which was fixed only in the controller rotator. **Not fixed in Sprint 20 (this run); fixed in Sprint 21 K1** (see `path.md` → Known issues).
 
 ### KI-2 — With `SHIELD_CERT_TTL` of 48h or less, shields renew every ~15 s
 
 - **Where:** the connector decides that a shield needs renewal using a **hard-coded** 48 h window (`connector/src/agent_server.rs`, `DEFAULT_RENEWAL_WINDOW_SECS`). The controller's `SHIELD_RENEWAL_WINDOW` is parsed but never used. The shield has no debounce.
 - **Effect:** with a short `SHIELD_CERT_TTL`, every 15 s shield health report triggers `ReEnroll`. The shield renews through the connector's `:9091` and reconnects its control stream.
 - **Why we still use it:** a shield renewal is the only way to exercise the `:9091` server and the shield-proxy controller channel after the connector's certificate has been renewed. With the 7-day default, no shield renewal would happen during the run.
-- **So:** run with `SHIELD_CERT_TTL=24h`. Expect a `cert renewed` line from the shield roughly every 15 s; treat that churn as expected. **Pre-existing, not fixed.** Don't use a shield-routed (RDE) tunnel for the "open tunnels are not dropped" check, because the churn reconnects the shield's stream.
+- **So:** run with `SHIELD_CERT_TTL=24h`. Expect a `cert renewed` line from the shield roughly every 15 s; treat that churn as expected. **Pre-existing, not fixed in Sprint 20 (this run); fixed in Sprint 21 K2.** Don't use a shield-routed (RDE) tunnel for the "open tunnels are not dropped" check, because the churn reconnects the shield's stream.
 
 ### KI-3 — Provider login is misconfigured in the dev `.env`
 
