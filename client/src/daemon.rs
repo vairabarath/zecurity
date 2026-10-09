@@ -588,8 +588,9 @@ async fn handle_up(
         };
     }
 
-    // Require an ACL snapshot with at least one entry. The transport snapshot is
-    // optional — routing falls back to the ACL relay fields when it's absent.
+    // Require a synced ACL snapshot and a device identity. The transport
+    // snapshot is optional — routing falls back to the ACL relay fields when
+    // it's absent. Zero resources is a valid tunnel state (see up_preflight).
     let (acl, transport, device) = {
         let s = state.read().await;
         (
@@ -599,53 +600,24 @@ async fn handle_up(
         )
     };
 
-    let acl = match acl {
-        None => {
+    let UpInputs {
+        acl,
+        device,
+        allowed_entries,
+        allowed_flows,
+    } = match up_preflight(acl, device) {
+        Ok(inputs) => inputs,
+        Err(error) => {
             return IpcResponse {
                 ok: false,
                 kind: "Up".into(),
-                error: Some(
-                    "no ACL snapshot — run zecurity-client status to check daemon state".into(),
-                ),
+                error: Some(error),
                 ..Default::default()
             }
         }
-        Some(a) if a.entries.is_empty() => {
-            return IpcResponse {
-                ok: false,
-                kind: "Up".into(),
-                error: Some("ACL snapshot has no entries — no resources to route".into()),
-                ..Default::default()
-            }
-        }
-        Some(a) => Arc::new(a),
-    };
-
-    let device = match device {
-        None => {
-            return IpcResponse {
-                ok: false,
-                kind: "Up".into(),
-                error: Some("no device identity — run zecurity-client login first".into()),
-                ..Default::default()
-            }
-        }
-        Some(d) => d,
     };
 
     let applied = effective_config(&acl, transport.as_ref(), &device);
-
-    // Filter to only entries this device is permitted to access.
-    let allowed_entries = allowed_entries_for(&acl, &device);
-
-    if allowed_entries.is_empty() {
-        return IpcResponse {
-            ok: false,
-            kind: "Up".into(),
-            error: Some("no accessible resources for this device — check group membership".into()),
-            ..Default::default()
-        };
-    }
 
     let relay_crl = {
         let mut runtime = state.write().await;
@@ -706,22 +678,10 @@ async fn handle_up(
     };
 
     // Mark only the allowed TCP destination flows into the Zecurity route table.
-    // Other ports on the same IP stay on the normal kernel route.
-    let allowed_flows: Vec<AllowedFlow> = allowed_entries
-        .iter()
-        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
-        .map(|(ip, port)| AllowedFlow { ip, port })
-        .collect();
-
-    if allowed_flows.is_empty() {
-        return IpcResponse {
-            ok: false,
-            kind: "Up".into(),
-            error: Some("no TCP resources available for this device".into()),
-            ..Default::default()
-        };
-    }
-
+    // Other ports on the same IP stay on the normal kernel route. With zero
+    // flows this only clears stale policy state; the first resource assigned
+    // later is added by the Phase 5-C resource hot-apply (it creates the nft
+    // table/chain and ensures the fwmark rule).
     if let Err(e) = mgr.configure_allowed_flows(&allowed_flows) {
         return IpcResponse {
             ok: false,
@@ -744,6 +704,7 @@ async fn handle_up(
         }
     };
 
+    let allowed_entries_count = allowed_entries.len();
     let relay_resync = { state.read().await.relay_resync.clone() };
     // Fix 05 Phase 5-C: resource hot-apply commands into the running net_stack.
     let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
@@ -773,10 +734,68 @@ async fn handle_up(
     }));
 
     info!(routes = route_count, "zecurity0 up");
+    if route_count == 0 {
+        log_no_resources_assigned(acl.entries.len(), allowed_entries_count);
+    }
     IpcResponse {
         ok: true,
         kind: "Up".into(),
+        synced_resources: Some(route_count),
         ..Default::default()
+    }
+}
+
+/// What `handle_up` needs once the preconditions hold.
+struct UpInputs {
+    acl: Arc<AclSnapshot>,
+    device: DeviceInfo,
+    /// ACL entries this device may access (SPIFFE-filtered).
+    allowed_entries: Vec<AclEntry>,
+    /// The routable (TCP, IPv4) subset the kernel marks into zecurity0.
+    allowed_flows: Vec<AllowedFlow>,
+}
+
+/// Preconditions for bringing the tunnel up. Only a missing ACL snapshot (the
+/// client has never synced) or a missing device identity fails. Zero resources
+/// — an empty snapshot, no entry for this device, or no routable entry — is a
+/// valid tunnel state: the resource mapping is empty and the Phase 5-C
+/// resource hot-apply fills it when a resource is assigned later.
+fn up_preflight(
+    acl: Option<AclSnapshot>,
+    device: Option<DeviceInfo>,
+) -> std::result::Result<UpInputs, String> {
+    let acl = acl.ok_or_else(|| {
+        "no ACL snapshot — run zecurity-client status to check daemon state".to_string()
+    })?;
+    let device =
+        device.ok_or_else(|| "no device identity — run zecurity-client login first".to_string())?;
+    let allowed_entries = allowed_entries_for(&acl, &device);
+    let allowed_flows = allowed_entries
+        .iter()
+        .filter_map(|e| net_stack::routable_key(&e.address, &e.protocol, e.port))
+        .map(|(ip, port)| AllowedFlow { ip, port })
+        .collect();
+    Ok(UpInputs {
+        acl: Arc::new(acl),
+        device,
+        allowed_entries,
+        allowed_flows,
+    })
+}
+
+/// Logged when the tunnel comes up with an empty resource mapping.
+fn log_no_resources_assigned(acl_entries: usize, allowed: usize) {
+    if allowed == 0 {
+        info!(
+            acl_entries,
+            "no resources currently assigned to this device; tunnel up, waiting for resource assignment"
+        );
+    } else {
+        info!(
+            acl_entries,
+            allowed,
+            "no routable (TCP) resources currently assigned to this device; tunnel up, waiting for resource assignment"
+        );
     }
 }
 
@@ -2380,10 +2399,23 @@ mod restart_decision_tests {
     /// Running tunnel built from `connectors` (transport plane) with the
     /// resource's preferred connector `preferred`.
     async fn harness_with(connectors: &[&str], preferred: &str) -> Harness {
+        harness_built(connectors, preferred, false).await
+    }
+
+    /// A tunnel that was brought up with zero resources (empty ACL snapshot):
+    /// what `handle_up` now installs instead of refusing.
+    async fn harness_zero_start() -> Harness {
+        harness_built(&["c1"], "", true).await
+    }
+
+    async fn harness_built(connectors: &[&str], preferred: &str, zero_start: bool) -> Harness {
         let state = crate::runtime::new_shared();
         let device = make_test_device();
         let mut acl = make_test_acl(&device);
         acl.entries[0].preferred_connector_id = preferred.to_string();
+        if zero_start {
+            acl.entries.clear();
+        }
         let mut transport = make_test_transport();
         transport.remote_networks[0].connectors = connectors.iter().map(|c| tconn(c)).collect();
         let applied = effective_config(&acl, Some(&transport), &device);
@@ -2426,7 +2458,7 @@ mod restart_decision_tests {
             s.relay_crl = Some(crate::crl::CrlManager::new());
             s.tun_handle = Some(Arc::new(TunHandle {
                 abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
-                route_count: 1,
+                route_count: if zero_start { 0 } else { 1 },
                 applied,
                 transport_tx: Arc::new(tx),
                 resource_tx: Arc::new(resource_tx),
@@ -3140,6 +3172,128 @@ mod restart_decision_tests {
         assert_eq!(h.kernel.lock().await.as_ref().unwrap().fwmark_rules, 1);
         let s = h.state.read().await;
         assert_eq!(s.tun_handle.as_ref().unwrap().abort.id(), abort_id);
+    }
+
+    // Zero resources is a valid tunnel state: `up` must not refuse it.
+    #[test]
+    fn up_preflight_accepts_empty_acl_snapshot() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries.clear();
+        let inputs = up_preflight(Some(acl), Some(device)).expect("zero entries is a valid up");
+        assert!(inputs.acl.entries.is_empty());
+        assert!(inputs.allowed_entries.is_empty());
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_accepts_no_entry_for_this_device() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].allowed_spiffe_ids = vec!["spiffe://other/device".to_string()];
+        let inputs = up_preflight(Some(acl), Some(device)).expect("no access is a valid up");
+        assert_eq!(inputs.acl.entries.len(), 1);
+        assert!(inputs.allowed_entries.is_empty());
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_accepts_no_routable_entry() {
+        let device = make_test_device();
+        let mut acl = make_test_acl(&device);
+        acl.entries[0].protocol = "udp".to_string();
+        let inputs = up_preflight(Some(acl), Some(device)).expect("UDP-only is a valid up");
+        assert_eq!(inputs.allowed_entries.len(), 1);
+        assert!(inputs.allowed_flows.is_empty());
+    }
+
+    #[test]
+    fn up_preflight_routable_entry_yields_flow() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let inputs = up_preflight(Some(acl), Some(device)).expect("up");
+        assert_eq!(
+            inputs.allowed_flows,
+            vec![AllowedFlow {
+                ip: "10.0.0.1".parse().unwrap(),
+                port: 80
+            }]
+        );
+    }
+
+    // Never synced / not logged in are not zero-resource states: still fail closed.
+    #[test]
+    fn up_preflight_without_acl_snapshot_fails_closed() {
+        let Err(e) = up_preflight(None, Some(make_test_device())) else {
+            panic!("missing ACL snapshot must fail");
+        };
+        assert!(e.contains("no ACL snapshot"), "{e}");
+    }
+
+    #[test]
+    fn up_preflight_without_device_fails_closed() {
+        let device = make_test_device();
+        let acl = make_test_acl(&device);
+        let Err(e) = up_preflight(Some(acl), None) else {
+            panic!("missing device identity must fail");
+        };
+        assert!(e.contains("no device identity"), "{e}");
+    }
+
+    // A tunnel that came up with zero resources applies the first assignment
+    // through the Phase 5-C resource hot-apply: same net_stack, no restart.
+    #[tokio::test]
+    async fn zero_start_tunnel_hot_applies_first_assigned_resource() {
+        let h = harness_zero_start().await;
+        let (abort_id, transport_tx, resource_tx) = {
+            let s = h.state.read().await;
+            let th = s.tun_handle.as_ref().unwrap();
+            assert_eq!(th.route_count, 0);
+            assert!(th.applied.entries.is_empty());
+            (
+                th.abort.id(),
+                th.transport_tx.clone(),
+                th.resource_tx.clone(),
+            )
+        };
+        {
+            let k = h.kernel.lock().await;
+            let k = k.as_ref().unwrap();
+            assert!(k.routes.is_empty());
+            assert!(k.nft.is_empty());
+        }
+        // Nothing assigned yet: a poll is a no-op.
+        assert!(decide(&h, false).await.is_ok());
+        assert!(log_of(&h).is_empty());
+
+        // Resource assigned later.
+        let device = make_test_device();
+        let entry = make_test_acl(&device).entries[0].clone();
+        h.state
+            .write()
+            .await
+            .acl_snapshot
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(entry);
+        assert!(decide(&h, false).await.is_ok());
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no VPN restart");
+        assert_eq!(
+            log_of(&h),
+            vec![
+                "fwmark pub=1",
+                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "route+ [10.0.0.1] pub=1",
+                "nft [10.0.0.1:80] pub=1",
+            ]
+        );
+        let s = h.state.read().await;
+        let th = s.tun_handle.as_ref().unwrap();
+        assert_eq!(th.abort.id(), abort_id, "same net_stack task");
+        assert!(Arc::ptr_eq(&th.transport_tx, &transport_tx));
+        assert!(Arc::ptr_eq(&th.resource_tx, &resource_tx));
+        assert_eq!(th.applied.entries.len(), 1);
     }
 
     #[tokio::test]

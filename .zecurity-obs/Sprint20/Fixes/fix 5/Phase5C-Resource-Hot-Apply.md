@@ -196,6 +196,9 @@ A later addition is the normal addition side with `removed = ∅`. A1 re-ensures
 no-op when present), and no tunnel reconstruction is needed. The three emptiness checks in
 `handle_up` stay startup-only.
 
+> **Superseded 2026-10-09** by *Zero-resource startup* (end of this file): `handle_up` no longer
+> refuses zero resources; it starts with the same empty state described above.
+
 ## F. AppliedConfig semantics (H1)
 
 **Capacity:** free slots = `IFACE_MAX_ADDR_COUNT − 1 (100.64.0.1) − |current IPs − addr_del|`.
@@ -345,7 +348,8 @@ Q6 network-move validation is not part of this phase.
 
 ## J. Follow-ups (not in this phase)
 
-- **FU-1:** error-recovery restart at zero desired resources (H3 / investigation I-Q3.3).
+- **FU-1:** error-recovery restart at zero desired resources (H3 / investigation I-Q3.3). **Resolved
+  2026-10-09** by *Zero-resource startup* (live Z3: recovery at zero → tunnel up empty).
 - **FU-2:** smoltcp address capacity (separate 2-IP investigation).
 - **FU-3:** same-port wrong-key listener binding (separate).
 - **FU-4:** RN-move hot-apply + controller `AutoMatchShield` on update (investigation §15 Q6).
@@ -422,5 +426,51 @@ Baseline count was taken from a clean `git worktree` of HEAD (same code as befor
 ### Known limits carried to live
 
 - Production capacity is `IFACE_MAX_ADDR_COUNT = 2` (100.64.0.1 + one resource IP): a second **new** resource IP is held pending with `resource additions pending: address capacity` (H1, FU-2). Capacity is computed from the IPs in `AppliedConfig`; if `handle_up` already silently dropped one at startup (FU-2), free slots read 0.
-- FU-1: a recovery restart while zero resources are desired leaves the VPN down (H3).
+- FU-1: a recovery restart while zero resources are desired leaves the VPN down (H3). *(Resolved
+  2026-10-09, see Zero-resource startup; live Z3.)*
 
+## Zero-resource startup (2026-10-09) — live-accepted, uncommitted
+
+Live record: [[ZeroResource-Startup-Live-Acceptance-2026-10-09]] (Z0–Z3 pass).
+
+Requirement (user): the VPN/TUN must start even when the device has no assigned resources. Zero
+resources is a valid tunnel state; only the resource mapping is empty. The client logs clearly that
+nothing is assigned and applies the mapping when a resource is assigned later.
+
+### Change (client only)
+
+| File | Change |
+|---|---|
+| `client/src/daemon.rs` | `handle_up` preconditions moved into pure `up_preflight(acl, device)`. It **fails closed only** when there is no ACL snapshot (never synced) or no device identity (not logged in). The three refusals are gone: `ACL snapshot has no entries`, `no accessible resources for this device`, `no TCP resources available`. With zero flows, `configure_allowed_flows(&[])` only clears stale policy, `net_stack` starts with an empty `FlowTable`, and `TunHandle` stores `applied` = zero-entry config with `route_count = 0`. New log `log_no_resources_assigned`: `no resources currently assigned to this device; tunnel up, waiting for resource assignment` (or `no routable (TCP) resources …` when entries exist but none is TCP/IPv4). `IpcResponse.synced_resources = Some(route_count)`. |
+| `client/src/cmd/up.rs` | Prints `Zecurity is up. No resources are currently assigned to this device.` when `synced_resources == Some(0)`. |
+
+No new data-plane code. The first assignment goes through the existing Phase 5-C `ResourceDelta` hot-apply: A1 ensures the fwmark rule, nft adds the table/chain, routes are added per IP, and the loop adds the address/listener.
+
+Side effect: **FU-1/H3 resolved in code.** A recovery `down_up` at zero desired resources now brings the tunnel back up with an empty mapping instead of leaving the VPN down.
+
+### Gates
+
+- `cargo test`: **196 passed / 0 failed** (189 → +7). New tests in `daemon.rs::restart_decision_tests`:
+  - `up_preflight_accepts_empty_acl_snapshot`
+  - `up_preflight_accepts_no_entry_for_this_device`
+  - `up_preflight_accepts_no_routable_entry`
+  - `up_preflight_routable_entry_yields_flow`
+  - `up_preflight_without_acl_snapshot_fails_closed`
+  - `up_preflight_without_device_fails_closed`
+  - `zero_start_tunnel_hot_applies_first_assigned_resource`: harness started at zero (`harness_zero_start`); the first assignment hot-applies with `down_ups = 0` and the same task and channels.
+- `cargo clippy --all-targets`: 23 → 23 diagnostics (no new ones). `cargo fmt --check`: 84 → 84 diff hunks (all pre-existing).
+- `cargo build --release`: sha256 `7d2da41544389150…`; `strings` contains the new log line.
+
+### Live (2026-10-09, client `7d2da415`)
+
+- Z0: old build `0f3adbbd` refuses (`ACL snapshot has no entries`, rc=1, no TUN). This is the baseline.
+- Z1: new build, `up` at zero gives rc=0, the CLI message, the log line, and `zecurity0` ifindex 12.
+- Z2: first assignment hot-applied at the next tick, with 0 restarts and the same ifindex/PID. fwmark and table 105 were created, and the probe went through the tunnel (12/12 × 200, 1:1 `new TCP connection`).
+- Z3: induced route-delete failure on removal to zero, then `recovering with full restart`, then `zecurity0 up routes=0` and the new log line (ifindex 12→13). A re-assign then hot-applied again.
+- 0 session errors and 0 non-200 probes. Details are in the live record.
+
+### Open
+
+- Not committed. To ship as a separate PR after #114 merges (user decision).
+- Unchanged: the controller, the connector and FU-2 (2-IP smoltcp capacity).
+- Not live: UDP-only assignment at startup (unit-tested only) and boot-time auto-start at zero.
