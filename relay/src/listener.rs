@@ -592,11 +592,9 @@ mod revocation_issuer_tests {
     /// still be refused (revoked per tenant A's CRL, or the chain refused),
     /// and tenant B's CRL must never decide it.
     ///
-    /// Ignored until the fix lands: today `peer_revocation` takes chain[1]
-    /// (tenant B's CA) as the issuer, checks tenant B's CRL, and admits the
-    /// revoked leaf. Run with `cargo test -- --ignored s1_`.
+    /// Before the fix `peer_revocation` took chain[1] (tenant B's CA) as the
+    /// issuer, checked tenant B's CRL, and admitted the revoked leaf.
     #[tokio::test]
-    #[ignore = "S1: demonstrates the relay revocation bypass; un-ignore with the fix"]
     async fn s1_revoked_leaf_with_foreign_ca_in_chain_is_still_rejected() {
         let s = setup().await;
         let (revoked, revoked_key) = s.ca_a.client_leaf(REVOKED_SERIAL);
