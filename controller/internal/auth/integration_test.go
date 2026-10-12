@@ -220,15 +220,25 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected returning login to reuse existing identity")
 	}
 
-	if err := pool.QueryRow(
-		ctx,
-		`SELECT last_login_at FROM users WHERE id = $1`,
-		userID,
-	).Scan(&lastLoginAt); err != nil {
-		t.Fatalf("query last_login_at after second callback: %v", err)
+	// identity.Service.touchLastLogin writes last_login_at in a background
+	// goroutine (so login latency is unaffected); wait for it instead of
+	// reading once, which raced the write under load.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if err := pool.QueryRow(
+			ctx,
+			`SELECT last_login_at FROM users WHERE id = $1`,
+			userID,
+		).Scan(&lastLoginAt); err != nil {
+			t.Fatalf("query last_login_at after second callback: %v", err)
+		}
+		if lastLoginAt != nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if lastLoginAt == nil {
-		t.Fatalf("expected returning login to update last_login_at")
+		t.Fatalf("expected returning login to update last_login_at within 5s")
 	}
 
 	var workspaceCountAfter int
