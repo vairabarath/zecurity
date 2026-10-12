@@ -57,11 +57,11 @@ func (s *serviceImpl) GenerateRelayCRL(ctx context.Context, revoked []RevokedEnt
 		return nil, fmt.Errorf("generate relay CRL serial: %w", err)
 	}
 
-	now := time.Now().UTC()
+	thisUpdate, nextUpdate := crlWindow(time.Now().UTC(), relayCRLValidity)
 	template := &x509.RevocationList{
 		Number:                    crlSerial,
-		ThisUpdate:                now,
-		NextUpdate:                now.Add(relayCRLValidity),
+		ThisUpdate:                thisUpdate,
+		NextUpdate:                nextUpdate,
 		RevokedCertificateEntries: entries,
 	}
 

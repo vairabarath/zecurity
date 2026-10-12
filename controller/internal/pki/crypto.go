@@ -276,3 +276,18 @@ func certValidity(years int) (time.Time, time.Time) {
 
 	return notBefore, notAfter
 }
+
+// crlThisUpdateBackdate is how far before signing a CRL's thisUpdate is set
+// (Sprint 21 B4). Every consumer (relay, connector, client) rejects a CRL whose
+// thisUpdate is after its own clock and then fails closed, so without this a
+// consumer whose clock is even a second behind the controller rejects a fresh
+// CRL. Same reason certificates backdate notBefore (certValidity), with a
+// smaller margin.
+const crlThisUpdateBackdate = 5 * time.Minute
+
+// crlWindow returns thisUpdate and nextUpdate for a CRL signed at now.
+// thisUpdate is backdated by crlThisUpdateBackdate; nextUpdate stays
+// now+validity, so the CRL is fresh for exactly as long as before.
+func crlWindow(now time.Time, validity time.Duration) (thisUpdate, nextUpdate time.Time) {
+	return now.Add(-crlThisUpdateBackdate), now.Add(validity)
+}

@@ -250,21 +250,26 @@ All code phases (A–G) are merged. The remaining unchecked boxes are **live dev
 
 Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
 
-## Known Issues (found preparing live acceptance — not fixed)
+## Known Issues (found preparing live acceptance)
+
+> **KI-1, KI-2 and KI-3 are fixed in Sprint 21 Phase K** ([[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]], branch `sprint21/k-sprint20-cleanup`). The Sprint 20 live run (Sprint 21 Phase V) is pinned to `46ab87d`, which still has them, so the runbook §2 workarounds still apply to that run.
 
 - **KI-1 — relay short-TTL renewal loop (Phase F-2).** The controller issues relay certs with `NotBefore = now − 1h` (`controller/internal/pki/relay.go:61`). The relay scheduler takes the lifetime as `not_after − not_before` (`relay/src/renewal.rs` `plan`), so renewal lands at `0.6·TTL − 24 min` after issue.
   - For `RELAY_CERT_TTL` ≤ 40 min the relay renews immediately and back to back. The default 30 d is unaffected (renewal at about 18 d).
   - Same class of bug as PF-1 (fixed only for the controller rotator).
   - The AT-F.8 "~9 min at 15m" expectation is wrong; the live run uses `RELAY_CERT_TTL=1h`.
   - Candidate fix: measure the lifetime from the relay's install time, as PF-1 does with `issuedAt`, or stop backdating.
+  - **FIXED (Sprint 21 K1, `7fb0fb7`, `fd8b6d7`):** the relay records its install time in `relay.crt.meta` and schedules from `max(NotBefore, installed_at)`. A 15m cert now renews ~9 min after install, with no loop.
 - **KI-2 — shield ReEnroll every ~15 s when `SHIELD_CERT_TTL` ≤ 48h (pre-existing).**
   - The connector's shield renewal window is a hard-coded 48 h (`connector/src/agent_server.rs` `DEFAULT_RENEWAL_WINDOW_SECS`). The controller's `SHIELD_RENEWAL_WINDOW` is parsed but unused, and the shield has no debounce.
   - Harmless at the 7 d default. Needs the window plumbed through, plus a shield-side debounce.
+  - **FIXED (Sprint 21 K2, `2c3dda0`, `657fdd0`):** the controller sends `min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL)` in `AgentPolicy` (proto field 18); the connector throttles `ReEnroll` to one per shield per stream per 10 min; the shield ignores `ReEnroll` for 60 s after a successful renewal.
 - **KI-3 — dev `PROVIDER_GOOGLE_REDIRECT_URI` points at the tenant callback** (`/auth/callback`, in `controller/.env` and `.env.example`). Provider login needs `/provider/auth/callback`.
+  - **RESOLVED BY REMOVAL (Sprint 21 H, confirmed in K3):** provider Google login and `PROVIDER_GOOGLE_REDIRECT_URI` no longer exist (D-24).
 - Smaller items (runbook §2):
   - No success log for controller cert rotation, or for the `:9091` / `:9092` TLS swaps.
   - The client can't force TLS or the relay path.
-  - Stale "every 5 minutes" comment in `connector/src/crl.rs:30`.
+  - Stale "every 5 minutes" comment in `connector/src/crl.rs:30`. **Fixed in Sprint 21 K5 (`8e55a36`).**
 
 ## Acceptance Criteria (sprint level)
 

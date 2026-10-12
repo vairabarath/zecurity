@@ -88,6 +88,20 @@ pub fn peer_revocation(connection: &Connection) -> Result<PeerRevocation> {
         .context("peer did not present a certificate")?
         .downcast::<Vec<CertificateDer<'static>>>()
         .map_err(|_| anyhow::anyhow!("unexpected QUIC peer identity type"))?;
+    revocation_from_chain(&chain)
+}
+
+/// Revocation inputs from the peer's presented chain `[leaf, Workspace CA, ..]`.
+///
+/// The handshake validated SOME path from the leaf to the Platform
+/// Intermediate, but rustls/webpki may have built it through a different
+/// certificate than chain[1] (an unrelated extra CA is skipped). chain[1]
+/// selects the workspace and the CA the CRL is verified against, so it must be
+/// proven to be the leaf's issuer — name AND signature — or a revoked leaf
+/// could be checked against another workspace's CRL (audit finding S1).
+/// Anything else is an error, which the listener treats as fail-closed; no
+/// other peer-supplied CA is tried.
+fn revocation_from_chain(chain: &[CertificateDer<'_>]) -> Result<PeerRevocation> {
     if chain.len() < 2 {
         bail!("peer must present leaf certificate plus Workspace CA");
     }
@@ -98,6 +112,12 @@ pub fn peer_revocation(connection: &Connection) -> Result<PeerRevocation> {
 
     let (_, ca) = X509Certificate::from_der(&workspace_ca_der)
         .map_err(|e| anyhow::anyhow!("parse Workspace CA: {e:?}"))?;
+    if leaf.issuer() != ca.subject() {
+        bail!("chain[1] is not the issuer of the peer leaf (issuer name mismatch)");
+    }
+    leaf.verify_signature(Some(ca.public_key())).map_err(|e| {
+        anyhow::anyhow!("chain[1] is not the issuer of the peer leaf (signature: {e:?})")
+    })?;
     let workspace_id = tenant_id_from_ca(&ca).context("Workspace CA has no tenant URI SAN")?;
 
     Ok(PeerRevocation {
@@ -299,5 +319,69 @@ mod tests {
             "workspace-a.zecurity.in"
         ))
         .is_err());
+    }
+
+    // ---- revocation_from_chain: chain[1] must be the leaf's issuer (S1) ----
+
+    const TENANT_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const TENANT_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const SERIAL: &[u8] = &[0x51, 0x01, 0x01, 0x01];
+
+    #[test]
+    fn revocation_uses_the_issuing_workspace_ca() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        let pr = revocation_from_chain(&[leaf, ca_a.der()]).unwrap();
+        assert_eq!(pr.workspace_id, TENANT_A);
+        assert_eq!(pr.leaf_serial, SERIAL);
+        assert_eq!(pr.workspace_ca_der, ca_a.der().as_ref());
+    }
+
+    #[test]
+    fn foreign_workspace_ca_at_chain_1_is_refused() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let ca_b = pki.workspace_ca(TENANT_B);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        // The real issuer later in the chain is not used as a fallback.
+        let err = revocation_from_chain(&[leaf, ca_b.der(), ca_a.der()])
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("issuer name mismatch"), "{err}");
+    }
+
+    #[test]
+    fn impostor_ca_with_the_issuers_name_is_refused() {
+        // Same subject and tenant SAN as the real issuer, different key: the
+        // name check passes, the signature check must not.
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let impostor = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        let err = revocation_from_chain(&[leaf, impostor.der(), ca_a.der()])
+            .err()
+            .expect("must be refused");
+        assert!(err.to_string().contains("signature"), "{err}");
+    }
+
+    #[test]
+    fn malformed_or_missing_issuer_is_refused() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+
+        assert!(revocation_from_chain(std::slice::from_ref(&leaf)).is_err());
+        assert!(revocation_from_chain(&[
+            leaf.clone(),
+            CertificateDer::from(b"not a cert".to_vec())
+        ])
+        .is_err());
+        // A leaf at chain[1] (not a CA, not the issuer).
+        let (other_leaf, _) = ca_a.client_leaf(&[0x52, 0x02]);
+        assert!(revocation_from_chain(&[leaf, other_leaf]).is_err());
     }
 }

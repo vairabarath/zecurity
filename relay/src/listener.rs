@@ -362,3 +362,254 @@ mod live_swap_tests {
         assert_eq!(server_serial(&existing), original_serial);
     }
 }
+
+/// Audit finding S1: which Workspace CA (and so which CRL) the revocation
+/// check uses, end to end through the real listener (`run_listener`): real
+/// QUIC/mTLS handshake against the production server config, then the
+/// production revocation gate with CRLs fetched over HTTP.
+#[cfg(test)]
+mod revocation_issuer_tests {
+    use super::*;
+    use crate::cert_manager::CertPaths;
+    use crate::crl::WorkspaceCrlManager;
+    use crate::test_support::{TestPki, TestWorkspaceCa, RELAY_ID};
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const TENANT_A: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const TENANT_B: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+    const REVOKED_SERIAL: &[u8] = &[0x51, 0x01, 0x01, 0x01];
+    const GOOD_SERIAL: &[u8] = &[0x52, 0x02, 0x02, 0x02];
+
+    fn limits() -> RuntimeLimits {
+        RuntimeLimits {
+            max_connections: 16,
+            max_lookup_bridges: 16,
+            max_bidi_streams: 16,
+            idle_timeout: Duration::from_secs(30),
+            // An admitted peer that opens no stream is dropped after this.
+            handshake_timeout: Duration::from_secs(1),
+            message_timeout: Duration::from_secs(1),
+            max_probe_rate: 10,
+            max_concurrent_probes: 4,
+            probe_timeout: Duration::from_secs(1),
+        }
+    }
+
+    /// Workspace ids whose CRL the relay fetched, in order.
+    type Fetched = Arc<std::sync::Mutex<Vec<String>>>;
+
+    /// Serves `/ca.crl?workspace_id=<id>` like the controller: each
+    /// workspace's own CRL, signed by that workspace's CA; 404 otherwise.
+    async fn spawn_crl_server(crls: HashMap<String, Vec<u8>>, fetched: Fetched) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let crls = Arc::new(crls);
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let crls = crls.clone();
+                let fetched = fetched.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buf[..n]);
+                    let workspace = request
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|path| path.split("workspace_id=").nth(1))
+                        .unwrap_or("")
+                        .to_owned();
+                    fetched.lock().unwrap().push(workspace.clone());
+                    let (status, body) = match crls.get(&workspace) {
+                        Some(der) => ("200 OK", der.clone()),
+                        None => ("404 Not Found", Vec::new()),
+                    };
+                    let head = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/pkix-crl\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(&body).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        addr.to_string()
+    }
+
+    /// Starts the production listener; returns its address.
+    async fn start_relay(pki: &TestPki, crl_http: String) -> SocketAddr {
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-s1-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let addr = std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        tokio::spawn(run_listener(
+            addr,
+            manager,
+            RelayState::new(),
+            limits(),
+            WorkspaceCrlManager::new(crl_http),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        addr
+    }
+
+    /// QUIC close reasons the listener uses when it refuses a peer after the
+    /// handshake (identity and revocation gates).
+    const GATE_REJECTIONS: &[&str] = &[
+        "invalid peer identity",
+        "peer certificate revoked",
+        "revocation state unavailable",
+        "revocation context error",
+    ];
+
+    #[derive(Debug, PartialEq)]
+    enum Outcome {
+        /// A gate refused the peer (reason recorded).
+        Rejected(String),
+        /// Every gate passed; the session then closed the idle peer (no first
+        /// stream within `handshake_timeout`) — reason recorded.
+        Admitted(String),
+    }
+
+    /// Connect presenting `chain` (sent as-is; a rustls client does not
+    /// validate its own chain). Panics if the TLS handshake itself fails, so
+    /// an outcome always means "passed path validation".
+    async fn connect(
+        pki: &TestPki,
+        relay: SocketAddr,
+        chain: Vec<CertificateDer<'static>>,
+        key: rcgen::KeyPair,
+    ) -> Outcome {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(
+                rustls_pemfile::certs(&mut pki.ca_pem.as_bytes())
+                    .next()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
+        let mut tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(chain, key)
+            .unwrap();
+        tls.alpn_protocols = vec![tls::RELAY_ALPN.to_vec()];
+        let mut endpoint = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
+        )));
+        let connection = endpoint
+            .connect(relay, "localhost")
+            .unwrap()
+            .await
+            .expect("TLS handshake must succeed: the chain is a valid path");
+        let reason = match tokio::time::timeout(Duration::from_secs(10), connection.closed())
+            .await
+            .expect("relay must close an idle peer within the session timeout")
+        {
+            quinn::ConnectionError::ApplicationClosed(close) => {
+                String::from_utf8_lossy(&close.reason).into_owned()
+            }
+            other => format!("{other}"),
+        };
+        if GATE_REJECTIONS.contains(&reason.as_str()) {
+            Outcome::Rejected(reason)
+        } else {
+            Outcome::Admitted(reason)
+        }
+    }
+
+    struct Setup {
+        pki: TestPki,
+        ca_a: TestWorkspaceCa,
+        ca_b: TestWorkspaceCa,
+        relay: SocketAddr,
+        fetched: Fetched,
+    }
+
+    /// Tenant A's CRL revokes REVOKED_SERIAL; tenant B's CRL revokes nothing.
+    async fn setup() -> Setup {
+        crate::test_support::install_crypto_provider();
+        let pki = TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let ca_b = pki.workspace_ca(TENANT_B);
+        let crls = HashMap::from([
+            (TENANT_A.to_owned(), ca_a.crl(&[REVOKED_SERIAL])),
+            (TENANT_B.to_owned(), ca_b.crl(&[])),
+        ]);
+        let fetched = Fetched::default();
+        let relay = start_relay(&pki, spawn_crl_server(crls, fetched.clone()).await).await;
+        Setup {
+            pki,
+            ca_a,
+            ca_b,
+            relay,
+            fetched,
+        }
+    }
+
+    /// Baseline: the normal chain `[leaf, its CA]` is checked against its own
+    /// workspace's CRL — a good leaf is admitted, a revoked one rejected.
+    #[tokio::test]
+    async fn normal_chain_is_checked_against_its_own_workspace_crl() {
+        let s = setup().await;
+
+        let (good, good_key) = s.ca_a.client_leaf(GOOD_SERIAL);
+        let outcome = connect(&s.pki, s.relay, vec![good, s.ca_a.der()], good_key).await;
+        assert!(
+            matches!(outcome, Outcome::Admitted(_)),
+            "good leaf must pass the revocation gate, got {outcome:?}"
+        );
+
+        let (revoked, revoked_key) = s.ca_a.client_leaf(REVOKED_SERIAL);
+        assert_eq!(
+            connect(&s.pki, s.relay, vec![revoked, s.ca_a.der()], revoked_key).await,
+            Outcome::Rejected("peer certificate revoked".into())
+        );
+        assert_eq!(s.fetched.lock().unwrap().as_slice(), [TENANT_A.to_owned()]);
+    }
+
+    /// S1: a revoked tenant-A leaf presented as `[leaf, tenant B's CA,
+    /// tenant A's CA]`. Path validation ignores the unrelated CA and builds
+    /// leaf -> CA_A -> Intermediate, so the handshake succeeds; the peer must
+    /// still be refused (revoked per tenant A's CRL, or the chain refused),
+    /// and tenant B's CRL must never decide it.
+    ///
+    /// Before the fix `peer_revocation` took chain[1] (tenant B's CA) as the
+    /// issuer, checked tenant B's CRL, and admitted the revoked leaf.
+    #[tokio::test]
+    async fn s1_revoked_leaf_with_foreign_ca_in_chain_is_still_rejected() {
+        let s = setup().await;
+        let (revoked, revoked_key) = s.ca_a.client_leaf(REVOKED_SERIAL);
+        let outcome = connect(
+            &s.pki,
+            s.relay,
+            vec![revoked, s.ca_b.der(), s.ca_a.der()],
+            revoked_key,
+        )
+        .await;
+        let fetched = s.fetched.lock().unwrap().clone();
+        assert!(
+            matches!(outcome, Outcome::Rejected(_)) && !fetched.iter().any(|w| w == TENANT_B),
+            "revoked tenant-A leaf: {outcome:?} after a successful handshake; CRLs fetched \
+             for the check: {fetched:?} (tenant A = {TENANT_A}, tenant B = {TENANT_B})"
+        );
+    }
+}

@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/valkey-io/valkey-go"
 	"github.com/valkey-io/valkey-go/valkeycompat"
+	"github.com/yourorg/ztna/controller/internal/valkeyurl"
 )
 
 type valkeyClient struct {
@@ -16,13 +16,14 @@ type valkeyClient struct {
 }
 
 func newValkeyClient(url string) (*valkeyClient, error) {
-	addr, err := parseValkeyAddr(url)
+	opts, err := valkeyurl.Parse(url)
 	if err != nil {
 		return nil, fmt.Errorf("parse valkey URL: %w", err)
 	}
 
 	client, err := valkey.NewClient(valkey.ClientOption{
-		InitAddress:  []string{addr},
+		InitAddress:  []string{opts.Addr},
+		SelectDB:     opts.DB,
 		DisableCache: true,
 	})
 	if err != nil {
@@ -37,17 +38,6 @@ func newValkeyClient(url string) (*valkeyClient, error) {
 
 	rdb := valkeycompat.NewAdapter(client)
 	return &valkeyClient{rdb: rdb}, nil
-}
-
-func parseValkeyAddr(rawURL string) (string, error) {
-	after, found := strings.CutPrefix(rawURL, "redis://")
-	if !found {
-		return "", fmt.Errorf("expected redis:// URL, got: %s", rawURL)
-	}
-	if idx := strings.LastIndex(after, "@"); idx != -1 {
-		after = after[idx+1:]
-	}
-	return after, nil
 }
 
 // PKCEState is the login scratchpad stored in Redis between the IdP redirect and

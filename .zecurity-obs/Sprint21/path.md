@@ -267,13 +267,13 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 
 > See [[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]].
 
-- [ ] **M2-K1** KI-1: fix relay renewal scheduling for the backdated `NotBefore` (Rust relay). Choose the option at phase start.
-- [ ] **M2-K2** KI-2: wire the shield renewal window to the connector; add a shield-side debounce and a per-shield `ReEnroll` throttle on the connector.
-- [ ] **M2-K3** KI-3: resolved by removal. Phase H deletes the provider Google login and `PROVIDER_GOOGLE_REDIRECT_URI` (D-24); confirm and close KI-3.
-- [ ] **M2-K4** Remove committed JWTs and install commands containing tokens from `controller/.env.example`; add a CI grep guard.
-- [ ] **M2-K5** Minor: stale "every 5 minutes" comment in `connector/src/crl.rs:30`.
-- [ ] **M2-K6** Pre-existing test defect (found in H-a): `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` **silently skips in CI** (the helper can't parse the `/15` in `AUTH_TEST_VALKEY_URL`); when forced to run it fails (a hard-coded schema list misses `subject_claim`) and `FlushDB`s Valkey db 0. Fix the URL parsing (and fail instead of skip), apply all schema files, drop `FlushDB`, and make CI flag the skip.
-- [ ] **M2-K7** Tests + build gate (relay, connector, shield, controller).
+- [x] **M2-K1** KI-1: fix relay renewal scheduling for the backdated `NotBefore` (Rust relay). Choose the option at phase start. *(Option A, install-time metadata: `7fb0fb7`; test safety `fd8b6d7`)*
+- [x] **M2-K2** KI-2: wire the shield renewal window to the connector; add a shield-side debounce and a per-shield `ReEnroll` throttle on the connector. *(Option A, `AgentPolicy` field 18 with the controller-clamped window: `2c3dda0`; tests `657fdd0`)*
+- [x] **M2-K3** KI-3: resolved by removal. Phase H deletes the provider Google login and `PROVIDER_GOOGLE_REDIRECT_URI` (D-24); confirm and close KI-3.
+- [x] **M2-K4** Remove committed JWTs and install commands containing tokens from `controller/.env.example`; add a CI grep guard. *(`8e55a36`)*
+- [x] **M2-K5** Minor: stale "every 5 minutes" comment in `connector/src/crl.rs:30`. *(`8e55a36`)*
+- [x] **M2-K6** Pre-existing test defect (found in H-a): `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` **silently skips in CI** (the helper can't parse the `/15` in `AUTH_TEST_VALKEY_URL`); when forced to run it fails (a hard-coded schema list misses `subject_claim`) and `FlushDB`s Valkey db 0. Fix the URL parsing (and fail instead of skip), apply all schema files, drop `FlushDB`, and make CI flag the skip. *(`411e216`; also fixes the same `/db` bug in the production Valkey clients)*
+- [x] **M2-K7** Tests + build gate (relay, connector, shield, controller). *(2026-10-09: controller `go test ./...` CI-style 1047 pass / 32 pre-existing skips; relay 90, connector 132, shield 19, client 157 pass; `buf breaking` clean; mutation checks caught)*
 
 ### DEV-1 — Database development guide (M2, lands with M2-H)
 
@@ -350,3 +350,12 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 - **Phase H-a: dummy-hash failure was cached for the process lifetime** (found before the PR, while writing the login capacity test). `VerifyDummy` built its dummy Argon2id hash lazily through the hashing semaphore and cached the result. Under a login flood with all slots busy, the build failed and `ErrHashBusy` was cached, so every later unknown-email login returned 503. It's now a precomputed constant (commit `a3fca4a`). Details: [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]] → Post-Phase Fixes.
 - **Known existing issue (not from H-a), tracked as M2-K6:** `internal/auth` `TestAuthIntegration_LoginBootstrapAndJWTIssue` never runs in CI (the `/15` Valkey URL isn't parsed, so it skips). When forced, it fails (a hard-coded schema list misses `subject_claim`) and `FlushDB`s dev Valkey db 0.
 - **CI on #104 exposed two latent defects** when H-a's `go.mod` change invalidated the Go test cache: `internal/resource` relied on a pre-provisioned schema (masked by `(cached)`), and `internal/outbox` had a shutdown race plus a shutdown hang. Both are fixed independently in PR #105.
+- **Phase K: S1, relay revocation bypass (security)**, found by the 2026-10-09 certificate lifecycle audit. The relay checked a peer's revocation against the CRL of whatever CA the peer put at `chain[1]`, without checking that CA issued the leaf, so a revoked leaf presented with another workspace's CA was admitted. Fixed in `735d485` (`chain[1]` must be the issuer: name and signature; otherwise fail closed); regression test `276fb4f`. Details: [[Sprint21/Member2-Go-Rust/Phase3-Sprint20-Cleanup]] → Post-Phase Fixes.
+- **Phase K test-safety follow-ups:** `fd8b6d7` (relay scheduler tests can't hang CI), `657fdd0` (K2 debounce-across-reconnect and throttle-after-send covered).
+- **Open findings from the 2026-10-09 certificate lifecycle audit (not fixed; need scheduling):**
+  - CRL `thisUpdate` has no clock-skew backdate (`pki/relay_crl.go`, `pki/workspace.go`); agents whose clock runs behind reject CRLs and fail closed.
+  - Client: a renewed device cert is not applied to an already-running tunnel (`client/src/daemon.rs` `attempt_cert_renewal`); access can fail after the old cert expires.
+  - Connector: the controller's renewal trigger reads the DB `cert_not_after`, not the presented cert, so a lost or rejected `RenewCert` reply is never retried.
+  - Relay provisioning writes key, cert and CA non-atomically (`relay/src/provision.rs` `store`).
+  - No validation that `CONNECTOR_RENEWAL_WINDOW` < `CONNECTOR_CERT_TTL` (window ≥ TTL renews every 10 min).
+  - **Architectural (needs a decision):** no CA renewal or rotation (workspace CA 2 y, intermediate 5 y); leaf `NotAfter` not clamped to the issuer; relays pin the intermediate by full-certificate hash.

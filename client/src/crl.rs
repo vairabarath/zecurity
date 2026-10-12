@@ -170,9 +170,7 @@ fn validate_crl(
         .next_update()
         .ok_or_else(|| anyhow::anyhow!("CRL is missing nextUpdate"))?
         .timestamp();
-    if this_update > now || next_update <= this_update || now >= next_update {
-        anyhow::bail!("CRL validity window is not current");
-    }
+    check_update_times(this_update, next_update, now)?;
 
     Ok(ValidCrl {
         revoked: crl
@@ -183,12 +181,110 @@ fn validate_crl(
     })
 }
 
+/// The CRL must be current: thisUpdate <= now < nextUpdate, with nextUpdate
+/// after thisUpdate. No clock-skew allowance here; the controller backdates
+/// thisUpdate by 5 min instead (Sprint 21 B4).
+fn check_update_times(this_update: i64, next_update: i64, now: i64) -> anyhow::Result<()> {
+    if this_update > now || next_update <= this_update || now >= next_update {
+        anyhow::bail!("CRL validity window is not current");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A CA and a CRL it signs for the fixed window [this_update, next_update]
+    /// (calendar dates, so the result does not depend on the test clock).
+    fn signed_crl(this_update: (i32, u8, u8), next_update: (i32, u8, u8)) -> (Vec<u8>, String) {
+        use rcgen::{
+            date_time_ymd, BasicConstraints, CertificateParams, CertificateRevocationListParams,
+            IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose, SerialNumber,
+        };
+        const KEY_ID: &[u8] = b"client-crl-test-kid";
+        let key = KeyPair::generate().unwrap();
+        let mut ca = CertificateParams::default();
+        ca.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca.key_identifier_method = KeyIdMethod::PreSpecified(KEY_ID.to_vec());
+        let ca = ca.self_signed(&key).unwrap();
+        let crl = CertificateRevocationListParams {
+            this_update: date_time_ymd(this_update.0, this_update.1, this_update.2),
+            next_update: date_time_ymd(next_update.0, next_update.1, next_update.2),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![],
+            key_identifier_method: KeyIdMethod::PreSpecified(KEY_ID.to_vec()),
+        }
+        .signed_by(&ca, &key)
+        .unwrap();
+        (crl.der().to_vec(), ca.pem())
+    }
+
+    fn validate(der: &[u8], ca_pem: &str) -> anyhow::Result<ValidCrl> {
+        let (_, crl) = parse_x509_crl(der).unwrap();
+        validate_crl(&crl, ca_pem.as_bytes())
+    }
+
+    /// validate_crl enforces the time window on real signed CRLs: current is
+    /// accepted, expired and future-dated are rejected.
+    #[test]
+    fn validate_crl_enforces_the_update_window() {
+        let (der, ca) = signed_crl((2000, 1, 1), (2999, 1, 1));
+        assert!(validate(&der, &ca).is_ok(), "current CRL must be accepted");
+        let (der, ca) = signed_crl((2000, 1, 1), (2001, 1, 1));
+        assert!(validate(&der, &ca).is_err(), "expired CRL must be rejected");
+        let (der, ca) = signed_crl((2998, 1, 1), (2999, 1, 1));
+        assert!(
+            validate(&der, &ca).is_err(),
+            "future-dated CRL must be rejected"
+        );
+    }
+
     #[test]
     fn cold_boot_has_no_valid_cache() {
         assert!(!CrlManager::new().has_valid_cache());
+    }
+
+    // ---- Sprint 21 B4: CRLs as the controller now signs them ----------------
+
+    /// The controller's CRL window: thisUpdate = signing time − 5 min,
+    /// nextUpdate = signing time + validity (controller/internal/pki crlWindow).
+    const CONTROLLER_BACKDATE_SECS: i64 = 5 * 60;
+    const CONSUMER_NOW: i64 = 1_791_441_726;
+
+    fn controller_crl(signed_at: i64, validity: i64) -> (i64, i64) {
+        (signed_at - CONTROLLER_BACKDATE_SECS, signed_at + validity)
+    }
+
+    #[test]
+    fn controller_clock_up_to_five_minutes_ahead_is_accepted() {
+        for ahead in [
+            0,
+            1,
+            5,
+            60,
+            CONTROLLER_BACKDATE_SECS - 1,
+            CONTROLLER_BACKDATE_SECS,
+        ] {
+            let (this_update, next_update) = controller_crl(CONSUMER_NOW + ahead, 600);
+            assert!(
+                check_update_times(this_update, next_update, CONSUMER_NOW).is_ok(),
+                "controller {ahead}s ahead"
+            );
+        }
+    }
+
+    #[test]
+    fn crls_outside_the_tolerance_or_window_are_still_rejected() {
+        let (this_update, next_update) =
+            controller_crl(CONSUMER_NOW + CONTROLLER_BACKDATE_SECS + 1, 600);
+        assert!(check_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        let (this_update, next_update) = controller_crl(CONSUMER_NOW - 600, 600);
+        assert!(check_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        let (this_update, next_update) = controller_crl(CONSUMER_NOW - 86_400, 600);
+        assert!(check_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        assert!(check_update_times(CONSUMER_NOW - 300, CONSUMER_NOW - 300, CONSUMER_NOW).is_err());
     }
 }

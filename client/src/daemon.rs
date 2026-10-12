@@ -138,12 +138,14 @@ pub async fn run() -> Result<()> {
     // Proactive device-cert renewal loop (Sprint 19 Track 3 / PENDING-13,
     // ADR-028 D1). Sibling to run_refresh_scheduler — cert renewal (days-long
     // TTL) and token refresh (minutes-long TTL) are on completely different
-    // clocks. No tun_slot needed: renewal never touches tunnels.
+    // clocks. Gets tun_slot so a successful renewal can restart a running
+    // tunnel onto the new certificate (Sprint 21 B1).
     {
         let state_clone = Arc::clone(&state);
         let conf_clone = conf.clone();
+        let tun_slot_clone = Arc::clone(&tun_slot);
         tokio::spawn(async move {
-            run_cert_renewal_scheduler(state_clone, conf_clone).await;
+            run_cert_renewal_scheduler(state_clone, conf_clone, tun_slot_clone).await;
         });
     }
     let socket_path = ipc_socket_path();
@@ -1119,8 +1121,10 @@ where
 /// True when the running tunnel has a pending TransportOnly change that was
 /// not applied (e.g. a transport-map build failed — D2). The 60 s sync tick
 /// uses this to retry even when no snapshot version changed. Structural
-/// pendings (e.g. a renewed device cert) are deliberately NOT retried here —
-/// Phase 1 behaviour (wait for the next version bump) is preserved for them.
+/// pendings are deliberately NOT retried here — Phase 1 behaviour (wait for
+/// the next version bump) is preserved for them. A renewed device cert is the
+/// exception handled elsewhere: the renewal scheduler restarts the tunnel
+/// itself (renew_and_apply_to_tunnel, Sprint 21 B1).
 async fn transport_apply_pending(state: &SharedState) -> bool {
     let s = state.read().await;
     let Some(handle) = s.tun_handle.as_ref() else {
@@ -4473,12 +4477,17 @@ fn jittered_sleep_secs(sleep_secs: u64) -> u64 {
 ///   - Re-check device/device_state after waking — it may have changed
 ///     during the sleep.
 ///   - On success: update in-memory state AND persist via
-///     state_store::save_renewed_cert.
+///     state_store::save_renewed_cert, then restart a running tunnel so it
+///     presents the new certificate (renew_and_apply_to_tunnel, B1).
 ///   - On failure: warn and retry after a flat backoff. Deliberately does
 ///     NOT react to a denial by wiping/exiting — that is exclusively
 ///     react_to_device_directive's job via the ACL poll. This loop's only
 ///     job is renewing; it never touches DeviceState itself.
-async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf) {
+async fn run_cert_renewal_scheduler(
+    state: SharedState,
+    conf: config::ClientConf,
+    tun_slot: TunSlot,
+) {
     const NO_DEVICE_POLL_SECS: u64 = 60;
     const RENEWAL_RETRY_SECS: u64 = 30;
 
@@ -4533,9 +4542,10 @@ async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf
             continue;
         }
 
-        if let Err(e) = attempt_cert_renewal(
+        if let Err(e) = scheduled_cert_renewal(
             &state,
             &conf,
+            &tun_slot,
             &device_id,
             &private_key_pem,
             tpm_key_material.as_deref(),
@@ -4548,6 +4558,85 @@ async fn run_cert_renewal_scheduler(state: SharedState, conf: config::ClientConf
             tokio::time::sleep(std::time::Duration::from_secs(RENEWAL_RETRY_SECS)).await;
         }
     }
+}
+
+/// The scheduler's renewal attempt with its production restart operation:
+/// restart_tunnel_if_running on this daemon's tunnel slot (Sprint 21 B1).
+/// Split out of run_cert_renewal_scheduler, which keeps only the timing and
+/// eligibility logic, so this wiring is directly testable.
+#[allow(clippy::too_many_arguments)]
+async fn scheduled_cert_renewal(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    tun_slot: &TunSlot,
+    device_id: &str,
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+    ca_pem: &str,
+) -> Result<()> {
+    renew_and_apply_to_tunnel(
+        state,
+        conf,
+        device_id,
+        private_key_pem,
+        tpm_key_material,
+        hostname,
+        ca_pem,
+        || restart_tunnel_if_running(state, conf, tun_slot),
+    )
+    .await
+}
+
+/// One scheduler renewal step (Sprint 21 B1): renew the device certificate,
+/// then bring an already-running tunnel onto it.
+///
+/// The connection pools copy the certificate when the tunnel starts
+/// (handle_up), so before B1 a running tunnel kept presenting the old
+/// certificate until something else restarted it — on a quiet workspace,
+/// until that certificate expired. `restart` is restart_tunnel_if_running in
+/// production: a no-op when no tunnel is running; otherwise the renewed
+/// certificate makes the running config Structural, so the restart
+/// coordinator does one full down/up and handle_up rebuilds the pools from the
+/// renewed certificate. Concurrent restart requests share one pass, and a
+/// request after the tunnel already uses the new certificate is NoChange.
+///
+/// A failed renewal returns its error without restarting (the old certificate
+/// stays in use). A failed restart is logged, not returned: the certificate is
+/// already renewed and saved and must not be renewed again for it.
+#[allow(clippy::too_many_arguments)]
+async fn renew_and_apply_to_tunnel<F, Fut>(
+    state: &SharedState,
+    conf: &config::ClientConf,
+    device_id: &str,
+    private_key_pem: &str,
+    tpm_key_material: Option<&str>,
+    hostname: &str,
+    ca_pem: &str,
+    restart: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    attempt_cert_renewal(
+        state,
+        conf,
+        device_id,
+        private_key_pem,
+        tpm_key_material,
+        hostname,
+        ca_pem,
+    )
+    .await?;
+    if let Err(e) = restart().await {
+        warn!(
+            error = %e,
+            "device cert renewed, but restarting the running tunnel onto it failed; \
+             the next restart will pick it up"
+        );
+    }
+    Ok(())
 }
 
 /// One renewal attempt: build the CSR, call RenewCert, persist + update state
@@ -6560,5 +6649,462 @@ mod renewal_tests {
         assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
         // The key never changes on renewal — that's the whole point of D-A.
         assert_eq!(on_disk.device.private_key_pem, private_key_pem);
+    }
+
+    // ---- Sprint 21 B1: a renewed cert reaches an already-running tunnel ----------
+
+    const OLD_CERT: &str = "OLD-CERT";
+    const RENEWED_CERT: &str = "FAKE-RENEWED-CERT";
+
+    /// A daemon with an enrolled device (cert OLD-CERT, persisted) and a
+    /// session, talking to the fake controller over real TLS. The fake only
+    /// renews `server_device_id`, so a different id makes renewal fail.
+    struct RenewalFixture {
+        _dir: tempfile::TempDir,
+        state: SharedState,
+        conf: config::ClientConf,
+        ca_pem: String,
+        device_id: String,
+        private_key_pem: String,
+    }
+
+    async fn renewal_fixture(server_device_id: &str) -> RenewalFixture {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let cert_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let ca_pem = cert_key.cert.pem();
+        let server_identity = tonic::transport::Identity::from_pem(
+            cert_key.cert.pem(),
+            cert_key.key_pair.serialize_pem(),
+        );
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let expected_device_id = server_device_id.to_string();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .tls_config(tonic::transport::ServerTlsConfig::new().identity(server_identity))
+                .unwrap()
+                .add_service(
+                    crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
+                        FakeRenewCertServer { expected_device_id },
+                    ),
+                )
+                .serve(addr)
+                .await
+                .unwrap();
+        });
+        // Wait until the fake controller accepts connections (no fixed sleep).
+        for _ in 0..200 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let conf = config::ClientConf {
+            workspace: "ws-b1-renewal".into(),
+            controller_address: format!("localhost:{}", addr.port()),
+            ..Default::default()
+        };
+        let device_id = "device-b1".to_string();
+        let private_key_pem = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)
+            .unwrap()
+            .serialize_pem();
+        state_store::save_workspace_state(
+            &conf.workspace,
+            &state_store::StoredWorkspaceState {
+                device: state_store::StoredDevice {
+                    id: device_id.clone(),
+                    certificate_pem: OLD_CERT.into(),
+                    private_key_pem: private_key_pem.clone(),
+                    cert_expires_at: 1_000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .expect("seed state file");
+
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(DeviceInfo {
+                id: device_id.clone(),
+                spiffe_id: "spiffe://example.test/device-b1".into(),
+                certificate_pem: OLD_CERT.into(),
+                private_key_pem: private_key_pem.clone(),
+                tpm_key_material: None,
+                ca_cert_pem: "OLD-CA".into(),
+                cert_expires_at: 1_000,
+                hostname: "b1-host".into(),
+                os: "linux".into(),
+            });
+            s.session = Some(SessionInfo {
+                access_token: "fake-access-token".into(),
+                refresh_token: "fake-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+        RenewalFixture {
+            _dir: dir,
+            state,
+            conf,
+            ca_pem,
+            device_id,
+            private_key_pem,
+        }
+    }
+
+    impl RenewalFixture {
+        async fn renew<F, Fut>(&self, restart: F) -> Result<()>
+        where
+            F: FnOnce() -> Fut,
+            Fut: std::future::Future<Output = Result<()>>,
+        {
+            renew_and_apply_to_tunnel(
+                &self.state,
+                &self.conf,
+                &self.device_id,
+                &self.private_key_pem,
+                None,
+                "b1-host",
+                &self.ca_pem,
+                restart,
+            )
+            .await
+        }
+    }
+
+    /// The receivers standing in for a running net_stack (kept alive for the
+    /// test so the data plane looks alive).
+    type NetStackStub = (
+        tokio::sync::watch::Receiver<Arc<net_stack::TransportMap>>,
+        tokio::sync::mpsc::Receiver<net_stack::ResourceCmd>,
+    );
+
+    /// Mark a tunnel as running, built (like handle_up) from the current
+    /// device.
+    async fn start_tunnel(state: &SharedState) -> NetStackStub {
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new()));
+        let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(8);
+        let mut s = state.write().await;
+        let acl = AclSnapshot::default();
+        let applied = effective_config(&acl, None, s.device.as_ref().unwrap());
+        s.acl_snapshot = Some(acl);
+        s.tun_handle = Some(Arc::new(TunHandle {
+            abort: tokio::spawn(std::future::pending::<()>()).abort_handle(),
+            route_count: 0,
+            applied,
+            transport_tx: Arc::new(tx),
+            resource_tx: Arc::new(resource_tx),
+        }));
+        (rx, resource_rx)
+    }
+
+    /// Records each full restart (down→up) and the certificate the new
+    /// tunnel was built with.
+    #[derive(Clone, Default)]
+    struct Restarts(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Restarts {
+        fn certs(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// restart_tunnel_if_running with only the TUN work faked: the real
+    /// restart coordinator and the real Fix 01 decision run; the full
+    /// down→up is replaced by what handle_up does to the state — rebuild from
+    /// the CURRENT device and record the applied config.
+    async fn restart_with_fake_tun(state: SharedState, restarts: Restarts) -> Result<()> {
+        let coordinator = { state.read().await.tunnel_restart.clone() };
+        let work = move || {
+            let state = state.clone();
+            let restarts = restarts.clone();
+            async move {
+                run_restart_decision(
+                    &state,
+                    |_, _, _, _, _| {
+                        panic!("a renewed certificate is never a transport-only change")
+                    },
+                    // A renewed certificate is Structural: no resource hot-apply,
+                    // so the kernel is never touched (and no TUN exists here).
+                    &Mutex::new(None::<crate::tun::TunManager>),
+                    || async {
+                        let mut s = state.write().await;
+                        let device = s.device.clone().unwrap();
+                        let applied =
+                            effective_config(s.acl_snapshot.as_ref().unwrap(), None, &device);
+                        let handle = s.tun_handle.as_ref().unwrap();
+                        s.tun_handle = Some(Arc::new(TunHandle {
+                            abort: handle.abort.clone(),
+                            route_count: handle.route_count,
+                            applied,
+                            transport_tx: handle.transport_tx.clone(),
+                            resource_tx: handle.resource_tx.clone(),
+                        }));
+                        restarts.0.lock().unwrap().push(device.certificate_pem);
+                        Ok(())
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+        };
+        register_restart_request(&coordinator, work)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    async fn applied_cert(state: &SharedState) -> String {
+        state
+            .read()
+            .await
+            .tun_handle
+            .as_ref()
+            .unwrap()
+            .applied
+            .certificate_pem
+            .clone()
+    }
+
+    /// Renewal with a running tunnel → exactly one restart, and the restarted
+    /// tunnel is built from the renewed certificate (not the old pool copy).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn renewal_restarts_a_running_tunnel_once_onto_the_new_certificate() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let _net_stack = start_tunnel(&f.state).await;
+        assert_eq!(applied_cert(&f.state).await, OLD_CERT);
+
+        let restarts = Restarts::default();
+        f.renew(|| restart_with_fake_tun(f.state.clone(), restarts.clone()))
+            .await
+            .expect("renewal succeeds");
+
+        assert_eq!(
+            restarts.certs(),
+            vec![RENEWED_CERT.to_string()],
+            "exactly one restart, with the new cert"
+        );
+        assert_eq!(applied_cert(&f.state).await, RENEWED_CERT);
+        // Persisted too, before the restart used it.
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, RENEWED_CERT);
+    }
+
+    /// Repeated or concurrent restart requests after a renewal (the renewal's
+    /// own, an ACL tick, a RENEW_SOON wake-up) restart the tunnel only once.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn repeated_restart_requests_after_renewal_restart_only_once() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let _net_stack = start_tunnel(&f.state).await;
+        let restarts = Restarts::default();
+
+        f.renew(|| async {
+            let (a, b) = tokio::join!(
+                restart_with_fake_tun(f.state.clone(), restarts.clone()),
+                restart_with_fake_tun(f.state.clone(), restarts.clone()),
+            );
+            a.and(b)
+        })
+        .await
+        .expect("renewal succeeds");
+        restart_with_fake_tun(f.state.clone(), restarts.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(restarts.certs(), vec![RENEWED_CERT.to_string()]);
+    }
+
+    /// No tunnel running → the real restart_tunnel_if_running does nothing:
+    /// no tunnel is started.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn renewal_without_a_running_tunnel_starts_nothing() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+
+        f.renew(|| restart_tunnel_if_running(&f.state, &f.conf, &tun_slot))
+            .await
+            .expect("renewal succeeds");
+
+        assert!(tun_slot.lock().await.is_none(), "no tunnel was started");
+        let s = f.state.read().await;
+        assert!(s.tun_handle.is_none());
+        assert_eq!(s.device.as_ref().unwrap().certificate_pem, RENEWED_CERT);
+    }
+
+    /// A failed renewal neither restarts the tunnel nor touches the current,
+    /// still-valid certificate (in memory or on disk).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn failed_renewal_neither_restarts_nor_replaces_the_certificate() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("some-other-device").await; // controller refuses ours
+        let _net_stack = start_tunnel(&f.state).await;
+        let restarts = Restarts::default();
+
+        let requested = std::sync::atomic::AtomicUsize::new(0);
+        let result = f
+            .renew(|| {
+                requested.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                restart_with_fake_tun(f.state.clone(), restarts.clone())
+            })
+            .await;
+
+        assert!(result.is_err(), "renewal must fail");
+        assert_eq!(
+            requested.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no restart may even be requested after a failed renewal"
+        );
+        assert!(
+            restarts.certs().is_empty(),
+            "no restart after a failed renewal"
+        );
+        assert_eq!(applied_cert(&f.state).await, OLD_CERT);
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            OLD_CERT
+        );
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, OLD_CERT);
+    }
+
+    // ---- B1 follow-up: the scheduler's own renewal→restart wiring ---------------
+
+    /// Mark a restart pass as already running, so every real
+    /// restart_tunnel_if_running request queues in `pending` (waiting for an
+    /// answer) instead of running: requests become countable.
+    async fn hold_restart_coordinator(state: &SharedState) {
+        state.read().await.tunnel_restart.lock().await.running = true;
+    }
+
+    async fn queued_restart_requests(state: &SharedState) -> usize {
+        state.read().await.tunnel_restart.lock().await.pending.len()
+    }
+
+    /// Answer every queued restart request with success (keeping the pass
+    /// "running", so a later request would queue and be counted too).
+    async fn answer_restart_requests(state: &SharedState) {
+        let waiters = std::mem::take(&mut state.read().await.tunnel_restart.lock().await.pending);
+        for waiter in waiters {
+            let _ = waiter.send(Ok(()));
+        }
+    }
+
+    /// Wait (bounded) for a scheduled renewal attempt to finish. An attempt
+    /// still running after 5 s is blocked on an unanswered restart request,
+    /// i.e. it requested a restart it should not have: fail, don't hang.
+    async fn finish(state: &SharedState, task: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+            Ok(joined) => joined.unwrap(),
+            Err(_) => panic!(
+                "renewal attempt did not finish: blocked on {} unexpected restart request(s)",
+                queued_restart_requests(state).await
+            ),
+        }
+    }
+
+    fn spawn_scheduled_renewal(f: &RenewalFixture) -> tokio::task::JoinHandle<Result<()>> {
+        let (state, conf) = (f.state.clone(), f.conf.clone());
+        let (device_id, key, ca) = (
+            f.device_id.clone(),
+            f.private_key_pem.clone(),
+            f.ca_pem.clone(),
+        );
+        tokio::spawn(async move {
+            let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+            scheduled_cert_renewal(
+                &state, &conf, &tun_slot, &device_id, &key, None, "b1-host", &ca,
+            )
+            .await
+        })
+    }
+
+    /// A successful scheduled renewal issues exactly one real
+    /// restart_tunnel_if_running request, after the new cert is in place.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn scheduled_renewal_requests_exactly_one_tunnel_restart() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("device-b1").await;
+        hold_restart_coordinator(&f.state).await;
+
+        let task = spawn_scheduled_renewal(&f);
+        let mut waited = 0;
+        while queued_restart_requests(&f.state).await == 0 {
+            assert!(
+                waited < 500,
+                "the scheduler never requested a tunnel restart"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            waited += 1;
+        }
+        assert_eq!(queued_restart_requests(&f.state).await, 1);
+        // The request comes after the renewed cert is in memory and on disk.
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            RENEWED_CERT
+        );
+        let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
+        assert_eq!(on_disk.device.certificate_pem, RENEWED_CERT);
+
+        answer_restart_requests(&f.state).await;
+        finish(&f.state, task)
+            .await
+            .expect("scheduled renewal succeeds");
+        // The attempt is over: any further (duplicate) request would be queued.
+        assert_eq!(
+            queued_restart_requests(&f.state).await,
+            0,
+            "exactly one restart request"
+        );
+    }
+
+    /// A failed scheduled renewal issues no restart request.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // STATE_DIR_GUARD serializes the process-wide ZECURITY_STATE_DIR for the whole test
+    async fn failed_scheduled_renewal_requests_no_tunnel_restart() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let f = renewal_fixture("some-other-device").await; // controller refuses ours
+        hold_restart_coordinator(&f.state).await;
+
+        let result = finish(&f.state, spawn_scheduled_renewal(&f)).await;
+
+        assert!(result.is_err(), "renewal must fail");
+        assert_eq!(
+            queued_restart_requests(&f.state).await,
+            0,
+            "no restart request after a failed renewal"
+        );
+        assert_eq!(
+            f.state
+                .read()
+                .await
+                .device
+                .as_ref()
+                .unwrap()
+                .certificate_pem,
+            OLD_CERT
+        );
     }
 }

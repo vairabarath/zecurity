@@ -337,6 +337,41 @@ mod tests {
         );
     }
 
+    // B4 end to end: a CRL signed by a controller whose clock is 60 s ahead
+    // (thisUpdate = its now − 5 min) is accepted and enforced; one whose
+    // thisUpdate is genuinely in the future still fails closed.
+    #[tokio::test]
+    async fn controller_ahead_within_tolerance_is_enforced_beyond_fails_closed() {
+        install_provider();
+        let (key, ca) = workspace_ca("ws-ca-a");
+        let controller_now = OffsetDateTime::now_utc() + TimeDuration::seconds(60);
+        let der = signed_crl(
+            &key,
+            &ca,
+            REVOKED_SERIAL,
+            controller_now - TimeDuration::minutes(5),
+            controller_now + TimeDuration::minutes(10),
+        );
+        let mgr = WorkspaceCrlManager::new(spawn_http(der, "200 OK").await);
+        assert_eq!(
+            mgr.check(WS, REVOKED_SERIAL, ca.der().as_ref()).await,
+            RevocationStatus::Revoked
+        );
+
+        let future = signed_crl(
+            &key,
+            &ca,
+            REVOKED_SERIAL,
+            OffsetDateTime::now_utc() + TimeDuration::seconds(60),
+            OffsetDateTime::now_utc() + TimeDuration::minutes(10),
+        );
+        let mgr = WorkspaceCrlManager::new(spawn_http(future, "200 OK").await);
+        assert_eq!(
+            mgr.check(WS, REVOKED_SERIAL, ca.der().as_ref()).await,
+            RevocationStatus::Unavailable
+        );
+    }
+
     // Cold cache + a failing fetch (404) must fail closed.
     #[tokio::test]
     async fn http_error_fails_closed() {
@@ -400,6 +435,61 @@ mod tests {
         assert_eq!(
             mgr.check(WS, REVOKED_SERIAL, ca.der().as_ref()).await,
             RevocationStatus::Unavailable
+        );
+    }
+
+    // ---- Sprint 21 B4: CRLs as the controller now signs them ----------------
+
+    /// The controller's CRL window: thisUpdate = signing time − 5 min,
+    /// nextUpdate = signing time + validity (controller/internal/pki crlWindow).
+    const CONTROLLER_BACKDATE_SECS: i64 = 5 * 60;
+    const CONSUMER_NOW: i64 = 1_791_441_726;
+
+    fn controller_crl(signed_at: i64, validity: i64) -> (i64, Option<i64>) {
+        (
+            signed_at - CONTROLLER_BACKDATE_SECS,
+            Some(signed_at + validity),
+        )
+    }
+
+    #[test]
+    fn controller_clock_up_to_five_minutes_ahead_is_accepted() {
+        for ahead in [
+            0,
+            1,
+            5,
+            60,
+            CONTROLLER_BACKDATE_SECS - 1,
+            CONTROLLER_BACKDATE_SECS,
+        ] {
+            for validity in [600, 86_400] {
+                let (this_update, next_update) = controller_crl(CONSUMER_NOW + ahead, validity);
+                assert_eq!(
+                    validate_update_times(this_update, next_update, CONSUMER_NOW).unwrap(),
+                    CONSUMER_NOW + ahead + validity,
+                    "controller {ahead}s ahead, validity {validity}s"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn crls_outside_the_tolerance_or_window_are_still_rejected() {
+        // Controller more than 5 min ahead: thisUpdate is in the future.
+        let (this_update, next_update) =
+            controller_crl(CONSUMER_NOW + CONTROLLER_BACKDATE_SECS + 1, 600);
+        assert!(validate_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        // Signed 10 min ago with a 10 min validity: expired at exactly nextUpdate.
+        let (this_update, next_update) = controller_crl(CONSUMER_NOW - 600, 600);
+        assert!(validate_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        // Long past nextUpdate.
+        let (this_update, next_update) = controller_crl(CONSUMER_NOW - 86_400, 600);
+        assert!(validate_update_times(this_update, next_update, CONSUMER_NOW).is_err());
+        // No nextUpdate, or nextUpdate not after thisUpdate.
+        assert!(validate_update_times(CONSUMER_NOW - 300, None, CONSUMER_NOW).is_err());
+        assert!(
+            validate_update_times(CONSUMER_NOW - 300, Some(CONSUMER_NOW - 300), CONSUMER_NOW)
+                .is_err()
         );
     }
 }

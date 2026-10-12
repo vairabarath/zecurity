@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 use tokio::sync::mpsc;
+// Tokio's clock (identical to std's unless a test pauses time).
 use tokio::time::interval;
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
 use tracing::{error, info, warn};
@@ -26,17 +28,81 @@ use crate::{renewal, resources, tls, util};
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
 const HEALTH_INTERVAL_SECS: u64 = 15;
+/// Ignore a ReEnroll this soon after a successful renewal (Sprint 21 K2).
+/// After renewing, the Shield reconnects and its first health report may
+/// still be answered with ReEnroll by a connector that has not seen the new
+/// certificate yet; that duplicate must not trigger another renewal.
+const REENROLL_DEBOUNCE: Duration = Duration::from_secs(60);
+
+/// When this process last renewed its certificate successfully. Owned by the
+/// reconnect loop, so it survives the reconnect that follows a renewal.
+#[derive(Debug, Default)]
+struct RenewalDebounce {
+    last_success: Option<Instant>,
+}
+
+impl RenewalDebounce {
+    /// True while a ReEnroll should be ignored.
+    fn suppresses(&self, now: Instant) -> bool {
+        matches!(self.last_success, Some(at) if now.saturating_duration_since(at) < REENROLL_DEBOUNCE)
+    }
+
+    fn record_success(&mut self, now: Instant) {
+        self.last_success = Some(now);
+    }
+}
 
 pub async fn run_control_stream(
     state: ShieldState,
     cfg: ShieldConfig,
     resource_state: Arc<SharedResourceState>,
 ) -> Result<()> {
+    reconnect_loop(
+        state,
+        LiveSession {
+            cfg,
+            resource_state,
+        },
+    )
+    .await
+}
+
+/// One Control-stream connection: run until the stream ends.
+trait ControlSession {
+    fn run(
+        &mut self,
+        state: &mut ShieldState,
+        debounce: &mut RenewalDebounce,
+    ) -> impl std::future::Future<Output = Result<()>> + Send;
+}
+
+/// The real connection to the Connector.
+struct LiveSession {
+    cfg: ShieldConfig,
+    resource_state: Arc<SharedResourceState>,
+}
+
+impl ControlSession for LiveSession {
+    fn run(
+        &mut self,
+        state: &mut ShieldState,
+        debounce: &mut RenewalDebounce,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        run_once(state, &self.cfg, &self.resource_state, debounce)
+    }
+}
+
+/// Run `session` forever, reconnecting after each connection ends. The
+/// renewal debounce is created once, here, so it survives the reconnect that
+/// follows a successful renewal (K2); a per-connection debounce would let the
+/// reconnected stream's first ReEnroll renew again.
+async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -> Result<()> {
     let mut current_state = state;
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
+    let mut debounce = RenewalDebounce::default();
 
     loop {
-        match run_once(&mut current_state, &cfg, &resource_state).await {
+        match session.run(&mut current_state, &mut debounce).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
                 info!("control stream closed cleanly, reconnecting");
@@ -61,6 +127,7 @@ async fn run_once(
     state: &mut ShieldState,
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
+    debounce: &mut RenewalDebounce,
 ) -> Result<()> {
     let (mut client, selected_idx) = build_client(state, cfg)
         .await
@@ -138,6 +205,7 @@ async fn run_once(
                             resource_state,
                             &out_tx,
                             tunnel_hub.clone(),
+                            debounce,
                         ).await {
                             return action;
                         }
@@ -184,6 +252,44 @@ async fn run_once(
     }
 }
 
+/// ReEnroll from the connector: renew unless a renewal succeeded within
+/// REENROLL_DEBOUNCE. Success → `Some(Ok(()))` (reconnect with the new
+/// certificate); debounced or failed → `None` (keep the stream).
+async fn handle_reenroll<F, Fut>(
+    state: &mut ShieldState,
+    debounce: &mut RenewalDebounce,
+    renew: F,
+) -> Option<Result<()>>
+where
+    F: FnOnce(ShieldState) -> Fut,
+    Fut: std::future::Future<Output = Result<ShieldState>>,
+{
+    if debounce.suppresses(Instant::now()) {
+        info!(
+            shield_id = %state.shield_id,
+            "ignoring ReEnroll: certificate renewed less than 60 s ago"
+        );
+        return None;
+    }
+    info!(shield_id = %state.shield_id, "connector requested cert renewal");
+    match renew(state.clone()).await {
+        Ok(new_state) => {
+            debounce.record_success(Instant::now());
+            info!(
+                shield_id = %new_state.shield_id,
+                new_expiry = new_state.cert_not_after,
+                "cert renewed — reconnecting Control stream"
+            );
+            *state = new_state;
+            Some(Ok(()))
+        }
+        Err(e) => {
+            error!(error = %e, "cert renewal failed");
+            None
+        }
+    }
+}
+
 async fn handle_connector_msg(
     msg: ShieldControlMessage,
     state: &mut ShieldState,
@@ -191,6 +297,7 @@ async fn handle_connector_msg(
     resource_state: &Arc<SharedResourceState>,
     out_tx: &mpsc::Sender<ShieldControlMessage>,
     tunnel_hub: TunnelHub,
+    debounce: &mut RenewalDebounce,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(Body::ResourceInstruction(instr)) => {
@@ -221,28 +328,18 @@ async fn handle_connector_msg(
                     .await
                     .is_err()
                 {
-                    return Some(Err(anyhow::anyhow!("outbound channel closed on snapshot ack")));
+                    return Some(Err(anyhow::anyhow!(
+                        "outbound channel closed on snapshot ack"
+                    )));
                 }
             }
             None
         }
         Some(Body::ReEnroll(_)) => {
-            info!(shield_id = %state.shield_id, "connector requested cert renewal");
-            match renewal::renew_cert(state, cfg).await {
-                Ok(new_state) => {
-                    info!(
-                        shield_id = %new_state.shield_id,
-                        new_expiry = new_state.cert_not_after,
-                        "cert renewed — reconnecting Control stream"
-                    );
-                    *state = new_state;
-                    Some(Ok(()))
-                }
-                Err(e) => {
-                    error!(error = %e, "cert renewal failed");
-                    None
-                }
-            }
+            handle_reenroll(state, debounce, |current| async move {
+                renewal::renew_cert(&current, cfg).await
+            })
+            .await
         }
         Some(Body::Ping(p)) => {
             if out_tx
@@ -319,7 +416,10 @@ fn apply_peer_connector_list(
     let mut new_sorted = new_list.clone();
     new_sorted.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
     if current_sorted == new_sorted {
-        info!(peers = new_list.len(), "PeerConnectorList unchanged, no update");
+        info!(
+            peers = new_list.len(),
+            "PeerConnectorList unchanged, no update"
+        );
         return;
     }
 
@@ -424,7 +524,7 @@ async fn send_discovery_report(
     let full_sync = diff.full_sync;
 
     let proto_report = DiscoveryReport {
-        shield_id:   diff.shield_id,
+        shield_id: diff.shield_id,
         seq,
         fingerprint: diff.fingerprint,
         full_sync,
@@ -432,9 +532,9 @@ async fn send_discovery_report(
             .added
             .into_iter()
             .map(|s| ProtoDiscoveredService {
-                protocol:     s.protocol.to_string(),
-                port:         s.port as u32,
-                bound_ip:     s.bound_ip,
+                protocol: s.protocol.to_string(),
+                port: s.port as u32,
+                bound_ip: s.bound_ip,
                 service_name: s.service_name,
             })
             .collect(),
@@ -442,9 +542,9 @@ async fn send_discovery_report(
             .removed
             .into_iter()
             .map(|(port, proto)| ProtoDiscoveredService {
-                protocol:     proto,
-                port:         port as u32,
-                bound_ip:     String::new(),
+                protocol: proto,
+                port: port as u32,
+                bound_ip: String::new(),
                 service_name: String::new(),
             })
             .collect(),
@@ -455,7 +555,13 @@ async fn send_discovery_report(
     };
 
     match out_tx.send(msg).await {
-        Ok(()) => info!(seq, added = added_len, removed = removed_len, full_sync, "discovery: report sent"),
+        Ok(()) => info!(
+            seq,
+            added = added_len,
+            removed = removed_len,
+            full_sync,
+            "discovery: report sent"
+        ),
         Err(e) => warn!("discovery: failed to send report: {}", e),
     }
 }
@@ -476,5 +582,202 @@ pub async fn goodbye(state: &ShieldState, cfg: &ShieldConfig) {
             }
         }
         Err(e) => warn!(error = %e, "failed to connect for goodbye (non-fatal)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debounce_suppresses_for_sixty_seconds_after_success() {
+        let t0 = Instant::now();
+        let mut d = RenewalDebounce::default();
+        assert!(!d.suppresses(t0), "no renewal yet: never suppressed");
+        d.record_success(t0);
+        assert!(d.suppresses(t0));
+        assert!(d.suppresses(t0 + Duration::from_secs(59)));
+        assert!(!d.suppresses(t0 + Duration::from_secs(60)));
+    }
+
+    fn test_state() -> ShieldState {
+        ShieldState {
+            shield_id: "shield-1".into(),
+            trust_domain: "ws-test.zecurity.in".into(),
+            connectors: vec![ConnectorRef {
+                connector_id: "conn-1".into(),
+                connector_addr: "127.0.0.1:1".into(),
+            }],
+            interface_addr: "100.64.0.5".into(),
+            enrolled_at: "2026-10-09T00:00:00Z".into(),
+            cert_not_after: 1_000,
+        }
+    }
+
+    /// Renewal stand-in: counts calls; succeeds with a later NotAfter, or fails.
+    fn fake_renew(
+        calls: &std::cell::Cell<u32>,
+        ok: bool,
+    ) -> impl FnOnce(ShieldState) -> std::future::Ready<Result<ShieldState>> + '_ {
+        move |current| {
+            calls.set(calls.get() + 1);
+            std::future::ready(if ok {
+                Ok(ShieldState {
+                    cert_not_after: current.cert_not_after + 3600,
+                    ..current
+                })
+            } else {
+                Err(anyhow::anyhow!("controller unreachable"))
+            })
+        }
+    }
+
+    /// What one scripted ReEnroll did.
+    #[derive(Debug, PartialEq)]
+    enum Reenroll {
+        Renewed,
+        Ignored,
+    }
+
+    /// A fake Control connection: delivers ReEnrolls through the real
+    /// `handle_reenroll` (with a counting fake renewal) on a script, and
+    /// returns `Ok(())` after a successful renewal — the reconnect `run_once`
+    /// performs.
+    struct ScriptedSession {
+        connection: usize,
+        renewals: Arc<std::sync::atomic::AtomicU32>,
+        log: Arc<std::sync::Mutex<Vec<(usize, u64, Reenroll)>>>,
+        started: tokio::time::Instant,
+        done: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ScriptedSession {
+        async fn reenroll(
+            &mut self,
+            state: &mut ShieldState,
+            debounce: &mut RenewalDebounce,
+        ) -> bool {
+            let renewals = self.renewals.clone();
+            let outcome = handle_reenroll(state, debounce, move |current| {
+                renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::future::ready(Ok(ShieldState {
+                    cert_not_after: current.cert_not_after + 3600,
+                    ..current
+                }))
+            })
+            .await;
+            let renewed = matches!(outcome, Some(Ok(())));
+            self.log.lock().unwrap().push((
+                self.connection,
+                self.started.elapsed().as_secs(),
+                if renewed {
+                    Reenroll::Renewed
+                } else {
+                    Reenroll::Ignored
+                },
+            ));
+            renewed
+        }
+    }
+
+    impl ControlSession for ScriptedSession {
+        async fn run(
+            &mut self,
+            state: &mut ShieldState,
+            debounce: &mut RenewalDebounce,
+        ) -> Result<()> {
+            self.connection += 1;
+            match self.connection {
+                // Connection 1: ReEnroll → renewal → reconnect.
+                1 => assert!(self.reenroll(state, debounce).await),
+                // Connection 2 (after the 1 s reconnect delay): the
+                // connector repeats ReEnroll at once, at 58 s and at 60 s
+                // after the renewal.
+                2 => {
+                    while !self.reenroll(state, debounce).await {
+                        let since_renewal = self.started.elapsed();
+                        let next = if since_renewal < Duration::from_secs(58) {
+                            Duration::from_secs(58)
+                        } else {
+                            Duration::from_secs(60)
+                        };
+                        tokio::time::sleep(next - since_renewal).await;
+                    }
+                }
+                // Connection 3: done.
+                _ => {
+                    if let Some(done) = self.done.take() {
+                        let _ = done.send(());
+                    }
+                    std::future::pending::<()>().await;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// K2: the debounce survives the reconnect that follows a successful
+    /// renewal — the reconnected stream's ReEnrolls are ignored until 60 s
+    /// after the renewal, then honoured. Paused Tokio time: deterministic.
+    #[tokio::test(start_paused = true)]
+    async fn debounce_survives_reconnect_for_sixty_seconds() {
+        let renewals = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let session = ScriptedSession {
+            connection: 0,
+            renewals: renewals.clone(),
+            log: log.clone(),
+            started: tokio::time::Instant::now(),
+            done: Some(done_tx),
+        };
+        let task = tokio::spawn(reconnect_loop(test_state(), session));
+        done_rx.await.expect("reached the third connection");
+        task.abort();
+
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                (1, 0, Reenroll::Renewed),
+                (2, 1, Reenroll::Ignored),  // right after reconnect
+                (2, 58, Reenroll::Ignored), // still inside 60 s
+                (2, 60, Reenroll::Renewed), // window over
+            ]
+        );
+        assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// The K2 scenario: renew, then a duplicate ReEnroll (e.g. on the
+    /// reconnected stream) inside 60 s is ignored without a renewal attempt.
+    #[tokio::test]
+    async fn duplicate_reenroll_after_success_is_ignored() {
+        let mut state = test_state();
+        let mut debounce = RenewalDebounce::default();
+        let calls = std::cell::Cell::new(0);
+
+        let first = handle_reenroll(&mut state, &mut debounce, fake_renew(&calls, true)).await;
+        assert!(matches!(first, Some(Ok(()))), "success reconnects");
+        assert_eq!(state.cert_not_after, 4_600);
+
+        let second = handle_reenroll(&mut state, &mut debounce, fake_renew(&calls, true)).await;
+        assert!(second.is_none(), "debounced ReEnroll keeps the stream");
+        assert_eq!(calls.get(), 1, "no second renewal within 60 s");
+        assert_eq!(state.cert_not_after, 4_600);
+    }
+
+    /// A failed renewal does not start the debounce: the next ReEnroll retries.
+    #[tokio::test]
+    async fn failed_renewal_does_not_debounce() {
+        let mut state = test_state();
+        let mut debounce = RenewalDebounce::default();
+        let calls = std::cell::Cell::new(0);
+
+        let failed = handle_reenroll(&mut state, &mut debounce, fake_renew(&calls, false)).await;
+        assert!(failed.is_none(), "failure keeps the stream");
+        assert_eq!(state.cert_not_after, 1_000, "state untouched on failure");
+
+        let retried = handle_reenroll(&mut state, &mut debounce, fake_renew(&calls, true)).await;
+        assert!(matches!(retried, Some(Ok(()))));
+        assert_eq!(calls.get(), 2, "retry after a failure is not debounced");
     }
 }

@@ -648,6 +648,10 @@ async fn handle_controller_msg(
             info!(version, %workspace_id, "ACL snapshot stored");
             MsgAction::Continue
         }
+        Some(CBody::AgentPolicy(policy)) => {
+            shield_registry.set_shield_renewal_window(policy.shield_renewal_window_secs);
+            MsgAction::Continue
+        }
         Some(CBody::RelayList(list)) => {
             // Sprint 11 ADR-016: forward to the relay selector via the watch
             // channel. The selector owns version-skip decisions; we just
@@ -817,6 +821,29 @@ mod renewal_switch_tests {
                 public_ip: String::new(),
             },
         }
+    }
+
+    /// K2: an AgentPolicy from the controller sets the Shield renewal window.
+    #[tokio::test]
+    async fn agent_policy_sets_the_shield_renewal_window() {
+        let e = env();
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let msg = ConnectorControlMessage {
+            body: Some(CBody::AgentPolicy(crate::proto::AgentPolicy {
+                shield_renewal_window_secs: 1440,
+            })),
+        };
+        let action = handle_controller_msg(
+            msg,
+            &e.shield_registry,
+            &out_tx,
+            &e.policy_cache,
+            &e.registry,
+            &e.relay_list_tx,
+        )
+        .await;
+        assert!(matches!(action, MsgAction::Continue));
+        assert_eq!(e.shield_registry.shield_renewal_window_secs(), 1440);
     }
 
     fn io(e: &mut Env) -> SessionIo<'_> {

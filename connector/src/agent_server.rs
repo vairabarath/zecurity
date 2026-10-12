@@ -30,7 +30,12 @@ use crate::shield_proto::{
 use crate::tls::cert_holder::{CertHolder, CertMaterial};
 use crate::tls::server_cfg::build_shield_server_tls;
 
+/// Shield renewal window until the controller sends AgentPolicy (K2).
 const DEFAULT_RENEWAL_WINDOW_SECS: u64 = 48 * 60 * 60;
+/// At most one ReEnroll per Shield Control stream per this interval (K2):
+/// a Shield inside its window is reminded every 10 min, not on every 15 s
+/// health report. Same interval as the controller's connector throttle.
+const SHIELD_REENROLL_RESEND_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const SHIELD_STALE_THRESHOLD_SECS: i64 = 90;
 
 /// A Shield must finish its TLS handshake on :9091 within this long; a
@@ -93,7 +98,8 @@ pub struct ShieldRegistry {
     controller_channel_swaps: Arc<AtomicU64>,
     trust_domain: String,
     connector_id: String,
-    renewal_window_secs: u64,
+    /// Shield renewal window; shared by every clone, updated by AgentPolicy.
+    renewal_window_secs: Arc<AtomicU64>,
     /// Tunnel hub — routes RDE tunnel messages between device connections and Shields.
     pub tunnel_hub: crate::agent_tunnel::AgentTunnelHub,
     /// Shared ACL snapshot cache. Read on every incoming ShieldHealthReport
@@ -125,7 +131,7 @@ impl ShieldRegistry {
             controller_channel_swaps: Arc::new(AtomicU64::new(0)),
             trust_domain,
             connector_id,
-            renewal_window_secs: DEFAULT_RENEWAL_WINDOW_SECS,
+            renewal_window_secs: Arc::new(AtomicU64::new(DEFAULT_RENEWAL_WINDOW_SECS)),
             tunnel_hub: crate::agent_tunnel::AgentTunnelHub::new(),
             policy_cache,
         }
@@ -536,8 +542,65 @@ impl ShieldRegistry {
 
     fn cert_needs_renewal(&self, cert_not_after_unix: i64) -> bool {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        cert_not_after_unix.saturating_sub(now) <= self.renewal_window_secs as i64
+        let window = self.renewal_window_secs.load(Ordering::Relaxed);
+        cert_not_after_unix.saturating_sub(now) <= window.min(i64::MAX as u64) as i64
     }
+
+    /// Apply the controller's AgentPolicy shield renewal window (K2). The
+    /// controller already clamped it to 2/5 of the Shield certificate TTL.
+    /// 0 means "not set" and keeps the current window.
+    pub fn set_shield_renewal_window(&self, secs: u64) {
+        if secs == 0 {
+            return;
+        }
+        let previous = self.renewal_window_secs.swap(secs, Ordering::Relaxed);
+        if previous != secs {
+            info!(
+                shield_renewal_window_secs = secs,
+                previous, "applied AgentPolicy shield renewal window"
+            );
+        }
+    }
+
+    pub fn shield_renewal_window_secs(&self) -> u64 {
+        self.renewal_window_secs.load(Ordering::Relaxed)
+    }
+}
+
+/// Throttle for ReEnroll on one Shield Control stream (K2): send when none
+/// was sent on this stream yet, or the last one is at least
+/// SHIELD_REENROLL_RESEND_INTERVAL old.
+fn reenroll_due(last_sent: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last_sent {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= SHIELD_REENROLL_RESEND_INTERVAL,
+    }
+}
+
+/// Queue a ReEnroll on a Shield Control stream if the Shield needs renewal
+/// and the per-stream throttle allows it. Only a ReEnroll that was actually
+/// queued starts the throttle: a failed send leaves `last_sent` unchanged.
+/// Returns whether one was queued.
+async fn send_reenroll_if_due(
+    out_tx: &mpsc::Sender<Result<ShieldControlMessage, Status>>,
+    needs_renewal: bool,
+    last_sent: &mut Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    use crate::shield_proto::shield_control_message::Body;
+    if !needs_renewal || !reenroll_due(*last_sent, now) {
+        return false;
+    }
+    let sent = out_tx
+        .send(Ok(ShieldControlMessage {
+            body: Some(Body::ReEnroll(ReEnrollSignal {})),
+        }))
+        .await
+        .is_ok();
+    if sent {
+        *last_sent = Some(now);
+    }
+    sent
 }
 
 #[derive(Debug, Clone)]
@@ -689,6 +752,9 @@ impl ShieldService for ShieldRegistry {
         let registry = self.clone();
         let shield_id = identity.shield_id.clone();
         let cert_not_after = identity.cert_not_after_unix;
+        // Per-stream ReEnroll throttle (K2): when the last ReEnroll was
+        // actually delivered to this Shield's outbound queue.
+        let mut last_reenroll_sent: Option<std::time::Instant> = None;
 
         tokio::spawn(async move {
             info!(shield_id = %shield_id, "shield Control stream connected");
@@ -762,13 +828,13 @@ impl ShieldService for ShieldRegistry {
                                                 }))
                                                 .await;
                                         }
-                                        if registry.cert_needs_renewal(cert_not_after) {
-                                            let _ = out_tx
-                                                .send(Ok(ShieldControlMessage {
-                                                    body: Some(Body::ReEnroll(ReEnrollSignal {})),
-                                                }))
-                                                .await;
-                                        }
+                                        send_reenroll_if_due(
+                                            &out_tx,
+                                            registry.cert_needs_renewal(cert_not_after),
+                                            &mut last_reenroll_sent,
+                                            std::time::Instant::now(),
+                                        )
+                                        .await;
                                     }
                                     Some(Body::ResourceAck(ack)) => {
                                         let _ = registry.ack_tx.send((shield_id.clone(), ack)).await;
@@ -1046,12 +1112,32 @@ mod shield_server_tls_tests {
 
     fn registry() -> ShieldRegistry {
         let (ack_tx, _ack_rx) = mpsc::channel(8);
+        // A peer in this connector's remote network: every Shield health
+        // report is then answered with a PeerConnectorList, which these tests
+        // use as a liveness reply independent of ReEnroll.
+        let policy_cache = Arc::new(crate::policy::PolicyCache::new());
+        policy_cache.update(crate::client::v1::AclSnapshot {
+            version: 1,
+            workspace_id: "ws-test".into(),
+            remote_networks: vec![crate::client::v1::AclRemoteNetwork {
+                remote_network_id: "rn-1".into(),
+                name: "rn-1".into(),
+                connectors: vec![crate::client::v1::AclConnector {
+                    connector_id: CONNECTOR_ID.into(),
+                    connector_tunnel_addr: "127.0.0.1:9092".into(),
+                    connector_spiffe: format!("spiffe://{TRUST_DOMAIN}/connector/{CONNECTOR_ID}"),
+                    relay_addr: String::new(),
+                    relay_spiffe_id: String::new(),
+                }],
+            }],
+            ..Default::default()
+        });
         ShieldRegistry::new(
             Channel::from_static("http://127.0.0.1:1").connect_lazy(),
             TRUST_DOMAIN.to_string(),
             CONNECTOR_ID.to_string(),
             ack_tx,
-            Arc::new(crate::policy::PolicyCache::new()),
+            policy_cache,
         )
     }
 
@@ -1068,9 +1154,17 @@ mod shield_server_tls_tests {
     }
 
     async fn start(certs: Arc<CertHolder>, handshake_timeout: Duration) -> Running {
+        start_with(registry(), certs, handshake_timeout).await
+    }
+
+    async fn start_with(
+        registry: ShieldRegistry,
+        certs: Arc<CertHolder>,
+        handshake_timeout: Duration,
+    ) -> Running {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let task = tokio::spawn(registry().serve_on(listener, certs, handshake_timeout));
+        let task = tokio::spawn(registry.serve_on(listener, certs, handshake_timeout));
         Running { addr, task }
     }
 
@@ -1151,26 +1245,58 @@ mod shield_server_tls_tests {
         }
     }
 
-    /// Send a health report on an open Control stream and wait for the reply.
-    /// The test Shield certificate (1 h) is inside the 48 h renewal window, so
-    /// every report is answered with ReEnroll — a round trip that proves the
-    /// stream is alive.
+    async fn next_reply(replies: &mut Streaming<ShieldControlMessage>) -> ShieldControlMessage {
+        tokio::time::timeout(WAIT, replies.message())
+            .await
+            .expect("reply within timeout")
+            .expect("Control stream healthy")
+            .expect("Control stream not closed")
+    }
+
+    /// Send a health report on an open Control stream; it must be answered,
+    /// first, with a PeerConnectorList (proves the stream is alive), then —
+    /// only if `expect_reenroll` — a ReEnroll.
+    ///
+    /// The connector sends PeerConnectorList before any ReEnroll, so a
+    /// ReEnroll left over from the PREVIOUS report would arrive here ahead of
+    /// this PeerConnectorList and fail the check: a round trip with
+    /// `expect_reenroll = false` proves the previous report sent none.
     async fn health_round_trip(
         out: &mpsc::Sender<ShieldControlMessage>,
         replies: &mut Streaming<ShieldControlMessage>,
+        expect_reenroll: bool,
     ) {
         out.send(health_report())
             .await
             .expect("Control stream open");
-        let reply = tokio::time::timeout(WAIT, replies.message())
-            .await
-            .expect("reply within timeout")
-            .expect("Control stream healthy")
-            .expect("Control stream not closed");
+        let reply = next_reply(replies).await;
         assert!(
-            matches!(reply.body, Some(Body::ReEnroll(_))),
-            "unexpected reply: {reply:?}"
+            matches!(reply.body, Some(Body::PeerConnectorList(_))),
+            "expected PeerConnectorList first, got {reply:?}"
         );
+        if expect_reenroll {
+            let reply = next_reply(replies).await;
+            assert!(
+                matches!(reply.body, Some(Body::ReEnroll(_))),
+                "expected ReEnroll, got {reply:?}"
+            );
+        }
+    }
+
+    async fn open_control(
+        pki: &TestPki,
+        addr: SocketAddr,
+    ) -> (
+        mpsc::Sender<ShieldControlMessage>,
+        Streaming<ShieldControlMessage>,
+    ) {
+        let (out, out_rx) = mpsc::channel(8);
+        let replies = ShieldServiceClient::new(shield_channel(pki, addr).await)
+            .control(ReceiverStream::new(out_rx))
+            .await
+            .expect("Control stream accepted")
+            .into_inner();
+        (out, replies)
     }
 
     /// A Shield connected before the renewal keeps its Control stream (the
@@ -1182,13 +1308,10 @@ mod shield_server_tls_tests {
         let (_dir, holder) = pki.holder(-60, 3600);
         let server = start(holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
 
-        let (out, out_rx) = mpsc::channel(8);
-        let mut replies = ShieldServiceClient::new(shield_channel(&pki, server.addr).await)
-            .control(ReceiverStream::new(out_rx))
-            .await
-            .expect("Control stream accepted")
-            .into_inner();
-        health_round_trip(&out, &mut replies).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        // The test Shield certificate (1 h) is inside the default 48 h window:
+        // the first report on this stream is answered with ReEnroll.
+        health_round_trip(&out, &mut replies, true).await;
 
         let renewed = pki.renew(&holder, 7200);
         assert_eq!(
@@ -1197,9 +1320,107 @@ mod shield_server_tls_tests {
             "new handshakes present the renewed certificate"
         );
 
-        // The pre-renewal stream is still the same live connection.
-        health_round_trip(&out, &mut replies).await;
-        health_round_trip(&out, &mut replies).await;
+        // The pre-renewal stream is still the same live connection, and the
+        // ReEnroll is throttled: no repeat within 10 minutes on this stream.
+        health_round_trip(&out, &mut replies, false).await;
+        health_round_trip(&out, &mut replies, false).await;
+    }
+
+    /// K2 throttle: a Shield inside its window gets ONE ReEnroll per stream
+    /// per 10 minutes, not one per health report; a new stream (the Shield
+    /// reconnecting) starts its own throttle.
+    #[tokio::test]
+    async fn reenroll_is_throttled_per_stream() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let server = start(holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, true).await;
+        for _ in 0..4 {
+            health_round_trip(&out, &mut replies, false).await;
+        }
+
+        let (out2, mut replies2) = open_control(&pki, server.addr).await;
+        health_round_trip(&out2, &mut replies2, true).await;
+        health_round_trip(&out2, &mut replies2, false).await;
+    }
+
+    /// K2 AgentPolicy: the controller's window replaces the 48 h default. The
+    /// test Shield certificate expires in ~1 h: outside a 10 min window (no
+    /// ReEnroll), inside a 2 h one (ReEnroll).
+    #[tokio::test]
+    async fn agent_policy_window_decides_reenroll() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let registry = registry();
+        assert_eq!(
+            registry.shield_renewal_window_secs(),
+            DEFAULT_RENEWAL_WINDOW_SECS
+        );
+        let server = start_with(registry.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+
+        registry.set_shield_renewal_window(600);
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        // 0 = "not set": keeps the current window.
+        registry.set_shield_renewal_window(0);
+        assert_eq!(registry.shield_renewal_window_secs(), 600);
+
+        registry.set_shield_renewal_window(2 * 3600);
+        let (out2, mut replies2) = open_control(&pki, server.addr).await;
+        health_round_trip(&out2, &mut replies2, true).await;
+        health_round_trip(&out2, &mut replies2, false).await;
+    }
+
+    /// K2: a ReEnroll that could not be queued does not consume the 10-min
+    /// throttle; the next due report sends one, which then does.
+    #[tokio::test]
+    async fn failed_reenroll_send_does_not_start_the_throttle() {
+        let t0 = std::time::Instant::now();
+        let mut last = None;
+
+        // Outbound queue closed: the send fails, the throttle is untouched.
+        let (closed_tx, closed_rx) = mpsc::channel(1);
+        drop(closed_rx);
+        assert!(!send_reenroll_if_due(&closed_tx, true, &mut last, t0).await);
+        assert_eq!(last, None);
+
+        // A later report one second on: sent, and now the throttle runs.
+        let (tx, mut rx) = mpsc::channel(4);
+        let t1 = t0 + Duration::from_secs(1);
+        assert!(send_reenroll_if_due(&tx, true, &mut last, t1).await);
+        assert_eq!(last, Some(t1));
+        assert!(matches!(
+            rx.try_recv().unwrap().unwrap().body,
+            Some(Body::ReEnroll(_))
+        ));
+
+        // Throttled for 10 min after the successful send, then due again.
+        assert!(!send_reenroll_if_due(&tx, true, &mut last, t1 + Duration::from_secs(599)).await);
+        assert!(rx.try_recv().is_err());
+        assert!(send_reenroll_if_due(&tx, true, &mut last, t1 + Duration::from_secs(600)).await);
+
+        // Outside the renewal window nothing is sent or recorded.
+        let mut untouched = None;
+        assert!(!send_reenroll_if_due(&tx, false, &mut untouched, t0).await);
+        assert_eq!(untouched, None);
+    }
+
+    #[test]
+    fn reenroll_due_throttles_for_ten_minutes() {
+        let t0 = std::time::Instant::now();
+        assert!(reenroll_due(None, t0));
+        assert!(!reenroll_due(Some(t0), t0));
+        assert!(!reenroll_due(
+            Some(t0),
+            t0 + Duration::from_secs(10 * 60 - 1)
+        ));
+        assert!(reenroll_due(Some(t0), t0 + Duration::from_secs(10 * 60)));
+        // A clock that appears to go backwards never sends early.
+        assert!(!reenroll_due(Some(t0 + Duration::from_secs(5)), t0));
     }
 
     /// Each new handshake presents whatever certificate the holder has at

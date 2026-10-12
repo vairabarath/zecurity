@@ -6,7 +6,7 @@ sprint: 21
 phase: 3
 execution: K
 title: Sprint 20 Cleanup (KI-1, KI-2, KI-3, .env.example JWTs)
-status: planned
+status: done   # 2026-10-09, branch sprint21/k-sprint20-cleanup (8e55a36 … 657fdd0), not yet pushed
 depends_on: [1]   # after H (both edit controller/.env.example); scheduled after U
 schema_change: false
 tags:
@@ -81,6 +81,13 @@ tags:
 
 ### K1 — KI-1 relay renewal scheduling
 
+> **Chosen: Option A.** Implemented in `7fb0fb7`; test-safety follow-up `fd8b6d7`.
+> - `relay.crt.meta` = `{"serial_hex", "installed_at_unix"}`, written atomically (`write_atomic`) at **both** provisioning and renewal. The serial binds the record to one certificate.
+> - `plan()` measures from `schedule_start = max(NotBefore, installed_at)`; jitter uses the same lifetime.
+> - Missing, malformed or mismatched metadata, or an install time at/after `NotAfter`: schedule from `NotBefore` exactly as before (never fails the load, never substitutes "now"). A metadata write failure doesn't fail the install.
+> - Timing: a 15m cert renews ~9 min **after install** (6 min remaining, ±45 s); 1h → ~36 min after install (±3 min); 30d without metadata unchanged (with metadata, 24 min later).
+> - `fd8b6d7`: the two scheduler-expiry tests run in a killable subprocess with a 30 s hard limit, so a scheduler regression that spins fails CI instead of hanging it.
+
 Choose at phase start and record the choice here.
 
 - **Option A (recommended):** the relay measures the lifetime from **when it installed the certificate**, not from `NotBefore`.
@@ -97,6 +104,13 @@ Choose at phase start and record the choice here.
   - a missing-metadata fallback.
 
 ### K2 — KI-2 shield renewal window wiring
+
+> **Chosen: Option A**, with one refinement. Implemented in `2c3dda0`; test follow-up `657fdd0`.
+> - Proto: `AgentPolicy { uint64 shield_renewal_window_secs = 1; }` as `ConnectorControlMessage` oneof field **18** (additive; `buf breaking` clean).
+> - **Refinement:** the controller sends the *effective* window `min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL)` (`shield.Config.EffectiveRenewalWindow`), computed from the configured TTL. If the connector derived 2/5 of the lifetime from the certificate, the 1 h `NotBefore` backdate would count and TTLs ≤ 40 min would renew immediately (the KI-1 bug again). Sent once per control stream on open; not sent for a window under 1 s.
+> - Connector: window is shared state, 48 h until `AgentPolicy` arrives (0 keeps the current value). Per-shield, per-stream throttle: at most one `ReEnroll` per 10 min, recorded only after a successful send (`send_reenroll_if_due`).
+> - Shield: 60 s debounce after a **successful** renewal, owned by the reconnect loop (`reconnect_loop`) so it survives the reconnect that follows; a failed renewal doesn't start it.
+> - `health_round_trip` now uses `PeerConnectorList` as its liveness reply and expects `ReEnroll` only on a stream's first report.
 
 Choose the wiring at phase start.
 
@@ -119,11 +133,15 @@ Choose the wiring at phase start.
 
 ### K3 — KI-3 closed by Phase H
 
+> **Done.** Confirmed 2026-10-09: `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (removed by Phase H). KI-3 closed as resolved by removal.
+
 - Phase H deletes the provider Google OAuth routes and stops reading `PROVIDER_GOOGLE_REDIRECT_URI` (D-24).
 - K3 confirms `controller/.env.example` has no `PROVIDER_GOOGLE_REDIRECT_URI` line (H removes it) and records KI-3 as **resolved by removal** in `.zecurity-obs/Sprint20/path.md` Known Issues.
 - The tenant `GOOGLE_REDIRECT_URI` stays as it is.
 
 ### K4 — Remove committed JWTs
+
+> **Done in `8e55a36`.** JWTs, the LAN IP and a personal path replaced with placeholders; new CI `hygiene` job "No JWTs in controller/.env.example" (checked to fail on a JWT and pass on clean files). History not rewritten: the tokens are expired dev enrollment tokens.
 
 - Delete every install command containing `ENROLLMENT_TOKEN=eyJ…` (and any other `eyJ` JWT) from `controller/.env.example`. Replace them with placeholders: `ENROLLMENT_TOKEN=<paste token from admin UI>`.
 - Keep the placeholders for the Phase H variables (`PROVIDER_JWT_SECRET=<32+ random bytes, different from JWT_SECRET>`, etc.).
@@ -132,6 +150,8 @@ Choose the wiring at phase start.
 - `controller/.env` is local and uncommitted: remind the team to check their own copy. Its plaintext SMTP password is out of scope for the repo.
 
 ### K6 — Pre-existing auth integration test defect (found during Phase H-a; corrected 2026-09-28)
+
+> **Done in `411e216`.** New `internal/valkeyurl` parses `redis://[userinfo@]host[:port][/db]`, used by **both** the auth and connector Valkey clients (`SelectDB`). The production parser had the same bug, so a `VALKEY_URL` with `/db` stopped the controller from starting; that is fixed too. The test applies every schema file, never calls `FlushDB` (a sentinel key must survive), fails instead of skipping when the configured Valkey is unreachable or the URL is bad, and checks the refresh key lands in the URL's db. CI's "Verify integration tests actually ran" step now also fails if this test skips.
 
 `internal/auth/integration_test.go` `TestAuthIntegration_LoginBootstrapAndJWTIssue` has three problems:
 
@@ -146,6 +166,8 @@ Choose the wiring at phase start.
 ### K5 — Minor
 
 Fix the `crl.rs:30` comment to "every 60 s (+0–15 s jitter)".
+
+> **Done in `8e55a36`.**
 
 ## Invariants
 
@@ -173,15 +195,36 @@ grep -nE 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.' controller/.env.example &
 
 ## Implementation Checklist
 
-- [ ] K1 option chosen and recorded; implemented; tests
-- [ ] K2 option chosen and recorded; window + throttle + debounce; tests
-- [ ] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
-- [ ] K4 JWTs removed; CI guard
-- [ ] K5 comment
-- [ ] K6 auth integration test: all schema files applied; no `FlushDB`; passes
-- [ ] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
-- [ ] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid)
+- [x] K1 option chosen and recorded; implemented; tests (`7fb0fb7`, `fd8b6d7`)
+- [x] K2 option chosen and recorded; window + throttle + debounce; tests (`2c3dda0`, `657fdd0`)
+- [x] K3 KI-3 confirmed resolved by H (no `PROVIDER_GOOGLE_REDIRECT_URI` in `.env.example`)
+- [x] K4 JWTs removed; CI guard (`8e55a36`)
+- [x] K5 comment (`8e55a36`)
+- [x] K6 auth integration test: all schema files applied; no `FlushDB`; passes (`411e216`)
+- [x] Update `.zecurity-obs/Sprint20/path.md` Known Issues: mark KI-1…KI-3 fixed, with a link to this phase
+- [x] Update runbook §2 notes if the recommended env values change (KI-1 → 15m becomes valid). The Sprint 20 live run is pinned to `46ab87d`, which still has KI-1/KI-2, so its workarounds stay; §2 now says they're fixed from Sprint 21 K onward.
 
 ## Post-Phase Fixes
 
-_None yet._
+### Fix: S1 — relay revocation check used a peer-chosen CA (security; found by the 2026-10-09 certificate audit)
+**Issue:** a revoked connector or client certificate could get through the relay. The relay's revocation gate (`relay/src/tls.rs` `peer_revocation`, from PENDING-02, `dfb2c65`) took the peer's `chain[1]` as the workspace CA without checking it issued the leaf. A revoked tenant-A leaf sent as `[leaf_A, CA_B, CA_A]` passed the handshake (webpki skips the unrelated CA and builds the path through CA_A), was checked against tenant B's CRL, and was admitted.
+
+**Root Cause:** `chain[1]` chose both the workspace whose CRL is fetched and the CA that CRL is verified against, and nothing tied it to the leaf.
+
+**Fix Applied:** `peer_revocation` → new `revocation_from_chain`, which requires `chain[1]` to be the leaf's issuer before using it:
+```rust
+// AFTER (relay/src/tls.rs):
+if leaf.issuer() != ca.subject() {
+    bail!("chain[1] is not the issuer of the peer leaf (issuer name mismatch)");
+}
+leaf.verify_signature(Some(ca.public_key())).map_err(|e| {
+    anyhow::anyhow!("chain[1] is not the issuer of the peer leaf (signature: {e:?})")
+})?;
+```
+Failure → the listener closes with "revocation context error" (fail closed); no other peer-supplied CA is tried. Normal `[leaf, workspace CA]` chains are unchanged. Connector and client CRLs cover one workspace and don't pick a CA from the peer chain, so they were not affected.
+
+**Commits / tests:** `276fb4f` added the end-to-end regression test (real QUIC/mTLS handshake through `run_listener`, CRLs from a fake controller); `735d485` is the fix and un-ignores it, plus unit tests (foreign CA, impostor CA with the issuer's name, malformed/missing issuer).
+
+### Test follow-ups within Phase K
+- `fd8b6d7` (K1): scheduler-expiry tests now run in a killable subprocess; a mutation that made `run()` spin had hung `cargo test` for hours.
+- `657fdd0` (K2): behaviour-preserving seams (`reconnect_loop`/`ControlSession` in the shield, `send_reenroll_if_due` in the connector) so the debounce-across-reconnect and throttle-after-send rules are tested (paused Tokio time). Residual, not covered: `run_once` ignoring the debounce it's given (needs a live connector).
