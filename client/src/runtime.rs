@@ -15,6 +15,11 @@ pub struct TunHandle {
     /// running net_stack (read once per accepted flow). Shared via Arc so a
     /// hot-apply can replace this TunHandle while keeping the same channel.
     pub transport_tx: Arc<tokio::sync::watch::Sender<Arc<crate::net_stack::TransportMap>>>,
+    /// Fix 05 Phase 5-C: sequenced, acknowledged resource commands (listeners,
+    /// smoltcp addresses, affected-flow close) into the running net_stack.
+    /// Shared via Arc so a hot-apply can replace this TunHandle while keeping
+    /// the same channel.
+    pub resource_tx: Arc<tokio::sync::mpsc::Sender<crate::net_stack::ResourceCmd>>,
 }
 
 impl std::fmt::Debug for TunHandle {

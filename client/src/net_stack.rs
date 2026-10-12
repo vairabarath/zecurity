@@ -13,7 +13,7 @@ use smoltcp::socket::tcp;
 use smoltcp::time::Instant as SmolInstant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{mpsc, watch, Notify};
+use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tokio::time::timeout;
 use tun::AsyncDevice;
 
@@ -246,6 +246,9 @@ struct ActiveRelay {
     last_state: tcp::State,
     // close()/abort() already issued by the lifecycle logic
     terminated: bool,
+    // Phase 5-C: set when this flow was closed because its resource was
+    // removed/changed; the removal ack waits until no relay carries the tag.
+    close_tag: Option<u64>,
 }
 
 impl ActiveRelay {
@@ -263,6 +266,7 @@ impl ActiveRelay {
             last_activity: now,
             last_state: tcp::State::SynReceived,
             terminated: false,
+            close_tag: None,
         }
     }
 
@@ -278,6 +282,7 @@ impl ActiveRelay {
             last_activity: now,
             last_state: tcp::State::Closed,
             terminated: true,
+            close_tag: None,
         }
     }
 }
@@ -524,6 +529,8 @@ struct FlowTable {
     listen_handles: HashMap<(Ipv4Addr, u16), SocketHandle>,
     active_relays: HashMap<SocketHandle, ActiveRelay>,
     stats: LifecycleStats,
+    // Phase 5-C: next tag for a resource-removal close batch.
+    next_close_tag: u64,
 }
 
 impl FlowTable {
@@ -536,6 +543,78 @@ impl FlowTable {
             listen_handles,
             active_relays: HashMap::new(),
             stats: LifecycleStats::default(),
+            next_close_tag: 0,
+        }
+    }
+
+    /// Phase 5-C (R1): stop serving `keys`. Removes their listeners and
+    /// aborts every live socket whose local endpoint is one of `keys` (the
+    /// app gets a RST). Returns the close tag; the removal is complete once
+    /// `close_pending(tag)` is false, i.e. every affected socket has had its
+    /// RST dispatched by `iface.poll` and been reaped by `service`.
+    fn remove_listeners_and_close(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+        keys: &[(Ipv4Addr, u16)],
+        now: SmolInstant,
+    ) -> u64 {
+        let tag = self.next_close_tag;
+        self.next_close_tag += 1;
+        for key in keys {
+            let Some(handle) = self.listen_handles.remove(key) else {
+                continue;
+            };
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            if socket.is_listening() {
+                sockets.remove(handle);
+            } else {
+                // A SYN already arrived on this listener: reset it and let the
+                // lifecycle reap it once the RST is out.
+                socket.abort();
+                let mut relay = ActiveRelay::fail_closed(now);
+                relay.close_tag = Some(tag);
+                self.active_relays.insert(handle, relay);
+            }
+        }
+        for (handle, relay) in self.active_relays.iter_mut() {
+            if relay.close_tag.is_some() {
+                continue;
+            }
+            let socket = sockets.get_mut::<tcp::Socket>(*handle);
+            let Some(ep) = socket.local_endpoint() else {
+                continue;
+            };
+            let IpAddress::Ipv4(addr) = ep.addr else {
+                continue;
+            };
+            if !keys.contains(&(Ipv4Addr::from(addr), ep.port)) {
+                continue;
+            }
+            socket.abort();
+            relay.terminated = true;
+            relay.tcp_to_quic_tx = None;
+            // Dropping the receiver ends the relay task (`quic_to_tcp_tx.closed()`).
+            relay.quic_to_tcp_rx = None;
+            relay.write_buf.clear();
+            relay.close_tag = Some(tag);
+        }
+        tag
+    }
+
+    /// True while any socket closed under `tag` is still in the SocketSet.
+    fn close_pending(&self, tag: u64) -> bool {
+        self.active_relays
+            .values()
+            .any(|relay| relay.close_tag == Some(tag))
+    }
+
+    /// Phase 5-C (A2): start serving `keys` (idempotent per key).
+    fn add_listeners(&mut self, sockets: &mut SocketSet<'_>, keys: &[(Ipv4Addr, u16)]) {
+        for key in keys {
+            if !self.listen_handles.contains_key(key) {
+                self.listen_handles
+                    .insert(*key, new_listen_socket(sockets, key.1));
+            }
         }
     }
 
@@ -630,6 +709,137 @@ impl FlowTable {
     }
 }
 
+// --- Phase 5-C: resource hot-apply commands ---
+
+/// The single definition of a client-routable resource: an IPv4 literal with
+/// protocol `tcp` (case-insensitive) or empty. Shared by the classifier,
+/// `handle_up`, `net_stack::run` and the resource hot-apply so they can never
+/// disagree about which entries produce data-plane state. `port` keeps the
+/// existing `as u16` conversion.
+pub(crate) fn routable_key(address: &str, protocol: &str, port: u32) -> Option<(Ipv4Addr, u16)> {
+    if !(protocol.to_lowercase() == "tcp" || protocol.is_empty()) {
+        return None;
+    }
+    match address.parse::<IpAddr>().ok()? {
+        IpAddr::V4(v4) => Some((v4, port as u16)),
+        IpAddr::V6(_) => None,
+    }
+}
+
+/// Sequenced, acknowledged data-plane mutations sent by the daemon's resource
+/// hot-apply into the running loop. Each command is applied between two
+/// `iface.poll` calls of the single loop thread.
+#[derive(Debug)]
+pub enum ResourceCmd {
+    /// R1: remove the listeners for `keys` and reset every live flow to them.
+    /// Acked only after every affected socket was reset and reaped.
+    Remove {
+        keys: Vec<(Ipv4Addr, u16)>,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    /// R4: remove smoltcp interface addresses.
+    RemoveAddrs {
+        ips: Vec<Ipv4Addr>,
+        ack: oneshot::Sender<Result<()>>,
+    },
+    /// A2: add smoltcp interface addresses (checked, never silently dropped),
+    /// then listeners for `keys`.
+    Add {
+        addrs: Vec<Ipv4Addr>,
+        keys: Vec<(Ipv4Addr, u16)>,
+        ack: oneshot::Sender<Result<()>>,
+    },
+}
+
+/// A removal waiting for its sockets to be reset and reaped.
+struct PendingClose {
+    tag: u64,
+    ack: oneshot::Sender<Result<()>>,
+}
+
+fn smol_v4(ip: Ipv4Addr) -> IpAddress {
+    IpAddress::Ipv4(Ipv4Address::from(ip))
+}
+
+/// R4: drop the given /32s from the interface (never `100.64.0.1`).
+fn remove_iface_addrs(iface: &mut Interface, ips: &[Ipv4Addr]) {
+    iface.update_ip_addrs(|addrs| {
+        addrs.retain(|cidr| !ips.iter().any(|ip| cidr.address() == smol_v4(*ip)));
+    });
+}
+
+/// A2: add the given /32s. Checks capacity BEFORE pushing anything, so an
+/// overflow is an error with no partial change — an address is never
+/// silently dropped (unlike the startup `let _ = addrs.push`).
+fn add_iface_addrs(iface: &mut Interface, ips: &[Ipv4Addr]) -> Result<()> {
+    let mut result = Ok(());
+    iface.update_ip_addrs(|addrs| {
+        let missing: Vec<Ipv4Addr> = ips
+            .iter()
+            .copied()
+            .filter(|ip| !addrs.iter().any(|c| c.address() == smol_v4(*ip)))
+            .collect();
+        if addrs.len() + missing.len() > addrs.capacity() {
+            result = Err(anyhow!(
+                "smoltcp interface address capacity exceeded: {} present + {} new > {}",
+                addrs.len(),
+                missing.len(),
+                addrs.capacity()
+            ));
+            return;
+        }
+        for ip in missing {
+            if addrs.push(IpCidr::new(smol_v4(ip), 32)).is_err() {
+                result = Err(anyhow!("smoltcp interface address push failed for {ip}"));
+                return;
+            }
+        }
+    });
+    result
+}
+
+/// Apply one resource command inside the loop. Remove acks are deferred into
+/// `pending` until `complete_pending_closes` sees their sockets reaped.
+fn apply_resource_cmd(
+    cmd: ResourceCmd,
+    iface: &mut Interface,
+    sockets: &mut SocketSet<'_>,
+    flows: &mut FlowTable,
+    now: SmolInstant,
+    pending: &mut Vec<PendingClose>,
+) {
+    match cmd {
+        ResourceCmd::Remove { keys, ack } => {
+            let tag = flows.remove_listeners_and_close(sockets, &keys, now);
+            pending.push(PendingClose { tag, ack });
+        }
+        ResourceCmd::RemoveAddrs { ips, ack } => {
+            remove_iface_addrs(iface, &ips);
+            let _ = ack.send(Ok(()));
+        }
+        ResourceCmd::Add { addrs, keys, ack } => {
+            let res = add_iface_addrs(iface, &addrs);
+            if res.is_ok() {
+                flows.add_listeners(sockets, &keys);
+            }
+            let _ = ack.send(res);
+        }
+    }
+}
+
+/// Ack every removal whose sockets have all been reset and reaped.
+fn complete_pending_closes(flows: &FlowTable, pending: &mut Vec<PendingClose>) {
+    let mut i = 0;
+    while i < pending.len() {
+        if flows.close_pending(pending[i].tag) {
+            i += 1;
+        } else {
+            let done = pending.swap_remove(i);
+            let _ = done.ack.send(Ok(()));
+        }
+    }
+}
+
 // --- Main entry point ---
 
 /// Connector transport map keyed by managed resource (ip, port).
@@ -657,6 +867,7 @@ pub async fn run(
     dev: AsyncDevice,
     allowed_entries: Vec<AclEntry>,
     transports: watch::Receiver<Arc<TransportMap>>,
+    mut resource_rx: mpsc::Receiver<ResourceCmd>,
     relay_resync: Arc<Notify>,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -699,14 +910,7 @@ pub async fn run(
     // Collect TCP resources from the allowed (SPIFFE-filtered) entries.
     let resource_entries: Vec<(Ipv4Addr, u16)> = allowed_entries
         .iter()
-        .filter(|e| e.protocol.to_lowercase() == "tcp" || e.protocol.is_empty())
-        .filter_map(|e| {
-            let ip = e.address.parse::<IpAddr>().ok()?;
-            match ip {
-                IpAddr::V4(v4) => Some((v4, e.port as u16)),
-                _ => None,
-            }
-        })
+        .filter_map(|e| routable_key(&e.address, &e.protocol, e.port))
         .collect();
 
     // Assign one /32 address per resource so smoltcp accepts inbound packets.
@@ -777,11 +981,27 @@ pub async fn run(
         });
     };
 
+    let mut pending_closes: Vec<PendingClose> = Vec::new();
+
     loop {
         let smol_now = smoltcp_now();
         iface.poll(smol_now, &mut tun_dev, &mut sockets);
 
+        // Phase 5-C: apply resource commands between two polls, before the
+        // accept/relay pass. Never awaits.
+        while let Ok(cmd) = resource_rx.try_recv() {
+            apply_resource_cmd(
+                cmd,
+                &mut iface,
+                &mut sockets,
+                &mut flows,
+                smol_now,
+                &mut pending_closes,
+            );
+        }
+
         flows.service(&mut sockets, smol_now, &transports, &mut spawn_relay);
+        complete_pending_closes(&flows, &mut pending_closes);
 
         // --- Fix 05-A observability ---
         let n_relays = flows.active_relays.len();
@@ -2126,5 +2346,297 @@ mod tests {
         lab.pump(2);
         assert_eq!(lab.flows.stats.backstop_aborts, 1);
         let (_h3, _s3) = establish(&mut lab, port);
+    }
+
+    // ---- Fix 05 Phase 5-C: resource commands against the real FlowTable --------------
+
+    type Pending = Vec<PendingClose>;
+
+    fn res_key(port: u16) -> (Ipv4Addr, u16) {
+        (Ipv4Addr::from(RES_IP), port)
+    }
+
+    /// Apply one command exactly as the production loop does (between polls),
+    /// then run the ack-completion check.
+    fn lab_cmd(lab: &mut Lab, cmd: ResourceCmd, pending: &mut Pending) {
+        let now = lab.now();
+        apply_resource_cmd(
+            cmd,
+            &mut lab.s_iface,
+            &mut lab.s_sockets,
+            &mut lab.flows,
+            now,
+            pending,
+        );
+        complete_pending_closes(&lab.flows, pending);
+    }
+
+    fn lab_step(lab: &mut Lab, pending: &mut Pending, rounds: usize) {
+        for _ in 0..rounds {
+            lab.step(10);
+            complete_pending_closes(&lab.flows, pending);
+        }
+    }
+
+    fn connect_to(lab: &mut Lab, local_port: u16, port: u16) -> SocketHandle {
+        let mut s = tcp::Socket::new(
+            tcp::SocketBuffer::new(vec![0u8; 64 * 1024]),
+            tcp::SocketBuffer::new(vec![0u8; 64 * 1024]),
+        );
+        s.connect(
+            lab.c_iface.context(),
+            (
+                IpAddress::v4(RES_IP[0], RES_IP[1], RES_IP[2], RES_IP[3]),
+                port,
+            ),
+            local_port,
+        )
+        .unwrap();
+        lab.c_sockets.add(s)
+    }
+
+    /// Add a served key at runtime (listener + transport slot), acked Ok.
+    fn add_served_key(lab: &mut Lab, pending: &mut Pending, port: u16) {
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            lab,
+            ResourceCmd::Add {
+                addrs: vec![],
+                keys: vec![res_key(port)],
+                ack,
+            },
+            pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok(), "add acked");
+        let mut map = (**lab.transports.borrow()).clone();
+        map.insert(res_key(port), Some(vec![pipe_transport().0]));
+        lab._transports_tx.send(Arc::new(map)).unwrap();
+    }
+
+    #[test]
+    fn runtime_added_listener_accepts_new_flows() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        add_served_key(&mut lab, &mut pending, 81);
+        let h = connect_to(&mut lab, 41_001, 81);
+        lab_step(&mut lab, &mut pending, 5);
+        assert_eq!(lab.app(h).state(), tcp::State::Established);
+        let spawn = lab
+            .spawned
+            .pop()
+            .expect("relay spawned for the added resource");
+        assert_eq!(spawn.port, 81);
+    }
+
+    /// R1 + H4: the removed key's live flow is reset, an unrelated flow keeps
+    /// passing bytes, new SYNs to the removed key are refused, and the ack is
+    /// sent only after the affected socket was reset AND reaped.
+    #[test]
+    fn remove_resets_only_affected_flows_and_acks_after_reap() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        add_served_key(&mut lab, &mut pending, 81);
+        let (h80, spawn80) = establish(&mut lab, 40_101);
+        let h81 = connect_to(&mut lab, 40_102, 81);
+        lab_step(&mut lab, &mut pending, 5);
+        assert_eq!(lab.app(h81).state(), tcp::State::Established);
+        let mut spawn81 = lab.spawned.pop().unwrap();
+        assert_eq!(lab.relay_sockets(), 2);
+
+        let (ack, mut ack_rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Remove {
+                keys: vec![res_key(RES_PORT)],
+                ack,
+            },
+            &mut pending,
+        );
+        assert!(
+            matches!(ack_rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "not acked before the RST is dispatched and the socket reaped"
+        );
+        assert!(
+            spawn80.quic_to_tcp_tx.is_closed(),
+            "relay task told to stop"
+        );
+
+        lab_step(&mut lab, &mut pending, 2);
+        assert!(
+            ack_rx.try_recv().unwrap().is_ok(),
+            "acked after reset + reap"
+        );
+        assert_eq!(lab.app(h80).state(), tcp::State::Closed, "RST received");
+        assert_eq!(
+            lab.flows.stats.rst_on_relay_failure, 0,
+            "reset by the removal itself, not by the relay-failure lifecycle"
+        );
+        assert_eq!(lab.relay_sockets(), 1, "affected socket reaped");
+        assert!(!lab.flows.listen_handles.contains_key(&res_key(RES_PORT)));
+
+        // Unrelated flow on the kept key is untouched.
+        assert_eq!(lab.app(h81).state(), tcp::State::Established);
+        lab.app(h81).send_slice(b"still here").unwrap();
+        lab_step(&mut lab, &mut pending, 3);
+        assert_eq!(spawn81.tcp_to_quic_rx.try_recv().unwrap(), b"still here");
+
+        // New connection to the removed key: refused.
+        let spawned_before = lab.spawned.len();
+        let h_new = lab.connect(40_103);
+        lab_step(&mut lab, &mut pending, 5);
+        assert_eq!(
+            lab.app(h_new).state(),
+            tcp::State::Closed,
+            "new SYN refused"
+        );
+        assert_eq!(
+            lab.spawned.len(),
+            spawned_before,
+            "no relay for a removed key"
+        );
+    }
+
+    #[test]
+    fn remove_with_no_live_flows_acks_immediately() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Remove {
+                keys: vec![res_key(RES_PORT)],
+                ack,
+            },
+            &mut pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert!(pending.is_empty());
+    }
+
+    /// Final resource removed → no listener, no socket left; a later add
+    /// (no tunnel reconstruction) serves again.
+    #[test]
+    fn final_removal_leaves_nothing_and_readd_serves_again() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        let (h, _spawn) = establish(&mut lab, 40_201);
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Remove {
+                keys: vec![res_key(RES_PORT)],
+                ack,
+            },
+            &mut pending,
+        );
+        lab_step(&mut lab, &mut pending, 2);
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert_eq!(lab.app(h).state(), tcp::State::Closed);
+        assert!(lab.flows.listen_handles.is_empty());
+        assert_eq!(
+            lab.stack_sockets(),
+            0,
+            "zero resources: nothing left in the SocketSet"
+        );
+
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Add {
+                addrs: vec![],
+                keys: vec![res_key(RES_PORT)],
+                ack,
+            },
+            &mut pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok());
+        let (_h2, _s2) = establish(&mut lab, 40_202);
+    }
+
+    #[test]
+    fn interface_addresses_add_checked_and_remove() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        let n = |lab: &Lab| lab.s_iface.ip_addrs().len();
+        assert_eq!(n(&lab), 1);
+        let cap = smoltcp::config::IFACE_MAX_ADDR_COUNT;
+
+        // Fill to capacity.
+        let fill: Vec<Ipv4Addr> = (0..cap - 1)
+            .map(|i| Ipv4Addr::new(10, 9, 0, i as u8 + 1))
+            .collect();
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Add {
+                addrs: fill.clone(),
+                keys: vec![],
+                ack,
+            },
+            &mut pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert_eq!(n(&lab), cap);
+
+        // Overflow: error, no partial change, listeners not added.
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Add {
+                addrs: vec![Ipv4Addr::new(10, 9, 9, 9)],
+                keys: vec![(Ipv4Addr::new(10, 9, 9, 9), 443)],
+                ack,
+            },
+            &mut pending,
+        );
+        let err = rx.try_recv().unwrap().unwrap_err().to_string();
+        assert!(err.contains("capacity exceeded"), "{err}");
+        assert_eq!(n(&lab), cap, "never silently dropped, never partial");
+        assert!(!lab
+            .flows
+            .listen_handles
+            .contains_key(&(Ipv4Addr::new(10, 9, 9, 9), 443)));
+
+        // Re-adding a present address is a no-op.
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::Add {
+                addrs: fill.clone(),
+                keys: vec![],
+                ack,
+            },
+            &mut pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert_eq!(n(&lab), cap);
+
+        // Remove only the given addresses.
+        let (ack, mut rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::RemoveAddrs { ips: fill, ack },
+            &mut pending,
+        );
+        assert!(rx.try_recv().unwrap().is_ok());
+        assert_eq!(n(&lab), 1);
+        assert_eq!(
+            lab.s_iface.ip_addrs()[0].address(),
+            IpAddress::v4(10, 0, 0, 1),
+            "unrelated address kept"
+        );
+    }
+
+    #[test]
+    fn routable_key_is_ipv4_tcp_or_empty_protocol() {
+        let ip = Ipv4Addr::new(10, 0, 0, 1);
+        assert_eq!(routable_key("10.0.0.1", "tcp", 80), Some((ip, 80)));
+        assert_eq!(routable_key("10.0.0.1", "TCP", 80), Some((ip, 80)));
+        assert_eq!(routable_key("10.0.0.1", "", 80), Some((ip, 80)));
+        assert_eq!(routable_key("10.0.0.1", "udp", 80), None);
+        assert_eq!(routable_key("::1", "tcp", 80), None);
+        assert_eq!(routable_key("db.internal", "tcp", 80), None);
+        // Existing `as u16` conversion is preserved.
+        assert_eq!(routable_key("10.0.0.1", "tcp", 65_536 + 22), Some((ip, 22)));
     }
 }
