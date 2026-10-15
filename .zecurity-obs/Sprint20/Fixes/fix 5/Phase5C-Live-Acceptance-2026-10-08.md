@@ -5,11 +5,24 @@ fix: 5
 phase: 5-C
 title: Phase 5-C Resource Hot-Apply — live acceptance run
 date: 2026-10-08
-status: L6-reopened
+status: live-accepted-with-caveat  # was L6-reopened; L6 closed by the 2026-10-10 re-run
 spec: "[[Phase5C-Resource-Hot-Apply]]"
 ---
 
 # Phase 5-C Resource Hot-Apply: live acceptance, 2026-10-08
+
+> **Follow-up 2026-10-10: L6 PASS.** [[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]] re-ran §6a.4.
+> - Result: a pure removal reset the held flow from the client (`resource change, hot-applying removed=1`, then
+>   `resources hot-applied resources=0 removed=1` and `tunnel kept up`; the hold got an RST at 11:18:02.530 IST).
+> - The connector's control traffic (TCP 9090) was blocked for the window, so the connector logged no session cancel.
+> - There were no relays and `rst_on_relay_failure=0`.
+> - Client PID 2501 and `zecurity0` ifindex 12 were unchanged; build `032a0cf4`.
+> - **Caveats:**
+>   - one held flow;
+>   - the client does not log per-flow aborts, so the attribution rests on correlated events and lifecycle counters;
+>   - deviations from §6a.4: .75 rig instead of .49/A2 (expired certs), a 120 s block instead of about 90 s,
+>     the unassign 2 s before the client tick instead of at `:06`, and the unrelated-resource hold was not repeated.
+> - The text below is the 2026-10-08 record, unchanged.
 
 Spec: [[Phase5C-Resource-Hot-Apply]] §H (L1–L15). Run window: 15:20–16:48 IST.
 
@@ -291,7 +304,7 @@ nftsamp saw no intermediate state. The final hash equals the start hash. ✅
 | L3 | ✅ | `fwmark_rules=1` on every hot-apply row, including zero (row 7, row 10 L15 start) |
 | L4 | ✅ | nftsamp/tunsamp after every row equal the expected set (row tables) |
 | L5 | ✅ | row 1, row 8 |
-| L6 | **OPEN** | row 3: apply/survival ✅; "its hold reset" and "new connects refused" were satisfied by connector/shield, not observed from the client (row 2 shows the client reset). Re-run: §6a.4 |
+| L6 | **OPEN** → ✅ **PASS 2026-10-10** (re-run, with caveats) | row 3: apply/survival ✅; "its hold reset" and "new connects refused" were satisfied by connector/shield, not observed from the client (row 2 shows the client reset). Re-run: §6a.4 → [[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]]: client RST on a pure removal with the connector blocked. "New connects refused" was not re-probed in the re-run |
 | L7 | ✅ | row 7 |
 | L8 | ✅ | row 8 |
 | L9 | ✅ | row 2 |
@@ -320,6 +333,7 @@ inflates it. Session health was clean throughout (0 `session expired`, 0 `refres
 
 - **L6: REOPENED (2026-10-08, after review)** — see §6a. Not passed until the re-run in §6a.4 shows the
   client's own reset on a pure removal.
+  **2026-10-10: re-run PASS**, see [[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]] (deviations and caveats listed there).
 - FU-1…FU-4: out of scope (spec §J).
 - Q6 network-move hot-apply: not part of this phase (spec §H).
 
@@ -367,6 +381,8 @@ inflates it. Session health was clean throughout (0 `session expired`, 0 `refres
 Row 2 already shows R1 live, but on a port change, not a pure removal.
 
 ### 6a.4 Re-run to close L6 (not run; needs approval + sudo on .49)
+
+> **Run 2026-10-10 on the .75 rig: PASS.** [[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]].
 
 Keep the connector from receiving the push while its data plane stays up:
 
