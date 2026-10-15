@@ -294,7 +294,7 @@ async fn handle_request(
                 if result.changed {
                     info!(
                         version = result.version,
-                        "ACL changed, restarting VPN or tunnel"
+                        "ACL changed, evaluating tunnel configuration"
                     );
 
                     if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
@@ -5018,9 +5018,14 @@ async fn run_transport_recovery(
         }
         match fetch_and_store_transport(state, conf).await {
             Ok(true) => {
-                info!("early transport resync: version changed, restarting tunnel");
+                info!(
+                    "early transport resync: transport version changed, evaluating tunnel configuration"
+                );
                 if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
-                    warn!(error = %e, "early transport resync: tunnel restart failed");
+                    warn!(
+                        error = %e,
+                        "early transport resync: tunnel configuration apply failed"
+                    );
                 }
                 break;
             }
@@ -5090,10 +5095,10 @@ async fn sync_and_restart_if_changed(
             transport_changed,
             transport_pending,
             resource_pending,
-            "background sync: version changed, restarting tunnel"
+            "background sync: change detected, evaluating tunnel configuration"
         );
         if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
-            warn!(error = %e, "background sync: tunnel restart failed");
+            warn!(error = %e, "background sync: tunnel configuration apply failed");
         }
     }
 }

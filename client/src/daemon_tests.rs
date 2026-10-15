@@ -1012,3 +1012,57 @@ async fn build_transports_is_all_or_nothing_on_invalid_connector_coords() {
     let key = ("10.0.0.1".parse::<Ipv4Addr>().unwrap(), 80u16);
     assert_eq!(map[&key].as_ref().map(|v| v.len()), Some(1));
 }
+
+// ── F-1: decision-point log wording ──────────────────────────────────────
+//
+// The sync callers log before `run_restart_decision` classifies the change,
+// so their lines must not claim a restart; only the decision arms may. The
+// crate has no log-capture dependency, so this pins the wording against the
+// daemon source itself: each caller line exactly once, the old misleading
+// wording nowhere, and the genuine restart lines still present.
+
+const DAEMON_SRC: &str = include_str!("daemon.rs");
+
+#[test]
+fn caller_log_lines_say_evaluating_not_restarting() {
+    for line in [
+        "\"ACL changed, evaluating tunnel configuration\"",
+        "\"early transport resync: transport version changed, evaluating tunnel configuration\"",
+        "\"early transport resync: tunnel configuration apply failed\"",
+        "\"background sync: change detected, evaluating tunnel configuration\"",
+        "\"background sync: tunnel configuration apply failed\"",
+    ] {
+        assert_eq!(DAEMON_SRC.matches(line).count(), 1, "expected once: {line}");
+    }
+}
+
+#[test]
+fn misleading_restart_wording_is_gone() {
+    for old in [
+        "ACL changed, restarting VPN or tunnel",
+        "early transport resync: version changed, restarting tunnel",
+        "early transport resync: tunnel restart failed",
+        "background sync: version changed, restarting tunnel",
+        "background sync: tunnel restart failed",
+    ] {
+        assert!(
+            !DAEMON_SRC.contains(old),
+            "misleading log line still present: {old}"
+        );
+    }
+}
+
+#[test]
+fn genuine_restart_log_lines_unchanged() {
+    for line in [
+        "\"structural configuration change, restarting VPN\"",
+        "\"net_stack task is not running, restarting VPN\"",
+        "\"hot-apply not possible, falling back to full restart\"",
+        "\"resource apply failed after mutation, recovering with full restart\"",
+    ] {
+        assert!(
+            DAEMON_SRC.contains(line),
+            "restart log line missing: {line}"
+        );
+    }
+}
