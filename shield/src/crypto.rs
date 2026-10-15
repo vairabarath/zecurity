@@ -20,9 +20,6 @@
 //   renewal.rs    — load_private_key(), build_csr() (renewal uses existing key)
 //   main.rs       — parse_cert_not_after() to check cert expiry on startup
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -41,31 +38,6 @@ use x509_parser::prelude::FromDer;
 /// On renewal, the SAME keypair is reused (load_private_key + build_csr).
 pub fn generate_keypair() -> Result<KeyPair> {
     KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).context("failed to generate EC P-384 keypair")
-}
-
-/// Save a private key to disk as PEM with strict permissions (mode 0600).
-///
-/// WHY 0600?
-///   The private key must never be readable by other users on the system.
-///   0600 = owner read+write only. We set this atomically via OpenOptionsExt
-///   rather than chmod-after-write to avoid a race window.
-///
-/// The file is written to `<state_dir>/shield.key`.
-pub fn save_private_key(key_pair: &KeyPair, path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
-
-    OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600) // owner read+write only — no chmod race
-        .open(path)
-        .with_context(|| format!("failed to open {}", path.display()))?
-        .write_all(key_pair.serialize_pem().as_bytes())
-        .with_context(|| format!("failed to write private key to {}", path.display()))
 }
 
 /// Load a private key from a PEM file on disk.
@@ -146,6 +118,13 @@ pub fn parse_cert_not_after(cert_pem: &[u8]) -> Result<OffsetDateTime> {
 pub fn extract_public_key_der(private_key_pem: &str) -> Result<Vec<u8>> {
     let key_pair = KeyPair::from_pem(private_key_pem).context("failed to parse PEM key")?;
     build_csr(&key_pair, "renewal", "spiffe://renewal/renewal")
+}
+
+/// SubjectPublicKeyInfo DER of the key in `private_key_pem` — compared with
+/// a returned certificate's public key on renewal (certificate audit bug 1).
+pub fn public_key_spki_der(private_key_pem: &str) -> Result<Vec<u8>> {
+    let key_pair = KeyPair::from_pem(private_key_pem).context("failed to parse PEM key")?;
+    Ok(rcgen::PublicKeyData::subject_public_key_info(&key_pair))
 }
 
 /// Compute SHA-256 hex digest of raw bytes.

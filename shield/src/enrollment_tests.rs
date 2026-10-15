@@ -42,6 +42,7 @@ mod bootstrap {
         ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
         PKCS_ECDSA_P384_SHA384,
     };
+    use sha2::{Digest, Sha256};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tonic::transport::{Identity, Server, ServerTlsConfig};
@@ -148,6 +149,45 @@ mod bootstrap {
                 csr_der,
                 &Issuer::from_params(&self.attacker_params, &self.attacker_key),
             )
+        }
+
+        /// A genuine leaf for `csr_der` whose parameters `shape` adjusts
+        /// (usages, validity …) — for the wrong-shape rejection tests.
+        fn genuine_leaf_shaped(
+            &self,
+            csr_der: &[u8],
+            shape: impl FnOnce(&mut CertificateParams),
+        ) -> String {
+            let csr = rustls::pki_types::CertificateSigningRequestDer::from(csr_der.to_vec());
+            let mut p = CertificateSigningRequestParams::from_der(&csr).unwrap();
+            p.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            p.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+            shape(&mut p.params);
+            p.signed_by(&Issuer::from_params(&self.ws_params, &self.ws_key))
+                .unwrap()
+                .pem()
+        }
+
+        /// A "Workspace CA" that is not a CA (issued by the real Intermediate)
+        /// and a leaf for `csr_der` signed by it. Returns (ws PEM, leaf PEM).
+        fn non_ca_workspace(&self, csr_der: &[u8]) -> (String, String) {
+            let key = new_key();
+            let mut params = CertificateParams::default();
+            params
+                .distinguished_name
+                .push(DnType::CommonName, "Test Workspace CA");
+            let ws_pem = params
+                .signed_by(&key, &Issuer::from_params(&self.int_params, &self.int_key))
+                .unwrap()
+                .pem();
+            let csr = rustls::pki_types::CertificateSigningRequestDer::from(csr_der.to_vec());
+            let mut p = CertificateSigningRequestParams::from_der(&csr).unwrap();
+            p.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+            let leaf = p
+                .signed_by(&Issuer::from_params(&params, &key))
+                .unwrap()
+                .pem();
+            (ws_pem, leaf)
         }
 
         fn other_key_leaf(&self) -> String {
@@ -401,7 +441,6 @@ mod bootstrap {
     /// Attack: Mallory appends her root to /ca.crt; today the whole file is
     /// trusted and her TLS server receives the enrollment token.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn appended_ca_cannot_intercept_the_enrollment_token() {
         let s = Scenario::new();
         let tampered = format!("{}\n{}", s.pki.intermediate_pem, s.pki.attacker_pem);
@@ -424,7 +463,6 @@ mod bootstrap {
     /// Attack: the reply carries Mallory's root as the Workspace CA and
     /// Intermediate; today it becomes the shield's trust store.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn forged_enrollment_reply_is_not_trusted_or_persisted() {
         let s = Scenario::new();
         let result = s
@@ -443,7 +481,6 @@ mod bootstrap {
     }
 
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn reply_for_another_key_is_refused_and_nothing_persisted() {
         let s = Scenario::new();
         let result = s
@@ -462,7 +499,6 @@ mod bootstrap {
     }
 
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn failed_attempt_leaves_nothing_and_retry_succeeds() {
         let s = Scenario::new();
         let first = s
@@ -516,5 +552,270 @@ mod bootstrap {
         for f in ["shield.key", "shield.crt", "workspace_ca.crt", "state.json"] {
             assert!(s.dir.path().join(f).exists(), "{f} missing");
         }
+    }
+
+    // ---- unit tests for the bug 1 fix (trust.rs) ------------------------------
+
+    fn der(pem: &str) -> rustls::pki_types::CertificateDer<'static> {
+        certs(&mut pem.as_bytes()).next().unwrap().unwrap()
+    }
+
+    /// A shield key's SPKI and a CSR for the shield identity.
+    fn shield_key() -> (Vec<u8>, Vec<u8>) {
+        let key = crypto::generate_keypair().unwrap();
+        let spki = crypto::public_key_spki_der(&key.serialize_pem()).unwrap();
+        let csr = crypto::build_csr(
+            &key,
+            "shield",
+            &appmeta::shield_spiffe_id(TRUST_DOMAIN, SHIELD_ID),
+        )
+        .unwrap();
+        (spki, csr)
+    }
+
+    #[test]
+    fn pinning_requires_exactly_the_one_pinned_certificate() {
+        let pki = Pki::new();
+        let pin = fingerprint(&pki.intermediate_pem);
+        assert!(trust::pinned_bootstrap_ca(&pki.intermediate_pem, &pin).is_ok());
+        let appended = format!("{}\n{}", pki.intermediate_pem, pki.attacker_pem);
+        let err = trust::pinned_bootstrap_ca(&appended, &pin).expect_err("appended CA refused");
+        assert!(err.to_string().contains("exactly one certificate"), "{err}");
+        assert!(trust::pinned_bootstrap_ca(&pki.attacker_pem, &pin).is_err());
+        assert!(trust::pinned_bootstrap_ca("", &pin).is_err());
+    }
+
+    #[test]
+    fn enrollment_validation_rejects_each_broken_link() {
+        let pki = Pki::new();
+        let (spki, csr) = shield_key();
+        let id = appmeta::shield_spiffe_id(TRUST_DOMAIN, SHIELD_ID);
+        let int = der(&pki.intermediate_pem);
+        let anchors = trust::Anchors {
+            intermediate: &int,
+            workspace_ca: None,
+        };
+        let genuine = pki.genuine_leaf(&csr);
+        let check = |ws: &str, int_pem: &str, leaf: &str| {
+            trust::validate_issued_chain(
+                &anchors,
+                ws.as_bytes(),
+                int_pem.as_bytes(),
+                leaf.as_bytes(),
+                &id,
+                &spki,
+            )
+        };
+        check(&pki.workspace_ca_pem, &pki.intermediate_pem, &genuine).expect("genuine chain");
+        assert!(check(&pki.workspace_ca_pem, &pki.attacker_pem, &genuine).is_err());
+        assert!(check(&pki.attacker_pem, &pki.intermediate_pem, &genuine).is_err());
+        assert!(check(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            &pki.attacker_leaf(&csr)
+        )
+        .is_err());
+        assert!(check(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            &pki.other_key_leaf()
+        )
+        .is_err());
+        let smuggled = format!("{}\n{}", pki.workspace_ca_pem, pki.attacker_pem);
+        assert!(check(&smuggled, &pki.intermediate_pem, &genuine).is_err());
+    }
+
+    /// Renewal: the returned Workspace CA and Intermediate must be exactly the
+    /// anchors saved at enrollment, and the leaf must be for the shield's key.
+    #[test]
+    fn renewal_validation_never_replaces_the_pinned_anchors() {
+        let pki = Pki::new();
+        let other = Pki::new(); // another platform's genuine-looking hierarchy
+        let (spki, csr) = shield_key();
+        let id = appmeta::shield_spiffe_id(TRUST_DOMAIN, SHIELD_ID);
+        let int = der(&pki.intermediate_pem);
+        let ws = der(&pki.workspace_ca_pem);
+        let anchors = trust::Anchors {
+            intermediate: &int,
+            workspace_ca: Some(&ws),
+        };
+        let check = |ws_pem: &str, int_pem: &str, leaf: &str| {
+            trust::validate_issued_chain(
+                &anchors,
+                ws_pem.as_bytes(),
+                int_pem.as_bytes(),
+                leaf.as_bytes(),
+                &id,
+                &spki,
+            )
+        };
+        check(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            &pki.genuine_leaf(&csr),
+        )
+        .expect("same anchors, same key: renewal accepted");
+        let err = check(
+            &other.workspace_ca_pem,
+            &pki.intermediate_pem,
+            &other.genuine_leaf(&csr),
+        )
+        .expect_err("a different Workspace CA must be refused");
+        assert!(err.to_string().contains("pinned Workspace CA"), "{err}");
+        assert!(check(
+            &other.workspace_ca_pem,
+            &other.intermediate_pem,
+            &other.genuine_leaf(&csr)
+        )
+        .is_err());
+        assert!(check(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            &pki.other_key_leaf()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn install_removes_partial_files_when_a_write_fails() {
+        let dir = TempDir::new();
+        fs::create_dir(dir.path().join("workspace_ca.crt")).unwrap();
+        fs::write(dir.path().join("workspace_ca.crt").join("blocker"), b"x").unwrap();
+        let err = trust::install_files(
+            dir.path(),
+            &[
+                ("shield.key", b"key".to_vec(), 0o600),
+                ("shield.crt", b"crt".to_vec(), 0o644),
+                ("workspace_ca.crt", b"ca".to_vec(), 0o644),
+                ("state.json", b"{}".to_vec(), 0o644),
+            ],
+        )
+        .expect_err("third write must fail");
+        assert!(format!("{err:#}").contains("workspace_ca.crt"), "{err:#}");
+        assert!(!dir.path().join("shield.key").exists(), "key left behind");
+        assert!(!dir.path().join("shield.crt").exists(), "cert left behind");
+        assert!(
+            !dir.path().join("state.json").exists(),
+            "state.json written"
+        );
+    }
+
+    #[test]
+    fn installed_key_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        trust::install_files(dir.path(), &[("shield.key", b"key".to_vec(), 0o600)]).unwrap();
+        let mode = fs::metadata(dir.path().join("shield.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn validation_rejects_wrong_shape_certificates() {
+        let pki = Pki::new();
+        let (spki, csr) = shield_key();
+        let id = appmeta::shield_spiffe_id(TRUST_DOMAIN, SHIELD_ID);
+        let int = der(&pki.intermediate_pem);
+        let anchors = trust::Anchors {
+            intermediate: &int,
+            workspace_ca: None,
+        };
+        let check = |ws: &str, leaf: &str, spiffe: &str| {
+            trust::validate_issued_chain(
+                &anchors,
+                ws.as_bytes(),
+                pki.intermediate_pem.as_bytes(),
+                leaf.as_bytes(),
+                spiffe,
+                &spki,
+            )
+            .expect_err("must be rejected")
+            .to_string()
+        };
+        let ws = pki.workspace_ca_pem.as_str();
+
+        let server_only = pki.genuine_leaf_shaped(&csr, |p| {
+            p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        });
+        assert!(check(ws, &server_only, &id).contains("client authentication"));
+        let expired = pki.genuine_leaf_shaped(&csr, |p| {
+            let now = ::time::OffsetDateTime::now_utc();
+            p.not_before = now - ::time::Duration::hours(2);
+            p.not_after = now - ::time::Duration::hours(1);
+        });
+        assert!(check(ws, &expired, &id).contains("validity"));
+        let (not_a_ca, leaf) = pki.non_ca_workspace(&csr);
+        assert!(check(&not_a_ca, &leaf, &id).contains("not a CA"));
+        let other_shield = appmeta::shield_spiffe_id(TRUST_DOMAIN, "other-shield");
+        assert!(check(ws, &pki.genuine_leaf(&csr), &other_shield).contains("identity"));
+    }
+
+    #[test]
+    fn renewal_installs_only_a_validated_certificate() {
+        let pki = Pki::new();
+        let other = Pki::new();
+        let dir = TempDir::new();
+        let key = crypto::generate_keypair().unwrap();
+        let key_pem = key.serialize_pem();
+        let id = appmeta::shield_spiffe_id(TRUST_DOMAIN, SHIELD_ID);
+        let csr = crypto::build_csr(&key, "shield", &id).unwrap();
+        let anchors = format!("{}\n{}", pki.workspace_ca_pem, pki.intermediate_pem);
+        fs::write(dir.path().join("shield.crt"), "previous").unwrap();
+        let reply = |ws: &str, int: &str, leaf: String| proto::RenewCertResponse {
+            certificate_pem: leaf.into_bytes(),
+            workspace_ca_pem: ws.as_bytes().to_vec(),
+            intermediate_ca_pem: int.as_bytes().to_vec(),
+        };
+        let renew = |r: &proto::RenewCertResponse| {
+            crate::renewal::install_renewed_certificate(
+                dir.path(),
+                anchors.as_bytes(),
+                &key_pem,
+                &id,
+                r,
+            )
+        };
+        let unchanged = || fs::read_to_string(dir.path().join("shield.crt")).unwrap() == "previous";
+
+        // Another platform's complete, self-consistent chain: refused.
+        let forged = reply(
+            &other.workspace_ca_pem,
+            &other.intermediate_pem,
+            other.genuine_leaf(&csr),
+        );
+        let err = renew(&forged).expect_err("forged renewal must be refused");
+        assert!(
+            format!("{err:#}").contains("renewed certificate rejected"),
+            "{err:#}"
+        );
+        assert!(unchanged(), "shield.crt replaced by a rejected renewal");
+        // A certificate for another key: refused.
+        let other_key = reply(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            pki.other_key_leaf(),
+        );
+        assert!(renew(&other_key).is_err());
+        assert!(unchanged(), "shield.crt replaced by a rejected renewal");
+
+        // The genuine renewal installs; the trust store is never written.
+        let leaf = pki.genuine_leaf(&csr);
+        renew(&reply(
+            &pki.workspace_ca_pem,
+            &pki.intermediate_pem,
+            leaf.clone(),
+        ))
+        .unwrap();
+        let installed = fs::read_to_string(dir.path().join("shield.crt")).unwrap();
+        assert!(
+            installed.starts_with(leaf.trim_end()),
+            "renewed leaf not installed"
+        );
+        assert!(
+            !dir.path().join("workspace_ca.crt").exists(),
+            "renewal wrote the trust store"
+        );
     }
 }

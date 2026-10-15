@@ -9,7 +9,8 @@
 //   2. Build CSR DER (proof of key possession; sent as public_key_der per proto)
 //   3. Build mTLS channel to connector :9091
 //   4. Call RenewCert RPC (connector proxies to controller)
-//   5. Save new shield.crt + updated workspace_ca.crt
+//   5. Validate the new cert against the saved anchors, then save shield.crt
+//      (workspace_ca.crt — the trust store — is never replaced by renewal)
 //   6. Update cert_not_after in state.json
 //   7. Return updated ShieldState (control_stream.rs reconnects with new cert)
 
@@ -113,27 +114,14 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
     let selected_idx =
         selected_idx.expect("selected_idx is Some when resp is Some (paired above)");
 
-    // Step 5: Save new shield.crt (leaf + workspace CA chain)
-    let leaf_pem = String::from_utf8(resp.certificate_pem.clone())
-        .context("certificate_pem is not valid UTF-8")?;
-    let ws_ca_pem = String::from_utf8(resp.workspace_ca_pem.clone())
-        .context("workspace_ca_pem is not valid UTF-8")?;
-    let int_ca_pem = String::from_utf8(resp.intermediate_ca_pem)
-        .context("intermediate_ca_pem is not valid UTF-8")?;
-
-    tokio::fs::write(
-        state_dir.join("shield.crt"),
-        format!("{}\n{}", leaf_pem, ws_ca_pem),
-    )
-    .await
-    .context("failed to write renewed shield.crt")?;
-
-    tokio::fs::write(
-        state_dir.join("workspace_ca.crt"),
-        format!("{}\n{}", ws_ca_pem, int_ca_pem),
-    )
-    .await
-    .context("failed to write renewed workspace_ca.crt")?;
+    // Step 5: Validate against the saved anchors, then save shield.crt.
+    install_renewed_certificate(
+        state_dir,
+        &ca_pem,
+        &key_pem,
+        &crate::appmeta::shield_spiffe_id(&state.trust_domain, &state.shield_id),
+        &resp,
+    )?;
 
     // Step 6: Parse new cert expiry
     let cert_not_after = parse_cert_not_after(&resp.certificate_pem)?;
@@ -165,6 +153,56 @@ pub async fn renew_cert(state: &ShieldState, cfg: &ShieldConfig) -> Result<Shiel
     );
 
     Ok(new_state)
+}
+
+/// Step 5: validate the renewed certificate against the anchors saved at
+/// enrollment, then atomically replace shield.crt. Nothing is written if the
+/// reply is rejected.
+pub(crate) fn install_renewed_certificate(
+    state_dir: &Path,
+    ca_pem: &[u8],
+    key_pem: &str,
+    expected_spiffe_id: &str,
+    resp: &proto::RenewCertResponse,
+) -> Result<()> {
+    // Validate the renewed certificate against the anchors saved at
+    // enrollment, then save it. The Workspace CA and Platform Intermediate
+    // must be exactly the pinned ones — a renewal can never replace the
+    // shield's trust store (certificate audit bug 1). Fail closed.
+    let saved_anchors = certs(&mut &ca_pem[..])
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .context("failed to parse saved workspace_ca.crt")?;
+    let (Some(saved_workspace), Some(saved_intermediate)) =
+        (saved_anchors.first(), saved_anchors.last())
+    else {
+        anyhow::bail!("saved workspace_ca.crt has no certificates");
+    };
+    let key_spki = crypto::public_key_spki_der(key_pem)
+        .context("failed to read shield public key for renewal check")?;
+    crate::trust::validate_issued_chain(
+        &crate::trust::Anchors {
+            intermediate: saved_intermediate,
+            workspace_ca: Some(saved_workspace),
+        },
+        &resp.workspace_ca_pem,
+        &resp.intermediate_ca_pem,
+        &resp.certificate_pem,
+        expected_spiffe_id,
+        &key_spki,
+    )
+    .context("renewed certificate rejected")?;
+
+    let leaf_pem = String::from_utf8(resp.certificate_pem.clone())
+        .context("certificate_pem is not valid UTF-8")?;
+    let ws_ca_pem = String::from_utf8(resp.workspace_ca_pem.clone())
+        .context("workspace_ca_pem is not valid UTF-8")?;
+    crate::trust::write_atomic(
+        &state_dir.join("shield.crt"),
+        format!("{}\n{}", leaf_pem, ws_ca_pem).as_bytes(),
+        0o644,
+    )
+    .context("failed to write renewed shield.crt")?;
+    Ok(())
 }
 
 fn parse_cert_not_after(cert_pem: &[u8]) -> Result<i64> {
