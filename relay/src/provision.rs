@@ -1,16 +1,16 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
+use rustls::pki_types::CertificateDer;
 use rustls_pemfile::certs;
 use sha2::{Digest, Sha256};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
 
 use crate::appmeta;
-use crate::cert_manager::{now_unix, record_install};
+use crate::cert_manager::{key_spki_der, now_unix, record_install, write_atomic};
 use crate::config::RelayConfig;
 use crate::csr::generate_relay_csr;
 use crate::relay::v1::relay_service_client::RelayServiceClient;
@@ -33,7 +33,9 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
     // if paths.exists = true then the remaining is not executed
     let provisioning_token = require_provisioning_token(cfg.provisioning_token.as_deref())?;
     let ca_pem = fetch_ca_cert(&cfg.controller_http_addr).await?;
-    verify_ca_fingerprint(&ca_pem, &cfg.ca_fingerprint)?;
+    // /ca.crt must be exactly the pinned Platform Intermediate, and only that
+    // certificate is trusted from here on (certificate audit bug 1).
+    let pinned_ca = pinned_bootstrap_ca(&ca_pem, &cfg.ca_fingerprint)?;
     info!("verified controller Intermediate CA fingerprint");
 
     let material = generate_relay_csr(&cfg.relay_id, &cfg.dns_sans, &cfg.ip_sans)?; /*RelayCsr {
@@ -41,9 +43,23 @@ pub async fn ensure_provisioned(cfg: &RelayConfig) -> Result<ProvisionedRelay> {
                                                                                         csr_der,
                                                                                     } */
 
-    let response =
-        send_provision_request(cfg, provisioning_token, &ca_pem, material.csr_der).await?;
+    let response = send_provision_request(
+        cfg,
+        provisioning_token,
+        &pem_from_der(&pinned_ca),
+        material.csr_der,
+    )
+    .await?;
     validate_response(&cfg.relay_id, &cfg.ca_fingerprint, &response)?;
+    // Beyond the identity and returned-intermediate checks above: the leaf
+    // must be issued by the pinned Platform Intermediate, for this relay's
+    // key, with the expected usages. Fail closed — nothing is stored.
+    validate_issued_leaf(
+        &pinned_ca,
+        &response,
+        &appmeta::relay_spiffe_id(&cfg.relay_id),
+        &key_spki_der(material.private_key_pem.as_bytes())?,
+    )?;
     paths.store(
         material.private_key_pem.as_bytes(),
         &response.certificate_pem,
@@ -91,16 +107,25 @@ impl ProvisionedRelay {
         fs::create_dir_all(state_dir)
             .with_context(|| format!("failed to create {}", state_dir.display()))?;
 
-        fs::write(&self.key_path, key)
-            .with_context(|| format!("failed to write {}", self.key_path.display()))?;
-        let mut permissions = fs::metadata(&self.key_path)?.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(&self.key_path, permissions)?;
-
-        fs::write(&self.certificate_path, certificate)
-            .with_context(|| format!("failed to write {}", self.certificate_path.display()))?;
-        fs::write(&self.intermediate_ca_path, intermediate_ca)
-            .with_context(|| format!("failed to write {}", self.intermediate_ca_path.display()))?;
+        // Atomic writes (temp file created with the final mode, fsync,
+        // rename), the Intermediate last: `exists()` needs all three, so a
+        // failed or interrupted install is never mistaken for a provisioned
+        // relay. On failure the files this call already wrote are removed.
+        let files: [(&Path, &[u8], u32); 3] = [
+            (&self.key_path, key, 0o600),
+            (&self.certificate_path, certificate, 0o644),
+            (&self.intermediate_ca_path, intermediate_ca, 0o644),
+        ];
+        let mut written: Vec<&Path> = Vec::new();
+        for (path, data, mode) in files {
+            if let Err(e) = write_atomic(path, data, mode) {
+                for done in &written {
+                    let _ = fs::remove_file(done);
+                }
+                return Err(e).with_context(|| format!("failed to write {}", path.display()));
+            }
+            written.push(path);
+        }
         // K1: record when this certificate was installed, for renewal
         // scheduling only, so a failure here does not fail provisioning (the
         // scheduler then falls back to NotBefore).
@@ -143,10 +168,114 @@ pub(crate) fn certificate_fingerprint(ca_pem: &[u8]) -> Result<String> {
     Ok(hex::encode(Sha256::digest(certificate.as_ref())))
 }
 
-fn verify_ca_fingerprint(ca_pem: &str, expected: &str) -> Result<()> {
-    let actual = certificate_fingerprint(ca_pem.as_bytes())?;
+/// `/ca.crt` must contain exactly ONE certificate and it must match the
+/// pinned Platform Intermediate fingerprint (`RELAY_CA_FINGERPRINT`). Returns
+/// that certificate — the only one trusted for the provisioning TLS
+/// connection (certificate audit bug 1: previously only the first certificate
+/// was checked while every certificate in the file was trusted).
+fn pinned_bootstrap_ca(ca_pem: &str, expected: &str) -> Result<CertificateDer<'static>> {
+    let certificates = certs(&mut ca_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("failed to parse controller CA PEM")?;
+    let [ca] = certificates.as_slice() else {
+        bail!(
+            "/ca.crt must contain exactly one certificate (the Platform Intermediate), got {} — possible MITM, aborting",
+            certificates.len()
+        );
+    };
+    let actual = hex::encode(Sha256::digest(ca.as_ref()));
     if actual != expected {
-        bail!("controller CA fingerprint mismatch: expected {expected}, got {actual}");
+        bail!("controller Intermediate CA fingerprint mismatch: expected {expected}, got {actual}");
+    }
+    Ok(ca.clone().into_owned())
+}
+
+/// PEM for a single DER certificate.
+fn pem_from_der(der: &CertificateDer<'_>) -> String {
+    use base64::Engine;
+    let body = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// Exactly one certificate in `pem`.
+fn single_certificate(pem: &[u8], label: &str) -> Result<CertificateDer<'static>> {
+    let certificates = certs(&mut &pem[..])
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse {label}"))?;
+    match <[_; 1]>::try_from(certificates) {
+        Ok([certificate]) => Ok(certificate),
+        Err(certificates) => bail!(
+            "{label} must be exactly one certificate, got {}",
+            certificates.len()
+        ),
+    }
+}
+
+/// The returned Relay leaf must be issued (name and signature) by the pinned
+/// Platform Intermediate, the returned intermediate must be exactly that
+/// certificate, and the leaf must be for this relay: exactly its SPIFFE ID,
+/// server and client authentication, and the key it generated.
+fn validate_issued_leaf(
+    pinned_intermediate: &CertificateDer<'_>,
+    response: &ProvisionResponse,
+    expected_spiffe_id: &str,
+    key_spki_der: &[u8],
+) -> Result<()> {
+    use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
+    let returned = single_certificate(&response.intermediate_ca_pem, "returned Intermediate CA")?;
+    if returned.as_ref() != pinned_intermediate.as_ref() {
+        bail!("returned Intermediate CA is not the pinned Platform Intermediate");
+    }
+    let (_, intermediate) = X509Certificate::from_der(pinned_intermediate.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse pinned Intermediate CA: {e:?}"))?;
+    let leaf_der = single_certificate(&response.certificate_pem, "returned Relay certificate")?;
+    let (_, leaf) = X509Certificate::from_der(leaf_der.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse returned Relay certificate: {e:?}"))?;
+    if leaf.is_ca() {
+        bail!("returned Relay certificate must not be a CA");
+    }
+    if leaf.issuer() != intermediate.subject() {
+        bail!("returned Relay certificate was not issued by the pinned Platform Intermediate");
+    }
+    leaf.verify_signature(Some(intermediate.public_key()))
+        .map_err(|e| anyhow::anyhow!("returned Relay certificate signature invalid: {e:?}"))?;
+    if !leaf.validity().is_valid() {
+        bail!("returned Relay certificate is outside its validity period");
+    }
+    let uris: Vec<&str> = leaf
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    GeneralName::URI(uri) => Some(*uri),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if uris != [expected_spiffe_id] {
+        bail!("returned Relay certificate identity {uris:?} is not {expected_spiffe_id}");
+    }
+    let eku = leaf
+        .extended_key_usage()
+        .ok()
+        .flatten()
+        .context("returned Relay certificate has no extended key usage")?;
+    if !eku.value.server_auth || !eku.value.client_auth {
+        bail!("returned Relay certificate must allow server and client authentication");
+    }
+    if leaf.public_key().raw != key_spki_der {
+        bail!("returned Relay certificate is not for the key this relay generated");
     }
     Ok(())
 }
@@ -585,7 +714,6 @@ mod tests {
         /// Attack: Mallory appends her root to /ca.crt; today the whole file
         /// is trusted and her TLS server receives the provisioning token.
         #[tokio::test]
-        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
         async fn appended_ca_cannot_intercept_the_provisioning_token() {
             let s = Scenario::new();
             let tampered = format!("{}\n{}", s.pki.ca_pem, s.attacker.root_pem);
@@ -633,7 +761,6 @@ mod tests {
         /// Attack: genuine intermediate returned, but the leaf is signed by
         /// Mallory; today it is stored.
         #[tokio::test]
-        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
         async fn leaf_not_issued_by_the_pinned_intermediate_is_refused() {
             let s = Scenario::new();
             let result = s
@@ -655,7 +782,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
         async fn leaf_for_another_key_is_refused_and_nothing_persisted() {
             let s = Scenario::new();
             let result = s
@@ -674,7 +800,6 @@ mod tests {
         }
 
         #[tokio::test]
-        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
         async fn failed_attempt_leaves_nothing_and_retry_succeeds() {
             let s = Scenario::new();
             let first = s
@@ -736,6 +861,135 @@ mod tests {
                 fs::read_to_string(&paths.intermediate_ca_path).unwrap(),
                 s.pki.ca_pem
             );
+        }
+
+        // ---- unit tests for the bug 1 fix -------------------------------------
+
+        #[test]
+        fn pinning_requires_exactly_the_one_pinned_certificate() {
+            let pki = TestPki::new();
+            let attacker = AttackerPki::new();
+            let pin = certificate_fingerprint(pki.ca_pem.as_bytes()).unwrap();
+            let pinned = pinned_bootstrap_ca(&pki.ca_pem, &pin).expect("pinned cert accepted");
+            assert_eq!(pem_from_der(&pinned).trim(), pki.ca_pem.trim());
+            let appended = format!("{}\n{}", pki.ca_pem, attacker.root_pem);
+            let err = pinned_bootstrap_ca(&appended, &pin).expect_err("appended CA refused");
+            assert!(err.to_string().contains("exactly one certificate"), "{err}");
+            assert!(pinned_bootstrap_ca(&attacker.root_pem, &pin).is_err());
+            assert!(pinned_bootstrap_ca("", &pin).is_err());
+        }
+
+        #[test]
+        fn issued_leaf_validation_rejects_each_broken_link() {
+            let pki = TestPki::new();
+            let attacker = AttackerPki::new();
+            let material = generate_relay_csr(RELAY_ID, &[], &[]).unwrap();
+            let spki = key_spki_der(material.private_key_pem.as_bytes()).unwrap();
+            let pinned = pinned_bootstrap_ca(
+                &pki.ca_pem,
+                &certificate_fingerprint(pki.ca_pem.as_bytes()).unwrap(),
+            )
+            .unwrap();
+            let id = appmeta::relay_spiffe_id(RELAY_ID);
+            let response = |leaf: String, int: &str| fake_response(leaf, int);
+            let check = |r: &ProvisionResponse, spiffe: &str| {
+                validate_issued_leaf(&pinned, r, spiffe, &spki)
+            };
+
+            let genuine = pki.sign_relay_csr(&material.csr_der, RELAY_ID);
+            check(&response(genuine.clone(), &pki.ca_pem), &id).expect("genuine leaf");
+            assert!(check(&response(genuine.clone(), &attacker.root_pem), &id).is_err());
+            assert!(check(
+                &response(attacker.sign_csr(&material.csr_der, RELAY_ID), &pki.ca_pem),
+                &id
+            )
+            .is_err());
+            let other_key = pki.relay_cert(RELAY_ID, &pki.relay_key(), -60, 3600);
+            assert!(check(&response(other_key, &pki.ca_pem), &id).is_err());
+            assert!(check(
+                &response(genuine.clone(), &pki.ca_pem),
+                &appmeta::relay_spiffe_id("other")
+            )
+            .is_err());
+            let two = format!("{}\n{}", genuine, pki.ca_pem);
+            assert!(check(&response(two, &pki.ca_pem), &id).is_err());
+        }
+
+        #[test]
+        fn issued_leaf_validation_rejects_wrong_shape_certificates() {
+            let pki = TestPki::new();
+            let material = generate_relay_csr(RELAY_ID, &[], &[]).unwrap();
+            let spki = key_spki_der(material.private_key_pem.as_bytes()).unwrap();
+            let pinned = pinned_bootstrap_ca(
+                &pki.ca_pem,
+                &certificate_fingerprint(pki.ca_pem.as_bytes()).unwrap(),
+            )
+            .unwrap();
+            let id = appmeta::relay_spiffe_id(RELAY_ID);
+            let check = |leaf: String| {
+                validate_issued_leaf(&pinned, &fake_response(leaf, &pki.ca_pem), &id, &spki)
+                    .expect_err("must be rejected")
+                    .to_string()
+            };
+            let csr = &material.csr_der;
+
+            let client_only = pki.sign_relay_csr_shaped(csr, RELAY_ID, |p| {
+                p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+            });
+            assert!(check(client_only).contains("server and client"));
+            let expired = pki.sign_relay_csr_shaped(csr, RELAY_ID, |p| {
+                let now = time::OffsetDateTime::now_utc();
+                p.not_before = now - time::Duration::hours(2);
+                p.not_after = now - time::Duration::hours(1);
+            });
+            assert!(check(expired).contains("validity"));
+            let ca_leaf = pki.sign_relay_csr_shaped(csr, RELAY_ID, |p| {
+                p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            });
+            assert!(check(ca_leaf).contains("must not be a CA"));
+        }
+
+        fn fake_response(leaf: String, intermediate: &str) -> ProvisionResponse {
+            ProvisionResponse {
+                certificate_pem: leaf.into_bytes(),
+                intermediate_ca_pem: intermediate.as_bytes().to_vec(),
+                relay_id: RELAY_ID.to_string(),
+                spiffe_id: appmeta::relay_spiffe_id(RELAY_ID),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn store_removes_partial_files_when_a_write_fails_and_key_is_private() {
+            use std::os::unix::fs::PermissionsExt;
+            let s = Scenario::new();
+            let paths = ProvisionedRelay::new(s.dir.to_str().unwrap());
+            // A directory where the Intermediate must go makes its rename fail.
+            fs::create_dir(&paths.intermediate_ca_path).unwrap();
+            fs::write(paths.intermediate_ca_path.join("blocker"), b"x").unwrap();
+            let err = paths
+                .store(b"key", b"crt", b"ca")
+                .expect_err("third write must fail");
+            assert!(
+                format!("{err:#}").contains("intermediate-ca.crt"),
+                "{err:#}"
+            );
+            assert!(!paths.key_path.exists(), "key left behind");
+            assert!(!paths.certificate_path.exists(), "cert left behind");
+
+            fs::remove_dir_all(&paths.intermediate_ca_path).unwrap();
+            let pki = TestPki::new();
+            let key = pki.relay_key();
+            let cert = pki.relay_cert(RELAY_ID, &key, -60, 3600);
+            paths
+                .store(
+                    key.serialize_pem().as_bytes(),
+                    cert.as_bytes(),
+                    pki.ca_pem.as_bytes(),
+                )
+                .unwrap();
+            let mode = fs::metadata(&paths.key_path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "relay.key must be created private");
         }
     }
 }

@@ -215,6 +215,17 @@ impl TestPki {
         sign_csr(csr_der, relay_id, &self.ca_cert, &self.ca_key)
     }
 
+    /// [`Self::sign_relay_csr`] with the leaf parameters (usages, validity,
+    /// CA flag …) adjusted by `shape` — for the wrong-shape rejection tests.
+    pub fn sign_relay_csr_shaped(
+        &self,
+        csr_der: &[u8],
+        relay_id: &str,
+        shape: impl FnOnce(&mut CertificateParams),
+    ) -> String {
+        sign_csr_shaped(csr_der, relay_id, &self.ca_cert, &self.ca_key, shape)
+    }
+
     /// A Workspace CA shaped like the controller's `GenerateWorkspaceCA`
     /// (CN `workspace-<tenant>`, CA with path length 0, CertSign + CRLSign,
     /// `tenant:<id>` URI SAN), issued by this Intermediate. Its key id is
@@ -385,6 +396,17 @@ impl rcgen::PublicKeyData for CsrKey {
 }
 
 fn sign_csr(csr_der: &[u8], relay_id: &str, issuer: &Certificate, issuer_key: &KeyPair) -> String {
+    sign_csr_shaped(csr_der, relay_id, issuer, issuer_key, |_| {})
+}
+
+/// [`sign_csr`] with the leaf parameters adjusted by `shape` before signing.
+fn sign_csr_shaped(
+    csr_der: &[u8],
+    relay_id: &str,
+    issuer: &Certificate,
+    issuer_key: &KeyPair,
+    shape: impl FnOnce(&mut CertificateParams),
+) -> String {
     use x509_parser::prelude::FromDer;
     let (_, csr) =
         x509_parser::certification_request::X509CertificationRequest::from_der(csr_der).unwrap();
@@ -407,6 +429,7 @@ fn sign_csr(csr_der: &[u8], relay_id: &str, issuer: &Certificate, issuer_key: &K
     ];
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.serial_number = Some(random_serial());
+    shape(&mut params);
     params.signed_by(&key, issuer, issuer_key).unwrap().pem()
 }
 
