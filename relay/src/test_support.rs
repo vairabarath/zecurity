@@ -257,11 +257,21 @@ impl TestWorkspaceCa {
         &self,
         claimed_tenant: &str,
     ) -> rustls::pki_types::CertificateDer<'static> {
+        self.forged_copy_claiming_signed_as(claimed_tenant, "attacker")
+    }
+
+    /// Like [`Self::forged_copy_claiming`], with the attacker's signing CA
+    /// named `attacker_cn` (e.g. the Platform Intermediate's own name).
+    pub fn forged_copy_claiming_signed_as(
+        &self,
+        claimed_tenant: &str,
+        attacker_cn: &str,
+    ) -> rustls::pki_types::CertificateDer<'static> {
         let attacker_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
         let mut attacker_params = CertificateParams::default();
         attacker_params
             .distinguished_name
-            .push(DnType::CommonName, "attacker");
+            .push(DnType::CommonName, attacker_cn);
         attacker_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let attacker = attacker_params.self_signed(&attacker_key).unwrap();
 

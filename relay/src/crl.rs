@@ -56,32 +56,39 @@ impl WorkspaceCrlManager {
         serial: &[u8],
         issuer_ca_der: &[u8],
     ) -> RevocationStatus {
-        let now = ASN1Time::now().timestamp();
         // fast path: fresh cache (guard dropped before any await)
-        if let Some(entry) = self.cache.get(workspace_id) {
-            if now < entry.crl.next_update {
-                return if entry.crl.revoked.contains(serial) {
-                    RevocationStatus::Revoked
-                } else {
-                    RevocationStatus::NotRevoked
-                };
-            }
+        if let Some(status) = self.cached_status(workspace_id, serial, issuer_ca_der) {
+            return status;
         }
         // slow path: (re)fetch + verify; keep-last-good on failure
         if let Err(e) = self.refresh_one(workspace_id, issuer_ca_der).await {
             warn!(workspace_id, error = %e, "workspace CRL fetch/verify failed — fail closed");
         }
-        let now = ASN1Time::now().timestamp();
-        match self.cache.get(workspace_id) {
-            Some(entry) if now < entry.crl.next_update => {
-                if entry.crl.revoked.contains(serial) {
-                    RevocationStatus::Revoked
-                } else {
-                    RevocationStatus::NotRevoked
-                }
-            }
-            _ => RevocationStatus::Unavailable,
+        self.cached_status(workspace_id, serial, issuer_ca_der)
+            .unwrap_or(RevocationStatus::Unavailable)
+    }
+
+    /// Answer from the cached CRL for `workspace_id` only if it is still fresh
+    /// AND was verified against this same Workspace CA (audit finding S1b): a
+    /// CRL cached for a workspace must never answer for a peer presenting a
+    /// different CA under that workspace's label.
+    fn cached_status(
+        &self,
+        workspace_id: &str,
+        serial: &[u8],
+        issuer_ca_der: &[u8],
+    ) -> Option<RevocationStatus> {
+        let entry = self.cache.get(workspace_id)?;
+        if entry.issuer_ca_der != issuer_ca_der
+            || ASN1Time::now().timestamp() >= entry.crl.next_update
+        {
+            return None;
         }
+        Some(if entry.crl.revoked.contains(serial) {
+            RevocationStatus::Revoked
+        } else {
+            RevocationStatus::NotRevoked
+        })
     }
 
     async fn refresh_one(&self, workspace_id: &str, issuer_ca_der: &[u8]) -> Result<()> {
@@ -369,6 +376,43 @@ mod tests {
         assert_eq!(
             mgr.check(WS, REVOKED_SERIAL, ca.der().as_ref()).await,
             RevocationStatus::Unavailable
+        );
+    }
+
+    // S1b: a CRL cached for a workspace answers only for the CA it was
+    // verified against — never for a different CA presented under that
+    // workspace's label (fast path or after a failed refresh).
+    #[tokio::test]
+    async fn cached_crl_answers_only_for_the_ca_that_verified_it() {
+        install_provider();
+        let (key_a, ca_a) = workspace_ca("ws-ca-a");
+        let (_key_b, ca_b) = workspace_ca("ws-ca-b");
+        let now = OffsetDateTime::now_utc();
+        let der = signed_crl(
+            &key_a,
+            &ca_a,
+            REVOKED_SERIAL,
+            now - TimeDuration::minutes(1),
+            now + TimeDuration::minutes(10),
+        );
+        let mgr = WorkspaceCrlManager::new(spawn_http(der, "200 OK").await);
+        let issuer_a = ca_a.der().as_ref().to_vec();
+
+        // Cache primed through the right CA.
+        assert_eq!(
+            mgr.check(WS, FRESH_SERIAL, &issuer_a).await,
+            RevocationStatus::NotRevoked
+        );
+        // Another CA under the same workspace label: the cached CRL must not
+        // answer; the refresh fails verification against that CA → Unavailable.
+        assert_eq!(
+            mgr.check(WS, FRESH_SERIAL, ca_b.der().as_ref()).await,
+            RevocationStatus::Unavailable
+        );
+        // The CA that verified the CRL still gets answers from the cache.
+        assert_eq!(
+            mgr.check(WS, REVOKED_SERIAL, &issuer_a).await,
+            RevocationStatus::Revoked
         );
     }
 

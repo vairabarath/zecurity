@@ -113,6 +113,7 @@ pub async fn run_listener(
         };
         let state = state.clone();
         let crl = crl.clone();
+        let certs = certs.clone();
         let session_limits = session_limits.clone();
         let handshake_timeout = limits.handshake_timeout;
         tokio::spawn(async move {
@@ -154,7 +155,8 @@ pub async fn run_listener(
                 "accepted authenticated Relay peer"
             );
             // Track-2: reject a revoked connector/client on the outer mTLS. Fail closed.
-            match tls::peer_revocation(&connection) {
+            let intermediate_ca_pem = certs.current().intermediate_ca_pem.clone();
+            match tls::peer_revocation(&connection, &intermediate_ca_pem) {
                 Ok(pr) => {
                     let status = crl
                         .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
@@ -622,9 +624,9 @@ mod revocation_issuer_tests {
     /// is keyed by workspace only, so once tenant B's CRL is cached the
     /// revoked tenant-A leaf is checked against B's CRL and admitted.
     ///
-    /// Ignored until the fix lands. Run with `cargo test -- --ignored s1b_`.
+    /// Before the fix the revoked leaf was admitted with only tenant B's CRL
+    /// consulted.
     #[tokio::test]
-    #[ignore = "S1b: demonstrates the relay revocation bypass via a forged issuer copy; un-ignore with the fix"]
     async fn s1b_revoked_leaf_with_forged_issuer_copy_is_still_rejected() {
         let s = setup().await;
 
