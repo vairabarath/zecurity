@@ -89,7 +89,7 @@ func reportHealth(t *testing.T, h *EnrollmentHandler, ctx context.Context, clien
 	t.Helper()
 	sent := 0
 	for i := 0; i < times; i++ {
-		if !h.handleConnectorHealth(ctx, client, healthReport()) {
+		if h.handleConnectorHealth(ctx, client, healthReport()) != nil {
 			t.Fatal("health report closed the stream")
 		}
 		sent += drainReEnrolls(client)

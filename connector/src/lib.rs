@@ -7,6 +7,7 @@
 pub mod agent_server;
 pub mod agent_tunnel;
 pub mod appmeta;
+pub mod authorization;
 pub mod config;
 pub mod control_stream;
 pub mod controller_client;

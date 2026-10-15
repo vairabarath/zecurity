@@ -134,12 +134,21 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 		return false, fmt.Errorf("revoke connector: %w", err)
 	}
 
+	// The UPDATE has committed: deliver the explicit terminal ConnectorRevoked
+	// on every live Control stream of this connector (including a stream
+	// superseded by a make-before-break renewal). Done before the notifies so
+	// a notify error can't skip it. A disconnected connector gets the revoked
+	// marker when it next opens Control.
+	if r.ConnectorRegistry != nil {
+		r.ConnectorRegistry.SignalRevoked(id)
+	}
+
 	// Drop the revoked connector from BOTH planes immediately: the ACL
 	// (availability) and the transport (connectivity) snapshots. Without this,
 	// the connector lingers in the cached snapshots until they happen to be
 	// invalidated. The guarded heartbeat UPDATE (control_stream) prevents the
-	// connector from resurrecting itself and closes its live stream on the next
-	// heartbeat.
+	// connector from resurrecting itself and closes any live stream that missed
+	// ConnectorRevoked on its next heartbeat (defence in depth).
 	if r.PolicyNotifier != nil {
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return false, fmt.Errorf("revoke connector: notify policy change: %w", err)
