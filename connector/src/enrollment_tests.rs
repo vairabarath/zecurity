@@ -293,7 +293,6 @@ mod bootstrap {
     /// matches the first certificate, so today the whole file is trusted and
     /// her TLS server receives the enrollment token.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn appended_ca_cannot_intercept_the_enrollment_token() {
         let s = Scenario::new();
         let tampered = format!("{}\n{}", s.pki.intermediate_pem, s.attacker.root_pem);
@@ -318,7 +317,6 @@ mod bootstrap {
     /// Attack (Act 4b): the reply carries Mallory's root as the Workspace CA
     /// and Intermediate. Today it is saved as the connector's trust store.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn forged_enrollment_reply_is_not_trusted_or_persisted() {
         let s = Scenario::new();
         let result = s
@@ -339,7 +337,6 @@ mod bootstrap {
 
     /// A reply whose leaf is for another key (genuine CAs) must be refused.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn reply_for_another_key_is_refused_and_nothing_persisted() {
         let s = Scenario::new();
         let result = s
@@ -361,7 +358,6 @@ mod bootstrap {
     /// A failed attempt leaves nothing behind, so a retry with a genuine
     /// controller enrolls cleanly.
     #[tokio::test]
-    #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
     async fn failed_attempt_leaves_nothing_and_retry_succeeds() {
         let s = Scenario::new();
         let first = s
@@ -440,5 +436,173 @@ mod bootstrap {
                 s.pki.intermediate_pem.as_bytes(),
             )
             .expect("renewal against the pinned anchors");
+    }
+
+    // ---- unit tests for the bug 1 fix -----------------------------------------
+
+    #[test]
+    fn pinning_requires_exactly_the_one_pinned_certificate() {
+        let pki = TestPki::new();
+        let attacker = AttackerPki::new();
+        let pin = fingerprint(&pki.intermediate_pem);
+        let pinned =
+            pinned_bootstrap_ca(&pki.intermediate_pem, &pin).expect("pinned cert accepted");
+        assert_eq!(pem_from_der(&pinned).trim(), pki.intermediate_pem.trim());
+
+        // The append attack: pinned first, attacker second.
+        let appended = format!("{}\n{}", pki.intermediate_pem, attacker.root_pem);
+        let err = pinned_bootstrap_ca(&appended, &pin).expect_err("appended CA refused");
+        assert!(err.to_string().contains("exactly one certificate"), "{err}");
+        // Attacker first, pinned second.
+        let prepended = format!("{}\n{}", attacker.root_pem, pki.intermediate_pem);
+        assert!(pinned_bootstrap_ca(&prepended, &pin).is_err());
+        // Wrong certificate, empty file.
+        assert!(pinned_bootstrap_ca(&attacker.root_pem, &pin).is_err());
+        assert!(pinned_bootstrap_ca("", &pin).is_err());
+    }
+
+    /// A key, its SPKI and a CSR for the connector's identity.
+    fn connector_key(pki: &TestPki) -> (rcgen::KeyPair, Vec<u8>, Vec<u8>) {
+        let key = crypto::generate_keypair().unwrap();
+        let spki = crate::tls::cert_holder::key_spki_der(key.serialize_pem().as_bytes()).unwrap();
+        let csr = crypto::build_csr(&key, "connector", &pki.spiffe_id).unwrap();
+        (key, spki, csr)
+    }
+
+    fn pinned(pki: &TestPki) -> rustls::pki_types::CertificateDer<'static> {
+        pinned_bootstrap_ca(&pki.intermediate_pem, &fingerprint(&pki.intermediate_pem)).unwrap()
+    }
+
+    #[test]
+    fn validation_accepts_the_genuine_chain() {
+        let pki = TestPki::new();
+        let (_key, spki, csr) = connector_key(&pki);
+        validate_enrollment_reply(
+            &pinned(&pki),
+            pki.workspace_ca_pem.as_bytes(),
+            pki.intermediate_pem.as_bytes(),
+            pki.sign_enrollment_csr(&csr).as_bytes(),
+            &pki.spiffe_id,
+            &spki,
+        )
+        .expect("genuine chain");
+    }
+
+    #[test]
+    fn validation_rejects_each_broken_link() {
+        let pki = TestPki::new();
+        let attacker = AttackerPki::new();
+        let (_key, spki, csr) = connector_key(&pki);
+        let genuine_leaf = pki.sign_enrollment_csr(&csr);
+        let check = |ws: &str, int: &str, leaf: &str, spiffe: &str| {
+            validate_enrollment_reply(
+                &pinned(&pki),
+                ws.as_bytes(),
+                int.as_bytes(),
+                leaf.as_bytes(),
+                spiffe,
+                &spki,
+            )
+            .expect_err("must be rejected")
+            .to_string()
+        };
+        let ws = pki.workspace_ca_pem.as_str();
+        let int = pki.intermediate_pem.as_str();
+        let id = pki.spiffe_id.as_str();
+
+        assert!(check(ws, &attacker.root_pem, &genuine_leaf, id)
+            .contains("pinned Platform Intermediate"));
+        assert!(check(&attacker.root_pem, int, &genuine_leaf, id).contains("Workspace CA"));
+        assert!(check(ws, int, &attacker.sign_csr(&csr), id).contains("issued by"));
+        assert!(check(ws, int, &pki.leaf_with_new_key(-60, 3600), id)
+            .contains("key this connector generated"));
+        assert!(check(
+            ws,
+            int,
+            &genuine_leaf,
+            "spiffe://ws-test.zecurity.in/connector/other"
+        )
+        .contains("identity"));
+        // Extra certificates smuggled into any field.
+        let two = format!("{ws}\n{}", attacker.root_pem);
+        assert!(check(&two, int, &genuine_leaf, id).contains("exactly one"));
+        let two_leaf = format!("{genuine_leaf}\n{ws}");
+        assert!(check(ws, int, &two_leaf, id).contains("exactly one"));
+    }
+
+    #[test]
+    fn validation_rejects_wrong_shape_certificates() {
+        let pki = TestPki::new();
+        let (_key, spki, csr) = connector_key(&pki);
+        let check = |ws: &str, leaf: &str| {
+            validate_enrollment_reply(
+                &pinned(&pki),
+                ws.as_bytes(),
+                pki.intermediate_pem.as_bytes(),
+                leaf.as_bytes(),
+                &pki.spiffe_id,
+                &spki,
+            )
+            .expect_err("must be rejected")
+            .to_string()
+        };
+        let ws = pki.workspace_ca_pem.as_str();
+
+        let client_only = pki.sign_enrollment_csr_shaped(&csr, |p| {
+            p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        });
+        assert!(check(ws, &client_only).contains("client and server"));
+        let expired = pki.sign_enrollment_csr_shaped(&csr, |p| {
+            let now = OffsetDateTime::now_utc();
+            p.not_before = now - time::Duration::hours(2);
+            p.not_after = now - time::Duration::hours(1);
+        });
+        assert!(check(ws, &expired).contains("validity"));
+        let (not_a_ca, leaf) = pki.non_ca_workspace_reply(&csr);
+        assert!(check(&not_a_ca, &leaf).contains("not a CA"));
+    }
+
+    #[test]
+    fn install_removes_partial_files_when_a_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the third file must go makes its rename fail.
+        fs::create_dir(dir.path().join("workspace_ca.crt")).unwrap();
+        fs::write(dir.path().join("workspace_ca.crt").join("blocker"), b"x").unwrap();
+
+        let err = install_enrollment(
+            dir.path(),
+            &[
+                ("connector.key", b"key".to_vec(), 0o600),
+                ("connector.crt", b"crt".to_vec(), 0o644),
+                ("workspace_ca.crt", b"ca".to_vec(), 0o644),
+                ("state.json", b"{}".to_vec(), 0o644),
+            ],
+        )
+        .expect_err("third write must fail");
+        assert!(format!("{err:#}").contains("workspace_ca.crt"), "{err:#}");
+        assert!(
+            !dir.path().join("connector.key").exists(),
+            "key left behind"
+        );
+        assert!(
+            !dir.path().join("connector.crt").exists(),
+            "cert left behind"
+        );
+        assert!(
+            !dir.path().join("state.json").exists(),
+            "state.json written"
+        );
+    }
+
+    #[test]
+    fn installed_key_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        install_enrollment(dir.path(), &[("connector.key", b"key".to_vec(), 0o600)]).unwrap();
+        let mode = fs::metadata(dir.path().join("connector.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

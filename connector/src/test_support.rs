@@ -144,6 +144,38 @@ impl TestPki {
         sign_csr(csr_der, &Issuer::from_params(&self.ws_params, &self.ws_key))
     }
 
+    /// [`Self::sign_enrollment_csr`] with the leaf parameters (usages,
+    /// validity …) adjusted by `shape` — for the wrong-shape rejection tests.
+    pub fn sign_enrollment_csr_shaped(
+        &self,
+        csr_der: &[u8],
+        shape: impl FnOnce(&mut CertificateParams),
+    ) -> String {
+        sign_csr_shaped(
+            csr_der,
+            &Issuer::from_params(&self.ws_params, &self.ws_key),
+            shape,
+        )
+    }
+
+    /// A "Workspace CA" that is not a CA (issued by the real Intermediate)
+    /// and an enrollment leaf for `csr_der` signed by it. Returns
+    /// (ws PEM, leaf PEM).
+    pub fn non_ca_workspace_reply(&self, csr_der: &[u8]) -> (String, String) {
+        let key = new_key();
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Test Workspace CA");
+        params.serial_number = Some(random_serial());
+        let ws_pem = params
+            .signed_by(&key, &Issuer::from_params(&self.int_params, &self.int_key))
+            .unwrap()
+            .pem();
+        let leaf = sign_csr(csr_der, &Issuer::from_params(&params, &key));
+        (ws_pem, leaf)
+    }
+
     /// Connector leaf (same key every time, new serial).
     pub fn connector_leaf(&self, offset: i64, lifetime: i64) -> String {
         self.leaf(
@@ -378,6 +410,15 @@ fn server_identity(issuer: &Issuer<'_, &KeyPair>) -> (String, String) {
 }
 
 fn sign_csr(csr_der: &[u8], issuer: &Issuer<'_, &KeyPair>) -> String {
+    sign_csr_shaped(csr_der, issuer, |_| {})
+}
+
+/// [`sign_csr`] with the leaf parameters adjusted by `shape` before signing.
+fn sign_csr_shaped(
+    csr_der: &[u8],
+    issuer: &Issuer<'_, &KeyPair>,
+    shape: impl FnOnce(&mut CertificateParams),
+) -> String {
     let csr = rustls::pki_types::CertificateSigningRequestDer::from(csr_der.to_vec());
     let mut params = rcgen::CertificateSigningRequestParams::from_der(&csr).unwrap();
     params.params.extended_key_usages = vec![
@@ -386,6 +427,7 @@ fn sign_csr(csr_der: &[u8], issuer: &Issuer<'_, &KeyPair>) -> String {
     ];
     params.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.params.serial_number = Some(random_serial());
+    shape(&mut params.params);
     params.signed_by(issuer).unwrap().pem()
 }
 
