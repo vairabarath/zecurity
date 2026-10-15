@@ -249,6 +249,40 @@ impl TestWorkspaceCa {
         self.cert.der().clone()
     }
 
+    /// An attacker's forgery of this CA (audit finding S1b): same subject
+    /// name and same PUBLIC key (both public), but claiming `tenant:<claimed>`
+    /// and signed by an unrelated attacker key, so it chains to nothing. Only
+    /// this CA's public key is used — the attacker needs no private key.
+    pub fn forged_copy_claiming(
+        &self,
+        claimed_tenant: &str,
+    ) -> rustls::pki_types::CertificateDer<'static> {
+        let attacker_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut attacker_params = CertificateParams::default();
+        attacker_params
+            .distinguished_name
+            .push(DnType::CommonName, "attacker");
+        attacker_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let attacker = attacker_params.self_signed(&attacker_key).unwrap();
+
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, format!("workspace-{}", self.tenant_id));
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.subject_alt_names = vec![SanType::URI(
+            format!("tenant:{claimed_tenant}").try_into().unwrap(),
+        )];
+        params.serial_number = Some(random_serial());
+        // Subject public key = this CA's public key; signature = attacker's.
+        params
+            .signed_by(&self.key, &attacker, &attacker_key)
+            .unwrap()
+            .der()
+            .clone()
+    }
+
     /// A client leaf (`spiffe://<tenant>.zecurity.in/client/<id>`) issued by
     /// this CA with the given serial (high bit clear, so the DER INTEGER
     /// content octets equal `serial` exactly, as the relay reads them).

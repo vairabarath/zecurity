@@ -384,4 +384,23 @@ mod tests {
         let (other_leaf, _) = ca_a.client_leaf(&[0x52, 0x02]);
         assert!(revocation_from_chain(&[leaf, other_leaf]).is_err());
     }
+
+    /// S1b: a forged chain[1] with the issuer's name and public key but a
+    /// different `tenant:` label must not choose the workspace for the CRL.
+    #[test]
+    #[ignore = "S1b: demonstrates the relay revocation bypass via a forged issuer copy; un-ignore with the fix"]
+    fn s1b_forged_issuer_copy_does_not_choose_the_workspace() {
+        let pki = crate::test_support::TestPki::new();
+        let ca_a = pki.workspace_ca(TENANT_A);
+        let (leaf, _) = ca_a.client_leaf(SERIAL);
+        let forged = ca_a.forged_copy_claiming(TENANT_B);
+
+        match revocation_from_chain(&[leaf, forged, ca_a.der()]) {
+            Err(_) => {} // refused: fine
+            Ok(pr) => assert_eq!(
+                pr.workspace_id, TENANT_A,
+                "a forged chain[1] chose the workspace (and so the CRL) for the revocation check"
+            ),
+        }
+    }
 }
