@@ -353,4 +353,389 @@ mod tests {
         response.spiffe_id = "spiffe://zecurity.in/relay/wrong".to_owned();
         assert!(validate_response(RELAY_ID, &fingerprint, &response).is_err());
     }
+
+    // ── Bug 1 (certificate audit 2026-10-15): bootstrap trust ──────────────
+    //
+    // A real provisioning (`ensure_provisioned`) against a fake controller:
+    // an HTTP server for /ca.crt and a gRPC TLS server (test-only server copy
+    // of the relay proto) that records every token it receives.
+
+    mod bootstrap {
+        use super::super::*;
+        use crate::config::RuntimeLimits;
+        use crate::test_support::{AttackerPki, TestPki};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tonic::transport::{Identity, Server, ServerTlsConfig};
+        use tonic::{Request, Response, Status};
+
+        #[allow(clippy::all, dead_code)]
+        mod fake {
+            include!(concat!(env!("OUT_DIR"), "/test_server/relay.v1.rs"));
+        }
+        use fake::relay_service_server::{RelayService, RelayServiceServer};
+
+        const RELAY_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+        #[derive(Clone, Copy)]
+        enum Reply {
+            /// What the real controller returns.
+            Genuine,
+            /// Mallory's leaf and her root as the "intermediate" (the existing
+            /// returned-intermediate pin check refuses this).
+            ForgedIntermediate,
+            /// Mallory's leaf, but the genuine intermediate returned.
+            ForgedLeaf,
+            /// Genuine intermediate-signed leaf for some other key.
+            OtherKey,
+        }
+
+        struct FakeController {
+            pki: Arc<TestPki>,
+            attacker: Arc<AttackerPki>,
+            reply: Reply,
+            tokens: Arc<Mutex<Vec<String>>>,
+        }
+
+        #[tonic::async_trait]
+        impl RelayService for FakeController {
+            async fn provision(
+                &self,
+                request: Request<fake::ProvisionRequest>,
+            ) -> Result<Response<fake::ProvisionResponse>, Status> {
+                let req = request.into_inner();
+                self.tokens
+                    .lock()
+                    .unwrap()
+                    .push(req.provisioning_token.clone());
+                let (leaf, int_ca) = match self.reply {
+                    Reply::Genuine => (
+                        self.pki.sign_relay_csr(&req.csr_der, RELAY_ID),
+                        self.pki.ca_pem.clone(),
+                    ),
+                    Reply::ForgedIntermediate => (
+                        self.attacker.sign_csr(&req.csr_der, RELAY_ID),
+                        self.attacker.root_pem.clone(),
+                    ),
+                    Reply::ForgedLeaf => (
+                        self.attacker.sign_csr(&req.csr_der, RELAY_ID),
+                        self.pki.ca_pem.clone(),
+                    ),
+                    Reply::OtherKey => (
+                        self.pki
+                            .relay_cert(RELAY_ID, &self.pki.relay_key(), -60, 3600),
+                        self.pki.ca_pem.clone(),
+                    ),
+                };
+                Ok(Response::new(fake::ProvisionResponse {
+                    certificate_pem: leaf.into_bytes(),
+                    intermediate_ca_pem: int_ca.into_bytes(),
+                    relay_id: RELAY_ID.to_string(),
+                    spiffe_id: appmeta::relay_spiffe_id(RELAY_ID),
+                    cert_not_after_unix: 0,
+                    cert_not_before_unix: 0,
+                }))
+            }
+
+            async fn heartbeat(
+                &self,
+                _request: Request<fake::HeartbeatRequest>,
+            ) -> Result<Response<fake::HeartbeatResponse>, Status> {
+                Err(Status::unimplemented("not used in provisioning tests"))
+            }
+
+            async fn renew_cert(
+                &self,
+                _request: Request<fake::RenewCertRequest>,
+            ) -> Result<Response<fake::RenewCertResponse>, Status> {
+                Err(Status::unimplemented("not used in provisioning tests"))
+            }
+        }
+
+        async fn spawn_ca_http(body: String) -> std::net::SocketAddr {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut sock, _)) = listener.accept().await {
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 2048];
+                        let _ = sock.read(&mut buf).await;
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(body.as_bytes()).await;
+                    });
+                }
+            });
+            addr
+        }
+
+        async fn spawn_grpc(identity: (String, String), controller: FakeController) -> u16 {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = probe.local_addr().unwrap();
+            drop(probe);
+            tokio::spawn(async move {
+                Server::builder()
+                    .tls_config(
+                        ServerTlsConfig::new().identity(Identity::from_pem(identity.0, identity.1)),
+                    )
+                    .unwrap()
+                    .add_service(RelayServiceServer::new(controller))
+                    .serve(addr)
+                    .await
+                    .unwrap();
+            });
+            for _ in 0..200 {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            addr.port()
+        }
+
+        struct Scenario {
+            pki: Arc<TestPki>,
+            attacker: Arc<AttackerPki>,
+            dir: std::path::PathBuf,
+            tokens: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Drop for Scenario {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.dir);
+            }
+        }
+
+        impl Scenario {
+            fn new() -> Self {
+                let dir = std::env::temp_dir()
+                    .join(format!("relay-provision-{}", uuid::Uuid::new_v4().simple()));
+                fs::create_dir_all(&dir).unwrap();
+                Self {
+                    pki: Arc::new(TestPki::new()),
+                    attacker: Arc::new(AttackerPki::new()),
+                    dir,
+                    tokens: Arc::new(Mutex::new(Vec::new())),
+                }
+            }
+
+            async fn provision(
+                &self,
+                ca_body: String,
+                identity: (String, String),
+                reply: Reply,
+            ) -> Result<ProvisionedRelay> {
+                let http = spawn_ca_http(ca_body).await;
+                let grpc = spawn_grpc(
+                    identity,
+                    FakeController {
+                        pki: self.pki.clone(),
+                        attacker: self.attacker.clone(),
+                        reply,
+                        tokens: self.tokens.clone(),
+                    },
+                )
+                .await;
+                let cfg = RelayConfig {
+                    relay_id: RELAY_ID.to_string(),
+                    provisioning_token: Some("provisioning-token".to_string()),
+                    controller_addr: format!("localhost:{grpc}"),
+                    controller_http_addr: http.to_string(),
+                    bind_addr: "127.0.0.1:0".parse().unwrap(),
+                    ca_fingerprint: certificate_fingerprint(self.pki.ca_pem.as_bytes()).unwrap(),
+                    state_dir: self.dir.to_str().unwrap().to_string(),
+                    dns_sans: vec![],
+                    ip_sans: vec![],
+                    log_level: "info".to_string(),
+                    runtime_limits: RuntimeLimits {
+                        max_connections: 16,
+                        max_lookup_bridges: 16,
+                        max_bidi_streams: 16,
+                        idle_timeout: Duration::from_secs(30),
+                        handshake_timeout: Duration::from_secs(5),
+                        message_timeout: Duration::from_secs(5),
+                        max_probe_rate: 10,
+                        max_concurrent_probes: 4,
+                        probe_timeout: Duration::from_secs(2),
+                    },
+                    heartbeat_interval: Duration::from_secs(30),
+                };
+                ensure_provisioned(&cfg).await
+            }
+
+            fn tokens_received(&self) -> usize {
+                self.tokens.lock().unwrap().len()
+            }
+
+            fn files(&self) -> Vec<String> {
+                let mut names: Vec<String> = fs::read_dir(&self.dir)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            }
+        }
+
+        /// Attack: Mallory appends her root to /ca.crt; today the whole file
+        /// is trusted and her TLS server receives the provisioning token.
+        #[tokio::test]
+        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
+        async fn appended_ca_cannot_intercept_the_provisioning_token() {
+            let s = Scenario::new();
+            let tampered = format!("{}\n{}", s.pki.ca_pem, s.attacker.root_pem);
+            let result = s
+                .provision(tampered, s.attacker.server_identity(), Reply::Genuine)
+                .await;
+            assert_eq!(
+                s.tokens_received(),
+                0,
+                "the provisioning token reached Mallory's server (ok={})",
+                result.is_ok()
+            );
+            assert!(result.is_err());
+            assert!(
+                s.files().is_empty(),
+                "nothing may be persisted: {:?}",
+                s.files()
+            );
+        }
+
+        /// Regression: the existing returned-intermediate pin check refuses a
+        /// reply carrying Mallory's root as the intermediate.
+        #[tokio::test]
+        async fn returned_intermediate_must_match_the_pin() {
+            let s = Scenario::new();
+            let result = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::ForgedIntermediate,
+                )
+                .await;
+            let err = result.expect_err("forged intermediate must be refused");
+            assert!(
+                format!("{err:#}").contains("Intermediate CA fingerprint mismatch"),
+                "{err:#}"
+            );
+            assert!(
+                s.files().is_empty(),
+                "nothing may be persisted: {:?}",
+                s.files()
+            );
+        }
+
+        /// Attack: genuine intermediate returned, but the leaf is signed by
+        /// Mallory; today it is stored.
+        #[tokio::test]
+        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
+        async fn leaf_not_issued_by_the_pinned_intermediate_is_refused() {
+            let s = Scenario::new();
+            let result = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::ForgedLeaf,
+                )
+                .await;
+            assert!(
+                result.is_err(),
+                "a leaf not issued by the intermediate must be refused"
+            );
+            assert!(
+                s.files().is_empty(),
+                "nothing may be persisted: {:?}",
+                s.files()
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
+        async fn leaf_for_another_key_is_refused_and_nothing_persisted() {
+            let s = Scenario::new();
+            let result = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::OtherKey,
+                )
+                .await;
+            assert!(result.is_err(), "a leaf for another key must be refused");
+            assert!(
+                s.files().is_empty(),
+                "nothing may be persisted: {:?}",
+                s.files()
+            );
+        }
+
+        #[tokio::test]
+        #[ignore = "bug 1: demonstrates the bootstrap hijack; un-ignore with the fix"]
+        async fn failed_attempt_leaves_nothing_and_retry_succeeds() {
+            let s = Scenario::new();
+            let first = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::ForgedLeaf,
+                )
+                .await;
+            assert!(first.is_err(), "forged first attempt must fail");
+            assert!(s.files().is_empty(), "failed attempt left {:?}", s.files());
+            let second = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::Genuine,
+                )
+                .await;
+            assert!(second.is_ok(), "retry must succeed: {:?}", second.err());
+        }
+
+        #[tokio::test]
+        async fn wrong_ca_is_refused_before_connecting() {
+            let s = Scenario::new();
+            let result = s
+                .provision(
+                    s.attacker.root_pem.clone(),
+                    s.attacker.server_identity(),
+                    Reply::Genuine,
+                )
+                .await;
+            assert!(result.is_err());
+            assert_eq!(s.tokens_received(), 0);
+        }
+
+        /// Positive: genuine provisioning installs material that the relay's
+        /// CertManager loads (leaf for the relay's own key).
+        #[tokio::test]
+        async fn genuine_provisioning_installs_loadable_material() {
+            let s = Scenario::new();
+            let paths = s
+                .provision(
+                    s.pki.ca_pem.clone(),
+                    s.pki.controller_server_identity(),
+                    Reply::Genuine,
+                )
+                .await
+                .expect("genuine provisioning");
+            crate::cert_manager::CertManager::load(
+                RELAY_ID,
+                crate::cert_manager::CertPaths {
+                    key_path: paths.key_path.clone(),
+                    certificate_path: paths.certificate_path.clone(),
+                    intermediate_ca_path: paths.intermediate_ca_path.clone(),
+                },
+            )
+            .expect("provisioned material loads");
+            assert_eq!(
+                fs::read_to_string(&paths.intermediate_ca_path).unwrap(),
+                s.pki.ca_pem
+            );
+        }
+    }
 }

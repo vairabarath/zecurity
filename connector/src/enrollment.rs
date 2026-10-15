@@ -85,6 +85,18 @@ impl EnrollmentState {
 /// Called from main.rs when state.json does not exist.
 /// Exits the process on fatal errors (e.g., MITM detection).
 pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
+    let state = bootstrap_enroll(cfg).await?;
+    // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
+    // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
+    // so the connector process (running as zecurity) may not have write access.
+    cleanup_config_after_enrollment(&state.connector_id);
+    Ok(state)
+}
+
+/// Enrollment up to and including persisting the enrolled state (steps 1–9);
+/// `enroll` adds the best-effort config-file cleanup. Split out so tests can
+/// run a full enrollment against a fake controller without touching /etc.
+async fn bootstrap_enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
     let token = cfg
         .enrollment_token
         .as_deref()
@@ -208,11 +220,6 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
         .save(&cfg.state_dir)
         .context("failed to save enrollment state")?;
     info!(path = %Path::new(&cfg.state_dir).join("state.json").display(), "saved enrollment state");
-
-    // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
-    // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
-    // so the connector process (running as zecurity) may not have write access.
-    cleanup_config_after_enrollment(&state.connector_id);
 
     // Step 10: Return result
     Ok(state)

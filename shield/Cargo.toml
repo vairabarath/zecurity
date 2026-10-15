@@ -42,5 +42,7 @@ tonic-build       = "0.14"
 tonic-prost-build = "0.14"
 
 [dev-dependencies]
+# Bootstrap-pinning tests: the fake controller signs the shield's real CSR.
+rcgen = { version = "0.14", features = ["x509-parser"] }
 # Paused Tokio time for deterministic reconnect-loop tests.
 tokio = { version = "1", features = ["test-util"] }

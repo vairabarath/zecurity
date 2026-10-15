@@ -83,6 +83,21 @@ struct JwtClaims {
 /// On success, returns a ShieldState that main.rs uses to start the control stream.
 /// On fatal error (MITM, bad token, controller rejection), returns Err.
 pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
+    let state = bootstrap_enroll(cfg).await?;
+    // ── Step 11: Clean up config file ─────────────────────────────────────────
+    //
+    // Remove ENROLLMENT_TOKEN from /etc/zecurity/shield.conf.
+    // The token is already burned in Redis, but keeping the raw JWT on disk
+    // leaks claims (shield_id, trust_domain, connector_addr) if the file is
+    // ever exposed. Best-effort — log a warning if we can't write.
+    cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
+    Ok(state)
+}
+
+/// Enrollment up to and including persisting the enrolled state (steps 1–10);
+/// `enroll` adds the best-effort config-file cleanup. Split out so tests can
+/// run a full enrollment against a fake controller without touching /etc.
+async fn bootstrap_enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     let token = cfg
         .enrollment_token
         .as_deref()
@@ -258,15 +273,6 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
 
     state.save(&cfg.state_dir)?;
     info!(path = %state_dir.join("state.json").display(), "saved state.json");
-
-    // ── Step 11: Clean up config file ─────────────────────────────────────────
-    //
-    // Remove ENROLLMENT_TOKEN from /etc/zecurity/shield.conf.
-    // The token is already burned in Redis, but keeping the raw JWT on disk
-    // leaks claims (shield_id, trust_domain, connector_addr) if the file is
-    // ever exposed. Best-effort — log a warning if we can't write.
-    cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
-
 
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)

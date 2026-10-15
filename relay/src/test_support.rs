@@ -201,6 +201,20 @@ impl TestPki {
         (vec![leaf.der().clone(), ws_cert.der().clone()], leaf_key)
     }
 
+    /// The controller's gRPC server identity as production issues it: signed
+    /// by the Platform Intermediate, serverAuth, valid for `localhost`.
+    /// Returns (cert PEM, key PEM).
+    pub fn controller_server_identity(&self) -> (String, String) {
+        server_identity(&self.ca_cert, &self.ca_key)
+    }
+
+    /// Sign a relay provisioning CSR the way the controller does: issued by
+    /// the Platform Intermediate for the CSR's own key, with the relay's
+    /// SPIFFE ID.
+    pub fn sign_relay_csr(&self, csr_der: &[u8], relay_id: &str) -> String {
+        sign_csr(csr_der, relay_id, &self.ca_cert, &self.ca_key)
+    }
+
     /// A Workspace CA shaped like the controller's `GenerateWorkspaceCA`
     /// (CN `workspace-<tenant>`, CA with path length 0, CertSign + CRLSign,
     /// `tenant:<id>` URI SAN), issued by this Intermediate. Its key id is
@@ -342,5 +356,97 @@ impl TestWorkspaceCa {
             .der()
             .as_ref()
             .to_vec()
+    }
+}
+
+fn server_identity(issuer: &Certificate, issuer_key: &KeyPair) -> (String, String) {
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+    let mut params = CertificateParams::default();
+    params.subject_alt_names = vec![SanType::DnsName("localhost".try_into().unwrap())];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.serial_number = Some(random_serial());
+    let cert = params.signed_by(&key, issuer, issuer_key).unwrap();
+    (cert.pem(), key.serialize_pem())
+}
+
+/// The public key carried in a CSR, for rcgen to sign (P-384, as the relay
+/// generates).
+struct CsrKey(Vec<u8>);
+
+impl rcgen::PublicKeyData for CsrKey {
+    fn der_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn algorithm(&self) -> &rcgen::SignatureAlgorithm {
+        &PKCS_ECDSA_P384_SHA384
+    }
+}
+
+fn sign_csr(csr_der: &[u8], relay_id: &str, issuer: &Certificate, issuer_key: &KeyPair) -> String {
+    use x509_parser::prelude::FromDer;
+    let (_, csr) =
+        x509_parser::certification_request::X509CertificationRequest::from_der(csr_der).unwrap();
+    let key = CsrKey(
+        csr.certification_request_info
+            .subject_pki
+            .subject_public_key
+            .data
+            .to_vec(),
+    );
+    let mut params = CertificateParams::default();
+    params.subject_alt_names = vec![SanType::URI(
+        crate::appmeta::relay_spiffe_id(relay_id)
+            .try_into()
+            .unwrap(),
+    )];
+    params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.serial_number = Some(random_serial());
+    params.signed_by(&key, issuer, issuer_key).unwrap().pem()
+}
+
+/// Mallory's PKI for bootstrap-hijack tests (bug 1).
+pub struct AttackerPki {
+    root: Certificate,
+    root_key: KeyPair,
+    pub root_pem: String,
+}
+
+impl Default for AttackerPki {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AttackerPki {
+    pub fn new() -> Self {
+        install_crypto_provider();
+        let root_key = KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).unwrap();
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Mallory Root");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        let root = params.self_signed(&root_key).unwrap();
+        let root_pem = root.pem();
+        Self {
+            root,
+            root_key,
+            root_pem,
+        }
+    }
+
+    pub fn server_identity(&self) -> (String, String) {
+        server_identity(&self.root, &self.root_key)
+    }
+
+    pub fn sign_csr(&self, csr_der: &[u8], relay_id: &str) -> String {
+        sign_csr(csr_der, relay_id, &self.root, &self.root_key)
     }
 }
