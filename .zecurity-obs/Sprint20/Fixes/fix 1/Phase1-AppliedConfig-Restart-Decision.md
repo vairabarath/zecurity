@@ -113,21 +113,113 @@ tests and reuse the `UpToDateAcl`/`NewAcl`/transport fetchers and the coordinato
 - Side effect to check in the live run: a device-cert renewal still triggers a restart on the next
   sync (the cert is part of `AppliedConfig`), same as before.
 
-## Acceptance — **Not yet satisfied** (code + unit tests done 2026-09-30; live run pending)
+## Acceptance — **Phase 1 decision logic accepted** (live validation 2026-10-01/02). Original G9 / AT-G.6 re-graded **PASS** from the 2026-10-06 hold (see § G9 / AT-G.6 re-grade). Strict U5 **PASS** from the 2026-10-10 connector-route hold. The post-slice Fix 01 regression validation remains outstanding.
+
+> Reconciled 2026-10-10. The heading previously read: *Not yet satisfied (code + unit tests done
+> 2026-09-30; live run pending)*. Evidence is cited by section of this document. The historical U5
+> long-hold and G9 results on the run sheet remain **FAIL** (hold #2 on 2026-09-26, Finding 15;
+> re-verified 2026-09-28). G9 / AT-G.6 was re-graded on 2026-10-10 from existing evidence; see
+> § G9 / AT-G.6 re-grade. Strict U5 passed in a new live run on 2026-10-10 ([[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]);
+> the 2026-09-26 U5 failure is kept as history.
 
 - [x] Phase 1 unit tests pass (`cd client && cargo build && cargo test`): 110 passed (baseline 90;
       +9 `effective_config` in `daemon_tests.rs`, +11 `restart_decision_tests` in `daemon.rs`).
-- [ ] **Live, PENDING / NOT YET RUN:** U5 passes.
-- [ ] **Live, PENDING / NOT YET RUN:** G9 passes (`tunnel_hold.py`, ≥ 3 connector renewals at
-      15 m TTL).
-- [ ] A renewal or effective no-op doesn't cause an unnecessary full tunnel restart.
+- [x] **Live: strict U5 PASS (2026-10-10).** The U5 row reads *"tunnel open to a connector-served TCP resource
+      (not shield-routed RDE)"*. Evidence: [[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]].
+      - Resource `s20f3-unrel` `261a549d`, 192.168.1.75:51713. It was `unprotected`, so it used the
+        connector route (no shield), which satisfies the strict routing requirement.
+      - Connector `s20l6-conn-75` `7523dc08`.
+      - Hold: 2,401 s on one TCP connection (local port 39492), 1,194 × HTTP 200, no `SOCKET CHANGED`.
+      - 8 connector renewals during the hold.
+      - No client restart reported. ACL stayed at v16 throughout.
+      **Does not validate:**
+      - Fix 01 hot-apply behaviour: no effective configuration version changed during the hold.
+      - Established-flow recovery after connector loss: still deferred as
+        [[PENDING-18-Established-Connection-Recovery-Connector-Failover]].
+      **History kept:** the 2026-09-26 U5 result, "tunnel open PASS; long-lived hold FAIL" (Finding 15),
+      stands as the historical record. The 2026-10-06 hold (§ G9 / AT-G.6 re-grade) used a protected
+      (shield-routed) resource and did not demonstrate this scope; the later 2026-10-10 run did, and passed.
+- [x] **Live: G9 / AT-G.6 (original criterion) PASS, with limitations.** Evidence is the 2026-10-06
+      hold: 91 min 17 s on one socket, through 17 renewals of connector inkyank (§ G9 / AT-G.6 re-grade).
+      Historical result: FAIL on 2026-09-26 (Finding 15), before `6362d1f`. **This is not Fix 01
+      regression proof.** Since `6362d1f`, a renewal no longer bumps the ACL/transport version, so
+      renewal survival does not exercise the restart/hot-apply decision. A separate post-slice Fix 01
+      regression criterion still needs agreement and remains **OUTSTANDING**.
+- [x] A renewal or effective no-op doesn't cause an unnecessary full tunnel restart. Evidence:
+      § Live evidence so far, 2026-10-01 hold #2 (`effective config unchanged, keeping tunnel` on
+      each version bump across 2 renewals); § Closing hold, 12:41:17 (forced version bump →
+      `keeping tunnel`, hold unaffected). Validated on the Phase 1 build only.
 - [ ] A long-lived TCP connection stays alive when the effective configuration is unchanged
-      (0 resets caused by snapshot synchronization).
-- [ ] No `snapshot changed, restarting VPN` for renewal-only effective no-op changes.
-- [ ] Record whether vN+1 was actually observed/applied during renewal, and what it did to the
-      long-lived flow. This is the evidence needed to resolve Q3 before Phase 2.
+      (0 resets caused by snapshot synchronization). **Not revalidated for the current
+      implementation.** Historical result: § Closing hold, 2026-10-02 (746 × 200 over 1500 s,
+      0 FAIL). Limitation: during that hold renewals no longer changed the version, so only the
+      single forced bump at 12:41:17 exercised the Phase 1 decision. It is not a formal U5/G9 pass.
+- [x] No `snapshot changed, restarting VPN` for renewal-only effective no-op changes. Evidence:
+      § Live evidence so far → **Q3 input** (0 renewal-caused ACL/transport versions across 38
+      renewals), and § Closing hold (5 renewals, 0 renewal-caused versions).
+- [x] Record whether vN+1 was actually observed/applied during renewal, and what it did to the
+      long-lived flow. Recorded: § Live evidence so far, 2026-10-01 hold #1 (sync landed in the
+      renewal's connector-absent gap → real change → restart, reset at 11:22:35) and **Q3 input**.
+      Q3 itself remains open.
+
+## G9 / AT-G.6 re-grade from existing evidence (2026-10-10)
+
+**Original criteria.**
+- G9 (run sheet): *"the long-lived tunnel from U5 is still open after several connector renewals"*.
+- AT-G.6 (`Acceptance-Test-Plan.md`, Phase G): *"Established tunnels during swap → not dropped"*.
+- The later "≥ 3 renewals at 15 m TTL" refinement is from this fix's docs.
+
+**Result: PASS for the original G9 / AT-G.6 criterion, with the limitations below.** No new test was run.
+
+**Evidence.** Source record: [[Phase5A-Live-Acceptance-2026-10-06]] (`.zecurity-obs/Sprint20/Fixes/fix 5/`; L1, L4,
+"long-lived flow survives the run"). Artifacts are in `~/s20-run/logs/` (lab host, not in the repo).
+
+| Item | Value | Source |
+|---|---|---|
+| Window | 2026-10-06 12:10:16 – 13:41:33 IST, **91 min 17 s** | `f5-hold.log` (`START local_port=37546` … `req=2718 FAIL TimeoutError`) |
+| Client | build `e2e36c45` (Phase 1 + Fix 01 Phase 2-A + Fix 05 5-A), PID 2379, `zecurity0` ifindex 14 | 5-A record, lab table; `f5-tunsamp.log` |
+| Connection | one TCP connection, local port 37546, to protected resource `s20f5-nika-web` 192.168.1.39:51711 | `f5-hold.log`; 5-A record |
+| Hold method | `~/s20-run/f5_hold.py`: one `http.client` connection, keep-alive GET every 2 s. It checks the local port on every request and exits on `SOCKET CHANGED` or any error, with no reconnect | script source |
+| Traffic | **2,717 × HTTP 200** (req 1–2717). The script prints any non-200; none was printed. No `SOCKET CHANGED` | `f5-hold.log` |
+| Renewals | **17 `ReEnroll sent`** for connector inkyank `5aa40833`, 12:14:31 – 13:37:32 IST. Each is followed within about 1 s by the renewed stream `connected` and the old stream `superseded stream closed (newer stream is authoritative)`; the reported cert expiry advances each cycle | `controller.log` (2026/10/06) |
+| Config versions | the controller logged `ACL already current … version=10` throughout; no `acl push` until the deliberate stop at 13:41:23 | `controller.log` |
+| Tunnel stability | PID 2379 / ifindex 14 at 12:10:13 and 13:39:50 (`f5-tunsamp.log`, change-only); 154 `f5-sampler.log` samples 12:10–13:41, all `pid=2379`. L1 recorded 0 `restarting VPN` for 12:10–13:10 | samplers; 5-A record L1 |
+| End of hold | inkyank deliberately stopped (≈13:41:18; controller `disconnected` 13:41:23). The hold timed out at 13:41:33 (`TimeoutError`, 10 s socket timeout). This was the **intended end of the test** (5-A row L4), not a renewal-triggered restart. Connector manoj stayed up | `f5-events.log` `L4-STOP-SENT` / `L4-END`; 5-A record L4 |
+
+**Limitations.**
+1. **Shield-routed target.** The resource was protected, so the flow ran Client → Zecurity tunnel → Connector →
+   Shield → application. It is not a demonstrated unprotected connector-served TCP resource, so strict U5
+   scope is not claimed.
+2. **Connector ownership is inferred, not logged.** The basis:
+   - the lab mapping: the shield is bound to inkyank `5aa40833` (5-A lab table; `f5-events.log` `F5-REBUILD`);
+   - stopping only inkyank ended the hold while manoj stayed available.
+   The per-flow client `tunnel opened` line was not retained.
+3. **The 2026-10-06 client journal is no longer available** (the host journal starts 2026-10-09). The
+   conclusion rests on the retained controller log, hold output, sampler output and the 5-A acceptance
+   record. For 13:10–13:39 only the endpoints of the change-only tunnel sampler and the PID sampler
+   cover the client; a VPN restart recreates `zecurity0` with a new ifindex.
+4. **Not a Fix 01 regression test.** After `6362d1f` (make-before-break control-stream renewal), renewal
+   no longer produces the `disconnected` → `connected` snapshot transitions and renewal-related version
+   bumps that caused the 2026-09-26 restart. During this hold the ACL stayed at v10, so the client had
+   no configuration change to decide on. The hold proves **renewal survival**. It does not prove that
+   Fix 01 hot-applies meaningful configuration changes without a restart.
+
+**Historical result kept.** G9 FAILED on 2026-09-26 (hold #2, Finding 15: reset by `snapshot changed,
+restarting VPN` after a connector renewal; re-verified 2026-09-28). That run predates both `6362d1f`
+and Phase 1.
+
+**Still open.**
+- ~~Strict U5~~: PASS on 2026-10-10 ([[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]; see § Acceptance).
+- A separate post-slice Fix 01 regression criterion (needs agreement).
+- Q3.
 
 ## Live evidence so far (2026-10-01 / 2026-10-02) — acceptance still open
+
+> 2026-10-10: the Phase 1 **decision logic** is accepted; see the verdict at the end of
+> § Live run 2026-10-02 (afternoon) ("Phase 1 verdict: correct … Phase 1 is done"). `status: done`
+> refers to the decision logic only. It does not mean every Phase 1 acceptance criterion passed (see
+> § Acceptance). Since then, G9 / AT-G.6 (2026-10-06 evidence) and strict U5 (2026-10-10 run) have
+> passed, while the post-slice Fix 01 regression validation remains **outstanding**.
 
 | Run | What it shows | Counts for Phase 1? |
 |---|---|---|

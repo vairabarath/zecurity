@@ -4,7 +4,7 @@ sprint: 20
 fix: 5
 phase: 5-C
 title: Resource Hot-Apply (ResourceDelta) — implementation plan
-status: implemented-pending-live
+status: live-accepted-with-caveat
 depends_on: [fix-01-phase-2a, fix-05-5a]
 component: client
 tags:
@@ -17,7 +17,15 @@ tags:
 # Fix 05 · Phase 5-C — Resource Hot-Apply (implementation plan)
 
 > Source design: [[Fix05-Resource-Hot-Apply-Investigation]] (§6–§8, §15–§18).
-> Status: **implemented 2026-10-08, unit gates + mutation check pass; live acceptance (L1–L15) NOT RUN. Not committed.**
+> Status (2026-10-10): **live-accepted-with-caveat.**
+> - L1–L5 and L7–L15 passed live on 2026-10-08 ([[Phase5C-Live-Acceptance-2026-10-08]]).
+> - L6 passed on the 2026-10-10 re-run ([[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]]). Caveats: one
+>   held flow, a substituted rig, the reset attributed by correlation, and "new connects refused" not re-probed.
+> - Code: `167ffa5` (PR #114, merged into `fixed-pendings`).
+> - Known limits FU-2, FU-3 and FU-4 remain.
+>
+> Earlier status line: *implemented 2026-10-08, unit gates + mutation check pass; live acceptance
+> (L1–L15) NOT RUN. Not committed.*
 > See [Implementation](#implementation-2026-10-08) at the end.
 
 ## 0. Scope
@@ -305,6 +313,13 @@ Record the baseline first, then report deltas:
 > the connector's ACL-diff teardown closes a removed resource's flow (FIN) before the client's 60 s poll
 > runs R1 (`remove_listeners_and_close`), so the client reset was never observed on a pure removal.
 > Function map and re-run plan are in the record's §6a. Status stays `implemented-pending-live`.
+>
+> **L6 re-run 2026-10-10: PASS** ([[Phase5C-L6-Rerun-Live-Acceptance-2026-10-10]]).
+> - The connector's TCP 9090 was blocked, the resource was unassigned at 11:17:59 IST, and the client logged
+>   `resource change, hot-applying removed=1` → `resources hot-applied resources=0 removed=1` → `tunnel kept up`.
+> - The hold got an RST at 11:18:02.530.
+> - No connector session cancel, no relay failure; PID 2501 and ifindex 12 were unchanged.
+> - Status moves to `live-accepted-with-caveat`.
 
 Run only with approval.
 
@@ -360,8 +375,8 @@ Q6 network-move validation is not part of this phase.
 - [x] Implementation authorized (2026-10-08)
 - [x] Implemented; unit gates pass (deltas recorded)
 - [x] Mutation check recorded (15/15 killed)
-- [ ] Live L1–L15
-- [ ] Committed (only when told)
+- [x] Live L1–L15: L1–L5 and L7–L15 on 2026-10-08; L6 on the 2026-10-10 re-run (with caveats, see the re-run record)
+- [x] Committed: `167ffa5` (+ docs `5fe4e1c`), PR #114 merged
 
 ## Implementation (2026-10-08)
 
@@ -472,5 +487,6 @@ Side effect: **FU-1/H3 resolved in code.** A recovery `down_up` at zero desired 
 ### Open
 
 - Not committed. To ship as a separate PR after #114 merges (user decision).
+  *2026-10-10: shipped as `e027a3a` (+ docs `eac891a`), PR #115 merged.*
 - Unchanged: the controller, the connector and FU-2 (2-IP smoltcp capacity).
 - Not live: UDP-only assignment at startup (unit-tested only) and boot-time auto-start at zero.

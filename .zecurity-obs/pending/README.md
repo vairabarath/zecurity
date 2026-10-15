@@ -54,6 +54,7 @@ discussion — the "Options" and "Open Questions" are the point; the
 | ✅ [PENDING-15](PENDING-15-Durable-Outbox-Infrastructure.md) | Platform Durable Outbox Infrastructure — implemented in Sprint 18 | platform | P1 | ADR-025, PENDING-13, PENDING-02 |
 | [PENDING-16](PENDING-16-Resource-Policy-Device-Profile-Binding.md) | Resource Policy → Device Profile Binding — *unbuilt; today's `resource_profile_bindings` is the direct binding this replaces* | policy | P1 | PENDING-08, PENDING-09 |
 | 🚧 [PENDING-17](PENDING-17-Hardware-Backed-Device-Keys.md) | Hardware-Backed Device Key Storage (Linux TPM 2.0) — **core implementation complete and verified end-to-end (2026-09-02); TPM device-access configuration is the deployment acceptance gate before default enablement** | identity/client | P2 | ADR-002, ADR-028 |
+| [PENDING-18](PENDING-18-Established-Connection-Recovery-Connector-Failover.md) | **Future Implementation: Established Connection Recovery and Connector Failover**. *DEFERRED / NOT IMPLEMENTED* (deferred from Sprint 20 Q3, 2026-10-10). New-connection fallback exists, but an established flow is pinned to its connector and is reset or times out when that connector fails | data-plane/client | unassigned | Fix 01, Phase 2 umbrella, Q3 |
 
 **Priority key:** P0 = security hole / finish-what's-started · P1 = needed to sell/operate ·
 P2 = differentiation / maturity.

@@ -3,7 +3,7 @@ type: fix
 sprint: 20
 fix: 1
 title: Client restarts the whole tunnel on every snapshot change
-status: planned
+status: partial
 source_rows: [U5, G9]
 source_findings: [15]
 severity: high
@@ -18,7 +18,21 @@ tags:
 # Fix 01 — Client restarts the whole tunnel on every snapshot change
 
 > Source: live acceptance rows **U5 (long-lived hold)** and **G9 / AT-G.6**, both FAIL. Run-sheet Finding 15.
-> Status: **verified, not fixed.** No code changed.
+> Status (reconciled 2026-10-10): **PARTIAL.**
+> - Phase 1 decision logic is accepted (`done` per its doc).
+> - Original G9 / AT-G.6 re-graded **PASS** (2026-10-06 hold, with limitations). This is renewal survival,
+>   not Fix 01 regression proof.
+> - Strict U5 **PASS** on 2026-10-10 (connector-route hold, [[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]). This is not
+>   Fix 01 hot-apply proof; no configuration version changed during the hold.
+> - Phase 2 is partially delivered through slices (2-A, Fix 05 5-A / 5-B / 5-C, zero-resource, F-3).
+> - Outstanding:
+>   - connector ownership of flows and the per-connector selective close;
+>   - Q3 (open);
+>   - a separate post-slice Fix 01 regression run (criterion still to be agreed).
+>
+> See [[Phase2-Full-Hot-Apply]] § Delivery status.
+>
+> Original status: *verified, not fixed. No code changed.*
 
 ## Failure (as observed)
 
@@ -104,14 +118,17 @@ doesn't remove its route or its access.
 
 Fix 01 is primarily a **client / data-plane lifecycle** problem. It is delivered in two stages.
 Phase 1 must be implemented **and live-validated** before Phase 2 starts. Neither stage is
-implemented yet.
+implemented yet. *(Original text. 2026-10-10: see the table below.)*
 
 Full scope, files, tests, and acceptance for each phase live in this folder (`fix 1/`):
 
 | Phase | Doc | Status |
 |---|---|---|
-| 1: AppliedConfig / Restart Decision | [[Phase1-AppliedConfig-Restart-Decision]] | planned, not implemented |
-| 2: Full Hot-Apply | [[Phase2-Full-Hot-Apply]] | **NOT IMPLEMENTED; future stage after Phase 1 validation and the Q3 decision** |
+| 1: AppliedConfig / Restart Decision | [[Phase1-AppliedConfig-Restart-Decision]] | `done`: decision logic accepted (`6d26479`, live 2026-10-01/02). G9 / AT-G.6 PASS (2026-10-06 evidence) and strict U5 PASS (2026-10-10). Post-slice Fix 01 regression validation outstanding |
+| 2: Full Hot-Apply | [[Phase2-Full-Hot-Apply]] | **PARTIAL** (2026-10-10). Delivered by slices: 2-A, Fix 05 5-A / 5-B / 5-C, zero-resource, F-3, with live records. Outstanding: connector ownership + per-connector selective close (gated by Q3), live U5/G9 after the slices |
+
+*Before 2026-10-10 the rows read: Phase 1 "planned, not implemented"; Phase 2 "NOT IMPLEMENTED;
+future stage after Phase 1 validation and the Q3 decision".*
 
 1. **Phase 1: AppliedConfig / Restart Decision** (first stage; `daemon.rs`, `runtime.rs`,
    `daemon_tests.rs`). Record the effective config the running tunnel was built from
@@ -192,6 +209,9 @@ Proposed direction (to be decided explicitly and tested before Phase 2 is consid
   flows that depend on that connector/resource.** Unaffected flows stay alive. This belongs to
   **Phase 2**. The current data plane has neither flow → connector tracking nor a hot-update
   mechanism, so this behaviour does **not** exist yet.
+  *2026-10-10: hot-update now exists (2-A, 5-C), and resource-dependent flows are closed (5-C,
+  F-3). Flow → connector tracking and the per-connector close still do **not** exist
+  ([[Phase2-Full-Hot-Apply]] § Remaining work).*
 - **Q3: How should the client handle vN+1 during connector renewal? → NOT FINALIZED YET.**
   Proposed direction: tolerate/defer transient connector removal for existing flows during the
   renewal transition, with a bounded grace/defer mechanism if the evidence supports it. Permanent
@@ -200,12 +220,27 @@ Proposed direction (to be decided explicitly and tested before Phase 2 is consid
   Phase 1 live run supplies the evidence: whether the client actually observes/applies vN+1 during
   renewal, and what that does to the long-lived flow. **Q3 must be resolved before Phase 2 is
   implemented.**
+  *2026-10-10: still open. Slices that didn't depend on it have shipped. Q3 now gates only the
+  remaining connector-flow work. The lifecycle policy is under discussion and must keep
+  distinct:*
+  - *transient control-plane interruption (e.g. renewal);*
+  - *a temporarily unreachable configured connector;*
+  - *intentional removal from configuration;*
+  - *certificate or identity revocation.*
+  *No grace period or close policy is approved.*
+  *2026-10-10: established-flow recovery and connector failover is **deferred** out of Sprint 20 /
+  Fix 01 scope and **not implemented**. It is tracked as
+  [[PENDING-18-Established-Connection-Recovery-Connector-Failover]]. Q3 is **not** resolved by this
+  deferral: the connector-loss classification above is still open.*
 - **Q4: Ship and validate Phase 1 on its own? → Decision: yes.** Phase 1 is implemented, tested,
   and run through U5/G9 before Phase 2 starts (sequence above).
 
 ## Files (expected)
 
-Details are in the phase docs.
+Details are in the phase docs. *(Original plan. 2026-10-10: all listed files now exist and were changed by the
+slices. `transport.rs` did not get `connector_id`, and `net_stack.rs` has no per-flow connector
+tracking. Fix 05-B also changed `tunnel_pool.rs`. Per-slice file lists are in
+[[Phase2-Full-Hot-Apply]] § Files.)*
 
 | File | Phase |
 |---|---|
@@ -238,24 +273,50 @@ Target: a long-lived TCP connection must survive connector certificate renewal a
 changes when the effective access/transport configuration required by that connection has not
 actually changed.
 
-### Phase 1: **Not yet satisfied**
+### Phase 1: **Decision logic accepted; G9 / AT-G.6 and strict U5 PASS; post-slice Fix 01 regression outstanding** (reconciled 2026-10-10; mirrors [[Phase1-AppliedConfig-Restart-Decision]] § Acceptance)
 
-- [ ] Phase 1 unit tests pass.
-- [ ] **Live, PENDING / NOT YET RUN:** U5 passes.
-- [ ] **Live, PENDING / NOT YET RUN:** G9 passes (≥ 3 connector renewals at 15 m TTL).
-- [ ] A renewal or effective no-op doesn't cause an unnecessary full tunnel restart.
-- [ ] A long-lived TCP connection stays alive when the effective configuration is unchanged.
-- [ ] No `snapshot changed, restarting VPN` for renewal-only effective no-op changes.
-- [ ] Record whether vN+1 was actually observed/applied.
+*Previously headed "Not yet satisfied". Historical: U5 long hold and G9 FAIL on 2026-09-26 (Finding 15,
+re-verified 2026-09-28); these entries are kept. G9 / AT-G.6 was re-graded 2026-10-10. Details and limitations:
+[[Phase1-AppliedConfig-Restart-Decision]] § G9 / AT-G.6 re-grade. Strict U5 passed in a later live run on
+2026-10-10 ([[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]).*
 
-### Phase 2: **Not yet implemented / Not yet satisfied**
+- [x] Phase 1 unit tests pass: 110 passed, +20 (Phase 1 doc § Acceptance).
+- [x] **U5 (strict): PASS on 2026-10-10** ([[U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]).
+      - Unprotected, connector-served resource `s20f3-unrel` `261a549d` at 192.168.1.75:51713, via
+        connector `s20l6-conn-75` `7523dc08`.
+      - One TCP connection (port 39492) held for 2,401 s: 1,194 × 200, no `SOCKET CHANGED`, 8 renewals.
+      - No client restart; ACL stayed at v16.
+      **Not validated:** Fix 01 hot-apply (no version change during the hold), and established-flow
+      recovery after connector loss (deferred, [[PENDING-18-Established-Connection-Recovery-Connector-Failover]]).
+      **History kept:** U5 long hold FAILED on 2026-09-26 (Finding 15). The 2026-10-06 hold used a
+      protected resource and did not cover this scope.
+- [x] **G9 / AT-G.6 (original criterion): PASS, with limitations.** 2026-10-06 12:10:16–13:41:33 IST
+      (91 min 17 s): one socket (port 37546), 2,717 × 200, 17 renewals of connector inkyank `5aa40833`,
+      PID 2379 / ifindex 14 stable ([[Phase5A-Live-Acceptance-2026-10-06]]).
+      Limitations:
+      - shield-routed target;
+      - connector ownership inferred;
+      - the client journal is no longer available.
+      Since `6362d1f`, renewals no longer bump the version, so this proves renewal survival only. A
+      separate post-slice Fix 01 regression criterion needs agreement and remains **outstanding**.
+- [x] A renewal or effective no-op doesn't cause an unnecessary full tunnel restart (live 2026-10-01
+      hold #2; 2026-10-02 12:41:17; Phase 1 build).
+- [ ] A long-lived TCP connection stays alive when the effective configuration is unchanged. Not
+      revalidated for the current implementation. The historical 2026-10-02 closing hold had 0 FAIL,
+      but only one forced bump exercised the decision.
+- [x] No `snapshot changed, restarting VPN` for renewal-only effective no-op changes (0
+      renewal-caused versions across 38 renewals).
+- [x] Record whether vN+1 was actually observed/applied (2026-10-01 hold #1; Q3 input). Q3 remains open.
 
-- [ ] Existing unaffected long-lived flows survive applicable configuration changes.
-- [ ] Removing a connector/resource closes only the flows that depend on it.
-- [ ] New flows use the updated transport configuration.
-- [ ] Incremental route changes work.
-- [ ] A failed hot-apply falls back safely to a full restart.
-- [ ] U5/G9 pass after Phase 2.
+### Phase 2: **Partially satisfied** (reconciled 2026-10-10; mirrors [[Phase2-Full-Hot-Apply]] § Acceptance)
+
+- [x] Existing unaffected long-lived flows survive applicable configuration changes (2-A; 5-C).
+- [x] Removing a **resource** closes only the flows that depend on it (5-C L6 re-run 2026-10-10, L9; F-3).
+- [ ] Removing a **connector** closes only the flows that depend on it. Not implemented; gated by Q3.
+- [x] New flows use the updated transport configuration (2-A).
+- [x] Incremental route changes work (5-C).
+- [x] A failed hot-apply falls back safely to a full restart (2-A `Fallback`, 5-C `MutationFailed`; live zero-resource Z3).
+- [ ] U5/G9 pass after Phase 2. **Not run.**
 
 ## Out of scope
 

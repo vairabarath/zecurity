@@ -300,6 +300,10 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 - Provider read APIs (`GET /provider/relays`, `/provider/audit`, …) belong to **Dashboard Phase 2**.
 - Suspension/deletion enforcement (D-07 … D-13) belongs to a later sprint.
 - Migration runner / schema versioning.
+- **Established connection recovery / connector failover (deferred from Q3, 2026-10-10).** An established
+  flow is pinned to the connector it opened on and is reset or times out when that connector fails.
+  New-connection fallback within the same remote network does exist. **DEFERRED / NOT IMPLEMENTED**;
+  tracked as [[PENDING-18-Established-Connection-Recovery-Connector-Failover]] (`.zecurity-obs/pending/`).
 
 ## Notes for AI Agents Working on This Sprint
 

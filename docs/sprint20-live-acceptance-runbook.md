@@ -501,7 +501,7 @@ With a 15 min certificate and a 10 min window, the controller sends `ReEnroll` a
 3. Check:
    - [ ] `connectors.status = disconnected` within **~90–120 s** (`CONNECTOR_DISCONNECT_THRESHOLD` 90 s + the 30 s watcher tick).
    - [ ] Controller log: `disconnect watcher: marked connector(s) disconnected workspaces=1`.
-   - [ ] The client picks up a **new** snapshot version, with no other action: `transport snapshot stored` with a higher `version`, and/or `background sync: version changed, restarting tunnel`. The snapshot no longer lists this connector.
+   - [ ] The client picks up a **new** snapshot version, with no other action: `transport snapshot stored` with a higher `version`, and/or `background sync: change detected, evaluating tunnel configuration` (builds before F-1: `background sync: version changed, restarting tunnel`). The snapshot no longer lists this connector.
 
 > The transport version is in memory in the controller and resets on controller restart, so don't restart the controller during Stages 3–6.
 
@@ -682,7 +682,7 @@ sudo systemctl restart zecurity-client     # clear the direct-path cooldown (KI-
 **Client**
 - `direct path failed; used relay fallback`
 - `transport snapshot stored` (`version`)
-- `background sync: version changed, restarting tunnel`
+- `background sync: change detected, evaluating tunnel configuration` (before F-1: `background sync: version changed, restarting tunnel`). This is the sync caller, not a restart; the decision follows on the next line: `effective config unchanged, keeping tunnel`, `transport-only change, hot-applying connector map`, `resource change, hot-applying`, or a real restart (`structural configuration change, restarting VPN`)
 
 ---
 
