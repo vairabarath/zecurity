@@ -113,6 +113,7 @@ pub async fn run_listener(
         };
         let state = state.clone();
         let crl = crl.clone();
+        let certs = certs.clone();
         let session_limits = session_limits.clone();
         let handshake_timeout = limits.handshake_timeout;
         tokio::spawn(async move {
@@ -154,7 +155,8 @@ pub async fn run_listener(
                 "accepted authenticated Relay peer"
             );
             // Track-2: reject a revoked connector/client on the outer mTLS. Fail closed.
-            match tls::peer_revocation(&connection) {
+            let intermediate_ca_pem = certs.current().intermediate_ca_pem.clone();
+            match tls::peer_revocation(&connection, &intermediate_ca_pem) {
                 Ok(pr) => {
                     let status = crl
                         .check(&pr.workspace_id, &pr.leaf_serial, &pr.workspace_ca_der)
@@ -610,6 +612,48 @@ mod revocation_issuer_tests {
             matches!(outcome, Outcome::Rejected(_)) && !fetched.iter().any(|w| w == TENANT_B),
             "revoked tenant-A leaf: {outcome:?} after a successful handshake; CRLs fetched \
              for the check: {fetched:?} (tenant A = {TENANT_A}, tenant B = {TENANT_B})"
+        );
+    }
+
+    /// S1b (certificate audit, 2026-10-15): the S1 fix proves chain[1] has
+    /// the leaf issuer's NAME and PUBLIC KEY, then trusts chain[1]'s
+    /// `tenant:` label — but anyone can mint a certificate with tenant A's CA
+    /// name and public key (both public) that claims `tenant:B`. Path
+    /// validation skips that forgery (it chains to nothing) and builds
+    /// leaf -> CA_A -> Intermediate, so the handshake succeeds; the CRL cache
+    /// is keyed by workspace only, so once tenant B's CRL is cached the
+    /// revoked tenant-A leaf is checked against B's CRL and admitted.
+    ///
+    /// Before the fix the revoked leaf was admitted with only tenant B's CRL
+    /// consulted.
+    #[tokio::test]
+    async fn s1b_revoked_leaf_with_forged_issuer_copy_is_still_rejected() {
+        let s = setup().await;
+
+        // Normal operation: any tenant-B peer connects, caching B's CRL.
+        let (b_peer, b_key) = s.ca_b.client_leaf(GOOD_SERIAL);
+        let primed = connect(&s.pki, s.relay, vec![b_peer, s.ca_b.der()], b_key).await;
+        assert!(
+            matches!(primed, Outcome::Admitted(_)),
+            "setup: a good tenant-B peer must be admitted, got {primed:?}"
+        );
+
+        // The attack: revoked tenant-A leaf + forged "tenant B" copy of CA_A.
+        let forged = s.ca_a.forged_copy_claiming(TENANT_B);
+        let (revoked, revoked_key) = s.ca_a.client_leaf(REVOKED_SERIAL);
+        let outcome = connect(
+            &s.pki,
+            s.relay,
+            vec![revoked, forged, s.ca_a.der()],
+            revoked_key,
+        )
+        .await;
+
+        let fetched = s.fetched.lock().unwrap().clone();
+        assert!(
+            matches!(outcome, Outcome::Rejected(_)),
+            "revoked tenant-A leaf with a forged tenant-B copy of its CA: {outcome:?} after a \
+             successful handshake; CRLs fetched: {fetched:?} (tenant A = {TENANT_A}, tenant B = {TENANT_B})"
         );
     }
 }
