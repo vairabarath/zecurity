@@ -28,6 +28,8 @@ const (
 	ClientService_GetTransportSnapshot_FullMethodName = "/client.v1.ClientService/GetTransportSnapshot"
 	ClientService_RevokeDevice_FullMethodName         = "/client.v1.ClientService/RevokeDevice"
 	ClientService_ReportDevicePosture_FullMethodName  = "/client.v1.ClientService/ReportDevicePosture"
+	ClientService_RefreshSession_FullMethodName       = "/client.v1.ClientService/RefreshSession"
+	ClientService_Logout_FullMethodName               = "/client.v1.ClientService/Logout"
 )
 
 // ClientServiceClient is the client API for ClientService service.
@@ -72,6 +74,19 @@ type ClientServiceClient interface {
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(ctx context.Context, in *RevokeDeviceRequest, opts ...grpc.CallOption) (*RevokeDeviceResponse, error)
 	ReportDevicePosture(ctx context.Context, in *ReportDevicePostureRequest, opts ...grpc.CallOption) (*ReportDevicePostureResponse, error)
+	// RefreshSession — exchange the (possibly expired) access token plus the
+	// single-use refresh token for a fresh pair, over the TLS channel pinned to
+	// the device's saved anchors. Replaces the client's use of the plain-HTTP
+	// /auth/refresh, which put both tokens on the wire in clear. Same session
+	// rules as /auth/refresh (rotation, lifecycle and generation checks,
+	// absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+	// must log in again.
+	RefreshSession(ctx context.Context, in *RefreshSessionRequest, opts ...grpc.CallOption) (*RefreshSessionResponse, error)
+	// Logout — end the caller's session server-side (delete its refresh
+	// session). Idempotent: succeeds whether or not a session existed, so it
+	// reveals nothing about session liveness. Replaces the client's plain-HTTP
+	// /auth/logout.
+	Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error)
 }
 
 type clientServiceClient struct {
@@ -172,6 +187,26 @@ func (c *clientServiceClient) ReportDevicePosture(ctx context.Context, in *Repor
 	return out, nil
 }
 
+func (c *clientServiceClient) RefreshSession(ctx context.Context, in *RefreshSessionRequest, opts ...grpc.CallOption) (*RefreshSessionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RefreshSessionResponse)
+	err := c.cc.Invoke(ctx, ClientService_RefreshSession_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *clientServiceClient) Logout(ctx context.Context, in *LogoutRequest, opts ...grpc.CallOption) (*LogoutResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LogoutResponse)
+	err := c.cc.Invoke(ctx, ClientService_Logout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ClientServiceServer is the server API for ClientService service.
 // All implementations must embed UnimplementedClientServiceServer
 // for forward compatibility
@@ -214,6 +249,19 @@ type ClientServiceServer interface {
 	// compiles and bumps the workspace policy version.
 	RevokeDevice(context.Context, *RevokeDeviceRequest) (*RevokeDeviceResponse, error)
 	ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error)
+	// RefreshSession — exchange the (possibly expired) access token plus the
+	// single-use refresh token for a fresh pair, over the TLS channel pinned to
+	// the device's saved anchors. Replaces the client's use of the plain-HTTP
+	// /auth/refresh, which put both tokens on the wire in clear. Same session
+	// rules as /auth/refresh (rotation, lifecycle and generation checks,
+	// absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+	// must log in again.
+	RefreshSession(context.Context, *RefreshSessionRequest) (*RefreshSessionResponse, error)
+	// Logout — end the caller's session server-side (delete its refresh
+	// session). Idempotent: succeeds whether or not a session existed, so it
+	// reveals nothing about session liveness. Replaces the client's plain-HTTP
+	// /auth/logout.
+	Logout(context.Context, *LogoutRequest) (*LogoutResponse, error)
 	mustEmbedUnimplementedClientServiceServer()
 }
 
@@ -247,6 +295,12 @@ func (UnimplementedClientServiceServer) RevokeDevice(context.Context, *RevokeDev
 }
 func (UnimplementedClientServiceServer) ReportDevicePosture(context.Context, *ReportDevicePostureRequest) (*ReportDevicePostureResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReportDevicePosture not implemented")
+}
+func (UnimplementedClientServiceServer) RefreshSession(context.Context, *RefreshSessionRequest) (*RefreshSessionResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RefreshSession not implemented")
+}
+func (UnimplementedClientServiceServer) Logout(context.Context, *LogoutRequest) (*LogoutResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Logout not implemented")
 }
 func (UnimplementedClientServiceServer) mustEmbedUnimplementedClientServiceServer() {}
 
@@ -423,6 +477,42 @@ func _ClientService_ReportDevicePosture_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ClientService_RefreshSession_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RefreshSessionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).RefreshSession(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_RefreshSession_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).RefreshSession(ctx, req.(*RefreshSessionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ClientService_Logout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LogoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ClientServiceServer).Logout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ClientService_Logout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ClientServiceServer).Logout(ctx, req.(*LogoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ClientService_ServiceDesc is the grpc.ServiceDesc for ClientService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -465,6 +555,14 @@ var ClientService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReportDevicePosture",
 			Handler:    _ClientService_ReportDevicePosture_Handler,
+		},
+		{
+			MethodName: "RefreshSession",
+			Handler:    _ClientService_RefreshSession_Handler,
+		},
+		{
+			MethodName: "Logout",
+			Handler:    _ClientService_Logout_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

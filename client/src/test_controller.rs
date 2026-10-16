@@ -151,6 +151,26 @@ impl ClientService for FakeController {
         Err(Status::unimplemented("not used"))
     }
 
+    async fn refresh_session(
+        &self,
+        r: Request<RefreshSessionRequest>,
+    ) -> Result<Response<RefreshSessionResponse>, Status> {
+        let r = r.into_inner();
+        self.record("RefreshSession", &r.refresh_token);
+        if r.refresh_token == "dead" {
+            return Err(Status::unauthenticated("refresh token expired"));
+        }
+        Ok(Response::new(RefreshSessionResponse {
+            access_token: fake_access_token(),
+            refresh_token: "rotated-refresh".into(),
+        }))
+    }
+
+    async fn logout(&self, r: Request<LogoutRequest>) -> Result<Response<LogoutResponse>, Status> {
+        self.record("Logout", &r.into_inner().access_token);
+        Ok(Response::new(LogoutResponse {}))
+    }
+
     async fn renew_cert(
         &self,
         r: Request<RenewCertRequest>,
@@ -165,6 +185,48 @@ impl ClientService for FakeController {
             cert_expires_at: 9_999_999_999,
         }))
     }
+}
+
+/// An unsigned JWT-shaped access token expiring in 15 minutes — the client
+/// only reads its `exp` claim (the controller verifies signatures).
+pub fn fake_access_token() -> String {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    let exp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 900;
+    format!(
+        "{}.{}.sig",
+        URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256"}"#),
+        URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{exp}}}"#))
+    )
+}
+
+/// A plain-HTTP listener that records every request it receives (request
+/// line and headers) and answers 401 — the stand-in for anyone on the network
+/// path watching plain HTTP.
+pub async fn spawn_recording_http() -> (std::net::SocketAddr, CallLog) {
+    let seen: CallLog = Arc::default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut sock, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = sock
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    (addr, seen)
 }
 
 /// Serve `body` as the response to any HTTP request (the `/ca.crt` stand-in).

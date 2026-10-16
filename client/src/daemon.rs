@@ -4075,14 +4075,17 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             // Persist the rotated pair BEFORE updating in-memory state so a
             // crash between save and in-memory update leaves the disk as the
@@ -4238,15 +4241,19 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
         };
 
         let _guard = refresh_lock.lock().await;
-        let (access_token, refresh_token) = {
+        let (access_token, refresh_token, ca_pem) = {
             let s = state.read().await;
 
-            match s.session.as_ref() {
-                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
-                None => continue,
+            match (s.session.as_ref(), s.device.as_ref()) {
+                (Some(sess), Some(device)) => (
+                    sess.access_token.clone(),
+                    sess.refresh_token.clone(),
+                    device.ca_cert_pem.clone(),
+                ),
+                _ => continue,
             }
         };
-        match auth::refresh_access_token(&conf, &access_token, &refresh_token).await {
+        match auth::refresh_access_token(&conf, &ca_pem, &access_token, &refresh_token).await {
             Ok(new_tokens) => {
                 if let Err(e) = state_store::save_rotated_tokens(
                     &conf.workspace,
@@ -4414,14 +4421,17 @@ async fn renew_cert_with_refresh(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -5000,14 +5010,17 @@ async fn submit_posture_report(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -5285,14 +5298,17 @@ async fn fetch_transport_snapshot_with_refresh(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -6601,6 +6617,21 @@ mod renewal_tests {
             tonic::Response<crate::grpc::client_v1::ReportDevicePostureResponse>,
             tonic::Status,
         > {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
+        async fn refresh_session(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RefreshSessionRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RefreshSessionResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn logout(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::LogoutRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::LogoutResponse>, tonic::Status>
+        {
             Err(tonic::Status::unimplemented("not used in this test"))
         }
 

@@ -49,8 +49,12 @@ pub enum RefreshError {
 /// the refresh token on every call — the returned refresh_token must
 /// replace the caller's stored value atomically before any subsequent
 /// refresh, or the next call will be rejected as a replay.
+///
+/// Certificate audit follow-up: this sends both tokens to the plain-HTTP
+/// `/auth/refresh`; `_ca_pem` (the device's saved anchors) is not used yet.
 pub async fn refresh_access_token(
     conf: &ClientConf,
+    _ca_pem: &str,
     access_token: &str,
     refresh_token: &str,
 ) -> Result<RefreshedTokens, RefreshError> {
@@ -117,7 +121,10 @@ struct RefreshResponse {
 /// contract; 401 means the token was already dead — either way, we've done
 /// what we can). Only returns Err on a transport failure the caller may
 /// want to log — the caller must still proceed to clear local state.
-pub async fn logout(conf: &ClientConf, access_token: &str) -> Result<()> {
+///
+/// Certificate audit follow-up: this sends the access token to the
+/// plain-HTTP `/auth/logout`; `_ca_pem` (the saved anchors) is not used yet.
+pub async fn logout(conf: &ClientConf, _ca_pem: &str, access_token: &str) -> Result<()> {
     let url = format!("{}/auth/logout", conf.http_base());
     reqwest::Client::new()
         .post(&url)

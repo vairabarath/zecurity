@@ -23,11 +23,11 @@ pub async fn run() -> Result<()> {
     // Best-effort DEVICE revoke — sets revoked_at server-side so the SPIFFE
     // drops from the ACL and the connector closes the gate. gRPC, mirroring
     // enroll/get-ACL. Failures logged and swallowed; local logout must proceed.
+    let saved_ca = stored
+        .as_ref()
+        .map(|s| s.device.ca_cert_pem.as_str())
+        .unwrap_or_default();
     if let (Some(token), Some(dev)) = (access_token.as_ref(), device_id.as_ref()) {
-        let saved_ca = stored
-            .as_ref()
-            .map(|s| s.device.ca_cert_pem.as_str())
-            .unwrap_or_default();
         let revoked = match crate::trust::embedded_platform_root_pem() {
             Ok(root) => revoke_device(&conf, token, dev, saved_ca, root).await,
             Err(e) => Err(e),
@@ -41,7 +41,7 @@ pub async fn run() -> Result<()> {
 
     // Best-effort SESSION revoke — invalidates the refresh token in Redis.
     if let Some(token) = access_token.as_ref() {
-        if let Err(e) = crate::auth::logout(&conf, token).await {
+        if let Err(e) = crate::auth::logout(&conf, saved_ca, token).await {
             eprintln!(
                 "warning: server-side logout failed: {e:#} (local session will still be cleared)"
             );
