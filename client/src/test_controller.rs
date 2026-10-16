@@ -160,6 +160,13 @@ impl ClientService for FakeController {
         if r.refresh_token == "dead" {
             return Err(Status::unauthenticated("refresh token expired"));
         }
+        if r.refresh_token == "empty" {
+            // A well-formed access token but no rotated refresh token.
+            return Ok(Response::new(RefreshSessionResponse {
+                access_token: fake_access_token(),
+                refresh_token: String::new(),
+            }));
+        }
         Ok(Response::new(RefreshSessionResponse {
             access_token: fake_access_token(),
             refresh_token: "rotated-refresh".into(),

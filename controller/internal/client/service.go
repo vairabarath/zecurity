@@ -851,5 +851,33 @@ func (s *Service) RevokeDevice(ctx context.Context, req *clientv1.RevokeDeviceRe
 	return &clientv1.RevokeDeviceResponse{}, nil
 }
 
+// RefreshSession rotates the caller's session over the TLS channel the
+// client pins to its saved anchors (certificate audit follow-up: the client
+// used to send both tokens to the plain-HTTP /auth/refresh). Same rules as
+// /auth/refresh — they share auth.Service.RefreshSession. UNAUTHENTICATED
+// means the session is dead and the client must log in again.
+func (s *Service) RefreshSession(ctx context.Context, req *clientv1.RefreshSessionRequest) (*clientv1.RefreshSessionResponse, error) {
+	if req.GetAccessToken() == "" || req.GetRefreshToken() == "" {
+		return nil, status.Error(codes.Unauthenticated, "access_token and refresh_token are required")
+	}
+	accessToken, refreshToken, err := s.authSvc.RefreshSession(ctx, req.GetAccessToken(), req.GetRefreshToken())
+	if err != nil {
+		var se *auth.SessionError
+		if errors.As(err, &se) && se.Dead() {
+			return nil, status.Error(codes.Unauthenticated, se.Msg)
+		}
+		return nil, status.Error(codes.Internal, "refresh session failed")
+	}
+	return &clientv1.RefreshSessionResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+// Logout ends the caller's session server-side, over the pinned channel
+// (replacing the client's plain-HTTP /auth/logout). Idempotent: always
+// succeeds, revealing nothing about whether a session existed.
+func (s *Service) Logout(ctx context.Context, req *clientv1.LogoutRequest) (*clientv1.LogoutResponse, error) {
+	s.authSvc.EndSession(ctx, req.GetAccessToken())
+	return &clientv1.LogoutResponse{}, nil
+}
+
 // Compile-time interface check.
 var _ clientv1.ClientServiceServer = (*Service)(nil)

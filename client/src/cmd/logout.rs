@@ -39,9 +39,15 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Best-effort SESSION revoke — invalidates the refresh token in Redis.
+    // Best-effort SESSION revoke — invalidates the refresh token in Redis,
+    // over the gRPC channel pinned to the saved anchors (checked against the
+    // platform root, like the revoke above).
     if let Some(token) = access_token.as_ref() {
-        if let Err(e) = crate::auth::logout(&conf, saved_ca, token).await {
+        let ended = match crate::trust::embedded_platform_root_pem() {
+            Ok(root) => end_session(&conf, token, saved_ca, root).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = ended {
             eprintln!(
                 "warning: server-side logout failed: {e:#} (local session will still be cleared)"
             );
@@ -58,6 +64,18 @@ pub async fn run() -> Result<()> {
     }
     Ok(())
 }
+/// End the session server-side over the channel pinned to the saved anchors,
+/// which must chain to `platform_root_pem` — the same check as the revoke.
+pub(crate) async fn end_session(
+    conf: &crate::config::ClientConf,
+    access_token: &str,
+    saved_ca_pem: &str,
+    platform_root_pem: &str,
+) -> Result<()> {
+    crate::daemon::check_saved_trust(saved_ca_pem, platform_root_pem)?;
+    crate::auth::logout(conf, saved_ca_pem, access_token).await
+}
+
 /// Certificate audit bug 1 (client): the controller connection trusts the
 /// anchors saved at enrollment (checked against `platform_root_pem`), not a
 /// fresh plain-HTTP `/ca.crt`. Only with nothing saved does it fall back to

@@ -150,7 +150,6 @@ func TestRefreshHandler_Success(t *testing.T) {
 // and /auth/refresh accepts the refresh token only as the browser's httpOnly
 // cookie. A header-borne token must be refused and must not rotate anything.
 func TestRefreshHandler_RejectsHeaderRefreshToken(t *testing.T) {
-	t.Skip("session tokens over plain HTTP: demonstrates the leak; un-skip with the fix")
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	handler := svc.RefreshHandler()

@@ -411,7 +411,6 @@ async fn genuine_with_watched_http(p: &Pkis) -> (crate::test_controller::Endpoin
 }
 
 #[tokio::test]
-#[ignore = "session tokens over plain HTTP: demonstrates the leak; un-ignore with the fix"]
 async fn refresh_sends_no_token_over_plain_http() {
     let p = pkis();
     let (ep, seen) = genuine_with_watched_http(&p).await;
@@ -437,7 +436,6 @@ async fn refresh_sends_no_token_over_plain_http() {
 }
 
 #[tokio::test]
-#[ignore = "session tokens over plain HTTP: demonstrates the leak; un-ignore with the fix"]
 async fn dead_session_is_reported_as_dead() {
     let p = pkis();
     let (ep, seen) = genuine_with_watched_http(&p).await;
@@ -456,7 +454,6 @@ async fn dead_session_is_reported_as_dead() {
 }
 
 #[tokio::test]
-#[ignore = "session tokens over plain HTTP: demonstrates the leak; un-ignore with the fix"]
 async fn logout_sends_no_token_over_plain_http() {
     let p = pkis();
     let (ep, seen) = genuine_with_watched_http(&p).await;
@@ -475,7 +472,6 @@ async fn logout_sends_no_token_over_plain_http() {
 }
 
 #[tokio::test]
-#[ignore = "session tokens over plain HTTP: demonstrates the leak; un-ignore with the fix"]
 async fn an_impostor_receives_no_session_token() {
     let p = pkis();
     // Mallory answers both plain HTTP and gRPC.
@@ -509,4 +505,60 @@ async fn an_impostor_receives_no_session_token() {
         "Mallory's gRPC received: {:?}",
         received(&mallory.calls)
     );
+}
+
+#[tokio::test]
+async fn an_empty_refresh_reply_is_a_failure_not_a_session() {
+    let p = pkis();
+    let (ep, _seen) = genuine_with_watched_http(&p).await;
+    let result =
+        crate::auth::refresh_access_token(&ep.conf, &p.pki.device_ca_chain(), "access", "empty")
+            .await;
+    assert!(
+        matches!(result, Err(crate::auth::RefreshError::Transient(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_logout_refuses_saved_anchors_not_under_the_root() {
+    let p = pkis();
+    let forged_saved = format!(
+        "{}\n{}",
+        p.attacker.workspace_ca_pem, p.attacker.fake_intermediate_pem
+    );
+    let mallory = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.attacker.root_pem.clone(),
+        p.attacker.identity_under_fake_intermediate(),
+        Reply::Forged,
+    )
+    .await;
+    let result = crate::cmd::logout::end_session(
+        &mallory.conf,
+        "logout-access-token",
+        &forged_saved,
+        &p.pki.root_pem,
+    )
+    .await;
+    assert!(result.is_err(), "session logout completed against Mallory");
+    assert!(
+        received(&mallory.calls).is_empty(),
+        "Mallory received: {:?}",
+        received(&mallory.calls)
+    );
+
+    let ep = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.pki.intermediate_pem.clone(),
+        p.pki.controller_identity(),
+        Reply::Genuine,
+    )
+    .await;
+    crate::cmd::logout::end_session(&ep.conf, "tok", &p.pki.device_ca_chain(), &p.pki.root_pem)
+        .await
+        .expect("session logout with the saved anchors");
+    assert_eq!(received(&ep.calls), vec!["Logout tok".to_string()]);
 }
