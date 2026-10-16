@@ -48,7 +48,7 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
 
 ## 4. Adding a schema change
 
-1. **Add a new file.** Use the next free number (check with `ls controller/migrations | tail -3`). The latest is `037_provider_local_auth.sql`, so the next is **`038_`**. Name it for what it does: `038_<short_description>.sql`.
+1. **Add a new file.** Use the next free number (check with `ls controller/migrations | tail -3`). The latest is `038_shield_revocations.sql`, so the next is **`039_`**. Name it for what it does: `039_<short_description>.sql`.
 2. **Never edit an existing schema file.** Other developers' databases and every test database are built from those files. Changing one means everyone's history silently diverges. Always add a new file, even to fix a mistake in an old one.
 3. **Keep it plain SQL** that runs correctly on a fresh database, after all the earlier files, in one pass. Comment the Sprint/phase and the reason at the top.
 4. **Label the PR `[schema: reset DB]`** (title or description), and put the reset command in the PR description, so reviewers and the other developer know to recreate their database after merging.
@@ -74,6 +74,7 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
   go test -count=1 ./...
   ```
   - Valkey-backed tests (e.g. the provider login limiter) read `AUTH_TEST_VALKEY_URL`.
+  - Tests that also need `RESOURCE_TEST_SHIELD_ID` (resource-ACL coherence, posture resolvers, shield snapshot generation, ack/reap) predate this rule: they use the URL as the database itself and need an existing active shield. Run them with `scripts/resource-test-fixture.sh`, which builds and drops a throwaway database with that shield.
 - **A skipped DB test is a failed acceptance case.**
   - An unset variable makes a suite skip silently and still report `ok`. Check with `go test -v … | grep -- '--- SKIP'`.
   - CI sets all of the variables, and a guard step fails the job if the canary integration test skips.
@@ -96,6 +97,6 @@ docker compose up -d        # recreates Postgres; every schema file runs again f
 |---|---|
 | Pulled a PR labelled `[schema: reset DB]` | `cd controller && docker compose down -v && docker compose up -d`, then re-bootstrap (section 3) |
 | `column/relation "…" does not exist` locally | You skipped the reset: see above |
-| Writing a schema change | New `NNN_description.sql` (next: `038_`); never edit old files; PR label `[schema: reset DB]` |
+| Writing a schema change | New `NNN_description.sql` (next: `039_`); never edit old files; PR label `[schema: reset DB]` |
 | Writing a DB-backed test | Throwaway DB + apply all schema files (section 5); no `FlushDB` |
 | Running the gate | All `*_TEST_DATABASE_URL` set, `-count=1`, check for `--- SKIP` |

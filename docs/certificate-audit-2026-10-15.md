@@ -48,9 +48,27 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
     - **Reliable delivery:** a dispatcher invalidates the policy and pushes the workspace's complete revoked list to every connected connector, retrying until delivered. A connector also receives the full list whenever its stream opens.
     - **Unreachable resources:** resources behind a revoked or missing shield get no ACL entry until an admin unprotects or reassigns them. There is no fallback to direct routing.
     - **Connector cut-off:** it accepts no shield until it has applied the list. On revocation it closes the shield's stream, unregisters it, discards its snapshot, ends every session through it (including ones being set up at that moment) and refuses its identity from then on.
+  - A connector admits shields only on a list received over its **current** controller stream. Every (re)connect or renewal switch makes it stop admitting new shields until that stream delivers its list.
+  - **Deploy order:** the controller must be deployed before the connector. A connector from this change accepts no shields until it receives the list. Migration `038_shield_revocations.sql` requires a local DB reset.
   - Follow-ups:
     - [ ] Shield CRL as an additional layer (deferred).
-    - [ ] A connector that loses its controller stream keeps its last list until it reconnects. It cannot learn of new revocations while the controller is unreachable.
+    - [ ] **Disconnected-connector window (accepted limitation).** While a connector cannot reach the controller, nothing can tell it about a new revocation:
+      - a revoked shield that is already connected to it keeps its control stream, and its user sessions keep flowing;
+      - a revoked shield may also connect to it if it was not revoked in the connector's last list;
+      - this lasts until the connector's controller stream comes back, at which point the list is applied immediately: the stream is closed, sessions are torn down and the identity is refused.
+
+      Refusing all new shield connections for the whole outage would close the second gap, but would lock out a shield that merely restarts during a controller outage. That trade-off needs a product decision.
+    - [ ] **Live end-to-end acceptance pending:** revoke a real enrolled shield mid-session and confirm the stream is closed, sessions end and reconnects are refused, on the lab machines.
+
+## Found during the bug 3 verification (2026-10-16), pre-existing and unrelated
+
+- [ ] **34 controller tests needed a pre-seeded shield.** `RESOURCE_TEST_SHIELD_ID` (resource-ACL coherence, posture resolvers, snapshot generation, ack/reap) skipped everywhere because the URL is used as the database itself. They now run with `scripts/resource-test-fixture.sh`: 30 pass, and the same 4 fail on `fixed-pendings`:
+  - `TestUpdateResource_InvalidatesWhenACLFieldChanges` and `TestForceDeleteResource_Invalidates`: the resolvers call `NotifyPolicyChange` twice, an unconditional call plus the later conditional one.
+  - `TestUpdateResource_NoInvalidateForIrrelevantField`: the unconditional call fires even for ACL-irrelevant updates.
+  - `TestProtectResource_DoesNotInvalidate`: the test is outdated. Since migration 021, protecting changes the route from connector to shield, so a notification is correct.
+
+  The effect is extra ACL recompiles and pushes, never fewer. These tests should be moved to the throwaway-database pattern.
+- [ ] **Leaked test databases.** A `graph/resolvers` SCIM-config test creates `resolvers_updsc_*` databases and never drops them; hundreds accumulate on a developer's Postgres.
 - [ ] **Bug 4 — High — client: a user being deprovisioned can still enroll a new device.**
   - Enrollment checks only that the login token is genuine and unexpired, which turns a 15-minute token into a 7-day certificate.
   - Policy checks only device revocation, never the user's status (`policy/store.go:346`).

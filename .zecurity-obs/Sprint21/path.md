@@ -69,7 +69,7 @@ Sprint 20 KI-1 / KI-2 / KI-3; JWTs in .env.example     Fixed; .env.example scrub
 
 Zecurity is **pre-production**. For this phase the team has chosen to **reset the development database whenever the schema changes**. There is **no migration framework**: no `golang-migrate`, Goose or similar, and none may be added.
 
-- A schema change is a new, numbered, plain SQL file in `controller/migrations/`. The next free number is **`037_`**.
+- A schema change is a new, numbered, plain SQL file in `controller/migrations/`. The next free number is **`039_`** (`037_provider_local_auth.sql` was Sprint 21 Phase H; `038_shield_revocations.sql` is certificate audit bug 3).
   - The directory name is historical. **Nothing tracks which files have run and nothing upgrades an existing database.** Postgres runs every file in the directory, once, in lexical order, only when its data volume is first created (`docker-entrypoint-initdb.d`, `controller/docker-compose.yml`).
 - **Any PR that adds a schema file requires every developer to recreate their local database:**
   ```bash

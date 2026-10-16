@@ -5,6 +5,11 @@
 -- remote network), but the shield's certificate may still be valid, so the
 -- revocation must outlive the row. Revocation is terminal: nothing deletes a
 -- tombstone except deleting the whole workspace.
+--
+-- [schema: reset DB] — there is no migration framework in the pre-production
+-- phase: recreate the local database after pulling this file
+-- (cd controller && docker compose down -v && docker compose up -d).
+
 CREATE TABLE shield_revocations (
     shield_id   UUID        PRIMARY KEY,
     tenant_id   UUID        NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
