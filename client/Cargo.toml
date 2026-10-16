@@ -74,3 +74,5 @@ picky-asn1-der = "0.5"
 
 [build-dependencies]
 tonic-build = "0.12"
+# Validates the embedded platform root CA at build time (certificate audit bug 1).
+x509-parser = { version = "0.18", features = ["verify"] }

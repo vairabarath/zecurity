@@ -14,6 +14,7 @@ mod relay_pool;
 mod runtime;
 mod state_store;
 mod transport;
+mod trust;
 mod tun;
 mod tunnel_pool;
 #[cfg(target_os = "linux")]

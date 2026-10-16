@@ -114,7 +114,10 @@ mod tpm_mode_tests {
 }
 
 pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<LoginResult> {
-    let (mut grpc, trusted_intermediate_pem) = connect_controller(conf, "").await?;
+    // Certificate audit bug 1: trust starts at the platform root compiled
+    // into this client, never at the plain-HTTP download.
+    let platform_root_pem = crate::trust::embedded_platform_root_pem()?;
+    let (mut grpc, trusted_intermediate_pem) = connect_controller(conf, platform_root_pem).await?;
 
     // CLI-Controller PKCE — CLI generates this pair.
     // code_challenge is sent to the controller in InitiateAuth.
@@ -276,30 +279,53 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
 /// Opens the login gRPC channel to the controller and returns it with the
 /// Intermediate it trusts.
 ///
-/// Certificate audit bug 1 (client): `/ca.crt` is fetched over plain HTTP
-/// and every certificate in it is trusted; `_platform_root_pem` is not used
-/// yet.
+/// Certificate audit bug 1 (client): `/ca.crt` arrives over plain HTTP, so it
+/// is accepted only if it is exactly one Platform Intermediate issued by
+/// `platform_root_pem`, and only that certificate is trusted for the
+/// connection. Nothing is sent to the controller before this check.
 pub(crate) async fn connect_controller(
     conf: &ClientConf,
-    _platform_root_pem: &str,
+    platform_root_pem: &str,
 ) -> Result<(
     crate::grpc::ClientServiceClient<tonic::transport::Channel>,
     String,
 )> {
-    let ca_pem = fetch_controller_ca(conf).await?;
-    let grpc = connect_grpc(conf.controller(), &ca_pem).await?;
-    Ok((grpc, ca_pem))
+    let download = fetch_controller_ca(conf).await?;
+    let pinned = crate::trust::pinned_intermediate(&download, platform_root_pem)?;
+    let pinned_pem = crate::trust::pem_from_der(&pinned);
+    let grpc = connect_grpc(conf.controller(), &pinned_pem).await?;
+    Ok((grpc, pinned_pem))
 }
 
 /// The device CA chain to persist (Workspace CA + Intermediate) from the
-/// EnrollDevice reply.
-///
-/// Certificate audit bug 1 (client): stored without any validation.
+/// EnrollDevice reply, after validating the reply (certificate audit bug 1):
+/// pinned Intermediate → Workspace CA → leaf, the leaf carrying the device
+/// SPIFFE ID the controller assigned and the key in the CSR this client sent.
+/// Nothing is saved if this fails.
 pub(crate) fn device_ca_chain(
-    _trusted_intermediate_pem: &str,
+    trusted_intermediate_pem: &str,
     enroll: &EnrollDeviceResponse,
-    _sent_csr_pem: &str,
+    sent_csr_pem: &str,
 ) -> Result<String> {
+    (|| {
+        let pinned = crate::trust::single_certificate(
+            trusted_intermediate_pem.as_bytes(),
+            "pinned Intermediate",
+        )?;
+        crate::trust::require_device_spiffe_id(&enroll.spiffe_id, &enroll.device_id)?;
+        crate::trust::validate_issued_chain(
+            &crate::trust::Anchors {
+                intermediate: &pinned,
+                workspace_ca: None,
+            },
+            &enroll.workspace_ca_pem,
+            &enroll.intermediate_ca_pem,
+            &enroll.certificate_pem,
+            &enroll.spiffe_id,
+            &crate::trust::csr_key_spki(sent_csr_pem)?,
+        )
+    })()
+    .context("enrollment reply rejected")?;
     Ok(format!(
         "{}\n{}",
         enroll.workspace_ca_pem, enroll.intermediate_ca_pem

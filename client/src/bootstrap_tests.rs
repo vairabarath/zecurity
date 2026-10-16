@@ -75,7 +75,6 @@ async fn genuine_login_saves_the_platform_chain() {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn replaced_ca_cannot_intercept_the_login() {
     let p = pkis();
     // Mallory answers both the /ca.crt download and the gRPC connection.
@@ -97,7 +96,6 @@ async fn replaced_ca_cannot_intercept_the_login() {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn appended_ca_cannot_intercept_the_login() {
     let p = pkis();
     let body = format!("{}\n{}", p.pki.intermediate_pem, p.attacker.root_pem);
@@ -118,7 +116,6 @@ async fn appended_ca_cannot_intercept_the_login() {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn look_alike_intermediate_not_issued_by_the_root_is_refused() {
     let p = pkis();
     // Same name as the platform Intermediate, but issued by Mallory's root.
@@ -152,7 +149,6 @@ async fn login_with_reply(reply: Reply) -> anyhow::Result<String> {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn forged_enroll_reply_is_refused() {
     let err = login_with_reply(Reply::Forged)
         .await
@@ -164,13 +160,11 @@ async fn forged_enroll_reply_is_refused() {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn enroll_reply_from_another_platform_is_refused() {
     assert!(login_with_reply(Reply::OtherPlatform).await.is_err());
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn enroll_reply_for_another_key_is_refused() {
     assert!(login_with_reply(Reply::OtherKey).await.is_err());
 }
@@ -188,14 +182,19 @@ async fn logout_revokes_against_the_genuine_controller() {
         Reply::Genuine,
     )
     .await;
-    crate::cmd::logout::revoke_device(&ep.conf, "tok", "dev", &p.pki.device_ca_chain())
-        .await
-        .expect("revoke against the genuine controller");
+    crate::cmd::logout::revoke_device(
+        &ep.conf,
+        "tok",
+        "dev",
+        &p.pki.device_ca_chain(),
+        &p.pki.root_pem,
+    )
+    .await
+    .expect("revoke against the genuine controller");
     assert_eq!(received(&ep.calls), vec!["RevokeDevice tok".to_string()]);
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn logout_does_not_trust_a_downloaded_ca() {
     let p = pkis();
     let mallory = endpoint(
@@ -211,6 +210,7 @@ async fn logout_does_not_trust_a_downloaded_ca() {
         "logout-access-token",
         "dev",
         &p.pki.device_ca_chain(),
+        &p.pki.root_pem,
     )
     .await;
     assert!(result.is_err(), "revoke completed against Mallory");
@@ -222,7 +222,6 @@ async fn logout_does_not_trust_a_downloaded_ca() {
 }
 
 #[tokio::test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 async fn logout_uses_the_saved_anchors_not_the_download() {
     let p = pkis();
     // A hostile /ca.crt in front of the genuine controller: logout must not
@@ -235,9 +234,15 @@ async fn logout_uses_the_saved_anchors_not_the_download() {
         Reply::Genuine,
     )
     .await;
-    crate::cmd::logout::revoke_device(&ep.conf, "tok", "dev", &p.pki.device_ca_chain())
-        .await
-        .expect("revoke with the saved anchors");
+    crate::cmd::logout::revoke_device(
+        &ep.conf,
+        "tok",
+        "dev",
+        &p.pki.device_ca_chain(),
+        &p.pki.root_pem,
+    )
+    .await
+    .expect("revoke with the saved anchors");
     assert_eq!(received(&ep.calls), vec!["RevokeDevice tok".to_string()]);
 }
 
@@ -251,7 +256,6 @@ fn saved_platform_chain_is_trusted() {
 }
 
 #[test]
-#[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
 fn saved_chain_not_under_the_platform_root_is_refused() {
     let p = pkis();
     let other = TestPki::new();
@@ -262,6 +266,120 @@ fn saved_chain_not_under_the_platform_root_is_refused() {
     for chain in [forged, other.device_ca_chain(), String::new()] {
         let err = crate::daemon::check_saved_trust(&chain, &p.pki.root_pem)
             .expect_err("an unanchored saved chain must be refused");
-        assert!(format!("{err:#}").contains("login again"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("run `zecurity-client login` again"),
+            "{err:#}"
+        );
     }
+}
+
+#[tokio::test]
+async fn logout_refuses_saved_anchors_not_under_the_root() {
+    let p = pkis();
+    // Anchors saved from a hijacked enrollment before the fix, and Mallory
+    // answering with an identity under her look-alike intermediate.
+    let forged_saved = format!(
+        "{}\n{}",
+        p.attacker.workspace_ca_pem, p.attacker.fake_intermediate_pem
+    );
+    let mallory = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.attacker.root_pem.clone(),
+        p.attacker.identity_under_fake_intermediate(),
+        Reply::Forged,
+    )
+    .await;
+    let result = crate::cmd::logout::revoke_device(
+        &mallory.conf,
+        "logout-access-token",
+        "dev",
+        &forged_saved,
+        &p.pki.root_pem,
+    )
+    .await;
+    assert!(result.is_err(), "revoke completed against Mallory");
+    assert!(
+        received(&mallory.calls).is_empty(),
+        "Mallory received: {:?}",
+        received(&mallory.calls)
+    );
+}
+
+#[test]
+fn enroll_reply_must_carry_this_devices_identity() {
+    use crate::grpc::client_v1::EnrollDeviceResponse;
+    use crate::test_pki::{device_spiffe_id, DEVICE_ID, TRUST_DOMAIN};
+    let p = pkis();
+    let (_key, csr) = device_key_and_csr();
+    let reply =
+        |certificate_pem: String, spiffe_id: String, device_id: &str| EnrollDeviceResponse {
+            certificate_pem,
+            workspace_ca_pem: p.pki.workspace_ca_pem.clone(),
+            intermediate_ca_pem: p.pki.intermediate_pem.clone(),
+            spiffe_id,
+            device_id: device_id.into(),
+        };
+    let chain =
+        |r: &EnrollDeviceResponse| crate::login::device_ca_chain(&p.pki.intermediate_pem, r, &csr);
+    let genuine = p.pki.sign_device_csr(&csr, DEVICE_ID);
+    chain(&reply(
+        genuine.clone(),
+        device_spiffe_id(DEVICE_ID),
+        DEVICE_ID,
+    ))
+    .expect("genuine reply");
+
+    // A consistent but non-device identity (here a connector's).
+    let connector_id = format!("spiffe://{TRUST_DOMAIN}/connector/{DEVICE_ID}");
+    let connector_leaf = p.pki.sign_device_csr_shaped(&csr, DEVICE_ID, |c| {
+        c.subject_alt_names = vec![rcgen::SanType::URI(
+            connector_id.clone().try_into().unwrap(),
+        )];
+    });
+    assert!(chain(&reply(connector_leaf, connector_id, DEVICE_ID)).is_err());
+    // A device ID that doesn't match the certificate's SPIFFE ID.
+    assert!(chain(&reply(genuine, device_spiffe_id(DEVICE_ID), "other-device")).is_err());
+}
+
+#[tokio::test]
+async fn logout_without_saved_anchors_pins_the_download_to_the_root() {
+    let p = pkis();
+    // Nothing saved: the download is the only source, so it must pass the
+    // same root check as login.
+    let mallory = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.attacker.root_pem.clone(),
+        p.attacker.identity(),
+        Reply::Forged,
+    )
+    .await;
+    let result = crate::cmd::logout::revoke_device(
+        &mallory.conf,
+        "logout-access-token",
+        "dev",
+        "",
+        &p.pki.root_pem,
+    )
+    .await;
+    assert!(result.is_err(), "revoke completed against Mallory");
+    assert!(
+        received(&mallory.calls).is_empty(),
+        "Mallory received: {:?}",
+        received(&mallory.calls)
+    );
+
+    let ep = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.pki.intermediate_pem.clone(),
+        p.pki.controller_identity(),
+        Reply::Genuine,
+    )
+    .await;
+    crate::cmd::logout::revoke_device(&ep.conf, "tok", "dev", "", &p.pki.root_pem)
+        .await
+        .expect("revoke via the root-pinned download");
+    assert_eq!(received(&ep.calls), vec!["RevokeDevice tok".to_string()]);
 }

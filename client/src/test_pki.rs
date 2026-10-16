@@ -104,6 +104,8 @@ fn server_identity(issuer: &Certificate, issuer_key: &KeyPair) -> (String, Strin
 }
 
 pub struct TestPki {
+    root_cert: Certificate,
+    root_key: KeyPair,
     int_cert: Certificate,
     int_key: KeyPair,
     ws_cert: Certificate,
@@ -132,6 +134,8 @@ impl TestPki {
             root_pem: root_cert.pem(),
             intermediate_pem: int_cert.pem(),
             workspace_ca_pem: ws_cert.pem(),
+            root_cert,
+            root_key,
             int_cert,
             int_key,
             ws_cert,
@@ -162,6 +166,26 @@ impl TestPki {
         shape: impl FnOnce(&mut CertificateParams),
     ) -> String {
         sign_device_csr(csr_pem, device_id, &self.ws_cert, &self.ws_key, shape)
+    }
+
+    /// An Intermediate issued by the root but expired, and a Workspace CA
+    /// issued by the real Intermediate but expired. Returns (int PEM, ws PEM).
+    pub fn expired_cas(&self) -> (String, String) {
+        let expire = |p: &mut CertificateParams| {
+            p.not_before = rcgen::date_time_ymd(2000, 1, 1);
+            p.not_after = rcgen::date_time_ymd(2000, 1, 2);
+        };
+        let mut int = ca_params("Test Platform Intermediate");
+        expire(&mut int);
+        let int = int
+            .signed_by(&new_key(), &self.root_cert, &self.root_key)
+            .unwrap();
+        let mut ws = ca_params("workspace-ws-test");
+        expire(&mut ws);
+        let ws = ws
+            .signed_by(&new_key(), &self.int_cert, &self.int_key)
+            .unwrap();
+        (int.pem(), ws.pem())
     }
 
     /// A "Workspace CA" that is not a CA, issued by the real Intermediate,
