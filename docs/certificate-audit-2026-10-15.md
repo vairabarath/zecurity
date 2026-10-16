@@ -67,6 +67,12 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
   - A passive eavesdropper on the network can steal the session; no tampering is needed. Combined with bug 4, a stolen access token can enroll a new device.
   - Fix needs a decision: move refresh and logout onto the pinned gRPC channel (additive RPCs plus controller handlers), or serve that HTTP over TLS and pin it to the saved anchors.
 - [ ] **Medium — client releases are not signed.** `client-release.yml` publishes binaries plus a `checksums.txt` file in the same release. That file isn't a signature: whoever can replace the binary can replace it too. The embedded root is only as trustworthy as the download channel (HTTPS from GitHub). Next step: sign the releases (minisign or cosign) and verify the signature in `client-install.sh`.
+- [ ] **Planned: root rollover support.** The client embeds exactly one root, so rotating the root (10 years, or after a compromise) requires every client to update first. To allow a smooth switch:
+  - the client should accept a set of roots;
+  - a release would ship with both old and new roots before the controller rotates;
+  - a later release drops the old one.
+
+  The controller also has no root-rotation mechanism yet. The intermediate can rotate without any client change.
 - [ ] **Production PKI must never reset.** With the root embedded in clients, a regenerated production root locks out every installed client. Lock down `pki/service.go` `canResetPKI` for production (see the "silent PKI auto-reset" risk below).
 
 ## Risks (need an extra condition, or latent today)
