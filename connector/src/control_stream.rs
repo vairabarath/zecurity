@@ -652,6 +652,11 @@ async fn handle_controller_msg(
             shield_registry.set_shield_renewal_window(policy.shield_renewal_window_secs);
             MsgAction::Continue
         }
+        // Certificate audit bug 3: the authoritative revoked-shield list.
+        Some(CBody::ShieldRevocations(list)) => {
+            shield_registry.apply_revocations(list.revoked_shield_ids);
+            MsgAction::Continue
+        }
         Some(CBody::RelayList(list)) => {
             // Sprint 11 ADR-016: forward to the relay selector via the watch
             // channel. The selector owns version-skip decisions; we just
@@ -844,6 +849,35 @@ mod renewal_switch_tests {
         .await;
         assert!(matches!(action, MsgAction::Continue));
         assert_eq!(e.shield_registry.shield_renewal_window_secs(), 1440);
+    }
+
+    /// Certificate audit bug 3: the controller's revocation list reaches the
+    /// Shield registry.
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn shield_revocations_reach_the_shield_registry() {
+        let e = env();
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let msg = ConnectorControlMessage {
+            body: Some(CBody::ShieldRevocations(
+                crate::proto::ShieldRevocationList {
+                    revoked_shield_ids: vec!["5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f".into()],
+                },
+            )),
+        };
+        let action = handle_controller_msg(
+            msg,
+            &e.shield_registry,
+            &out_tx,
+            &e.policy_cache,
+            &e.registry,
+            &e.relay_list_tx,
+        )
+        .await;
+        assert!(matches!(action, MsgAction::Continue));
+        assert!(e
+            .shield_registry
+            .is_revoked("5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"));
     }
 
     fn io(e: &mut Env) -> SessionIo<'_> {

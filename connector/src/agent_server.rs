@@ -137,6 +137,19 @@ impl ShieldRegistry {
         }
     }
 
+    /// Apply the controller's authoritative, complete list of revoked shield
+    /// identities (certificate audit bug 3).
+    ///
+    /// Certificate audit bug 3: not enforced yet — revoked shields keep their
+    /// Control streams, sessions and cached snapshots, and may reconnect.
+    pub fn apply_revocations(&self, _revoked_shield_ids: Vec<String>) {}
+
+    /// Whether `shield_id` is revoked (certificate audit bug 3: always false
+    /// today).
+    pub fn is_revoked(&self, _shield_id: &str) -> bool {
+        false
+    }
+
     /// The current controller channel (cheap clone).
     pub fn controller_channel(&self) -> Channel {
         self.controller_channel.read().clone()
@@ -1574,5 +1587,300 @@ mod shield_server_tls_tests {
                 .expect("accept loop alive");
         }
         accept_loop.abort();
+    }
+
+    // ---- certificate audit bug 3: shield revocation ----------------------
+    //
+    // Revoking a shield used to change nothing on the connector: the revoked
+    // shield kept its Control stream, kept carrying user sessions, could
+    // reconnect, and was replayed its cached snapshot. The connector now
+    // applies the controller's authoritative revocation list: it closes the
+    // shield's stream, unregisters it, drops its snapshot, tears down every
+    // session through it, refuses its identity, and accepts no shield at all
+    // until it has applied that list.
+
+    /// A registry that has not applied an authoritative revocation list
+    /// (fresh process: connector start or restart). Its renewal window is
+    /// tiny, so no ReEnroll interleaves with what these tests watch for.
+    fn unsynced_registry() -> ShieldRegistry {
+        let r = registry();
+        r.set_shield_renewal_window(1);
+        r
+    }
+
+    /// A registry that has applied an (empty) authoritative revocation list.
+    fn synced_registry() -> ShieldRegistry {
+        let r = unsynced_registry();
+        r.apply_revocations(vec![]);
+        r
+    }
+
+    /// The Control stream must end — closed or failed — and deliver nothing
+    /// else first.
+    async fn expect_closed(replies: &mut Streaming<ShieldControlMessage>) {
+        match tokio::time::timeout(WAIT, replies.message()).await {
+            Err(_) => panic!("revoked shield's Control stream is still open"),
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Ok(Ok(Some(m))) => panic!("revoked shield was sent {m:?}"),
+        }
+    }
+
+    /// Whether `shield_id` can open a Control stream on `addr` and get a
+    /// liveness reply.
+    async fn control_admitted(pki: &TestPki, addr: SocketAddr, shield_id: &str) -> bool {
+        let Ok(channel) = channel(pki, addr, Some(pki.shield_identity_pem(shield_id))).await else {
+            return false;
+        };
+        let (out, out_rx) = mpsc::channel(8);
+        let Ok(replies) = ShieldServiceClient::new(channel)
+            .control(ReceiverStream::new(out_rx))
+            .await
+        else {
+            return false;
+        };
+        let mut replies = replies.into_inner();
+        if out.send(health_report()).await.is_err() {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(WAIT, replies.message()).await,
+            Ok(Ok(Some(ShieldControlMessage {
+                body: Some(Body::PeerConnectorList(_))
+            })))
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn revoking_a_shield_closes_its_open_control_stream() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        expect_closed(&mut replies).await;
+        assert!(r.is_revoked(SHIELD_ID));
+    }
+
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn a_revoked_shield_cannot_reconnect_or_call_the_connector() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a revoked shield reconnected"
+        );
+        let revoked = channel(&pki, server.addr, Some(pki.shield_identity_pem(SHIELD_ID))).await;
+        if let Ok(ch) = revoked {
+            let err = goodbye(ch.clone(), SHIELD_ID)
+                .await
+                .expect_err("a revoked shield's Goodbye must be refused");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err}");
+            let err = ShieldServiceClient::new(ch)
+                .renew_cert(crate::shield_proto::RenewCertRequest {
+                    shield_id: SHIELD_ID.into(),
+                    public_key_der: vec![1, 2, 3],
+                })
+                .await
+                .expect_err("a revoked shield's RenewCert must be refused");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err}");
+        }
+        assert!(
+            control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await,
+            "an unrevoked shield must still be admitted"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn revocation_discards_and_suppresses_the_shields_snapshot_and_instructions() {
+        let r = synced_registry();
+        let snapshot = |generation| ResourceSnapshot {
+            generation,
+            ..Default::default()
+        };
+        r.push_snapshot(SHIELD_ID, snapshot(1));
+        r.push_instructions(SHIELD_ID, vec![]);
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        r.push_snapshot(SHIELD_ID, snapshot(2));
+        r.push_instructions(
+            SHIELD_ID,
+            vec![ResourceInstruction {
+                resource_id: "r".into(),
+                ..Default::default()
+            }],
+        );
+        let maps = r.maps.lock();
+        assert!(
+            !maps.resource_snapshots.contains_key(SHIELD_ID),
+            "a revoked shield's snapshot is still cached"
+        );
+        assert!(
+            maps.resource_instructions
+                .get(SHIELD_ID)
+                .is_none_or(|v| v.is_empty()),
+            "instructions are still buffered for a revoked shield"
+        );
+    }
+
+    /// Missing initial synchronization: until the controller's authoritative
+    /// list is applied, no shield is accepted.
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn no_shield_is_accepted_before_the_authoritative_list_is_applied() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = unsynced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was accepted before the revocation list was applied"
+        );
+        if let Ok(ch) = channel(&pki, server.addr, Some(pki.shield_identity_pem(SHIELD_ID))).await {
+            assert!(goodbye(ch, SHIELD_ID).await.is_err());
+        }
+
+        r.apply_revocations(vec![]);
+        assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+    }
+
+    /// Connector restart: revocation state is not trusted across processes —
+    /// the new process refuses every shield until the controller resends the
+    /// list, then refuses only the revoked ones.
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn after_a_restart_shields_wait_for_the_resent_list() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let before = synced_registry();
+        before.apply_revocations(vec![SHIELD_ID.to_string()]);
+
+        let restarted = unsynced_registry();
+        let server = start_with(restarted.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        assert!(!control_admitted(&pki, server.addr, SHIELD_ID).await);
+        assert!(!control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await);
+
+        restarted.apply_revocations(vec![SHIELD_ID.to_string()]);
+        assert!(!control_admitted(&pki, server.addr, SHIELD_ID).await);
+        assert!(control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await);
+    }
+
+    /// A live user session relayed through the shield is torn down when the
+    /// shield is revoked.
+    #[tokio::test]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn revocation_tears_down_live_sessions_through_the_shield() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        let hub = r.tunnel_hub.clone();
+        let opening = tokio::spawn(async move {
+            hub.open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                .await
+        });
+        let open = next_reply(&mut replies).await;
+        let Some(Body::TunnelOpen(open)) = open.body else {
+            panic!("expected TunnelOpen, got {open:?}");
+        };
+        out.send(ShieldControlMessage {
+            body: Some(Body::TunnelOpened(crate::shield_proto::TunnelOpened {
+                connection_id: open.connection_id,
+                ok: true,
+                error: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+        let session = opening.await.unwrap().expect("session opened");
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let relay = tokio::spawn(session.relay_stream(relay_end));
+        device.write_all(b"git push").await.unwrap();
+
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("the session through a revoked shield must end")
+            .unwrap()
+            .ok();
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(WAIT, device.read(&mut buf))
+            .await
+            .expect("device side must see the session end")
+            .unwrap_or(0);
+        assert_eq!(
+            n, 0,
+            "the device still receives data through a revoked shield"
+        );
+    }
+
+    /// Sessions being established while the shield is revoked: every session
+    /// that opened is torn down, and none opens after revocation returned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
+    async fn concurrent_session_establishment_and_revocation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for _round in 0..20 {
+            let r = synced_registry();
+            let (shield_tx, mut shield_rx) = mpsc::channel::<ShieldControlMessage>(1024);
+            r.tunnel_hub
+                .register_shield(SHIELD_ID.to_string(), shield_tx);
+            // A shield that accepts every tunnel.
+            let hub = r.tunnel_hub.clone();
+            tokio::spawn(async move {
+                while let Some(m) = shield_rx.recv().await {
+                    if let Some(Body::TunnelOpen(o)) = m.body {
+                        hub.dispatch_opened(&o.connection_id, true, String::new());
+                    }
+                }
+            });
+
+            let revoked = Arc::new(AtomicBool::new(false));
+            let mut tasks = Vec::new();
+            for _ in 0..16 {
+                let hub = r.tunnel_hub.clone();
+                let revoked = revoked.clone();
+                tasks.push(tokio::spawn(async move {
+                    let started_after_revocation = revoked.load(Ordering::SeqCst);
+                    if let Ok(session) = hub
+                        .open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                        .await
+                    {
+                        assert!(
+                            !started_after_revocation,
+                            "a session opened after the shield was revoked"
+                        );
+                        let (_device, relay_end) = tokio::io::duplex(64);
+                        tokio::time::timeout(WAIT, session.relay_stream(relay_end))
+                            .await
+                            .expect("a session through a revoked shield must end")
+                            .ok();
+                    }
+                }));
+            }
+            tokio::task::yield_now().await;
+            r.apply_revocations(vec![SHIELD_ID.to_string()]);
+            revoked.store(true, Ordering::SeqCst);
+            for task in tasks {
+                task.await.expect("session task");
+            }
+            assert!(r
+                .tunnel_hub
+                .open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                .await
+                .is_err());
+        }
     }
 }
