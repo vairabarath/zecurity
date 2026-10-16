@@ -240,26 +240,29 @@ func insertClientDevice(
 // enrollment. Never called again on renewal; see updateClientDeviceCertOnRenewal,
 // whose signature has no fingerprint parameter at all so a future edit can't
 // accidentally reintroduce an overwrite (Track3-Renew-Reenroll.md D-A).
+// updateClientDeviceCert records an enrolled device's certificate, only while
+// the device's user is still authorized (certificate audit bug 4). Returns the
+// rows updated; 0 means the user's state changed during enrollment.
 func updateClientDeviceCert(
 	ctx context.Context,
 	db *pgxpool.Pool,
 	deviceID, certSerial string,
 	notAfter time.Time,
 	spiffeID, publicKeyFingerprint string,
-) error {
-	_, err := db.Exec(ctx,
+) (int64, error) {
+	tag, err := db.Exec(ctx,
 		`UPDATE client_devices
 		    SET cert_serial = $1,
 		        cert_not_after = $2,
 		        spiffe_id = $3,
 		        public_key_fingerprint = $4
-		  WHERE id = $5`,
+		  WHERE id = $5`+deviceOwnerActiveSQL,
 		certSerial, notAfter, spiffeID, publicKeyFingerprint, deviceID,
 	)
 	if err != nil {
-		return fmt.Errorf("update client_device cert: %w", err)
+		return 0, fmt.Errorf("update client_device cert: %w", err)
 	}
-	return nil
+	return tag.RowsAffected(), nil
 }
 
 // updateClientDeviceCertOnRenewal records a fresh cert issued by RenewCert.
@@ -286,7 +289,7 @@ func updateClientDeviceCertOnRenewal(
 		        cert_not_after = $2
 		  WHERE id = $3
 		    AND revoked_at IS NULL
-		    AND status <> 're_enroll_required'`,
+		    AND status <> 're_enroll_required'`+deviceOwnerActiveSQL,
 		certSerial, notAfter, deviceID,
 	)
 	if err != nil {

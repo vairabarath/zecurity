@@ -69,12 +69,18 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
 
   The effect is extra ACL recompiles and pushes, never fewer. These tests should be moved to the throwaway-database pattern.
 - [ ] **Leaked test databases.** A `graph/resolvers` SCIM-config test creates `resolvers_updsc_*` databases and never drops them; hundreds accumulate on a developer's Postgres.
-- [ ] **Bug 4 — High — client: a user being deprovisioned can still enroll a new device.**
-  - Enrollment checks only that the login token is genuine and unexpired, which turns a 15-minute token into a 7-day certificate.
-  - Policy checks only device revocation, never the user's status (`policy/store.go:346`).
-- [ ] **Bug 5 — Med-High — client: disabling an IdP connection suspends its users but doesn't revoke their devices.**
-  - Their devices keep access for up to 7 days.
-  - Decision needed for bugs 4 and 5: should policy exclude devices of non-active users, should every suspend path revoke devices, or both?
+- [x] **Bug 4 — High — client: an inactive user could still enroll or renew a device certificate.** `EnrollDevice` and `RenewCert` trusted the access token alone, so a just-suspended user's token (valid up to 15 minutes) could mint or renew a 7-day certificate.
+  - Fixed (decided 2026-10-16): both now read the user's current status, session generation, workspace and membership from the database, as `/auth/refresh` does, and fail closed.
+  - The final conditional write re-checks status and membership, so a suspension during issuance returns no certificate, and a refused enrollment leaves no device row.
+- [x] **Bug 5 — Med-High — client: devices of inactive users kept access.** The policy authorized every unrevoked device of a group member, whatever the user's status.
+  - Fixed: a device authorizes only while its user is `active` and, if the user has a `workspace_members` row, that membership is `active`. A missing row does not deny on its own, because SCIM and first-login users have none.
+  - Suspension is reversible; revocation is not.
+  - IdP-connection disable and delete, and SCIM reactivation, now record durable policy invalidation (outbox event `policy.invalidation.requested`, or the re-enrollment consumer) atomically with the change. Previously disable was not atomic and had no invalidation; delete and reactivation notified best-effort after commit.
+  - Follow-ups:
+    - [ ] **No admin lifecycle API exists yet:** there is no admin mutation to suspend, lock, delete or reactivate a user, and nothing sets `users.status = 'locked'`. When these mutations are built, each must commit its policy invalidation (`policy.NewInvalidationEvent` via the outbox) in the same transaction as the status change.
+    - [ ] **Membership model gap:** SCIM provisioning and first-login (JIT) create users without `workspace_members` rows, and nothing ever sets a membership to `suspended`. Making membership authoritative would need provisioning changes and a backfill.
+    - [ ] IdP-disable session revocation (generation bump) stays best-effort after commit, as before. Access is cut off by the user suspension and policy invalidation, which are atomic.
+    - [ ] Tokens without a generation claim (`gen` = 0, pre-Phase-5) are accepted by `CheckGeneration` by convention, as at `/auth/refresh`.
 - [ ] **Bug 6 — Medium — connector, client: the relay CRL and workspace CRL can be swapped for each other.** Each is checked against a bundle containing both signing CAs (`connector/src/main.rs:195`, `crl.rs:149-155`).
 - [ ] **Bug 7 — Medium — controller: a revoked connector can still renew its shields' certificates.** `shield/renewal.go` never checks the connector's status.
 - [ ] **Bug 8 — Medium — connector, shield: re-issuing an enrollment token doesn't cancel the old one.**

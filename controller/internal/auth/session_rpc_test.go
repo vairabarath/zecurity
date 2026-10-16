@@ -145,3 +145,18 @@ func TestRefreshHandler_CookiePathKeepsTheRefreshTokenOutOfTheBody(t *testing.T)
 		t.Fatal("refresh cookie not rotated")
 	}
 }
+
+// Certificate audit bug 4: device-certificate issuance compares the token's
+// session generation with the current one, so VerifyAccessToken must expose it.
+func TestVerifyAccessToken_ExposesTheSessionGeneration(t *testing.T) {
+	rc, _ := newTestValkey(t)
+	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
+	token, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 7)
+	claims, err := svc.VerifyAccessToken(token)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if claims.Generation != 7 {
+		t.Fatalf("Generation = %d, want 7", claims.Generation)
+	}
+}

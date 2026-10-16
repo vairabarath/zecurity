@@ -91,4 +91,9 @@ type AccessTokenClaims struct {
 	TenantID string
 	Role     string
 	Email    string
+	// Generation is the users.identity_generation the token was minted under
+	// (the "gen" claim; 0 for tokens that predate generations). Compared with
+	// the current value before issuing device certificates (certificate audit
+	// bugs 4/5), as /auth/refresh does.
+	Generation int
 }

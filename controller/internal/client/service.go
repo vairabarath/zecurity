@@ -434,6 +434,15 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
+	// Certificate audit bug 4: the token alone is not enough — the user must
+	// be authorized now. Fail closed; nothing has been written yet.
+	if err := authorizeDeviceIssuance(ctx, s.pool, tokenClaims); err != nil {
+		if errors.Is(err, errIssuanceNotAuthorized) {
+			log.Printf("EnrollDevice: refused for user %s: %v", tokenClaims.UserID, err)
+			return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
+		}
+		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
+	}
 
 	block, _ := pem.Decode([]byte(req.GetCsrPem()))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -472,8 +481,18 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}
 
 	spiffeID := appmeta.ClientSPIFFEID(trustDomain, deviceID)
-	if err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID, fingerprint); err != nil {
+	recorded, err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID, fingerprint)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "record device cert: %v", err)
+	}
+	if recorded == 0 {
+		// The user was suspended (or similar) while this enrollment ran: the
+		// certificate just signed is never returned, and the half-made device
+		// row is removed.
+		if _, derr := s.pool.Exec(ctx, `DELETE FROM client_devices WHERE id = $1`, deviceID); derr != nil {
+			log.Printf("EnrollDevice: remove refused device %s: %v", deviceID, derr)
+		}
+		return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
 	}
 	if err := s.policyNotifier.NotifyPolicyChange(ctx, tokenClaims.TenantID); err != nil {
 		return nil, status.Errorf(codes.Internal, "refresh policy after device enrollment: %v", err)
@@ -546,6 +565,14 @@ func (s *Service) RenewCert(ctx context.Context, req *clientv1.RenewCertRequest)
 	directive, _, err := deviceGate(ctx, s.pool, req.GetDeviceId(), tokenClaims)
 	if err != nil {
 		return nil, auditDenied("not_found")
+	}
+	// Certificate audit bug 4: the token alone is not enough — the user must
+	// be authorized now. Fail closed.
+	if err := authorizeDeviceIssuance(ctx, s.pool, tokenClaims); err != nil {
+		if errors.Is(err, errIssuanceNotAuthorized) {
+			return nil, auditDenied("user_not_authorized")
+		}
+		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
 	}
 	switch directive {
 	case clientv1.DeviceDirective_DIRECTIVE_REVOKED:
