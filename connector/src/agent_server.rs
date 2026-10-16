@@ -191,6 +191,25 @@ impl ShieldRegistry {
         }
     }
 
+    /// A new controller stream became current (certificate audit bug 3): the
+    /// list held so far was received on an earlier stream, so no new shield is
+    /// admitted until the current stream delivers its own list. Revocations
+    /// already applied stay applied, and established shield streams and
+    /// sessions are not touched.
+    pub fn require_revocation_resync(&self) {
+        if self.revocations_synced.swap(false, Ordering::SeqCst) {
+            info!(
+                "new controller stream: admitting no new shields until its revocation list arrives"
+            );
+        }
+    }
+
+    /// Whether this process currently holds an authoritative revocation
+    /// list (one received on the current controller stream).
+    pub fn revocations_synced(&self) -> bool {
+        self.revocations_synced.load(Ordering::SeqCst)
+    }
+
     /// Whether `shield_id` is revoked.
     pub fn is_revoked(&self, shield_id: &str) -> bool {
         self.maps.lock().revoked.contains(shield_id)

@@ -420,6 +420,11 @@ async fn run_session<O: StreamOps>(
         health,
     } = io;
 
+    // Certificate audit bug 3: only a revocation list received on the current
+    // stream is authoritative, so a newly (re)connected stream must deliver one
+    // before the connector admits new shields again.
+    shield_registry.require_revocation_resync();
+
     let mut pending: Option<PendingSwitch> = None;
     let mut opening: Option<OpenFuture> = None;
 
@@ -483,6 +488,9 @@ async fn run_session<O: StreamOps>(
                         let old = std::mem::replace(&mut stream, new_stream);
                         drop(old);
                         pending = None;
+                        // The old stream is never read again; the new one
+                        // must deliver its own revocation list (bug 3).
+                        shield_registry.require_revocation_resync();
                         info!("switched to renewed Control stream — old stream dropped");
                     }
                     Err(e) => {
@@ -1039,6 +1047,65 @@ mod renewal_switch_tests {
                 Some(CBody::ResourceAcks(b)) => assert_eq!(b.acks[0].resource_id, "r1"),
                 other => panic!("expected ResourceAcks on new stream, got {other:?}"),
             }
+        };
+        tokio::select! {
+            r = session => panic!("session ended unexpectedly: {r:?}"),
+            _ = driver => {}
+        }
+    }
+
+    fn revocations(ids: &[&str]) -> ConnectorControlMessage {
+        ConnectorControlMessage {
+            body: Some(CBody::ShieldRevocations(
+                crate::proto::ShieldRevocationList {
+                    revoked_shield_ids: ids.iter().map(|s| s.to_string()).collect(),
+                },
+            )),
+        }
+    }
+
+    /// Certificate audit bug 3: only a revocation list received on the
+    /// current Control stream is authoritative. When a new stream becomes
+    /// current — a (re)connect or a renewal switch — the connector admits no
+    /// new shield until that stream has delivered its list.
+    #[tokio::test]
+    async fn a_new_control_stream_must_deliver_its_revocation_list_before_shields_are_admitted() {
+        let mut e = env();
+        let shields = e.shield_registry.clone();
+        shields.apply_revocations(vec![]); // synced on an earlier stream
+        let (old, old_peer) = fake_stream(far_future());
+        let (new, mut new_peer) = fake_stream(far_future());
+        let (mut ops, _shared) = fake_ops(vec![Script::Ok(new)], true, &old);
+
+        let session = run_session(into_stream(old), &mut ops, io(&mut e));
+        let driver = async {
+            wait_for("reconnected stream requires a fresh list", || {
+                !shields.revocations_synced()
+            })
+            .await;
+            old_peer.in_tx.send(Ok(revocations(&[]))).await.unwrap();
+            wait_for("list on the current stream applied", || {
+                shields.revocations_synced()
+            })
+            .await;
+
+            // Renewal switch: the replacement stream must deliver its own list.
+            old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
+            let _initial_health = recv(&mut new_peer.out_rx).await;
+            wait_for("switched stream requires a fresh list", || {
+                !shields.revocations_synced()
+            })
+            .await;
+            new_peer
+                .in_tx
+                .send(Ok(revocations(&["5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"])))
+                .await
+                .unwrap();
+            wait_for("list on the new stream applied", || {
+                shields.revocations_synced()
+            })
+            .await;
+            assert!(shields.is_revoked("5c1d2e3f-4a5b-4c6d-8e7f-9a0b1c2d3e4f"));
         };
         tokio::select! {
             r = session => panic!("session ended unexpectedly: {r:?}"),
