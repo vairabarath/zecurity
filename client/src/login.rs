@@ -114,8 +114,7 @@ mod tpm_mode_tests {
 }
 
 pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<LoginResult> {
-    let ca_pem = fetch_controller_ca(conf).await?;
-    let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;
+    let (mut grpc, trusted_intermediate_pem) = connect_controller(conf, "").await?;
 
     // CLI-Controller PKCE — CLI generates this pair.
     // code_challenge is sent to the controller in InitiateAuth.
@@ -219,6 +218,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         .distinguished_name
         .push(rcgen::DnType::CommonName, &hostname); // adds cn = desktop-abc123 'the host name'
     let csr_pem = params.serialize_request(&key_pair)?.pem()?;// creates the signing request contains public key and cn and signature using the private key
+    let sent_csr_pem = csr_pem.clone();
 
     // EnrollDevice — unchanged from the original flow.
     let enroll = grpc
@@ -236,11 +236,7 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
         .await?
         .into_inner();
 
-    // Build CA chain — concatenate workspace CA + intermediate.
-    let ca_cert_pem = format!(
-        "{}\n{}",
-        enroll.workspace_ca_pem, enroll.intermediate_ca_pem
-    );
+    let ca_cert_pem = device_ca_chain(&trusted_intermediate_pem, &enroll, &sent_csr_pem)?;
     let cert_expires_at = certificate_not_after_unix(&enroll.certificate_pem)?;
 
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -275,6 +271,39 @@ pub async fn run(conf: &ClientConf, invite_token: Option<String>) -> Result<Logi
             expires_at: now + tok.expires_in,
         },
     })
+}
+
+/// Opens the login gRPC channel to the controller and returns it with the
+/// Intermediate it trusts.
+///
+/// Certificate audit bug 1 (client): `/ca.crt` is fetched over plain HTTP
+/// and every certificate in it is trusted; `_platform_root_pem` is not used
+/// yet.
+pub(crate) async fn connect_controller(
+    conf: &ClientConf,
+    _platform_root_pem: &str,
+) -> Result<(
+    crate::grpc::ClientServiceClient<tonic::transport::Channel>,
+    String,
+)> {
+    let ca_pem = fetch_controller_ca(conf).await?;
+    let grpc = connect_grpc(conf.controller(), &ca_pem).await?;
+    Ok((grpc, ca_pem))
+}
+
+/// The device CA chain to persist (Workspace CA + Intermediate) from the
+/// EnrollDevice reply.
+///
+/// Certificate audit bug 1 (client): stored without any validation.
+pub(crate) fn device_ca_chain(
+    _trusted_intermediate_pem: &str,
+    enroll: &EnrollDeviceResponse,
+    _sent_csr_pem: &str,
+) -> Result<String> {
+    Ok(format!(
+        "{}\n{}",
+        enroll.workspace_ca_pem, enroll.intermediate_ca_pem
+    ))
 }
 
 pub async fn fetch_controller_ca(conf: &ClientConf) -> Result<String> {

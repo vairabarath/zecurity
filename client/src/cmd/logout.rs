@@ -24,7 +24,11 @@ pub async fn run() -> Result<()> {
     // drops from the ACL and the connector closes the gate. gRPC, mirroring
     // enroll/get-ACL. Failures logged and swallowed; local logout must proceed.
     if let (Some(token), Some(dev)) = (access_token.as_ref(), device_id.as_ref()) {
-        if let Err(e) = revoke_device(&conf, token, dev).await {
+        let saved_ca = stored
+            .as_ref()
+            .map(|s| s.device.ca_cert_pem.as_str())
+            .unwrap_or_default();
+        if let Err(e) = revoke_device(&conf, token, dev, saved_ca).await {
             eprintln!(
                 "warning: server-side device revoke failed: {e:#} (local session will still be cleared)"
             );
@@ -50,10 +54,14 @@ pub async fn run() -> Result<()> {
     }
     Ok(())
 }
-async fn revoke_device(
+/// Certificate audit bug 1 (client): `/ca.crt` is fetched again over plain
+/// HTTP and trusted wholesale; `_saved_ca_pem` (the anchors saved at
+/// enrollment) is not used yet.
+pub(crate) async fn revoke_device(
     conf: &crate::config::ClientConf,
     access_token: &str,
     device_id: &str,
+    _saved_ca_pem: &str,
 ) -> Result<()> {
     let ca_pem = crate::login::fetch_controller_ca(conf).await?;
     let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;

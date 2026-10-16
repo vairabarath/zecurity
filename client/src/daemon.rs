@@ -4639,6 +4639,15 @@ where
     Ok(())
 }
 
+/// Whether the CA chain saved at enrollment (Workspace CA + Intermediate) is
+/// anchored in the platform root compiled into this client.
+///
+/// Certificate audit bug 1 (client): not checked yet — a chain saved from an
+/// unvalidated enrollment reply is trusted as-is.
+pub(crate) fn check_saved_trust(_ca_cert_pem: &str, _platform_root_pem: &str) -> Result<()> {
+    Ok(())
+}
+
 /// One renewal attempt: build the CSR, call RenewCert, persist + update state
 /// on success. Split out from run_cert_renewal_scheduler's loop (which owns
 /// only the sleep/eligibility/retry-timing logic) so the actual network +
@@ -6654,6 +6663,139 @@ mod renewal_tests {
         assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
         // The key never changes on renewal — that's the whole point of D-A.
         assert_eq!(on_disk.device.private_key_pem, private_key_pem);
+    }
+
+    // ---- Certificate audit bug 1 (client): renewal can't swap the anchors ----
+    //
+    // RenewCert's reply used to be saved as-is, including a new "Workspace
+    // CA + Intermediate" pair, so whoever answered a renewal could replace
+    // the device's trust store. The reply must chain to the anchors saved at
+    // enrollment, for the device's own key and identity, and the anchors are
+    // never replaced.
+
+    struct RenewalOutcome {
+        result: Result<()>,
+        old_cert: String,
+        anchors: String,
+        memory: DeviceInfo,
+        disk: state_store::StoredDevice,
+    }
+
+    async fn renew_with_reply(reply: crate::test_controller::Reply) -> RenewalOutcome {
+        use crate::test_pki::{
+            device_key_and_csr, device_spiffe_id, AttackerPki, TestPki, DEVICE_ID,
+        };
+        let pki = Arc::new(TestPki::new());
+        let attacker = Arc::new(AttackerPki::new());
+        let ep = crate::test_controller::endpoint(
+            &pki,
+            &attacker,
+            pki.intermediate_pem.clone(),
+            pki.controller_identity(),
+            reply,
+        )
+        .await;
+        let (key_pem, csr) = device_key_and_csr();
+        let old_cert = pki.sign_device_csr(&csr, DEVICE_ID);
+        let anchors = pki.device_ca_chain();
+        let device = DeviceInfo {
+            id: DEVICE_ID.into(),
+            spiffe_id: device_spiffe_id(DEVICE_ID),
+            certificate_pem: old_cert.clone(),
+            private_key_pem: key_pem.clone(),
+            tpm_key_material: None,
+            ca_cert_pem: anchors.clone(),
+            cert_expires_at: 1_000,
+            hostname: "e2e-host".into(),
+            os: "linux".into(),
+        };
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device.id.clone(),
+                spiffe_id: device.spiffe_id.clone(),
+                certificate_pem: old_cert.clone(),
+                ca_cert_pem: anchors.clone(),
+                private_key_pem: key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&ep.conf.workspace, &seeded).expect("seed state file");
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(device);
+            s.session = Some(SessionInfo {
+                access_token: "renewal-access-token".into(),
+                refresh_token: "renewal-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+        let result = attempt_cert_renewal(
+            &state, &ep.conf, DEVICE_ID, &key_pem, None, "e2e-host", &anchors,
+        )
+        .await;
+        let memory = state.read().await.device.clone().unwrap();
+        let disk = state_store::load_workspace_state(&ep.conf.workspace)
+            .expect("reload state")
+            .device;
+        RenewalOutcome {
+            result,
+            old_cert,
+            anchors,
+            memory,
+            disk,
+        }
+    }
+
+    #[tokio::test]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn genuine_renewal_installs_the_new_cert_and_keeps_the_anchors() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let out = renew_with_reply(crate::test_controller::Reply::Genuine).await;
+        out.result.expect("genuine renewal");
+        assert_ne!(out.memory.certificate_pem, out.old_cert, "cert not renewed");
+        assert_eq!(out.disk.certificate_pem, out.memory.certificate_pem);
+        assert_eq!(out.memory.ca_cert_pem, out.anchors);
+        assert_eq!(out.disk.ca_cert_pem, out.anchors);
+    }
+
+    #[tokio::test]
+    #[ignore = "bug 1 (client): demonstrates the bootstrap hijack; un-ignore with the fix"]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn renewal_reply_not_under_the_saved_anchors_changes_nothing() {
+        use crate::test_controller::Reply;
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        for reply in [Reply::Forged, Reply::OtherPlatform, Reply::OtherKey] {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+            let out = renew_with_reply(reply).await;
+            let err = out.result.expect_err("renewal reply must be refused");
+            assert!(
+                format!("{err:#}").contains("renewed certificate rejected"),
+                "{err:#}"
+            );
+            assert_eq!(
+                out.memory.certificate_pem, out.old_cert,
+                "in-memory cert replaced"
+            );
+            assert_eq!(
+                out.memory.ca_cert_pem, out.anchors,
+                "in-memory anchors replaced"
+            );
+            assert_eq!(
+                out.disk.certificate_pem, out.old_cert,
+                "saved cert replaced"
+            );
+            assert_eq!(out.disk.ca_cert_pem, out.anchors, "saved anchors replaced");
+        }
     }
 
     // ---- Sprint 21 B1: a renewed cert reaches an already-running tunnel ----------

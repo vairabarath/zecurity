@@ -34,6 +34,14 @@ mod posture;
 #[cfg(test)]
 mod posture_tests;
 
+// Certificate audit bug 1 (client): bootstrap-trust tests and their fixtures.
+#[cfg(test)]
+mod bootstrap_tests;
+#[cfg(test)]
+mod test_controller;
+#[cfg(test)]
+mod test_pki;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
