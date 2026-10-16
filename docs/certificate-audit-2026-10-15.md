@@ -41,9 +41,16 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
       - Logout reuses the saved anchors.
       - Daemon startup refuses saved state not anchored in the root.
       - Release builds without a root fail.
-- [ ] **Bug 3 — High — shield: revoking a shield doesn't cut it off.**
-  - Revoke only updates the database (`shield.resolvers.go:78`). The connector is never told, and policy still routes resources through revoked shields (`policy/store.go:314`).
-  - Decision needed: put shields on a CRL, or have the controller notify the connector? Should open connections be closed?
+- [x] **Bug 3 — High — shield: revoking a shield didn't cut it off.**
+  - Revoke only updated the database. The connector was never told, and policy kept routing resources through the revoked shield, so user traffic kept flowing through it.
+  - Fixed (decided 2026-10-16):
+    - **Durable revocation:** the revocation, a tombstone (`shield_revocations`, which outlives the shields row) and the propagation work (`shield_revocation_outbox`) commit in one transaction. A trigger stops a revoked identity from ever being reused.
+    - **Reliable delivery:** a dispatcher invalidates the policy and pushes the workspace's complete revoked list to every connected connector, retrying until delivered. A connector also receives the full list whenever its stream opens.
+    - **Unreachable resources:** resources behind a revoked or missing shield get no ACL entry until an admin unprotects or reassigns them. There is no fallback to direct routing.
+    - **Connector cut-off:** it accepts no shield until it has applied the list. On revocation it closes the shield's stream, unregisters it, discards its snapshot, ends every session through it (including ones being set up at that moment) and refuses its identity from then on.
+  - Follow-ups:
+    - [ ] Shield CRL as an additional layer (deferred).
+    - [ ] A connector that loses its controller stream keeps its last list until it reconnects. It cannot learn of new revocations while the controller is unreachable.
 - [ ] **Bug 4 — High — client: a user being deprovisioned can still enroll a new device.**
   - Enrollment checks only that the login token is genuine and unexpired, which turns a 15-minute token into a 7-day certificate.
   - Policy checks only device revocation, never the user's status (`policy/store.go:346`).
