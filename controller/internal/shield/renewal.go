@@ -2,9 +2,8 @@ package shield
 
 import (
 	"context"
-	"errors"
+	"time"
 
-	pgx "github.com/jackc/pgx/v5"
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -25,7 +24,15 @@ import (
 //   - here we confirm req.ShieldId is a shield managed by THAT connector.
 //
 // A connector already controls its shields' traffic, so letting it renew their
-// certs stays within the existing trust boundary.
+// certs stays within the existing trust boundary — but only while it is
+// trusted (certificate audit bug 7). A renewed certificate is returned only if
+// the connector is not revoked (status <> 'revoked' AND revoked_at IS NULL)
+// in the caller's trust domain, and the shield is managed by it, is not
+// revoked or deleted, and has no revocation tombstone. The interceptor already
+// refuses revoked connectors; this handler checks again so it is safe on its
+// own, and the final write re-checks everything atomically, so a revocation
+// that lands while the certificate is being signed returns no certificate.
+// Unreadable authorization state fails closed.
 //
 // req.PublicKeyDer carries a DER-encoded PKCS#10 CSR (the field name is
 // historical) — RenewShieldCert verifies the CSR signature (proof of key
@@ -42,47 +49,85 @@ func (s *service) RenewCert(ctx context.Context, req *shieldpb.RenewCertRequest)
 		return nil, status.Error(codes.InvalidArgument, "shield_id is required")
 	}
 
-	var shieldStatus, tenantID, shieldConnectorID, shieldTrustDomain string
+	// One read: the tombstone (which outlives the shields row), the shield and
+	// its connector.
+	var tombstoned bool
+	var shieldStatus, tenantID, shieldConnectorID, shieldTrustDomain *string
+	var connStatus, connTrustDomain *string
+	var connRevokedAt *time.Time
 	err := s.db.QueryRow(ctx,
-		`SELECT status, tenant_id, connector_id, COALESCE(trust_domain, '')
-		   FROM shields
-		  WHERE id = $1`,
+		`SELECT EXISTS (SELECT 1 FROM shield_revocations WHERE shield_id = $1),
+		        s.status, s.tenant_id::text, s.connector_id::text, COALESCE(s.trust_domain, ''),
+		        c.status, c.revoked_at, COALESCE(c.trust_domain, '')
+		   FROM (SELECT 1) AS one
+		   LEFT JOIN shields s ON s.id = $1
+		   LEFT JOIN connectors c ON c.id = s.connector_id`,
 		shieldID,
-	).Scan(&shieldStatus, &tenantID, &shieldConnectorID, &shieldTrustDomain)
+	).Scan(&tombstoned, &shieldStatus, &tenantID, &shieldConnectorID, &shieldTrustDomain,
+		&connStatus, &connRevokedAt, &connTrustDomain)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, status.Error(codes.NotFound, "shield not found")
-		}
 		return nil, status.Errorf(codes.Internal, "load shield: %v", err)
 	}
-	if shieldStatus == "revoked" || shieldStatus == "deleted" {
-		return nil, status.Errorf(codes.PermissionDenied, "shield status is %q", shieldStatus)
+	if tombstoned {
+		return nil, status.Error(codes.PermissionDenied, "shield is revoked")
 	}
-	if shieldConnectorID != connectorID {
+	if shieldStatus == nil {
+		return nil, status.Error(codes.NotFound, "shield not found")
+	}
+	if *shieldStatus == "revoked" || *shieldStatus == "deleted" {
+		return nil, status.Errorf(codes.PermissionDenied, "shield status is %q", *shieldStatus)
+	}
+	if *shieldConnectorID != connectorID {
 		return nil, status.Error(codes.PermissionDenied, "shield is not managed by the requesting connector")
 	}
-	if shieldTrustDomain != "" && shieldTrustDomain != trustDomain {
+	if *shieldTrustDomain != "" && *shieldTrustDomain != trustDomain {
 		return nil, status.Error(codes.PermissionDenied, "shield trust domain mismatch")
 	}
+	if connStatus == nil || *connTrustDomain != trustDomain {
+		return nil, status.Error(codes.PermissionDenied, "connector not found in the caller's trust domain")
+	}
+	if *connStatus == "revoked" || connRevokedAt != nil {
+		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
+	}
 
-	certResult, err := s.pki.RenewShieldCert(ctx, tenantID, shieldID, trustDomain, req.PublicKeyDer, s.cfg.CertTTL)
+	certResult, err := s.pki.RenewShieldCert(ctx, *tenantID, shieldID, trustDomain, req.PublicKeyDer, s.cfg.CertTTL)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "renew shield cert: %v", err)
 	}
 
-	_, err = s.db.Exec(ctx,
-		`UPDATE shields
+	// Record the certificate only if everything still holds. FOR SHARE makes
+	// a concurrent connector revocation either wait for this write or be seen
+	// by it; a concurrent shield revocation updates the shields row, so the
+	// same applies to it.
+	tag, err := s.db.Exec(ctx,
+		`WITH conn AS (
+		     SELECT id FROM connectors
+		      WHERE id = $5 AND trust_domain = $6
+		        AND status <> 'revoked' AND revoked_at IS NULL
+		        FOR SHARE
+		 )
+		 UPDATE shields s
 		    SET cert_serial = $1,
 		        cert_not_after = $2,
 		        updated_at = NOW()
-		  WHERE id = $3 AND tenant_id = $4`,
+		   FROM conn
+		  WHERE s.id = $3 AND s.tenant_id = $4
+		    AND s.connector_id = conn.id
+		    AND s.status NOT IN ('revoked', 'deleted')
+		    AND COALESCE(s.trust_domain, '') IN ('', $6)
+		    AND NOT EXISTS (SELECT 1 FROM shield_revocations r WHERE r.shield_id = s.id)`,
 		certResult.Serial,
 		certResult.NotAfter,
 		shieldID,
-		tenantID,
+		*tenantID,
+		connectorID,
+		trustDomain,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update shield cert: %v", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return nil, status.Error(codes.PermissionDenied, "shield or connector is no longer eligible for renewal")
 	}
 
 	return &shieldpb.RenewCertResponse{

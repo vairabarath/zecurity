@@ -201,6 +201,9 @@ func TestShieldRenewCert_ConnectorRevokedAtWithInconsistentStatusRefused(t *test
 		f.exec(`UPDATE connectors SET status = 'revoked', revoked_at = NULL WHERE id = $1`, f.connID)
 		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
 		f.refused(resp, err, codes.PermissionDenied, f.shield)
+		if f.pki.calls != 0 {
+			t.Fatal("a certificate was signed for a revoked connector")
+		}
 	})
 }
 
@@ -240,19 +243,50 @@ func TestShieldRenewCert_RevokedShieldRowRefused(t *testing.T) {
 	}
 	resp, err := f.renew(f.as(f.connID, f.td), f.shield)
 	f.refused(resp, err, codes.PermissionDenied, f.shield)
+	if f.pki.calls != 0 {
+		t.Fatal("a certificate was signed for a revoked shield")
+	}
+}
+
+// A shield row marked revoked without a tombstone (older data) is refused
+// before anything is signed.
+func TestShieldRenewCert_RevokedStatusWithoutTombstoneRefused(t *testing.T) {
+	f := newRenewalFixture(t)
+	f.exec(`UPDATE shields SET status = 'revoked' WHERE id = $1`, f.shield)
+	resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+	f.refused(resp, err, codes.PermissionDenied, f.shield)
+	if f.pki.calls != 0 {
+		t.Fatal("a certificate was signed for a revoked shield")
+	}
 }
 
 func TestShieldRenewCert_OtherConnectorOrTrustDomainRefused(t *testing.T) {
+	// The shield row names another trust domain than its (matching) connector.
+	t.Run("shield row in another trust domain", func(t *testing.T) {
+		f := newRenewalFixture(t)
+		f.exec(`UPDATE shields SET trust_domain = 'other.zecurity.test' WHERE id = $1`, f.shield)
+		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+		f.refused(resp, err, codes.PermissionDenied, f.shield)
+		if f.pki.calls != 0 {
+			t.Fatal("a certificate was signed for a shield in another trust domain")
+		}
+	})
 	t.Run("shield managed by another connector", func(t *testing.T) {
 		f := newRenewalFixture(t)
 		other := f.connector(f.td)
 		resp, err := f.renew(f.as(other, f.td), f.shield)
 		f.refused(resp, err, codes.PermissionDenied, f.shield)
+		if f.pki.calls != 0 {
+			t.Fatal("a certificate was signed for another connector's shield")
+		}
 	})
 	t.Run("caller trust domain differs from the shield's", func(t *testing.T) {
 		f := newRenewalFixture(t)
 		resp, err := f.renew(f.as(f.connID, "other.zecurity.test"), f.shield)
 		f.refused(resp, err, codes.PermissionDenied, f.shield)
+		if f.pki.calls != 0 {
+			t.Fatal("a certificate was signed for a shield in another trust domain")
+		}
 	})
 	// The shield row carries no trust domain, so only the connector's own
 	// trust domain can prove the caller is the connector it claims to be.
@@ -285,12 +319,26 @@ func TestShieldRenewCert_UnreadableStateFailsClosed(t *testing.T) {
 }
 
 func TestShieldRenewCert_ConnectorRevokedDuringRenewalReturnsNoCertificate(t *testing.T) {
-	f := newRenewalFixture(t)
-	f.pki.during = func() { f.revokeConnector(f.connID) }
-	resp, err := f.renew(f.as(f.connID, f.td), f.shield)
-	f.refused(resp, err, codes.PermissionDenied, f.shield)
-	if f.pki.calls != 1 {
-		t.Fatalf("pki calls = %d, want 1 (the race lands mid-issuance)", f.pki.calls)
+	for name, sql := range map[string]string{
+		"revoked":                       `UPDATE connectors SET status = 'revoked', revoked_at = NOW() WHERE id = $1`,
+		"revoked_at only":               `UPDATE connectors SET revoked_at = NOW() WHERE id = $1`,
+		"status revoked only":           `UPDATE connectors SET status = 'revoked' WHERE id = $1`,
+		"deleted":                       `DELETE FROM connectors WHERE id = $1`,
+		"moved to another trust domain": `UPDATE connectors SET trust_domain = 'other.zecurity.test' WHERE id = $1`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newRenewalFixture(t)
+			f.pki.during = func() { f.exec(sql, f.connID) }
+			resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+			shieldID := f.shield
+			if name == "deleted" {
+				shieldID = "" // the shield row cascades away with its connector
+			}
+			f.refused(resp, err, codes.PermissionDenied, shieldID)
+			if f.pki.calls != 1 {
+				t.Fatalf("pki calls = %d, want 1 (the race lands mid-issuance)", f.pki.calls)
+			}
+		})
 	}
 }
 
@@ -321,6 +369,18 @@ func TestShieldRenewCert_ShieldRevokedDuringRenewalReturnsNoCertificate(t *testi
 		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
 		f.refused(resp, err, codes.PermissionDenied, f.shield)
 	})
+	t.Run("moved to another trust domain", func(t *testing.T) {
+		f := newRenewalFixture(t)
+		f.pki.during = func() { f.exec(`UPDATE shields SET trust_domain = 'other.zecurity.test' WHERE id = $1`, f.shield) }
+		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+		f.refused(resp, err, codes.PermissionDenied, f.shield)
+	})
+	t.Run("status revoked only", func(t *testing.T) {
+		f := newRenewalFixture(t)
+		f.pki.during = func() { f.exec(`UPDATE shields SET status = 'revoked' WHERE id = $1`, f.shield) }
+		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+		f.refused(resp, err, codes.PermissionDenied, f.shield)
+	})
 	t.Run("deleted", func(t *testing.T) {
 		f := newRenewalFixture(t)
 		f.pki.during = func() { f.exec(`DELETE FROM shields WHERE id = $1`, f.shield) }
@@ -348,3 +408,54 @@ func TestShieldRenewCert_SigningFailureReturnsNoCertificate(t *testing.T) {
 type poolTx struct{ pool *pgxpool.Pool }
 
 func (p poolTx) BeginTx(ctx context.Context) (pgx.Tx, error) { return p.pool.Begin(ctx) }
+
+// inFlight starts a transaction running sql, leaves it uncommitted while the
+// renewal's final write begins, and commits it shortly after. The final write
+// must wait for it and then honour it.
+func (f *renewalFixture) inFlight(done chan<- error, sqls ...string) {
+	f.t.Helper()
+	tx, err := f.pool.Begin(f.ctx)
+	if err != nil {
+		f.t.Fatalf("begin: %v", err)
+	}
+	for _, sql := range sqls {
+		if _, err := tx.Exec(f.ctx, sql); err != nil {
+			_ = tx.Rollback(f.ctx)
+			f.t.Fatalf("in-flight %q: %v", sql, err)
+		}
+	}
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		done <- tx.Commit(f.ctx)
+	}()
+}
+
+func TestShieldRenewCert_InFlightRevocationCommittingDuringFinalWrite(t *testing.T) {
+	t.Run("connector", func(t *testing.T) {
+		f := newRenewalFixture(t)
+		done := make(chan error, 1)
+		f.pki.during = func() {
+			f.inFlight(done, fmt.Sprintf(
+				`UPDATE connectors SET status = 'revoked', revoked_at = NOW() WHERE id = '%s'`, f.connID))
+		}
+		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+		if cerr := <-done; cerr != nil {
+			t.Fatalf("commit revocation: %v", cerr)
+		}
+		f.refused(resp, err, codes.PermissionDenied, f.shield)
+	})
+	t.Run("shield", func(t *testing.T) {
+		f := newRenewalFixture(t)
+		done := make(chan error, 1)
+		f.pki.during = func() {
+			f.inFlight(done,
+				fmt.Sprintf(`UPDATE shields SET status = 'revoked', updated_at = NOW() WHERE id = '%s'`, f.shield),
+				fmt.Sprintf(`INSERT INTO shield_revocations (shield_id, tenant_id) VALUES ('%s', '%s')`, f.shield, f.wsID))
+		}
+		resp, err := f.renew(f.as(f.connID, f.td), f.shield)
+		if cerr := <-done; cerr != nil {
+			t.Fatalf("commit revocation: %v", cerr)
+		}
+		f.refused(resp, err, codes.PermissionDenied, f.shield)
+	})
+}
