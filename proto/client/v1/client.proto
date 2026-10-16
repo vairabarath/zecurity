@@ -51,6 +51,21 @@ service ClientService {
   rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
 
   rpc ReportDevicePosture(ReportDevicePostureRequest) returns (ReportDevicePostureResponse);
+
+  // RefreshSession — exchange the (possibly expired) access token plus the
+  // single-use refresh token for a fresh pair, over the TLS channel pinned to
+  // the device's saved anchors. Replaces the client's use of the plain-HTTP
+  // /auth/refresh, which put both tokens on the wire in clear. Same session
+  // rules as /auth/refresh (rotation, lifecycle and generation checks,
+  // absolute lifetime). UNAUTHENTICATED means the session is dead: the client
+  // must log in again.
+  rpc RefreshSession(RefreshSessionRequest) returns (RefreshSessionResponse);
+
+  // Logout — end the caller's session server-side (delete its refresh
+  // session). Idempotent: succeeds whether or not a session existed, so it
+  // reveals nothing about session liveness. Replaces the client's plain-HTTP
+  // /auth/logout.
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
 }
 message ReportDevicePostureRequest {
   string access_token = 1;
@@ -293,3 +308,21 @@ message RevokeDeviceResponse {
   // Intentionally empty in v1. Reserved for future fields (revoked_at,
   // was_already_revoked, etc.) without breaking the wire format.
 }
+
+// ── RefreshSession / Logout (certificate audit follow-up) ────────────────────
+
+message RefreshSessionRequest {
+  string access_token  = 1; // may be expired; signature is verified
+  string refresh_token = 2; // single-use; rotated on success
+}
+
+message RefreshSessionResponse {
+  string access_token  = 1;
+  string refresh_token = 2; // the rotated refresh token — replaces the old one
+}
+
+message LogoutRequest {
+  string access_token = 1; // may be expired; signature is verified
+}
+
+message LogoutResponse {}

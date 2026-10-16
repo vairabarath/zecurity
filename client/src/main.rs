@@ -14,6 +14,7 @@ mod relay_pool;
 mod runtime;
 mod state_store;
 mod transport;
+mod trust;
 mod tun;
 mod tunnel_pool;
 #[cfg(target_os = "linux")]
@@ -33,6 +34,14 @@ mod cmd {
 mod posture;
 #[cfg(test)]
 mod posture_tests;
+
+// Certificate audit bug 1 (client): bootstrap-trust tests and their fixtures.
+#[cfg(test)]
+mod bootstrap_tests;
+#[cfg(test)]
+mod test_controller;
+#[cfg(test)]
+mod test_pki;
 
 use clap::{Parser, Subcommand};
 

@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -15,217 +17,228 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 )
 
-// RefreshHandler handles POST /auth/refresh.
+// RefreshHandler handles POST /auth/refresh — the browser (admin UI) path.
 // Registered as a public route in main.go (no auth middleware).
-// Called by: main.go route registration (Member 4 wires this: mux.Handle("/auth/refresh", authSvc.RefreshHandler())).
 //
-// Two callers, two token-carriage shapes:
-//
-//   - Browser (admin UI) — refresh_token arrives in the httpOnly cookie the
-//     browser attached automatically. Rotated token is returned via Set-Cookie
-//     and the JSON body carries only the new access token.
-//   - CLI daemon (Rust client) — refresh_token arrives in the X-Refresh-Token
-//     header because reqwest cannot receive Set-Cookie from a JSON API cleanly.
-//     Rotated token is returned in the JSON body so the CLI can persist it.
-//
-// The refresh token is single-use and rotated on every call (ADR-006). Reuse
-// of a rotated token fails the constant-time compare below and returns 401.
-//
-// Flow:
-//
-//  1. Extract refresh token (cookie or header)
-//  2. Read user_id from the expired (or expiring) access JWT in Authorization header
-//     Note: we parse the JWT without verifying expiry — we just need the user_id
-//     to look up the refresh token in Redis
-//  3. Look up refresh token in Redis by user_id
-//  4. Compare presented value with stored value (constant-time)
-//  5. Issue new access JWT
-//  6. Rotate refresh token in Redis
-//  7. Return new tokens — via Set-Cookie (browser) or JSON body (CLI)
+// The refresh token arrives only in the httpOnly cookie the browser attaches;
+// the rotated token goes back via Set-Cookie and the JSON body carries only
+// the new access token. The Rust client used to send its refresh token here
+// in an X-Refresh-Token header, over plain HTTP by default — anyone watching
+// the network could take over the session (certificate audit follow-up). It
+// now uses the ClientService.RefreshSession RPC over the TLS channel pinned
+// to its saved anchors, and a header-borne token is refused here like a
+// missing one. Both paths share RefreshSession, so the session rules are
+// identical.
 func (s *serviceImpl) RefreshHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		// Step 1 — Extract refresh token from cookie (browser) or header (CLI).
-		// The response shape depends on which channel it arrived through.
-		presentedToken, viaCookie := extractRefreshToken(r)
+		presentedToken := refreshCookie(r)
 		if presentedToken == "" {
 			writeJSONError(w, http.StatusUnauthorized, "missing refresh token")
 			return
 		}
-
-		// Step 2 — Read user_id from the access JWT (without verifying expiry).
-		// The access JWT is sent in the Authorization header even when expired.
-		// We only need the sub (user_id), tenant_id, and role claims.
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
 			writeJSONError(w, http.StatusUnauthorized, "missing authorization header")
 			return
 		}
 
-		// Parse JWT skipping claims validation (exp check) — we just need the identity.
-		// Signature IS verified; expiry IS NOT (refresh accepts expired tokens by design).
-		//
-		// P9-F1: explicitly enforce HS256 in the keyFunc — without this, an attacker
-		// presenting a token with alg=none (or RS256 confusion) could bypass signature.
-		// Mirrors session.go::verifyAccessToken and middleware/auth.go::AuthMiddleware.
-		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-		claims := &jwtClaims{}
-		_, err := parser.ParseWithClaims(
-			extractBearer(authHeader), claims,
-			func(t *jwt.Token) (interface{}, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
-				}
-				return []byte(s.cfg.JWTSecret), nil
-			},
-		)
+		accessToken, newToken, err := s.RefreshSession(r.Context(), extractBearer(authHeader), presentedToken)
 		if err != nil {
-			writeJSONError(w, http.StatusUnauthorized, "invalid access token")
-			return
-		}
-
-		userID := claims.Subject
-		tenantID := claims.TenantID
-		role := claims.Role
-		email := claims.Email
-
-		if userID == "" || tenantID == "" {
-			writeJSONError(w, http.StatusUnauthorized, "token missing claims")
-			return
-		}
-
-		// Enforce lifecycle + session-generation revocation at refresh (PENDING-04
-		// Phase 5). Access tokens are short-lived, so gating the refresh chain
-		// here kills every session for a suspended/locked user or a bumped
-		// identity_generation — with no per-request DB read. The new access token
-		// is re-stamped with the CURRENT generation. Skipped only when no pool is
-		// configured (unit tests exercising token mechanics in isolation).
-		currentGen := claims.IdentityGeneration
-		if s.cfg.Pool != nil {
-			var dbEmail, status string
-			if err := s.cfg.Pool.QueryRow(ctx,
-				`SELECT email, status, identity_generation FROM users WHERE id = $1`,
-				userID,
-			).Scan(&dbEmail, &status, &currentGen); err != nil {
-				writeJSONError(w, http.StatusUnauthorized, "token missing claims")
-				return
+			var se *SessionError
+			if errors.As(err, &se) {
+				writeJSONError(w, se.Status, se.Msg)
+			} else {
+				writeJSONError(w, http.StatusInternalServerError, "server error")
 			}
-			if email == "" {
-				email = dbEmail
-			}
-			if err := identity.CheckLifecycle(status); err != nil {
-				s.redisClient.DeleteRefreshToken(ctx, userID)
-				writeJSONError(w, http.StatusUnauthorized, "session revoked")
-				return
-			}
-			if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
-				s.redisClient.DeleteRefreshToken(ctx, userID)
-				writeJSONError(w, http.StatusUnauthorized, "session revoked")
-				return
-			}
-		}
-
-		// Step 3 — Look up stored refresh session in Redis by user_id.
-		// Called: valkey.go → GetRefreshSession()
-		stored, found, err := s.redisClient.GetRefreshSession(ctx, userID)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "server error")
-			return
-		}
-		if !found {
-			// Idle TTL expired or user signed out.
-			writeJSONError(w, http.StatusUnauthorized, "refresh token expired")
 			return
 		}
 
-		// Step 4 — Compare tokens using constant-time comparison.
-		// Prevents timing attacks that could leak the stored token byte-by-byte.
-		if subtle.ConstantTimeCompare([]byte(presentedToken), []byte(stored.Token)) != 1 {
-			writeJSONError(w, http.StatusUnauthorized, "refresh token mismatch")
-			return
-		}
-
-		// ADR-006: enforce absolute lifetime cap from the initial OAuth signin.
-		// Beyond this, the user must re-authenticate via the full OAuth flow.
-		// MaxLifetimeAt=0 means "no cap" — only set on legacy sessions issued
-		// before this code shipped; treat as still-valid for the rolling TTL window.
-		if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
-			s.redisClient.DeleteRefreshToken(ctx, userID)
-			writeJSONError(w, http.StatusUnauthorized, "refresh token max lifetime exceeded")
-			return
-		}
-
-		// Step 5 — Issue new access JWT stamped with the current generation.
-		// Called: session.go → issueAccessToken()
-		accessToken, err := s.issueAccessToken(userID, tenantID, role, email, currentGen)
-		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "token issue failed")
-			return
-		}
-
-		// ADR-006 — Rotate the refresh token on every use.
-		// Generate a new 256-bit token, replace the stored value (preserving
-		// OriginalIAT and MaxLifetimeAt), and overwrite the cookie. The old
-		// token value is now invalid — a replay attempt by a stolen cookie
-		// will fail the constant-time compare on its next refresh.
-		raw := make([]byte, 32)
-		if _, err := rand.Read(raw); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "token rotate failed")
-			return
-		}
-		newToken := base64.RawURLEncoding.EncodeToString(raw)
-
-		ttl, perr := time.ParseDuration(s.cfg.JWTRefreshTTL)
-		if perr != nil {
-			ttl = 7 * 24 * time.Hour
-		}
-
-		rotated := RefreshSession{
-			Token:         newToken,
-			OriginalIAT:   stored.OriginalIAT,
-			MaxLifetimeAt: stored.MaxLifetimeAt,
-		}
-		if err := s.redisClient.SetRefreshSession(ctx, userID, rotated, ttl); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, "token rotate failed")
-			return
-		}
-
-		// Step 7 — Return the rotated tokens. Browser caller reads the refresh
-		// token from Set-Cookie; CLI caller reads it from the JSON body. Access
-		// token is always in the body. The two channels are mutually exclusive
-		// so we never leak the refresh token in a place the caller doesn't own.
-		respBody := map[string]string{"access_token": accessToken}
-		if viaCookie {
-			http.SetCookie(w, &http.Cookie{
-				Name:     "refresh_token",
-				Value:    newToken,
-				Path:     "/auth/refresh",
-				HttpOnly: true,
-				SameSite: http.SameSiteStrictMode,
-				Secure:   true,
-				MaxAge:   int(ttl.Seconds()),
-			})
-		} else {
-			respBody["refresh_token"] = newToken
-		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     "refresh_token",
+			Value:    newToken,
+			Path:     "/auth/refresh",
+			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
+			Secure:   true,
+			MaxAge:   int(s.refreshTTL().Seconds()),
+		})
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(respBody)
+		json.NewEncoder(w).Encode(map[string]string{"access_token": accessToken})
 	})
 }
 
-// extractRefreshToken returns the presented refresh token and whether it came
-// via the httpOnly cookie (browser) or the X-Refresh-Token header (CLI). If
-// both are present the cookie wins — this preserves the browser flow when a
-// misbehaving proxy attaches stray headers. Returns "" when neither is set.
-func extractRefreshToken(r *http.Request) (token string, viaCookie bool) {
-	if cookie, err := r.Cookie("refresh_token"); err == nil && cookie.Value != "" {
-		return cookie.Value, true
+// SessionError is a refused refresh. Status is what the browser path returns
+// (401: the session is dead, 500: a server error) and Msg its message.
+type SessionError struct {
+	Status int
+	Msg    string
+}
+
+func (e *SessionError) Error() string { return e.Msg }
+
+// Dead reports whether the session is dead and the caller must sign in again.
+func (e *SessionError) Dead() bool { return e.Status == http.StatusUnauthorized }
+
+func dead(msg string) error { return &SessionError{Status: http.StatusUnauthorized, Msg: msg} }
+
+func serverError(msg string) error {
+	return &SessionError{Status: http.StatusInternalServerError, Msg: msg}
+}
+
+// RefreshSession exchanges an access token (expired is fine; the signature
+// is verified) plus the single-use refresh token for a fresh pair. Shared by
+// /auth/refresh (browser) and ClientService.RefreshSession (Rust client).
+// Errors are *SessionError.
+//
+// The refresh token is single-use and rotated on every call (ADR-006). Reuse
+// of a rotated token fails the constant-time compare below.
+//
+// Flow:
+//
+//  1. Read user_id from the access JWT (signature verified, expiry not)
+//  2. Enforce user lifecycle and session generation (PENDING-04 Phase 5)
+//  3. Look up the refresh session in Redis by user_id
+//  4. Compare presented value with stored value (constant-time)
+//  5. Enforce the absolute lifetime cap (ADR-006)
+//  6. Issue a new access JWT and rotate the refresh token
+func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshToken string) (newAccessToken, newRefreshToken string, err error) {
+	if refreshToken == "" {
+		return "", "", dead("missing refresh token")
 	}
-	if h := r.Header.Get("X-Refresh-Token"); h != "" {
-		return h, false
+	if accessToken == "" {
+		return "", "", dead("missing authorization header")
 	}
-	return "", false
+
+	// Step 1 — Parse the JWT skipping claims validation (exp check) — we just
+	// need the identity. Signature IS verified; expiry IS NOT (refresh accepts
+	// expired tokens by design).
+	//
+	// P9-F1: explicitly enforce HS256 in the keyFunc — without this, an attacker
+	// presenting a token with alg=none (or RS256 confusion) could bypass signature.
+	// Mirrors session.go::verifyAccessToken and middleware/auth.go::AuthMiddleware.
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	claims := &jwtClaims{}
+	if _, err := parser.ParseWithClaims(
+		accessToken, claims,
+		func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+			}
+			return []byte(s.cfg.JWTSecret), nil
+		},
+	); err != nil {
+		return "", "", dead("invalid access token")
+	}
+
+	userID := claims.Subject
+	tenantID := claims.TenantID
+	role := claims.Role
+	email := claims.Email
+
+	if userID == "" || tenantID == "" {
+		return "", "", dead("token missing claims")
+	}
+
+	// Step 2 — Enforce lifecycle + session-generation revocation at refresh
+	// (PENDING-04 Phase 5). Access tokens are short-lived, so gating the
+	// refresh chain here kills every session for a suspended/locked user or a
+	// bumped identity_generation — with no per-request DB read. The new access
+	// token is re-stamped with the CURRENT generation. Skipped only when no
+	// pool is configured (unit tests exercising token mechanics in isolation).
+	currentGen := claims.IdentityGeneration
+	if s.cfg.Pool != nil {
+		var dbEmail, status string
+		if err := s.cfg.Pool.QueryRow(ctx,
+			`SELECT email, status, identity_generation FROM users WHERE id = $1`,
+			userID,
+		).Scan(&dbEmail, &status, &currentGen); err != nil {
+			return "", "", dead("token missing claims")
+		}
+		if email == "" {
+			email = dbEmail
+		}
+		if err := identity.CheckLifecycle(status); err != nil {
+			s.redisClient.DeleteRefreshToken(ctx, userID)
+			return "", "", dead("session revoked")
+		}
+		if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
+			s.redisClient.DeleteRefreshToken(ctx, userID)
+			return "", "", dead("session revoked")
+		}
+	}
+
+	// Step 3 — Look up stored refresh session in Redis by user_id.
+	// Called: valkey.go → GetRefreshSession()
+	stored, found, err := s.redisClient.GetRefreshSession(ctx, userID)
+	if err != nil {
+		return "", "", serverError("server error")
+	}
+	if !found {
+		// Idle TTL expired or user signed out.
+		return "", "", dead("refresh token expired")
+	}
+
+	// Step 4 — Compare tokens using constant-time comparison.
+	// Prevents timing attacks that could leak the stored token byte-by-byte.
+	if subtle.ConstantTimeCompare([]byte(refreshToken), []byte(stored.Token)) != 1 {
+		return "", "", dead("refresh token mismatch")
+	}
+
+	// Step 5 — ADR-006: enforce absolute lifetime cap from the initial OAuth
+	// signin. Beyond this, the user must re-authenticate via the full OAuth
+	// flow. MaxLifetimeAt=0 means "no cap" — only set on legacy sessions
+	// issued before this code shipped; treat as still-valid for the rolling
+	// TTL window.
+	if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
+		s.redisClient.DeleteRefreshToken(ctx, userID)
+		return "", "", dead("refresh token max lifetime exceeded")
+	}
+
+	// Step 6 — Issue new access JWT stamped with the current generation.
+	// Called: session.go → issueAccessToken()
+	newAccessToken, err = s.issueAccessToken(userID, tenantID, role, email, currentGen)
+	if err != nil {
+		return "", "", serverError("token issue failed")
+	}
+
+	// ADR-006 — Rotate the refresh token on every use. Generate a new 256-bit
+	// token and replace the stored value (preserving OriginalIAT and
+	// MaxLifetimeAt). The old token value is now invalid — a replay of a
+	// stolen token fails the constant-time compare on its next refresh.
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", "", serverError("token rotate failed")
+	}
+	newRefreshToken = base64.RawURLEncoding.EncodeToString(raw)
+
+	rotated := RefreshSession{
+		Token:         newRefreshToken,
+		OriginalIAT:   stored.OriginalIAT,
+		MaxLifetimeAt: stored.MaxLifetimeAt,
+	}
+	if err := s.redisClient.SetRefreshSession(ctx, userID, rotated, s.refreshTTL()); err != nil {
+		return "", "", serverError("token rotate failed")
+	}
+	return newAccessToken, newRefreshToken, nil
+}
+
+// refreshTTL is the rolling idle lifetime of a refresh session.
+func (s *serviceImpl) refreshTTL() time.Duration {
+	ttl, err := time.ParseDuration(s.cfg.JWTRefreshTTL)
+	if err != nil {
+		return 7 * 24 * time.Hour
+	}
+	return ttl
+}
+
+// refreshCookie returns the refresh token from the browser's httpOnly
+// cookie, or "" if there is none. There is deliberately no header fallback
+// (see RefreshHandler).
+func refreshCookie(r *http.Request) string {
+	if cookie, err := r.Cookie("refresh_token"); err == nil {
+		return cookie.Value
+	}
+	return ""
 }
 
 // writeJSONError writes a JSON error response with the given status code.

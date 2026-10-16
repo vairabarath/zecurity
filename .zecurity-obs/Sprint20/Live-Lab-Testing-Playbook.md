@@ -122,8 +122,13 @@ cd ~/zecurity/controller && go build -o ~/s20-run/controller-fixconn ./cmd/serve
 cd ~/zecurity/connector && cargo build --release
 #   bundle = zecurity-connector + scripts/connector-local-install.sh + scripts/connector-uninstall.sh + SHA256SUMS
 #   tar into ~/s20-run/serve/cbundle.tgz, record its sha
-# client
-cd ~/zecurity/client && cargo build --release && sudo install target/release/zecurity-client /usr/local/bin/   # user types sudo
+# client — embeds THIS controller's platform root CA (certificate audit bug 1);
+# a plain `cargo build --release` now fails without one. On the controller host:
+#   scripts/export-platform-root.sh ~/s20-run/platform-root.pem
+# then on the client host (copy the file over first):
+cd ~/zecurity/client && ROOT_PEM=~/s20-run/platform-root.pem scripts/dev-build.sh --release \
+  && sudo install target/release/zecurity-client /usr/local/bin/   # user types sudo
+# After a controller DB reset (new root): rebuild the client, then log in again.
 ```
 
 **Connector install on each host** (the user types sudo):
