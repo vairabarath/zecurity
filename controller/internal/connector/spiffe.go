@@ -54,6 +54,11 @@ type WorkspaceStore interface {
 	// GetIntermediateCA loads the platform intermediate CA certificate used to
 	// verify workspace CA chains and the controller server certificate.
 	GetIntermediateCA(ctx context.Context) (*x509.Certificate, error)
+
+	// GetConnectorStanding loads the authoritative revocation state of the
+	// connector connectorID in trustDomain. Returns (nil, nil) if no such
+	// connector exists and (nil, err) if the state cannot be read.
+	GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error)
 }
 
 // WorkspaceLookup is the minimal workspace info needed by the trust domain validator.

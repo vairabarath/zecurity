@@ -1077,6 +1077,10 @@ func (s connectorWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context
 	return parseCertPEM(certPEM)
 }
 
+func (s connectorWorkspaceStore) GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*connector.ConnectorStanding, error) {
+	return connector.LoadConnectorStanding(ctx, s.pool, trustDomain, connectorID)
+}
+
 func (s connectorWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {
 	var certPEM string
 	err := s.pool.QueryRow(ctx,
