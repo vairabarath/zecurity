@@ -1,0 +1,56 @@
+package policy
+
+import (
+	"context"
+	"encoding/json"
+
+	"github.com/google/uuid"
+
+	"github.com/yourorg/ztna/controller/internal/outbox"
+)
+
+// EventPolicyInvalidationRequested asks the controller to invalidate a
+// workspace's compiled policy (certificate audit bugs 4/5). It is enqueued in
+// the same transaction as a lifecycle change that affects who may connect —
+// an identity-connection disable or delete — so the invalidation can never be
+// lost after the change commits.
+const EventPolicyInvalidationRequested = "policy.invalidation.requested"
+
+type invalidationPayload struct {
+	Reason string `json:"reason"`
+}
+
+// NewInvalidationEvent builds the outbox event for workspaceID; reason is
+// recorded for diagnostics only.
+func NewInvalidationEvent(workspaceID uuid.UUID, reason string) outbox.Event {
+	payload, _ := json.Marshal(invalidationPayload{Reason: reason})
+	return outbox.Event{
+		EventType:     EventPolicyInvalidationRequested,
+		WorkspaceID:   workspaceID,
+		CorrelationID: uuid.New(),
+		Payload:       payload,
+	}
+}
+
+// changeNotifier is the subset of *Notifier the handler needs.
+type changeNotifier interface {
+	NotifyPolicyChange(ctx context.Context, workspaceID string) error
+}
+
+// InvalidationHandler consumes EventPolicyInvalidationRequested.
+//
+// Certificate audit bugs 4/5: not implemented yet — the policy is not
+// invalidated.
+type InvalidationHandler struct {
+	notifier changeNotifier
+}
+
+// NewInvalidationHandler builds the handler.
+func NewInvalidationHandler(notifier changeNotifier) *InvalidationHandler {
+	return &InvalidationHandler{notifier: notifier}
+}
+
+// Handle implements outbox.EventHandler.
+func (h *InvalidationHandler) Handle(ctx context.Context, evt outbox.OutboxEvent) error {
+	return nil
+}

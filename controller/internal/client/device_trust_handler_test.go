@@ -416,7 +416,7 @@ func TestDeviceTrustReEnrollRequired(t *testing.T) {
 		t.Fatalf("pre-revoke: %v", err)
 	}
 
-	handler := NewDeviceTrustReEnrollHandler(pool)
+	handler := NewDeviceTrustReEnrollHandler(pool, nil)
 	corr := uuid.NewString()
 	evt := newDevTrustEvent(identity.EventDeviceTrustReEnrollmentRequired, wsID, user1, corr, identity.DeviceTrustReason(""))
 

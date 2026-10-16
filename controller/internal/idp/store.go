@@ -359,6 +359,43 @@ func (s *Store) TouchConnectionSync(ctx context.Context, tenantID, connectionID 
 	return nil
 }
 
+// InTx runs inside a store transaction — e.g. to enqueue durable outbox work
+// that must commit atomically with the store change.
+type InTx func(ctx context.Context, tx pgx.Tx) error
+
+// DisableConnection disables an identity connection and suspends + unmanages
+// its SCIM-managed users, then runs inTx. Returns the suspended and unmanaged
+// counts.
+//
+// Certificate audit bugs 4/5: not atomic yet — each step commits on its own
+// and inTx is ignored.
+func (s *Store) DisableConnection(ctx context.Context, tenantID, connectionID string, inTx InTx) (suspended, unmanaged int, err error) {
+	if err := s.SetStatus(ctx, tenantID, connectionID, "disabled"); err != nil {
+		return 0, 0, err
+	}
+	if suspended, err = s.SuspendSCIMUsersForConnection(ctx, tenantID, connectionID); err != nil {
+		return 0, 0, err
+	}
+	if unmanaged, err = s.SetSCIMUsersUnmanaged(ctx, tenantID, connectionID); err != nil {
+		return suspended, 0, err
+	}
+	return suspended, unmanaged, nil
+}
+
+// SoftDeleteConnectionTx is SoftDeleteConnection plus inTx.
+//
+// Certificate audit bugs 4/5: inTx is ignored yet.
+func (s *Store) SoftDeleteConnectionTx(ctx context.Context, tenantID, connectionID string, inTx InTx) error {
+	return s.SoftDeleteConnection(ctx, tenantID, connectionID)
+}
+
+// DeleteWorkspaceConnectionTx is DeleteWorkspaceConnection plus inTx.
+//
+// Certificate audit bugs 4/5: inTx is ignored yet.
+func (s *Store) DeleteWorkspaceConnectionTx(ctx context.Context, tenantID, id string, inTx InTx) error {
+	return s.DeleteWorkspaceConnection(ctx, tenantID, id)
+}
+
 // SuspendSCIMUsersForConnection sets every SCIM-provisioned, still-active user
 // of a connection to status='suspended' (reversible) when the connection is
 // disabled. Scoped to (tenant, connection) and to provisioning_owner='scim' so a

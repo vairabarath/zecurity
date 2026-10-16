@@ -114,7 +114,10 @@ type DeviceTrustReEnrollHandler struct {
 }
 
 // NewDeviceTrustReEnrollHandler builds the re-enrollment handler.
-func NewDeviceTrustReEnrollHandler(pool *pgxpool.Pool) *DeviceTrustReEnrollHandler {
+//
+// Certificate audit bugs 4/5: notifier is not used yet — the reactivation's
+// policy invalidation is still a best-effort call in the SCIM service.
+func NewDeviceTrustReEnrollHandler(pool *pgxpool.Pool, notifier *policy.Notifier) *DeviceTrustReEnrollHandler {
 	return &DeviceTrustReEnrollHandler{pool: pool}
 }
 

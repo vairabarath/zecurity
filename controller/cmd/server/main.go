@@ -600,17 +600,8 @@ func main() {
 	// handlers execute them — revoking the user's device certs (→ workspace CRL)
 	// and recording re-enrollment requirements. Fail-fast at startup so a missing
 	// registration is caught immediately rather than letting events dead-letter.
-	if err := outboxRegistry.RegisterHandler(
-		identity.EventDeviceTrustRevokeRequested,
-		clientsvc.NewDeviceTrustRevokeHandler(db.Pool, policyNotifier),
-	); err != nil {
-		log.Fatalf("register device.trust.revoke.requested handler: %v", err)
-	}
-	if err := outboxRegistry.RegisterHandler(
-		identity.EventDeviceTrustReEnrollmentRequired,
-		clientsvc.NewDeviceTrustReEnrollHandler(db.Pool),
-	); err != nil {
-		log.Fatalf("register device.trust.re_enrollment_required handler: %v", err)
+	if err := registerOutboxHandlers(outboxRegistry, db.Pool, policyNotifier); err != nil {
+		log.Fatalf("register outbox handlers: %v", err)
 	}
 
 	// REST endpoint: Google OAuth callback for CLI authentication (Option B flow).
@@ -1236,4 +1227,23 @@ func envOrInt(key string, fallback int) int {
 	}
 
 	return n
+}
+
+// registerOutboxHandlers registers every outbox consumer. Startup fails if
+// one cannot be registered, because an event without a handler is failed
+// terminally on its first attempt.
+func registerOutboxHandlers(reg *outbox.HandlerRegistry, pool *pgxpool.Pool, notifier *policy.Notifier) error {
+	if err := reg.RegisterHandler(
+		identity.EventDeviceTrustRevokeRequested,
+		clientsvc.NewDeviceTrustRevokeHandler(pool, notifier),
+	); err != nil {
+		return fmt.Errorf("device.trust.revoke.requested: %w", err)
+	}
+	if err := reg.RegisterHandler(
+		identity.EventDeviceTrustReEnrollmentRequired,
+		clientsvc.NewDeviceTrustReEnrollHandler(pool, notifier),
+	); err != nil {
+		return fmt.Errorf("device.trust.re_enrollment_required: %w", err)
+	}
+	return nil
 }
