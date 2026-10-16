@@ -192,31 +192,32 @@ func (r *mutationResolver) SetIdpConnectionStatus(ctx context.Context, id string
 		}
 	}
 
-	if err := r.IdpStore.SetStatus(ctx, tc.TenantID, id, status); err != nil {
+	action := "idp.connection.enable"
+	if status == "disabled" {
+		action = "idp.connection.disable"
+		// The connection is no longer a valid login path. In ONE transaction:
+		// disable it, suspend + unmanage the affected SCIM-managed users
+		// (ADR-025 §12), and record durable policy invalidation (certificate
+		// audit bugs 4/5) — all or nothing.
+		suspended, unmanaged, err := r.IdpStore.DisableConnection(ctx, tc.TenantID, id,
+			r.durablePolicyInvalidation(tc.TenantID, "idp.connection.disable"))
+		if err != nil {
+			if errors.Is(err, idp.ErrConnectionNotFound) {
+				return nil, apperr.UserErrorf("setIdpConnectionStatus: connection not found")
+			}
+			return nil, fmt.Errorf("setIdpConnectionStatus: %w", err)
+		}
+		if suspended > 0 || unmanaged > 0 {
+			log.Printf("idp: disable of connection %s suspended %d and unmanaged %d scim users", id, suspended, unmanaged)
+		}
+		// Revoke the sessions of everyone who authenticates through it.
+		// Best-effort, after commit: it talks to Valkey.
+		r.revokeConnectionSessions(ctx, tc, id)
+	} else if err := r.IdpStore.SetStatus(ctx, tc.TenantID, id, status); err != nil {
 		if errors.Is(err, idp.ErrConnectionNotFound) {
 			return nil, apperr.UserErrorf("setIdpConnectionStatus: connection not found")
 		}
 		return nil, fmt.Errorf("setIdpConnectionStatus: %w", err)
-	}
-
-	action := "idp.connection.enable"
-	if status == "disabled" {
-		action = "idp.connection.disable"
-		// The connection is no longer a valid login path: revoke the sessions
-		// of everyone who authenticates through it, and suspend + unmanage the
-		// affected SCIM-managed users (ADR-025 §12). All best-effort — the
-		// status change above has already committed.
-		r.revokeConnectionSessions(ctx, tc, id)
-		if n, err := r.IdpStore.SuspendSCIMUsersForConnection(ctx, tc.TenantID, id); err != nil {
-			log.Printf("idp: suspend scim users for connection %s: %v", id, err)
-		} else if n > 0 {
-			log.Printf("idp: suspended %d scim users on disable of connection %s", n, id)
-		}
-		if n, err := r.IdpStore.SetSCIMUsersUnmanaged(ctx, tc.TenantID, id); err != nil {
-			log.Printf("idp: unmanage scim users for connection %s: %v", id, err)
-		} else if n > 0 {
-			log.Printf("idp: set provisioning_owner=unmanaged for %d users on disable of connection %s", n, id)
-		}
 	}
 	r.auditIdp(ctx, tc, action, id, nil)
 
@@ -265,7 +266,8 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 		if _, err := r.IdpStore.SetSCIMUsersUnmanaged(ctx, tc.TenantID, id); err != nil {
 			return false, fmt.Errorf("deleteIdpConnection: unmanage users: %w", err)
 		}
-		if err := r.IdpStore.SoftDeleteConnection(ctx, tc.TenantID, id); err != nil {
+		if err := r.IdpStore.SoftDeleteConnectionTx(ctx, tc.TenantID, id,
+			r.durablePolicyInvalidation(tc.TenantID, "idp.connection.delete")); err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
 				return false, apperr.UserErrorf("deleteIdpConnection: connection not found")
 			}
@@ -276,7 +278,8 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 		// No linked users: a clean hard-delete is safe.
 		// DeleteWorkspaceConnection cascades to scim_tokens, external_identities,
 		// scim_sync_instances, and groups (via FK CASCADE on connection_id).
-		if err := r.IdpStore.DeleteWorkspaceConnection(ctx, tc.TenantID, id); err != nil {
+		if err := r.IdpStore.DeleteWorkspaceConnectionTx(ctx, tc.TenantID, id,
+			r.durablePolicyInvalidation(tc.TenantID, "idp.connection.delete")); err != nil {
 			if errors.Is(err, idp.ErrConnectionNotFound) {
 				return false, apperr.UserErrorf("deleteIdpConnection: connection not found")
 			}
@@ -286,12 +289,10 @@ func (r *mutationResolver) DeleteIdpConnection(ctx context.Context, id string, f
 
 	// Both branches remove the connection's SCIM-owned groups (the soft path
 	// explicitly, the hard path via FK CASCADE), and dropping a group cascades
-	// away every access_rules row targeting it. That is a policy mutation, so
-	// the per-workspace ACL snapshot cache must be invalidated or connectors
-	// keep serving access through a group that no longer exists.
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("deleteIdpConnection notify: %w", err)
-	}
+	// away every access_rules row targeting it. That is a policy mutation: its
+	// invalidation was recorded durably in the same transaction (certificate
+	// audit bugs 4/5), so connectors cannot keep serving access through a group
+	// that no longer exists.
 
 	r.auditIdp(ctx, tc, action, id, map[string]any{"linked_users": linked, "force": force})
 

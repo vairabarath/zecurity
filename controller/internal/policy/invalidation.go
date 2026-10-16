@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -37,10 +38,9 @@ type changeNotifier interface {
 	NotifyPolicyChange(ctx context.Context, workspaceID string) error
 }
 
-// InvalidationHandler consumes EventPolicyInvalidationRequested.
-//
-// Certificate audit bugs 4/5: not implemented yet — the policy is not
-// invalidated.
+// InvalidationHandler consumes EventPolicyInvalidationRequested: it
+// invalidates the event's workspace policy. Invalidating twice is harmless, so
+// duplicate delivery is safe; a failure is returned so the outbox retries.
 type InvalidationHandler struct {
 	notifier changeNotifier
 }
@@ -52,5 +52,8 @@ func NewInvalidationHandler(notifier changeNotifier) *InvalidationHandler {
 
 // Handle implements outbox.EventHandler.
 func (h *InvalidationHandler) Handle(ctx context.Context, evt outbox.OutboxEvent) error {
+	if err := h.notifier.NotifyPolicyChange(ctx, evt.WorkspaceID.String()); err != nil {
+		return fmt.Errorf("%s: %w", EventPolicyInvalidationRequested, err)
+	}
 	return nil
 }

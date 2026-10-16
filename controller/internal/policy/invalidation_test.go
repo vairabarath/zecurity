@@ -42,7 +42,6 @@ func (n *flakyNotifier) notified() []string {
 }
 
 func TestInvalidationHandler_InvalidatesTheEventsWorkspace(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	ws := uuid.New()
 	evt := NewInvalidationEvent(ws, "test")
 	if evt.EventType != EventPolicyInvalidationRequested || evt.WorkspaceID != ws {
@@ -69,7 +68,6 @@ func TestInvalidationHandler_InvalidatesTheEventsWorkspace(t *testing.T) {
 // The event survives a failing notifier (retried) and a worker that crashed
 // mid-processing (reaped and re-run by a new processor).
 func TestInvalidationEvent_RetriedAndRecoveredThroughTheOutbox(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	pool, ctx := lifecycleTestPool(t)
 	wsID := mustInsertWorkspace(t, ctx, pool, "invalidation-outbox")
 	ob := outbox.NewOutbox(pool)

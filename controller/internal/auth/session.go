@@ -66,10 +66,11 @@ func (s *serviceImpl) VerifyAccessToken(tokenStr string) (*AccessTokenClaims, er
 		return nil, err
 	}
 	return &AccessTokenClaims{
-		UserID:   claims.Subject,
-		TenantID: claims.TenantID,
-		Role:     claims.Role,
-		Email:    claims.Email,
+		UserID:     claims.Subject,
+		TenantID:   claims.TenantID,
+		Role:       claims.Role,
+		Email:      claims.Email,
+		Generation: claims.IdentityGeneration,
 	}, nil
 }
 

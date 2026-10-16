@@ -111,7 +111,6 @@ func TestEnrollDevice_ActiveUsersStillEnroll(t *testing.T) {
 }
 
 func TestEnrollDevice_RejectedForInactiveUserDespiteValidToken(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	for _, tc := range deniedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, ctx, wsID, userID, pkiSvc := deviceGateTestHarness(t)
@@ -176,7 +175,6 @@ func TestRenewCert_ActiveUsersStillRenew(t *testing.T) {
 }
 
 func TestRenewCert_RejectedForInactiveUserDespiteValidToken(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	for _, tc := range deniedCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			pool, ctx, wsID, userID, pkiSvc := deviceGateTestHarness(t)
@@ -204,7 +202,6 @@ func TestRenewCert_RejectedForInactiveUserDespiteValidToken(t *testing.T) {
 // reactivation's propagation is durable instead of a best-effort call after
 // commit.
 func TestDeviceTrustReEnrollHandler_InvalidatesThePolicy(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	pool, ctx, wsID, userID, _ := deviceGateTestHarness(t)
 	notifier := policy.NewNotifier(policy.NewSnapshotCache())
 	var pushed []string
@@ -219,5 +216,33 @@ func TestDeviceTrustReEnrollHandler_InvalidatesThePolicy(t *testing.T) {
 	}
 	if len(pushed) != 2 || pushed[0] != wsID {
 		t.Fatalf("policy invalidated for %v, want %s on each delivery", pushed, wsID)
+	}
+}
+
+// A lifecycle change that lands while an enrollment is in flight: the user
+// passes the up-front check, then is suspended (or loses an active
+// membership) before the certificate is recorded. The final conditional write
+// refuses, no certificate is returned, and the half-made device row is
+// removed.
+func TestEnrollDevice_LifecycleChangeDuringEnrollmentReturnsNoCertificate(t *testing.T) {
+	for name, body := range map[string]string{
+		"user suspended":              `UPDATE users SET status = 'suspended' WHERE id = NEW.user_id`,
+		"membership no longer active": `INSERT INTO workspace_members (workspace_id, user_id, email, status) SELECT NEW.workspace_id, id, email, 'suspended' FROM users WHERE id = NEW.user_id`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			pool, ctx, wsID, userID, pkiSvc := deviceGateTestHarness(t)
+			execOrFail(t, ctx, pool, `CREATE FUNCTION change_on_device_insert() RETURNS trigger AS $$ BEGIN `+body+`; RETURN NEW; END; $$ LANGUAGE plpgsql`)
+			execOrFail(t, ctx, pool, `CREATE TRIGGER change_on_device_insert AFTER INSERT ON client_devices FOR EACH ROW EXECUTE FUNCTION change_on_device_insert()`)
+			claims := &auth.AccessTokenClaims{UserID: userID, TenantID: wsID, Email: "race@example.test", Generation: 1}
+			svc := issuanceService(pool, &Service{pool: pool, pkiSvc: pkiSvc}, claims)
+
+			resp, err := svc.EnrollDevice(ctx, enrollRequest(t))
+			if status.Code(err) != codes.PermissionDenied || resp != nil {
+				t.Fatalf("want PermissionDenied and no certificate, got resp=%v err=%v", resp != nil, err)
+			}
+			if n := deviceCount(t, ctx, pool, userID); n != 0 {
+				t.Fatalf("the refused enrollment left %d device row(s)", n)
+			}
+		})
 	}
 }

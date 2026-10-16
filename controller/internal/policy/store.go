@@ -343,15 +343,28 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 
 // ListActiveDeviceSPIFFEsForGroup returns non-revoked client device SPIFFE IDs
 // for all users in a group, within the workspace. Used by the ACL compiler.
+//
+// Certificate audit bugs 4/5: a device authorizes only while its user exists
+// in the workspace and is active, and — if the user has a workspace
+// membership row — that membership is active. A missing membership row does
+// not deny on its own (SCIM-provisioned and first-login users have none).
+// Suspension is therefore reversible; revocation (revoked_at) is not.
 func (s *Store) ListActiveDeviceSPIFFEsForGroup(ctx context.Context, workspaceID, groupID string) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT cd.spiffe_id
 		 FROM group_members gm
 		 JOIN client_devices cd ON cd.user_id = gm.user_id
+		 JOIN users u ON u.id = cd.user_id AND u.tenant_id = cd.workspace_id
 		 WHERE gm.group_id = $1
 		   AND cd.workspace_id = $2
 		   AND cd.spiffe_id IS NOT NULL
-		   AND cd.revoked_at IS NULL`,
+		   AND cd.revoked_at IS NULL
+		   AND u.status = 'active'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM workspace_members wm
+		        WHERE wm.workspace_id = cd.workspace_id
+		          AND wm.user_id = cd.user_id
+		          AND wm.status <> 'active')`,
 		groupID, workspaceID,
 	)
 	if err != nil {
@@ -388,10 +401,17 @@ func (s *Store) ListActiveDeviceSPIFFEsForGroups(ctx context.Context, workspaceI
 		`SELECT DISTINCT gm.group_id::text, cd.id, cd.spiffe_id
 		 FROM group_members gm
 		 JOIN client_devices cd ON cd.user_id = gm.user_id
+		 JOIN users u ON u.id = cd.user_id AND u.tenant_id = cd.workspace_id
 		 WHERE gm.group_id = ANY($1::uuid[])
 		   AND cd.workspace_id = $2
 		   AND cd.spiffe_id IS NOT NULL
-		   AND cd.revoked_at IS NULL`,
+		   AND cd.revoked_at IS NULL
+		   AND u.status = 'active'
+		   AND NOT EXISTS (
+		       SELECT 1 FROM workspace_members wm
+		        WHERE wm.workspace_id = cd.workspace_id
+		          AND wm.user_id = cd.user_id
+		          AND wm.status <> 'active')`,
 		groupIDs, workspaceID,
 	)
 	if err != nil {

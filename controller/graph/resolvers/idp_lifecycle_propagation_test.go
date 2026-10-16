@@ -133,7 +133,6 @@ func (f *idpPropagationFixture) failOutboxInserts(t *testing.T) {
 }
 
 func TestSetIdpConnectionStatus_DisableRecordsDurableInvalidation(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newIdpPropagationFixture(t)
 	if _, err := f.mr.SetIdpConnectionStatus(f.ctx, f.connID, "disabled"); err != nil {
 		t.Fatalf("disable: %v", err)
@@ -147,7 +146,6 @@ func TestSetIdpConnectionStatus_DisableRecordsDurableInvalidation(t *testing.T) 
 }
 
 func TestSetIdpConnectionStatus_DisableFailsClosedWithoutInvalidation(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newIdpPropagationFixture(t)
 	f.failOutboxInserts(t)
 	if _, err := f.mr.SetIdpConnectionStatus(f.ctx, f.connID, "disabled"); err == nil {
@@ -162,7 +160,6 @@ func TestSetIdpConnectionStatus_DisableFailsClosedWithoutInvalidation(t *testing
 }
 
 func TestDeleteIdpConnection_RecordsDurableInvalidation(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newIdpPropagationFixture(t)
 	if _, err := f.mr.DeleteIdpConnection(f.ctx, f.connID, true); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -173,7 +170,6 @@ func TestDeleteIdpConnection_RecordsDurableInvalidation(t *testing.T) {
 }
 
 func TestDeleteIdpConnection_FailsClosedWithoutInvalidation(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newIdpPropagationFixture(t)
 	f.failOutboxInserts(t)
 	if _, err := f.mr.DeleteIdpConnection(f.ctx, f.connID, true); err == nil {
@@ -181,5 +177,14 @@ func TestDeleteIdpConnection_FailsClosedWithoutInvalidation(t *testing.T) {
 	}
 	if got := f.scalar(t, `SELECT status FROM identity_connections WHERE id = $1`, f.connID); got != "active" {
 		t.Fatalf("connection status = %s", got)
+	}
+}
+
+// Without an outbox the hook fails, so a lifecycle change cannot commit
+// without its durable propagation.
+func TestDurablePolicyInvalidation_FailsClosedWithoutAnOutbox(t *testing.T) {
+	hook := (&Resolver{}).durablePolicyInvalidation("00000000-0000-0000-0000-000000000001", "test")
+	if err := hook(context.Background(), nil); err == nil {
+		t.Fatal("the invalidation hook succeeded without an outbox")
 	}
 }

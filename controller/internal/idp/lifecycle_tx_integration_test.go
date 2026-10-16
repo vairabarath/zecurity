@@ -122,7 +122,6 @@ func (f *lifecycleTxFixture) failOutboxInserts(t *testing.T) {
 }
 
 func TestDisableConnection_SuspendsAndRecordsInvalidationAtomically(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newLifecycleTxFixture(t)
 	suspended, _, err := f.store.DisableConnection(f.ctx, f.ws, f.connID, f.invalidate("idp.connection.disable"))
 	if err != nil {
@@ -149,7 +148,6 @@ func TestDisableConnection_SuspendsAndRecordsInvalidationAtomically(t *testing.T
 }
 
 func TestDisableConnection_RollsBackWhenInvalidationCannotBeRecorded(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	f := newLifecycleTxFixture(t)
 	f.failOutboxInserts(t)
 	if _, _, err := f.store.DisableConnection(f.ctx, f.ws, f.connID, f.invalidate("idp.connection.disable")); err == nil {
@@ -167,7 +165,6 @@ func TestDisableConnection_RollsBackWhenInvalidationCannotBeRecorded(t *testing.
 }
 
 func TestDeleteConnection_RecordsInvalidationAtomically(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	t.Run("soft delete", func(t *testing.T) {
 		f := newLifecycleTxFixture(t)
 		if err := f.store.SoftDeleteConnectionTx(f.ctx, f.ws, f.connID, f.invalidate("idp.connection.delete")); err != nil {

@@ -6,10 +6,14 @@ package resolvers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"github.com/yourorg/ztna/controller/graph"
@@ -18,6 +22,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/auth/providers"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/permission"
+	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -81,6 +86,23 @@ func (r *Resolver) auditIdp(ctx context.Context, tc tenant.TenantContext, action
 		TargetID:    targetID,
 		Details:     details,
 	})
+}
+
+// durablePolicyInvalidation returns the in-transaction hook that records the
+// workspace's policy invalidation in the outbox, so it commits with the
+// lifecycle change (certificate audit bugs 4/5). Without an outbox it fails —
+// the change must not commit without its propagation.
+func (r *Resolver) durablePolicyInvalidation(tenantID, reason string) idp.InTx {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		if r.Outbox == nil {
+			return errors.New("durable policy invalidation: no outbox configured")
+		}
+		ws, err := uuid.Parse(tenantID)
+		if err != nil {
+			return fmt.Errorf("durable policy invalidation: workspace id: %w", err)
+		}
+		return r.Outbox.Enqueue(ctx, tx, policy.NewInvalidationEvent(ws, reason))
+	}
 }
 
 // revokeConnectionSessions bumps identity_generation for every user linked to

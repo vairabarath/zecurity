@@ -495,7 +495,10 @@ func (s *DirectoryService) Reactivate(ctx context.Context, sc *scope, userID str
 	if err := tx.Commit(ctx); err != nil {
 		return newSCIMError(500, "", "commit reactivate: "+err.Error())
 	}
-	if s.notifier != nil {
+	// The re-enrollment event committed above carries the policy
+	// invalidation durably (its consumer notifies; certificate audit bugs
+	// 4/5). Only without a sink is there nothing durable, so notify here.
+	if s.sink == nil && s.notifier != nil {
 		_ = s.notifier.NotifyPolicyChange(ctx, sc.workspaceID)
 	}
 	if syncInst != "" {

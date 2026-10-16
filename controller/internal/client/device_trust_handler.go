@@ -110,15 +110,16 @@ func (h *DeviceTrustRevokeHandler) Handle(ctx context.Context, evt outbox.Outbox
 // (service.go) reports RE_ENROLL_REQUIRED instead of the terminal REVOKED —
 // letting the daemon show "sign in again" instead of "contact your admin".
 type DeviceTrustReEnrollHandler struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	notifier *policy.Notifier
 }
 
 // NewDeviceTrustReEnrollHandler builds the re-enrollment handler.
-//
-// Certificate audit bugs 4/5: notifier is not used yet — the reactivation's
-// policy invalidation is still a best-effort call in the SCIM service.
+// notifier (optional) invalidates the workspace policy on each delivery: the
+// event commits with the SCIM reactivation, so this makes the reactivation's
+// propagation durable (certificate audit bugs 4/5).
 func NewDeviceTrustReEnrollHandler(pool *pgxpool.Pool, notifier *policy.Notifier) *DeviceTrustReEnrollHandler {
-	return &DeviceTrustReEnrollHandler{pool: pool}
+	return &DeviceTrustReEnrollHandler{pool: pool, notifier: notifier}
 }
 
 // Handle implements outbox.EventHandler. Sets status='re_enroll_required' on
@@ -138,6 +139,11 @@ func (h *DeviceTrustReEnrollHandler) Handle(ctx context.Context, evt outbox.Outb
 	count, err := markUserDevicesReEnrollRequired(ctx, h.pool, userID, workspaceID)
 	if err != nil {
 		return fmt.Errorf("device.trust.re_enrollment_required: %w", err)
+	}
+	if h.notifier != nil {
+		if err := h.notifier.NotifyPolicyChange(ctx, workspaceID); err != nil {
+			return fmt.Errorf("device.trust.re_enrollment_required: invalidate policy: %w", err)
+		}
 	}
 
 	_ = audit.Record(ctx, h.pool, audit.Entry{

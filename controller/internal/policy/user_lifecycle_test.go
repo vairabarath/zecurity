@@ -114,7 +114,6 @@ func newLifecycleFixture(t *testing.T, pool *pgxpool.Pool, ctx context.Context, 
 }
 
 func TestDeviceAuthorization_FollowsUserAndMembershipLifecycle(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	pool, ctx := lifecycleTestPool(t)
 	f := newLifecycleFixture(t, pool, ctx, "lifecycle")
 
@@ -150,7 +149,6 @@ func TestDeviceAuthorization_FollowsUserAndMembershipLifecycle(t *testing.T) {
 
 // Suspension is reversible; revocation is not.
 func TestDeviceAuthorization_ReactivationRestoresOnlyValidDevices(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	pool, ctx := lifecycleTestPool(t)
 	f := newLifecycleFixture(t, pool, ctx, "reactivate")
 	keptUser, kept := f.device(t, "active", "")
@@ -206,7 +204,6 @@ func TestDeviceAuthorization_RecreatedUserCannotReuseDeletedUsersDevices(t *test
 
 // The full compile excludes a suspended user's device from every entry.
 func TestCompileACLSnapshot_ExcludesSuspendedUsersDevices(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	pool, ctx := lifecycleTestPool(t)
 	f := newLifecycleFixture(t, pool, ctx, "compile")
 	rnID, _ := mustInsertRNWithConnector(t, ctx, pool, f.wsID, "rn-compile", "td-compile", "10.40.0.1")

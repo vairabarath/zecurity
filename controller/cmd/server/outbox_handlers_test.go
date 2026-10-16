@@ -13,7 +13,6 @@ import (
 // attempt, so a missing registration would silently drop the work (certificate
 // audit bugs 4/5 add EventPolicyInvalidationRequested).
 func TestRegisterOutboxHandlers_RegistersEveryProducedEventType(t *testing.T) {
-	t.Skip("bugs 4/5: demonstrates the gap; un-skip with the fix")
 	reg := outbox.NewHandlerRegistry()
 	if err := registerOutboxHandlers(reg, nil, policy.NewNotifier(policy.NewSnapshotCache())); err != nil {
 		t.Fatalf("register: %v", err)

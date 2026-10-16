@@ -309,6 +309,7 @@ func main() {
 				ConnectorCfg:      connectorCfg,
 				ConnectorRegistry: connectorRegistry,
 				ShieldRevocations: shieldRevocations,
+				Outbox:            outboxStore,
 				Redis:             valkeycompat.NewAdapter(connectorValkey),
 				Pool:              db.Pool,
 				ShieldSvc:         shieldSvc,
@@ -1244,6 +1245,12 @@ func registerOutboxHandlers(reg *outbox.HandlerRegistry, pool *pgxpool.Pool, not
 		clientsvc.NewDeviceTrustReEnrollHandler(pool, notifier),
 	); err != nil {
 		return fmt.Errorf("device.trust.re_enrollment_required: %w", err)
+	}
+	if err := reg.RegisterHandler(
+		policy.EventPolicyInvalidationRequested,
+		policy.NewInvalidationHandler(notifier),
+	); err != nil {
+		return fmt.Errorf("%s: %w", policy.EventPolicyInvalidationRequested, err)
 	}
 	return nil
 }
