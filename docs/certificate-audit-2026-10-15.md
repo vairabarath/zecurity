@@ -82,7 +82,18 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
     - [ ] IdP-disable session revocation (generation bump) stays best-effort after commit, as before. Access is cut off by the user suspension and policy invalidation, which are atomic.
     - [ ] Tokens without a generation claim (`gen` = 0, pre-Phase-5) are accepted by `CheckGeneration` by convention, as at `/auth/refresh`.
 - [ ] **Bug 6 — Medium — connector, client: the relay CRL and workspace CRL can be swapped for each other.** Each is checked against a bundle containing both signing CAs (`connector/src/main.rs:195`, `crl.rs:149-155`).
-- [ ] **Bug 7 — Medium — controller: a revoked connector can still renew its shields' certificates.** `shield/renewal.go` never checks the connector's status.
+- [x] **Bug 7 — Medium — controller: a revoked connector can still renew its shields' certificates.** `shield/renewal.go` never checked the connector's status or the shield's tombstone, and its final write was unconditional. The unary SPIFFE interceptor verified a connector's certificate chain but never its revocation.
+  - Why it matters: revocation does not shorten a certificate's lifetime. A revoked connector with an unexpired certificate could keep minting 7-day certificates for its shields, extending its foothold past revocation. A revocation racing a renewal could also still produce an accepted certificate.
+  - Fixed (2026-10-16, controller only, no schema change):
+    - **Interceptor:** every connector unary RPC (connector `RenewCert` and `Goodbye`, and the shield `RenewCert` and `Goodbye` it proxies) now reads the connector's standing from the database, scoped to the certificate's trust domain. A revoked connector (`status = 'revoked'` **or** `revoked_at` set) or an unknown one is refused with `PermissionDenied`; unreadable state fails closed with `Unavailable`. This follows the relay revocation pattern; relays and bootstrap RPCs are unchanged.
+    - **Shield renewal:** before signing, the handler requires the shield to have no tombstone (even when its row is gone), to be managed by the calling connector, not revoked or deleted, in the caller's trust domain, and its connector to be unrevoked in that trust domain. The check costs no extra query: one read covers the tombstone, shield and connector. Unreadable state returns `Internal`, and nothing is signed.
+    - **Race-safe final write:** the certificate is recorded only if a single conditional `UPDATE` re-confirms all of the above. It locks the connector row `FOR SHARE`, so a concurrent connector revocation waits or is seen, and a concurrent shield revocation conflicts on the shield row. If no row is updated, or the write fails, no certificate is returned.
+    - **Goodbye** also requires `revoked_at IS NULL`, so it can never alter a revoked connector's row (defence in depth behind the interceptor).
+  - Verified with throwaway-DB tests (direct and in-flight races, write failure) and 31 mutations, all caught.
+  - Limitations:
+    - [ ] The stream interceptor (`Control`) does not consult standing; the `Control` handler already refuses revoked connectors itself.
+    - [ ] Shield certificates renewed before a connector was revoked stay valid until they expire (7 days). Revoking a connector does not revoke its shields.
+    - [ ] Not validated live end to end (a real connector proxying a renewal after revocation).
 - [ ] **Bug 8 — Medium — connector, shield: re-issuing an enrollment token doesn't cancel the old one.**
   - The old token stays valid for up to 24 hours.
   - Two tokens used at once can produce a certificate the database doesn't track.
