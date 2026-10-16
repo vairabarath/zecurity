@@ -26,7 +26,7 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
 
 - [x] **Bug 2 — High — relay: the S1 fix could be bypassed.** The relay chose which workspace's revocation list (CRL) to check from a forged copy of the issuer CA, and the CRL cache ignored which CA was presented.
   - Fixed in PR #118 (merged): `b7bf4a6` demonstrates the bug, `d80dedb` fixes it.
-- [ ] **Bug 1 — High — connector, shield, relay, client: first-time trust can be hijacked.**
+- [x] **Bug 1 — High — connector, shield, relay, client: first-time trust can be hijacked.**
   - Agents pinned only the first certificate in `/ca.crt` but trusted all of them. Enrollment replies were saved without validation, the private key was written before validation, and writes were not atomic.
   - The client fetches `/ca.crt` with no pin at all.
   - Progress:
@@ -34,7 +34,13 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
     - [x] Connector: exact pin, full reply validation, atomic install with cleanup (`84195e4`).
     - [x] Shield: same, plus renewal validated against the saved anchors; renewal never rewrites `workspace_ca.crt` (`564561a`).
     - [x] Relay: same; the existing returned-intermediate pin check is kept and regression-tested (`30cd9cd`).
-    - [ ] Client: **waiting on the design decision.** Proposal: embed the platform root certificate in the signed client package and verify `/ca.crt` against it. Then apply the agents' pinning and reply validation, and save the validated chain so logout and renewal reuse it. Next steps: attack tests first, then the fix.
+    - [x] Client (decided 2026-10-16: embed the platform root; official releases carry the production root, dev and LAN controllers build with their own via `client/scripts/dev-build.sh`):
+      - `/ca.crt` must be exactly one intermediate issued by the embedded root; it is the only certificate trusted for login.
+      - The enroll reply is validated before anything is saved.
+      - Renewal must match the saved anchors, which it never replaces.
+      - Logout reuses the saved anchors.
+      - Daemon startup refuses saved state not anchored in the root.
+      - Release builds without a root fail.
 - [ ] **Bug 3 — High — shield: revoking a shield doesn't cut it off.**
   - Revoke only updates the database (`shield.resolvers.go:78`). The connector is never told, and policy still routes resources through revoked shields (`policy/store.go:314`).
   - Decision needed: put shields on a CRL, or have the controller notify the connector? Should open connections be closed?
@@ -54,10 +60,19 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
   - Needs a new table: a schema change and a DB reset.
 - [ ] **Bug 10 — Low-Med — controller: connector and shield renewal accept a different key.** Stolen credentials can be moved to an attacker's key.
 
+## Found during the bug 1 work (2026-10-16)
+
+- [ ] **High — client: access and refresh tokens are sent over plain HTTP.**
+  - `client/src/auth.rs` `refresh_access_token` and `logout` POST to `{http_base}/auth/refresh` and `/auth/logout`. `http_base` defaults to `http://<controller>:8080`, and the refresh token travels in an `X-Refresh-Token` header.
+  - A passive eavesdropper on the network can steal the session; no tampering is needed. Combined with bug 4, a stolen access token can enroll a new device.
+  - Fix needs a decision: move refresh and logout onto the pinned gRPC channel (additive RPCs plus controller handlers), or serve that HTTP over TLS and pin it to the saved anchors.
+- [ ] **Medium — client releases are not signed.** `client-release.yml` publishes binaries plus a `checksums.txt` file in the same release. That file isn't a signature: whoever can replace the binary can replace it too. The embedded root is only as trustworthy as the download channel (HTTPS from GitHub). Next step: sign the releases (minisign or cosign) and verify the signature in `client-install.sh`.
+- [ ] **Production PKI must never reset.** With the root embedded in clients, a regenerated production root locks out every installed client. Lock down `pki/service.go` `canResetPKI` for production (see the "silent PKI auto-reset" risk below).
+
 ## Risks (need an extra condition, or latent today)
 
 - [ ] The controller can be impersonated by a relay certificate whose allowed names match the controller's. Relays and shields never check the controller's identity.
-- [ ] The client fetches its trust anchor over plain HTTP with no pin. This is the client part of bug 1.
+- [x] The client fetched its trust anchor over plain HTTP with no pin. Fixed as the client part of bug 1.
 - [ ] One signing secret is shared by login tokens and all enrollment tokens; only relay tokens carry an audience.
 - [ ] Revocation doesn't cut existing relay sessions of revoked connectors and clients.
 - [ ] Clients never check whether a connector is revoked.
