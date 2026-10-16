@@ -24,6 +24,9 @@ type Resolver struct {
 	AuthService       auth.Service
 	ConnectorCfg      connector.Config
 	ConnectorRegistry *connector.ConnectorRegistry
+	// ShieldRevocations is woken after a shield revocation commits
+	// (certificate audit bug 3); nil-safe.
+	ShieldRevocations *connector.ShieldRevocationDispatcher
 	ShieldSvc         shield.Service
 	ResourceCfg       resource.Config
 	Redis             valkeycompat.Cmdable

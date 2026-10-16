@@ -298,6 +298,10 @@ type CompilerResourceRow struct {
 	Status            string
 	RemoteNetworkID   string
 	RemoteNetworkName string
+	// ShieldRevoked is true when the resource's shield is revoked — its row
+	// says so, it has a tombstone, or the row is gone (certificate audit
+	// bug 3).
+	ShieldRevoked bool
 }
 
 // ListEnabledRulesWithResources returns all enabled access_rules joined with
@@ -307,7 +311,11 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 		`SELECT ar.resource_id, r.name, r.host, r.port_from, r.protocol,
 			        ar.group_id, COALESCE(r.shield_id::text, ''),
 			        COALESCE(s.connector_id::text, ''), r.status,
-			        r.remote_network_id::text, rn.name
+			        r.remote_network_id::text, rn.name,
+			        (r.shield_id IS NOT NULL AND (
+			            s.id IS NULL OR s.status = 'revoked'
+			            OR EXISTS (SELECT 1 FROM shield_revocations sr WHERE sr.shield_id = r.shield_id)
+			        ))
 			 FROM access_rules ar
 			 JOIN resources r ON r.id = ar.resource_id
 			 JOIN remote_networks rn ON rn.id = r.remote_network_id
@@ -325,7 +333,7 @@ func (s *Store) ListEnabledRulesWithResources(ctx context.Context, workspaceID s
 	var out []*CompilerResourceRow
 	for rows.Next() {
 		r := &CompilerResourceRow{}
-		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID, &r.ShieldConnectorID, &r.Status, &r.RemoteNetworkID, &r.RemoteNetworkName); err != nil {
+		if err := rows.Scan(&r.ResourceID, &r.Name, &r.Address, &r.Port, &r.Protocol, &r.GroupID, &r.ShieldID, &r.ShieldConnectorID, &r.Status, &r.RemoteNetworkID, &r.RemoteNetworkName, &r.ShieldRevoked); err != nil {
 			return nil, fmt.Errorf("scan rule row: %w", err)
 		}
 		out = append(out, r)

@@ -1,5 +1,5 @@
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -35,10 +35,22 @@ enum RelayEvent {
 /// as Shields connect / send messages / disconnect.
 #[derive(Clone, Debug, Default)]
 pub struct AgentTunnelHub {
+    /// One lock for registrations, sessions and revocations, so a shield
+    /// revocation and a session being opened through that shield are
+    /// serialized (certificate audit bug 3).
+    state: Arc<Mutex<HubState>>,
+}
+
+#[derive(Debug, Default)]
+struct HubState {
     /// shield_id → channel for sending ShieldControlMessages TO that Shield.
-    shield_txs: Arc<Mutex<HashMap<String, mpsc::Sender<ShieldControlMessage>>>>,
-    /// connection_id → channel for routing events FROM Shield back to the relay session.
-    relay_sessions: Arc<Mutex<HashMap<String, mpsc::Sender<RelayEvent>>>>,
+    shield_txs: HashMap<String, mpsc::Sender<ShieldControlMessage>>,
+    /// connection_id → the session's Shield and the channel routing events
+    /// FROM that Shield back to the relay session. The hub holds the only
+    /// sender, so removing an entry ends the session.
+    relay_sessions: HashMap<String, (String, mpsc::Sender<RelayEvent>)>,
+    /// Revoked shields (terminal): never registered again, no new sessions.
+    revoked: HashSet<String>,
 }
 
 impl AgentTunnelHub {
@@ -52,13 +64,45 @@ impl AgentTunnelHub {
 
     /// Register a channel that delivers ShieldControlMessages to `shield_id`.
     /// Called by agent_server's `control()` after the Shield connects.
-    pub fn register_shield(&self, shield_id: String, tx: mpsc::Sender<ShieldControlMessage>) {
-        self.shield_txs.lock().insert(shield_id, tx);
+    /// Returns false, registering nothing, if the shield is revoked.
+    #[must_use]
+    pub fn register_shield(
+        &self,
+        shield_id: String,
+        tx: mpsc::Sender<ShieldControlMessage>,
+    ) -> bool {
+        let mut state = self.state.lock();
+        if state.revoked.contains(&shield_id) {
+            return false;
+        }
+        state.shield_txs.insert(shield_id, tx);
+        true
     }
 
     /// Remove the Shield's send channel when it disconnects.
     pub fn unregister_shield(&self, shield_id: &str) {
-        self.shield_txs.lock().remove(shield_id);
+        self.state.lock().shield_txs.remove(shield_id);
+    }
+
+    /// Revoke `shield_id` (certificate audit bug 3): unregister it, refuse it
+    /// from now on, and end every relay session through it — including one
+    /// still waiting for TunnelOpened. Idempotent.
+    pub fn revoke_shield(&self, shield_id: &str) {
+        let mut state = self.state.lock();
+        state.revoked.insert(shield_id.to_string());
+        state.shield_txs.remove(shield_id);
+        let ended: Vec<String> = state
+            .relay_sessions
+            .iter()
+            .filter(|(_, (sid, _))| sid == shield_id)
+            .map(|(cid, _)| cid.clone())
+            .collect();
+        for cid in ended {
+            if let Some((_, tx)) = state.relay_sessions.remove(&cid) {
+                // Best effort: dropping the only sender ends the session anyway.
+                let _ = tx.try_send(RelayEvent::Close("shield revoked".to_string()));
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -66,26 +110,30 @@ impl AgentTunnelHub {
     // -----------------------------------------------------------------------
 
     pub fn dispatch_opened(&self, connection_id: &str, ok: bool, error: String) {
-        let tx = self.relay_sessions.lock().get(connection_id).cloned();
-        if let Some(tx) = tx {
+        if let Some(tx) = self.session_tx(connection_id) {
             let _ = tx.try_send(RelayEvent::Opened { ok, error });
         }
     }
 
     pub fn dispatch_data(&self, connection_id: &str, data: Vec<u8>) {
-        let tx = self.relay_sessions.lock().get(connection_id).cloned();
-        if let Some(tx) = tx {
+        if let Some(tx) = self.session_tx(connection_id) {
             let _ = tx.try_send(RelayEvent::Data(data));
         }
     }
 
     pub fn dispatch_close(&self, connection_id: &str, error: String) {
-        let tx = self.relay_sessions.lock().get(connection_id).cloned();
-        if let Some(tx) = tx {
+        // Remove session — Shield closed its side.
+        if let Some((_, tx)) = self.state.lock().relay_sessions.remove(connection_id) {
             let _ = tx.try_send(RelayEvent::Close(error));
         }
-        // Remove session — Shield closed its side.
-        self.relay_sessions.lock().remove(connection_id);
+    }
+
+    fn session_tx(&self, connection_id: &str) -> Option<mpsc::Sender<RelayEvent>> {
+        self.state
+            .lock()
+            .relay_sessions
+            .get(connection_id)
+            .map(|(_, tx)| tx.clone())
     }
 
     // -----------------------------------------------------------------------
@@ -111,21 +159,28 @@ impl AgentTunnelHub {
         port: u16,
         protocol: &str,
     ) -> Result<RelaySession> {
-        let shield_tx = self
-            .shield_txs
-            .lock()
-            .get(shield_id)
-            .cloned()
-            .ok_or_else(|| anyhow!("shield {} not connected", shield_id))?;
-
         let connection_id = Uuid::new_v4().to_string();
 
         // Register session channel before sending TunnelOpen — avoid race where
-        // Shield replies before we're listening.
+        // Shield replies before we're listening. The revocation check and the
+        // registration happen under the hub lock, so a concurrent revocation
+        // either refuses this session or ends it (certificate audit bug 3).
         let (event_tx, mut event_rx) = mpsc::channel::<RelayEvent>(64);
-        self.relay_sessions
-            .lock()
-            .insert(connection_id.clone(), event_tx);
+        let shield_tx = {
+            let mut state = self.state.lock();
+            if state.revoked.contains(shield_id) {
+                return Err(anyhow!("shield {} is revoked", shield_id));
+            }
+            let shield_tx = state
+                .shield_txs
+                .get(shield_id)
+                .cloned()
+                .ok_or_else(|| anyhow!("shield {} not connected", shield_id))?;
+            state
+                .relay_sessions
+                .insert(connection_id.clone(), (shield_id.to_string(), event_tx));
+            shield_tx
+        };
 
         shield_tx
             .send(ShieldControlMessage {
@@ -143,11 +198,11 @@ impl AgentTunnelHub {
         match event_rx.recv().await {
             Some(RelayEvent::Opened { ok: true, .. }) => {}
             Some(RelayEvent::Opened { ok: false, error }) => {
-                self.relay_sessions.lock().remove(&connection_id);
+                self.state.lock().relay_sessions.remove(&connection_id);
                 return Err(anyhow!("shield rejected tunnel: {}", error));
             }
             _ => {
-                self.relay_sessions.lock().remove(&connection_id);
+                self.state.lock().relay_sessions.remove(&connection_id);
                 return Err(anyhow!("tunnel session closed before TunnelOpened"));
             }
         }
@@ -261,5 +316,65 @@ impl RelaySession {
 
         d2s.abort();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod revocation_tests {
+    //! Certificate audit bug 3: a revoked shield is refused by the hub and
+    //! every session through it ends.
+
+    use super::*;
+    use std::time::Duration;
+
+    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn a_revoked_shield_cannot_register_again() {
+        let hub = AgentTunnelHub::new();
+        let (tx, _rx) = mpsc::channel(8);
+        assert!(hub.register_shield(SHIELD.into(), tx.clone()));
+        hub.revoke_shield(SHIELD);
+        assert!(!hub.register_shield(SHIELD.into(), tx));
+        assert!(!hub.state.lock().shield_txs.contains_key(SHIELD));
+    }
+
+    #[tokio::test]
+    async fn no_session_opens_through_a_revoked_shield() {
+        let hub = AgentTunnelHub::new();
+        let (tx, _rx) = mpsc::channel(8);
+        assert!(hub.register_shield(SHIELD.into(), tx));
+        hub.revoke_shield(SHIELD);
+        let err = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+            .await
+            .err()
+            .expect("refused");
+        assert!(err.to_string().contains("revoked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn revocation_ends_a_session_waiting_for_tunnel_opened() {
+        let hub = AgentTunnelHub::new();
+        let (tx, mut rx) = mpsc::channel(8);
+        assert!(hub.register_shield(SHIELD.into(), tx));
+        let opener = hub.clone();
+        let opening = tokio::spawn(async move {
+            opener
+                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+                .await
+        });
+        // The shield received TunnelOpen but never answers.
+        let _open = tokio::time::timeout(WAIT, rx.recv())
+            .await
+            .expect("TunnelOpen sent");
+        hub.revoke_shield(SHIELD);
+        let result = tokio::time::timeout(WAIT, opening)
+            .await
+            .expect("open must end when the shield is revoked")
+            .unwrap();
+        assert!(result.is_err());
+        assert!(hub.state.lock().relay_sessions.is_empty());
     }
 }

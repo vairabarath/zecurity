@@ -275,6 +275,15 @@ func main() {
 	postureStore := posture.NewStore(db.Pool)
 	postureEvaluator := posture.NewEvaluator(postureStore, policyNotifier)
 
+	// Certificate audit bug 3: drain the shield revocation outbox — at start
+	// (work left by a previous process), on every revocation, and on a timer.
+	shieldRevocations := &connector.ShieldRevocationDispatcher{
+		Pool:           db.Pool,
+		Registry:       connectorRegistry,
+		PolicyNotifier: policyNotifier,
+	}
+	go shieldRevocations.Run(ctx)
+
 	// ADR-016 C5: build a fresh LabelledRelayList and fan it out to all
 	// connected connectors. Triggered on capacity-tier promotion, address
 	// changes, and eviction. The version is a content fingerprint set by
@@ -299,6 +308,7 @@ func main() {
 				AuthService:       authSvc,
 				ConnectorCfg:      connectorCfg,
 				ConnectorRegistry: connectorRegistry,
+				ShieldRevocations: shieldRevocations,
 				Redis:             valkeycompat.NewAdapter(connectorValkey),
 				Pool:              db.Pool,
 				ShieldSvc:         shieldSvc,

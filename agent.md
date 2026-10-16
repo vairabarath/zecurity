@@ -235,7 +235,7 @@ Full guide: **`docs/database-development.md`**.
 - Schema files in `controller/migrations/` run **only when the Postgres volume is first created**. There is **no migration framework** and nothing upgrades an existing database. Don't add one.
 - **After any schema change:** `cd controller && docker compose down -v && docker compose up -d`. Local data is disposable. Then re-create the first provider super-admin with `PROVIDER_BOOTSTRAP_EMAIL` / `PROVIDER_BOOTSTRAP_PASSWORD`.
 - **Adding a schema change:**
-  - a new numbered file (next: `038_`);
+  - a new numbered file (next: `039_`);
   - never edit an existing file;
   - label the PR `[schema: reset DB]`.
 - **DB-backed tests:**
