@@ -519,6 +519,15 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		log.Printf("control stream: initial ping enqueue to connector %s failed: %v", connectorID, err)
 	}
 
+	// Certificate audit bug 3: the authoritative revoked-shield list. The
+	// connector accepts no shields until it has applied it, so if it cannot be
+	// sent the stream is closed and the connector retries, rather than staying
+	// connected without it.
+	if err := h.sendShieldRevocations(ctx, client); err != nil {
+		log.Printf("control stream: send shield revocation list to connector %s: %v", connectorID, err)
+		return status.Errorf(codes.Unavailable, "shield revocation list unavailable: %v", err)
+	}
+
 	// Sprint 21 K2: tell the connector the shield renewal window.
 	h.sendAgentPolicy(client)
 

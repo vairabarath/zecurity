@@ -854,7 +854,6 @@ mod renewal_switch_tests {
     /// Certificate audit bug 3: the controller's revocation list reaches the
     /// Shield registry.
     #[tokio::test]
-    #[ignore = "bug 3: demonstrates the gap; un-ignore with the fix"]
     async fn shield_revocations_reach_the_shield_registry() {
         let e = env();
         let (out_tx, _out_rx) = mpsc::channel(8);

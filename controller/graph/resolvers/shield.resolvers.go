@@ -74,12 +74,16 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	// Certificate audit bug 3: the revocation, its tombstone and its
+	// propagation work commit together; the dispatcher then invalidates the
+	// policy and tells the workspace's connectors.
 	if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, id); err != nil {
 		if errors.Is(err, shield.ErrNotRevocable) {
 			return false, fmt.Errorf("revoke shield: shield not found or not in revocable status")
 		}
 		return false, err
 	}
+	r.ShieldRevocations.Wake()
 	return true, nil
 }
 

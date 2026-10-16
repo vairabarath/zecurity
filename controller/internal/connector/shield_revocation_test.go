@@ -83,7 +83,6 @@ func (f *shieldRevocationFixture) shieldStatus(t *testing.T, id string) string {
 }
 
 func TestRevokeShield_RecordsTombstoneAndPropagationWorkAtomically(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	id := f.seedShield(t, "active")
 
@@ -103,7 +102,6 @@ func TestRevokeShield_RecordsTombstoneAndPropagationWorkAtomically(t *testing.T)
 
 // The revocation must not commit unless its propagation work is recorded.
 func TestRevokeShield_DoesNotCommitWithoutPropagationWork(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	id := f.seedShield(t, "active")
 	// Make recording the propagation work fail.
@@ -128,7 +126,6 @@ func TestRevokeShield_DoesNotCommitWithoutPropagationWork(t *testing.T) {
 }
 
 func TestRevokeShield_IsTerminalAndIdempotent(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	id := f.seedShield(t, "disconnected")
 	if err := shield.Revoke(f.ctx, txPool{f.pool}, f.wsID, id); err != nil {
@@ -152,7 +149,6 @@ func TestRevokeShield_IsTerminalAndIdempotent(t *testing.T) {
 // Deleting the shields row — directly, or by cascade from its connector —
 // must neither erase the revocation nor free the identity for reuse.
 func TestRevokedShieldIdentitySurvivesDeletion(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	deleted := f.seedShield(t, "active")
 	cascaded := f.seedShield(t, "active")
@@ -227,7 +223,6 @@ func drainRevocationLists(c *connectorStreamClient) [][]string {
 }
 
 func TestShieldRevocationDispatcher_DeliversThenClearsTheOutbox(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	earlier := f.seedShield(t, "active")
 	id := f.seedShield(t, "active")
@@ -269,7 +264,6 @@ func TestShieldRevocationDispatcher_DeliversThenClearsTheOutbox(t *testing.T) {
 // Failed propagation keeps the work for a retry; a dispatcher started after a
 // crash finishes work left by the previous process.
 func TestShieldRevocationDispatcher_RetriesUntilDelivered(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	id := f.seedShield(t, "active")
 	if err := shield.Revoke(f.ctx, txPool{f.pool}, f.wsID, id); err != nil {
@@ -366,7 +360,6 @@ func (f *shieldRevocationFixture) openControl(t *testing.T, h *EnrollmentHandler
 }
 
 func TestControl_SendsTheAuthoritativeRevocationListOnConnect(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	revoked := f.seedShield(t, "active")
 	_ = f.seedShield(t, "active") // live, must not be listed
@@ -397,7 +390,6 @@ func TestControl_SendsTheAuthoritativeRevocationListOnConnect(t *testing.T) {
 // stream, so the connector keeps refusing shields, rather than leave a
 // connected connector without its authoritative list.
 func TestControl_ClosesTheStreamWhenRevocationsCannotBeRead(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	f := newShieldRevocationFixture(t)
 	if _, err := f.pool.Exec(f.ctx, `ALTER TABLE shield_revocations RENAME TO shield_revocations_gone`); err != nil {
 		t.Fatalf("break revocation table: %v", err)
@@ -411,5 +403,42 @@ func TestControl_ClosesTheStreamWhenRevocationsCannotBeRead(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Control kept the stream open without an authoritative revocation list")
+	}
+}
+
+// hookNotifier runs a hook on its first NotifyPolicyChange.
+type hookNotifier struct {
+	once sync.Once
+	hook func()
+}
+
+func (n *hookNotifier) NotifyPolicyChange(context.Context, string) error {
+	n.once.Do(n.hook)
+	return nil
+}
+
+// A revocation that commits while a delivery is in progress keeps its own
+// outbox row: the dispatcher clears only the rows it read.
+func TestShieldRevocationDispatcher_KeepsWorkCommittedDuringDelivery(t *testing.T) {
+	f := newShieldRevocationFixture(t)
+	first := f.seedShield(t, "active")
+	second := f.seedShield(t, "active")
+	if err := shield.Revoke(f.ctx, txPool{f.pool}, f.wsID, first); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	n := &hookNotifier{hook: func() {
+		if err := shield.Revoke(f.ctx, txPool{f.pool}, f.wsID, second); err != nil {
+			t.Errorf("revoke during delivery: %v", err)
+		}
+	}}
+	d := &ShieldRevocationDispatcher{Pool: f.pool, Registry: NewConnectorRegistry(), PolicyNotifier: n}
+	if err := d.ProcessOnce(f.ctx); err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if left := f.count(t, `SELECT count(*) FROM shield_revocation_outbox WHERE shield_id = $1`, second); left != 1 {
+		t.Fatalf("work committed during delivery was cleared (%d rows left)", left)
+	}
+	if left := f.count(t, `SELECT count(*) FROM shield_revocation_outbox WHERE shield_id = $1`, first); left != 0 {
+		t.Fatalf("delivered work not cleared (%d rows left)", left)
 	}
 }

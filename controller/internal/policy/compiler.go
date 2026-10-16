@@ -54,6 +54,9 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 	rnNames := make(map[string]string) // remote_network_id → name (authoritative set)
 
 	for _, rule := range rules {
+		if shieldUnavailable(rule) {
+			continue
+		}
 		key := entryKey{rule.ResourceID, rule.Address, rule.Port, rule.Protocol}
 		if _, ok := names[key]; !ok {
 			routeType, err := routeTypeForResource(rule.Status, rule.ShieldID)
@@ -390,6 +393,20 @@ func resolveConnectorRelayAddr(publicAddr, observedHost string) string {
 		return net.JoinHostPort(observedHost, defaultRelayPort)
 	}
 	return ""
+}
+
+// shieldUnavailable reports whether a resource is protected through a shield
+// that is revoked or gone (certificate audit bug 3). Such a resource gets no
+// ACL entry — connectors default-deny it and tear down its live sessions —
+// until an administrator unprotects it or assigns another shield. It never
+// falls back to direct connector routing.
+func shieldUnavailable(rule *CompilerResourceRow) bool {
+	switch rule.Status {
+	case "protecting", "protected", "failed":
+		return rule.ShieldID == "" || rule.ShieldRevoked
+	default:
+		return false
+	}
 }
 
 func routeTypeForResource(status, shieldID string) (string, error) {

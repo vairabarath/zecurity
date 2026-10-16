@@ -22,10 +22,13 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// Revoke revokes shieldID in tenantID.
-//
-// Certificate audit bug 3: this only flips shields.status. Nothing records
-// the revocation durably or the work to propagate it.
+// Revoke revokes shieldID in tenantID (certificate audit bug 3). In one
+// transaction it marks the shield revoked, writes its tombstone (which
+// outlives the shields row) and records the propagation work in the outbox,
+// so the revocation cannot commit without it. The caller should then wake the
+// dispatcher; if it does not, or the process dies first, the dispatcher's
+// periodic pass and its startup pass deliver the work anyway. Terminal: a
+// revoked shield is ErrNotRevocable.
 func Revoke(ctx context.Context, db TxBeginner, tenantID, shieldID string) error {
 	tx, err := db.BeginTx(ctx)
 	if err != nil {
@@ -48,19 +51,30 @@ func Revoke(ctx context.Context, db TxBeginner, tenantID, shieldID string) error
 		}
 		return fmt.Errorf("revoke shield: %w", err)
 	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shield_revocations (shield_id, tenant_id) VALUES ($1, $2)
+		 ON CONFLICT (shield_id) DO NOTHING`,
+		shieldID, tenantID,
+	); err != nil {
+		return fmt.Errorf("revoke shield: record tombstone: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO shield_revocation_outbox (tenant_id, shield_id) VALUES ($1, $2)`,
+		tenantID, shieldID,
+	); err != nil {
+		return fmt.Errorf("revoke shield: record propagation work: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("revoke shield: commit: %w", err)
 	}
 	return nil
 }
 
-// RevokedShieldIDs returns every revoked shield identity in tenantID, sorted.
-//
-// Certificate audit bug 3: read from shields.status, so the revocation of a
-// shield whose row was deleted is lost.
+// RevokedShieldIDs returns every revoked shield identity in tenantID, sorted:
+// the tombstones, which survive the shields row (certificate audit bug 3).
 func RevokedShieldIDs(ctx context.Context, db Querier, tenantID string) ([]string, error) {
 	rows, err := db.Query(ctx,
-		`SELECT id::text FROM shields WHERE tenant_id = $1 AND status = 'revoked' ORDER BY id`,
+		`SELECT shield_id::text FROM shield_revocations WHERE tenant_id = $1 ORDER BY shield_id::text`,
 		tenantID,
 	)
 	if err != nil {

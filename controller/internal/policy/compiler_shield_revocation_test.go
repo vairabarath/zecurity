@@ -16,7 +16,6 @@ import (
 // shield. It must never fall back to direct connector routing. A shield row
 // that is gone (deleted after revocation, or cascaded away) counts as revoked.
 func TestCompileACLSnapshot_RevokedShieldMakesItsResourcesUnreachable(t *testing.T) {
-	t.Skip("bug 3: demonstrates the gap; un-skip with the fix")
 	adminDSN := os.Getenv("PKI_TEST_DATABASE_URL")
 	if adminDSN == "" {
 		t.Skip("PKI_TEST_DATABASE_URL not set")
