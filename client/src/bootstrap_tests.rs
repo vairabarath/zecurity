@@ -383,3 +383,182 @@ async fn logout_without_saved_anchors_pins_the_download_to_the_root() {
         .expect("revoke via the root-pinned download");
     assert_eq!(received(&ep.calls), vec!["RevokeDevice tok".to_string()]);
 }
+
+// ---- session tokens never travel over plain HTTP ---------------------------
+//
+// Certificate audit follow-up: the client refreshed and ended its session by
+// POSTing to `{http_base}/auth/refresh` and `/auth/logout`, plain HTTP by
+// default, with the access token in `Authorization` and the refresh token in
+// `X-Refresh-Token`. Anyone watching the network could take over the session.
+// Both now go over the gRPC channel pinned to the saved anchors.
+
+use crate::test_controller::spawn_recording_http;
+
+/// A genuine controller endpoint whose `http_base` is a recording plain-HTTP
+/// listener. Returns (endpoint, what plain HTTP saw).
+async fn genuine_with_watched_http(p: &Pkis) -> (crate::test_controller::Endpoint, CallLog) {
+    let mut ep = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.pki.intermediate_pem.clone(),
+        p.pki.controller_identity(),
+        Reply::Genuine,
+    )
+    .await;
+    let (http, seen) = spawn_recording_http().await;
+    ep.conf.http_base_url = format!("http://{http}");
+    (ep, seen)
+}
+
+#[tokio::test]
+async fn refresh_sends_no_token_over_plain_http() {
+    let p = pkis();
+    let (ep, seen) = genuine_with_watched_http(&p).await;
+    let result = crate::auth::refresh_access_token(
+        &ep.conf,
+        &p.pki.device_ca_chain(),
+        "old-access-token",
+        "old-refresh-token",
+    )
+    .await;
+    assert!(
+        received(&seen).is_empty(),
+        "plain HTTP saw: {:?}",
+        received(&seen)
+    );
+    let tokens = result.expect("refresh over the pinned channel");
+    assert_eq!(tokens.refresh_token, "rotated-refresh");
+    assert!(tokens.expires_at > 0);
+    assert_eq!(
+        received(&ep.calls),
+        vec!["RefreshSession old-refresh-token".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn dead_session_is_reported_as_dead() {
+    let p = pkis();
+    let (ep, seen) = genuine_with_watched_http(&p).await;
+    let result =
+        crate::auth::refresh_access_token(&ep.conf, &p.pki.device_ca_chain(), "access", "dead")
+            .await;
+    assert!(
+        matches!(result, Err(crate::auth::RefreshError::SessionDead)),
+        "{result:?}"
+    );
+    assert!(
+        received(&seen).is_empty(),
+        "plain HTTP saw: {:?}",
+        received(&seen)
+    );
+}
+
+#[tokio::test]
+async fn logout_sends_no_token_over_plain_http() {
+    let p = pkis();
+    let (ep, seen) = genuine_with_watched_http(&p).await;
+    crate::auth::logout(&ep.conf, &p.pki.device_ca_chain(), "logout-access-token")
+        .await
+        .expect("logout over the pinned channel");
+    assert!(
+        received(&seen).is_empty(),
+        "plain HTTP saw: {:?}",
+        received(&seen)
+    );
+    assert_eq!(
+        received(&ep.calls),
+        vec!["Logout logout-access-token".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn an_impostor_receives_no_session_token() {
+    let p = pkis();
+    // Mallory answers both plain HTTP and gRPC.
+    let mut mallory = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.attacker.root_pem.clone(),
+        p.attacker.identity(),
+        Reply::Forged,
+    )
+    .await;
+    let (http, seen) = spawn_recording_http().await;
+    mallory.conf.http_base_url = format!("http://{http}");
+    let anchors = p.pki.device_ca_chain();
+    let refreshed =
+        crate::auth::refresh_access_token(&mallory.conf, &anchors, "access", "refresh").await;
+    assert!(
+        matches!(refreshed, Err(crate::auth::RefreshError::Transient(_))),
+        "{refreshed:?}"
+    );
+    assert!(crate::auth::logout(&mallory.conf, &anchors, "access")
+        .await
+        .is_err());
+    assert!(
+        received(&seen).is_empty(),
+        "Mallory's HTTP saw: {:?}",
+        received(&seen)
+    );
+    assert!(
+        received(&mallory.calls).is_empty(),
+        "Mallory's gRPC received: {:?}",
+        received(&mallory.calls)
+    );
+}
+
+#[tokio::test]
+async fn an_empty_refresh_reply_is_a_failure_not_a_session() {
+    let p = pkis();
+    let (ep, _seen) = genuine_with_watched_http(&p).await;
+    let result =
+        crate::auth::refresh_access_token(&ep.conf, &p.pki.device_ca_chain(), "access", "empty")
+            .await;
+    assert!(
+        matches!(result, Err(crate::auth::RefreshError::Transient(_))),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn session_logout_refuses_saved_anchors_not_under_the_root() {
+    let p = pkis();
+    let forged_saved = format!(
+        "{}\n{}",
+        p.attacker.workspace_ca_pem, p.attacker.fake_intermediate_pem
+    );
+    let mallory = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.attacker.root_pem.clone(),
+        p.attacker.identity_under_fake_intermediate(),
+        Reply::Forged,
+    )
+    .await;
+    let result = crate::cmd::logout::end_session(
+        &mallory.conf,
+        "logout-access-token",
+        &forged_saved,
+        &p.pki.root_pem,
+    )
+    .await;
+    assert!(result.is_err(), "session logout completed against Mallory");
+    assert!(
+        received(&mallory.calls).is_empty(),
+        "Mallory received: {:?}",
+        received(&mallory.calls)
+    );
+
+    let ep = endpoint(
+        &p.pki,
+        &p.attacker,
+        p.pki.intermediate_pem.clone(),
+        p.pki.controller_identity(),
+        Reply::Genuine,
+    )
+    .await;
+    crate::cmd::logout::end_session(&ep.conf, "tok", &p.pki.device_ca_chain(), &p.pki.root_pem)
+        .await
+        .expect("session logout with the saved anchors");
+    assert_eq!(received(&ep.calls), vec!["Logout tok".to_string()]);
+}

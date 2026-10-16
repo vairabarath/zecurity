@@ -162,6 +162,10 @@ func (*postureTestAuth) VerifyIDToken(context.Context, string) (*auth.GoogleClai
 func (*postureTestAuth) IssueAccessToken(string, string, string, string, int) (string, int64, error) {
 	panic("not used")
 }
+func (*postureTestAuth) RefreshSession(context.Context, string, string) (string, string, error) {
+	return "", "", nil
+}
+func (*postureTestAuth) EndSession(context.Context, string) {}
 func (*postureTestAuth) IssueRefreshToken(context.Context, string) (string, error) {
 	panic("not used")
 }

@@ -62,10 +62,10 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
 
 ## Found during the bug 1 work (2026-10-16)
 
-- [ ] **High — client: access and refresh tokens are sent over plain HTTP.**
-  - `client/src/auth.rs` `refresh_access_token` and `logout` POST to `{http_base}/auth/refresh` and `/auth/logout`. `http_base` defaults to `http://<controller>:8080`, and the refresh token travels in an `X-Refresh-Token` header.
-  - A passive eavesdropper on the network can steal the session; no tampering is needed. Combined with bug 4, a stolen access token can enroll a new device.
-  - Fix needs a decision: move refresh and logout onto the pinned gRPC channel (additive RPCs plus controller handlers), or serve that HTTP over TLS and pin it to the saved anchors.
+- [x] **High — client: access and refresh tokens were sent over plain HTTP.**
+  - `client/src/auth.rs` POSTed to `{http_base}/auth/refresh` and `/auth/logout`, plain HTTP by default, with the refresh token in an `X-Refresh-Token` header. A passive eavesdropper could take over the session.
+  - Fixed (decided 2026-10-16: option A): refresh and logout now use the new `ClientService.RefreshSession` and `Logout` RPCs over the gRPC channel pinned to the saved anchors. The controller shares the session rules with the browser's cookie path.
+  - `/auth/refresh` no longer accepts the header, so clients that haven't updated must log in again.
 - [ ] **Medium — client releases are not signed.** `client-release.yml` publishes binaries plus a `checksums.txt` file in the same release. That file isn't a signature: whoever can replace the binary can replace it too. The embedded root is only as trustworthy as the download channel (HTTPS from GitHub). Next step: sign the releases (minisign or cosign) and verify the signature in `client-install.sh`.
 - [ ] **Planned: root rollover support.** The client embeds exactly one root, so rotating the root (10 years, or after a compromise) requires every client to update first. To allow a smooth switch:
   - the client should accept a set of roots;
