@@ -54,6 +54,10 @@ type sessionResponse struct {
 	PasswordChangeRequired bool   `json:"password_change_required"`
 }
 
+// loginLimiterTimeout bounds the rate-limiter round-trips so a dead Valkey
+// answers 503 instead of hanging the request for the client's whole timeout.
+const loginLimiterTimeout = 2 * time.Second
+
 // Login: POST /provider/auth/login {email, password}.
 func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -64,14 +68,16 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 
-	if !h.checkLimiter(w, ctx, req.Email, ip) {
+	limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+	defer cancel()
+	if !h.checkLimiter(w, limCtx, req.Email, ip) {
 		return
 	}
 
 	u, err := h.authn.Authenticate(ctx, Credentials{Email: req.Email, Password: req.Password})
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
-		h.recordFailure(w, ctx, req.Email, ip, "invalid credentials")
+		h.recordFailure(w, limCtx, req.Email, ip, "invalid credentials")
 		return
 	case errors.Is(err, ErrHashBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeAuthError(w, http.StatusServiceUnavailable, "login_unavailable")

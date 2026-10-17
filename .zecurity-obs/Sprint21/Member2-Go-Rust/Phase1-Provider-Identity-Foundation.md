@@ -371,6 +371,28 @@ func VerifyDummy(ctx context.Context, password string) error {
 - **Guard tests:** `TestDummyHash_UsesProductionParameters` (fails if the Argon2id parameters change and the constant isn't regenerated) and `TestVerifyDummy_RecoversAfterSaturation`.
 - **Found by:** writing `TestLogin_HashCapacityExhausted_503`, before the PR.
 
+### Fix: Valkey down hangs login instead of 503 (AT-H.7)
+**Issue:** with Valkey stopped, `POST /provider/auth/login` hung for the client's whole timeout and returned no response (curl: HTTP 000) instead of the required 503 `login_unavailable`.
+
+**Root Cause:** `AuthHandlers.Login` passed `r.Context()` (no deadline) into `checkLimiter` → `ValkeyLoginLimiter.Blocked`, whose `rdb.Get`/`rdb.TTL` round-trips have no per-call timeout. A dead Valkey therefore blocked the handler indefinitely; the fail-closed 503 branch was never reached.
+
+**Fix Applied (`controller/internal/provider/auth_handlers.go`, ~line 58):**
+```go
+// BEFORE:
+ctx := r.Context()
+...
+if !h.checkLimiter(w, ctx, req.Email, ip) { return }
+
+// AFTER:
+const loginLimiterTimeout = 2 * time.Second
+limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+defer cancel()
+if !h.checkLimiter(w, limCtx, req.Email, ip) { return }
+```
+and the failure-record path in `recordFailure` now uses `limCtx` too. The handler already maps the resulting `context.DeadlineExceeded` to `writeAuthError(w, 503, "login_unavailable")`, so a dead Valkey now answers 503 within ~2s.
+
+**Found by:** AT-H.7 (Valkey down → 503) during the Sprint 21 acceptance run.
+
 ## Implementation notes (H-a, 2026-09-28)
 
 Deviations from the commit plan, recorded for future contributors:
