@@ -633,28 +633,7 @@ async fn handle_up(
             .clone()
     };
     let relay_crl_url = format!("{}/relay.crl", conf.http_base());
-    // The Relay CRL is verified against the Platform Intermediate only
-    // (certificate audit bug 6). Without it the manager stays empty, so relay
-    // routing is refused (fail closed).
-    match crate::crl::crl_issuers(device.ca_cert_pem.as_bytes()) {
-        Ok(issuers) => {
-            if !relay_crl.has_valid_cache() {
-                if let Err(error) = relay_crl
-                    .refresh(&relay_crl_url, &issuers.intermediate_pem)
-                    .await
-                {
-                    warn!(%error, "initial Relay CRL fetch failed; relay routing is fail-closed");
-                }
-            }
-            relay_crl
-                .clone()
-                .spawn_refresh(relay_crl_url, issuers.intermediate_pem, 60, 15);
-        }
-        Err(error) => warn!(
-            error = format!("{error:#}"),
-            "device CA chain does not yield the Relay CRL issuer; relay routing is fail-closed"
-        ),
-    }
+    crate::crl::start_relay_crl(&relay_crl, relay_crl_url, device.ca_cert_pem.as_bytes()).await;
 
     let transports = match build_transports_by_resource_with_crl(
         &allowed_entries,
