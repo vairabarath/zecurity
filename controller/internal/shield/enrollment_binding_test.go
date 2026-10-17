@@ -10,7 +10,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,6 +25,7 @@ import (
 	shieldpb "github.com/yourorg/ztna/controller/gen/go/proto/shield/v1"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
+	"github.com/yourorg/ztna/controller/internal/tenant"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -387,6 +391,59 @@ func TestShieldEnrollBinding_ReissueRacingEnrollment(t *testing.T) {
 		t.Fatal("re-issue for a shield that is no longer pending reported success")
 	}
 	f.enrolledAs(resp, err)
+}
+
+// The token endpoint passes its pending pre-check, then the shield enrolls
+// before the swap: the endpoint answers 409 and mints nothing.
+func TestShieldEnrollBinding_TokenEndpointRacingEnrollment(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	token := f.mustReissue()
+	var code int
+	var body string
+	var done <-chan struct{}
+	hook := &shieldSignHookPKI{Service: f.pki}
+	hook.during = func() {
+		done = untilBlockedOrDone(t, f.pool, func() {
+			req := httptest.NewRequest(http.MethodPost, "/api/shields/"+f.shieldID+"/token", nil)
+			req = req.WithContext(tenant.Set(f.ctx, tenant.TenantContext{TenantID: f.wsID}))
+			rec := httptest.NewRecorder()
+			f.svc(f.pki, f.rdb).TokenHandler().ServeHTTP(rec, req)
+			code, body = rec.Code, rec.Body.String()
+		})
+	}
+	resp, err := f.svc(hook, f.rdb).Enroll(f.ctx, f.request(token))
+	<-done
+	if code != http.StatusConflict {
+		t.Fatalf("token endpoint status %d (%q), want 409", code, body)
+	}
+	f.enrolledAs(resp, err)
+}
+
+// A non-pending shield whose row still names the token is refused.
+func TestShieldEnrollBinding_NonPendingShieldRefused(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	token := f.mustReissue()
+	f.exec(`UPDATE shields SET status = 'disconnected' WHERE id = $1`, f.shieldID)
+	resp, err := f.svc(f.pki, f.rdb).Enroll(f.ctx, f.request(token))
+	refusedShieldEnrollment(t, resp, err, codes.PermissionDenied)
+	if r := f.row(); r.status != "disconnected" || r.serial != "" {
+		t.Fatalf("row changed by a refused enrollment: %+v", r)
+	}
+}
+
+// The current token whose Valkey entry expired is refused.
+func TestShieldEnrollBinding_ExpiredEntryRefused(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	token := f.mustReissue()
+	f.redis.Del(enrollmentJTIPrefix + f.jti(token))
+	resp, err := f.svc(f.pki, f.rdb).Enroll(f.ctx, f.request(token))
+	refusedShieldEnrollment(t, resp, err, codes.PermissionDenied)
+	if !strings.Contains(err.Error(), "token expired or already used") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	if r := f.row(); r.status != "pending" || r.jti != f.jti(token) {
+		t.Fatalf("row changed by a refused enrollment: %+v", r)
+	}
 }
 
 func TestShieldEnrollBinding_ReissueRefusedForNonPendingShield(t *testing.T) {

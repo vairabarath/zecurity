@@ -370,6 +370,7 @@ func TestEnrollBinding_ConcurrentSupersededAndCurrentTokens(t *testing.T) {
 func TestEnrollBinding_ReissueRacingEnrollment(t *testing.T) {
 	f := newBindingFixture(t)
 	token := f.mustReissue()
+	entriesBefore := f.tokenEntries()
 	var reissued string
 	var reissueCode int
 	var done <-chan struct{}
@@ -388,6 +389,20 @@ func TestEnrollBinding_ReissueRacingEnrollment(t *testing.T) {
 		t.Fatalf("re-issue status %d, want 409", reissueCode)
 	}
 	f.enrolledAs(resp, err)
+	// The refused re-issue left no entry; the enrollment consumed its own.
+	if got := f.tokenEntries(); got != entriesBefore-1 {
+		t.Fatalf("token entries %d → %d, want %d", entriesBefore, got, entriesBefore-1)
+	}
+}
+
+// tokenEntries counts stored connector enrollment token entries.
+func (f *bindingFixture) tokenEntries() int {
+	f.t.Helper()
+	keys, err := testValkeyRDB.Keys(f.ctx, enrollmentJTIPrefix+"*").Result()
+	if err != nil {
+		f.t.Fatalf("list token entries: %v", err)
+	}
+	return len(keys)
 }
 
 func TestEnrollBinding_ReissueRefusedForNonPendingConnector(t *testing.T) {
