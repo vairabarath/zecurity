@@ -181,29 +181,41 @@ async fn main() -> anyhow::Result<()> {
         enrollment_state.workspace_id
     );
 
-    let crl_manager = crl::CrlManager::new();
-    let workspace_ca_bundle = cert_store.workspace_ca_pem.clone();
-    if let Err(e) = crl_manager.refresh(&crl_url, &workspace_ca_bundle).await {
-        tracing::warn!("initial CRL fetch failed; revocation state is unavailable: {e}");
-    }
-    crl_manager
-        .clone()
-        .spawn_refresh(crl_url, workspace_ca_bundle, 60, 15);
-
     let relay_crl_url = format!("{}/relay.crl", http_base.trim_end_matches('/'));
+    let crl_manager = crl::CrlManager::new();
     let relay_crl_manager = crl::CrlManager::new();
-    if let Err(e) = relay_crl_manager
-        .refresh(&relay_crl_url, &cert_store.workspace_ca_pem)
-        .await
-    {
-        tracing::warn!("initial Relay CRL fetch failed; relay dialing is fail-closed: {e}");
+    // Each CRL is verified against its own signer only (certificate audit
+    // bug 6). Without the issuers both managers stay empty, so revocation
+    // checks deny (fail closed).
+    match crl::crl_issuers(&cert_store.workspace_ca_pem) {
+        Ok(issuers) => {
+            if let Err(e) = crl_manager
+                .refresh(&crl_url, &issuers.workspace_ca_pem)
+                .await
+            {
+                tracing::warn!("initial CRL fetch failed; revocation state is unavailable: {e}");
+            }
+            crl_manager
+                .clone()
+                .spawn_refresh(crl_url, issuers.workspace_ca_pem, 60, 15);
+
+            if let Err(e) = relay_crl_manager
+                .refresh(&relay_crl_url, &issuers.intermediate_pem)
+                .await
+            {
+                tracing::warn!("initial Relay CRL fetch failed; relay dialing is fail-closed: {e}");
+            }
+            relay_crl_manager.clone().spawn_refresh(
+                relay_crl_url,
+                issuers.intermediate_pem,
+                60,
+                15,
+            );
+        }
+        Err(e) => tracing::error!(
+            "CA bundle does not yield the CRL issuers; revocation checks fail closed: {e:#}"
+        ),
     }
-    relay_crl_manager.clone().spawn_refresh(
-        relay_crl_url,
-        cert_store.workspace_ca_pem.clone(),
-        60,
-        15,
-    );
 
     // Control message channel for device_tunnel → control_stream (emits access logs).
     let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::channel::<ControlMessage>(128);

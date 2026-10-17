@@ -103,6 +103,27 @@ fn server_identity(issuer: &Certificate, issuer_key: &KeyPair) -> (String, Strin
     (cert.pem(), key.serialize_pem())
 }
 
+/// A current CRL (fixed calendar window 2000–2999) revoking `revoked`.
+fn signed_crl(issuer: &Certificate, issuer_key: &KeyPair, revoked: &[u8]) -> Vec<u8> {
+    rcgen::CertificateRevocationListParams {
+        this_update: rcgen::date_time_ymd(2000, 1, 1),
+        next_update: rcgen::date_time_ymd(2999, 1, 1),
+        crl_number: SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: vec![rcgen::RevokedCertParams {
+            serial_number: SerialNumber::from_slice(revoked),
+            revocation_time: rcgen::date_time_ymd(2000, 1, 1),
+            reason_code: None,
+            invalidity_date: None,
+        }],
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    }
+    .signed_by(issuer, issuer_key)
+    .unwrap()
+    .der()
+    .to_vec()
+}
+
 pub struct TestPki {
     root_cert: Certificate,
     root_key: KeyPair,
@@ -186,6 +207,17 @@ impl TestPki {
             .signed_by(&new_key(), &self.int_cert, &self.int_key)
             .unwrap();
         (int.pem(), ws.pem())
+    }
+
+    /// `/ca.crl` as the controller signs it: by the Workspace CA, revoking
+    /// `revoked` (certificate audit bug 6).
+    pub fn workspace_crl(&self, revoked: &[u8]) -> Vec<u8> {
+        signed_crl(&self.ws_cert, &self.ws_key, revoked)
+    }
+
+    /// `/relay.crl` as the controller signs it: by the Platform Intermediate.
+    pub fn relay_crl(&self, revoked: &[u8]) -> Vec<u8> {
+        signed_crl(&self.int_cert, &self.int_key, revoked)
     }
 
     /// A "Workspace CA" that is not a CA, issued by the real Intermediate,

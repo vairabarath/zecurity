@@ -118,6 +118,26 @@ impl CrlManager {
     }
 }
 
+/// The issuer each CRL is checked against, derived from the saved device CA
+/// chain (Workspace CA + Platform Intermediate). Certificate audit bug 6: the
+/// two CRLs are signed by different CAs, and each must be accepted only from
+/// its own signer.
+#[derive(Clone, Debug)]
+pub struct CrlIssuers {
+    /// Signs `/ca.crl` (revoked devices and connectors).
+    #[allow(dead_code)] // the client checks only the Relay CRL today
+    pub workspace_ca_pem: Vec<u8>,
+    /// Signs `/relay.crl` (revoked relays).
+    pub intermediate_pem: Vec<u8>,
+}
+
+pub fn crl_issuers(bundle_pem: &[u8]) -> anyhow::Result<CrlIssuers> {
+    Ok(CrlIssuers {
+        workspace_ca_pem: bundle_pem.to_vec(),
+        intermediate_pem: bundle_pem.to_vec(),
+    })
+}
+
 fn validate_crl(
     crl: &CertificateRevocationList<'_>,
     issuer_ca_pem: &[u8],
@@ -286,5 +306,115 @@ mod tests {
         let (this_update, next_update) = controller_crl(CONSUMER_NOW - 86_400, 600);
         assert!(check_update_times(this_update, next_update, CONSUMER_NOW).is_err());
         assert!(check_update_times(CONSUMER_NOW - 300, CONSUMER_NOW - 300, CONSUMER_NOW).is_err());
+    }
+}
+
+/// Certificate audit bug 6: the client checked the Relay CRL against the
+/// whole device CA chain (Workspace CA + Intermediate), so the Workspace CRL
+/// (signed by the Workspace CA) served as `/relay.crl` was accepted, and
+/// revoked relays passed.
+#[cfg(test)]
+mod issuer_binding_tests {
+    use super::*;
+    use crate::test_pki::TestPki;
+
+    const RELAY_SERIAL: &[u8] = &[0x7e, 0x1a];
+
+    #[test]
+    fn genuine_relay_crl_validates_against_the_intermediate() {
+        let pki = TestPki::new();
+        let issuers = crl_issuers(pki.device_ca_chain().as_bytes()).unwrap();
+        let relay = CrlManager::new();
+        relay
+            .install_verified_der(&pki.relay_crl(RELAY_SERIAL), &issuers.intermediate_pem)
+            .unwrap();
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    #[test]
+    fn workspace_crl_substituted_for_relay_crl_is_rejected() {
+        let pki = TestPki::new();
+        let issuers = crl_issuers(pki.device_ca_chain().as_bytes()).unwrap();
+        let relay = CrlManager::new();
+        assert!(
+            relay
+                .install_verified_der(&pki.workspace_crl(&[0x01]), &issuers.intermediate_pem)
+                .is_err(),
+            "the Workspace CRL was accepted as the Relay CRL"
+        );
+        // Rejected, so still Unavailable (deny), never NotRevoked.
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Unavailable);
+
+        // And it never replaces a genuine Relay CRL.
+        relay
+            .install_verified_der(&pki.relay_crl(RELAY_SERIAL), &issuers.intermediate_pem)
+            .unwrap();
+        assert!(relay
+            .install_verified_der(&pki.workspace_crl(&[0x01]), &issuers.intermediate_pem)
+            .is_err());
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    #[test]
+    fn the_device_ca_chain_is_not_accepted_as_a_crl_issuer() {
+        let pki = TestPki::new();
+        for der in [pki.workspace_crl(&[0x01]), pki.relay_crl(RELAY_SERIAL)] {
+            assert!(CrlManager::new()
+                .install_verified_der(&der, pki.device_ca_chain().as_bytes())
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn roles_follow_the_chain_not_the_order() {
+        let pki = TestPki::new();
+        let reversed = format!("{}\n{}", pki.intermediate_pem, pki.workspace_ca_pem);
+        let issuers = crl_issuers(reversed.as_bytes()).unwrap();
+        assert_eq!(issuers.intermediate_pem, pki.intermediate_pem.as_bytes());
+        assert_eq!(issuers.workspace_ca_pem, pki.workspace_ca_pem.as_bytes());
+    }
+
+    #[test]
+    fn malformed_or_invalid_chains_are_rejected() {
+        let pki = TestPki::new();
+        let (expired_int, expired_ws) = pki.expired_cas();
+        let (_, csr) = crate::test_pki::device_key_and_csr();
+        let (non_ca_ws, _) = pki.non_ca_workspace(&csr, crate::test_pki::DEVICE_ID);
+        for (bundle, why) in [
+            (String::new(), "empty"),
+            ("garbage".to_string(), "garbage"),
+            (pki.intermediate_pem.clone(), "Intermediate only"),
+            (pki.workspace_ca_pem.clone(), "Workspace CA only"),
+            (
+                format!("{}\n{}", pki.device_ca_chain(), pki.root_pem),
+                "extra certificate",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, pki.workspace_ca_pem),
+                "duplicate",
+            ),
+            (
+                format!("{}\n{}", pki.intermediate_pem, pki.root_pem),
+                "root in the Intermediate role",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, pki.root_pem),
+                "no issuing relationship",
+            ),
+            (
+                format!("{}\n{}", expired_ws, pki.intermediate_pem),
+                "expired Workspace CA",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, expired_int),
+                "expired Intermediate (and not the Workspace CA's issuer key)",
+            ),
+            (
+                format!("{}\n{}", non_ca_ws, pki.intermediate_pem),
+                "non-CA Workspace certificate",
+            ),
+        ] {
+            assert!(crl_issuers(bundle.as_bytes()).is_err(), "accepted: {why}");
+        }
     }
 }

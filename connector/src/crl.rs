@@ -137,6 +137,25 @@ impl CrlManager {
     }
 }
 
+/// The issuer each CRL is checked against, derived from the stored CA bundle
+/// (Workspace CA + Platform Intermediate). Certificate audit bug 6: the two
+/// CRLs are signed by different CAs, and each must be accepted only from its
+/// own signer.
+#[derive(Clone, Debug)]
+pub struct CrlIssuers {
+    /// Signs `/ca.crl` (revoked devices and connectors).
+    pub workspace_ca_pem: Vec<u8>,
+    /// Signs `/relay.crl` (revoked relays).
+    pub intermediate_pem: Vec<u8>,
+}
+
+pub fn crl_issuers(bundle_pem: &[u8]) -> anyhow::Result<CrlIssuers> {
+    Ok(CrlIssuers {
+        workspace_ca_pem: bundle_pem.to_vec(),
+        intermediate_pem: bundle_pem.to_vec(),
+    })
+}
+
 fn validate_crl(
     crl: &CertificateRevocationList<'_>,
     issuer_ca_pem: &[u8],
@@ -480,5 +499,363 @@ mod tests {
             validate_update_times(CONSUMER_NOW - 300, Some(CONSUMER_NOW - 300), CONSUMER_NOW)
                 .is_err()
         );
+    }
+}
+
+/// Certificate audit bug 6: the Workspace CRL (signed by the Workspace CA) and
+/// the Relay CRL (signed by the Platform Intermediate) were both checked
+/// against the whole CA bundle, so whichever bundle certificate matched the
+/// CRL's issuer was accepted. Over plain HTTP, either genuine CRL could be
+/// served in place of the other: revoked devices and connectors, or revoked
+/// relays, would then pass.
+#[cfg(test)]
+mod issuer_binding_tests {
+    use super::*;
+    use ::time::{Duration as TimeDuration, OffsetDateTime};
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertificateRevocationListParams, CertifiedIssuer,
+        DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod, KeyPair,
+        KeyUsagePurpose, RevokedCertParams, SerialNumber, PKCS_ECDSA_P256_SHA256,
+    };
+
+    // Minimal DER serials (high bit clear), as CRL entries store them.
+    const DEVICE_SERIAL: &[u8] = &[0x5e, 0xed];
+    const RELAY_SERIAL: &[u8] = &[0x7e, 0x1a];
+
+    fn ca_params(cn: &str, key_id: &[u8], constraint: BasicConstraints) -> CertificateParams {
+        let mut params = CertificateParams::default();
+        let mut dn = DistinguishedName::new();
+        dn.push(DnType::CommonName, cn);
+        params.distinguished_name = dn;
+        params.is_ca = IsCa::Ca(constraint);
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        params.key_identifier_method = KeyIdMethod::PreSpecified(key_id.to_vec());
+        params
+    }
+
+    fn key() -> KeyPair {
+        KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap()
+    }
+
+    /// Platform Root → Platform Intermediate → Workspace CA, shaped like the
+    /// controller's PKI.
+    struct Pki {
+        root: CertifiedIssuer<'static, KeyPair>,
+        intermediate: CertifiedIssuer<'static, KeyPair>,
+        workspace: CertifiedIssuer<'static, KeyPair>,
+    }
+
+    const ROOT_KID: &[u8] = b"root-kid";
+    const INT_KID: &[u8] = b"intermediate-kid";
+    const WS_KID: &[u8] = b"workspace-kid";
+
+    impl Pki {
+        fn new() -> Self {
+            let root = CertifiedIssuer::self_signed(
+                ca_params("Platform Root", ROOT_KID, BasicConstraints::Constrained(2)),
+                key(),
+            )
+            .unwrap();
+            let intermediate = CertifiedIssuer::signed_by(
+                ca_params(
+                    "Platform Intermediate",
+                    INT_KID,
+                    BasicConstraints::Constrained(1),
+                ),
+                key(),
+                &root,
+            )
+            .unwrap();
+            let workspace = CertifiedIssuer::signed_by(
+                ca_params(
+                    "workspace-ws-test",
+                    WS_KID,
+                    BasicConstraints::Constrained(0),
+                ),
+                key(),
+                &intermediate,
+            )
+            .unwrap();
+            Self {
+                root,
+                intermediate,
+                workspace,
+            }
+        }
+
+        /// The stored bundle: Workspace CA + Platform Intermediate.
+        fn bundle(&self) -> String {
+            format!("{}{}", self.workspace.pem(), self.intermediate.pem())
+        }
+
+        /// `/ca.crl`: revokes a device, signed by the Workspace CA.
+        fn workspace_crl(&self) -> Vec<u8> {
+            crl(&self.workspace, WS_KID, DEVICE_SERIAL)
+        }
+
+        /// `/relay.crl`: revokes a relay, signed by the Platform Intermediate.
+        fn relay_crl(&self) -> Vec<u8> {
+            crl(&self.intermediate, INT_KID, RELAY_SERIAL)
+        }
+    }
+
+    fn crl(issuer: &Issuer<'_, KeyPair>, key_id: &[u8], revoked: &[u8]) -> Vec<u8> {
+        let now = OffsetDateTime::now_utc();
+        CertificateRevocationListParams {
+            this_update: now - TimeDuration::minutes(1),
+            next_update: now + TimeDuration::hours(1),
+            crl_number: SerialNumber::from(1u64),
+            issuing_distribution_point: None,
+            revoked_certs: vec![RevokedCertParams {
+                serial_number: SerialNumber::from_slice(revoked),
+                revocation_time: now - TimeDuration::minutes(1),
+                reason_code: None,
+                invalidity_date: None,
+            }],
+            key_identifier_method: KeyIdMethod::PreSpecified(key_id.to_vec()),
+        }
+        .signed_by(issuer)
+        .unwrap()
+        .der()
+        .to_vec()
+    }
+
+    #[test]
+    fn genuine_crls_validate_at_their_own_endpoints() {
+        let pki = Pki::new();
+        let issuers = crl_issuers(pki.bundle().as_bytes()).unwrap();
+
+        let workspace = CrlManager::new();
+        workspace
+            .install_verified_der(&pki.workspace_crl(), &issuers.workspace_ca_pem)
+            .unwrap();
+        assert_eq!(workspace.check(&DEVICE_SERIAL), RevocationStatus::Revoked);
+
+        let relay = CrlManager::new();
+        relay
+            .install_verified_der(&pki.relay_crl(), &issuers.intermediate_pem)
+            .unwrap();
+        assert_eq!(relay.check(&RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    // A substituted CRL has a valid signature from the other bundle CA; it
+    // must still be rejected, and a fresh manager must stay Unavailable (deny),
+    // never NotRevoked.
+    #[test]
+    fn relay_crl_substituted_for_workspace_crl_is_rejected() {
+        let pki = Pki::new();
+        let issuers = crl_issuers(pki.bundle().as_bytes()).unwrap();
+        let workspace = CrlManager::new();
+        assert!(
+            workspace
+                .install_verified_der(&pki.relay_crl(), &issuers.workspace_ca_pem)
+                .is_err(),
+            "the Relay CRL was accepted as the Workspace CRL"
+        );
+        assert_eq!(
+            workspace.check(&DEVICE_SERIAL),
+            RevocationStatus::Unavailable
+        );
+    }
+
+    #[test]
+    fn workspace_crl_substituted_for_relay_crl_is_rejected() {
+        let pki = Pki::new();
+        let issuers = crl_issuers(pki.bundle().as_bytes()).unwrap();
+        let relay = CrlManager::new();
+        assert!(
+            relay
+                .install_verified_der(&pki.workspace_crl(), &issuers.intermediate_pem)
+                .is_err(),
+            "the Workspace CRL was accepted as the Relay CRL"
+        );
+        assert_eq!(relay.check(&RELAY_SERIAL), RevocationStatus::Unavailable);
+    }
+
+    // A substituted CRL never replaces a genuine one already installed.
+    #[test]
+    fn substitution_keeps_the_last_genuine_crl() {
+        let pki = Pki::new();
+        let issuers = crl_issuers(pki.bundle().as_bytes()).unwrap();
+        let workspace = CrlManager::new();
+        workspace
+            .install_verified_der(&pki.workspace_crl(), &issuers.workspace_ca_pem)
+            .unwrap();
+        assert!(workspace
+            .install_verified_der(&pki.relay_crl(), &issuers.workspace_ca_pem)
+            .is_err());
+        assert_eq!(workspace.check(&DEVICE_SERIAL), RevocationStatus::Revoked);
+    }
+
+    // A bundle of CAs must never be used as the issuer: it lets the CRL pick
+    // its own signer.
+    #[test]
+    fn a_bundle_is_not_accepted_as_a_crl_issuer() {
+        let pki = Pki::new();
+        for der in [pki.workspace_crl(), pki.relay_crl()] {
+            assert!(CrlManager::new()
+                .install_verified_der(&der, pki.bundle().as_bytes())
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn roles_follow_the_chain_not_the_order() {
+        let pki = Pki::new();
+        let reversed = format!("{}{}", pki.intermediate.pem(), pki.workspace.pem());
+        let issuers = crl_issuers(reversed.as_bytes()).unwrap();
+        assert_eq!(issuers.workspace_ca_pem, pki.workspace.pem().into_bytes());
+        assert_eq!(
+            issuers.intermediate_pem,
+            pki.intermediate.pem().into_bytes()
+        );
+    }
+
+    fn rejected(bundle: &str, why: &str) {
+        assert!(crl_issuers(bundle.as_bytes()).is_err(), "accepted: {why}");
+    }
+
+    #[test]
+    fn malformed_or_wrongly_shaped_bundles_are_rejected() {
+        let pki = Pki::new();
+        let unrelated = CertifiedIssuer::self_signed(
+            ca_params(
+                "Unrelated CA",
+                b"other-kid",
+                BasicConstraints::Unconstrained,
+            ),
+            key(),
+        )
+        .unwrap();
+        rejected("", "empty bundle");
+        rejected("not a certificate", "garbage");
+        rejected(
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+            "undecodable certificate",
+        );
+        rejected(&pki.workspace.pem(), "Workspace CA only");
+        rejected(&pki.intermediate.pem(), "Intermediate only");
+        rejected(
+            &format!("{}{}", pki.bundle(), pki.root.pem()),
+            "extra certificate (root)",
+        );
+        rejected(
+            &format!("{}{}", pki.workspace.pem(), pki.workspace.pem()),
+            "duplicate certificate",
+        );
+        rejected(
+            &format!("{}{}", pki.workspace.pem(), unrelated.pem()),
+            "no issuing relationship",
+        );
+        rejected(
+            &format!("{}{}", pki.workspace.pem(), pki.root.pem()),
+            "Workspace CA with the root instead of its issuer",
+        );
+        rejected(
+            &format!("{}{}", pki.intermediate.pem(), pki.root.pem()),
+            "self-signed root in the Intermediate role",
+        );
+    }
+
+    #[test]
+    fn invalid_chains_are_rejected() {
+        let pki = Pki::new();
+
+        // Names say "issued by the Intermediate", but another key signed it.
+        let impostor_key = key();
+        let impostor = Issuer::new(
+            ca_params(
+                "Platform Intermediate",
+                INT_KID,
+                BasicConstraints::Constrained(1),
+            ),
+            impostor_key,
+        );
+        let forged = ca_params(
+            "workspace-ws-test",
+            WS_KID,
+            BasicConstraints::Constrained(0),
+        )
+        .signed_by(&key(), &impostor)
+        .unwrap();
+        rejected(
+            &format!("{}{}", forged.pem(), pki.intermediate.pem()),
+            "bad signature",
+        );
+
+        // A leaf in the Workspace CA role.
+        let mut leaf = CertificateParams::default();
+        leaf.distinguished_name.push(DnType::CommonName, "leaf");
+        leaf.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let leaf = leaf.signed_by(&key(), &pki.intermediate).unwrap();
+        rejected(
+            &format!("{}{}", leaf.pem(), pki.intermediate.pem()),
+            "non-CA Workspace certificate",
+        );
+
+        // A Workspace CA that may not sign CRLs.
+        let mut no_crl_sign = ca_params(
+            "workspace-ws-test",
+            WS_KID,
+            BasicConstraints::Constrained(0),
+        );
+        no_crl_sign.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let no_crl_sign = no_crl_sign.signed_by(&key(), &pki.intermediate).unwrap();
+        rejected(
+            &format!("{}{}", no_crl_sign.pem(), pki.intermediate.pem()),
+            "Workspace CA without cRLSign",
+        );
+
+        // An expired Workspace CA.
+        let mut expired = ca_params(
+            "workspace-ws-test",
+            WS_KID,
+            BasicConstraints::Constrained(0),
+        );
+        expired.not_before = OffsetDateTime::now_utc() - TimeDuration::days(10);
+        expired.not_after = OffsetDateTime::now_utc() - TimeDuration::days(1);
+        let expired = expired.signed_by(&key(), &pki.intermediate).unwrap();
+        rejected(
+            &format!("{}{}", expired.pem(), pki.intermediate.pem()),
+            "expired Workspace CA",
+        );
+
+        // An Intermediate that may not issue CA certificates.
+        let capped = CertifiedIssuer::signed_by(
+            ca_params(
+                "Platform Intermediate",
+                INT_KID,
+                BasicConstraints::Constrained(0),
+            ),
+            key(),
+            &pki.root,
+        )
+        .unwrap();
+        let ws = ca_params(
+            "workspace-ws-test",
+            WS_KID,
+            BasicConstraints::Constrained(0),
+        )
+        .signed_by(&key(), &capped)
+        .unwrap();
+        rejected(
+            &format!("{}{}", ws.pem(), capped.pem()),
+            "Intermediate with path length 0",
+        );
+    }
+
+    // Two CAs that each certify the other: no unambiguous Workspace CA.
+    #[test]
+    fn ambiguous_relationships_are_rejected() {
+        let (key_a, key_b) = (key(), key());
+        let params_a = ca_params("CA A", b"kid-a", BasicConstraints::Unconstrained);
+        let params_b = ca_params("CA B", b"kid-b", BasicConstraints::Unconstrained);
+        let a = params_a
+            .signed_by(&key_a, &Issuer::from_params(&params_b, &key_b))
+            .unwrap();
+        let b = params_b
+            .signed_by(&key_b, &Issuer::from_params(&params_a, &key_a))
+            .unwrap();
+        rejected(&format!("{}{}", a.pem(), b.pem()), "mutual certification");
     }
 }
