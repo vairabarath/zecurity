@@ -54,6 +54,11 @@ type WorkspaceStore interface {
 	// GetIntermediateCA loads the platform intermediate CA certificate used to
 	// verify workspace CA chains and the controller server certificate.
 	GetIntermediateCA(ctx context.Context) (*x509.Certificate, error)
+
+	// GetConnectorStanding loads the authoritative revocation state of the
+	// connector connectorID in trustDomain. Returns (nil, nil) if no such
+	// connector exists and (nil, err) if the state cannot be read.
+	GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error)
 }
 
 // WorkspaceLookup is the minimal workspace info needed by the trust domain validator.
@@ -206,6 +211,11 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 			if err := verifyConnectorCertificate(ctx, store, trustDomain, leaf); err != nil {
 				return nil, status.Errorf(codes.Unauthenticated, "connector certificate verification failed: %v", err)
 			}
+			// Certificate audit bug 7: reject a revoked connector on every
+			// unary RPC, including the shield RPCs it proxies.
+			if err := requireConnectorNotRevoked(ctx, store, trustDomain, entityID); err != nil {
+				return nil, err
+			}
 		}
 		if role == appmeta.SPIFFERoleRelay {
 			if err := verifyRelayCertificate(ctx, store, trustDomain, leaf); err != nil {
@@ -229,6 +239,24 @@ func UnarySPIFFEInterceptor(validator TrustDomainValidator, store WorkspaceStore
 
 		return handler(ctx, req)
 	}
+}
+
+// requireConnectorNotRevoked refuses a connector that is revoked or unknown in
+// its trust domain. Revocation does not shorten a certificate's lifetime, so
+// a verified chain is not enough. It fails closed: if the standing cannot be
+// read, the call is refused as Unavailable.
+func requireConnectorNotRevoked(ctx context.Context, store WorkspaceStore, trustDomain, connectorID string) error {
+	standing, err := store.GetConnectorStanding(ctx, trustDomain, connectorID)
+	if err != nil {
+		return status.Error(codes.Unavailable, "connector revocation state unavailable")
+	}
+	if standing == nil {
+		return status.Error(codes.PermissionDenied, "connector not found")
+	}
+	if standing.Revoked() {
+		return status.Error(codes.PermissionDenied, "connector revoked")
+	}
+	return nil
 }
 
 func verifyRelayCertificate(ctx context.Context, store WorkspaceStore, trustDomain string, leaf *x509.Certificate) error {

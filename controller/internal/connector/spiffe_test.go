@@ -141,6 +141,15 @@ func TestContextAccessors_EmptyContext(t *testing.T) {
 type mockWorkspaceStore struct {
 	workspaces     map[string]*WorkspaceLookup
 	intermediateCA *x509.Certificate
+	workspaceCA    *x509.Certificate
+	standing       *ConnectorStanding
+	standingErr    error
+	standingCalls  int
+}
+
+func (m *mockWorkspaceStore) GetConnectorStanding(ctx context.Context, trustDomain, connectorID string) (*ConnectorStanding, error) {
+	m.standingCalls++
+	return m.standing, m.standingErr
 }
 
 func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string) (*WorkspaceLookup, error) {
@@ -152,7 +161,7 @@ func (m *mockWorkspaceStore) GetByTrustDomain(ctx context.Context, domain string
 }
 
 func (m *mockWorkspaceStore) GetWorkspaceCAByTrustDomain(ctx context.Context, domain string) (*x509.Certificate, error) {
-	return nil, nil
+	return m.workspaceCA, nil
 }
 
 func (m *mockWorkspaceStore) GetIntermediateCA(ctx context.Context) (*x509.Certificate, error) {

@@ -31,6 +31,7 @@ func (h *EnrollmentHandler) Goodbye(ctx context.Context, req *pb.GoodbyeRequest)
 		  WHERE id = $1
 		    AND trust_domain = $2
 		    AND status = 'active'
+		    AND revoked_at IS NULL
 		RETURNING tenant_id`,
 		connectorID, trustDomain,
 	).Scan(&tenantID)
