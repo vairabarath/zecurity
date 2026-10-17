@@ -118,23 +118,170 @@ impl CrlManager {
     }
 }
 
+/// The issuer each CRL is checked against, derived from the saved device CA
+/// chain (Workspace CA + Platform Intermediate). Certificate audit bug 6: the
+/// two CRLs are signed by different CAs, and each must be accepted only from
+/// its own signer.
+#[derive(Clone, Debug)]
+pub struct CrlIssuers {
+    /// Signs `/ca.crl` (revoked devices and connectors).
+    #[allow(dead_code)] // the client checks only the Relay CRL today
+    pub workspace_ca_pem: Vec<u8>,
+    /// Signs `/relay.crl` (revoked relays).
+    pub intermediate_pem: Vec<u8>,
+}
+
+/// Starts the Relay CRL `manager` from `url`: an initial fetch unless it
+/// already holds a current CRL, then periodic refresh. The CRL is verified
+/// against the Platform Intermediate only (certificate audit bug 6). If the
+/// device CA chain does not yield it, the manager stays empty, so relay
+/// routing is refused (fail closed).
+pub async fn start_relay_crl(manager: &CrlManager, url: String, device_ca_chain_pem: &[u8]) {
+    let issuers = match crl_issuers(device_ca_chain_pem) {
+        Ok(issuers) => issuers,
+        Err(error) => {
+            warn!(
+                error = format!("{error:#}"),
+                "device CA chain does not yield the Relay CRL issuer; relay routing is fail-closed"
+            );
+            return;
+        }
+    };
+    if !manager.has_valid_cache() {
+        if let Err(error) = manager.refresh(&url, &issuers.intermediate_pem).await {
+            warn!(%error, "initial Relay CRL fetch failed; relay routing is fail-closed");
+        }
+    }
+    manager
+        .clone()
+        .spawn_refresh(url, issuers.intermediate_pem, 60, 15);
+}
+
+/// Derives the two CRL issuers from the saved device CA chain by their actual
+/// relationship, not their position: exactly two distinct, currently valid CA
+/// certificates that may sign certificates and CRLs, where one (the Workspace
+/// CA) is issued by the other (the Platform Intermediate) and not the reverse.
+/// The Intermediate must not be self-signed (a root does not belong here) and
+/// must be allowed to issue a CA. Anything else is rejected; callers then
+/// leave revocation state unavailable, so checks deny.
+///
+/// The bundle itself was anchored in the platform root at enrollment and
+/// renewal; this only decides which of its two certificates signs which CRL.
+pub fn crl_issuers(bundle_pem: &[u8]) -> anyhow::Result<CrlIssuers> {
+    let ders = issuer_certificates(bundle_pem, "CA bundle")?;
+    let [first_der, second_der] = ders.as_slice() else {
+        anyhow::bail!(
+            "CA bundle must be exactly the Workspace CA and the Platform Intermediate, got {} certificates",
+            ders.len()
+        );
+    };
+    if first_der.as_ref() == second_der.as_ref() {
+        anyhow::bail!("CA bundle contains the same certificate twice");
+    }
+    let first = parse_crl_signing_ca(first_der.as_ref(), "first CA bundle certificate")?;
+    let second = parse_crl_signing_ca(second_der.as_ref(), "second CA bundle certificate")?;
+    if first.subject() == second.subject() {
+        anyhow::bail!("CA bundle certificates have the same subject");
+    }
+    let (workspace_der, workspace, intermediate_der, intermediate) =
+        match (issued_by(&first, &second), issued_by(&second, &first)) {
+            (true, false) => (first_der, first, second_der, second),
+            (false, true) => (second_der, second, first_der, first),
+            (true, true) => anyhow::bail!("CA bundle certificates certify each other"),
+            (false, false) => {
+                anyhow::bail!("CA bundle is not a Workspace CA issued by the Platform Intermediate")
+            }
+        };
+    if issued_by(&intermediate, &intermediate) {
+        anyhow::bail!("Platform Intermediate must not be self-signed");
+    }
+    if issued_by(&workspace, &workspace) {
+        anyhow::bail!("Workspace CA must not be self-signed");
+    }
+    let path_len = intermediate
+        .basic_constraints()
+        .map_err(|e| anyhow::anyhow!("Platform Intermediate basic constraints: {e:?}"))?
+        .and_then(|bc| bc.value.path_len_constraint);
+    if path_len == Some(0) {
+        anyhow::bail!("Platform Intermediate may not issue CA certificates (path length 0)");
+    }
+    Ok(CrlIssuers {
+        workspace_ca_pem: pem_from_der(workspace_der.as_ref()),
+        intermediate_pem: pem_from_der(intermediate_der.as_ref()),
+    })
+}
+
+fn issuer_certificates(
+    pem: &[u8],
+    label: &str,
+) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let mut reader = pem;
+    rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("failed to parse {label}: {e}"))
+}
+
+/// A currently valid CA certificate allowed to sign certificates and CRLs.
+fn parse_crl_signing_ca<'a>(der: &'a [u8], label: &str) -> anyhow::Result<X509Certificate<'a>> {
+    let (remaining, cert) =
+        parse_x509_certificate(der).map_err(|e| anyhow::anyhow!("{label} parse error: {e:?}"))?;
+    if !remaining.is_empty() {
+        anyhow::bail!("trailing data after {label}");
+    }
+    if !cert.is_ca() {
+        anyhow::bail!("{label} is not a CA certificate");
+    }
+    let key_usage = cert
+        .key_usage()
+        .map_err(|e| anyhow::anyhow!("{label} key usage: {e:?}"))?
+        .ok_or_else(|| anyhow::anyhow!("{label} has no key usage"))?;
+    if !key_usage.value.key_cert_sign() || !key_usage.value.crl_sign() {
+        anyhow::bail!("{label} may not sign certificates and CRLs");
+    }
+    if !cert.validity().is_valid() {
+        anyhow::bail!("{label} is outside its validity period");
+    }
+    Ok(cert)
+}
+
+/// `child` names `issuer` as its issuer and carries its signature.
+fn issued_by(child: &X509Certificate<'_>, issuer: &X509Certificate<'_>) -> bool {
+    child.issuer() == issuer.subject() && child.verify_signature(Some(issuer.public_key())).is_ok()
+}
+
+fn pem_from_der(der: &[u8]) -> Vec<u8> {
+    use base64::Engine as _;
+    let body = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem.into_bytes()
+}
+
 fn validate_crl(
     crl: &CertificateRevocationList<'_>,
     issuer_ca_pem: &[u8],
 ) -> anyhow::Result<ValidCrl> {
-    let mut issuer_reader = issuer_ca_pem;
-    let issuer_ders =
-        rustls_pemfile::certs(&mut issuer_reader).collect::<Result<Vec<_>, _>>()?;
-    let mut issuer = None;
-    for der in &issuer_ders {
-        let (_, candidate) = parse_x509_certificate(der.as_ref())
-            .map_err(|e| anyhow::anyhow!("issuer CA parse error: {e:?}"))?;
-        if crl.issuer() == candidate.subject() {
-            issuer = Some(candidate);
-            break;
-        }
+    // Exactly one expected issuer (certificate audit bug 6): a bundle would
+    // let the CRL pick whichever CA matches its issuer name.
+    let issuer_ders = issuer_certificates(issuer_ca_pem, "issuer_ca_pem")?;
+    let [issuer_der] = issuer_ders.as_slice() else {
+        anyhow::bail!(
+            "CRL issuer must be exactly one CA certificate, got {}",
+            issuer_ders.len()
+        );
+    };
+    let (remaining, issuer) = parse_x509_certificate(issuer_der.as_ref())
+        .map_err(|e| anyhow::anyhow!("issuer CA parse error: {e:?}"))?;
+    if !remaining.is_empty() {
+        anyhow::bail!("trailing data after issuer CA certificate");
     }
-    let issuer = issuer.ok_or_else(|| anyhow::anyhow!("CRL issuer does not match expected CA"))?;
+    if crl.issuer() != issuer.subject() {
+        anyhow::bail!("CRL issuer does not match expected CA");
+    }
 
     let aki = crl
         .tbs_cert_list
@@ -286,5 +433,235 @@ mod tests {
         let (this_update, next_update) = controller_crl(CONSUMER_NOW - 86_400, 600);
         assert!(check_update_times(this_update, next_update, CONSUMER_NOW).is_err());
         assert!(check_update_times(CONSUMER_NOW - 300, CONSUMER_NOW - 300, CONSUMER_NOW).is_err());
+    }
+}
+
+/// Certificate audit bug 6: the client checked the Relay CRL against the
+/// whole device CA chain (Workspace CA + Intermediate), so the Workspace CRL
+/// (signed by the Workspace CA) served as `/relay.crl` was accepted, and
+/// revoked relays passed.
+#[cfg(test)]
+mod issuer_binding_tests {
+    use super::*;
+    use crate::test_pki::TestPki;
+
+    const RELAY_SERIAL: &[u8] = &[0x7e, 0x1a];
+
+    #[test]
+    fn genuine_relay_crl_validates_against_the_intermediate() {
+        let pki = TestPki::new();
+        let issuers = crl_issuers(pki.device_ca_chain().as_bytes()).unwrap();
+        let relay = CrlManager::new();
+        relay
+            .install_verified_der(&pki.relay_crl(RELAY_SERIAL), &issuers.intermediate_pem)
+            .unwrap();
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    #[test]
+    fn workspace_crl_substituted_for_relay_crl_is_rejected() {
+        let pki = TestPki::new();
+        let issuers = crl_issuers(pki.device_ca_chain().as_bytes()).unwrap();
+        let relay = CrlManager::new();
+        assert!(
+            relay
+                .install_verified_der(&pki.workspace_crl(&[0x01]), &issuers.intermediate_pem)
+                .is_err(),
+            "the Workspace CRL was accepted as the Relay CRL"
+        );
+        // Rejected, so still Unavailable (deny), never NotRevoked.
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Unavailable);
+
+        // And it never replaces a genuine Relay CRL.
+        relay
+            .install_verified_der(&pki.relay_crl(RELAY_SERIAL), &issuers.intermediate_pem)
+            .unwrap();
+        assert!(relay
+            .install_verified_der(&pki.workspace_crl(&[0x01]), &issuers.intermediate_pem)
+            .is_err());
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    #[test]
+    fn the_device_ca_chain_is_not_accepted_as_a_crl_issuer() {
+        let pki = TestPki::new();
+        for der in [pki.workspace_crl(&[0x01]), pki.relay_crl(RELAY_SERIAL)] {
+            assert!(CrlManager::new()
+                .install_verified_der(&der, pki.device_ca_chain().as_bytes())
+                .is_err());
+        }
+    }
+
+    /// Serves one CRL body over plain HTTP; returns its URL.
+    async fn serve(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let _ = stream.read(&mut buf).await;
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes()).await;
+                    let _ = stream.write_all(&body).await;
+                });
+            }
+        });
+        format!("http://{addr}/relay.crl")
+    }
+
+    #[tokio::test]
+    async fn startup_installs_the_genuine_relay_crl() {
+        let pki = TestPki::new();
+        let relay = CrlManager::new();
+        let url = serve(pki.relay_crl(RELAY_SERIAL)).await;
+        start_relay_crl(&relay, url, pki.device_ca_chain().as_bytes()).await;
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Revoked);
+    }
+
+    // The attacker serves the genuine Workspace CRL as /relay.crl.
+    #[tokio::test]
+    async fn startup_rejects_the_workspace_crl_as_relay_crl() {
+        let pki = TestPki::new();
+        let relay = CrlManager::new();
+        let url = serve(pki.workspace_crl(&[0x01])).await;
+        start_relay_crl(&relay, url, pki.device_ca_chain().as_bytes()).await;
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn startup_with_an_unusable_chain_fails_closed() {
+        let pki = TestPki::new();
+        let relay = CrlManager::new();
+        let url = serve(pki.relay_crl(RELAY_SERIAL)).await;
+        start_relay_crl(&relay, url, pki.intermediate_pem.as_bytes()).await;
+        assert_eq!(relay.check(RELAY_SERIAL), RevocationStatus::Unavailable);
+    }
+
+    // Each case below is caught by exactly one check, so every check is
+    // exercised on its own.
+    #[test]
+    fn each_role_check_rejects_on_its_own() {
+        use rcgen::{BasicConstraints, IsCa, KeyUsagePurpose};
+        let pki = TestPki::new();
+        let with_int = |ws: String| format!("{}\n{}", ws, pki.intermediate_pem);
+        let (mutual_a, mutual_b) = crate::test_pki::mutually_certifying_cas();
+        let (capped_int, capped_ws) =
+            pki.intermediate_shaped(|p| p.is_ca = IsCa::Ca(BasicConstraints::Constrained(0)));
+        for (bundle, why) in [
+            (
+                with_int(pki.workspace_ca_shaped(|p| {
+                    p.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+                })),
+                "Workspace CA without cRLSign",
+            ),
+            (
+                with_int(pki.workspace_ca_shaped(|p| {
+                    p.is_ca = IsCa::ExplicitNoCa;
+                    p.key_usages = vec![];
+                    // rcgen omits key usages on a non-CA; add keyCertSign +
+                    // cRLSign directly.
+                    let mut ext = rcgen::CustomExtension::from_oid_content(
+                        &[2, 5, 29, 15],
+                        vec![0x03, 0x02, 0x01, 0x06],
+                    );
+                    ext.set_criticality(true);
+                    p.custom_extensions = vec![ext];
+                })),
+                "non-CA with CA key usages",
+            ),
+            (
+                with_int(pki.workspace_ca_shaped(|p| {
+                    p.distinguished_name = rcgen::DistinguishedName::new();
+                    p.distinguished_name
+                        .push(rcgen::DnType::CommonName, "Test Platform Intermediate");
+                })),
+                "same subject as its issuer",
+            ),
+            (
+                with_int(pki.workspace_ca_under_issuer_name("Somebody Else")),
+                "right key, wrong issuer name",
+            ),
+            (with_int(pki.forged_workspace_ca()), "forged signature"),
+            (
+                format!("{capped_ws}\n{capped_int}"),
+                "Intermediate with path length 0",
+            ),
+            (format!("{mutual_a}\n{mutual_b}"), "mutual certification"),
+        ] {
+            assert!(crl_issuers(bundle.as_bytes()).is_err(), "accepted: {why}");
+        }
+    }
+
+    // A CRL signed with the Intermediate's key under another issuer name.
+    #[test]
+    fn relay_crl_with_the_wrong_issuer_name_is_rejected() {
+        let pki = TestPki::new();
+        let issuers = crl_issuers(pki.device_ca_chain().as_bytes()).unwrap();
+        let der = pki.relay_crl_under_issuer_name("Somebody Else", RELAY_SERIAL);
+        assert!(CrlManager::new()
+            .install_verified_der(&der, &issuers.intermediate_pem)
+            .is_err());
+    }
+
+    #[test]
+    fn roles_follow_the_chain_not_the_order() {
+        let pki = TestPki::new();
+        let reversed = format!("{}\n{}", pki.intermediate_pem, pki.workspace_ca_pem);
+        let issuers = crl_issuers(reversed.as_bytes()).unwrap();
+        assert_eq!(issuers.intermediate_pem, pki.intermediate_pem.as_bytes());
+        assert_eq!(issuers.workspace_ca_pem, pki.workspace_ca_pem.as_bytes());
+    }
+
+    #[test]
+    fn malformed_or_invalid_chains_are_rejected() {
+        let pki = TestPki::new();
+        let (expired_int, expired_ws) = pki.expired_cas();
+        let (_, csr) = crate::test_pki::device_key_and_csr();
+        let (non_ca_ws, _) = pki.non_ca_workspace(&csr, crate::test_pki::DEVICE_ID);
+        for (bundle, why) in [
+            (String::new(), "empty"),
+            ("garbage".to_string(), "garbage"),
+            (pki.intermediate_pem.clone(), "Intermediate only"),
+            (pki.workspace_ca_pem.clone(), "Workspace CA only"),
+            (
+                format!("{}\n{}", pki.device_ca_chain(), pki.root_pem),
+                "extra certificate",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, pki.workspace_ca_pem),
+                "duplicate",
+            ),
+            (
+                format!("{}\n{}", pki.intermediate_pem, pki.root_pem),
+                "root in the Intermediate role",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, pki.root_pem),
+                "no issuing relationship",
+            ),
+            (
+                format!("{}\n{}", expired_ws, pki.intermediate_pem),
+                "expired Workspace CA",
+            ),
+            (
+                format!("{}\n{}", pki.workspace_ca_pem, expired_int),
+                "expired Intermediate (and not the Workspace CA's issuer key)",
+            ),
+            (
+                format!("{}\n{}", non_ca_ws, pki.intermediate_pem),
+                "non-CA Workspace certificate",
+            ),
+        ] {
+            assert!(crl_issuers(bundle.as_bytes()).is_err(), "accepted: {why}");
+        }
     }
 }

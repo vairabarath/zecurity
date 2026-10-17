@@ -103,6 +103,41 @@ fn server_identity(issuer: &Certificate, issuer_key: &KeyPair) -> (String, Strin
     (cert.pem(), key.serialize_pem())
 }
 
+/// Two CAs that each certify the other (certificate audit bug 6).
+pub fn mutually_certifying_cas() -> (String, String) {
+    let (key_a, key_b) = (new_key(), new_key());
+    let a_self = ca_params("CA A").self_signed(&key_a).unwrap();
+    let b_self = ca_params("CA B").self_signed(&key_b).unwrap();
+    let a = ca_params("CA A")
+        .signed_by(&key_a, &b_self, &key_b)
+        .unwrap();
+    let b = ca_params("CA B")
+        .signed_by(&key_b, &a_self, &key_a)
+        .unwrap();
+    (a.pem(), b.pem())
+}
+
+/// A current CRL (fixed calendar window 2000–2999) revoking `revoked`.
+fn signed_crl(issuer: &Certificate, issuer_key: &KeyPair, revoked: &[u8]) -> Vec<u8> {
+    rcgen::CertificateRevocationListParams {
+        this_update: rcgen::date_time_ymd(2000, 1, 1),
+        next_update: rcgen::date_time_ymd(2999, 1, 1),
+        crl_number: SerialNumber::from(1u64),
+        issuing_distribution_point: None,
+        revoked_certs: vec![rcgen::RevokedCertParams {
+            serial_number: SerialNumber::from_slice(revoked),
+            revocation_time: rcgen::date_time_ymd(2000, 1, 1),
+            reason_code: None,
+            invalidity_date: None,
+        }],
+        key_identifier_method: rcgen::KeyIdMethod::Sha256,
+    }
+    .signed_by(issuer, issuer_key)
+    .unwrap()
+    .der()
+    .to_vec()
+}
+
 pub struct TestPki {
     root_cert: Certificate,
     root_key: KeyPair,
@@ -186,6 +221,74 @@ impl TestPki {
             .signed_by(&new_key(), &self.int_cert, &self.int_key)
             .unwrap();
         (int.pem(), ws.pem())
+    }
+
+    /// `/ca.crl` as the controller signs it: by the Workspace CA, revoking
+    /// `revoked` (certificate audit bug 6).
+    pub fn workspace_crl(&self, revoked: &[u8]) -> Vec<u8> {
+        signed_crl(&self.ws_cert, &self.ws_key, revoked)
+    }
+
+    /// `/relay.crl` as the controller signs it: by the Platform Intermediate.
+    pub fn relay_crl(&self, revoked: &[u8]) -> Vec<u8> {
+        signed_crl(&self.int_cert, &self.int_key, revoked)
+    }
+
+    /// A Workspace CA issued by the real Intermediate, with its parameters
+    /// adjusted by `shape` (certificate audit bug 6).
+    pub fn workspace_ca_shaped(&self, shape: impl FnOnce(&mut CertificateParams)) -> String {
+        let mut p = ca_params("workspace-ws-test");
+        shape(&mut p);
+        p.signed_by(&new_key(), &self.int_cert, &self.int_key)
+            .unwrap()
+            .pem()
+    }
+
+    /// An Intermediate issued by the root with `shape` applied, and a
+    /// Workspace CA under it. Returns (Intermediate PEM, Workspace CA PEM).
+    pub fn intermediate_shaped(
+        &self,
+        shape: impl FnOnce(&mut CertificateParams),
+    ) -> (String, String) {
+        let key = new_key();
+        let mut p = ca_params("Test Platform Intermediate");
+        shape(&mut p);
+        let int = p.signed_by(&key, &self.root_cert, &self.root_key).unwrap();
+        let ws = ca_params("workspace-ws-test")
+            .signed_by(&new_key(), &int, &key)
+            .unwrap();
+        (int.pem(), ws.pem())
+    }
+
+    /// The Intermediate's key under another name, as an issuer.
+    fn renamed_intermediate(&self, name: &str) -> Certificate {
+        ca_params(name).self_signed(&self.int_key).unwrap()
+    }
+
+    /// A Workspace CA signed with the Intermediate's key, but naming another
+    /// issuer.
+    pub fn workspace_ca_under_issuer_name(&self, name: &str) -> String {
+        ca_params("workspace-ws-test")
+            .signed_by(&new_key(), &self.renamed_intermediate(name), &self.int_key)
+            .unwrap()
+            .pem()
+    }
+
+    /// A Workspace CA naming the Intermediate as issuer, signed by another key.
+    pub fn forged_workspace_ca(&self) -> String {
+        let key = new_key();
+        let impostor = ca_params("Test Platform Intermediate")
+            .self_signed(&key)
+            .unwrap();
+        ca_params("workspace-ws-test")
+            .signed_by(&new_key(), &impostor, &key)
+            .unwrap()
+            .pem()
+    }
+
+    /// A Relay CRL signed with the Intermediate's key under another name.
+    pub fn relay_crl_under_issuer_name(&self, name: &str, revoked: &[u8]) -> Vec<u8> {
+        signed_crl(&self.renamed_intermediate(name), &self.int_key, revoked)
     }
 
     /// A "Workspace CA" that is not a CA, issued by the real Intermediate,
