@@ -20,7 +20,7 @@ One place for every test **completed** so far, with the verdict and where the ev
 | Area | Verdict | Completed | Not done |
 |---|---|---|---|
 | **Sprint 20 live acceptance** (Phase V) | **FAILED** | 45 rows: 40 PASS, 1 PASS only under a TEMP patch, 3 FAIL, 1 not exercised | — (run complete, closed out) |
-| **Sprint 21 acceptance, local** | **PASS** for everything runnable locally | AT-CORE 1–5, AT-H 1–11, AT-U 1–8, AT-R 1/6/7/8, AT-P 1–7, AT-DEV 1–3 | AT-R 2–5 (no relay or tenant locally), AT-K live, AT-C.4 browser notice |
+| **Sprint 21 acceptance, local + live** | **PASS** for everything run | AT-CORE 1–5, AT-H 1–11, AT-U 1–8, AT-R 1–8, AT-P 1–7, AT-C.4, AT-K.1 (live), AT-DEV 1–3 | AT-K.2/K.3 live (shield: needs sudo + resource host) |
 | **Regression gate on current code** | **Not green** | Go full suite; Rust renewal suites; console | 4 tests fail when not skipped (F35) |
 
 ---
@@ -119,12 +119,18 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 | AT-CORE-5 | No password leaks (logs, audit, GET bodies, storage) | grep of 13 secrets → 0 hits | PASS |
 | AT-H.1 | Bad `PROVIDER_JWT_SECRET` → startup refused | 3 cases (unset, short, equal) | PASS |
 | AT-H.2–H.6, H.8 | Bootstrap, forced change, no enumeration, rate limit, revocation | API (+ earlier session) | PASS |
-| AT-H.7 | Valkey down → 503 `login_unavailable` | `docker stop ztna_valkey` → 503 in 1.5 s | PASS (relies on the **uncommitted** `loginLimiterTimeout` fix in `auth_handlers.go`) |
+| AT-H.7 | Valkey down → 503 `login_unavailable` | `docker stop ztna_valkey` → 503 in 1.5 s | PASS. Fix committed `cb07806`; a rate-limit bypass it introduced was fixed in `94f1196` (regression test added) |
 | AT-H.9 | Argon2id PHC hash | DB prefix only | PASS |
 | AT-H.10 | Google provider routes 404; CORS exact origin | curl | PASS (tenant Google still wired) |
 | AT-H.11 | Single token-minting path; `amr: ["pwd"]` | Go test + token claims | PASS |
 | AT-U.1–U.8 | Role matrix, add + first login, duplicates, role change, disable/enable/reset, guards, concurrency, audit/privacy | 44 scripted API checks + Go tests | PASS |
 | AT-R.1 | Read role matrix | API | PASS |
+| AT-R.2 | Relay liveness from Valkey: DB heartbeat backdated 4 min, API still fresh and `active` | Real local relay + DB/Valkey | PASS (live 2026-10-17) |
+| AT-R.3 | Relay detail: allowlists, cert history with `is_current`, `revoked_at` after revoke, no `enrollment_token_jti` | Real local relay | PASS (live) |
+| AT-R.4 | Tenant list counts match seed; status filter; detail collections; no secrets or identities | SQL-seeded test tenants | PASS (live) |
+| AT-R.5 | Exactly one `tenant.read` audit row per detail call; none for list | API + DB | PASS (live) |
+| AT-K.1 | Relay at 15m renews 8 m 45 s after install, then 585 s, 504 s, no loop | Real relay, `RELAY_CERT_TTL=15m` | PASS (live) |
+| AT-C.4 | Role change, disable or reset by another admin → next request → Login with notice | Headed browser + API | PASS 3/3 (live) |
 | AT-R.6 | Audit filters, keyset pagination (78 rows, 12 pages, no gaps), limit clamp | API | PASS |
 | AT-R.7 | Controller cert matches `openssl s_client :9090` | API + openssl | PASS |
 | AT-R.8 | Bad cursor, limit or window → 400; unknown id → 404 | API | PASS |
@@ -141,9 +147,7 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 
 | ID | Why | Needs |
 |---|---|---|
-| AT-R.2–R.5 | Local DB has 0 relays and 0 tenants; Go tests pass | A relay and a tenant workspace |
-| AT-K.1, K.2 (live) | Unit tests pass; live run not done | Relay + shield running (sudo, resource host) |
-| AT-C.4 | Browser notice after another admin ends your session not driven (API side passes) | ~5 min local |
+| AT-K.2, K.3 (live) | Unit tests pass; the shield needs root (nftables) | sudo + a resource host for the shield |
 | #117 extras (S1, client renewal restart, lost renewal reply, CRL skew) | Not targeted | Local test run |
 | Full regression gate (§10) | Only partial suites run for Sprint 21 | ~15 min local |
 
@@ -158,7 +162,9 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 
 ## 4. Open hygiene
 
-- **Repo:** uncommitted `loginLimiterTimeout` fix in `controller/internal/provider/auth_handlers.go`.
+- **Repo:** `cb07806` + `94f1196` (provider login limiter) are on `test/merge-verification` only, not yet in `fixed-pendings`.
+- **Live-run test data:** SQL-seeded tenants `at-r4-test` / `at-r4-suspended`, revoked relay `k1-relay` (`.localdev/k1-relay`), disabled operator `c4-op-112712@example.com`.
+- **Sprint 20 Finding 32 still reproduces** on current code: a revoked relay keeps reconnecting its heartbeat.
 - **Local leftovers:** `.worktrees/s20-live`, `.localdev/s20-relay1`, 30 leaked `resolvers_updsc_*` test databases.
 - **Needs sudo:** nft table `s20test`.
 - **Lab hosts:** update timers, test binaries, resource `s20-nika-summa`.
