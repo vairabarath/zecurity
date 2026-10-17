@@ -3,7 +3,7 @@ type: run-sheet
 sprint: 20
 title: Sprint 20 Live Acceptance — Run Sheet
 operator: Sathiya (M1)
-status: in-progress   # not-run | in-progress | passed | failed
+status: failed   # not-run | in-progress | passed | failed — closed out 2026-10-17: 45 rows = 40 PASS, 1 PASS only under a TEMP patch (U2), 3 FAIL (U5 hold, G9, R2), 1 not exercised (G4); see "Close-out — 2026-10-17"
 runbook: docs/sprint20-live-acceptance-runbook.md
 tags:
   - acceptance
@@ -36,14 +36,14 @@ tags:
 | Value | Recorded | Time |
 |---|---|---|
 | `ctl_serial_0` / `ctl_notafter_0` (controller's original gRPC cert) | `5343251ce74d343551adb4faf87de5a2` / `2026-09-26 07:56:03 GMT` (13:26:03 IST) | 13:11 IST |
-| `ctl_serial_1` (first rotation) | | |
-| `ctl_serial_2` (second rotation) | | |
+| `ctl_serial_1` (first rotation) | `D4A62F44…` (notBefore 04:48:58Z), after the 2026-09-28 restart whose baseline was `5AA251E3…` (see E1) | 2026-09-28 11:20:27 IST |
+| `ctl_serial_2` (second rotation) | `F1108C48…` (notBefore 04:58:58Z); then `E74BB8BD…`, `B8F01417…`, `42AC0B20…` every 10 min (see E4) | 2026-09-28 11:29:28 IST |
 | `conn_serial_0` / `conn_notafter_0` (connector's **original** cert) | `6415dec88fe9dcf342aadd24101b71d` / `2026-09-26 09:45:36Z` (15:15:36 IST); connector `c650566c-df86-40aa-a16c-c12672d7f6dc` | 15:00:36 IST |
-| `conn_serial_1` (first renewal) | | |
+| `conn_serial_1` (first renewal) | `f595bedf…` (first renewal by the branch binary; earlier 15:00–15:55 renewals were by the release 1.0.18 binary and were discarded, Finding 7; see G1) | 15:56:07 IST |
 | `relay_serial_0` / `relay_notafter_0` (relay1's first cert) | `d98d8ca9e8927c01a31eb44ce51108bc` / `2026-09-26 10:08:07Z` (15:38:07 IST); first renewal `delay_secs=832` (~14:51:59 IST) | 14:38:07 IST |
 | relay1 `relay.key` sha256 (after provisioning) | `e792e75fb0014d9c2a058e3f7c25547ddd8a2de2aaed90ecf7424ebf54cd861c` | 14:38 IST |
-| relay1 renewals: serial @ time (list) | | |
-| `tunnel_opened_at` (long-lived tunnel) | | |
+| relay1 renewals: serial @ time (list) | 17 serials in `relay_certificates`, first `d98d8ca9…` @ 14:38:07, …, `ca4c5b8e…`→`83ab8702…` @ 17:30:51, →`8a00c290…` @ 17:48:25, →`5cbf7b7d…` @ 17:55:25; delays 420–1060 s; key unchanged (see F1–F3). The full per-renewal list was in `/tmp/s20-live` logs, which were deleted at clean-up | 14:38–17:55 IST |
+| `tunnel_opened_at` (long-lived tunnel) | hold #1 opened 16:29–16:32 (U5); hold #2 opened 17:34:15 and was reset at 17:37:22 (G9, Finding 15) | 16:29 / 17:34:15 IST |
 
 ---
 
@@ -182,11 +182,11 @@ Also closes the unticked Phase B build gate, `path.md` **:156**.
 
 ## Close-out checklist (runbook §14)
 
-- [ ] Every row above has a time, evidence and PASS / FAIL.
-- [ ] `path.md` boxes ticked **only** for rows that passed: :143, :156, :169, :206, :207, :227 and sprint criteria :246–:255. Failed rows keep their box unticked, with a note linking the row here.
-- [ ] Bugs recorded in the phase file's Post-Phase Fixes and in `path.md` Post-Sprint Fixes.
-- [ ] Session Log entry added.
-- [ ] Frontmatter `status:` updated. Clean-up done (nft table, processes, `/tmp/s20-live`, `.localdev/s20-*`).
+- [x] Every row above has a time, evidence and PASS / FAIL. (2026-10-17: G4 is recorded as **not exercised**, because the duplicate-ReEnroll path never triggered live. The 5 empty reference values were filled from the E/G/F/U5 rows.)
+- [x] `path.md` boxes ticked **only** for rows that passed (2026-10-17). Boxes for failed or unproven rows stay unticked with a note: :227 (G9 FAIL, G4), :285 (all scenarios). The current line numbers differ from the ones above; see path.md.
+- [x] Bugs recorded in `path.md` Post-Sprint Fixes (2026-10-17: pointer entries for Findings 4/5/22, 7/18/23/31, 15, 19/20/24/25, 28, 30, 32, 33, 34, 35, 36, each with its tracking doc and current status) and in the phase files' Post-Phase Fixes (A, B, D, F, G).
+- [x] Session Log entry added (2026-10-17).
+- [~] Frontmatter `status:` updated (`failed`, with a pointer). Clean-up partly verified, see "Close-out — 2026-10-17".
 
 ## Findings during the run
 
@@ -248,3 +248,41 @@ Context: over the weekend, DHCP moved udaya .62 → .46 and nika .57 → .43 (ma
 | 34 | B1–B2 | **A revoked connector keeps serving tunnels until its process restarts.** After the 15:18:34 revoke, summa via the tunnel returned **200** at 15:19:07, 15:30:29 and 15:33:26. The connector logged `access allowed … tunnel_opened ok shield=3ebed021…` up to 10:03:26Z (6 tunnels after revoke). **It was still accepting at 15:33, after its own cert expired at 10:02:12Z** (`cert_serial d83f7081…`, 15 m TTL; openssl on :9091/:9092 at 10:03:38Z showed that expired cert). Cause, from the code: the client reuses its cached QUIC connection (`client/src/tunnel_pool.rs:374-383` returns the pooled connection while `close_reason()` is none; keep-alive 10 s at `:361`), so no new TLS handshake runs and neither expiry nor revocation is re-checked. The connector keeps its device-tunnel listeners and ACL cache after losing the control stream. Access ended only when the restart (15:34:38) dropped the QUIC connection: 15:35:32 `connector rejected authentication — failing closed` → summa `000`. Combined with Finding 33 (shield revoke doesn't cut traffic) and Finding 21 (the client session had expired at 15:30 yet it still had access), **revocation has no data-plane effect on established paths** | **high (security)** | connector: on `PermissionDenied`/revoked, close device-tunnel listeners and live QUIC/TLS connections and clear the ACL. Client: cap pooled-connection lifetime at cert expiry, and re-validate on transport/ACL change. Add a data-plane check to AT-B.1/B.2 |
 | 35 | R2 | **Resource ACL-coherence tests fail, and CI can't see it.** `resource_acl_coherence_test.go` (added `391b28b`) needs `RESOURCE_TEST_SHIELD_ID`, which `.github/workflows/ci.yml` doesn't set, so all these tests **skip in CI** and the job stays green. With it set: `UpdateResource` fires `NotifyPolicyChange` **twice** for ACL-relevant updates and **once** for irrelevant ones. `resource.resolvers.go:58-60` notifies unconditionally, then `:66-70` notifies again under `ACLRelevantUpdate`; both came in with merge `df5a041`. This undoes the `391b28b` fix meant to stop ACL churn. `ForceDeleteResource` also fires 2 hooks. `TestProtectResource_DoesNotInvalidate` needs the shield's `lan_ip` to equal the test host `10.0.0.95` (`MarkProtecting` joins on `s.lan_ip = r.host`), so it only works against a hand-crafted shield | medium | remove the unconditional notify at `resource.resolvers.go:58-60`; check the ForceDelete double notify; make the fixture self-provision a shield with a matching `lan_ip` and add it to CI env |
 | 36 | R2 | **`TestAuthIntegration_LoginBootstrapAndJWTIssue` always skips, CI included.** `parseValkeyAddr` (`internal/auth/valkey.go:42-51`) strips `redis://` and userinfo but not the `/15` DB path, so `redis://localhost:6379/15` (the test default **and** `ci.yml:80`) becomes address `localhost:6379/15` → `lookup tcp/6379/15: unknown port` → `t.Skipf`. Per `Acceptance-Test-Plan.md:17` a skipped DB test counts as a failure. Not re-run here with a bare URL, because the test runs `FlushDB` and db 0 holds the live controller's sessions | medium | parse the URL properly (host:port + select DB), and have the CI "verify integration tests actually ran" step cover auth too |
+
+## Close-out — 2026-10-17
+
+Closed out by Claude Code for Sathiya (M1). The verdicts in the rows above are **not changed**: they are results for the code under test. Later work is recorded here as follow-up only.
+
+**Commit under test.** `5a4f940` (the code actually run) is 2 commits after `46ab87d` (the Phase V pin) and differs from it only in docs: `git diff --stat 46ab87d 5a4f940 -- controller connector relay shield client proto` is empty. The results therefore stand for `46ab87d`.
+
+**Result at the tested commit: FAILED.** 45 rows: 40 PASS, 1 PASS only under a TEMP code patch (U2), 3 FAIL, 1 not exercised.
+- **U5 (long hold) and G9 / AT-G.6 FAIL:** the client drops long-lived tunnels on every transport change (Finding 15).
+- **R2 FAIL:** 4 `graph/resolvers` ACL-coherence tests fail (Finding 35), and the auth integration test always skipped (Finding 36).
+- **G4 / AT-G.1 not exercised:** no duplicate ReEnroll occurred live. The unit tests (`reenroll_test.go`, connector single-flight + debounce) cover it.
+- **U2** passed only under the TEMP private-address patch (Findings 4, 5, 22).
+- **D1** passed only with `kill -STOP` instead of the runbook's `kill -9` (Finding 30, a runbook deviation).
+- **G8** passed on evidence from before 17:16; after that the shield ran at `SHIELD_CERT_TTL=168h`, not the runbook's 24h (KI-2).
+
+**Follow-up status on later code** (does not change the verdicts above):
+
+| Item | Status on 2026-10-17 | Evidence |
+|---|---|---|
+| Finding 15 (U5/G9) | Live long hold **PASS on later code**, 2026-10-10 (2400 s, one connection, 1194 requests). Fix01 doc still `status: partial` | `Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10.md` |
+| Finding 35 (R2) | **Still failing on `fixed-pendings`.** Re-run 2026-10-17 on `test/merge-verification` @ `1c164c7` (contains `origin/fixed-pendings`) with a seeded throwaway DB (`RESOURCE_TEST_SHIELD_ID` set): `./graph/... ./internal/resource/...` → 110 PASS, **4 FAIL** (the same 4), 1 SKIP. In plain CI they skip, because `RESOURCE_TEST_SHIELD_ID` isn't set. The audit says `TestProtectResource_DoesNotInvalidate` is outdated (notify on protect is correct since migration 021) and the other 3 are real double or extra notifies (over-invalidation, never under) | `Fixes/Fix02-Resource-ACL-Double-Notify.md` (`status: planned`); `docs/certificate-audit-2026-10-15.md` "Found during the bug 3 verification" |
+| Finding 36 (R2) | **Fixed** in `411e216` (Sprint 21 K6). `TestAuthIntegration_LoginBootstrapAndJWTIssue` PASS on `1c164c7` (2026-10-17) | `Fixes/Fix03-…` (doc still says `planned`) |
+| R2 gate on current code | `1c164c7`, CI env: `go build` OK, `go vet` OK, `go test ./...` exit 0: 1161 PASS, 0 FAIL, **32 SKIP** (30 need `RESOURCE_TEST_SHIELD_ID` and hide Finding 35; 1 `TestEnroll_CSRSignatureInvalid`; 1 SCIM "covered by"). So the gate only looks green because tests skip | this close-out |
+| Finding 33 (revoked shield carries traffic) | **Fixed in code**: bug 3, PR #123 (`86a436d`, `b2b00b5`). **Live end-to-end acceptance still pending** | `docs/certificate-audit-2026-10-15.md` bug 3 |
+| Finding 34 (revoked connector keeps serving) | **Open.** Connector revocation is at Phase A only ("NOT FAIL-CLOSED"); Phase B1 not started | `Handoff-Connector-Revocation-PhaseA-2026-10-15.md` |
+| Finding 28 (client never passes FIN) | Tracked as Fix 05 Phase 5-A; see its live acceptance doc | `Fixes/fix 5/`, `Handoff-Fix05-5A-2026-10-06.md` |
+| KI-1 / KI-2 | Fixed in Sprint 21 K1/K2; live check of the 15m relay / 24h shield is Sprint 21 AT-K.1/K.3 (not run live) | `Sprint21/Acceptance-Run-Checklist.md` |
+
+**Clean-up, verified 2026-10-17 on 192.168.1.164 (this machine):**
+- [x] TEMP `heartbeat.go` patch: no `S20_TEMP` in the main tree or in `.worktrees/s20-live`.
+- [x] `/tmp/s20-live` (incl. token files) is gone.
+- [x] Okta IdP `1779ca3e` re-enable: **moot locally**, because the local DB was recreated for Sprint 21 (0 workspaces). Re-enable it if it still exists in any other DB.
+- [x] `/usr/local/bin/zecurity-client` was replaced by a later build (Oct 9, Fix01 testing), so the pre-s20 restore no longer applies.
+- [ ] nft table `s20test`: needs `sudo nft list tables` to confirm it's gone (not checked: sudo needs a password).
+- [ ] `.localdev/s20-relay1` still exists. Remove it when it's no longer needed.
+- [ ] `.worktrees/s20-live` (detached at `46ab87d`) still exists. Remove it after any re-run (`git worktree remove .worktrees/s20-live`).
+- [ ] Lab hosts (udaya, nika, manojinkyank), not checkable from here: update timers (Findings 7/18/23/31), branch binaries, test resources `s20-nika-summa` / group `s20-summa-users`.
+- [ ] `zecurity-shield` reports `activating` on this machine (2026-10-17). Check whether that's a leftover unit.

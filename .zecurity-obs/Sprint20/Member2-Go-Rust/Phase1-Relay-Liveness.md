@@ -197,3 +197,13 @@ for _, key := range []string{relayHeartbeatDBWritePrefix + relayID, relayHeartbe
 }
 ```
 Caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit. No other files affected.
+
+### Live finding (no fix found as of 2026-10-17): relays on private addresses never reach connectors (Findings 4, 5, 22)
+**Issue:** in the 2026-09-26/28 live run (run sheet U2), a relay on a LAN address (192.168.1.x) was never put in the connector's relay list (`relay_count=0`). After the list did change, a connector parked in backoff never re-read it, so a connector restart was needed.
+
+**Root cause (from the run sheet):**
+- `BuildLabelledRelayList` requires `public_addr` or `address_scope='public'`.
+- `public_addr` is derived only from a global-unicast observed peer IP (`internal/relay/heartbeat.go` private-IP branch).
+- The connector's `relay_selector.rs` sleeps the full backoff while disconnected and never picks up a new list.
+
+**Fix applied:** none recorded. U2 passed only under the TEMP `S20_TEMP_RELAY_ALLOW_PRIVATE_ADDR` patch, since reverted. Details: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 4, 5, 22.

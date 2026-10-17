@@ -220,3 +220,12 @@ let incoming = ReceiverStream::new(conn_rx).map(Ok::<_, std::io::Error>); // Ite
 // shield gets PermissionDenied("missing mTLS peer certificate").
 ```
 Guarded by `shield_identity_is_verified_through_custom_tls`.
+
+### Live finding (AT-G.6 FAIL): long-lived tunnels dropped on every transport change (Finding 15)
+**Issue:** in the 2026-09-26 live run, G9 / AT-G.6 FAILED. A long-lived TCP connection (93 requests) was reset at 17:37:22, in the same second the client logged `snapshot changed, restarting VPN` after a connector renewal. The connector side passed (G1–G3, G5–G8): renewal, consumer switch-over and serving after the original `NotAfter`.
+
+**Root cause:** client side. The client restarts its tunnel on every transport snapshot change, not the connector hot-swap.
+
+**Fix applied:** tracked as Fix01 ([[Sprint20/Fixes/fix 1/Fix01-Client-Tunnel-Restart-On-Snapshot-Change]], `status: partial`). A live long hold PASSED on later code on 2026-10-10 ([[Sprint20/Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]: 2400 s, one connection, 1194 requests). That doesn't change the FAIL at the Sprint 20 commit.
+
+**Also:** G4 / AT-G.1 (a duplicate ReEnroll within 60 s is ignored) was **not exercised live**, because no duplicate occurred. It is covered by `reenroll_test.go` and the connector's single-flight + debounce tests.
