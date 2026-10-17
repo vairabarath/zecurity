@@ -63,6 +63,13 @@ type ConnectorRegistry struct {
 	mu      sync.RWMutex
 	clients map[string]*connectorStreamClient // keyed by connector_id
 
+	// live holds EVERY activated, not-yet-retired Control stream per
+	// connector — the authoritative one in clients plus any superseded stream
+	// a make-before-break renewal has not finished retiring. SignalRevoked
+	// delivers ConnectorRevoked to all of them. Guarded by mu; mutated only
+	// under lifecycleMu.
+	live map[string]map[*connectorStreamClient]struct{}
+
 	// lifecycleMu serialises each Control stream's ownership transition —
 	// (activation UPDATE + add) on open, (ownership check + remove +
 	// disconnect UPDATE) on close — so an old stream closing after a
@@ -75,7 +82,10 @@ type ConnectorRegistry struct {
 
 // NewConnectorRegistry creates an empty registry.
 func NewConnectorRegistry() *ConnectorRegistry {
-	return &ConnectorRegistry{clients: make(map[string]*connectorStreamClient)}
+	return &ConnectorRegistry{
+		clients: make(map[string]*connectorStreamClient),
+		live:    make(map[string]map[*connectorStreamClient]struct{}),
+	}
 }
 
 // connectorSendQueueSize bounds a connector's outbound mailbox. A wedged connector
@@ -89,6 +99,19 @@ type connectorStreamClient struct {
 	outbound    chan *pb.ConnectorControlMessage
 	connectorID string
 	tenantID    string
+	trustDomain string
+
+	// Authorization contract (Phase A). authMu serialises the revoked flag
+	// with AuthorizationAck enqueueing, so no ack can be queued after
+	// ConnectorRevoked on the same stream. terminal is a one-slot mailbox the
+	// writer drains before outbound (ConnectorRevoked can't be dropped by a
+	// full outbound queue); terminalSent is closed once the writer has sent
+	// it, which ends the handler with the revoked marker. Both channels are
+	// nil for clients not created by Control (unit tests).
+	authMu       sync.Mutex
+	revoked      bool
+	terminal     chan *pb.ConnectorControlMessage
+	terminalSent chan struct{}
 
 	// lastReEnrollAt is when a ReEnroll was last enqueued on this stream (zero =
 	// never). Only the stream's recv loop (handleConnectorHealth) touches it.
@@ -178,27 +201,34 @@ func (h *EnrollmentHandler) maybeSendReEnroll(client *connectorStreamClient, cer
 // the mailbox is full (connector not draining) it fails fast, so a wedged connector
 // can't stall a GraphQL resolver or the reconciler on the socket write. gRPC permits
 // only one concurrent Send, which runWriter (the sole sender) guarantees.
-// agentPolicyMessage is the AgentPolicy for this controller's configuration,
-// or nil when no shield renewal window is configured (a whole second or more);
-// the connector then keeps its default window.
+// agentPolicyMessage is the AgentPolicy for this controller. It is ALWAYS
+// produced: authorization_acks is the authorization-contract capability
+// assertion (design §4.6) and must not depend on unrelated optional settings.
+// shield_renewal_window_secs is 0 ("not set": the connector keeps its default
+// window) unless a shield renewal window of a whole second or more is
+// configured.
 func (h *EnrollmentHandler) agentPolicyMessage() *pb.ConnectorControlMessage {
 	secs := int64(h.Cfg.ShieldRenewalWindow / time.Second)
-	if secs <= 0 {
-		return nil
+	if secs < 0 {
+		secs = 0
 	}
 	return &pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_AgentPolicy{
-			AgentPolicy: &pb.AgentPolicy{ShieldRenewalWindowSecs: uint64(secs)},
+			AgentPolicy: &pb.AgentPolicy{
+				ShieldRenewalWindowSecs: uint64(secs),
+				AuthorizationAcks:       true,
+			},
 		},
 	}
 }
 
 // sendAgentPolicy enqueues the AgentPolicy on a newly opened Control stream.
+// It is the first message enqueued on the stream, so the capability reaches
+// the connector before any AuthorizationAck (FIFO).
 func (h *EnrollmentHandler) sendAgentPolicy(client *connectorStreamClient) {
 	msg := h.agentPolicyMessage()
-	if msg == nil {
+	if msg.GetAgentPolicy().GetShieldRenewalWindowSecs() == 0 {
 		log.Printf("control stream: no shield renewal window configured; connector %s keeps its default", client.connectorID)
-		return
 	}
 	if err := client.send(msg); err != nil {
 		log.Printf("control stream: send agent policy to connector %s: %v", client.connectorID, err)
@@ -219,10 +249,24 @@ func (c *connectorStreamClient) send(msg *pb.ConnectorControlMessage) error {
 // exit) or a Send fails (broken stream) — in which case the recv loop also observes
 // the error and tears the connection down. A blocking Send on a wedged connector
 // blocks only this goroutine; callers have already failed fast in send().
+//
+// A queued ConnectorRevoked (terminal) is sent before anything still waiting
+// in outbound; after sending it the writer stops and closes terminalSent so
+// the handler ends the stream with the revoked marker.
 func (c *connectorStreamClient) runWriter(ctx context.Context) {
 	for {
+		// Priority: a pending terminal message goes out first.
+		select {
+		case msg := <-c.terminal:
+			c.sendTerminal(msg)
+			return
+		default:
+		}
 		select {
 		case <-ctx.Done():
+			return
+		case msg := <-c.terminal:
+			c.sendTerminal(msg)
 			return
 		case msg := <-c.outbound:
 			if err := c.stream.Send(msg); err != nil {
@@ -230,6 +274,18 @@ func (c *connectorStreamClient) runWriter(ctx context.Context) {
 				return
 			}
 		}
+	}
+}
+
+// sendTerminal writes the terminal message; on success it signals the handler.
+func (c *connectorStreamClient) sendTerminal(msg *pb.ConnectorControlMessage) {
+	if err := c.stream.Send(msg); err != nil {
+		log.Printf("control stream: send ConnectorRevoked to connector %s failed: %v", c.connectorID, err)
+		return
+	}
+	log.Printf("control stream: ConnectorRevoked sent to connector %s", c.connectorID)
+	if c.terminalSent != nil {
+		close(c.terminalSent)
 	}
 }
 
@@ -427,24 +483,30 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		return status.Errorf(codes.PermissionDenied, "expected role %q, got %q", appmeta.SPIFFERoleConnector, role)
 	}
 
-	var connStatus, tenantID string
-	var revokedAt *time.Time
-
-	if err := h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id, revoked_at FROM connectors WHERE id = $1 AND trust_domain = $2`,
-		connectorID, trustDomain,
-	).Scan(&connStatus, &tenantID, &revokedAt); err != nil {
-		return status.Errorf(codes.NotFound, "connector not found: %v", err)
+	// Authoritative lookup, split three ways (design §4.5 correction 1):
+	// absent → NotFound + unknown marker; revoked → PermissionDenied + revoked
+	// marker; any query failure → Unavailable, no marker (a DB failure is never
+	// reported as NotFound or as a terminal state).
+	state, rec, err := h.lookupConnector(ctx, connectorID, trustDomain)
+	if err != nil {
+		log.Printf("control stream: connector %s state lookup failed (state undetermined, no marker): %v", connectorID, err)
+		return rejectStream(stream, rejectUnavailable())
 	}
-	if connStatus == "revoked" || revokedAt != nil {
-		return status.Error(codes.PermissionDenied, "connector is revoked")
+	if state != connectorStateAuthorized {
+		rej := rejectionFor(state, nil)
+		log.Printf("control stream: connector %s refused at open: %s", connectorID, describeRejection(rej))
+		return rejectStream(stream, rej)
 	}
+	tenantID := rec.tenantID
 
 	client := &connectorStreamClient{
 		stream:                stream,
 		outbound:              make(chan *pb.ConnectorControlMessage, connectorSendQueueSize),
 		connectorID:           connectorID,
 		tenantID:              tenantID,
+		trustDomain:           trustDomain,
+		terminal:              make(chan *pb.ConnectorControlMessage, 1),
+		terminalSent:          make(chan struct{}),
 		presentedCertNotAfter: presentedCertNotAfter(ctx),
 	}
 	if client.presentedCertNotAfter == nil {
@@ -454,9 +516,9 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	// Activation UPDATE + registration happen atomically under lifecycleMu, so
 	// an older stream for this connector closing concurrently either retires
 	// before this stream exists (a real gap) or finds it is no longer current.
-	becameActive, err := h.activateStream(ctx, client)
-	if err != nil {
-		return err
+	becameActive, rej := h.activateStream(ctx, client)
+	if rej != nil {
+		return rejectStream(stream, rej)
 	}
 	if becameActive {
 		if h.PolicyNotifier != nil {
@@ -508,9 +570,14 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 
 	log.Printf("control stream: connector %s connected", connectorID)
 
-	// Flush gRPC headers by enqueuing an initial Ping (the writer sends it first,
-	// resolving the client-side .control().await immediately). Enqueue can't fail on
-	// a fresh empty mailbox; if it ever did, the recv loop would surface the break.
+	// AgentPolicy is the FIRST message on every stream: it carries the
+	// authorization-contract capability, which the connector requires before
+	// it accepts any AuthorizationAck (design §4.6). Enqueue can't fail on a
+	// fresh empty mailbox; it also flushes the gRPC headers, resolving the
+	// client-side .control().await.
+	h.sendAgentPolicy(client)
+
+	// Initial Ping (liveness/diagnostic only; never authorization).
 	if err := client.send(&pb.ConnectorControlMessage{
 		Body: &pb.ConnectorControlMessage_Ping{
 			Ping: &shieldpb.Ping{TimestampUnix: time.Now().Unix()},
@@ -527,10 +594,6 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		log.Printf("control stream: send shield revocation list to connector %s: %v", connectorID, err)
 		return status.Errorf(codes.Unavailable, "shield revocation list unavailable: %v", err)
 	}
-
-	// Sprint 21 K2: tell the connector the shield renewal window.
-	h.sendAgentPolicy(client)
-
 	// ADR-016 C4: push the current eligible relay pool so the connector can
 	// pick a Tier 1 relay at startup without waiting for the next pool change.
 	if h.RelayListSrc != nil {
@@ -554,16 +617,48 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 	}
 	log.Printf("control stream: entering message loop for connector %s", connectorID)
 
+	// Recv runs in its own goroutine (grpc-go allows one RecvMsg goroutine
+	// concurrently with the writer's SendMsg) so the handler can also end the
+	// stream when the writer has delivered ConnectorRevoked. Messages are
+	// still processed one at a time, in order, by this goroutine.
+	type recvResult struct {
+		msg *pb.ConnectorControlMessage
+		err error
+	}
+	recvCh := make(chan recvResult, 1)
+	go func() {
+		for {
+			msg, err := stream.Recv()
+			select {
+			case recvCh <- recvResult{msg: msg, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
 	for {
 		log.Printf("control stream: waiting for message from connector %s", connectorID)
-		msg, err := stream.Recv()
-		if err == io.EOF {
-			log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
-			return nil
-		}
-		if err != nil {
-			log.Printf("control stream: connector %s stream error: %v", connectorID, err)
-			return err
+		var msg *pb.ConnectorControlMessage
+		select {
+		case <-client.terminalSent:
+			// ConnectorRevoked was written to this stream (SignalRevoked).
+			// End it with the authoritative revoked marker.
+			log.Printf("control stream: connector %s revoked — ConnectorRevoked delivered, closing control stream", connectorID)
+			return rejectStream(stream, rejectRevoked())
+		case r := <-recvCh:
+			if r.err == io.EOF {
+				log.Printf("control stream: connector %s closed stream (EOF)", connectorID)
+				return nil
+			}
+			if r.err != nil {
+				log.Printf("control stream: connector %s stream error: %v", connectorID, r.err)
+				return r.err
+			}
+			msg = r.msg
 		}
 
 		log.Printf("control stream: received message from connector %s, body type: %T", connectorID, msg.Body)
@@ -572,9 +667,12 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 		case nil:
 			log.Printf("control stream: connector %s body is NIL", connectorID)
 		case *pb.ConnectorControlMessage_ConnectorHealth:
-			if !h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth) {
-				// Connector was revoked/deleted — tear down the control stream.
-				return status.Error(codes.PermissionDenied, "connector revoked")
+			if rej := h.handleConnectorHealth(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ConnectorHealth).ConnectorHealth); rej != nil {
+				// Revoked / unknown (marked), state undetermined
+				// (Unavailable, unmarked) or contract missing
+				// (FailedPrecondition, unmarked): tear down the stream.
+				log.Printf("control stream: connector %s health refused, closing control stream: %s", connectorID, describeRejection(rej))
+				return rejectStream(stream, rej)
 			}
 		case *pb.ConnectorControlMessage_ShieldStatus:
 			h.handleShieldStatus(ctx, client, msg.Body.(*pb.ConnectorControlMessage_ShieldStatus).ShieldStatus)
@@ -607,10 +705,13 @@ func (h *EnrollmentHandler) Control(stream pb.ConnectorService_ControlServer) er
 // connector: under the registry's lifecycleMu it marks the connector active
 // (revocation-guarded) and registers client. It reports whether the connector
 // transitioned into 'active' (the caller notifies, after the lock is
-// released). A revoked connector is never registered. A non-revocation DB error
-// is logged and the stream is still registered — unchanged from the
-// pre-ownership behaviour.
-func (h *EnrollmentHandler) activateStream(ctx context.Context, client *connectorStreamClient) (bool, error) {
+// released). A revoked or deleted connector is never registered: the guarded
+// UPDATE matching nothing is classified by an authoritative follow-up lookup
+// into revoked (marker), unknown (marker) or undetermined (Unavailable, no
+// marker). A non-revocation DB error on the UPDATE itself is logged and the
+// stream is still registered — unchanged; it confers no authorization, since
+// only an AuthorizationAck after a successful guarded health UPDATE does.
+func (h *EnrollmentHandler) activateStream(ctx context.Context, client *connectorStreamClient) (bool, *authzRejection) {
 	h.Registry.lifecycleMu.Lock()
 	defer h.Registry.lifecycleMu.Unlock()
 
@@ -628,12 +729,13 @@ func (h *EnrollmentHandler) activateStream(ctx context.Context, client *connecto
 		client.connectorID,
 	).Scan(&becameActive); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return false, status.Error(codes.PermissionDenied, "connector is revoked")
+			return false, h.classifyRefusal(ctx, client, "activation")
 		}
 		log.Printf("control stream: mark connector %s active: %v", client.connectorID, err)
 		becameActive = false
 	}
 	h.Registry.add(client.connectorID, client)
+	h.Registry.trackLive(client.connectorID, client)
 	return becameActive, nil
 }
 
@@ -647,6 +749,8 @@ func (h *EnrollmentHandler) retireStream(ctx context.Context, client *connectorS
 	h.Registry.lifecycleMu.Lock()
 	defer h.Registry.lifecycleMu.Unlock()
 
+	// The stream is ending: it can no longer receive ConnectorRevoked.
+	h.Registry.untrackLive(client.connectorID, client)
 	if !h.Registry.removeIfCurrent(client.connectorID, client) {
 		return false, false
 	}
@@ -750,14 +854,30 @@ func (h *EnrollmentHandler) pushPendingInstructions(ctx context.Context, client 
 	return rows.Err()
 }
 
-// handleConnectorHealth processes a heartbeat. It returns false when the
-// connector is revoked/deleted — the caller must then close the control stream.
-// The UPDATE is guarded (status NOT IN revoked/deleted) so a revoked connector's
-// heartbeat can never resurrect it to 'active'; that guard makes `updated` empty,
-// so the query returns no rows (ErrNoRows) — our signal to tear the stream down.
-func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) bool {
+// handleConnectorHealth processes an authorization-bearing heartbeat. It
+// returns nil to keep the stream, or the rejection the caller must end the
+// stream with.
+//
+// Authorization (design §4.3, D9): AuthorizationAck{heartbeat_seq} is enqueued
+// LAST and only when (1) heartbeat_seq ≥ 1, (2) the revocation-guarded UPDATE
+// returned a row (the connector is authorized now), and (3) any required ACL
+// push for this report was enqueued ahead of it on this FIFO stream. Every
+// other path sends no ack:
+//   - heartbeat_seq = 0 → FailedPrecondition, no marker, no DB write;
+//   - guarded UPDATE matched nothing (ErrNoRows conflates revoked/deleted) →
+//     authoritative follow-up lookup → revoked / unknown marker, or
+//     Unavailable (no marker) when the lookup fails;
+//   - any other DB error → stream kept, no ACL push, no ack; the next report
+//     retries;
+//   - ACL push failed, or the stream already carries ConnectorRevoked → no ack.
+func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorHealthReport) *authzRejection {
 	connectorID := client.connectorID
-	log.Printf("control stream: received health report connector=%s version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
+	seq := r.GetHeartbeatSeq()
+	log.Printf("control stream: received health report connector=%s seq=%d version=%s hostname=%s lan_addr=%s acl_version=%d", connectorID, seq, r.Version, r.Hostname, r.LanAddr, r.AclVersion)
+	if seq == 0 {
+		log.Printf("control stream: connector %s health report has heartbeat_seq=0 (no authorization contract) — not acknowledged", connectorID)
+		return rejectMissingSeq()
+	}
 	var connectorChanged bool
 	var certNotAfter *time.Time
 	err := h.Pool.QueryRow(ctx,
@@ -786,13 +906,13 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		     FROM current, updated`,
 		r.Version, r.Hostname, r.PublicIp, r.LanAddr, connectorID).Scan(&connectorChanged, &certNotAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
-		// Guarded UPDATE matched nothing → connector revoked/deleted while its
-		// stream was open. Stop serving it and signal the caller to close.
-		log.Printf("control stream: connector %s revoked/deleted — closing control stream", connectorID)
-		return false
+		// Guarded UPDATE matched nothing → revoked or deleted while the stream
+		// was open (or undetermined). Classify authoritatively; no ack.
+		return h.classifyRefusal(ctx, client, "health")
 	}
-	if err != nil {
-		log.Printf("control stream: update connector health %s: %v", connectorID, err)
+	dbOK := err == nil
+	if !dbOK {
+		log.Printf("control stream: update connector health %s: %v — authorization undetermined: no ACL push, no AuthorizationAck for seq=%d", connectorID, err, seq)
 	} else if connectorChanged {
 		if h.PolicyNotifier != nil {
 			if err := h.PolicyNotifier.NotifyPolicyChange(ctx, client.tenantID); err != nil {
@@ -810,7 +930,7 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 	}
 	// Renewal trigger (Sprint 20 Phase G-1). Reached only when the
 	// revocation-guarded UPDATE succeeded: a revoked connector returned above.
-	if err == nil {
+	if dbOK {
 		h.maybeSendReEnroll(client, renewalExpiry(certNotAfter, client.presentedCertNotAfter), time.Now())
 	}
 	// Process relay attachment from heartbeat. Non-empty relay_id means the
@@ -843,10 +963,21 @@ func (h *EnrollmentHandler) handleConnectorHealth(ctx context.Context, client *c
 		}
 	}
 
-	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
-		log.Printf("control stream: push ACL snapshot to connector %s: %v", connectorID, err)
+	if !dbOK {
+		return nil
 	}
-	return true
+	// D9: the ACL push for this report is enqueued BEFORE the ack. A failed
+	// push (compile error, full mailbox) withholds the ack.
+	if err := h.pushACLSnapshot(ctx, client, r.AclVersion); err != nil {
+		log.Printf("control stream: push ACL snapshot to connector %s: %v — AuthorizationAck withheld for seq=%d", connectorID, err, seq)
+		return nil
+	}
+	if err := client.sendAuthorizationAck(seq); err != nil {
+		log.Printf("control stream: AuthorizationAck seq=%d to connector %s not enqueued: %v", seq, connectorID, err)
+		return nil
+	}
+	log.Printf("control stream: AuthorizationAck enqueued connector=%s seq=%d", connectorID, seq)
+	return nil
 }
 
 func (h *EnrollmentHandler) handleConnectorRelayState(ctx context.Context, client *connectorStreamClient, r *pb.ConnectorRelayState) {

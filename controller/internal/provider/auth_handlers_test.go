@@ -117,11 +117,18 @@ type fakeLimiter struct {
 	resets     int
 }
 
-func (f *fakeLimiter) Blocked(context.Context, string, string) (bool, time.Duration, error) {
+// Like the real Valkey client, both calls fail once their context is done.
+func (f *fakeLimiter) Blocked(ctx context.Context, _, _ string) (bool, time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return false, 0, err
+	}
 	return f.blocked, f.retry, f.blockedErr
 }
 
-func (f *fakeLimiter) RecordFailure(_ context.Context, email, _ string) ([]LimitTrip, error) {
+func (f *fakeLimiter) RecordFailure(ctx context.Context, email, _ string) ([]LimitTrip, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.recordErr != nil {
 		return nil, f.recordErr
 	}
@@ -138,10 +145,12 @@ func (f *fakeLimiter) Reset(context.Context, string) error { f.resets++; return 
 type countingAuthn struct {
 	Authenticator
 	calls int
+	delay time.Duration // simulates a slow or queued password hash
 }
 
 func (c *countingAuthn) Authenticate(ctx context.Context, in Credentials) (*ProviderUser, error) {
 	c.calls++
+	time.Sleep(c.delay)
 	return c.Authenticator.Authenticate(ctx, in)
 }
 
@@ -260,6 +269,20 @@ func TestLogin_ValkeyDown_FailsClosed(t *testing.T) {
 	f.limiter.blockedErr, f.limiter.recordErr = nil, errors.New("valkey down")
 	if rec := postJSON(t, f.h.Login, loginRequest{Email: "ops@inkyank.com", Password: "wrong-password-11"}, nil); rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("RecordFailure error: status %d, want 503", rec.Code)
+	}
+}
+
+// A slow credential check (e.g. queued behind the hash cap) must not use up the
+// limiter's time budget: the failure is still counted and answered 401, not a
+// 503 that leaves the attempt uncounted (unlimited guesses with a 503/200 oracle).
+func TestLogin_SlowAuthenticateStillCountsFailure(t *testing.T) {
+	f := newAuthFixture(t, activeUser(t, "u1", "ops@inkyank.com", RoleSuperAdmin, "correct-password-1", false))
+	f.authn.delay = loginLimiterTimeout + 200*time.Millisecond
+	if rec := postJSON(t, f.h.Login, loginRequest{Email: "ops@inkyank.com", Password: "wrong-password-11"}, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d, want 401", rec.Code)
+	}
+	if f.limiter.failures != 1 {
+		t.Fatalf("failures counted = %d, want 1", f.limiter.failures)
 	}
 }
 

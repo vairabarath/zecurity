@@ -238,4 +238,9 @@ Atomic write (`cert_manager::write_atomic`): temp file (`create_new`) → `fsync
 
 ## Post-Phase Fixes
 
-_None yet._
+### Live finding (no fix found as of 2026-10-17): a revoked relay retries its heartbeat every 5 s forever (Finding 32)
+**Issue:** live run F5–F7 (2026-09-28). After revoke, the relay process stayed `active` and reconnected its heartbeat every 5 s, each attempt refused.
+
+**Suggested fix (from the run sheet):** treat revoked / `PermissionDenied` as terminal (exit, or a long backoff) and log it clearly. Low severity.
+
+**Also:** AT-F.8 was accepted at `RELAY_CERT_TTL=1h` (F1–F4 PASS), because of KI-1. KI-1 itself is fixed in Sprint 21 K1 (`7fb0fb7`); the 15m live check is Sprint 21 AT-K.1.

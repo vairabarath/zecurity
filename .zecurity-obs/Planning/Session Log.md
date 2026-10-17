@@ -2706,3 +2706,58 @@ serves on `127.0.0.1:9102`.
 - Push and open the Phase K PR (when Barath says so).
 - Sathiya: Phase V live run, then AT-K acceptance.
 - Schedule the open audit findings; CA rotation needs an architectural decision.
+
+---
+
+## 2026-10-17 — Claude Code (Sathiya / M1) — Sprint 21 local acceptance run (API + headed browser)
+
+**What was done:**
+- Ran the Sprint 21 acceptance cases on the local stack, branch `test/merge-verification`. Results are in `Sprint21/Acceptance-Run-Checklist.md`; tools are listed in `Sprint21/Live-Demo-Notes.md` §4 and `~/Desktop/sprint21-browser-automation-tools.md`.
+- **Gates:**
+  - DB-backed Go `internal/provider`, `internal/providerquery`, `internal/middleware`: 175 pass, 0 skip.
+  - provider-console: `npm ci`, `lint`, `build` OK and `npm test` 374 pass.
+  - Rust renewal tests: relay 22, connector 28 + 8 (window/ReEnroll), shield 3.
+- **Live:** 44 scripted HTTP checks plus 35 + 6 headed-browser checks (puppeteer-core + Chrome 155); screenshots in `~/sprint21-ui/`.
+- **Results:** all AT-CORE, AT-H, AT-U, AT-P and AT-DEV items pass, plus R.1, R.6, R.7 and R.8.
+  - `[~]` because the data or lab is missing: R.2–R.5 (0 relays and 0 workspaces locally; Go tests pass), K.1 and K.2 (unit tests pass, live run needs the lab), and V.*.
+  - Not covered: plan AT-C.4 (the browser notice after another admin ends your session).
+
+**Notes:**
+- AT-H.7 passes only with the **uncommitted** `loginLimiterTimeout` change in `controller/internal/provider/auth_handlers.go`.
+- Throwaway operators were left in the local DB; at-op2-152625 and at-op2-152709 are active super-admins.
+- `/provider/relays?cursor=%%%bad` → 200, because Go drops the invalid query pair. Observation only.
+
+**What's next:**
+- Commit the AT-H.7 fix.
+- Phase V live run and live AT-R/AT-K in the lab.
+- Drive AT-C.4 in the browser.
+
+---
+
+## 2026-10-17 — Claude Code (Sathiya / M1) — Sprint 20 close-out (Sprint 21 Phase V paperwork)
+
+**What was done:**
+- **Code under test:** the Sprint 20 live run (2026-09-26/28) was at `5a4f940`, which is code-identical to the Phase V pin `46ab87d` (2 docs-only commits). So the run counts as Phase V.
+- **Run sheet:**
+  - filled the 5 empty reference values;
+  - G4 recorded as not exercised;
+  - `status: failed` (40 PASS, 1 PASS only under a TEMP patch (U2), 3 FAIL: U5 hold / G9 = Finding 15, R2 = Finding 35, 1 not exercised (G4));
+  - added a dated "Close-out — 2026-10-17" section with follow-up status and clean-up.
+- **`Sprint20/path.md`:**
+  - ticked only the rows the sheet proves: Phase A/C/F live, Phase B build gate, 9 of 10 sprint criteria;
+  - :227 (Phase G live) and "all scenarios pass" stay unticked;
+  - the :206 box was reworded to the 1h AT-F.8 target (KI-1);
+  - findings filed in Post-Sprint Fixes and in the A/B/D/F/G phase files.
+- **Re-checks on current code** (`1c164c7`, contains `origin/fixed-pendings`):
+  - full Go gate: 1161 PASS, 0 FAIL, 32 SKIP;
+  - with a seeded `RESOURCE_TEST_SHIELD_ID` on a throwaway DB (since dropped), Finding 35's **4 ACL-coherence tests still fail**;
+  - Finding 36 is fixed (`411e216`).
+
+**Open after close-out:**
+- **F34 (security): a revoked connector keeps serving tunnels.** Connector revocation is at Phase A only.
+- **F33:** fixed in code (bug 3, PR #123); live end-to-end check still pending.
+- **F35:** Fix02 still planned. 3 real extra notifies; 1 outdated test.
+- **G9 / AT-G.6** passed later on newer code (2026-10-10), not at this commit.
+- **Hygiene:** `.worktrees/s20-live`, `.localdev/s20-relay1`, nft `s20test` (needs sudo), lab-host update timers and test objects, and `zecurity-shield` reporting `activating` on this machine.
+
+**What's next:** Barath: Fix02 (F35) and connector revocation Phase B1 (F34). Sathiya: live end-to-end check of shield revocation (bug 3); Sprint 21 live AT-K.

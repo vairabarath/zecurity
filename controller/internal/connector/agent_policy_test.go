@@ -13,30 +13,34 @@ import (
 
 // Sprint 21 K2: AgentPolicy carries the shield renewal window to connectors.
 
+// Sprint 20 connector-revocation Phase A (design §4.6): AgentPolicy is ALWAYS
+// produced and always asserts the authorization-contract capability; an unset
+// shield renewal window no longer suppresses the whole message (that would
+// silently drop the capability).
 func TestAgentPolicyMessage(t *testing.T) {
 	cases := []struct {
 		window   time.Duration
-		wantSecs uint64 // 0 = no message
+		wantSecs uint64 // 0 = window "not set" (connector keeps its default)
 	}{
 		{48 * time.Hour, 172800},
 		{24 * time.Minute, 1440},
 		{1500 * time.Millisecond, 1}, // whole seconds only
-		{500 * time.Millisecond, 0},  // rounds to 0: not sent
+		{500 * time.Millisecond, 0},  // rounds to 0: window not set
 		{0, 0},
 		{-time.Hour, 0},
 	}
 	for _, tc := range cases {
 		h := &EnrollmentHandler{Cfg: Config{ShieldRenewalWindow: tc.window}}
 		msg := h.agentPolicyMessage()
-		if tc.wantSecs == 0 {
-			if msg != nil {
-				t.Errorf("window %s: got %v, want no AgentPolicy", tc.window, msg)
-			}
-			continue
-		}
 		body, ok := msg.GetBody().(*pb.ConnectorControlMessage_AgentPolicy)
-		if !ok || body.AgentPolicy.GetShieldRenewalWindowSecs() != tc.wantSecs {
-			t.Errorf("window %s: got %v, want shield_renewal_window_secs=%d", tc.window, msg, tc.wantSecs)
+		if !ok {
+			t.Fatalf("window %s: got %v, want an AgentPolicy", tc.window, msg)
+		}
+		if got := body.AgentPolicy.GetShieldRenewalWindowSecs(); got != tc.wantSecs {
+			t.Errorf("window %s: shield_renewal_window_secs=%d, want %d", tc.window, got, tc.wantSecs)
+		}
+		if !body.AgentPolicy.GetAuthorizationAcks() {
+			t.Errorf("window %s: authorization_acks=false, want true (capability must not depend on the window)", tc.window)
 		}
 	}
 }
@@ -50,14 +54,24 @@ func TestSendAgentPolicy_EnqueuesOnTheStream(t *testing.T) {
 		if got := msg.GetAgentPolicy().GetShieldRenewalWindowSecs(); got != 1440 {
 			t.Fatalf("shield_renewal_window_secs = %d, want 1440", got)
 		}
+		if !msg.GetAgentPolicy().GetAuthorizationAcks() {
+			t.Fatal("authorization_acks = false, want true")
+		}
 	default:
 		t.Fatal("no AgentPolicy enqueued")
 	}
 
+	// T8: no shield window configured — the capability is still sent.
 	none := testClient("c2", "ws")
 	(&EnrollmentHandler{}).sendAgentPolicy(none)
-	if len(none.outbound) != 0 {
-		t.Fatal("AgentPolicy enqueued without a configured window")
+	select {
+	case msg := <-none.outbound:
+		p := msg.GetAgentPolicy()
+		if p == nil || !p.GetAuthorizationAcks() || p.GetShieldRenewalWindowSecs() != 0 {
+			t.Fatalf("no-window AgentPolicy = %v, want authorization_acks=true, window 0", msg)
+		}
+	default:
+		t.Fatal("AgentPolicy (capability) omitted when no shield window is configured")
 	}
 }
 

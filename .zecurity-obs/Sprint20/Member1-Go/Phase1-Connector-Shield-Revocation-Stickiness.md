@@ -199,4 +199,20 @@ cd controller && go test ./internal/connector/... ./internal/shield/...
 
 ## Post-Phase Fixes
 
-_None yet._
+### Live finding: a revoked shield still carried traffic (Finding 33), FIXED later
+**Issue:** live run B3 (2026-09-28). The DB row stayed `revoked`, as this phase requires, but tunnels through the revoked shield kept returning 200.
+
+**Root cause:** revoke only updated the database. The connector was never told, and policy kept routing through the shield.
+
+**Fix applied:** bug 3, PR #123 (`86a436d`, `b2b00b5`):
+- durable tombstone and outbox;
+- a dispatcher pushes the revoked list to every connector;
+- the connector closes the stream and refuses the identity;
+- resources behind a revoked shield get no ACL entry.
+
+Live end-to-end acceptance is still pending. See `docs/certificate-audit-2026-10-15.md` → Bug 3.
+
+### Live finding (OPEN, security): a revoked connector keeps serving tunnels (Finding 34)
+**Issue:** live run B1–B2 (2026-09-28). The row stays `revoked` and reconnects are refused (this phase's scope passes), but the running connector kept serving existing tunnels until its process restarted.
+
+**Fix applied:** not yet. Connector revocation is at Phase A (`4cb5a6a`, protocol only, **not fail-closed**); Phase B1 not started. See [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Related: audit Bug 7 (a revoked connector can still renew its shields' certs).

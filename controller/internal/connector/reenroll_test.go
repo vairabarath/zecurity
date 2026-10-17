@@ -155,7 +155,7 @@ func setConnectorCertNotAfter(t *testing.T, h *EnrollmentHandler, connID string,
 }
 
 func healthReport() *pb.ConnectorHealthReport {
-	return &pb.ConnectorHealthReport{Version: "test", Hostname: "h"}
+	return &pb.ConnectorHealthReport{Version: "test", Hostname: "h", HeartbeatSeq: 1}
 }
 
 // Inside the window: the first health report triggers exactly one ReEnroll; the
@@ -169,13 +169,13 @@ func TestHandleConnectorHealth_SendsReEnrollInsideWindow(t *testing.T) {
 	setConnectorCertNotAfter(t, h, connID, &soon)
 	client := testClient(connID, wsID)
 
-	if !h.handleConnectorHealth(ctx, client, healthReport()) {
+	if h.handleConnectorHealth(ctx, client, healthReport()) != nil {
 		t.Fatal("active connector's health report closed the stream")
 	}
 	if n := drainReEnrolls(client); n != 1 {
 		t.Fatalf("ReEnroll after first report = %d, want 1", n)
 	}
-	if !h.handleConnectorHealth(ctx, client, healthReport()) {
+	if h.handleConnectorHealth(ctx, client, healthReport()) != nil {
 		t.Fatal("second health report closed the stream")
 	}
 	if n := drainReEnrolls(client); n != 0 {
@@ -196,7 +196,7 @@ func TestHandleConnectorHealth_NoReEnrollOutsideWindowOrNull(t *testing.T) {
 			setConnectorCertNotAfter(t, h, connID, notAfter)
 			client := testClient(connID, wsID)
 
-			if !h.handleConnectorHealth(ctx, client, healthReport()) {
+			if h.handleConnectorHealth(ctx, client, healthReport()) != nil {
 				t.Fatal("active connector's health report closed the stream")
 			}
 			if n := drainReEnrolls(client); n != 0 {
@@ -228,7 +228,7 @@ func TestHandleConnectorHealth_RevokedNeverGetsReEnroll(t *testing.T) {
 			setConnectorCertNotAfter(t, h, connID, &soon)
 			client := testClient(connID, wsID)
 
-			if h.handleConnectorHealth(ctx, client, healthReport()) {
+			if h.handleConnectorHealth(ctx, client, healthReport()) == nil {
 				t.Fatal("revoked connector's health report did not close the stream")
 			}
 			if n := drainReEnrolls(client); n != 0 {

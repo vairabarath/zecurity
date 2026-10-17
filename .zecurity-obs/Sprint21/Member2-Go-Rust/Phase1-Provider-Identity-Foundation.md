@@ -371,6 +371,58 @@ func VerifyDummy(ctx context.Context, password string) error {
 - **Guard tests:** `TestDummyHash_UsesProductionParameters` (fails if the Argon2id parameters change and the constant isn't regenerated) and `TestVerifyDummy_RecoversAfterSaturation`.
 - **Found by:** writing `TestLogin_HashCapacityExhausted_503`, before the PR.
 
+### Fix: Valkey down hangs login instead of 503 (AT-H.7)
+**Issue:** with Valkey stopped, `POST /provider/auth/login` hung for the client's whole timeout and returned no response (curl: HTTP 000) instead of the required 503 `login_unavailable`.
+
+**Root Cause:** `AuthHandlers.Login` passed `r.Context()` (no deadline) into `checkLimiter` → `ValkeyLoginLimiter.Blocked`, whose `rdb.Get`/`rdb.TTL` round-trips have no per-call timeout. A dead Valkey therefore blocked the handler indefinitely; the fail-closed 503 branch was never reached.
+
+**Fix Applied (`controller/internal/provider/auth_handlers.go`, ~line 58):**
+```go
+// BEFORE:
+ctx := r.Context()
+...
+if !h.checkLimiter(w, ctx, req.Email, ip) { return }
+
+// AFTER:
+const loginLimiterTimeout = 2 * time.Second
+limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+defer cancel()
+if !h.checkLimiter(w, limCtx, req.Email, ip) { return }
+```
+and the failure-record path in `recordFailure` now uses `limCtx` too. The handler already maps the resulting `context.DeadlineExceeded` to `writeAuthError(w, 503, "login_unavailable")`, so a dead Valkey now answers 503 within ~2s.
+
+**Found by:** AT-H.7 (Valkey down → 503) during the Sprint 21 acceptance run.
+
+### Fix: the AT-H.7 timeout let slow logins skip the failure count (rate-limit bypass)
+**Issue:** the fix above (commit `cb07806`) made a new hole, flagged by a security review on 2026-10-17. `limCtx` was created **before** `Authenticate` and reused for `recordFailure`. Argon2id plus a wait for a hash slot can take up to about 2 s, which uses up the shared budget. A wrong password then hit `RecordFailure` with an expired context and got **503 without being counted**, while a correct password still got 200. Saturating the hash cap (more than 4 concurrent logins) therefore gave unlimited guesses with a 503/200 oracle, bypassing the 6-per-email lockout.
+
+**Root Cause:** one timeout context was shared across the limiter check, the credential check and the failure record. `ChangePassword` had the same helpers with no timeout at all, so its limiter calls could still hang.
+
+**Fix Applied (`auth_handlers.go`, `checkLimiter` / `recordFailure`):**
+```go
+// BEFORE (Login):
+limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+defer cancel()
+if !h.checkLimiter(w, limCtx, req.Email, ip) { return }
+... h.recordFailure(w, limCtx, req.Email, ip, "invalid credentials")
+
+// AFTER: each helper bounds its own Valkey step; Login and ChangePassword pass ctx.
+func (h *AuthHandlers) checkLimiter(w, ctx, email, ip) bool {
+	ctx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+	defer cancel()
+	...
+}
+func (h *AuthHandlers) recordFailure(w, ctx, email, ip, reason) {
+	// fresh budget, detached from the request: neither a slow credential
+	// check nor a client disconnect skips the count
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginLimiterTimeout)
+	defer cancel()
+	...
+}
+```
+
+**Test:** `TestLogin_SlowAuthenticateStillCountsFailure` delays `Authenticate` past `loginLimiterTimeout`; it expects 401 and the failure counted. It **failed** on `cb07806` (503) and passes with the fix. The fake limiter now fails on a done context, as the real Valkey client does. `internal/provider` + `internal/middleware`: 105 PASS, 0 SKIP.
+
 ## Implementation notes (H-a, 2026-09-28)
 
 Deviations from the commit plan, recorded for future contributors:
