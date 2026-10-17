@@ -41,6 +41,8 @@ tonic-prost-build = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
+# Bootstrap-pinning tests: the fake controller signs the connector's real CSR.
+rcgen = { version = "0.14", features = ["x509-parser"] }
 
 [features]
 # Exposes a broadcast::Sender<SelectorEvent> on relay_selector so integration

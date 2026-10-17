@@ -86,8 +86,12 @@ pub async fn run() -> Result<()> {
     // keeps fetch_and_store_acl and the scheduler using the one TunSlot.
     let tun_slot: TunSlot = Arc::new(Mutex::new(None));
 
-    // Load encrypted durable state on startup if present.
-    if let Ok(stored) = state_store::load_workspace_state(&conf.workspace) {
+    // Load encrypted durable state on startup if present — only if its saved
+    // trust anchors chain to the platform root compiled into this client
+    // (certificate audit bug 1); otherwise the device must log in again.
+    if let Some(stored) =
+        load_trusted_state(&conf.workspace, crate::trust::embedded_platform_root_pem())
+    {
         let mut s = state.write().await;
         populate_runtime(&mut s, &stored);
         info!(workspace = %conf.workspace, "durable state loaded on startup");
@@ -4071,14 +4075,17 @@ async fn fetch_acl_snapshot_with_refresh(
                 }
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             // Persist the rotated pair BEFORE updating in-memory state so a
             // crash between save and in-memory update leaves the disk as the
@@ -4234,15 +4241,19 @@ async fn run_refresh_scheduler(state: SharedState, conf: config::ClientConf) {
         };
 
         let _guard = refresh_lock.lock().await;
-        let (access_token, refresh_token) = {
+        let (access_token, refresh_token, ca_pem) = {
             let s = state.read().await;
 
-            match s.session.as_ref() {
-                Some(sess) => (sess.access_token.clone(), sess.refresh_token.clone()),
-                None => continue,
+            match (s.session.as_ref(), s.device.as_ref()) {
+                (Some(sess), Some(device)) => (
+                    sess.access_token.clone(),
+                    sess.refresh_token.clone(),
+                    device.ca_cert_pem.clone(),
+                ),
+                _ => continue,
             }
         };
-        match auth::refresh_access_token(&conf, &access_token, &refresh_token).await {
+        match auth::refresh_access_token(&conf, &ca_pem, &access_token, &refresh_token).await {
             Ok(new_tokens) => {
                 if let Err(e) = state_store::save_rotated_tokens(
                     &conf.workspace,
@@ -4410,14 +4421,17 @@ async fn renew_cert_with_refresh(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -4639,6 +4653,36 @@ where
     Ok(())
 }
 
+/// Whether the CA chain saved at enrollment (Workspace CA + Intermediate) is
+/// anchored in the platform root compiled into this client (certificate
+/// audit bug 1). A chain saved before the fix was never validated, so a
+/// mismatch means the device must log in again.
+pub(crate) fn check_saved_trust(ca_cert_pem: &str, platform_root_pem: &str) -> Result<()> {
+    crate::trust::saved_anchors(ca_cert_pem, platform_root_pem)
+        .map(|_| ())
+        .context(
+            "saved trust anchors are not issued by this client's platform root; \
+             run `zecurity-client login` again",
+        )
+}
+
+/// The saved state for `workspace`, if any, but only if its trust anchors
+/// chain to `platform_root_pem` (certificate audit bug 1). Otherwise it is
+/// not loaded and the device must log in again.
+fn load_trusted_state(
+    workspace: &str,
+    platform_root_pem: Result<&str>,
+) -> Option<state_store::StoredWorkspaceState> {
+    let stored = state_store::load_workspace_state(workspace).ok()?;
+    match platform_root_pem.and_then(|root| check_saved_trust(&stored.device.ca_cert_pem, root)) {
+        Ok(()) => Some(stored),
+        Err(e) => {
+            error!(error = %format!("{e:#}"), "saved device state not loaded");
+            None
+        }
+    }
+}
+
 /// One renewal attempt: build the CSR, call RenewCert, persist + update state
 /// on success. Split out from run_cert_renewal_scheduler's loop (which owns
 /// only the sleep/eligibility/retry-timing logic) so the actual network +
@@ -4657,12 +4701,37 @@ async fn attempt_cert_renewal(
         .context("build renewal CSR")?;
     let resp = renew_cert_with_refresh(conf, ca_pem, state, device_id, &csr_pem).await?;
 
-    let new_ca_cert_pem = format!("{}\n{}", resp.workspace_ca_pem, resp.intermediate_ca_pem);
+    // Certificate audit bug 1: the renewed certificate must chain to the
+    // anchors saved at enrollment (byte-identical Workspace CA and
+    // Intermediate), for this device's identity and key. The anchors are
+    // never replaced by a renewal. On rejection nothing changes.
+    let spiffe_id = state
+        .read()
+        .await
+        .device
+        .as_ref()
+        .map(|d| d.spiffe_id.clone())
+        .unwrap_or_default();
+    (|| {
+        let (saved_workspace, saved_intermediate) = crate::trust::split_saved_chain(ca_pem)?;
+        crate::trust::validate_issued_chain(
+            &crate::trust::Anchors {
+                intermediate: &saved_intermediate,
+                workspace_ca: Some(&saved_workspace),
+            },
+            &resp.workspace_ca_pem,
+            &resp.intermediate_ca_pem,
+            &resp.certificate_pem,
+            &spiffe_id,
+            &crate::trust::csr_key_spki(&csr_pem)?,
+        )
+    })()
+    .context("renewed certificate rejected")?;
 
     if let Err(e) = state_store::save_renewed_cert(
         &conf.workspace,
         resp.certificate_pem.clone(),
-        new_ca_cert_pem.clone(),
+        ca_pem.to_string(),
         resp.cert_expires_at,
     ) {
         warn!(error = %e, "persist renewed cert failed — in-memory update still applied");
@@ -4671,7 +4740,6 @@ async fn attempt_cert_renewal(
     let mut s = state.write().await;
     if let Some(device) = s.device.as_mut() {
         device.certificate_pem = resp.certificate_pem;
-        device.ca_cert_pem = new_ca_cert_pem;
         device.cert_expires_at = resp.cert_expires_at;
     }
     info!(new_expiry = resp.cert_expires_at, "device cert renewed proactively");
@@ -4942,14 +5010,17 @@ async fn submit_posture_report(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -5227,14 +5298,17 @@ async fn fetch_transport_snapshot_with_refresh(
                 Err(err) => return Err(err),
             }
 
-            let new_tokens = auth::refresh_access_token(conf, &access_token, &refresh_token)
-                .await
-                .map_err(|e| match e {
-                    auth::RefreshError::SessionDead => {
-                        anyhow::anyhow!("session expired; re-login required")
-                    }
-                    auth::RefreshError::Transient(inner) => inner.context("refresh access token"),
-                })?;
+            let new_tokens =
+                auth::refresh_access_token(conf, ca_pem, &access_token, &refresh_token)
+                    .await
+                    .map_err(|e| match e {
+                        auth::RefreshError::SessionDead => {
+                            anyhow::anyhow!("session expired; re-login required")
+                        }
+                        auth::RefreshError::Transient(inner) => {
+                            inner.context("refresh access token")
+                        }
+                    })?;
 
             state_store::save_rotated_tokens(
                 &conf.workspace,
@@ -6452,6 +6526,35 @@ mod renewal_tests {
     /// accidental call fails the test cleanly instead of aborting the task.
     struct FakeRenewCertServer {
         expected_device_id: String,
+        /// The reply — a real chain from `crate::test_pki` (certificate
+        /// audit bug 1: renewal replies are validated).
+        reply: crate::grpc::client_v1::RenewCertResponse,
+    }
+
+    /// A test PKI, a device key, and a renewed leaf for that key and
+    /// `device_id` (issued by the PKI's Workspace CA). Returns
+    /// (pki, key PEM, renewal reply).
+    fn real_renewal(
+        device_id: &str,
+    ) -> (
+        crate::test_pki::TestPki,
+        String,
+        crate::grpc::client_v1::RenewCertResponse,
+    ) {
+        let pki = crate::test_pki::TestPki::new();
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
+        let csr = rcgen::CertificateParams::default()
+            .serialize_request(&key)
+            .unwrap()
+            .pem()
+            .unwrap();
+        let reply = crate::grpc::client_v1::RenewCertResponse {
+            certificate_pem: pki.sign_device_csr(&csr, device_id),
+            workspace_ca_pem: pki.workspace_ca_pem.clone(),
+            intermediate_ca_pem: pki.intermediate_pem.clone(),
+            cert_expires_at: 9_999_999_999,
+        };
+        (pki, key.serialize_pem(), reply)
     }
 
     #[tonic::async_trait]
@@ -6517,6 +6620,21 @@ mod renewal_tests {
             Err(tonic::Status::unimplemented("not used in this test"))
         }
 
+        async fn refresh_session(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::RefreshSessionRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::RefreshSessionResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+        async fn logout(
+            &self,
+            _request: tonic::Request<crate::grpc::client_v1::LogoutRequest>,
+        ) -> Result<tonic::Response<crate::grpc::client_v1::LogoutResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("not used in this test"))
+        }
+
         async fn renew_cert(
             &self,
             request: tonic::Request<crate::grpc::client_v1::RenewCertRequest>,
@@ -6529,12 +6647,7 @@ mod renewal_tests {
             if req.csr_pem.is_empty() || req.access_token.is_empty() {
                 return Err(tonic::Status::invalid_argument("missing csr_pem/access_token"));
             }
-            Ok(tonic::Response::new(crate::grpc::client_v1::RenewCertResponse {
-                certificate_pem: "FAKE-RENEWED-CERT".into(),
-                workspace_ca_pem: "FAKE-WORKSPACE-CA".into(),
-                intermediate_ca_pem: "FAKE-INTERMEDIATE-CA".into(),
-                cert_expires_at: 9_999_999_999,
-            }))
+            Ok(tonic::Response::new(self.reply.clone()))
         }
     }
 
@@ -6544,19 +6657,16 @@ mod renewal_tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::env::set_var("ZECURITY_STATE_DIR", dir.path());
 
-        // Real self-signed TLS identity — connect_grpc always uses TLS, never
-        // plaintext, so a real handshake is part of what this test proves
-        // works. The self-signed cert doubles as its own trust anchor, same
-        // as any CA-of-one.
-        let cert_key =
-            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let ca_pem = cert_key.cert.pem();
-        let server_identity = tonic::transport::Identity::from_pem(
-            cert_key.cert.pem(),
-            cert_key.key_pair.serialize_pem(),
-        );
-
+        // Real TLS identity from the test PKI — connect_grpc always uses
+        // TLS, never plaintext, so a real handshake is part of what this
+        // test proves works. The saved anchors (Workspace CA + Intermediate)
+        // are the trust store, as after a real enrollment.
         let device_id = "device-e2e-1".to_string();
+        let (pki, private_key_pem, reply) = real_renewal(&device_id);
+        let ca_pem = pki.device_ca_chain();
+        let (identity_cert, identity_key) = pki.controller_identity();
+        let server_identity = tonic::transport::Identity::from_pem(identity_cert, identity_key);
+        let renewed_cert = reply.certificate_pem.clone();
 
         // Grab a free port, then release it — tonic binds it fresh. Small
         // TOCTOU window, negligible in practice for a single-machine test.
@@ -6573,6 +6683,7 @@ mod renewal_tests {
                     crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
                         FakeRenewCertServer {
                             expected_device_id: server_device_id,
+                            reply,
                         },
                     ),
                 )
@@ -6588,9 +6699,6 @@ mod renewal_tests {
             controller_address: format!("localhost:{}", addr.port()),
             ..Default::default()
         };
-
-        let key_pair = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384).unwrap();
-        let private_key_pem = key_pair.serialize_pem();
 
         // Seed a state file so save_renewed_cert's load->mutate->save has
         // something to load — mirrors seed_state_file in directive_tests.
@@ -6611,11 +6719,11 @@ mod renewal_tests {
             let mut s = state.write().await;
             s.device = Some(DeviceInfo {
                 id: device_id.clone(),
-                spiffe_id: "spiffe://example.test/device-e2e-1".into(),
+                spiffe_id: crate::test_pki::device_spiffe_id(&device_id),
                 certificate_pem: "OLD-CERT".into(),
                 private_key_pem: private_key_pem.clone(),
                 tpm_key_material: None,
-                ca_cert_pem: "OLD-CA".into(),
+                ca_cert_pem: ca_pem.clone(),
                 cert_expires_at: 1_000,
                 hostname: "e2e-host".into(),
                 os: "linux".into(),
@@ -6642,24 +6750,200 @@ mod renewal_tests {
         // In-memory state reflects the server's response.
         let s = state.read().await;
         let device = s.device.as_ref().unwrap();
-        assert_eq!(device.certificate_pem, "FAKE-RENEWED-CERT");
-        assert_eq!(device.ca_cert_pem, "FAKE-WORKSPACE-CA\nFAKE-INTERMEDIATE-CA");
+        assert_eq!(device.certificate_pem, renewed_cert);
+        // The saved anchors are never replaced by a renewal (bug 1).
+        assert_eq!(device.ca_cert_pem, ca_pem);
         assert_eq!(device.cert_expires_at, 9_999_999_999);
         drop(s);
 
         // Disk reflects it too — save_renewed_cert actually ran, not just
         // the in-memory update.
         let on_disk = state_store::load_workspace_state(&conf.workspace).expect("reload state");
-        assert_eq!(on_disk.device.certificate_pem, "FAKE-RENEWED-CERT");
+        assert_eq!(on_disk.device.certificate_pem, renewed_cert);
         assert_eq!(on_disk.device.cert_expires_at, 9_999_999_999);
         // The key never changes on renewal — that's the whole point of D-A.
         assert_eq!(on_disk.device.private_key_pem, private_key_pem);
     }
 
+    // ---- Certificate audit bug 1 (client): renewal can't swap the anchors ----
+    //
+    // RenewCert's reply used to be saved as-is, including a new "Workspace
+    // CA + Intermediate" pair, so whoever answered a renewal could replace
+    // the device's trust store. The reply must chain to the anchors saved at
+    // enrollment, for the device's own key and identity, and the anchors are
+    // never replaced.
+
+    struct RenewalOutcome {
+        result: Result<()>,
+        old_cert: String,
+        anchors: String,
+        memory: DeviceInfo,
+        disk: state_store::StoredDevice,
+    }
+
+    async fn renew_with_reply(reply: crate::test_controller::Reply) -> RenewalOutcome {
+        use crate::test_pki::{
+            device_key_and_csr, device_spiffe_id, AttackerPki, TestPki, DEVICE_ID,
+        };
+        let pki = Arc::new(TestPki::new());
+        let attacker = Arc::new(AttackerPki::new());
+        let ep = crate::test_controller::endpoint(
+            &pki,
+            &attacker,
+            pki.intermediate_pem.clone(),
+            pki.controller_identity(),
+            reply,
+        )
+        .await;
+        let (key_pem, csr) = device_key_and_csr();
+        let old_cert = pki.sign_device_csr(&csr, DEVICE_ID);
+        let anchors = pki.device_ca_chain();
+        let device = DeviceInfo {
+            id: DEVICE_ID.into(),
+            spiffe_id: device_spiffe_id(DEVICE_ID),
+            certificate_pem: old_cert.clone(),
+            private_key_pem: key_pem.clone(),
+            tpm_key_material: None,
+            ca_cert_pem: anchors.clone(),
+            cert_expires_at: 1_000,
+            hostname: "e2e-host".into(),
+            os: "linux".into(),
+        };
+        let seeded = state_store::StoredWorkspaceState {
+            device: state_store::StoredDevice {
+                id: device.id.clone(),
+                spiffe_id: device.spiffe_id.clone(),
+                certificate_pem: old_cert.clone(),
+                ca_cert_pem: anchors.clone(),
+                private_key_pem: key_pem.clone(),
+                cert_expires_at: 1_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        state_store::save_workspace_state(&ep.conf.workspace, &seeded).expect("seed state file");
+        let state = crate::runtime::new_shared();
+        {
+            let mut s = state.write().await;
+            s.device = Some(device);
+            s.session = Some(SessionInfo {
+                access_token: "renewal-access-token".into(),
+                refresh_token: "renewal-refresh-token".into(),
+                expires_at: now_unix() + 900,
+            });
+        }
+        let result = attempt_cert_renewal(
+            &state, &ep.conf, DEVICE_ID, &key_pem, None, "e2e-host", &anchors,
+        )
+        .await;
+        let memory = state.read().await.device.clone().unwrap();
+        let disk = state_store::load_workspace_state(&ep.conf.workspace)
+            .expect("reload state")
+            .device;
+        RenewalOutcome {
+            result,
+            old_cert,
+            anchors,
+            memory,
+            disk,
+        }
+    }
+
+    #[tokio::test]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn genuine_renewal_installs_the_new_cert_and_keeps_the_anchors() {
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let out = renew_with_reply(crate::test_controller::Reply::Genuine).await;
+        out.result.expect("genuine renewal");
+        assert_ne!(out.memory.certificate_pem, out.old_cert, "cert not renewed");
+        assert_eq!(out.disk.certificate_pem, out.memory.certificate_pem);
+        assert_eq!(out.memory.ca_cert_pem, out.anchors);
+        assert_eq!(out.disk.ca_cert_pem, out.anchors);
+    }
+
+    #[tokio::test]
+    // The state-dir guard serializes ZECURITY_STATE_DIR across tests and must
+    // span the awaits, as in renewal_e2e_against_real_tls_server.
+    #[allow(clippy::await_holding_lock)]
+    async fn renewal_reply_not_under_the_saved_anchors_changes_nothing() {
+        use crate::test_controller::Reply;
+        let _guard = STATE_DIR_GUARD.lock().unwrap();
+        for reply in [Reply::Forged, Reply::OtherPlatform, Reply::OtherKey] {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+            let out = renew_with_reply(reply).await;
+            let err = out.result.expect_err("renewal reply must be refused");
+            assert!(
+                format!("{err:#}").contains("renewed certificate rejected"),
+                "{err:#}"
+            );
+            assert_eq!(
+                out.memory.certificate_pem, out.old_cert,
+                "in-memory cert replaced"
+            );
+            assert_eq!(
+                out.memory.ca_cert_pem, out.anchors,
+                "in-memory anchors replaced"
+            );
+            assert_eq!(
+                out.disk.certificate_pem, out.old_cert,
+                "saved cert replaced"
+            );
+            assert_eq!(out.disk.ca_cert_pem, out.anchors, "saved anchors replaced");
+        }
+    }
+
+    #[test]
+    fn startup_loads_only_saved_state_anchored_in_the_platform_root() {
+        use crate::test_pki::{AttackerPki, TestPki};
+        let _guard = STATE_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        std::env::set_var("ZECURITY_STATE_DIR", dir.path());
+        let pki = TestPki::new();
+        let attacker = AttackerPki::new();
+        let seed = |ca_cert_pem: String| {
+            let state = state_store::StoredWorkspaceState {
+                device: state_store::StoredDevice {
+                    id: "device-startup".into(),
+                    ca_cert_pem,
+                    private_key_pem: "KEY".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            state_store::save_workspace_state("ws-startup", &state).expect("seed state file");
+        };
+
+        assert!(
+            load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_none(),
+            "no state saved"
+        );
+        seed(pki.device_ca_chain());
+        assert!(load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_some());
+        assert!(
+            load_trusted_state("ws-startup", Err(anyhow::anyhow!("no root"))).is_none(),
+            "a build without a platform root must not load saved state"
+        );
+        for unanchored in [
+            TestPki::new().device_ca_chain(),
+            format!(
+                "{}\n{}",
+                attacker.workspace_ca_pem, attacker.fake_intermediate_pem
+            ),
+            "OLD-CA".to_string(),
+        ] {
+            seed(unanchored);
+            assert!(load_trusted_state("ws-startup", Ok(&pki.root_pem)).is_none());
+        }
+    }
+
     // ---- Sprint 21 B1: a renewed cert reaches an already-running tunnel ----------
 
     const OLD_CERT: &str = "OLD-CERT";
-    const RENEWED_CERT: &str = "FAKE-RENEWED-CERT";
 
     /// A daemon with an enrolled device (cert OLD-CERT, persisted) and a
     /// session, talking to the fake controller over real TLS. The fake only
@@ -6671,17 +6955,19 @@ mod renewal_tests {
         ca_pem: String,
         device_id: String,
         private_key_pem: String,
+        /// The certificate the fake controller renews to.
+        renewed_cert: String,
     }
 
     async fn renewal_fixture(server_device_id: &str) -> RenewalFixture {
         let dir = tempfile::TempDir::new().unwrap();
         std::env::set_var("ZECURITY_STATE_DIR", dir.path());
-        let cert_key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let ca_pem = cert_key.cert.pem();
-        let server_identity = tonic::transport::Identity::from_pem(
-            cert_key.cert.pem(),
-            cert_key.key_pair.serialize_pem(),
-        );
+        // The fake renews "device-b1" with a real chain from the test PKI.
+        let (pki, private_key_pem, reply) = real_renewal("device-b1");
+        let ca_pem = pki.device_ca_chain();
+        let (identity_cert, identity_key) = pki.controller_identity();
+        let server_identity = tonic::transport::Identity::from_pem(identity_cert, identity_key);
+        let renewed_cert = reply.certificate_pem.clone();
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = probe.local_addr().unwrap();
         drop(probe);
@@ -6692,7 +6978,10 @@ mod renewal_tests {
                 .unwrap()
                 .add_service(
                     crate::grpc::client_v1::client_service_server::ClientServiceServer::new(
-                        FakeRenewCertServer { expected_device_id },
+                        FakeRenewCertServer {
+                            expected_device_id,
+                            reply,
+                        },
                     ),
                 )
                 .serve(addr)
@@ -6713,9 +7002,6 @@ mod renewal_tests {
             ..Default::default()
         };
         let device_id = "device-b1".to_string();
-        let private_key_pem = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P384_SHA384)
-            .unwrap()
-            .serialize_pem();
         state_store::save_workspace_state(
             &conf.workspace,
             &state_store::StoredWorkspaceState {
@@ -6736,11 +7022,11 @@ mod renewal_tests {
             let mut s = state.write().await;
             s.device = Some(DeviceInfo {
                 id: device_id.clone(),
-                spiffe_id: "spiffe://example.test/device-b1".into(),
+                spiffe_id: crate::test_pki::device_spiffe_id("device-b1"),
                 certificate_pem: OLD_CERT.into(),
                 private_key_pem: private_key_pem.clone(),
                 tpm_key_material: None,
-                ca_cert_pem: "OLD-CA".into(),
+                ca_cert_pem: ca_pem.clone(),
                 cert_expires_at: 1_000,
                 hostname: "b1-host".into(),
                 os: "linux".into(),
@@ -6758,6 +7044,7 @@ mod renewal_tests {
             ca_pem,
             device_id,
             private_key_pem,
+            renewed_cert,
         }
     }
 
@@ -6891,13 +7178,13 @@ mod renewal_tests {
 
         assert_eq!(
             restarts.certs(),
-            vec![RENEWED_CERT.to_string()],
+            vec![f.renewed_cert.clone()],
             "exactly one restart, with the new cert"
         );
-        assert_eq!(applied_cert(&f.state).await, RENEWED_CERT);
+        assert_eq!(applied_cert(&f.state).await, f.renewed_cert);
         // Persisted too, before the restart used it.
         let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
-        assert_eq!(on_disk.device.certificate_pem, RENEWED_CERT);
+        assert_eq!(on_disk.device.certificate_pem, f.renewed_cert);
     }
 
     /// Repeated or concurrent restart requests after a renewal (the renewal's
@@ -6923,7 +7210,7 @@ mod renewal_tests {
             .await
             .unwrap();
 
-        assert_eq!(restarts.certs(), vec![RENEWED_CERT.to_string()]);
+        assert_eq!(restarts.certs(), vec![f.renewed_cert.clone()]);
     }
 
     /// No tunnel running → the real restart_tunnel_if_running does nothing:
@@ -6942,7 +7229,7 @@ mod renewal_tests {
         assert!(tun_slot.lock().await.is_none(), "no tunnel was started");
         let s = f.state.read().await;
         assert!(s.tun_handle.is_none());
-        assert_eq!(s.device.as_ref().unwrap().certificate_pem, RENEWED_CERT);
+        assert_eq!(s.device.as_ref().unwrap().certificate_pem, f.renewed_cert);
     }
 
     /// A failed renewal neither restarts the tunnel nor touches the current,
@@ -7068,10 +7355,10 @@ mod renewal_tests {
                 .as_ref()
                 .unwrap()
                 .certificate_pem,
-            RENEWED_CERT
+            f.renewed_cert
         );
         let on_disk = state_store::load_workspace_state(&f.conf.workspace).unwrap();
-        assert_eq!(on_disk.device.certificate_pem, RENEWED_CERT);
+        assert_eq!(on_disk.device.certificate_pem, f.renewed_cert);
 
         answer_restart_requests(&f.state).await;
         finish(&f.state, task)

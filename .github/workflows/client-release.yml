@@ -47,9 +47,20 @@ jobs:
           sudo mv /tmp/protoc/bin/protoc /usr/local/bin/protoc
           protoc --version
 
+      - name: Require the platform root CA
+        # Certificate audit bug 1: the client trusts only the platform root
+        # compiled into it. No release ships without one (see client/trust/README.md).
+        run: |
+          test -s client/trust/platform-root.pem || {
+            echo "::error::client/trust/platform-root.pem is missing: add the production platform root CA (client/trust/README.md)"
+            exit 1
+          }
+
       - name: Build release binary
         env:
           CROSS_CONTAINER_OPTS: "--volume /usr/local/bin/protoc:/usr/local/bin/protoc --env PROTOC=/usr/local/bin/protoc"
+          # Relative to the client crate; passed into the cross container (Cross.toml).
+          ZECURITY_PLATFORM_ROOT_PEM_FILE: trust/platform-root.pem
         run: cross build --manifest-path client/Cargo.toml --release --target ${{ matrix.target }}
 
       - name: Rename binary
@@ -111,6 +122,9 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/vairabarath/zecurity/main/client/scripts/client-install.sh | \
               sudo CONTROLLER_ADDR=192.168.x.x:9090 bash
             ```
+            These binaries trust only the production platform's root CA. A dev or
+            LAN controller has its own root: build the client for it with
+            `client/scripts/dev-build.sh` (see `client/trust/README.md`).
 
             ### After install
             ```bash

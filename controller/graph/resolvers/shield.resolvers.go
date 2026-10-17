@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -73,23 +74,16 @@ func (r *mutationResolver) GenerateShieldToken(ctx context.Context, remoteNetwor
 func (r *mutationResolver) RevokeShield(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
-	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
-		`UPDATE shields
-		    SET status = 'revoked', updated_at = NOW()
-		  WHERE id = $1
-		    AND tenant_id = $2
-		    AND status IN ('active', 'disconnected')
-		 RETURNING id`,
-		id, tc.TenantID,
-	).Scan(&discardedID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	// Certificate audit bug 3: the revocation, its tombstone and its
+	// propagation work commit together; the dispatcher then invalidates the
+	// policy and tells the workspace's connectors.
+	if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, id); err != nil {
+		if errors.Is(err, shield.ErrNotRevocable) {
 			return false, fmt.Errorf("revoke shield: shield not found or not in revocable status")
 		}
-		return false, fmt.Errorf("revoke shield: %w", err)
+		return false, err
 	}
-
+	r.ShieldRevocations.Wake()
 	return true, nil
 }
 

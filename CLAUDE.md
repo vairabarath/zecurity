@@ -125,7 +125,7 @@ cd controller && docker compose down -v && docker compose up -d   # Recreate loc
 Sprint 21 specific:
 - Build gate passes before proceeding to next phase (DB-backed tests must run, not skip)
 - The Decision Record (`docs/provider-dashboard-architecture-decisions.md`, 2026-09-23) is binding. If a phase seems to need a new architectural choice, stop and ask. Don't decide it in code. Open questions OQ-1/OQ-2 in `path.md` must be answered before the tenant read endpoints.
-- **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `037_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
+- **No migration framework.** A schema change is a new numbered SQL file in `controller/migrations/` (next: `039_`); never edit an existing file; label the PR `[schema: reset DB]`; everyone recreates their local DB.
 - Provider tokens use the provider key and issuer only; a tenant JWT must never authenticate a provider route.
 - The provider console is **read-only except** logout and operator management (super-admin). Don't modify `admin/`.
 - Operator management must stay lock-out-proof: no self-disable/demote/reset, never zero active super-admins. Bootstrap is **create-only** (ignored once any super-admin exists; no reset env flag). Break-glass recovery is a future controller CLI command (`zecurity-controller provider recover-admin`), not an env var.

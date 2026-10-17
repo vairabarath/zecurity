@@ -42,6 +42,17 @@ type Service interface {
 	// browser doesn't keep re-presenting a dead token.
 	LogoutHandler() http.Handler
 
+	// RefreshSession exchanges an access token (expired is fine; signature
+	// verified) plus the single-use refresh token for a fresh pair, rotating
+	// the refresh token. The core of /auth/refresh, also behind the
+	// ClientService.RefreshSession RPC the Rust client uses over its pinned
+	// TLS channel. Errors are *SessionError; Dead() means sign in again.
+	RefreshSession(ctx context.Context, accessToken, refreshToken string) (newAccessToken, newRefreshToken string, err error)
+
+	// EndSession deletes the session the access token names. Idempotent and
+	// silent. The core of /auth/logout and of ClientService.Logout.
+	EndSession(ctx context.Context, accessToken string)
+
 	// ── Sprint 7: ClientService primitives ──────────────────────────────────
 	// These power the Rust CLI's TokenExchange / EnrollDevice gRPC handlers,
 	// which run their own PKCE flow against a localhost redirect URI rather
@@ -80,4 +91,9 @@ type AccessTokenClaims struct {
 	TenantID string
 	Role     string
 	Email    string
+	// Generation is the users.identity_generation the token was minted under
+	// (the "gen" claim; 0 for tokens that predate generations). Compared with
+	// the current value before issuing device certificates (certificate audit
+	// bugs 4/5), as /auth/refresh does.
+	Generation int
 }

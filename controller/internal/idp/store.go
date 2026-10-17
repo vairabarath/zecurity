@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yourorg/ztna/controller/internal/pki"
@@ -332,15 +333,7 @@ func (s *Store) SetScimMapping(ctx context.Context, tenantID, id, subjectClaim, 
 // DeleteWorkspaceConnection removes a workspace connection. The tenant_id guard
 // prevents deleting a platform (tenant_id NULL) connection through this path.
 func (s *Store) DeleteWorkspaceConnection(ctx context.Context, tenantID, id string) error {
-	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM identity_connections WHERE id = $1 AND tenant_id = $2`, id, tenantID)
-	if err != nil {
-		return fmt.Errorf("delete connection: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return ErrConnectionNotFound
-	}
-	return nil
+	return s.DeleteWorkspaceConnectionTx(ctx, tenantID, id, nil)
 }
 
 // TouchConnectionSync stamps identity_connections.last_sync_at for a workspace
@@ -359,12 +352,79 @@ func (s *Store) TouchConnectionSync(ctx context.Context, tenantID, connectionID 
 	return nil
 }
 
-// SuspendSCIMUsersForConnection sets every SCIM-provisioned, still-active user
-// of a connection to status='suspended' (reversible) when the connection is
-// disabled. Scoped to (tenant, connection) and to provisioning_owner='scim' so a
-// non-SCIM-owned user is never touched. Returns the number suspended.
-func (s *Store) SuspendSCIMUsersForConnection(ctx context.Context, tenantID, connectionID string) (int, error) {
-	tag, err := s.pool.Exec(ctx,
+// InTx runs inside a store transaction — e.g. to enqueue durable outbox work
+// that must commit atomically with the store change.
+type InTx func(ctx context.Context, tx pgx.Tx) error
+
+// DisableConnection disables an identity connection and suspends + unmanages
+// its SCIM-managed users (ADR-025 §12), then runs inTx — all in one
+// transaction, so the lifecycle change and its durable propagation work
+// (certificate audit bugs 4/5) commit together or not at all. Returns the
+// suspended and unmanaged counts. Session revocation, which talks to Valkey,
+// stays with the caller, after commit.
+func (s *Store) DisableConnection(ctx context.Context, tenantID, connectionID string, inTx InTx) (suspended, unmanaged int, err error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("begin disable transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	tag, err := tx.Exec(ctx,
+		`UPDATE identity_connections SET status = 'disabled', updated_at = NOW()
+		 WHERE id = $1 AND tenant_id = $2`, connectionID, tenantID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("disable connection: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return 0, 0, ErrConnectionNotFound
+	}
+	if suspended, err = suspendSCIMUsers(ctx, tx, tenantID, connectionID); err != nil {
+		return 0, 0, err
+	}
+	if unmanaged, err = unmanageSCIMUsers(ctx, tx, tenantID, connectionID); err != nil {
+		return 0, 0, err
+	}
+	if inTx != nil {
+		if err := inTx(ctx, tx); err != nil {
+			return 0, 0, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, 0, fmt.Errorf("commit disable: %w", err)
+	}
+	return suspended, unmanaged, nil
+}
+
+// DeleteWorkspaceConnectionTx is DeleteWorkspaceConnection plus inTx, in one
+// transaction.
+func (s *Store) DeleteWorkspaceConnectionTx(ctx context.Context, tenantID, id string, inTx InTx) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx,
+		`DELETE FROM identity_connections WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+	if err != nil {
+		return fmt.Errorf("delete connection: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrConnectionNotFound
+	}
+	if inTx != nil {
+		if err := inTx(ctx, tx); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+func suspendSCIMUsers(ctx context.Context, db execer, tenantID, connectionID string) (int, error) {
+	tag, err := db.Exec(ctx,
 		`UPDATE users SET status = 'suspended', updated_at = NOW()
 		  WHERE tenant_id = $1 AND status = 'active' AND provisioning_owner = 'scim'
 		    AND id IN (
@@ -377,12 +437,8 @@ func (s *Store) SuspendSCIMUsersForConnection(ctx context.Context, tenantID, con
 	return int(tag.RowsAffected()), nil
 }
 
-// SetSCIMUsersUnmanaged flips provisioning_owner from 'scim' to 'unmanaged' for
-// every user still owned by a connection (used on DISABLE and DELETE per
-// ADR-025 §12 — the immutable provisioned_by stays 'scim' so roles/policies/
-// devices are preserved). Returns the number flipped.
-func (s *Store) SetSCIMUsersUnmanaged(ctx context.Context, tenantID, connectionID string) (int, error) {
-	tag, err := s.pool.Exec(ctx,
+func unmanageSCIMUsers(ctx context.Context, db execer, tenantID, connectionID string) (int, error) {
+	tag, err := db.Exec(ctx,
 		`UPDATE users SET provisioning_owner = 'unmanaged', updated_at = NOW()
 		  WHERE tenant_id = $1 AND provisioning_owner = 'scim'
 		    AND id IN (
@@ -393,6 +449,22 @@ func (s *Store) SetSCIMUsersUnmanaged(ctx context.Context, tenantID, connectionI
 		return 0, fmt.Errorf("set scim users unmanaged: %w", err)
 	}
 	return int(tag.RowsAffected()), nil
+}
+
+// SuspendSCIMUsersForConnection sets every SCIM-provisioned, still-active user
+// of a connection to status='suspended' (reversible) when the connection is
+// disabled. Scoped to (tenant, connection) and to provisioning_owner='scim' so a
+// non-SCIM-owned user is never touched. Returns the number suspended.
+func (s *Store) SuspendSCIMUsersForConnection(ctx context.Context, tenantID, connectionID string) (int, error) {
+	return suspendSCIMUsers(ctx, s.pool, tenantID, connectionID)
+}
+
+// SetSCIMUsersUnmanaged flips provisioning_owner from 'scim' to 'unmanaged' for
+// every user still owned by a connection (used on DISABLE and DELETE per
+// ADR-025 §12 — the immutable provisioned_by stays 'scim' so roles/policies/
+// devices are preserved). Returns the number flipped.
+func (s *Store) SetSCIMUsersUnmanaged(ctx context.Context, tenantID, connectionID string) (int, error) {
+	return unmanageSCIMUsers(ctx, s.pool, tenantID, connectionID)
 }
 
 // LinkedUserCount returns the number of canonical users that authenticate
@@ -419,6 +491,13 @@ func (s *Store) LinkedUserCount(ctx context.Context, tenantID, connectionID stri
 // connection. Groups are SCIM-owned metadata, not core identity data, so
 // they can be cleaned up independently of users.
 func (s *Store) SoftDeleteConnection(ctx context.Context, tenantID, connectionID string) error {
+	return s.SoftDeleteConnectionTx(ctx, tenantID, connectionID, nil)
+}
+
+// SoftDeleteConnectionTx is SoftDeleteConnection plus inTx, run before the
+// commit: removing the connection's SCIM groups changes the policy, so its
+// durable invalidation (certificate audit bugs 4/5) commits with it.
+func (s *Store) SoftDeleteConnectionTx(ctx context.Context, tenantID, connectionID string, inTx InTx) error {
 	// Use a transaction to ensure atomicity of status update and cleanup.
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -460,6 +539,11 @@ func (s *Store) SoftDeleteConnection(ctx context.Context, tenantID, connectionID
 		return fmt.Errorf("purge scim sync instances: %w", err)
 	}
 
+	if inTx != nil {
+		if err := inTx(ctx, tx); err != nil {
+			return err
+		}
+	}
 	return tx.Commit(ctx)
 }
 

@@ -1,8 +1,8 @@
 use parking_lot::{Mutex, RwLock};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -15,6 +15,7 @@ use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::{Channel, Server};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
@@ -75,6 +76,12 @@ struct ShieldMaps {
     pending_state: HashMap<String, ResourceStateReport>,
     health: HashMap<String, ShieldEntry>,
     pending_discovery: HashMap<String, crate::shield_proto::DiscoveryReport>,
+    /// Certificate audit bug 3: revoked shield identities, from the
+    /// controller's authoritative list. Terminal: the set only grows.
+    revoked: HashSet<String>,
+    /// Cancellation of each open Control stream, per shield: (stream id,
+    /// token). Revocation cancels them all.
+    stream_cancels: HashMap<String, Vec<(u64, CancellationToken)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +113,11 @@ pub struct ShieldRegistry {
     /// so the connector can piggyback the current peer-Connector list back to
     /// the Shield (see PeerConnectorList in the Shield Control stream).
     policy_cache: Arc<crate::policy::PolicyCache>,
+    /// Certificate audit bug 3: set once this process has applied the
+    /// controller's authoritative revocation list. Until then no shield is
+    /// accepted — not at TCP accept, not on any RPC.
+    revocations_synced: Arc<AtomicBool>,
+    next_stream_id: Arc<AtomicU64>,
 }
 
 impl ShieldRegistry {
@@ -125,6 +137,8 @@ impl ShieldRegistry {
                 pending_state: HashMap::new(),
                 health: HashMap::new(),
                 pending_discovery: HashMap::new(),
+                revoked: HashSet::new(),
+                stream_cancels: HashMap::new(),
             })),
             ack_tx,
             controller_channel: Arc::new(RwLock::new(controller_channel)),
@@ -134,7 +148,85 @@ impl ShieldRegistry {
             renewal_window_secs: Arc::new(AtomicU64::new(DEFAULT_RENEWAL_WINDOW_SECS)),
             tunnel_hub: crate::agent_tunnel::AgentTunnelHub::new(),
             policy_cache,
+            revocations_synced: Arc::new(AtomicBool::new(false)),
+            next_stream_id: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Apply the controller's authoritative, complete list of revoked shield
+    /// identities (certificate audit bug 3). Idempotent; revocation is
+    /// terminal, so ids are only ever added. Every newly revoked shield has its
+    /// Control streams closed, its channels unregistered, its cached snapshot,
+    /// buffered instructions and reports discarded, and every relay session
+    /// through it ended. The first call in a process opens the connector to
+    /// shields.
+    pub fn apply_revocations(&self, revoked_shield_ids: Vec<String>) {
+        let mut newly = Vec::new();
+        let mut cancels = Vec::new();
+        {
+            let mut maps = self.maps.lock();
+            for id in revoked_shield_ids {
+                if maps.revoked.insert(id.clone()) {
+                    newly.push(id);
+                }
+            }
+            for id in &newly {
+                maps.instruction_txs.remove(id);
+                maps.snapshot_txs.remove(id);
+                maps.resource_snapshots.remove(id);
+                maps.resource_instructions.remove(id);
+                maps.pending_state.remove(id);
+                maps.pending_discovery.remove(id);
+                maps.health.remove(id);
+                cancels.extend(maps.stream_cancels.remove(id).unwrap_or_default());
+            }
+            self.revocations_synced.store(true, Ordering::SeqCst);
+        }
+        for (_, token) in cancels {
+            token.cancel();
+        }
+        for id in &newly {
+            self.tunnel_hub.revoke_shield(id);
+            warn!(shield_id = %id, "shield revoked: stream closed, sessions ended, identity refused");
+        }
+    }
+
+    /// A new controller stream became current (certificate audit bug 3): the
+    /// list held so far was received on an earlier stream, so no new shield is
+    /// admitted until the current stream delivers its own list. Revocations
+    /// already applied stay applied, and established shield streams and
+    /// sessions are not touched.
+    pub fn require_revocation_resync(&self) {
+        if self.revocations_synced.swap(false, Ordering::SeqCst) {
+            info!(
+                "new controller stream: admitting no new shields until its revocation list arrives"
+            );
+        }
+    }
+
+    /// Whether this process currently holds an authoritative revocation
+    /// list (one received on the current controller stream).
+    pub fn revocations_synced(&self) -> bool {
+        self.revocations_synced.load(Ordering::SeqCst)
+    }
+
+    /// Whether `shield_id` is revoked.
+    pub fn is_revoked(&self, shield_id: &str) -> bool {
+        self.maps.lock().revoked.contains(shield_id)
+    }
+
+    /// Certificate audit bug 3: a shield is admitted only after this process
+    /// applied the authoritative revocation list, and only if not revoked.
+    fn admit(&self, shield_id: &str) -> Result<(), Status> {
+        if !self.revocations_synced.load(Ordering::SeqCst) {
+            return Err(Status::unavailable(
+                "connector has not yet applied the controller's shield revocation list",
+            ));
+        }
+        if self.maps.lock().revoked.contains(shield_id) {
+            return Err(Status::permission_denied("shield is revoked"));
+        }
+        Ok(())
     }
 
     /// The current controller channel (cheap clone).
@@ -237,6 +329,9 @@ impl ShieldRegistry {
         // Mirrors push_snapshot's already-correct discipline.
         let tx = {
             let mut maps = self.maps.lock();
+            if maps.revoked.contains(shield_id) {
+                return; // certificate audit bug 3: never buffered for a revoked shield
+            }
             match maps.instruction_txs.get(shield_id).cloned() {
                 Some(tx) => tx,
                 None => {
@@ -288,6 +383,9 @@ impl ShieldRegistry {
     pub fn push_snapshot(&self, shield_id: &str, snapshot: ResourceSnapshot) {
         let maybe_tx = {
             let mut maps = self.maps.lock();
+            if maps.revoked.contains(shield_id) {
+                return; // certificate audit bug 3: never cached for a revoked shield
+            }
             maps.resource_snapshots
                 .insert(shield_id.to_string(), snapshot.clone());
             maps.snapshot_txs.get(shield_id).cloned()
@@ -415,6 +513,7 @@ impl ShieldRegistry {
             acceptor,
             handshake_timeout,
             conn_tx,
+            self.revocations_synced.clone(),
         ));
 
         // The raw tokio-rustls `TlsStream<TcpStream>` goes to tonic unwrapped:
@@ -470,6 +569,7 @@ impl ShieldRegistry {
         let shield_id = found_id.ok_or_else(|| {
             Status::permission_denied("shield cert SPIFFE identity not in expected trust domain")
         })?;
+        self.admit(&shield_id)?;
 
         let cert_not_after_unix = cert.validity().not_after.timestamp();
         info!(
@@ -526,6 +626,7 @@ impl ShieldRegistry {
         let spiffe_id = verified_spiffe.ok_or_else(|| {
             Status::permission_denied("Shield certificate SPIFFE identity mismatch")
         })?;
+        self.admit(claimed_shield_id)?;
 
         let cert_not_after_unix = cert.validity().not_after.timestamp();
         info!(
@@ -646,6 +747,7 @@ async fn accept_shield_connections(
     acceptor: TlsAcceptor,
     handshake_timeout: Duration,
     conn_tx: mpsc::Sender<TlsStream<TcpStream>>,
+    revocations_synced: Arc<AtomicBool>,
 ) {
     loop {
         let (tcp, peer) = tokio::select! {
@@ -661,6 +763,12 @@ async fn accept_shield_connections(
             // The gRPC server stopped consuming connections.
             _ = conn_tx.closed() => return,
         };
+        // Certificate audit bug 3: no shield connection is accepted before
+        // this process applied the controller's revocation list.
+        if !revocations_synced.load(Ordering::SeqCst) {
+            debug!(peer = %peer, "shield connection refused: revocation list not yet applied");
+            continue;
+        }
         // Same as tonic's own listener default.
         let _ = tcp.set_nodelay(true);
 
@@ -739,15 +847,38 @@ impl ShieldService for ShieldRegistry {
         // Tunnel send channel — hub enqueues TunnelOpen/Data/Close messages to deliver to this Shield.
         let (tunnel_tx, mut tunnel_rx) = mpsc::channel::<ShieldControlMessage>(64);
 
+        // Certificate audit bug 3: check and register in one critical section,
+        // so a concurrent revocation either refuses this stream here or finds
+        // its cancel token and closes it. The hub keeps its own revoked set for
+        // the same reason (revocation updates the maps first, then the hub).
+        let cancel = CancellationToken::new();
+        let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut maps = self.maps.lock();
+            if !self.revocations_synced.load(Ordering::SeqCst) {
+                return Err(Status::unavailable(
+                    "connector has not yet applied the controller's shield revocation list",
+                ));
+            }
+            if maps.revoked.contains(&identity.shield_id) {
+                return Err(Status::permission_denied("shield is revoked"));
+            }
             maps.instruction_txs
                 .insert(identity.shield_id.clone(), instr_tx);
             maps.snapshot_txs
                 .insert(identity.shield_id.clone(), snap_tx);
+            maps.stream_cancels
+                .entry(identity.shield_id.clone())
+                .or_default()
+                .push((stream_id, cancel.clone()));
         }
-        self.tunnel_hub
-            .register_shield(identity.shield_id.clone(), tunnel_tx);
+        if !self
+            .tunnel_hub
+            .register_shield(identity.shield_id.clone(), tunnel_tx)
+        {
+            // Revoked in between: apply_revocations already cleaned the maps.
+            return Err(Status::permission_denied("shield is revoked"));
+        }
 
         let registry = self.clone();
         let shield_id = identity.shield_id.clone();
@@ -805,6 +936,12 @@ impl ShieldService for ShieldRegistry {
 
             loop {
                 tokio::select! {
+                    biased;
+                    // Certificate audit bug 3: the shield was revoked.
+                    _ = cancel.cancelled() => {
+                        let _ = out_tx.try_send(Err(Status::permission_denied("shield is revoked")));
+                        break;
+                    }
                     msg = in_stream.message() => {
                         match msg {
                             Ok(Some(m)) => {
@@ -910,6 +1047,12 @@ impl ShieldService for ShieldRegistry {
                 let mut maps = registry.maps.lock();
                 maps.instruction_txs.remove(&shield_id);
                 maps.snapshot_txs.remove(&shield_id); // cache itself survives for the next reconnect
+                if let Some(tokens) = maps.stream_cancels.get_mut(&shield_id) {
+                    tokens.retain(|(id, _)| *id != stream_id);
+                    if tokens.is_empty() {
+                        maps.stream_cancels.remove(&shield_id);
+                    }
+                }
             }
             registry.tunnel_hub.unregister_shield(&shield_id);
             info!(shield_id = %shield_id, "shield Control stream disconnected");
@@ -1110,7 +1253,15 @@ mod shield_server_tls_tests {
     const OTHER_SHIELD_ID: &str = "c2a9e4b1-7d3f-4a8e-b6c5-0f1e2d3c4b5a";
     const WAIT: Duration = Duration::from_secs(5);
 
+    /// A registry that has applied an (empty) authoritative revocation list —
+    /// what every connected connector has (certificate audit bug 3).
     fn registry() -> ShieldRegistry {
+        let r = unsynced_base_registry();
+        r.apply_revocations(vec![]);
+        r
+    }
+
+    fn unsynced_base_registry() -> ShieldRegistry {
         let (ack_tx, _ack_rx) = mpsc::channel(8);
         // A peer in this connector's remote network: every Shield health
         // report is then answered with a PeerConnectorList, which these tests
@@ -1558,6 +1709,7 @@ mod shield_server_tls_tests {
             acceptor,
             SHIELD_TLS_HANDSHAKE_TIMEOUT,
             conn_tx,
+            Arc::new(AtomicBool::new(true)),
         ));
 
         // Nobody drains conn_rx: after the first connection the queue is full.
@@ -1574,5 +1726,310 @@ mod shield_server_tls_tests {
                 .expect("accept loop alive");
         }
         accept_loop.abort();
+    }
+
+    // ---- certificate audit bug 3: shield revocation ----------------------
+    //
+    // Revoking a shield used to change nothing on the connector: the revoked
+    // shield kept its Control stream, kept carrying user sessions, could
+    // reconnect, and was replayed its cached snapshot. The connector now
+    // applies the controller's authoritative revocation list: it closes the
+    // shield's stream, unregisters it, drops its snapshot, tears down every
+    // session through it, refuses its identity, and accepts no shield at all
+    // until it has applied that list.
+
+    /// A registry that has not applied an authoritative revocation list
+    /// (fresh process: connector start or restart). Its renewal window is
+    /// tiny, so no ReEnroll interleaves with what these tests watch for.
+    fn unsynced_registry() -> ShieldRegistry {
+        let r = unsynced_base_registry();
+        r.set_shield_renewal_window(1);
+        r
+    }
+
+    /// A registry that has applied an (empty) authoritative revocation list,
+    /// with the tiny renewal window.
+    fn synced_registry() -> ShieldRegistry {
+        let r = unsynced_registry();
+        r.apply_revocations(vec![]);
+        r
+    }
+
+    /// The Control stream must end — closed or failed — and deliver nothing
+    /// else first.
+    async fn expect_closed(replies: &mut Streaming<ShieldControlMessage>) {
+        match tokio::time::timeout(WAIT, replies.message()).await {
+            Err(_) => panic!("revoked shield's Control stream is still open"),
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Ok(Ok(Some(m))) => panic!("revoked shield was sent {m:?}"),
+        }
+    }
+
+    /// Whether `shield_id` can open a Control stream on `addr` and get a
+    /// liveness reply.
+    async fn control_admitted(pki: &TestPki, addr: SocketAddr, shield_id: &str) -> bool {
+        let Ok(channel) = channel(pki, addr, Some(pki.shield_identity_pem(shield_id))).await else {
+            return false;
+        };
+        let (out, out_rx) = mpsc::channel(8);
+        let Ok(replies) = ShieldServiceClient::new(channel)
+            .control(ReceiverStream::new(out_rx))
+            .await
+        else {
+            return false;
+        };
+        let mut replies = replies.into_inner();
+        if out.send(health_report()).await.is_err() {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(WAIT, replies.message()).await,
+            Ok(Ok(Some(ShieldControlMessage {
+                body: Some(Body::PeerConnectorList(_))
+            })))
+        )
+    }
+
+    #[tokio::test]
+    async fn revoking_a_shield_closes_its_open_control_stream() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        expect_closed(&mut replies).await;
+        assert!(r.is_revoked(SHIELD_ID));
+    }
+
+    #[tokio::test]
+    async fn a_revoked_shield_cannot_reconnect_or_call_the_connector() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a revoked shield reconnected"
+        );
+        let revoked = channel(&pki, server.addr, Some(pki.shield_identity_pem(SHIELD_ID))).await;
+        if let Ok(ch) = revoked {
+            let err = goodbye(ch.clone(), SHIELD_ID)
+                .await
+                .expect_err("a revoked shield's Goodbye must be refused");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err}");
+            let err = ShieldServiceClient::new(ch)
+                .renew_cert(crate::shield_proto::RenewCertRequest {
+                    shield_id: SHIELD_ID.into(),
+                    public_key_der: vec![1, 2, 3],
+                })
+                .await
+                .expect_err("a revoked shield's RenewCert must be refused");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{err}");
+        }
+        assert!(
+            control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await,
+            "an unrevoked shield must still be admitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_discards_and_suppresses_the_shields_snapshot_and_instructions() {
+        let r = synced_registry();
+        let snapshot = |generation| ResourceSnapshot {
+            generation,
+            ..Default::default()
+        };
+        r.push_snapshot(SHIELD_ID, snapshot(1));
+        r.push_instructions(SHIELD_ID, vec![]);
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        r.push_snapshot(SHIELD_ID, snapshot(2));
+        r.push_instructions(
+            SHIELD_ID,
+            vec![ResourceInstruction {
+                resource_id: "r".into(),
+                ..Default::default()
+            }],
+        );
+        let maps = r.maps.lock();
+        assert!(
+            !maps.resource_snapshots.contains_key(SHIELD_ID),
+            "a revoked shield's snapshot is still cached"
+        );
+        assert!(
+            maps.resource_instructions
+                .get(SHIELD_ID)
+                .is_none_or(|v| v.is_empty()),
+            "instructions are still buffered for a revoked shield"
+        );
+    }
+
+    /// Missing initial synchronization: until the controller's authoritative
+    /// list is applied, no shield is accepted.
+    #[tokio::test]
+    async fn no_shield_is_accepted_before_the_authoritative_list_is_applied() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = unsynced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        // Not even a TLS handshake: the connection is dropped at accept.
+        let tcp = TcpStream::connect(server.addr).await.unwrap();
+        let handshake = tokio::time::timeout(
+            WAIT,
+            tokio_rustls::TlsConnector::from(shield_tls_client(&pki)).connect(
+                rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                tcp,
+            ),
+        )
+        .await
+        .expect("refused promptly");
+        assert!(
+            handshake.is_err(),
+            "a shield connection was accepted before the revocation list was applied"
+        );
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was accepted before the revocation list was applied"
+        );
+        if let Ok(ch) = channel(&pki, server.addr, Some(pki.shield_identity_pem(SHIELD_ID))).await {
+            assert!(goodbye(ch, SHIELD_ID).await.is_err());
+        }
+
+        r.apply_revocations(vec![]);
+        assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+    }
+
+    /// Connector restart: revocation state is not trusted across processes —
+    /// the new process refuses every shield until the controller resends the
+    /// list, then refuses only the revoked ones.
+    #[tokio::test]
+    async fn after_a_restart_shields_wait_for_the_resent_list() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let before = synced_registry();
+        before.apply_revocations(vec![SHIELD_ID.to_string()]);
+
+        let restarted = unsynced_registry();
+        let server = start_with(restarted.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        assert!(!control_admitted(&pki, server.addr, SHIELD_ID).await);
+        assert!(!control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await);
+
+        restarted.apply_revocations(vec![SHIELD_ID.to_string()]);
+        assert!(!control_admitted(&pki, server.addr, SHIELD_ID).await);
+        assert!(control_admitted(&pki, server.addr, OTHER_SHIELD_ID).await);
+    }
+
+    /// A live user session relayed through the shield is torn down when the
+    /// shield is revoked.
+    #[tokio::test]
+    async fn revocation_tears_down_live_sessions_through_the_shield() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        let hub = r.tunnel_hub.clone();
+        let opening = tokio::spawn(async move {
+            hub.open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                .await
+        });
+        let open = next_reply(&mut replies).await;
+        let Some(Body::TunnelOpen(open)) = open.body else {
+            panic!("expected TunnelOpen, got {open:?}");
+        };
+        out.send(ShieldControlMessage {
+            body: Some(Body::TunnelOpened(crate::shield_proto::TunnelOpened {
+                connection_id: open.connection_id,
+                ok: true,
+                error: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+        let session = opening.await.unwrap().expect("session opened");
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let relay = tokio::spawn(session.relay_stream(relay_end));
+        device.write_all(b"git push").await.unwrap();
+
+        r.apply_revocations(vec![SHIELD_ID.to_string()]);
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("the session through a revoked shield must end")
+            .unwrap()
+            .ok();
+        let mut buf = [0u8; 16];
+        let n = tokio::time::timeout(WAIT, device.read(&mut buf))
+            .await
+            .expect("device side must see the session end")
+            .unwrap_or(0);
+        assert_eq!(
+            n, 0,
+            "the device still receives data through a revoked shield"
+        );
+    }
+
+    /// Sessions being established while the shield is revoked: every session
+    /// that opened is torn down, and none opens after revocation returned.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_session_establishment_and_revocation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        for _round in 0..20 {
+            let r = synced_registry();
+            let (shield_tx, mut shield_rx) = mpsc::channel::<ShieldControlMessage>(1024);
+            assert!(r
+                .tunnel_hub
+                .register_shield(SHIELD_ID.to_string(), shield_tx));
+            // A shield that accepts every tunnel.
+            let hub = r.tunnel_hub.clone();
+            tokio::spawn(async move {
+                while let Some(m) = shield_rx.recv().await {
+                    if let Some(Body::TunnelOpen(o)) = m.body {
+                        hub.dispatch_opened(&o.connection_id, true, String::new());
+                    }
+                }
+            });
+
+            let revoked = Arc::new(AtomicBool::new(false));
+            let mut tasks = Vec::new();
+            for _ in 0..16 {
+                let hub = r.tunnel_hub.clone();
+                let revoked = revoked.clone();
+                tasks.push(tokio::spawn(async move {
+                    let started_after_revocation = revoked.load(Ordering::SeqCst);
+                    if let Ok(session) = hub
+                        .open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                        .await
+                    {
+                        assert!(
+                            !started_after_revocation,
+                            "a session opened after the shield was revoked"
+                        );
+                        let (_device, relay_end) = tokio::io::duplex(64);
+                        tokio::time::timeout(WAIT, session.relay_stream(relay_end))
+                            .await
+                            .expect("a session through a revoked shield must end")
+                            .ok();
+                    }
+                }));
+            }
+            tokio::task::yield_now().await;
+            r.apply_revocations(vec![SHIELD_ID.to_string()]);
+            revoked.store(true, Ordering::SeqCst);
+            for task in tasks {
+                task.await.expect("session task");
+            }
+            assert!(r
+                .tunnel_hub
+                .open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp")
+                .await
+                .is_err());
+        }
     }
 }

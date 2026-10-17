@@ -38,6 +38,7 @@ mod config;
 mod crypto;
 mod enrollment;
 mod tls;
+mod trust;
 mod types;
 mod updater;
 mod util;

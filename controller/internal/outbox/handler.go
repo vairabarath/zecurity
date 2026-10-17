@@ -57,6 +57,16 @@ func (r *HandlerRegistry) RegisterHandler(
 	return nil
 }
 
+// Has reports whether a handler is registered for eventType. Used to verify
+// startup registration: an event without a handler is failed terminally on
+// its first attempt.
+func (r *HandlerRegistry) Has(eventType string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.handlers[eventType]
+	return ok
+}
+
 // lookup returns the handler registered for eventType.
 func (r *HandlerRegistry) lookup(
 	eventType string,

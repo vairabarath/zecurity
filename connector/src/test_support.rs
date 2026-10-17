@@ -57,6 +57,8 @@ fn new_key() -> KeyPair {
 }
 
 pub struct TestPki {
+    int_params: CertificateParams,
+    int_key: KeyPair,
     ws_params: CertificateParams,
     ws_key: KeyPair,
     connector_key: KeyPair,
@@ -86,6 +88,8 @@ impl TestPki {
             .unwrap();
 
         Self {
+            int_params,
+            int_key,
             ws_params,
             ws_key,
             connector_key: new_key(),
@@ -125,6 +129,51 @@ impl TestPki {
             .signed_by(key, &Issuer::from_params(&self.ws_params, &self.ws_key))
             .unwrap()
             .pem()
+    }
+
+    /// The controller's gRPC server identity as production issues it: signed
+    /// by the Platform Intermediate, serverAuth, valid for `localhost`.
+    /// Returns (cert PEM, key PEM).
+    pub fn controller_server_identity(&self) -> (String, String) {
+        server_identity(&Issuer::from_params(&self.int_params, &self.int_key))
+    }
+
+    /// Sign a connector enrollment CSR the way the controller does: issued by
+    /// the Workspace CA for the CSR's own key and SANs.
+    pub fn sign_enrollment_csr(&self, csr_der: &[u8]) -> String {
+        sign_csr(csr_der, &Issuer::from_params(&self.ws_params, &self.ws_key))
+    }
+
+    /// [`Self::sign_enrollment_csr`] with the leaf parameters (usages,
+    /// validity …) adjusted by `shape` — for the wrong-shape rejection tests.
+    pub fn sign_enrollment_csr_shaped(
+        &self,
+        csr_der: &[u8],
+        shape: impl FnOnce(&mut CertificateParams),
+    ) -> String {
+        sign_csr_shaped(
+            csr_der,
+            &Issuer::from_params(&self.ws_params, &self.ws_key),
+            shape,
+        )
+    }
+
+    /// A "Workspace CA" that is not a CA (issued by the real Intermediate)
+    /// and an enrollment leaf for `csr_der` signed by it. Returns
+    /// (ws PEM, leaf PEM).
+    pub fn non_ca_workspace_reply(&self, csr_der: &[u8]) -> (String, String) {
+        let key = new_key();
+        let mut params = CertificateParams::default();
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "Test Workspace CA");
+        params.serial_number = Some(random_serial());
+        let ws_pem = params
+            .signed_by(&key, &Issuer::from_params(&self.int_params, &self.int_key))
+            .unwrap()
+            .pem();
+        let leaf = sign_csr(csr_der, &Issuer::from_params(&params, &key));
+        (ws_pem, leaf)
     }
 
     /// Connector leaf (same key every time, new serial).
@@ -343,5 +392,83 @@ pub fn selector_config(
         reconnect_max: StdDuration::from_secs(10),
         reconnect_backoff_factor: 2.0,
         drain_timeout: StdDuration::from_secs(10),
+    }
+}
+
+fn server_identity(issuer: &Issuer<'_, &KeyPair>) -> (String, String) {
+    let key = new_key();
+    let mut params = CertificateParams::default();
+    params.subject_alt_names = vec![
+        SanType::DnsName("localhost".try_into().unwrap()),
+        SanType::URI(crate::appmeta::SPIFFE_CONTROLLER_ID.try_into().unwrap()),
+    ];
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.serial_number = Some(random_serial());
+    let cert = params.signed_by(&key, issuer).unwrap();
+    (cert.pem(), key.serialize_pem())
+}
+
+fn sign_csr(csr_der: &[u8], issuer: &Issuer<'_, &KeyPair>) -> String {
+    sign_csr_shaped(csr_der, issuer, |_| {})
+}
+
+/// [`sign_csr`] with the leaf parameters adjusted by `shape` before signing.
+fn sign_csr_shaped(
+    csr_der: &[u8],
+    issuer: &Issuer<'_, &KeyPair>,
+    shape: impl FnOnce(&mut CertificateParams),
+) -> String {
+    let csr = rustls::pki_types::CertificateSigningRequestDer::from(csr_der.to_vec());
+    let mut params = rcgen::CertificateSigningRequestParams::from_der(&csr).unwrap();
+    params.params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
+    params.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    params.params.serial_number = Some(random_serial());
+    shape(&mut params.params);
+    params.signed_by(issuer).unwrap().pem()
+}
+
+/// Mallory's PKI for bootstrap-hijack tests (bug 1): her own self-signed
+/// root, which she appends to `/ca.crt` or hands back as the "workspace" and
+/// "intermediate" CAs.
+pub struct AttackerPki {
+    root_params: CertificateParams,
+    root_key: KeyPair,
+    pub root_pem: String,
+}
+
+impl Default for AttackerPki {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AttackerPki {
+    pub fn new() -> Self {
+        install_crypto_provider();
+        let root_key = new_key();
+        let root_params = ca_params("Mallory Root");
+        let root_pem = root_params.self_signed(&root_key).unwrap().pem();
+        Self {
+            root_params,
+            root_key,
+            root_pem,
+        }
+    }
+
+    /// A server identity for `localhost` signed by Mallory's root.
+    pub fn server_identity(&self) -> (String, String) {
+        server_identity(&Issuer::from_params(&self.root_params, &self.root_key))
+    }
+
+    /// A leaf for the CSR's key, signed by Mallory's root.
+    pub fn sign_csr(&self, csr_der: &[u8]) -> String {
+        sign_csr(
+            csr_der,
+            &Issuer::from_params(&self.root_params, &self.root_key),
+        )
     }
 }

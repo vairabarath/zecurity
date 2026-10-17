@@ -23,17 +23,31 @@ pub async fn run() -> Result<()> {
     // Best-effort DEVICE revoke — sets revoked_at server-side so the SPIFFE
     // drops from the ACL and the connector closes the gate. gRPC, mirroring
     // enroll/get-ACL. Failures logged and swallowed; local logout must proceed.
+    let saved_ca = stored
+        .as_ref()
+        .map(|s| s.device.ca_cert_pem.as_str())
+        .unwrap_or_default();
     if let (Some(token), Some(dev)) = (access_token.as_ref(), device_id.as_ref()) {
-        if let Err(e) = revoke_device(&conf, token, dev).await {
+        let revoked = match crate::trust::embedded_platform_root_pem() {
+            Ok(root) => revoke_device(&conf, token, dev, saved_ca, root).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = revoked {
             eprintln!(
                 "warning: server-side device revoke failed: {e:#} (local session will still be cleared)"
             );
         }
     }
 
-    // Best-effort SESSION revoke — invalidates the refresh token in Redis.
+    // Best-effort SESSION revoke — invalidates the refresh token in Redis,
+    // over the gRPC channel pinned to the saved anchors (checked against the
+    // platform root, like the revoke above).
     if let Some(token) = access_token.as_ref() {
-        if let Err(e) = crate::auth::logout(&conf, token).await {
+        let ended = match crate::trust::embedded_platform_root_pem() {
+            Ok(root) => end_session(&conf, token, saved_ca, root).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = ended {
             eprintln!(
                 "warning: server-side logout failed: {e:#} (local session will still be cleared)"
             );
@@ -50,13 +64,37 @@ pub async fn run() -> Result<()> {
     }
     Ok(())
 }
-async fn revoke_device(
+/// End the session server-side over the channel pinned to the saved anchors,
+/// which must chain to `platform_root_pem` — the same check as the revoke.
+pub(crate) async fn end_session(
+    conf: &crate::config::ClientConf,
+    access_token: &str,
+    saved_ca_pem: &str,
+    platform_root_pem: &str,
+) -> Result<()> {
+    crate::daemon::check_saved_trust(saved_ca_pem, platform_root_pem)?;
+    crate::auth::logout(conf, saved_ca_pem, access_token).await
+}
+
+/// Certificate audit bug 1 (client): the controller connection trusts the
+/// anchors saved at enrollment (checked against `platform_root_pem`), not a
+/// fresh plain-HTTP `/ca.crt`. Only with nothing saved does it fall back to
+/// the download, pinned to the platform root exactly like login.
+pub(crate) async fn revoke_device(
     conf: &crate::config::ClientConf,
     access_token: &str,
     device_id: &str,
+    saved_ca_pem: &str,
+    platform_root_pem: &str,
 ) -> Result<()> {
-    let ca_pem = crate::login::fetch_controller_ca(conf).await?;
-    let mut grpc = connect_grpc(conf.controller(), &ca_pem).await?;
+    let mut grpc = if saved_ca_pem.is_empty() {
+        crate::login::connect_controller(conf, platform_root_pem)
+            .await?
+            .0
+    } else {
+        crate::daemon::check_saved_trust(saved_ca_pem, platform_root_pem)?;
+        connect_grpc(conf.controller(), saved_ca_pem).await?
+    };
     grpc.revoke_device(RevokeDeviceRequest {
         access_token: access_token.to_string(),
         device_id: device_id.to_string(),

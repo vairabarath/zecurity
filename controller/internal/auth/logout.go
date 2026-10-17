@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,55 +22,20 @@ import (
 // return 204. Leaking "session was active" via a different status code
 // helps an attacker probe live sessions.
 //
-// Two callers, symmetric to /auth/refresh:
-//
-//   - Browser (admin UI) — sends Cookie. We also clear the cookie via
-//     Set-Cookie with MaxAge=-1 so the browser stops re-presenting a
-//     token that no longer matches Redis.
-//   - CLI daemon (Rust client) — sends X-Refresh-Token header, has
-//     nothing on its own state we can clear. It clears local state
-//     itself after this call returns.
+// This is the browser (admin UI) path: it sends the access token and we also
+// clear the refresh cookie via Set-Cookie with MaxAge=-1 so the browser stops
+// re-presenting a token that no longer matches Redis. The Rust client uses
+// the ClientService.Logout RPC over its pinned TLS channel instead
+// (certificate audit follow-up); both share EndSession.
 func (s *serviceImpl) LogoutHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			// No token to identify the session — nothing to invalidate.
-			// Still 204 for idempotency.
-			w.WriteHeader(http.StatusNoContent)
-			return
+		// No Authorization header: nothing to identify the session, nothing
+		// to invalidate. Still 204 for idempotency.
+		if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+			s.EndSession(r.Context(), extractBearer(authHeader))
 		}
 
-		// Parse without expiry validation — user is logging out; a
-		// just-expired token is fine. Signature IS enforced (HS256 only).
-		parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-		claims := &jwtClaims{}
-		_, err := parser.ParseWithClaims(
-			extractBearer(authHeader), claims,
-			func(t *jwt.Token) (interface{}, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
-				}
-				return []byte(s.cfg.JWTSecret), nil
-			},
-		)
-		if err != nil || claims.Subject == "" {
-			// Malformed / wrong signature — do not touch Redis. Do not
-			// leak the reason. 204 keeps the response shape the same as
-			// the success path.
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		if err := s.redisClient.DeleteRefreshToken(ctx, claims.Subject); err != nil {
-			// Log server-side but still 204 — the caller can't do anything
-			// with the failure and reporting it leaks liveness.
-			log.Printf("auth logout: delete refresh session user=%s: %v", claims.Subject, err)
-		}
-
-		// Best-effort cookie clear for browser callers. No-op for the CLI
-		// path (no cookie to clear).
+		// Best-effort cookie clear for browser callers.
 		http.SetCookie(w, &http.Cookie{
 			Name:     "refresh_token",
 			Value:    "",
@@ -82,4 +48,34 @@ func (s *serviceImpl) LogoutHandler() http.Handler {
 
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
+
+// EndSession deletes the refresh session of the user the access token names.
+// The token may be expired (the user is logging out) but its signature is
+// enforced (HS256 only). Idempotent and silent: a malformed token, no session,
+// or a Redis failure all look the same to the caller, so nothing leaks about
+// session liveness. Shared by /auth/logout and ClientService.Logout.
+func (s *serviceImpl) EndSession(ctx context.Context, accessToken string) {
+	if accessToken == "" {
+		return
+	}
+	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
+	claims := &jwtClaims{}
+	_, err := parser.ParseWithClaims(
+		accessToken, claims,
+		func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected alg: %v", t.Header["alg"])
+			}
+			return []byte(s.cfg.JWTSecret), nil
+		},
+	)
+	if err != nil || claims.Subject == "" {
+		// Malformed / wrong signature — do not touch Redis.
+		return
+	}
+	if err := s.redisClient.DeleteRefreshToken(ctx, claims.Subject); err != nil {
+		// Logged server-side only — reporting it would leak liveness.
+		log.Printf("auth logout: delete refresh session user=%s: %v", claims.Subject, err)
+	}
 }

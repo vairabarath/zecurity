@@ -434,6 +434,15 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "invalid access token: %v", err)
 	}
+	// Certificate audit bug 4: the token alone is not enough — the user must
+	// be authorized now. Fail closed; nothing has been written yet.
+	if err := authorizeDeviceIssuance(ctx, s.pool, tokenClaims); err != nil {
+		if errors.Is(err, errIssuanceNotAuthorized) {
+			log.Printf("EnrollDevice: refused for user %s: %v", tokenClaims.UserID, err)
+			return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
+		}
+		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
+	}
 
 	block, _ := pem.Decode([]byte(req.GetCsrPem()))
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
@@ -472,8 +481,18 @@ func (s *Service) EnrollDevice(ctx context.Context, req *clientv1.EnrollDeviceRe
 	}
 
 	spiffeID := appmeta.ClientSPIFFEID(trustDomain, deviceID)
-	if err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID, fingerprint); err != nil {
+	recorded, err := updateClientDeviceCert(ctx, s.pool, deviceID, certResult.Serial, certResult.NotAfter, spiffeID, fingerprint)
+	if err != nil {
 		return nil, status.Errorf(codes.Internal, "record device cert: %v", err)
+	}
+	if recorded == 0 {
+		// The user was suspended (or similar) while this enrollment ran: the
+		// certificate just signed is never returned, and the half-made device
+		// row is removed.
+		if _, derr := s.pool.Exec(ctx, `DELETE FROM client_devices WHERE id = $1`, deviceID); derr != nil {
+			log.Printf("EnrollDevice: remove refused device %s: %v", deviceID, derr)
+		}
+		return nil, status.Error(codes.PermissionDenied, "not authorized to enroll a device")
 	}
 	if err := s.policyNotifier.NotifyPolicyChange(ctx, tokenClaims.TenantID); err != nil {
 		return nil, status.Errorf(codes.Internal, "refresh policy after device enrollment: %v", err)
@@ -546,6 +565,14 @@ func (s *Service) RenewCert(ctx context.Context, req *clientv1.RenewCertRequest)
 	directive, _, err := deviceGate(ctx, s.pool, req.GetDeviceId(), tokenClaims)
 	if err != nil {
 		return nil, auditDenied("not_found")
+	}
+	// Certificate audit bug 4: the token alone is not enough — the user must
+	// be authorized now. Fail closed.
+	if err := authorizeDeviceIssuance(ctx, s.pool, tokenClaims); err != nil {
+		if errors.Is(err, errIssuanceNotAuthorized) {
+			return nil, auditDenied("user_not_authorized")
+		}
+		return nil, status.Errorf(codes.Internal, "check user authorization: %v", err)
 	}
 	switch directive {
 	case clientv1.DeviceDirective_DIRECTIVE_REVOKED:
@@ -849,6 +876,34 @@ func (s *Service) RevokeDevice(ctx context.Context, req *clientv1.RevokeDeviceRe
 	}
 
 	return &clientv1.RevokeDeviceResponse{}, nil
+}
+
+// RefreshSession rotates the caller's session over the TLS channel the
+// client pins to its saved anchors (certificate audit follow-up: the client
+// used to send both tokens to the plain-HTTP /auth/refresh). Same rules as
+// /auth/refresh — they share auth.Service.RefreshSession. UNAUTHENTICATED
+// means the session is dead and the client must log in again.
+func (s *Service) RefreshSession(ctx context.Context, req *clientv1.RefreshSessionRequest) (*clientv1.RefreshSessionResponse, error) {
+	if req.GetAccessToken() == "" || req.GetRefreshToken() == "" {
+		return nil, status.Error(codes.Unauthenticated, "access_token and refresh_token are required")
+	}
+	accessToken, refreshToken, err := s.authSvc.RefreshSession(ctx, req.GetAccessToken(), req.GetRefreshToken())
+	if err != nil {
+		var se *auth.SessionError
+		if errors.As(err, &se) && se.Dead() {
+			return nil, status.Error(codes.Unauthenticated, se.Msg)
+		}
+		return nil, status.Error(codes.Internal, "refresh session failed")
+	}
+	return &clientv1.RefreshSessionResponse{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+// Logout ends the caller's session server-side, over the pinned channel
+// (replacing the client's plain-HTTP /auth/logout). Idempotent: always
+// succeeds, revealing nothing about whether a session existed.
+func (s *Service) Logout(ctx context.Context, req *clientv1.LogoutRequest) (*clientv1.LogoutResponse, error) {
+	s.authSvc.EndSession(ctx, req.GetAccessToken())
+	return &clientv1.LogoutResponse{}, nil
 }
 
 // Compile-time interface check.

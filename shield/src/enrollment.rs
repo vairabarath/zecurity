@@ -40,7 +40,6 @@ use base64::Engine;
 use reqwest::Client;
 use rustls_pemfile::certs;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
 use x509_parser::prelude::*;
@@ -49,6 +48,7 @@ use crate::appmeta;
 use crate::config::ShieldConfig;
 use crate::crypto;
 use crate::proto;
+use crate::trust;
 use crate::types::ShieldState;
 use crate::util;
 
@@ -83,6 +83,21 @@ struct JwtClaims {
 /// On success, returns a ShieldState that main.rs uses to start the control stream.
 /// On fatal error (MITM, bad token, controller rejection), returns Err.
 pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
+    let state = bootstrap_enroll(cfg).await?;
+    // ── Step 11: Clean up config file ─────────────────────────────────────────
+    //
+    // Remove ENROLLMENT_TOKEN from /etc/zecurity/shield.conf.
+    // The token is already burned in Redis, but keeping the raw JWT on disk
+    // leaks claims (shield_id, trust_domain, connector_addr) if the file is
+    // ever exposed. Best-effort — log a warning if we can't write.
+    cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
+    Ok(state)
+}
+
+/// Enrollment up to and including persisting the enrolled state (steps 1–10);
+/// `enroll` adds the best-effort config-file cleanup. Split out so tests can
+/// run a full enrollment against a fake controller without touching /etc.
+async fn bootstrap_enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     let token = cfg
         .enrollment_token
         .as_deref()
@@ -117,17 +132,17 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
     // We compute the fingerprint of what we downloaded and compare.
     // If they don't match → MITM attack → abort immediately.
     // This is the core security guarantee of the enrollment flow.
-    verify_ca_fingerprint(&ca_pem, &claims.ca_fingerprint)?;
+    // /ca.crt must be exactly that one certificate, and only it is trusted
+    // from here on (certificate audit bug 1).
+    let pinned_ca = trust::pinned_bootstrap_ca(&ca_pem, &claims.ca_fingerprint)?;
     info!("CA fingerprint verified — no MITM detected");
 
     // ── Step 4: Generate EC P-384 keypair ─────────────────────────────────────
     //
-    // The private key never leaves this machine. We save it with mode 0600
-    // (owner read+write only) to prevent other users from reading it.
+    // The private key never leaves this machine. It stays in memory until the
+    // controller's reply has been validated, then is written with mode 0600
+    // together with the rest of the enrollment state (step 8).
     let key_pair = crypto::generate_keypair()?;
-    let key_path = Path::new(&cfg.state_dir).join("shield.key");
-    crypto::save_private_key(&key_pair, &key_path)?;
-    info!(path = %key_path.display(), "saved EC P-384 private key");
 
     // ── Step 5: Build PKCS#10 CSR ─────────────────────────────────────────────
     //
@@ -159,7 +174,7 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         .with_context(|| format!("invalid controller gRPC address: {}", grpc_addr))?
         .tls_config(
             ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(ca_pem.as_bytes()))
+                .ca_certificate(Certificate::from_pem(trust::pem_from_der(&pinned_ca)))
                 .domain_name(grpc_host),
         )
         .context("failed to configure TLS for controller gRPC")?
@@ -200,50 +215,38 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         "enrollment RPC succeeded"
     );
 
-    // ── Step 8: Save shield.crt ───────────────────────────────────────────────
+    // ── Step 8: Validate the reply, then install atomically ──────────────────
     //
-    // We save the leaf cert + workspace CA as a chain. The mTLS client needs
-    // to present the full chain so the connector can verify it.
-    let state_dir = Path::new(&cfg.state_dir);
-    fs::create_dir_all(state_dir)
-        .with_context(|| format!("failed to create state dir {}", state_dir.display()))?;
+    // Pinned Platform Intermediate → Workspace CA → leaf, the leaf carrying
+    // this shield's SPIFFE ID and the key generated in step 4 (certificate
+    // audit bug 1). Fail closed: on any mismatch nothing is written. Files are
+    // written atomically with state.json last (its presence marks the shield
+    // enrolled); a failed write removes what this attempt already wrote.
+    let key_spki = rcgen::PublicKeyData::subject_public_key_info(&key_pair);
+    trust::validate_issued_chain(
+        &trust::Anchors {
+            intermediate: &pinned_ca,
+            workspace_ca: None,
+        },
+        &response.workspace_ca_pem,
+        &response.intermediate_ca_pem,
+        &response.certificate_pem,
+        &spiffe_uri,
+        &key_spki,
+    )
+    .context("enrollment reply rejected")?;
+    info!("enrollment reply validated against the pinned Platform Intermediate");
 
     let leaf_pem = String::from_utf8(response.certificate_pem.clone())
         .context("certificate_pem is not valid UTF-8")?;
     let ws_ca_pem = String::from_utf8(response.workspace_ca_pem.clone())
         .context("workspace_ca_pem is not valid UTF-8")?;
-
-    // Full chain = leaf cert + workspace CA (connector needs both to verify)
-    let cert_path = state_dir.join("shield.crt");
-    fs::write(&cert_path, format!("{}\n{}", leaf_pem, ws_ca_pem))
-        .with_context(|| format!("failed to write {}", cert_path.display()))?;
-    info!(path = %cert_path.display(), "saved shield certificate chain");
-
-    // Parse cert expiry for state.json
-    let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
-
-    // ── Step 9: Save workspace_ca.crt ────────────────────────────────────────
-    //
-    // The CA chain (workspace CA + intermediate CA) is used by the mTLS client
-    // to verify the connector's certificate during the control stream.
-    let int_ca_pem = String::from_utf8(response.intermediate_ca_pem)
+    let int_ca_pem = String::from_utf8(response.intermediate_ca_pem.clone())
         .context("intermediate_ca_pem is not valid UTF-8")?;
-    let ca_chain_path = state_dir.join("workspace_ca.crt");
-    fs::write(&ca_chain_path, format!("{}\n{}", ws_ca_pem, int_ca_pem))
-        .with_context(|| format!("failed to write {}", ca_chain_path.display()))?;
-    info!(path = %ca_chain_path.display(), "saved CA chain");
-
-    // ── Step 10: Write state.json ─────────────────────────────────────────────
-    //
-    // state.json is the "enrolled" marker. On next startup, main.rs checks for
-    // this file. If it exists → skip enrollment, load state, start control stream.
+    let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
     let enrolled_at = ::time::OffsetDateTime::now_utc()
         .format(&::time::format_description::well_known::Rfc3339)
         .context("failed to format enrollment timestamp")?;
-
-    // First-enrollment peer list is a single element (the Connector that
-    // enrolled us). Subsequent `PeerConnectorList` piggybacks from the
-    // active Connector will expand this list as siblings come online.
     let state = ShieldState {
         shield_id: response.shield_id,
         trust_domain: claims.trust_domain,
@@ -255,18 +258,21 @@ pub async fn enroll(cfg: &ShieldConfig) -> Result<ShieldState> {
         enrolled_at,
         cert_not_after,
     };
-
-    state.save(&cfg.state_dir)?;
-    info!(path = %state_dir.join("state.json").display(), "saved state.json");
-
-    // ── Step 11: Clean up config file ─────────────────────────────────────────
-    //
-    // Remove ENROLLMENT_TOKEN from /etc/zecurity/shield.conf.
-    // The token is already burned in Redis, but keeping the raw JWT on disk
-    // leaks claims (shield_id, trust_domain, connector_addr) if the file is
-    // ever exposed. Best-effort — log a warning if we can't write.
-    cleanup_config_after_enrollment(&state.shield_id, &cfg.state_dir);
-
+    let state_json = serde_json::to_vec_pretty(&state).context("failed to serialize state.json")?;
+    let state_dir = Path::new(&cfg.state_dir);
+    // shield.crt = leaf + Workspace CA (the connector needs both to verify);
+    // workspace_ca.crt = Workspace CA + Platform Intermediate (the trust store
+    // for the Control stream and for renewal).
+    trust::install_files(
+        state_dir,
+        &[
+            ("shield.key", key_pair.serialize_pem().into_bytes(), 0o600),
+            ("shield.crt", format!("{}\n{}", leaf_pem, ws_ca_pem).into_bytes(), 0o644),
+            ("workspace_ca.crt", format!("{}\n{}", ws_ca_pem, int_ca_pem).into_bytes(), 0o644),
+            ("state.json", state_json, 0o644),
+        ],
+    )?;
+    info!(path = %state_dir.join("state.json").display(), "saved enrollment state");
 
     info!(shield_id = %state.shield_id, "enrollment complete");
     Ok(state)
@@ -337,35 +343,6 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
     }
 
     Ok(pem)
-}
-
-/// Verify the downloaded CA cert's SHA-256 fingerprint matches the JWT claim.
-///
-/// This is the MITM detection step. The JWT was signed by the controller
-/// and embeds the fingerprint of the real CA. If a MITM substitutes a rogue
-/// CA cert, the fingerprint won't match and we abort.
-fn verify_ca_fingerprint(ca_pem: &str, expected: &str) -> Result<()> {
-    // Parse PEM → DER
-    let der_certs = certs(&mut ca_pem.as_bytes())
-        .collect::<Result<Vec<_>, _>>()
-        .context("failed to parse CA PEM")?;
-
-    let der = der_certs
-        .first()
-        .context("no certificate found in CA PEM")?;
-
-    // SHA-256 of DER bytes
-    let fingerprint = hex::encode(Sha256::digest(der.as_ref()));
-
-    if fingerprint != expected {
-        bail!(
-            "CA fingerprint mismatch — possible MITM attack!\n  expected: {}\n  got:      {}",
-            expected,
-            fingerprint
-        );
-    }
-
-    Ok(())
 }
 
 /// Parse the NotAfter timestamp from a PEM certificate.

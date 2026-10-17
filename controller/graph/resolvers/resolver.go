@@ -9,6 +9,7 @@ import (
 	"github.com/yourorg/ztna/controller/internal/identity"
 	"github.com/yourorg/ztna/controller/internal/idp"
 	"github.com/yourorg/ztna/controller/internal/invitation"
+	"github.com/yourorg/ztna/controller/internal/outbox"
 	"github.com/yourorg/ztna/controller/internal/permission"
 	"github.com/yourorg/ztna/controller/internal/policy"
 	"github.com/yourorg/ztna/controller/internal/posture"
@@ -24,6 +25,13 @@ type Resolver struct {
 	AuthService       auth.Service
 	ConnectorCfg      connector.Config
 	ConnectorRegistry *connector.ConnectorRegistry
+	// ShieldRevocations is woken after a shield revocation commits
+	// (certificate audit bug 3); nil-safe.
+	ShieldRevocations *connector.ShieldRevocationDispatcher
+	// Outbox records durable work in the caller's transaction — here the
+	// policy invalidation for identity-connection lifecycle changes
+	// (certificate audit bugs 4/5).
+	Outbox            *outbox.Outbox
 	ShieldSvc         shield.Service
 	ResourceCfg       resource.Config
 	Redis             valkeycompat.Cmdable

@@ -21,6 +21,7 @@ use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use reqwest::Client;
+use rustls::pki_types::CertificateDer;
 use rustls_pemfile::certs;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,6 +29,7 @@ use time::OffsetDateTime;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
 use tracing::{info, warn};
 use x509_parser::parse_x509_certificate;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::appmeta;
 use crate::config::ConnectorConfig;
@@ -85,6 +87,18 @@ impl EnrollmentState {
 /// Called from main.rs when state.json does not exist.
 /// Exits the process on fatal errors (e.g., MITM detection).
 pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
+    let state = bootstrap_enroll(cfg).await?;
+    // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
+    // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
+    // so the connector process (running as zecurity) may not have write access.
+    cleanup_config_after_enrollment(&state.connector_id);
+    Ok(state)
+}
+
+/// Enrollment up to and including persisting the enrolled state (steps 1–9);
+/// `enroll` adds the best-effort config-file cleanup. Split out so tests can
+/// run a full enrollment against a fake controller without touching /etc.
+async fn bootstrap_enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
     let token = cfg
         .enrollment_token
         .as_deref()
@@ -108,15 +122,14 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
     let ca_pem = fetch_ca_cert(&http_addr).await?;
     info!("fetched CA certificate from controller");
 
-    // Step 4: Verify CA fingerprint
-    verify_ca_fingerprint(&ca_pem, &claims.ca_fingerprint)?;
+    // Step 4: Pin the CA: /ca.crt must be exactly the pinned Platform
+    // Intermediate, and only that certificate is trusted from here on.
+    let pinned_ca = pinned_bootstrap_ca(&ca_pem, &claims.ca_fingerprint)?;
     info!("CA fingerprint verified");
 
-    // Step 5: Generate keypair and save private key
+    // Step 5: Generate the keypair. It stays in memory until the controller's
+    // reply has been validated (step 9) — nothing is written before that.
     let key_pair = crypto::generate_keypair()?;
-    let key_path = Path::new(&cfg.state_dir).join("connector.key");
-    crypto::save_private_key(&key_pair, &key_path)?;
-    info!(path = %key_path.display(), "saved private key");
 
     // Step 6: Build CSR
     let cn = format!(
@@ -135,7 +148,7 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
         .with_context(|| format!("invalid gRPC address: {}", grpc_addr))?
         .tls_config(
             ClientTlsConfig::new()
-                .ca_certificate(Certificate::from_pem(ca_pem.as_bytes()))
+                .ca_certificate(Certificate::from_pem(pem_from_der(&pinned_ca)))
                 .domain_name(grpc_host.clone()),
         )
         .with_context(|| format!("failed to configure TLS for {}", grpc_addr))?
@@ -161,41 +174,31 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
         .into_inner();
     info!("enrollment successful");
 
-    // Step 9: Save artifacts
-    let state_dir = Path::new(&cfg.state_dir);
-    fs::create_dir_all(state_dir)
-        .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+    // Step 9: Validate the reply against the pinned Platform Intermediate,
+    // then install everything atomically (state.json last). Fail closed: on
+    // any mismatch nothing is written.
+    let key_spki = crate::tls::cert_holder::key_spki_der(key_pair.serialize_pem().as_bytes())?;
+    validate_enrollment_reply(
+        &pinned_ca,
+        &response.workspace_ca_pem,
+        &response.intermediate_ca_pem,
+        &response.certificate_pem,
+        &spiffe_uri,
+        &key_spki,
+    )
+    .context("enrollment reply rejected")?;
+    info!("enrollment reply validated against the pinned Platform Intermediate");
 
-    // Save full certificate chain (leaf + Workspace CA) for mTLS client auth.
-    // The controller's x509.Verify() needs the Workspace CA as an intermediate
-    // to build the chain: Connector cert ← Workspace CA ← Intermediate CA.
-    let cert_path = state_dir.join("connector.crt");
     let leaf_cert = String::from_utf8(response.certificate_pem.clone())
         .context("certificate_pem is not valid UTF-8")?;
-    let workspace_ca_for_chain = String::from_utf8(response.workspace_ca_pem.clone())
+    let workspace_ca = String::from_utf8(response.workspace_ca_pem.clone())
         .context("workspace_ca_pem is not valid UTF-8")?;
-    let full_chain = format!("{}\n{}", leaf_cert, workspace_ca_for_chain);
-    fs::write(&cert_path, &full_chain)
-        .with_context(|| format!("failed to write {}", cert_path.display()))?;
-    info!(path = %cert_path.display(), "saved connector certificate chain");
-    let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
-
-    // Save CA chain (workspace CA + intermediate CA concatenated)
-    let ca_chain_path = state_dir.join("workspace_ca.crt");
-    let workspace_ca = String::from_utf8(response.workspace_ca_pem)
-        .context("workspace_ca_pem is not valid UTF-8")?;
-    let intermediate_ca = String::from_utf8(response.intermediate_ca_pem)
+    let intermediate_ca = String::from_utf8(response.intermediate_ca_pem.clone())
         .context("intermediate_ca_pem is not valid UTF-8")?;
-    let ca_chain = format!("{}\n{}", workspace_ca, intermediate_ca);
-    fs::write(&ca_chain_path, &ca_chain)
-        .with_context(|| format!("failed to write {}", ca_chain_path.display()))?;
-    info!(path = %ca_chain_path.display(), "saved CA chain");
-
-    // Save state.json
+    let cert_not_after = parse_cert_not_after(&response.certificate_pem)?;
     let enrolled_at = OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .context("failed to format RFC 3339 timestamp")?;
-
     let state = EnrollmentState {
         connector_id: claims.connector_id.clone(),
         trust_domain: claims.trust_domain.clone(),
@@ -203,16 +206,35 @@ pub async fn enroll(cfg: &ConnectorConfig) -> Result<EnrollmentState> {
         enrolled_at,
         cert_not_after,
     };
+    let state_json =
+        serde_json::to_vec_pretty(&state).context("failed to serialize EnrollmentState")?;
 
-    state
-        .save(&cfg.state_dir)
-        .context("failed to save enrollment state")?;
+    // Full chain (leaf + Workspace CA) for mTLS client auth: the controller's
+    // x509.Verify() needs the Workspace CA as an intermediate. The CA chain
+    // (Workspace CA + Platform Intermediate) is the trust store every later
+    // connection and every renewal pins against.
+    install_enrollment(
+        Path::new(&cfg.state_dir),
+        &[
+            (
+                "connector.key",
+                key_pair.serialize_pem().into_bytes(),
+                0o600,
+            ),
+            (
+                "connector.crt",
+                format!("{}\n{}", leaf_cert, workspace_ca).into_bytes(),
+                0o644,
+            ),
+            (
+                "workspace_ca.crt",
+                format!("{}\n{}", workspace_ca, intermediate_ca).into_bytes(),
+                0o644,
+            ),
+            ("state.json", state_json, 0o644),
+        ],
+    )?;
     info!(path = %Path::new(&cfg.state_dir).join("state.json").display(), "saved enrollment state");
-
-    // Step 9b: Clean up config file — remove ENROLLMENT_TOKEN, add CONNECTOR_ID.
-    // Best-effort: the config file is typically owned by root:zecurity with mode 0640,
-    // so the connector process (running as zecurity) may not have write access.
-    cleanup_config_after_enrollment(&state.connector_id);
 
     // Step 10: Return result
     Ok(state)
@@ -367,25 +389,26 @@ async fn fetch_ca_cert(http_addr: &str) -> Result<String> {
     Ok(pem)
 }
 
-/// Step 4: Verify the CA certificate fingerprint matches the JWT claim.
-///
-/// Parses the PEM → DER bytes, computes SHA-256, hex-encodes, and compares.
-/// Mismatch → bail with MITM warning.
-fn verify_ca_fingerprint(ca_pem: &str, expected_fingerprint: &str) -> Result<()> {
-    // Parse PEM to DER using rustls_pemfile
-    let certs = certs(&mut ca_pem.as_bytes())
+/// Step 4 (certificate audit bug 1): `/ca.crt` must contain exactly ONE
+/// certificate and it must match the pinned Platform Intermediate fingerprint
+/// from the token. Returns that certificate — the only one trusted for the
+/// enrollment TLS connection. Previously only the first certificate was
+/// checked while every certificate in the file was trusted, so an on-path
+/// attacker could append their own CA.
+fn pinned_bootstrap_ca(
+    ca_pem: &str,
+    expected_fingerprint: &str,
+) -> Result<CertificateDer<'static>> {
+    let certificates = certs(&mut ca_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .context("failed to parse PEM certificates")?;
-
-    if certs.is_empty() {
-        bail!("no certificates found in PEM data");
-    }
-
-    // Compute SHA-256 of the first cert's DER bytes
-    let der_bytes = &certs[0];
-    let hash = Sha256::digest(der_bytes);
-    let fingerprint = hex::encode(hash);
-
+    let [ca] = certificates.as_slice() else {
+        bail!(
+            "/ca.crt must contain exactly one certificate (the Platform Intermediate), got {} — possible MITM, aborting",
+            certificates.len()
+        );
+    };
+    let fingerprint = hex::encode(Sha256::digest(ca.as_ref()));
     if fingerprint != expected_fingerprint {
         warn!(
             expected = expected_fingerprint,
@@ -398,7 +421,136 @@ fn verify_ca_fingerprint(ca_pem: &str, expected_fingerprint: &str) -> Result<()>
             fingerprint
         );
     }
+    Ok(ca.clone().into_owned())
+}
 
+/// PEM for a single DER certificate.
+fn pem_from_der(der: &CertificateDer<'_>) -> String {
+    let body = base64::engine::general_purpose::STANDARD.encode(der.as_ref());
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// Exactly one certificate in `pem`.
+fn single_certificate(pem: &[u8], label: &str) -> Result<CertificateDer<'static>> {
+    let certificates = certs(&mut &pem[..])
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("parse {label}"))?;
+    match <[_; 1]>::try_from(certificates) {
+        Ok([certificate]) => Ok(certificate),
+        Err(certificates) => bail!(
+            "{label} must be exactly one certificate, got {}",
+            certificates.len()
+        ),
+    }
+}
+
+/// Step 9 (certificate audit bug 1): validate the enrollment reply before
+/// anything is persisted. The chain must be pinned Platform Intermediate →
+/// Workspace CA → leaf, and the leaf must be this connector's: its exact
+/// SPIFFE ID, client and server usage, and the key generated in step 5.
+fn validate_enrollment_reply(
+    pinned_intermediate: &CertificateDer<'_>,
+    workspace_ca_pem: &[u8],
+    intermediate_ca_pem: &[u8],
+    leaf_pem: &[u8],
+    expected_spiffe_id: &str,
+    key_spki_der: &[u8],
+) -> Result<()> {
+    let returned_intermediate =
+        single_certificate(intermediate_ca_pem, "returned Intermediate CA")?;
+    if returned_intermediate.as_ref() != pinned_intermediate.as_ref() {
+        bail!("returned Intermediate CA is not the pinned Platform Intermediate");
+    }
+    let (_, intermediate) = X509Certificate::from_der(pinned_intermediate.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse pinned Intermediate CA: {e:?}"))?;
+
+    let workspace_der = single_certificate(workspace_ca_pem, "returned Workspace CA")?;
+    let (_, workspace) = X509Certificate::from_der(workspace_der.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse returned Workspace CA: {e:?}"))?;
+    if !workspace.is_ca() {
+        bail!("returned Workspace CA is not a CA certificate");
+    }
+    if workspace.issuer() != intermediate.subject() {
+        bail!("returned Workspace CA was not issued by the pinned Platform Intermediate");
+    }
+    workspace
+        .verify_signature(Some(intermediate.public_key()))
+        .map_err(|e| anyhow::anyhow!("returned Workspace CA signature invalid: {e:?}"))?;
+    if !workspace.validity().is_valid() {
+        bail!("returned Workspace CA is outside its validity period");
+    }
+
+    let leaf_der = single_certificate(leaf_pem, "returned certificate")?;
+    let (_, leaf) = X509Certificate::from_der(leaf_der.as_ref())
+        .map_err(|e| anyhow::anyhow!("parse returned certificate: {e:?}"))?;
+    if leaf.is_ca() {
+        bail!("returned certificate must not be a CA");
+    }
+    if leaf.issuer() != workspace.subject() {
+        bail!("returned certificate was not issued by the returned Workspace CA");
+    }
+    leaf.verify_signature(Some(workspace.public_key()))
+        .map_err(|e| anyhow::anyhow!("returned certificate signature invalid: {e:?}"))?;
+    if !leaf.validity().is_valid() {
+        bail!("returned certificate is outside its validity period");
+    }
+    let uris: Vec<&str> = leaf
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    x509_parser::extensions::GeneralName::URI(uri) => Some(*uri),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if uris != [expected_spiffe_id] {
+        bail!("returned certificate identity {uris:?} is not {expected_spiffe_id}");
+    }
+    let eku = leaf
+        .extended_key_usage()
+        .ok()
+        .flatten()
+        .context("returned certificate has no extended key usage")?;
+    if !eku.value.client_auth || !eku.value.server_auth {
+        bail!("returned certificate must allow client and server authentication");
+    }
+    if leaf.public_key().raw != key_spki_der {
+        bail!("returned certificate is not for the key this connector generated");
+    }
+    Ok(())
+}
+
+/// Step 9: write every enrollment file atomically (temp file, fsync,
+/// rename), in order, `state.json` last — its presence is what marks the
+/// connector enrolled. If any write fails, the files already written by this
+/// attempt are removed, so a failed enrollment leaves nothing behind.
+fn install_enrollment(state_dir: &Path, files: &[(&str, Vec<u8>, u32)]) -> Result<()> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+    let mut written = Vec::new();
+    for (name, data, mode) in files {
+        let path = state_dir.join(name);
+        if let Err(e) = crate::tls::cert_holder::write_atomic(&path, data, *mode) {
+            for done in &written {
+                let _ = fs::remove_file(done);
+            }
+            return Err(e).with_context(|| format!("failed to write {}", path.display()));
+        }
+        info!(path = %path.display(), "installed");
+        written.push(path);
+    }
     Ok(())
 }
 

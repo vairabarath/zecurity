@@ -102,16 +102,21 @@ message ConnectorControlMessage {
     // Controller → Connector — agent policy, sent when the Control stream
     // opens (Sprint 21 K2 / Sprint 20 KI-2).
     AgentPolicy agent_policy = 18;
+    // Controller → Connector — the complete list of revoked shield
+    // identities in the connector's workspace (certificate audit bug 3).
+    // Authoritative: sent when the Control stream opens and after every
+    // revocation. Until a connector has applied it, it accepts no shields.
+    ShieldRevocationList shield_revocations = 19;
     // Controller → Connector — authorization acknowledgement for the
     // ConnectorHealthReport carrying the same heartbeat_seq. Sent only after
     // the revocation-guarded health UPDATE succeeded and any required ACL push
     // for that report was enqueued ahead of it on this stream. A heartbeat or
     // a missing acknowledgement never counts as authorization.
-    AuthorizationAck authorization_ack = 19;
+    AuthorizationAck authorization_ack = 20;
     // Controller → Connector — terminal administrative revocation of this
     // connector's identity, delivered on every live Control stream. Never
     // sent for a temporary failure.
-    ConnectorRevoked connector_revoked = 20;
+    ConnectorRevoked connector_revoked = 21;
   }
   // Reserve the retired TransportSnapshot field number so it is never reused.
   // (reserved must be at message scope, not inside the oneof.)
@@ -276,4 +281,11 @@ message ScanReport {
   string request_id = 1;
   repeated ScanResult results = 2;
   string error = 3; // set only on scan-level errors
+}
+
+// ShieldRevocationList is the authoritative, complete set of revoked shield
+// IDs in a workspace (certificate audit bug 3). Revocation is terminal, so
+// the set only grows, and applying it is idempotent.
+message ShieldRevocationList {
+  repeated string revoked_shield_ids = 1;
 }
