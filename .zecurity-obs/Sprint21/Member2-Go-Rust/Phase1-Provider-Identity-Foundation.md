@@ -393,6 +393,36 @@ and the failure-record path in `recordFailure` now uses `limCtx` too. The handle
 
 **Found by:** AT-H.7 (Valkey down → 503) during the Sprint 21 acceptance run.
 
+### Fix: the AT-H.7 timeout let slow logins skip the failure count (rate-limit bypass)
+**Issue:** the fix above (commit `cb07806`) made a new hole, flagged by a security review on 2026-10-17. `limCtx` was created **before** `Authenticate` and reused for `recordFailure`. Argon2id plus a wait for a hash slot can take up to about 2 s, which uses up the shared budget. A wrong password then hit `RecordFailure` with an expired context and got **503 without being counted**, while a correct password still got 200. Saturating the hash cap (more than 4 concurrent logins) therefore gave unlimited guesses with a 503/200 oracle, bypassing the 6-per-email lockout.
+
+**Root Cause:** one timeout context was shared across the limiter check, the credential check and the failure record. `ChangePassword` had the same helpers with no timeout at all, so its limiter calls could still hang.
+
+**Fix Applied (`auth_handlers.go`, `checkLimiter` / `recordFailure`):**
+```go
+// BEFORE (Login):
+limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+defer cancel()
+if !h.checkLimiter(w, limCtx, req.Email, ip) { return }
+... h.recordFailure(w, limCtx, req.Email, ip, "invalid credentials")
+
+// AFTER: each helper bounds its own Valkey step; Login and ChangePassword pass ctx.
+func (h *AuthHandlers) checkLimiter(w, ctx, email, ip) bool {
+	ctx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+	defer cancel()
+	...
+}
+func (h *AuthHandlers) recordFailure(w, ctx, email, ip, reason) {
+	// fresh budget, detached from the request: neither a slow credential
+	// check nor a client disconnect skips the count
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginLimiterTimeout)
+	defer cancel()
+	...
+}
+```
+
+**Test:** `TestLogin_SlowAuthenticateStillCountsFailure` delays `Authenticate` past `loginLimiterTimeout`; it expects 401 and the failure counted. It **failed** on `cb07806` (503) and passes with the fix. The fake limiter now fails on a done context, as the real Valkey client does. `internal/provider` + `internal/middleware`: 105 PASS, 0 SKIP.
+
 ## Implementation notes (H-a, 2026-09-28)
 
 Deviations from the commit plan, recorded for future contributors:

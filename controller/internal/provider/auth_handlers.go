@@ -54,8 +54,10 @@ type sessionResponse struct {
 	PasswordChangeRequired bool   `json:"password_change_required"`
 }
 
-// loginLimiterTimeout bounds the rate-limiter round-trips so a dead Valkey
-// answers 503 instead of hanging the request for the client's whole timeout.
+// loginLimiterTimeout bounds each rate-limiter step (check, record) so a dead
+// Valkey answers 503 instead of hanging the request for the client's whole
+// timeout. Each step gets its own budget: time spent hashing the password
+// must never use up the budget for counting the failure.
 const loginLimiterTimeout = 2 * time.Second
 
 // Login: POST /provider/auth/login {email, password}.
@@ -68,16 +70,14 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := clientIP(r)
 
-	limCtx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
-	defer cancel()
-	if !h.checkLimiter(w, limCtx, req.Email, ip) {
+	if !h.checkLimiter(w, ctx, req.Email, ip) {
 		return
 	}
 
 	u, err := h.authn.Authenticate(ctx, Credentials{Email: req.Email, Password: req.Password})
 	switch {
 	case errors.Is(err, ErrInvalidCredentials):
-		h.recordFailure(w, limCtx, req.Email, ip, "invalid credentials")
+		h.recordFailure(w, ctx, req.Email, ip, "invalid credentials")
 		return
 	case errors.Is(err, ErrHashBusy), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeAuthError(w, http.StatusServiceUnavailable, "login_unavailable")
@@ -242,6 +242,8 @@ func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 // checkLimiter writes 429 (locked out) or 503 (limiter unavailable — fail
 // closed) and returns false; true means the attempt may proceed.
 func (h *AuthHandlers) checkLimiter(w http.ResponseWriter, ctx context.Context, email, ip string) bool {
+	ctx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
+	defer cancel()
 	blocked, retry, err := h.limiter.Blocked(ctx, email, ip)
 	if err != nil {
 		log.Printf("provider auth: login limiter unavailable, failing closed: %v", err)
@@ -259,8 +261,11 @@ func (h *AuthHandlers) checkLimiter(w http.ResponseWriter, ctx context.Context, 
 
 // recordFailure counts a failed credential check, audits a lockout start once
 // per tripped scope, and answers 401 — or 503 if the failure could not be
-// counted (fail closed).
+// counted (fail closed). It runs on a fresh budget detached from the request,
+// so neither a slow credential check nor a client disconnect skips the count.
 func (h *AuthHandlers) recordFailure(w http.ResponseWriter, ctx context.Context, email, ip, reason string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginLimiterTimeout)
+	defer cancel()
 	trips, err := h.limiter.RecordFailure(ctx, email, ip)
 	if err != nil {
 		log.Printf("provider auth: record failure, failing closed: %v", err)
