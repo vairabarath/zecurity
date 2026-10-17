@@ -5,11 +5,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/netutil"
@@ -87,19 +90,48 @@ func RegenerateTokenHandler(pool *pgxpool.Pool, cfg Config, rdb valkeycompat.Cmd
 			return
 		}
 
+		// Certificate audit bug 8: the row's enrollment_token_jti is the
+		// authority on which token is current. Store the new token's entry
+		// first (Enroll requires it), then make it current, only while the
+		// connector is still pending. That swap supersedes every earlier
+		// token at once; deleting the predecessor's entry is cleanup.
 		if err := StoreEnrollmentJTI(ctx, rdb, jti, connectorID, cfg.EnrollmentTokenTTL); err != nil {
 			http.Error(w, "failed to store token jti", http.StatusInternalServerError)
 			return
 		}
 
-		_, err = pool.Exec(ctx,
-			`UPDATE connectors SET enrollment_token_jti = $1, updated_at = NOW()
-			  WHERE id = $2 AND tenant_id = $3`,
+		// The row lock makes this wait for an enrollment in flight; a
+		// connector that enrolled meanwhile is no longer pending.
+		var previousJTI *string
+		err = pool.QueryRow(ctx,
+			`WITH current AS (
+			     SELECT id, enrollment_token_jti AS previous FROM connectors
+			      WHERE id = $2 AND tenant_id = $3 AND status = 'pending'
+			        FOR UPDATE
+			 )
+			 UPDATE connectors c
+			    SET enrollment_token_jti = $1, updated_at = NOW()
+			   FROM current
+			  WHERE c.id = current.id
+			 RETURNING current.previous`,
 			jti, connectorID, tc.TenantID,
-		)
+		).Scan(&previousJTI)
 		if err != nil {
+			// The new token is not current, so it cannot enroll; drop its entry.
+			if derr := DeleteEnrollmentJTI(ctx, rdb, jti); derr != nil {
+				log.Printf("connector token: %s: unused token entry not deleted: %v", connectorID, derr)
+			}
+			if errors.Is(err, pgx.ErrNoRows) {
+				http.Error(w, "connector must be in pending state", http.StatusConflict)
+				return
+			}
 			http.Error(w, "failed to persist token jti", http.StatusInternalServerError)
 			return
+		}
+		if previousJTI != nil && *previousJTI != jti {
+			if derr := DeleteEnrollmentJTI(ctx, rdb, *previousJTI); derr != nil {
+				log.Printf("connector token: %s: superseded token entry not deleted: %v", connectorID, derr)
+			}
 		}
 
 		grpcDefault, httpDefault := netutil.DetectLANAddr(cfg.GRPCPort, "8080")
