@@ -155,8 +155,8 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 
 ## 3. Evidence locations
 
-- **Screenshots:** `/home/inkyank-01/sprint21-ui/` (01–19, live-1…4).
-- **Test scripts:** `/home/inkyank-01/sprint21-ui/scripts/` (`live_api.py`, `ui_run.js`, `ui_ratelimit.js`).
+- **Screenshots:** `/home/inkyank-01/sprint21-ui/` (01–22, live-1…4; 20–22 are AT-C.4).
+- **Test scripts:** `/home/inkyank-01/sprint21-ui/scripts/` (`live_api.py`, `ui_run.js`, `ui_ratelimit.js`, `ui_c4.js`).
 - **Browser tooling write-up:** `~/Desktop/sprint21-browser-automation-tools.md` and [[Sprint21/Live-Demo-Notes]] §4.
 - **Sprint 20 raw logs:** were in `/tmp/s20-live`, deleted at clean-up. The run sheet keeps the evidence text.
 
@@ -169,3 +169,64 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 - **Needs sudo:** nft table `s20test`.
 - **Lab hosts:** update timers, test binaries, resource `s20-nika-summa`.
 - **Local DB:** throwaway operators `at-op*` and `ui-op*`, two of them active super-admins.
+
+## 5. Security fix found during this session
+
+- **What:** the first AT-H.7 fix (`cb07806`) shared one 2 s timeout across the limiter check, the password check and the failure record. A login queued behind the Argon2id cap (more than 4 at once) therefore got **503 without the wrong password being counted**, while a correct password still got 200. That gave unlimited guesses with a 503/200 answer, bypassing the 6-per-email lockout.
+- **Found by:** an automated security review of the commit, then confirmed with a new test that failed on `cb07806`.
+- **Fix:** `94f1196`. `checkLimiter` and `recordFailure` each bound their own Valkey step; `recordFailure` is detached from request cancellation; `ChangePassword` is covered too.
+- **Test:** `TestLogin_SlowAuthenticateStillCountsFailure`. `internal/provider` + `internal/middleware`: 105 PASS, 0 SKIP.
+- **Recorded in:** [[Sprint21/Member2-Go-Rust/Phase1-Provider-Identity-Foundation]] → Post-Phase Fixes, and [[Sprint21/path.md]] → Post-Sprint Fixes.
+
+## 6. Commits (branch `test/merge-verification`, **not pushed**)
+
+| Commit | What |
+|---|---|
+| `cb07806` | fix(provider): bound login rate-limiter calls so a dead Valkey answers 503 (AT-H.7) |
+| `1eedd7c` | docs(acceptance): Sprint 20 close-out and Sprint 21 local acceptance results |
+| `94f1196` | fix(provider): give each login rate-limiter step its own time budget (security fix, §5) |
+| `19474e8` | docs(sprint21): live AT-K.1, AT-R.2–R.5 and AT-C.4 results |
+
+The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
+
+## 7. State of the local dev stack (end of session)
+
+- **Controller:** `94f1196`, built to the session scratchpad, running from `controller/` with the normal `.env` settings (the `RELAY_CERT_TTL=15m` run is over); :8080 / :9090.
+- **Provider console:** dev server on :5174 (restarted after `npm ci`).
+- **Postgres and Valkey:** Docker `ztna_postgres`, `ztna_valkey`. Valkey was stopped and restarted once for AT-H.7, which cleared the login-limiter counters.
+- **Test relay `k1-relay`:** stopped and revoked.
+
+## 8. Still to do (everything open, in one list)
+
+**Sprint 21:**
+1. **AT-K.2 / K.3 live (shield):** at `SHIELD_CERT_TTL=24h`, exactly one ReEnroll inside the window and no renewal churn. Needs sudo (the shield uses nftables) and a resource host for the shield (this PC can be it if the resource's LAN IP is this PC).
+2. **Full regression gate (plan §10)**, about 20 min locally: all Rust suites (`connector`, `relay`, `shield`, `client`), the `admin` build and `buf generate`. Only the provider Go suites, the full Go suite and the Rust `renew` filters were run.
+3. **#117 fixes, targeted tests:** S1 relay revocation, client tunnel restarting onto a renewed cert, connector re-asked to renew after a lost reply, CRL clock skew.
+
+**Sprint 20 (to turn FAILED into passed):**
+
+4. **R2:** Barath fixes Fix02 (Finding 35: 3 extra `NotifyPolicyChange` calls, 1 outdated test), then re-run with `RESOURCE_TEST_SHIELD_ID` (`scripts/resource-test-fixture.sh`). CI should also set it, or the tests stay hidden.
+5. **G9 / AT-G.6:** a team decision on whether the 2026-10-10 long-hold PASS on later code is accepted, or a re-run.
+
+**Security (lab):**
+
+6. **F33 shield revocation (bug 3):** live end-to-end check: revoke a real shield mid-session; sessions end and it can't reconnect.
+7. **F34 connector revocation:** still at Phase A, not fail-closed. Re-test after Barath's Phase B1.
+8. **Finding 32:** a revoked relay keeps reconnecting its heartbeat (re-confirmed today); low, needs a fix ticket.
+
+**Other:**
+
+9. **Fix 05:** re-test F-1/F-2 and decide whether Barath takes them.
+10. **Send Barath:** F35 still failing on `fixed-pendings` (hidden by CI skips); F34 status; the two `fix(provider)` commits.
+
+**Clean-up:**
+
+11. **Local DB:**
+    - test tenants `at-r4-test` / `at-r4-suspended` (SQL-seeded) and their rows;
+    - revoked relay `k1-relay`;
+    - throwaway operators `at-op*`, `ui-op*`, `c4-op-*` (`at-op2-152625` and `at-op2-152709` are **active super-admins**);
+    - 30 leaked `resolvers_updsc_*` databases.
+12. **Files:** `.localdev/k1-relay`, `.localdev/s20-relay1`, `.worktrees/s20-live` (`git worktree remove`), `orca.deb` (untracked).
+13. **Needs sudo:** `sudo nft list tables`, confirm `s20test` is gone; check why `zecurity-shield` shows `activating`.
+14. **Lab hosts:** update timers, test binaries, resource `s20-nika-summa` / group `s20-summa-users`.
+15. **Optional:** re-enable Okta IdP `1779ca3e` if it exists in any non-local DB.
