@@ -286,7 +286,7 @@ Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
 - [x] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Live PASS: E1–E4; 6 rotations, 10-min cadence, 0 failures.)*
 - [x] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Live PASS: F1–F7. The concurrent-revoke race is covered by `store_renew_integration_test.go`.)*
 - [x] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Live PASS: G1–G3, G5–G8. The shield-renewal part rests on evidence from before 17:16, while the shield TTL was 24h. Established tunnels during a swap are AT-G.6, which FAILED; see Phase G.)*
-- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **Not met:** G9 / AT-G.6 FAIL (Finding 15); R2 regression gate FAIL (Finding 35, 4 `graph/resolvers` tests, **still failing on `fixed-pendings` 2026-10-17**); G4 / AT-G.1 not exercised live.
+- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **Not met (2026-10-20):** R2 regression gate FAIL (Finding 35: 4 `graph/resolvers` tests, still failing on `fixed-pendings`, waiting on Fix02); G4 / AT-G.1 not exercised live (unit-tested). G9 / AT-G.6 was accepted on 2026-10-20 on the `a25bb33` re-test (see Phase G).
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
 
