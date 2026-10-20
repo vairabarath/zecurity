@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 3, 2026-10-15) — IMPLEMENTATION NOT AUTHORIZED
+status: PROPOSED (revision 4, 2026-10-20) — Phase A done; Phase B1 AUTHORIZED (2026-10-20); other phases NOT AUTHORIZED
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -46,6 +46,10 @@ based_on:
 - O3 accepted (D11): an unknown/deleted connector identity never serves; it enters its own terminal non-serving state (`UnknownIdentity`), distinct from `Revoked`.
 - §4.5 error classification, §5 state machine, §7, §13 Phase A, §14 tests (T19–T28), §16 and §17 updated accordingly. Phase A is unblocked **with respect to O2/O3 only**.
 - New source facts verified at `12e43ac`: `activateStream` maps `ErrNoRows` to `PermissionDenied "connector is revoked"` (`control_stream.go:621-622`) and only logs other DB errors (`:624-625`); the connector certificate interceptor maps a workspace-CA load failure to `Unauthenticated` (`control_stream.go:1008-1011`, `spiffe.go:256-260`); the relay path already separates `Unavailable` (state unavailable) from `PermissionDenied` (revoked) (`:1018-1024`).
+
+**Revision 4 (2026-10-20):**
+- O9 accepted (D12): `Revoked`/`UnknownIdentity` are **not persisted** across restart, and the connector **idles** in a terminal state (stays alive with the data plane closed and the reconnect loop stopped) instead of exiting. Reason for idle: the Docker deployment uses `restart: unless-stopped` (`connector/docker-compose.yml:17`), which restarts after any exit, including exit 0; the systemd unit uses `Restart=on-failure` (`connector/systemd/zecurity-connector.service:24`). Exiting would cause a restart loop against the controller under Docker. Reason for no persistence: safety doesn't depend on it (§5.2), and a persisted flag would need clearing rules on re-enrollment (O10, undesigned).
+- §5.2, §7, §16 and §17 updated. Phase B1 acceptance list: [B1 acceptance](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md).
 
 Raw evidence isn't repeated. See:
 - [Feasibility report](Connector-Revocation-Enforcement-Feasibility-2026-10-14.md) ("FR");
@@ -291,7 +295,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 | UnknownIdentity | anything, including a marker of another kind | UnknownIdentity (reconnect loop stops) |
 | process restart | — | Starting (in every case) |
 
-**Restart (ACCEPTED D11).** Terminal states are in-memory; whether they are also persisted locally is **OPEN (O9)**. Protection **does not depend on that persistence**: every restart begins in `Starting`, and only the controller's authoritative response can open the data plane.
+**Restart (ACCEPTED D11).** Terminal states are in-memory only and are **not persisted** (ACCEPTED D12 = O9). In a terminal state the process idles: it stays alive, the data plane stays closed and the reconnect loop is stopped; it does not exit. Protection **does not depend on that persistence**: every restart begins in `Starting`, and only the controller's authoritative response can open the data plane.
 - A valid connector becomes `Serving` only after a fresh accepted ack.
 - A revoked identity is rejected again by the controller (`revoked` marker) and returns to `Revoked`.
 - An unknown identity gets the `unknown` marker again and returns to `UnknownIdentity`; it never serves in between.
@@ -426,7 +430,7 @@ Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE
 **Other items:**
 - Relay attachment: relay-routed streams are already covered by steps 2–3. Detaching from relays is **OPEN (O8)**.
 - Tracking and closing existing client QUIC connections is **OPEN (O8)**.
-- Persisting `Revoked`/`UnknownIdentity` across restart is **OPEN (O9)**. Safety doesn't depend on it: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
+- `Revoked`/`UnknownIdentity` are not persisted across restart, and the process idles rather than exits (ACCEPTED D12 = O9). Safety doesn't depend on persistence: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
 
 **Failure handling:** a step that fails is logged and doesn't revert step 1. Fail-closed never depends on later steps succeeding.
 
@@ -520,7 +524,7 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 |---|---|---|---|---|---|---|
 | **A** Controller contract | §17 gate | `proto/connector/v1/connector.proto`; `controller/internal/connector/control_stream.go` (`handleConnectorHealth`, `Control`, `activateStream`, `agentPolicyMessage`, exported registry accessor); `graph/resolvers/connector.resolvers.go`; policy compiler/store (revoked list); `proto/client/v1/client.proto` | ack rules §4.3; `ConnectorRevoked` push; `revoked`/`unknown` trailer markers (D10); the four §4.5 corrections (`Scan` error → `Unavailable`; follow-up classification in health and activation); `AgentPolicy` always sent; revoked-connector list compiled | T5, T8, T19–T22, T14 | new controller suite tests; existing suite green | O2, O3 **resolved** (D10, D11); remaining gate items in §17 |
 | **M** Measurements | A in the lab | instrumentation only | §6.6 | T17 | B, P, O6 recorded | — |
-| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 |
+| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 resolved (D12); B1-Q1 = (a) |
 | **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | O5, O8 |
 | **C** Client | A | `client/src/daemon.rs`, `transport.rs`, `net_stack.rs`, `tunnel_pool.rs` | §8 | T11 | unit + live | O11 |
 | **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + **live relay lab (BLOCKED today)** | O12 |
@@ -604,6 +608,7 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D9 | The ack is sent only after any required ACL push (§6.5) |
 | D10 (= O2) | A structured, machine-readable gRPC status marker (trailer metadata, §4.5) distinguishes REVOKED and UNKNOWN_CONNECTOR from ordinary errors; message text is never used for security decisions; markers only after a successful lookup |
 | D11 (= O3) | An unknown/deleted identity never serves; it enters `UnknownIdentity`, a terminal non-serving state for the process, distinct from `Revoked`; recovery only through explicitly authorized re-enrollment or replacement; DB failures stay recoverable |
+| D12 (= O9) | Terminal states are not persisted across restart; in `Revoked`/`UnknownIdentity` the connector idles (process alive, data plane closed, reconnect loop stopped, terminal state logged periodically) rather than exiting, because `restart: unless-stopped` restarts any exit |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -617,7 +622,7 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | O6 | Full health report vs lightweight authorization request at period P | **BLOCKED ON MEASUREMENT** |
 | O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **BLOCKED ON MEASUREMENT** |
 | O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **OPEN** (shield traffic must stop either way, §7 step 4) |
-| O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **OPEN** (safety doesn't depend on it, §5.2) |
+| O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **ACCEPTED (D12)**: no persistence; idle, don't exit |
 | O10 | Recovery after permanent revocation | **OPEN** (today: new identity only) |
 | O11 | Retention of `revoked_connectors`; client offline staleness bound | **OPEN** |
 | O12 | Relay behaviour when its revoked list is stale | **OPEN** |
@@ -634,7 +639,7 @@ Release requirement (not a decision): the new development stack's protocol behav
 |---|---|
 | Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker ACCEPTED (D10 = O2) |
 | Exact deadline and scheduling semantics | ACCEPTED (D1, O1); B/P BLOCKED ON MEASUREMENT (O7); request type O6 |
-| Terminal vs recoverable states | ACCEPTED (D4, D11 = O3); persistence O9 OPEN |
+| Terminal vs recoverable states | ACCEPTED (D4, D11 = O3, D12 = O9) |
 | Complete fail-closed definition | ACCEPTED (D5, §7); O8 OPEN |
 | Enforcement ownership: client, relay, shield | directions ACCEPTED (D6); O11–O13 OPEN |
 | Rollout sequence | ACCEPTED (D8, §15) |
@@ -644,7 +649,7 @@ Release requirement (not a decision): the new development stack's protocol behav
 Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
-- **B1** needs O9.
+- **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implementation authorized.**
 - **B2** needs the M results (O6/O7), plus O5 and O8.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).

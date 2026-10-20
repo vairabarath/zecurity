@@ -68,7 +68,7 @@ This fixes the old "DB error → `NotFound`" and the "deleted row labelled revok
 
 **Prerequisites before starting B1:**
 1. An explicit B1 go-ahead with a pre-written acceptance list (design §17).
-2. A decision on **O9**: persist `Revoked`/`UnknownIdentity` across restart, and exit vs idle. Safety doesn't depend on it.
+2. ~~A decision on **O9**~~ — **ACCEPTED 2026-10-20 (D12):** no persistence; in a terminal state the connector idles (alive, data plane closed, reconnect loop stopped) instead of exiting. Acceptance list drafted: [[Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseB1-Acceptance-2026-10-20]] — signed off 2026-10-20 with B1-Q1 = (a) (unit-tested intermediate, no live deploy until B2).
 3. Re-read design §4.4 (all ack rules, including the **deadline D** and **`lost_at`** rows deferred from Phase A), §5 (state machine), and §7 steps 1–2.
 
 **B1 scope (design §13):**
