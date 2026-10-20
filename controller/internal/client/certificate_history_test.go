@@ -190,3 +190,20 @@ func TestDeviceCertificateHistory_RefusedRenewalRecordsNothing(t *testing.T) {
 	}
 	f.exactlyListed(first)
 }
+
+// An enrollment refused by the lifecycle check (certificate audit bug 4)
+// issues nothing, so it records no certificate.
+func TestDeviceCertificateHistory_RefusedEnrollmentRecordsNothing(t *testing.T) {
+	f := newDeviceHistoryFixture(t)
+	execOrFail(t, f.ctx, f.pool, `UPDATE users SET status = 'suspended' WHERE id = $1`, f.userID)
+	if _, err := f.svc.EnrollDevice(f.ctx, enrollRequest(t)); err == nil {
+		t.Fatal("a suspended user enrolled a device")
+	}
+	var n int
+	if err := f.pool.QueryRow(f.ctx, `SELECT count(*) FROM client_device_certificates WHERE tenant_id = $1`, f.wsID).Scan(&n); err != nil {
+		t.Fatalf("count history: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("a refused enrollment recorded %d certificates", n)
+	}
+}

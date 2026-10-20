@@ -86,14 +86,14 @@ func TestCertificateHistoryMigration_BackfillsCurrentSerials(t *testing.T) {
 	revoked := conn("revoked", "revoked", "1b", notAfter, revokedAt)
 	legacyRevoked := conn("legacy-revoked", "revoked", "1c", notAfter, nil) // status only
 	conn("pending", "pending", "", nil, nil)                                // never issued
-	conn("no-expiry", "active", "1e", nil, nil)                             // unusable legacy row
+	noExpiry := conn("no-expiry", "active", "1e", nil, nil)                 // expiry unknown
 	dev := func(name, serial string, notAfter, revokedAt any) string {
 		return scalar(`INSERT INTO client_devices (user_id, workspace_id, name, os, cert_serial, cert_not_after, revoked_at)
 			VALUES ($1, $2, $3, 'linux', NULLIF($4, ''), $5, $6) RETURNING id::text`, user, ws, name, serial, notAfter, revokedAt)
 	}
 	liveDevice := dev("laptop", "2a", notAfter, nil)
 	revokedDevice := dev("phone", "2b", notAfter, revokedAt)
-	dev("no-expiry", "2c", nil, nil)
+	noExpiryDevice := dev("no-expiry", "2c", nil, nil)
 	if _, err := pool.Exec(ctx, `UPDATE connectors SET cert_serial = NULL WHERE name = 'pending'`); err != nil {
 		t.Fatalf("clear pending serial: %v", err)
 	}
@@ -104,12 +104,12 @@ func TestCertificateHistoryMigration_BackfillsCurrentSerials(t *testing.T) {
 
 	type row struct {
 		owner, tenant string
-		notAfter      time.Time
+		notAfter      *time.Time // nil: infinity (expiry unknown)
 		revoked       *time.Time
 	}
 	read := func(table, ownerCol string) map[string]row {
 		t.Helper()
-		rows, err := pool.Query(ctx, `SELECT serial, `+ownerCol+`::text, tenant_id::text, not_after, revoked_at FROM `+table)
+		rows, err := pool.Query(ctx, `SELECT serial, `+ownerCol+`::text, tenant_id::text, NULLIF(not_after, 'infinity'), revoked_at FROM `+table)
 		if err != nil {
 			t.Fatalf("read %s: %v", table, err)
 		}
@@ -127,28 +127,36 @@ func TestCertificateHistoryMigration_BackfillsCurrentSerials(t *testing.T) {
 	}
 
 	connectors := read("connector_certificates", "connector_id")
-	if len(connectors) != 3 {
-		t.Fatalf("connector history %v, want exactly 1a, 1b, 1c", connectors)
+	if len(connectors) != 4 {
+		t.Fatalf("connector history %v, want exactly 1a, 1b, 1c, 1e", connectors)
 	}
 	for serial, want := range map[string]struct {
 		owner   string
 		revoked bool
 	}{"1a": {active, false}, "1b": {revoked, true}, "1c": {legacyRevoked, true}} {
 		got, ok := connectors[serial]
-		if !ok || got.owner != want.owner || got.tenant != ws || !got.notAfter.Equal(notAfter) || (got.revoked != nil) != want.revoked {
+		if !ok || got.owner != want.owner || got.tenant != ws || got.notAfter == nil || !got.notAfter.Equal(notAfter) || (got.revoked != nil) != want.revoked {
 			t.Errorf("connector history %s = %+v, want owner %s, tenant %s, not_after %v, revoked %v", serial, got, want.owner, ws, notAfter, want.revoked)
 		}
+	}
+	// Expiry unknown: kept with not_after = infinity, so if it is ever
+	// revoked it stays listed rather than dropping off.
+	if got, ok := connectors["1e"]; !ok || got.owner != noExpiry || got.notAfter != nil || got.revoked != nil {
+		t.Errorf("connector history 1e = %+v, want owner %s, infinite not_after, not revoked", got, noExpiry)
 	}
 	if got := connectors["1b"].revoked; got == nil || !got.Equal(revokedAt) {
 		t.Errorf("1b revoked_at = %v, want the connector's %v", got, revokedAt)
 	}
 
 	devices := read("client_device_certificates", "device_id")
-	if len(devices) != 2 {
-		t.Fatalf("device history %v, want exactly 2a, 2b", devices)
+	if len(devices) != 3 {
+		t.Fatalf("device history %v, want exactly 2a, 2b, 2c", devices)
 	}
-	if got := devices["2a"]; got.owner != liveDevice || got.tenant != ws || got.revoked != nil || !got.notAfter.Equal(notAfter) {
+	if got := devices["2a"]; got.owner != liveDevice || got.tenant != ws || got.revoked != nil || got.notAfter == nil || !got.notAfter.Equal(notAfter) {
 		t.Errorf("device history 2a = %+v", got)
+	}
+	if got := devices["2c"]; got.owner != noExpiryDevice || got.notAfter != nil || got.revoked != nil {
+		t.Errorf("device history 2c = %+v, want infinite not_after, not revoked", got)
 	}
 	if got := devices["2b"]; got.owner != revokedDevice || got.revoked == nil || !got.revoked.Equal(revokedAt) {
 		t.Errorf("device history 2b = %+v", got)

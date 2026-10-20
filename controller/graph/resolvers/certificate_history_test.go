@@ -251,3 +251,21 @@ func TestWorkspaceCRL_UnrevokedCertificatesAreNotListed(t *testing.T) {
 	requireNotListed(t, crl, "e1e1e1e1", "e2e2e2e2", "e3e3e3e3", "e4e4e4e4")
 	requireListed(t, crl, "e5e5e5e5")
 }
+
+// Each workspace's CRL lists only its own revoked certificates.
+func TestWorkspaceCRL_OtherWorkspacesAreNotListed(t *testing.T) {
+	f := newCertHistoryFixture(t)
+	other := f.scalar(t, `INSERT INTO workspaces (slug, name, status, trust_domain)
+		VALUES ('certhist-other', 'other', 'active', 'other.test') RETURNING id::text`)
+	otherRN := f.scalar(t, `INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1, 'rn', 'office') RETURNING id::text`, other)
+	otherConn := f.scalar(t, `INSERT INTO connectors (tenant_id, remote_network_id, name, status, cert_serial, cert_not_after)
+		VALUES ($1, $2, 'theirs', 'active', 'f1f1f1f1', $3) RETURNING id::text`, other, otherRN, valid)
+	f.exec(t, `UPDATE connectors SET status = 'revoked', revoked_at = NOW() WHERE id = $1`, otherConn)
+	mine := f.connector(t, "mine", []string{"f2f2f2f2"}, valid)
+	if _, err := f.mr.RevokeConnector(f.ctx, mine); err != nil {
+		t.Fatalf("RevokeConnector: %v", err)
+	}
+	crl := f.crl(t)
+	requireNotListed(t, crl, "f1f1f1f1")
+	requireListed(t, crl, "f2f2f2f2")
+}
