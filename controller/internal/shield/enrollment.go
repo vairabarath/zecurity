@@ -55,6 +55,12 @@ func (s *service) Enroll(ctx context.Context, req *shieldpb.EnrollRequest) (*shi
 	if err := csr.CheckSignature(); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "CSR signature invalid: %v", err)
 	}
+	// Certificate audit bug 10: pin the key the certificate is issued for, so
+	// renewal can require the same key.
+	keyFingerprint, err := publicKeyFingerprint(csr.PublicKey)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "CSR public key: %v", err)
+	}
 	expectedSPIFFE := appmeta.ShieldSPIFFEID(trustDomain, shieldID)
 	if !csrHasSPIFFEURI(csr, expectedSPIFFE) {
 		return nil, status.Errorf(codes.PermissionDenied, "SPIFFE ID in CSR does not match token: expected %s", expectedSPIFFE)
@@ -151,6 +157,7 @@ func (s *service) Enroll(ctx context.Context, req *shieldpb.EnrollRequest) (*shi
 		        version = $6,
 		        last_heartbeat_at = NOW(),
 		        enrollment_token_jti = NULL,
+		        public_key_fingerprint = $9,
 		        updated_at = NOW()
 		  WHERE id = $7 AND status = 'pending' AND enrollment_token_jti = $8`,
 		trustDomain,
@@ -161,6 +168,7 @@ func (s *service) Enroll(ctx context.Context, req *shieldpb.EnrollRequest) (*shi
 		req.Version,
 		shieldID,
 		jti,
+		keyFingerprint,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update shield: %v", err)

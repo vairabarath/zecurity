@@ -106,9 +106,10 @@ func (f *renewalFixture) connector(td string) string {
 
 func (f *renewalFixture) newShield(connID string, td *string) string {
 	f.t.Helper()
-	return f.scalar(`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, trust_domain, cert_serial)
-		VALUES ($1, $2, $3, 'sh-' || gen_random_uuid()::text, 'active', $4, 'original-serial') RETURNING id::text`,
-		f.wsID, f.rnID, connID, td)
+	// Enrolled with the fixture key (certificate audit bug 10 pin).
+	return f.scalar(`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, trust_domain, cert_serial, public_key_fingerprint)
+		VALUES ($1, $2, $3, 'sh-' || gen_random_uuid()::text, 'active', $4, 'original-serial', $5) RETURNING id::text`,
+		f.wsID, f.rnID, connID, td, keyFingerprint(f.t, f.key))
 }
 
 // as returns a context carrying the identity the SPIFFE interceptor injects

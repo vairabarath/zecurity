@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"crypto"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -236,6 +237,33 @@ func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (
 	}, nil
 }
 
+// requireSameKeyAsPresented refuses a renewal CSR unless its key is the key
+// of the mTLS peer certificate, the leaf the SPIFFE interceptor verified for
+// this connection (never a certificate from the request). Keys are compared
+// as parsed keys, not as encodings. It fails closed: no peer certificate, an
+// unreadable key or an invalid CSR are refused.
+func requireSameKeyAsPresented(ctx context.Context, csrDER []byte) error {
+	certs, err := peerFromContext(ctx)
+	if err != nil {
+		return status.Error(codes.Unauthenticated, "renewal requires the presented connector certificate")
+	}
+	presented, ok := certs[0].PublicKey.(interface{ Equal(crypto.PublicKey) bool })
+	if !ok || certs[0].PublicKey == nil {
+		return status.Error(codes.PermissionDenied, "presented certificate key is unreadable")
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "parse renewal CSR: %v", err)
+	}
+	if err := csr.CheckSignature(); err != nil {
+		return status.Errorf(codes.InvalidArgument, "renewal CSR signature invalid: %v", err)
+	}
+	if !presented.Equal(csr.PublicKey) {
+		return status.Error(codes.PermissionDenied, "renewal key does not match the presented certificate")
+	}
+	return nil
+}
+
 // enrollmentClaimError explains why the connector row could not be claimed:
 // it does not exist, is no longer pending, or the token is not its current
 // one (superseded by a re-issue, or already used).
@@ -312,6 +340,14 @@ func (h *EnrollmentHandler) RenewCert(ctx context.Context, req *pb.RenewCertRequ
 
 	if connStatus == "revoked" || revokedAt != nil {
 		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
+	}
+
+	// Certificate audit bug 10: renew only for the key of the certificate
+	// this connection authenticated with. The connector reuses its key on
+	// renewal; anything else would let whoever briefly held the key move the
+	// identity onto a key of their own.
+	if err := requireSameKeyAsPresented(ctx, req.PublicKeyDer); err != nil {
+		return nil, err
 	}
 
 	certResult, err := h.PKIService.RenewConnectorCert(

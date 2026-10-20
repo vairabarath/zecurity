@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -157,6 +158,9 @@ func TestShieldRenewalKey_MissingOrMalformedPinRefused(t *testing.T) {
 			if name == "uppercase" {
 				value = fmt.Sprintf("%X", mustHex(t, keyFingerprint(t, key)))
 			}
+			// The column's format constraint stops such values being written;
+			// drop it to model corrupted or legacy data.
+			f.exec(`ALTER TABLE shields DROP CONSTRAINT shields_public_key_fingerprint_format`)
 			f.exec(`UPDATE shields SET public_key_fingerprint = $2 WHERE id = $1`, f.shieldID, value)
 			before := f.row().serial
 			resp, err := f.renewAs(f.svc(f.pki, f.rdb), key)
@@ -245,5 +249,16 @@ func TestShieldRenewalKey_FailedEnrollmentPinsNothing(t *testing.T) {
 	}
 	if got := f.fingerprint(); got != "" {
 		t.Fatalf("a failed enrollment pinned %q", got)
+	}
+}
+
+// The format constraint rejects a malformed pin at write time.
+func TestShieldRenewalKey_MalformedPinCannotBeStored(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	f.enrollWithKey(newShieldKey(t))
+	for _, bad := range []string{"", "not-a-fingerprint", strings.Repeat("A", 64), strings.Repeat("0", 63)} {
+		if _, err := f.pool.Exec(f.ctx, `UPDATE shields SET public_key_fingerprint = $2 WHERE id = $1`, f.shieldID, bad); err == nil {
+			t.Errorf("malformed pin %q was stored", bad)
+		}
 	}
 }
