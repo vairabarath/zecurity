@@ -53,18 +53,19 @@ func (s *service) RenewCert(ctx context.Context, req *shieldpb.RenewCertRequest)
 	// its connector.
 	var tombstoned bool
 	var shieldStatus, tenantID, shieldConnectorID, shieldTrustDomain *string
-	var connStatus, connTrustDomain *string
+	var connStatus, connTrustDomain, pinnedKey *string
 	var connRevokedAt *time.Time
 	err := s.db.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM shield_revocations WHERE shield_id = $1),
 		        s.status, s.tenant_id::text, s.connector_id::text, COALESCE(s.trust_domain, ''),
-		        c.status, c.revoked_at, COALESCE(c.trust_domain, '')
+		        c.status, c.revoked_at, COALESCE(c.trust_domain, ''),
+		        s.public_key_fingerprint
 		   FROM (SELECT 1) AS one
 		   LEFT JOIN shields s ON s.id = $1
 		   LEFT JOIN connectors c ON c.id = s.connector_id`,
 		shieldID,
 	).Scan(&tombstoned, &shieldStatus, &tenantID, &shieldConnectorID, &shieldTrustDomain,
-		&connStatus, &connRevokedAt, &connTrustDomain)
+		&connStatus, &connRevokedAt, &connTrustDomain, &pinnedKey)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "load shield: %v", err)
 	}
@@ -88,6 +89,20 @@ func (s *service) RenewCert(ctx context.Context, req *shieldpb.RenewCertRequest)
 	}
 	if *connStatus == "revoked" || connRevokedAt != nil {
 		return nil, status.Error(codes.PermissionDenied, "connector is revoked")
+	}
+
+	// Certificate audit bug 10: renew only for the key the shield enrolled
+	// with. A missing or malformed pin is refused: the shield must re-enroll
+	// (no trust on first use). The pin is never changed by renewal.
+	csrKeyFingerprint, err := renewalKeyFingerprint(req.PublicKeyDer)
+	if err != nil {
+		return nil, err
+	}
+	if pinnedKey == nil || !validKeyFingerprint(*pinnedKey) {
+		return nil, status.Error(codes.PermissionDenied, "shield has no valid pinned key; re-enroll the shield")
+	}
+	if *pinnedKey != csrKeyFingerprint {
+		return nil, status.Error(codes.PermissionDenied, "renewal key does not match the shield's enrolled key")
 	}
 
 	certResult, err := s.pki.RenewShieldCert(ctx, *tenantID, shieldID, trustDomain, req.PublicKeyDer, s.cfg.CertTTL)
@@ -115,13 +130,15 @@ func (s *service) RenewCert(ctx context.Context, req *shieldpb.RenewCertRequest)
 		    AND s.connector_id = conn.id
 		    AND s.status NOT IN ('revoked', 'deleted')
 		    AND COALESCE(s.trust_domain, '') IN ('', $6)
-		    AND NOT EXISTS (SELECT 1 FROM shield_revocations r WHERE r.shield_id = s.id)`,
+		    AND NOT EXISTS (SELECT 1 FROM shield_revocations r WHERE r.shield_id = s.id)
+		    AND s.public_key_fingerprint = $7`,
 		certResult.Serial,
 		certResult.NotAfter,
 		shieldID,
 		*tenantID,
 		connectorID,
 		trustDomain,
+		csrKeyFingerprint,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update shield cert: %v", err)

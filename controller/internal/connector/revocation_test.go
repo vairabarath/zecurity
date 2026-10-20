@@ -549,8 +549,12 @@ func TestRenewCert_RaceRevokeReturnsNoCert(t *testing.T) {
 		connID,
 		trustDomain,
 	)
+	// A genuine renewal: the connector presents its certificate and asks to
+	// renew it for the same key (certificate audit bug 10).
+	key := newConnectorKey(t)
+	reqCtx = withPeer(reqCtx, selfSignedLeaf(t, key))
 
-	resp, err := h.RenewCert(reqCtx, &pb.RenewCertRequest{PublicKeyDer: []byte("test-key")})
+	resp, err := h.RenewCert(reqCtx, &pb.RenewCertRequest{PublicKeyDer: connectorCSRWithKey(t, connID, trustDomain, key)})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

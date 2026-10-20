@@ -3,15 +3,12 @@ package connector
 import (
 	"context"
 	"crypto/x509"
-	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
-	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/pki"
-	"github.com/yourorg/ztna/controller/internal/spiffe"
 	"google.golang.org/grpc/codes"
 )
 
@@ -20,19 +17,16 @@ import (
 // so revoking a renewed connector left its earlier certificates off the CRL.
 // These tests drive the real Enroll and RenewCert handlers with real signing.
 
+// renew renews the connector's current certificate the way the connector
+// does: with its existing key, presenting its current certificate.
 func (f *bindingFixture) renew(h *EnrollmentHandler) (*pb.RenewCertResponse, error) {
-	ctx := spiffe.WithIdentity(f.ctx, fmt.Sprintf("spiffe://%s/connector/%s", f.td, f.connID),
-		appmeta.SPIFFERoleConnector, f.connID, f.td)
-	return h.RenewCert(ctx, &pb.RenewCertRequest{PublicKeyDer: generateConnectorCSR(f.t, f.connID, f.td)})
+	return f.renewWith(h, f.leaf, f.key)
 }
 
 func (f *bindingFixture) mustEnroll() string {
 	f.t.Helper()
-	resp, err := f.handler(f.pki).Enroll(f.ctx, f.request(f.mustReissue()))
-	if err != nil {
-		f.t.Fatalf("enroll: %v", err)
-	}
-	return certSerial(f.t, resp)
+	f.leaf = f.enrollWithKey(newConnectorKey(f.t))
+	return f.leaf.SerialNumber.Text(16)
 }
 
 func (f *bindingFixture) mustRenew() string {
@@ -41,12 +35,13 @@ func (f *bindingFixture) mustRenew() string {
 	if err != nil {
 		f.t.Fatalf("renew: %v", err)
 	}
-	return pemSerial(f.t, resp.CertificatePem)
+	f.leaf = parsePEMCert(f.t, resp.CertificatePem)
+	return f.leaf.SerialNumber.Text(16)
 }
 
 func pemSerial(t *testing.T, certPEM []byte) string {
 	t.Helper()
-	return certSerial(t, &pb.EnrollResponse{CertificatePem: certPEM})
+	return parsePEMCert(t, certPEM).SerialNumber.Text(16)
 }
 
 // revoke revokes the connector exactly as the revokeConnector resolver does.
@@ -112,10 +107,12 @@ func TestConnectorCertificateHistory_FailedIssuanceRecordsNothing(t *testing.T) 
 	refusedEnrollment(t, resp, err, codes.Internal)
 	f.exec(`DROP TRIGGER fail_commit ON connectors`)
 
-	resp, err = f.handler(f.pki).Enroll(f.ctx, f.request(token))
+	f.key = newConnectorKey(t)
+	resp, err = f.handler(f.pki).Enroll(f.ctx, f.requestWithKey(token, f.key))
 	if err != nil {
 		t.Fatalf("enroll: %v", err)
 	}
+	f.leaf = parsePEMCert(t, resp.CertificatePem)
 	enrolled := certSerial(t, resp)
 	f.revoke()
 	if _, err := f.renew(f.handler(f.pki)); err == nil {
