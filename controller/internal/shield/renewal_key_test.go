@@ -120,10 +120,14 @@ func TestShieldRenewalKey_DifferentKeyRefused(t *testing.T) {
 	f := newShieldBindingFixture(t)
 	f.enrollWithKey(newShieldKey(t))
 	before := f.row().serial
-	resp, err := f.renewAs(f.svc(f.pki, f.rdb), newShieldKey(t))
+	hook := &shieldRenewHookPKI{Service: f.pki}
+	resp, err := f.renewAs(f.svc(hook, f.rdb), newShieldKey(t))
 	f.refusedRenewal(resp, err, before)
 	if got := status.Code(err); got != codes.PermissionDenied {
 		t.Fatalf("code = %v, want PermissionDenied", got)
+	}
+	if hook.calls != 0 {
+		t.Fatal("a certificate was signed for a key the shield did not enroll with")
 	}
 }
 
@@ -165,6 +169,9 @@ func TestShieldRenewalKey_MissingOrMalformedPinRefused(t *testing.T) {
 			before := f.row().serial
 			resp, err := f.renewAs(f.svc(f.pki, f.rdb), key)
 			f.refusedRenewal(resp, err, before)
+			if !strings.Contains(err.Error(), "re-enroll") {
+				t.Fatalf("refused without telling the operator to re-enroll: %v", err)
+			}
 		})
 	}
 }
