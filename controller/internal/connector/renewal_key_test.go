@@ -198,3 +198,29 @@ func selfSignedLeaf(t *testing.T, key *ecdsa.PrivateKey) *x509.Certificate {
 	}
 	return leaf
 }
+
+// tamperSignature corrupts the last byte of a CSR's signature: the CSR still
+// parses and carries the right key, but proves no key possession.
+func tamperSignature(der []byte) []byte {
+	out := append([]byte(nil), der...)
+	out[len(out)-1] ^= 0xff
+	return out
+}
+
+// A CSR with the right key but an invalid signature never reaches issuance.
+// RenewCert checks the signature, and so does the signer
+// (RenewConnectorCert) before creating any certificate.
+func TestConnectorRenewalKey_InvalidCSRSignatureRefused(t *testing.T) {
+	f := newBindingFixture(t)
+	leaf := f.enrollWithKey(newConnectorKey(t))
+	before := f.certState()
+	ctx := withPeer(spiffe.WithIdentity(f.ctx, fmt.Sprintf("spiffe://%s/connector/%s", f.td, f.connID),
+		appmeta.SPIFFERoleConnector, f.connID, f.td), leaf)
+	csr := tamperSignature(connectorCSRWithKey(t, f.connID, f.td, f.key))
+	if _, err := x509.ParseCertificateRequest(csr); err != nil {
+		t.Fatalf("test setup: the tampered CSR must still parse: %v", err)
+	}
+	resp, err := f.handler(f.pki).RenewCert(ctx, &pb.RenewCertRequest{PublicKeyDer: csr})
+	f.refusedRenewal(resp, err, before)
+	t.Logf("refused: %v", err)
+}

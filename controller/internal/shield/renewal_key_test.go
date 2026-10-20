@@ -269,3 +269,24 @@ func TestShieldRenewalKey_MalformedPinCannotBeStored(t *testing.T) {
 		}
 	}
 }
+
+// A CSR with the pinned key but an invalid signature never reaches issuance.
+// RenewCert checks the signature, and so does the signer (RenewShieldCert)
+// before creating any certificate.
+func TestShieldRenewalKey_InvalidCSRSignatureRefused(t *testing.T) {
+	f := newShieldBindingFixture(t)
+	key := newShieldKey(t)
+	f.enrollWithKey(key)
+	before := f.row().serial
+	csr := shieldCSR(t, f.td, f.shieldID, key)
+	csr[len(csr)-1] ^= 0xff
+	if _, err := x509.ParseCertificateRequest(csr); err != nil {
+		t.Fatalf("test setup: the tampered CSR must still parse: %v", err)
+	}
+	connID := f.scalar(`SELECT connector_id::text FROM shields WHERE id = $1`, f.shieldID)
+	ctx := spiffe.WithIdentity(f.ctx, fmt.Sprintf("spiffe://%s/connector/%s", f.td, connID),
+		appmeta.SPIFFERoleConnector, connID, f.td)
+	resp, err := f.svc(f.pki, f.rdb).RenewCert(ctx, &shieldpb.RenewCertRequest{ShieldId: f.shieldID, PublicKeyDer: csr})
+	f.refusedRenewal(resp, err, before)
+	t.Logf("refused: %v", err)
+}
