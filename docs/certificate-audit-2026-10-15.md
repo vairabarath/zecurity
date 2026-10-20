@@ -139,7 +139,43 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
     - [ ] No pruning: expired history rows are kept (filtered out of the CRL), like `relay_certificates`.
     - [ ] Not validated live end to end (a renewed then revoked connector presenting its older certificate to a relay).
     - [ ] Every developer must recreate their local database after pulling (`[schema: reset DB]`).
-- [ ] **Bug 10 — Low-Med — controller: connector and shield renewal accept a different key.** Stolen credentials can be moved to an attacker's key.
+- [x] **Bug 10 — Low-Med — controller: connector and shield renewal accepted a different key.** Stolen credentials could be moved to an attacker's key.
+  - Root cause: `RenewConnectorCert` and `RenewShieldCert` checked the renewal CSR's self-signature, then signed whatever public key it carried. Renewal is authenticated with the current certificate, but nothing tied the new key to it. Whoever briefly held a connector's key could move the identity onto a key of their own and keep renewing it. A connector could silently re-key its shields: shield renewal is proxied by the connector, and the controller never sees the shield's own certificate.
+  - Fixed (2026-10-20, controller only; no protobuf, Rust, client or relay change):
+    - **Connector:** `RenewCert` renews only for the key of the mTLS peer certificate the SPIFFE interceptor verified for the connection (never a certificate from the request), comparing parsed keys (`Equal`), as relay renewal does. A missing peer certificate, an unreadable presented key or an invalid CSR fail closed. Runs after the bug 7 revocation checks, before signing.
+    - **Shield, migration `040_shield_public_key_fingerprint.sql` `[schema: reset DB]`:** `shields.public_key_fingerprint`, SHA-256 of the parsed key's PKIX DER, lowercase hex. It has the same canonical form as the client (036) and relay pins, and a format `CHECK`. No backfill: shield keys were never stored.
+    - **Shield enrollment** pins the fingerprint of the CSR key the certificate is issued for, inside the bug 8 enrollment transaction; a failed enrollment pins nothing.
+    - **Shield renewal** requires the CSR key's fingerprint to equal the pin before signing, and again in the bug 7 conditional final write, so a pin change during renewal returns no certificate. A missing or malformed pin is refused with "re-enroll the shield" (no trust on first use). Renewal never changes the pin; changing a key means re-enrolling.
+  - Verified: 12 new tests on throwaway databases with real enrollment, renewal and signing. 4 failed against the original code for the expected reason (connector: different key, no presented certificate, unreadable presented key; shield: different key). 5 failed because the pin column did not exist yet; 2 are guards that already passed (same-key renewal); 1 (format constraint) was added after the fix. Existing tests now renew as real connectors and shields do (same key, presented certificate). Full suite twice, `-race` on the connector and shield packages. 13 mutations: 11 caught; the 2 survivors remove the handlers' own CSR signature check, which the signers (`RenewConnectorCert`, `RenewShieldCert`) repeat, so they are equivalent.
+  - Excluded: **clients** already pin a key fingerprint at enrollment (036) and renew only for it. **Relays** already renew only for the presented certificate's key.
+  - Limitations:
+    - [ ] Shields enrolled before migration 040 have no pin and must re-enroll before they can renew. With the `[schema: reset DB]` rule there are none in practice.
+    - [ ] There is no key-rotation operation: a connector or shield that needs a new key must re-enroll.
+    - [ ] Not validated live end to end (a real connector and shield renewing, and a renewal with a different key refused).
+
+## Certificate-system closure checklist (2026-10-20)
+
+Sources: this tracker, `git log` on `fixed-pendings`, and the Sprint 21 test report (`.zecurity-obs/Sprint21/Test-Status-Report-2026-10-17.md`). "Verified locally" means the regression tests were written first, shown failing, and the merged fix passed them plus the Go suite and, where noted, mutation testing. **No bug has been verified in live integration since its fix.**
+
+| Bug | Fix commits | PR | Regression evidence | Live | Remaining limitations | Status |
+|---|---|---|---|---|---|---|
+| 1 — first-time trust hijack (connector, shield, relay, client) | `5387d43` tests; `84195e4`, `564561a`, `30cd9cd` agents; `0bd6280`, `9f95a9f`, `7e3d544` client | #120, #121 merged | attack-reproduction tests per agent and client (Rust suites, CI) | not recorded | unsigned client releases; no root rollover; production PKI auto-reset must be locked down (see below) | verified locally |
+| 2 — relay CRL picked from a forged issuer copy | `b7bf4a6` test, `d80dedb` fix | #118 merged | relay demonstration test (Rust, CI) | not recorded | — | verified locally |
+| 3 — revoking a shield didn't cut it off | `47e381e` tests; `86a436d`, `b2b00b5` fixes; `77196f3`, `aa899d3` docs | #123 merged | Go and connector Rust tests; resource fixture 30 pass / 4 pre-existing fail | **pending** (F33 in the test report) | disconnected-connector window; no shield CRL | verified locally |
+| 4/5 — inactive users' devices: issuance and access | `6c49e17` tests, `ca2be59` fix, `a303782` docs | #124 merged | Go tests; 28 mutations, 2 survivors (layered checks) | not recorded (session teardown gap noted in PR) | no admin lifecycle API; membership not authoritative for SCIM/JIT users | verified locally |
+| 6 — Workspace/Relay CRLs swappable | `7045bb9` tests, `4a7fae8` fix, `cf4ff91` docs | #126 merged | connector and client Rust tests; 41 mutation runs, 4 equivalent survivors | not validated | `crl_issuers` duplicated in two crates; restart needed on Workspace CA rotation | verified locally |
+| 7 — revoked connector renews shield certificates | `cccd1e1` tests, `473d953` fix, `f7c3e3b` docs | #125 merged | Go tests; 31 mutations, all caught | not validated | stream interceptor does not check standing; shields renewed before revocation stay valid ≤ 7 days | verified locally |
+| 8 — re-issued enrollment token not cancelled | `e2eb952` tests, `a4a14c9` fix, `ee35d77` tests, `c803ea0` docs | #128 merged | 23 Go tests (16 failed pre-fix); 34 + 6 mutations, 6 unreachable under the lock | not validated | Valkey/Postgres not atomic (no usable stale token); ambiguous commit error needs re-creation | verified locally |
+| 9 — workspace CRL covered only the newest certificate | `34f088f` tests, `52c16fa` fix, `2d14935` tests, `6cd032e` docs | #129 merged | 18 Go tests (12 failed pre-fix); 21 mutations, all caught | not validated | serials overwritten before migration 039 unrecoverable (≤ 7-day window); no pruning | verified locally |
+| 10 — renewal accepted a different key | `cb95534` tests, `12614ae` fix, `c740fae` tests, tracker update | **not pushed** | 12 Go tests (4 failed pre-fix, 5 schema-absent); 13 mutations, 2 equivalent | not validated | pre-040 shields must re-enroll; no key rotation | **pending review** |
+
+**The certificate system is not closed.** Still open:
+- **F34 (High, Sprint 20 live finding): a revoked connector keeps serving tunnels.** Connector-side enforcement is at Phase A (#127) and does not fail closed; Phase B1 is pending.
+- **Shield revocation is not enforced by the shield** (follow-up found during bug 6).
+- **F33:** live acceptance of the bug 3 shield revocation is pending.
+- **F32 (Low):** a revoked relay keeps reconnecting its heartbeat.
+- Live end-to-end validation of bugs 1–10.
+- The open items under "Found during the bug 1 work" and "Risks" below.
 
 ## Found during the bug 1 work (2026-10-16)
 
