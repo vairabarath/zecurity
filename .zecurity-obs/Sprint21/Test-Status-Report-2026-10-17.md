@@ -227,7 +227,7 @@ The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
     - revoked relay `k1-relay`;
     - throwaway operators `at-op*`, `ui-op*`, `c4-op-*` (`at-op2-152625` and `at-op2-152709` are **active super-admins**);
     - 30 leaked `resolvers_updsc_*` databases.
-12. **Files:** `.localdev/k1-relay`, `.localdev/s20-relay1`, `.worktrees/s20-live` (`git worktree remove`), `orca.deb` (untracked).
+12. **Files:** `.localdev/k1-relay`, `.localdev/s20-relay1`, `.worktrees/s20-live` (`git worktree remove`), `orca.deb` (untracked). (V.3 was accepted as PASS on 2026-10-20 with these as follow-ups.)
 13. **Needs sudo:** `sudo nft list tables`, confirm `s20test` is gone; check why `zecurity-shield` shows `activating`.
 14. **Lab hosts:** update timers, test binaries, resource `s20-nika-summa` / group `s20-summa-users`.
 15. **Optional:** re-enable Okta IdP `1779ca3e` if it exists in any non-local DB.
