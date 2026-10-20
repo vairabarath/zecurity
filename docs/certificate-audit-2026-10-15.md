@@ -119,9 +119,26 @@ Platform Root CA (10y, self-signed, ca_root) ── signs only the intermediate
     - [ ] A commit error after the server actually committed leaves the connector or shield enrolled without the client holding its certificate; it must be re-created. Safe direction: never an untracked certificate.
     - [ ] Not validated live end to end (real connector and shield installs with re-issued tokens).
   - **Relay provisioning is out of scope.** A relay's provisioning token is issued once, when the relay is created, and there is no endpoint to re-issue it, so no token can be superseded. Revisit if a re-issue path is ever added: it must then bind provisioning to `relays.enrollment_token_jti` the same way.
-- [ ] **Bug 9 — Medium — all: CRLs cover only the newest certificate.**
-  - Each renewal overwrites the stored serial, so an earlier, still-valid certificate isn't revoked.
-  - Needs a new table: a schema change and a DB reset.
+- [x] **Bug 9 — Medium — connector, client: the workspace CRL covered only the newest certificate.**
+  - Root cause: `GenerateClientCRL` (`internal/pki/workspace.go`) listed revoked connectors and client devices by their current `cert_serial`. Every renewal overwrote it: client `updateClientDeviceCertOnRenewal` and connector `RenewCert`. Revoking a renewed connector or device therefore left its earlier, still-valid certificates (up to 7 days) off the CRL. Deleting a revoked connector (allowed for `revoked`) dropped it from the CRL entirely. The connector's device port and the relay check client and connector certificates against this CRL. For devices the policy also drops a revoked device's identity; for older connector certificates presented to a relay, the CRL was the main check.
+  - Fixed (2026-10-20, controller only; no protobuf, Rust, relay or shield change):
+    - **Migration `039_certificate_history.sql` `[schema: reset DB]`:** `connector_certificates` and `client_device_certificates`, one row per issued certificate (tenant, owner, unique serial, `not_after`, `revoked_at`), modelled on `relay_certificates`. No foreign key to the owning row, so history outlives a deleted connector or device; only deleting the workspace removes it. Indexes: unique serial, owner, and a partial `(tenant_id, not_after) WHERE revoked_at IS NOT NULL` for CRL generation.
+    - **Atomic history through triggers** on `connectors` and `client_devices`, in the same statement (so the same transaction) as the write they record:
+      - a new or changed `cert_serial` records the certificate. This covers connector `Enroll` (inside the bug 8 transaction) and `RenewCert`, and client `EnrollDevice` and `RenewCert`. A refused or rolled-back write records nothing.
+      - the first transition to revoked marks every certificate of that owner revoked. For connectors that is status `revoked` or `revoked_at` set, either marker counting; for devices, `revoked_at`. This covers `revokeConnector`, `revokeDevice`, the client `RevokeDevice` RPC (`revokeClientDevice`) and SCIM offboarding (`revokeUserDevices`).
+      - a certificate recorded on an already revoked owner starts out revoked.
+
+      Triggers rather than per-path code, so no current or future issuance or revocation path can skip the history.
+    - **Race safety:** renewal and revocation update the same owner row, so they serialize on its row lock. A renewal that commits first is revoked with the rest; a revocation that commits first makes the renewal's guarded write refuse it, so no certificate is returned.
+    - **CRL from history:** every unexpired (`not_after > NOW()`) revoked certificate of the workspace; expired ones drop off. Superseded certificates are not treated as revoked. A device serial that cannot be encoded now fails CRL generation instead of being listed as zero. Workspace CA, signing, CRL number and validity window are unchanged.
+    - **Backfill:** the serial each row currently holds, with its revocation (`revoked_at`, or `updated_at` for legacy status-only revoked connectors).
+  - Historical-data limitation: serials overwritten before migration 039 cannot be recovered, because no other source records them. They stay off the CRL until they expire, at most one certificate lifetime (7 days) after the last renewal before the migration. A row without `cert_not_after` is kept with `not_after = infinity`, so if revoked it stays listed rather than dropping off for an unknown expiry.
+  - Verified: 18 tests on throwaway databases with real PKI and the real issuance and revocation handlers. 12 failed against the original code for the expected reason; the backfill test failed because the schema was absent; 4 are guards that already passed; 1 (refused enrollment) was added after the fix. Full suite twice, `-race` on the affected packages, and 21 mutations of the triggers, backfill and CRL queries, all caught after closing 6 test gaps.
+  - Excluded: **relays** already keep per-certificate history (`relay_certificates`, migration 027) and list every unexpired serial of a revoked relay. **Shields** are revoked by identity (bug 3 tombstones enforced by connectors), not by serial, and have no CRL.
+  - Follow-ups:
+    - [ ] No pruning: expired history rows are kept (filtered out of the CRL), like `relay_certificates`.
+    - [ ] Not validated live end to end (a renewed then revoked connector presenting its older certificate to a relay).
+    - [ ] Every developer must recreate their local database after pulling (`[schema: reset DB]`).
 - [ ] **Bug 10 — Low-Med — controller: connector and shield renewal accept a different key.** Stolen credentials can be moved to an attacker's key.
 
 ## Found during the bug 1 work (2026-10-16)

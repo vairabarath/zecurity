@@ -526,7 +526,8 @@ func (s *serviceImpl) SignClientCert(
 }
 
 // GenerateClientCRL builds a DER-encoded CRL signed by the workspace CA for
-// tenantID. It lists every client_devices row with a non-null revoked_at.
+// tenantID. It lists every unexpired revoked client device and connector
+// certificate in the per-certificate history (certificate audit bug 9).
 func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([]byte, error) {
 	var encryptedKey, nonce, caCertPEM string
 	if err := s.pool.QueryRow(ctx,
@@ -549,12 +550,16 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 		return nil, fmt.Errorf("parse workspace CA cert: %w", err)
 	}
 
+	// Certificate audit bug 9: list every revoked certificate that has not
+	// expired, from the per-certificate history (039), not the owner's current
+	// serial. Earlier certificates of a renewed device stay listed, and the
+	// history does not depend on the device row still existing.
 	rows, err := s.pool.Query(ctx,
-		`SELECT cert_serial, revoked_at
-		   FROM client_devices
-		  WHERE workspace_id = $1
+		`SELECT serial, revoked_at
+		   FROM client_device_certificates
+		  WHERE tenant_id = $1
 		    AND revoked_at IS NOT NULL
-		    AND cert_serial IS NOT NULL`,
+		    AND not_after > NOW()`,
 		tenantID,
 	)
 	if err != nil {
@@ -570,7 +575,9 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 			return nil, fmt.Errorf("scan revoked device: %w", err)
 		}
 		n := new(big.Int)
-		n.SetString(serialHex, 16)
+		if _, ok := n.SetString(serialHex, 16); !ok {
+			return nil, fmt.Errorf("invalid device certificate serial %q", serialHex)
+		}
 		revoked = append(revoked, x509.RevocationListEntry{
 			SerialNumber:   n,
 			RevocationTime: revokedAt.UTC(),
@@ -582,13 +589,15 @@ func (s *serviceImpl) GenerateClientCRL(ctx context.Context, tenantID string) ([
 
 	// PENDING-02: also publish revoked CONNECTOR serials on the same workspace
 	// CRL (connectors are Workspace-CA-signed, so they belong here). Serials are
-	// stored as SerialNumber.Text(16), matching the base-16 parse below.
+	// stored as SerialNumber.Text(16), matching the base-16 parse below. From
+	// the per-certificate history (bug 9): every unexpired certificate of a
+	// revoked connector, even after the connector row was deleted.
 	connRows, err := s.pool.Query(ctx,
-		`SELECT cert_serial, revoked_at
-		   FROM connectors
+		`SELECT serial, revoked_at
+		   FROM connector_certificates
 		  WHERE tenant_id = $1
 		    AND revoked_at IS NOT NULL
-		    AND cert_serial IS NOT NULL`,
+		    AND not_after > NOW()`,
 		tenantID,
 	)
 	if err != nil {
