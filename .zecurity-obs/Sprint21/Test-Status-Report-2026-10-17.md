@@ -20,7 +20,7 @@ One place for every test **completed** so far, with the verdict and where the ev
 | Area | Verdict | Completed | Not done |
 |---|---|---|---|
 | **Sprint 20 live acceptance** (Phase V) | **FAILED** | 45 rows: 40 PASS, 1 PASS only under a TEMP patch, 3 FAIL, 1 not exercised | — (run complete, closed out) |
-| **Sprint 21 acceptance, local + live** | **PASS** for everything run | AT-CORE 1–5, AT-H 1–11, AT-U 1–8, AT-R 1–8, AT-P 1–7, AT-C.4, AT-K.1 (live), AT-DEV 1–3 | AT-K.2/K.3 live (shield: needs sudo + resource host) |
+| **Sprint 21 acceptance, local + live** | **PASS** for everything run | AT-CORE 1–5, AT-H 1–11, AT-U 1–8, AT-R 1–8, AT-P 1–7, AT-C.4, AT-K.1, AT-K.2, AT-K.3 (live), AT-DEV 1–3 | Full regression gate, #117 targeted tests |
 | **Regression gate on current code** | **Not green** | Go full suite; Rust renewal suites; console | 4 tests fail when not skipped (F35) |
 
 ---
@@ -131,6 +131,8 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 | AT-R.5 | Exactly one `tenant.read` audit row per detail call; none for list | API + DB | PASS (live) |
 | AT-K.1 | Relay at 15m renews 8 m 45 s after install, then 585 s, 504 s, no loop | Real relay, `RELAY_CERT_TTL=15m` | PASS (live) |
 | AT-C.4 | Role change, disable or reset by another admin → next request → Login with notice | Headed browser + API | PASS 3/3 (live) |
+| AT-K.2 | Shield renews once per window: `SHIELD_CERT_TTL=20m` → window 8 m (AgentPolicy 480 s); renewals at 05:45:56, 05:57:58, 06:09:59 UTC (every 12 m) | Lab: shield on nika, connector on inkyank, `fixed-pendings` `a25bb33` (2026-10-20) | PASS (live) |
+| AT-K.3 | No churn: 3 requests ↔ 3 renewals over 36 min, 0 errors, 0 restarts, no heartbeat gap | Same lab run | PASS (live; suppression paths not triggered, unit-tested) |
 | AT-R.6 | Audit filters, keyset pagination (78 rows, 12 pages, no gaps), limit clamp | API | PASS |
 | AT-R.7 | Controller cert matches `openssl s_client :9090` | API + openssl | PASS |
 | AT-R.8 | Bad cursor, limit or window → 400; unknown id → 404 | API | PASS |
@@ -147,7 +149,6 @@ Plan cases that can't be triggered live (A.1, A.4–A.6, B.3–B.7, B.9, C.1, C.
 
 | ID | Why | Needs |
 |---|---|---|
-| AT-K.2, K.3 (live) | Unit tests pass; the shield needs root (nftables) | sudo + a resource host for the shield |
 | #117 extras (S1, client renewal restart, lost renewal reply, CRL skew) | Not targeted | Local test run |
 | Full regression gate (§10) | Only partial suites run for Sprint 21 | ~15 min local |
 
@@ -199,14 +200,14 @@ The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
 ## 8. Still to do (everything open, in one list)
 
 **Sprint 21:**
-1. **AT-K.2 / K.3 live (shield):** at `SHIELD_CERT_TTL=24h`, exactly one ReEnroll inside the window and no renewal churn. Needs sudo (the shield uses nftables) and a resource host for the shield (this PC can be it if the resource's LAN IP is this PC).
+1. ~~AT-K.2 / K.3 live (shield)~~: **done 2026-10-20**, PASS (see §2.2 and §9).
 2. **Full regression gate (plan §10)**, about 20 min locally: all Rust suites (`connector`, `relay`, `shield`, `client`), the `admin` build and `buf generate`. Only the provider Go suites, the full Go suite and the Rust `renew` filters were run.
 3. **#117 fixes, targeted tests:** S1 relay revocation, client tunnel restarting onto a renewed cert, connector re-asked to renew after a lost reply, CRL clock skew.
 
 **Sprint 20 (to turn FAILED into passed):**
 
 4. **R2:** Barath fixes Fix02 (Finding 35: 3 extra `NotifyPolicyChange` calls, 1 outdated test), then re-run with `RESOURCE_TEST_SHIELD_ID` (`scripts/resource-test-fixture.sh`). CI should also set it, or the tests stay hidden.
-5. **G9 / AT-G.6:** a team decision on whether the 2026-10-10 long-hold PASS on later code is accepted, or a re-run.
+5. **G9 / AT-G.6:** re-run live **2026-10-20 on `fixed-pendings` `a25bb33`: PASS** (§10). Accepting it for Sprint 20 is a team decision.
 
 **Security (lab):**
 
@@ -226,7 +227,29 @@ The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
     - revoked relay `k1-relay`;
     - throwaway operators `at-op*`, `ui-op*`, `c4-op-*` (`at-op2-152625` and `at-op2-152709` are **active super-admins**);
     - 30 leaked `resolvers_updsc_*` databases.
-12. **Files:** `.localdev/k1-relay`, `.localdev/s20-relay1`, `.worktrees/s20-live` (`git worktree remove`), `orca.deb` (untracked).
+12. **Files:** `.localdev/k1-relay`, `.localdev/s20-relay1`, `.worktrees/s20-live` (`git worktree remove`), `orca.deb` (untracked). (V.3 was accepted as PASS on 2026-10-20 with these as follow-ups.)
 13. **Needs sudo:** `sudo nft list tables`, confirm `s20test` is gone; check why `zecurity-shield` shows `activating`.
 14. **Lab hosts:** update timers, test binaries, resource `s20-nika-summa` / group `s20-summa-users`.
 15. **Optional:** re-enable Okta IdP `1779ca3e` if it exists in any non-local DB.
+
+## 9. Live lab run — AT-K.2 / AT-K.3 (2026-10-20)
+
+- **Code:** `origin/fixed-pendings` `a25bb33` (PR #128, enrollment-token binding), built in worktree `.worktrees/fp-live`. The local `fixed-pendings` branch was fast-forwarded to it at the user's request.
+- **Controller:** user unit `k2-controller`, `SHIELD_CERT_TTL=20m` (user asked for 15–20 min instead of 24h). The admin UI ran as unit `k2-admin`.
+- **Workspace:** `xiyo` (409e57e0…), created by the user's Google sign-in. Network `k2-net` (95f2a823…). Connector `k2-conn` (9c1078f5…) on **inkyank 192.168.1.75**; shield `k2-shield` (6e90ae91…) on **nika 192.168.1.39**.
+- **Binaries:** connector `57cd82ef2fe6`, shield `16804d600202`; update timers disabled on both hosts.
+- **Tokens:** created through the admin session and stored in 0600 files; shipped with tty echo off and verified by sha prefix. They were never printed, and the agents removed them from their config after enrolling.
+- **Results:** see the AT-K.2 / AT-K.3 rows in §2.2 and the checklist.
+- **Lab notes:**
+  - **IPs changed again (DHCP):** nika .39, udaya .37, manojinkyank .49, inkyank .75.
+  - **The manojinkyank SSH session dropped mid-run.** One command then reached this PC's local shell. zsh rejected it at the first word, so nothing ran (no `~/k2` was created locally). The helper now quotes its markers and refuses to send when a terminal is back at the local prompt.
+  - **udaya's old connector** is in an `activating` restart loop against the reset DB.
+- **Still running after the test:** controller (20m shield TTL), admin UI, connector on inkyank, shield on nika (renewing every 12 min). The LAN file server `k2-serve` stops after 30 min.
+
+## 10. Sprint 20 G9 / U5 long-hold re-test (2026-10-20)
+
+**Re-test 2026-10-20 on `origin/fixed-pendings` `a25bb33`: PASS.** Connector `k2-conn` (inkyank 192.168.1.75) at `CONNECTOR_CERT_TTL=15m` / `CONNECTOR_RENEWAL_WINDOW=10m`; shield-protected resource `g9-nika-web` (nika 192.168.1.39 tcp/5173, HTTP/1.1 keep-alive); client `69eb3d83e8f3` on 192.168.1.164 with a fresh login. `fc_hold.py`: one TCP socket (local port 45552), GET every 2 s, 06:55:41–07:25:42 UTC: **895 requests, 0 failures, 0 socket changes**, through **6 connector renewals** (06:57:22, 07:02:20, 07:07:19, 07:12:22, 07:17:20, 07:22:18) and past the 07:07:18 `NotAfter` of the cert in use at the start. Controller: 6 `ReEnroll sent`, 6 `superseded stream closed`, **0 connector disconnects**, 0 ACL pushes. Connector: 6× `opening replacement Control stream` → 6× `switched to renewed Control stream`, 0 replacement failures, 6× device QUIC switched, **1 `tunnel_opened`** (the hold), 0 errors, 0 restarts. Client: **0 `restarting VPN`** (Finding 15's failure mode), 0 handshake timeouts, 0 WARN/ERROR. Setup note: a first hold attempt stopped at request 1 because the test server (Python `http.server`) defaulted to HTTP/1.0 and closed each connection; restarted with `--protocol HTTP/1.1`. That was a harness issue, not a product result.
+
+- **Controller during the run:** user unit `k2-controller`, `CONNECTOR_CERT_TTL=15m` / `CONNECTOR_RENEWAL_WINDOW=10m`. Its 7-day connector cert was moved onto a 15-minute cert by one controller run with a 200 h window (exactly one renewal), then a restart with the 10 min window.
+- **Client install:** the old client binary was kept as `/usr/local/bin/zecurity-client.pre-g9` and its saved state as `~/.local/share/zecurity-client.pre-g9`.
+- **Test objects in workspace `xiyo`:** resource `g9-nika-web` (protected), group `g9-users`. Test server: `~/g9www` on nika (`python3 -m http.server 5173 --protocol HTTP/1.1`).
