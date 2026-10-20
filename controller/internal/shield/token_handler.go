@@ -2,6 +2,7 @@ package shield
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -48,6 +49,11 @@ func (s *service) TokenHandler() http.Handler {
 		}
 
 		_, installCmd, err := s.GenerateShieldToken(ctx, remoteNetworkID, tc.TenantID, tc.TenantID, shieldID, shieldName)
+		if errors.Is(err, ErrShieldNotPending) {
+			// Enrolled (or changed) since the check above.
+			http.Error(w, "shield must be in pending state", http.StatusConflict)
+			return
+		}
 		if err != nil {
 			http.Error(w, "token generation failed: "+err.Error(), http.StatusInternalServerError)
 			return

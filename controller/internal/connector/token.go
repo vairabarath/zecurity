@@ -80,6 +80,32 @@ func StoreEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti, conn
 	return rdb.Set(ctx, enrollmentJTIPrefix+jti, connectorID, ttl).Err()
 }
 
+// PeekEnrollmentJTI reports whether an enrollment token JTI is still stored
+// (not expired, not consumed) and for which connector, without consuming it.
+// Enroll checks it before claiming the connector row and deletes the entry
+// only after the enrollment commits (certificate audit bug 8), so a failed
+// enrollment leaves the token usable for a retry.
+func PeekEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (connectorID string, found bool, err error) {
+	val, err := rdb.Get(ctx, enrollmentJTIPrefix+jti).Result()
+	if err == valkeycompat.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read enrollment jti: %w", err)
+	}
+	return val, true, nil
+}
+
+// DeleteEnrollmentJTI removes an enrollment token JTI. It is cleanup, not the
+// authority: the connector row's enrollment_token_jti decides which token is
+// current, so an entry left behind by a failed delete cannot enroll.
+func DeleteEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) error {
+	if err := rdb.Del(ctx, enrollmentJTIPrefix+jti).Err(); err != nil {
+		return fmt.Errorf("delete enrollment jti: %w", err)
+	}
+	return nil
+}
+
 // BurnEnrollmentJTI atomically fetches and deletes an enrollment token JTI.
 func BurnEnrollmentJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (connectorID string, found bool, err error) {
 	val, err := rdb.GetDel(ctx, enrollmentJTIPrefix+jti).Result()

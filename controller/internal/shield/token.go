@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	pgx "github.com/jackc/pgx/v5"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/appmeta"
 	"github.com/yourorg/ztna/controller/internal/netutil"
@@ -84,21 +87,36 @@ func (s *service) GenerateShieldToken(
 		return "", "", fmt.Errorf("sign shield enrollment token: %w", err)
 	}
 
+	// Certificate audit bug 8: the row's enrollment_token_jti is the
+	// authority on which token is current. Store the new token's entry first
+	// (Enroll requires it), then make it current, only while the shield is
+	// still pending. That swap supersedes every earlier token at once;
+	// deleting the predecessor's entry is cleanup.
 	if err := StoreShieldJTI(ctx, s.redis, jti, shieldID, s.cfg.EnrollmentTokenTTL); err != nil {
 		return "", "", fmt.Errorf("store shield jti: %w", err)
 	}
 
-	_, err = s.db.Exec(ctx,
-		`UPDATE shields
+	// The row lock makes this wait for an enrollment in flight; a shield that
+	// enrolled meanwhile is no longer pending.
+	var previousJTI *string
+	err = s.db.QueryRow(ctx,
+		`WITH current AS (
+		     SELECT id, enrollment_token_jti AS previous FROM shields
+		      WHERE id = $5
+		        AND tenant_id = $6
+		        AND remote_network_id = $7
+		        AND status = 'pending'
+		        FOR UPDATE
+		 )
+		 UPDATE shields s
 		    SET enrollment_token_jti = $1,
 		        connector_id = $2,
 		        trust_domain = $3,
 		        interface_addr = $4,
 		        updated_at = NOW()
-		  WHERE id = $5
-		    AND tenant_id = $6
-		    AND remote_network_id = $7
-		    AND status = 'pending'`,
+		   FROM current
+		  WHERE s.id = current.id
+		 RETURNING current.previous`,
 		jti,
 		connectorID,
 		trustDomain,
@@ -106,9 +124,21 @@ func (s *service) GenerateShieldToken(
 		shieldID,
 		tenantID,
 		remoteNetworkID,
-	)
+	).Scan(&previousJTI)
 	if err != nil {
+		// The new token is not current, so it cannot enroll; drop its entry.
+		if derr := DeleteShieldJTI(ctx, s.redis, jti); derr != nil {
+			log.Printf("shield token: %s: unused token entry not deleted: %v", shieldID, derr)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", fmt.Errorf("persist shield token state: %w", ErrShieldNotPending)
+		}
 		return "", "", fmt.Errorf("persist shield token state: %w", err)
+	}
+	if previousJTI != nil && *previousJTI != jti {
+		if derr := DeleteShieldJTI(ctx, s.redis, *previousJTI); derr != nil {
+			log.Printf("shield token: %s: superseded token entry not deleted: %v", shieldID, derr)
+		}
 	}
 
 	grpcDefault, httpDefault := netutil.DetectLANAddr("9090", "8080")
@@ -132,6 +162,10 @@ func (s *service) GenerateShieldToken(
 	return tokenString, installCmd, nil
 }
 
+// ErrShieldNotPending means a token was requested for a shield that is not
+// (or no longer) pending in the workspace and remote network.
+var ErrShieldNotPending = errors.New("shield is not pending")
+
 func VerifyShieldToken(cfg Config, tokenString string) (*EnrollmentClaims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &EnrollmentClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -154,6 +188,32 @@ func VerifyShieldToken(cfg Config, tokenString string) (*EnrollmentClaims, error
 
 func StoreShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti, shieldID string, ttl time.Duration) error {
 	return rdb.Set(ctx, enrollmentJTIPrefix+jti, shieldID, ttl).Err()
+}
+
+// PeekShieldJTI reports whether a shield enrollment token JTI is still stored
+// (not expired, not consumed) and for which shield, without consuming it.
+// Enroll checks it before claiming the shield row and deletes the entry only
+// after the enrollment commits (certificate audit bug 8), so a failed
+// enrollment leaves the token usable for a retry.
+func PeekShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (shieldID string, found bool, err error) {
+	val, err := rdb.Get(ctx, enrollmentJTIPrefix+jti).Result()
+	if err == valkeycompat.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read shield jti: %w", err)
+	}
+	return val, true, nil
+}
+
+// DeleteShieldJTI removes a shield enrollment token JTI. It is cleanup, not
+// the authority: the shield row's enrollment_token_jti decides which token is
+// current, so an entry left behind by a failed delete cannot enroll.
+func DeleteShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) error {
+	if err := rdb.Del(ctx, enrollmentJTIPrefix+jti).Err(); err != nil {
+		return fmt.Errorf("delete shield jti: %w", err)
+	}
+	return nil
 }
 
 func BurnShieldJTI(ctx context.Context, rdb valkeycompat.Cmdable, jti string) (shieldID string, found bool, err error) {

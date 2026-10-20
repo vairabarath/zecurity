@@ -3,9 +3,12 @@ package connector
 import (
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
@@ -49,22 +52,27 @@ type EnrollmentHandler struct {
 //
 //  1. Verify JWT signature using cfg.JWTSecret, check exp, verify iss == appmeta.ControllerIssuer
 //  2. Extract jti, connector_id, workspace_id, trust_domain from JWT claims
-//  3. Call BurnEnrollmentJTI(ctx, redis, jti) — atomic GET+DEL (single-use)
+//  3. PeekEnrollmentJTI: the token must still be stored in Valkey for this
+//     connector (checked, not consumed)
 //     - Not found → codes.PermissionDenied ("token expired or already used")
-//  4. Load connector row: verify status='pending', verify tenant_id == workspace_id
-//     - Fail → codes.PermissionDenied
-//  5. Verify workspace status='active'
-//     - Fail → codes.FailedPrecondition
-//  6. Parse CSR from request.csr_der
-//  7. Verify CSR self-signature (proves connector holds the private key)
-//  8. Verify CSR SPIFFE SAN matches expected:
-//     expected := appmeta.ConnectorSPIFFEID(trust_domain, connector_id)
-//     - Mismatch → codes.PermissionDenied
-//  9. Call pki.SignConnectorCert(ctx, tenantID, connectorID, trustDomain, csr, cfg.CertTTL)
-//  10. UPDATE connector row: status='active', trust_domain, cert_serial, cert_not_after,
-//     hostname, version, last_heartbeat_at=NOW(), enrollment_token_jti=NULL
-//  11. Return EnrollResponse with signed cert PEM, workspace CA PEM, intermediate CA PEM,
-//     and connector ID
+//  4. Parse the CSR, verify its self-signature and that its SPIFFE SAN is
+//     appmeta.ConnectorSPIFFEID(trust_domain, connector_id)
+//  5. Begin a transaction
+//  6. Claim the row with SELECT … FOR UPDATE: status='pending' and
+//     enrollment_token_jti = the token's jti (the authority: a superseded or
+//     used token is refused before signing); verify tenant_id == workspace_id
+//  7. Verify workspace status='active' (codes.FailedPrecondition otherwise)
+//  8. pki.SignConnectorCert
+//  9. Load the CA certs for the response
+//  10. UPDATE the row (still pending, still this jti): status='active',
+//     cert_serial, …, enrollment_token_jti=NULL; exactly one row
+//  11. Commit — nothing is returned unless the serial is recorded
+//  12. Delete the token's Valkey entry (cleanup; the row already moved on)
+//  13. Return EnrollResponse with signed cert PEM, workspace CA PEM,
+//     intermediate CA PEM, and connector ID
+//
+// Certificate audit bug 8: the row lock serializes concurrent enrollments
+// and re-issues, and the token binding makes every superseded token useless.
 func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.EnrollResponse, error) {
 	// Step 1 — Verify enrollment JWT.
 	// Called: token.go → VerifyEnrollmentToken()
@@ -83,39 +91,72 @@ func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (
 		return nil, status.Error(codes.InvalidArgument, "enrollment token missing required claims")
 	}
 
-	// Step 3 — Burn the JTI (atomic single-use).
-	// Called: token.go → BurnEnrollmentJTI()
-	burnedConnectorID, found, err := BurnEnrollmentJTI(ctx, h.Redis, jti)
+	// Step 3 — The token must still be stored in Valkey (not expired, not
+	// consumed), for this connector. Checked, not consumed: the entry is
+	// deleted only after the enrollment commits (step 12), so a failed
+	// enrollment leaves the token usable for a retry. The connector row is
+	// the authority (step 6); this is the second layer.
+	// Called: token.go → PeekEnrollmentJTI()
+	storedConnectorID, found, err := PeekEnrollmentJTI(ctx, h.Redis, jti)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "burn jti: %v", err)
+		return nil, status.Errorf(codes.Internal, "read jti: %v", err)
 	}
 	if !found {
 		return nil, status.Error(codes.PermissionDenied, "token expired or already used")
 	}
 	// Verify the JTI was stored for the same connector (defense in depth).
-	if burnedConnectorID != connectorID {
+	if storedConnectorID != connectorID {
 		return nil, status.Error(codes.PermissionDenied, "token connector mismatch")
 	}
 
-	// Step 4 — Load connector row, verify status='pending' and tenant match.
-	var connStatus, connTenantID string
-	err = h.Pool.QueryRow(ctx,
-		`SELECT status, tenant_id FROM connectors WHERE id = $1`,
-		connectorID,
-	).Scan(&connStatus, &connTenantID)
+	// Step 4 — Parse the CSR and verify its self-signature (proves the
+	// connector holds the private key) and its SPIFFE SAN. No state yet.
+	csr, err := x509.ParseCertificateRequest(req.CsrDer)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "connector not found: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "parse CSR: %v", err)
 	}
-	if connStatus != "pending" {
-		return nil, status.Errorf(codes.PermissionDenied, "connector status is %q, expected pending", connStatus)
+	if err := csr.CheckSignature(); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "CSR signature invalid: %v", err)
+	}
+	// Called: appmeta/identity.go → ConnectorSPIFFEID()
+	expectedSPIFFE := appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
+	if !csrHasSPIFFEURI(csr, expectedSPIFFE) {
+		return nil, status.Errorf(codes.PermissionDenied,
+			"SPIFFE ID in CSR does not match token: expected %s", expectedSPIFFE)
+	}
+
+	// Step 5 — Everything from here runs in one transaction holding the
+	// connector row lock (certificate audit bug 8), so only one enrollment
+	// can win, and a concurrent re-issue waits for it.
+	tx, err := h.Pool.Begin(ctx)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "begin enrollment: %v", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+
+	// Step 6 — Claim the row: still pending, and this token is its current
+	// one. A superseded or already used token is refused here, before
+	// anything is signed, whatever Valkey still holds.
+	var connTenantID string
+	err = tx.QueryRow(ctx,
+		`SELECT tenant_id FROM connectors
+		  WHERE id = $1 AND status = 'pending' AND enrollment_token_jti = $2
+		    FOR UPDATE`,
+		connectorID, jti,
+	).Scan(&connTenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, enrollmentClaimError(ctx, tx, connectorID)
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "claim connector: %v", err)
 	}
 	if connTenantID != workspaceID {
 		return nil, status.Error(codes.PermissionDenied, "connector tenant mismatch")
 	}
 
-	// Step 5 — Verify workspace is active.
+	// Step 7 — Verify workspace is active.
 	var wsStatus string
-	err = h.Pool.QueryRow(ctx,
+	err = tx.QueryRow(ctx,
 		`SELECT status FROM workspaces WHERE id = $1`,
 		workspaceID,
 	).Scan(&wsStatus)
@@ -126,34 +167,24 @@ func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (
 		return nil, status.Errorf(codes.FailedPrecondition, "workspace status is %q, expected active", wsStatus)
 	}
 
-	// Step 6 — Parse CSR from DER bytes.
-	csr, err := x509.ParseCertificateRequest(req.CsrDer)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "parse CSR: %v", err)
-	}
-
-	// Step 7 — Verify CSR self-signature (proves connector holds the private key).
-	if err := csr.CheckSignature(); err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "CSR signature invalid: %v", err)
-	}
-
-	// Step 8 — Verify CSR SPIFFE SAN matches expected identity.
-	// Called: appmeta/identity.go → ConnectorSPIFFEID()
-	expectedSPIFFE := appmeta.ConnectorSPIFFEID(trustDomain, connectorID)
-	if !csrHasSPIFFEURI(csr, expectedSPIFFE) {
-		return nil, status.Errorf(codes.PermissionDenied,
-			"SPIFFE ID in CSR does not match token: expected %s", expectedSPIFFE)
-	}
-
-	// Step 9 — Sign connector certificate.
+	// Step 8 — Sign connector certificate. The signer only reads CA keys;
+	// a certificate it signs is returned (step 13) only once its serial is
+	// committed (step 11), so none leaves the controller untracked.
 	// Called: pki/workspace.go → SignConnectorCert()
 	certResult, err := h.PKIService.SignConnectorCert(ctx, workspaceID, connectorID, trustDomain, csr, h.Cfg.CertTTL)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "sign connector cert: %v", err)
 	}
 
-	// Step 10 — Update connector row to 'active'.
-	_, err = h.Pool.Exec(ctx,
+	// Step 9 — Load CA certs for the response before committing, so a
+	// failure here leaves the enrollment undone.
+	workspaceCAPEM, intermediateCAPEM, err := h.loadCACerts(ctx, workspaceID)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "load CA certs: %v", err)
+	}
+
+	// Step 10 — Activate the claimed row, still bound to this token.
+	tag, err := tx.Exec(ctx,
 		`UPDATE connectors
 		    SET status = 'active',
 		        trust_domain = $1,
@@ -164,30 +195,58 @@ func (h *EnrollmentHandler) Enroll(ctx context.Context, req *pb.EnrollRequest) (
 		        last_heartbeat_at = NOW(),
 		        enrollment_token_jti = NULL,
 		        updated_at = NOW()
-		  WHERE id = $6`,
+		  WHERE id = $6 AND status = 'pending' AND enrollment_token_jti = $7`,
 		trustDomain,
 		certResult.Serial,
 		certResult.NotAfter,
 		req.Hostname,
 		req.Version,
 		connectorID,
+		jti,
 	)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "update connector: %v", err)
 	}
-
-	// Step 11 — Load CA certs for the response.
-	workspaceCAPEM, intermediateCAPEM, err := h.loadCACerts(ctx, workspaceID)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "load CA certs: %v", err)
+	if tag.RowsAffected() != 1 {
+		return nil, status.Error(codes.Internal, "update connector: claimed row no longer matches")
 	}
 
+	// Step 11 — Commit. Nothing is returned unless the serial is recorded.
+	if err := tx.Commit(ctx); err != nil {
+		return nil, status.Errorf(codes.Internal, "commit enrollment: %v", err)
+	}
+
+	// Step 12 — Consume the token's Valkey entry. Cleanup only: the row no
+	// longer names this token, so a leftover entry cannot enroll again.
+	if err := DeleteEnrollmentJTI(ctx, h.Redis, jti); err != nil {
+		log.Printf("connector enrollment: %s: consumed token entry not deleted: %v", connectorID, err)
+	}
+
+	// Step 13 — Respond.
 	return &pb.EnrollResponse{
 		CertificatePem:    []byte(certResult.CertificatePEM),
 		WorkspaceCaPem:    []byte(workspaceCAPEM),
 		IntermediateCaPem: []byte(intermediateCAPEM),
 		ConnectorId:       connectorID,
 	}, nil
+}
+
+// enrollmentClaimError explains why the connector row could not be claimed:
+// it does not exist, is no longer pending, or the token is not its current
+// one (superseded by a re-issue, or already used).
+func enrollmentClaimError(ctx context.Context, tx pgx.Tx, connectorID string) error {
+	var connStatus string
+	err := tx.QueryRow(ctx, `SELECT status FROM connectors WHERE id = $1`, connectorID).Scan(&connStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return status.Error(codes.NotFound, "connector not found")
+	}
+	if err != nil {
+		return status.Errorf(codes.Internal, "load connector: %v", err)
+	}
+	if connStatus != "pending" {
+		return status.Errorf(codes.PermissionDenied, "connector status is %q, expected pending", connStatus)
+	}
+	return status.Error(codes.PermissionDenied, "enrollment token is not the connector's current token")
 }
 
 // loadCACerts fetches the workspace CA PEM and intermediate CA PEM for the EnrollResponse.

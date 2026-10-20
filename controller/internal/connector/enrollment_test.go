@@ -417,6 +417,12 @@ func TestEnroll_FullFlow(t *testing.T) {
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
+	}
 
 	trustDomain := appmeta.WorkspaceTrustDomain(workspaceSlug)
 	csrDER := generateConnectorCSR(t, connectorID, trustDomain)
@@ -622,6 +628,12 @@ func TestEnroll_ReplayAttack(t *testing.T) {
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
+	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
 
@@ -777,6 +789,12 @@ func TestEnroll_ConnectorNotPending(t *testing.T) {
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
+	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
 
@@ -912,6 +930,12 @@ func TestEnroll_WorkspaceNotActive(t *testing.T) {
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
 	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
+	}
 
 	csrDER := generateConnectorCSR(t, connectorID, appmeta.WorkspaceTrustDomain(workspaceSlug))
 
@@ -1046,6 +1070,12 @@ func TestEnroll_CSRSPIFFEMismatch(t *testing.T) {
 
 	if err := StoreEnrollmentJTI(ctx, testValkeyRDB, jti, connectorID, 5*time.Minute); err != nil {
 		t.Fatalf("StoreEnrollmentJTI: %v", err)
+	}
+	// The connector's current token, as the token endpoint records it.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE connectors SET enrollment_token_jti = $1 WHERE id = $2`, jti, connectorID,
+	); err != nil {
+		t.Fatalf("record current token: %v", err)
 	}
 
 	// CSR uses a different connector ID — SPIFFE mismatch
