@@ -2,6 +2,7 @@ package connector
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
@@ -40,6 +41,10 @@ type bindingFixture struct {
 	wsID   string
 	td     string
 	connID string
+	// key and leaf: the connector's key and its current certificate, once
+	// enrolled with enrollWithKey (renewal must present both).
+	key  *ecdsa.PrivateKey
+	leaf *x509.Certificate
 }
 
 func newBindingFixture(t *testing.T) *bindingFixture {

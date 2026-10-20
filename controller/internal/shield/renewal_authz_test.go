@@ -2,6 +2,7 @@ package shield
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"testing"
@@ -64,12 +65,13 @@ type renewalFixture struct {
 	shield string
 	pki    *fakeShieldPKI
 	svc    *service
+	key    *ecdsa.PrivateKey // the shields' key: renewal CSRs are signed with it
 }
 
 func newRenewalFixture(t *testing.T) *renewalFixture {
 	t.Helper()
 	pool, ctx := setupHeartbeatTestDB(t)
-	f := &renewalFixture{t: t, pool: pool, ctx: ctx, pki: &fakeShieldPKI{}}
+	f := &renewalFixture{t: t, pool: pool, ctx: ctx, pki: &fakeShieldPKI{}, key: newShieldKey(t)}
 	slug := "renew-" + uuid.NewString()[:8]
 	f.td = slug + ".zecurity.test"
 	f.wsID = f.scalar(`INSERT INTO workspaces (slug, name, trust_domain, status) VALUES ($1, $1, $2, 'active') RETURNING id::text`, slug, f.td)
@@ -117,7 +119,7 @@ func (f *renewalFixture) as(connID, td string) context.Context {
 }
 
 func (f *renewalFixture) renew(ctx context.Context, shieldID string) (*shieldpb.RenewCertResponse, error) {
-	return f.svc.RenewCert(ctx, &shieldpb.RenewCertRequest{ShieldId: shieldID, PublicKeyDer: []byte("csr")})
+	return f.svc.RenewCert(ctx, &shieldpb.RenewCertRequest{ShieldId: shieldID, PublicKeyDer: shieldCSR(f.t, f.td, shieldID, f.key)})
 }
 
 func (f *renewalFixture) serial(shieldID string) string {
