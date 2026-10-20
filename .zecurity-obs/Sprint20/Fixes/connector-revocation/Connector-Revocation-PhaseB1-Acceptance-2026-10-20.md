@@ -2,9 +2,9 @@
 title: Connector Revocation — Phase B1 acceptance list (connector states + serving gate)
 date: 2026-10-20
 type: acceptance list (pre-written, design §17)
-status: SIGNED OFF 2026-10-20 — B1-Q1 = option (a) ACCEPTED; implementation authorized
+status: SIGNED OFF 2026-10-20 — B1-Q1 = option (a) ACCEPTED; implementation NOT STARTED (deferred by the user; start on their explicit go)
 branch: feat/sprint20-m1-phase2
-revision: 4d10fb9 (in sync with origin)
+revision: 4d10fb9 (in sync with origin); source surveyed, no source changed
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (rev 4)
 handoff: ../../Handoff-Connector-Revocation-PhaseA-2026-10-15.md
 ---
@@ -92,3 +92,46 @@ Each item closes at **unit** level in B1 unless it is marked deferred.
 
 - `connector/systemd/zecurity-connector.service` sets no `WatchdogSec`, so `spawn_watchdog` is a no-op today. The idle design doesn't depend on it. If a watchdog is added later, it must keep pinging while idle.
 - The existing shield `revocations_synced` gate in `agent_server.rs` (refuse with `Unavailable` until synced) is the pattern for the shield-side admission check.
+
+## 5. Implementation notes from the pre-start survey (2026-10-20, HEAD `1d7072e`, no code written)
+
+These came from reading the source before the user deferred the start. They are notes for whoever starts B1, not decisions.
+
+**Where the state lives.**
+- `authorization.rs` `AckTracker` is already the single process-global, mutex-serialized bookkeeping object (`SharedAckTracker = Arc<Mutex<AckTracker>>`). It holds `sent`, `highest_accepted`, `latest_accepted_sent_at` (the anchor for D) and `terminal`.
+- It is written from three places: `stamp_sends` (the tonic encoder, `record_sent`), `observe_controller_msg` and `observe_status`.
+- §5.4 describes a supervisor task fed by one `mpsc`. An equivalent, simpler option: extend `AckTracker` with `state`, `deadline` and `lost_at`, and publish a `watch<{state, D}>` snapshot from inside the lock on every mutation. That keeps a single writer and serialized events. Expiry would be a small task that sleeps until D and calls `expire(now)`. Admission compares `now` with D itself, so timer lag never admits. **If this is chosen, record it as the §5.4 realisation in the B1 implementation record.**
+
+**Making the expiry rule independent of timing.** Apply `expire(now)` first in every event (ack, stream up/down, terminal). Then `Serving/ServingDisconnected → Disabled` always gets `lost_at = D` exactly, whenever the event is processed.
+
+**Doc inconsistency to resolve when starting.**
+- §4.4 says `lost_at` is also set "on entry to `Recovering`".
+- §5.2 says `Disabled → Recovering` leaves `lost_at` unchanged.
+- The initial health report is sent when the stream opens, which is before the first controller message (the `Recovering` trigger). So the §4.4 reading would always reject the ack for that initial report, and recovery would be delayed by one tick.
+- Recommendation: follow §5.2 (the specific transition row). Ask the user before coding if in doubt.
+- `Recovering → Disabled` (stream ends) sets `lost_at = now`. That is stricter, which is safe.
+
+**Hook points in `control_stream.rs`.**
+- **Tracker creation.** The tracker is created inside `run_control_stream` (`AckTracker::shared(AUTHORIZATION_FRESHNESS)`). It must move to `main.rs`, so that the listeners and the shield server get the gate before `run_control_stream` (`main.rs:300`) starts.
+- **Stream up.** It is the first controller message on a stream. `StreamAuthz.first_seen` in `observe_controller_msg` already detects it.
+- **Stream down.** It is every return of `run_once`, whether `Ok` or `Err`, in the outer loop of `run_control_stream`. The renewal switch drops the old stream; that is **not** a stream-down.
+- **Terminal handling.**
+  - Mid-stream: after `observe_controller_msg` records `ConnectorRevoked`, `run_session` should return at once, which stops health ticks and renewal.
+  - After every `run_once` return, the outer loop checks `terminal()`. If it is set, the loop parks forever: a slow periodic log, never `return`.
+  - `open_refused` already records the marker on a refused open.
+
+**Entry-path refusal mechanics.**
+- **TLS** (`device_tunnel::listen`, accept at `:84`): drop the `TcpStream` before the TLS handshake.
+- **QUIC** (`quic_listener::listen`): use `incoming.refuse()` at `:85`. For new streams on an existing connection (the `accept_bi` loop, `:125`), reset them: `send.reset(0)` plus `recv.stop(0)`, as `relay_handler::reject_stream` does. Simply dropping a quinn `SendStream` finishes it gracefully; it is not a reset.
+- **Relay** (`RelayHandler::run`): use `reject_stream` per stream when closed.
+- **Funnel** (`device_tunnel::handle_stream:151`):
+  - Check the gate **first**, before the CRL check. The CRL check sends `ok:false`, and a gate refusal must send no `TunnelResponse`.
+  - After `registry.register(...)` (`:211`, next to the existing `is_allowed` re-check), re-check the gate. On refusal, return `Err` without writing anything.
+- **Shield `control()`** (`agent_server.rs:836`): refuse with `Status::unavailable` inside the same critical section as the `revocations_synced` check (`:858`).
+
+**Plumbing.** Pass the gate explicitly (a cheap `watch::Receiver` wrapper), not a global, because tests run in parallel. Signatures that change:
+- `device_tunnel::listen` and `handle_stream`;
+- `quic_listener::listen`;
+- `RelayHandler::new`;
+- the `ShieldRegistry` constructor or the serve path;
+- the test caller `control_stream.rs:1901`, which needs an always-open test gate. A `watch::Receiver` still serves `borrow()` after its sender is dropped.

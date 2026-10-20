@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 4, 2026-10-20) — Phase A done; Phase B1 AUTHORIZED (2026-10-20); other phases NOT AUTHORIZED
+status: PROPOSED (revision 4, 2026-10-20) — Phase A done; Phase B1 acceptance list signed off (2026-10-20), not started; other phases NOT AUTHORIZED
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -649,7 +649,7 @@ Release requirement (not a decision): the new development stack's protocol behav
 Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
-- **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implementation authorized.**
+- **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. B1 implementation not started; it begins on the user's explicit go (see the acceptance list §5 for the pre-start survey).
 - **B2** needs the M results (O6/O7), plus O5 and O8.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
