@@ -207,7 +207,7 @@ The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
 **Sprint 20 (to turn FAILED into passed):**
 
 4. **R2:** Barath fixes Fix02 (Finding 35: 3 extra `NotifyPolicyChange` calls, 1 outdated test), then re-run with `RESOURCE_TEST_SHIELD_ID` (`scripts/resource-test-fixture.sh`). CI should also set it, or the tests stay hidden.
-5. **G9 / AT-G.6:** a team decision on whether the 2026-10-10 long-hold PASS on later code is accepted, or a re-run.
+5. **G9 / AT-G.6:** re-run live **2026-10-20 on `fixed-pendings` `a25bb33`: PASS** (§10). Accepting it for Sprint 20 is a team decision.
 
 **Security (lab):**
 
@@ -245,3 +245,11 @@ The two `fix(provider)` commits must reach `fixed-pendings`; tell Barath.
   - **The manojinkyank SSH session dropped mid-run.** One command then reached this PC's local shell. zsh rejected it at the first word, so nothing ran (no `~/k2` was created locally). The helper now quotes its markers and refuses to send when a terminal is back at the local prompt.
   - **udaya's old connector** is in an `activating` restart loop against the reset DB.
 - **Still running after the test:** controller (20m shield TTL), admin UI, connector on inkyank, shield on nika (renewing every 12 min). The LAN file server `k2-serve` stops after 30 min.
+
+## 10. Sprint 20 G9 / U5 long-hold re-test (2026-10-20)
+
+**Re-test 2026-10-20 on `origin/fixed-pendings` `a25bb33`: PASS.** Connector `k2-conn` (inkyank 192.168.1.75) at `CONNECTOR_CERT_TTL=15m` / `CONNECTOR_RENEWAL_WINDOW=10m`; shield-protected resource `g9-nika-web` (nika 192.168.1.39 tcp/5173, HTTP/1.1 keep-alive); client `69eb3d83e8f3` on 192.168.1.164 with a fresh login. `fc_hold.py`: one TCP socket (local port 45552), GET every 2 s, 06:55:41–07:25:42 UTC: **895 requests, 0 failures, 0 socket changes**, through **6 connector renewals** (06:57:22, 07:02:20, 07:07:19, 07:12:22, 07:17:20, 07:22:18) and past the 07:07:18 `NotAfter` of the cert in use at the start. Controller: 6 `ReEnroll sent`, 6 `superseded stream closed`, **0 connector disconnects**, 0 ACL pushes. Connector: 6× `opening replacement Control stream` → 6× `switched to renewed Control stream`, 0 replacement failures, 6× device QUIC switched, **1 `tunnel_opened`** (the hold), 0 errors, 0 restarts. Client: **0 `restarting VPN`** (Finding 15's failure mode), 0 handshake timeouts, 0 WARN/ERROR. Setup note: a first hold attempt stopped at request 1 because the test server (Python `http.server`) defaulted to HTTP/1.0 and closed each connection; restarted with `--protocol HTTP/1.1`. That was a harness issue, not a product result.
+
+- **Controller during the run:** user unit `k2-controller`, `CONNECTOR_CERT_TTL=15m` / `CONNECTOR_RENEWAL_WINDOW=10m`. Its 7-day connector cert was moved onto a 15-minute cert by one controller run with a 200 h window (exactly one renewal), then a restart with the 10 min window.
+- **Client install:** the old client binary was kept as `/usr/local/bin/zecurity-client.pre-g9` and its saved state as `~/.local/share/zecurity-client.pre-g9`.
+- **Test objects in workspace `xiyo`:** resource `g9-nika-web` (protected), group `g9-users`. Test server: `~/g9www` on nika (`python3 -m http.server 5173 --protocol HTTP/1.1`).
