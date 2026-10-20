@@ -261,11 +261,54 @@ func TestWorkspaceCRL_OtherWorkspacesAreNotListed(t *testing.T) {
 	otherConn := f.scalar(t, `INSERT INTO connectors (tenant_id, remote_network_id, name, status, cert_serial, cert_not_after)
 		VALUES ($1, $2, 'theirs', 'active', 'f1f1f1f1', $3) RETURNING id::text`, other, otherRN, valid)
 	f.exec(t, `UPDATE connectors SET status = 'revoked', revoked_at = NOW() WHERE id = $1`, otherConn)
+	otherUser := f.scalar(t, `INSERT INTO users (tenant_id, email, provider, provider_sub, role, status)
+		VALUES ($1, 'them@other.test', 'google', 'sub-them', 'member', 'active') RETURNING id::text`, other)
+	f.exec(t, `INSERT INTO client_devices (user_id, workspace_id, name, os, cert_serial, cert_not_after, revoked_at)
+		VALUES ($1, $2, 'their-laptop', 'linux', 'f3f3f3f3', $3, NOW())`, otherUser, other, valid)
 	mine := f.connector(t, "mine", []string{"f2f2f2f2"}, valid)
 	if _, err := f.mr.RevokeConnector(f.ctx, mine); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	crl := f.crl(t)
-	requireNotListed(t, crl, "f1f1f1f1")
+	requireNotListed(t, crl, "f1f1f1f1", "f3f3f3f3")
 	requireListed(t, crl, "f2f2f2f2")
+}
+
+// Either revocation marker revokes a connector's certificates on its own
+// (older rows can carry one without the other).
+func TestWorkspaceCRL_EitherConnectorRevocationMarkerCounts(t *testing.T) {
+	f := newCertHistoryFixture(t)
+	statusOnly := f.connector(t, "status-only", []string{"a7a7a7a1", "a7a7a7a2"}, valid)
+	f.exec(t, `UPDATE connectors SET status = 'revoked' WHERE id = $1`, statusOnly)
+	stampOnly := f.connector(t, "revoked-at-only", []string{"a8a8a8a1", "a8a8a8a2"}, valid)
+	f.exec(t, `UPDATE connectors SET revoked_at = NOW() WHERE id = $1`, stampOnly)
+	requireListed(t, f.crl(t), "a7a7a7a1", "a7a7a7a2", "a8a8a8a1", "a8a8a8a2")
+}
+
+// A certificate recorded on an owner that is already revoked starts out
+// revoked: revocation is terminal and covers it too.
+func TestWorkspaceCRL_CertificateRecordedOnARevokedOwnerIsRevoked(t *testing.T) {
+	f := newCertHistoryFixture(t)
+	f.scalar(t, `INSERT INTO connectors (tenant_id, remote_network_id, name, status, revoked_at, cert_serial, cert_not_after)
+		VALUES ($1, $2, 'born-revoked', 'revoked', NOW(), 'a9a9a9a1', $3) RETURNING id::text`, f.ws, f.rn, valid)
+	conn := f.connector(t, "revoked-then-written", []string{"a9a9a9a2"}, valid)
+	f.exec(t, `UPDATE connectors SET status = 'revoked', revoked_at = NOW() WHERE id = $1`, conn)
+	f.exec(t, `UPDATE connectors SET cert_serial = 'a9a9a9a3', cert_not_after = $2 WHERE id = $1`, conn, valid)
+	f.exec(t, `INSERT INTO client_devices (user_id, workspace_id, name, os, cert_serial, cert_not_after, revoked_at)
+		VALUES ($1, $2, 'born-revoked', 'linux', 'a9a9a9a4', $3, NOW())`, f.user, f.ws, valid)
+	dev := f.device(t, "revoked-then-written", []string{"a9a9a9a5"}, valid)
+	f.exec(t, `UPDATE client_devices SET revoked_at = NOW() WHERE id = $1`, dev)
+	f.exec(t, `UPDATE client_devices SET cert_serial = 'a9a9a9a6', cert_not_after = $2 WHERE id = $1`, dev, valid)
+	requireListed(t, f.crl(t), "a9a9a9a1", "a9a9a9a2", "a9a9a9a3", "a9a9a9a4", "a9a9a9a5", "a9a9a9a6")
+}
+
+// A stored serial the CRL cannot encode fails CRL generation rather than
+// being listed as a different serial.
+func TestWorkspaceCRL_UnparsableSerialFailsClosed(t *testing.T) {
+	f := newCertHistoryFixture(t)
+	dev := f.device(t, "bad-serial", []string{"not-hex"}, valid)
+	f.exec(t, `UPDATE client_devices SET revoked_at = NOW() WHERE id = $1`, dev)
+	if _, err := f.pki.GenerateClientCRL(f.ctx, f.ws); err == nil {
+		t.Fatal("a CRL was generated although a revoked serial could not be encoded")
+	}
 }
