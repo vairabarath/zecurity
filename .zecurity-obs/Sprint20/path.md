@@ -140,7 +140,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **M2-A5** `cmd/server/main.go` — pass the liveness source to `RunExpiryLoop`.
 - [x] **M2-A6** Tests: `expiry_test.go`, `heartbeat_test.go`, `store_evict_integration_test.go` (race; ran against Postgres, not skipped).
 - [x] **Build gate:** `cd controller && go build ./... && go test ./internal/relay/...`
-- [ ] **Live acceptance — PENDING / NOT YET RUN:** relay stays `active` ≥ 10 min with unchanged metadata; stopped relay → `inactive` ≤ 150 s; restarted relay → `active` on first heartbeat (AT-CORE-2, AT-A.2, AT-A.3). Needs a running relay.
+- [x] **Live acceptance — PASS (run sheet A1–A5):** relay stays `active` ≥ 10 min with unchanged metadata; stopped relay → `inactive` ≤ 150 s; restarted relay → `active` on first heartbeat (AT-CORE-2, AT-A.2, AT-A.3). A3–A5 were run on relay2 `c655ced6` (relay1 retired, Finding 17).
 
 ### Phase B — M1: Connector + Shield Revocation Stickiness
 
@@ -153,7 +153,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **M1-B5** `control_stream.go` `handleConnectorHealth` — add `revoked_at IS NULL` to the guard.
 - [x] **M1-B6** `shield/heartbeat.go` `UpdateShieldHealth` — never overwrite a `revoked` shield.
 - [x] **M1-B7** Tests: `revocation_test.go` (Control/Goodbye/RenewCert/health, DB) + `shield/heartbeat_test.go` revoked-shield + regression.
-- [ ] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./internal/shield/...`
+- [x] **Build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./internal/shield/...` (run sheet R2, 2026-09-28: build and vet OK; every package except `graph/resolvers` ok, so the connector and shield packages passed. R2 as a whole FAILED on `graph/resolvers`, Finding 35.)
 
 ### Phase C — M2: Relay SAN Allowlist Enforcement
 
@@ -166,7 +166,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **M2-C5** `scripts/relay-local-install*.sh`, `scripts/run-relay-local.sh` — document that `RELAY_DNS_SANS`/`RELAY_IP_SANS` must match the allowlists registered at `POST /provider/relays`.
 - [x] **M2-C6** Tests: `provision_test.go` (updated), `provision_allowlist_test.go` (allowlist + canonicalization).
 - [x] **Build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... ./internal/pki/...` (0 skips with DB env; also `go test ./...` and relay `cargo build`, after rebase onto Phase B)
-- [ ] **Live acceptance — PENDING / NOT YET RUN:** relay created with `ip_allowlist: []` + `RELAY_IP_SANS=127.0.0.1` is rejected, token still usable; retry without the IP SAN succeeds with the same token (AT-C.2, AT-C.5). Needs a running controller + provider token.
+- [x] **Live acceptance — PASS (run sheet C1–C3):** relay created with `ip_allowlist: []` + `RELAY_IP_SANS=127.0.0.1` is rejected, token still usable; retry without the IP SAN succeeds with the same token (AT-C.2, AT-C.5).
 
 ### Phase D — M1: Disconnect Watcher → Transport Plane
 
@@ -203,8 +203,8 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **M2-F6 (Rust)** Tests: scheduler timing/jitter/backoff, existing-key CSR, expired never calls RenewCert, atomic write + crash-before-rename, bad-reply rejection, restart after crash between rename and swap, heartbeat reconnect with new cert, real-QUIC listener swap without dropping existing connections (65 relay tests pass).
 - [x] **F-1 build gate:** `buf generate && cd controller && go build ./... && go test ./internal/relay/... ./internal/pki/...` (0 skips with DB env); also `go test ./...` and relay `cargo build` with the additive proto.
 - [x] **Full build gate:** `cd relay && cargo build && cargo test` (65 passed); controller regression `go build ./... && go test ./...` pass; clippy clean for F-2 code.
-- [ ] **Live acceptance — NOT YET RUN:** `RELAY_CERT_TTL=15m` → relay renews itself (~9 min) and keeps serving past the first cert's `NotAfter` without restart. Needs a running controller + provider token.
-- [ ] **Operational CRL verification — NOT YET RUN:** revoke the renewed relay → both serials on `/relay.crl`; connectors drop it.
+- [x] **Live acceptance — PASS at `RELAY_CERT_TTL=1h` (run sheet F1–F4, AT-F.8):** relay renewed itself 16× (every 420–1060 s, same key) and kept serving 2 h 30 m past the first cert's `NotAfter` without restart. *(This box originally said `15m` / ~9 min. That target was invalid at this commit because of KI-1, so AT-F.8 and the runbook use 1h. The 15m case is Sprint 21 AT-K.1, not yet run live.)*
+- [x] **Operational CRL verification — PASS (run sheet F5–F7):** revoke → 204, zero unrevoked `relay_certificates` rows; `/relay.crl` listed exactly the 4 unexpired serials; the connector dropped the relay in the same second. Run on relay2 `c655ced6`. Follow-up: the revoked relay keeps retrying every 5 s (Finding 32).
 
 > **F-1 → F-2 contract:** save before publish; after saving, the relay switches every consumer and must not keep presenting its old certificate. The controller supersedes an unrevoked successor only while the relay still presents the certificate that successor replaced (such a successor was never put into use). See the phase file.
 
@@ -224,7 +224,7 @@ All phases → Acceptance gate (Acceptance-Test-Plan.md)
 - [x] **G-1 build gate:** `cd controller && go build ./... && go test ./internal/connector/... ./...` (connector DB tests run; the only skip is the pre-existing unconditional `TestEnroll_CSRSignatureInvalid`).
 - [x] **G-2a build gate:** `cd connector && cargo build && cargo test` (109 + 4, stable over 5 runs); controller `go build ./... && go test ./...`; clippy clean for new G-2a code.
 - [x] **Full build gate** with G-2b: `cd connector && cargo build && cargo test` (115 + 4, stable over 5 runs; 0 build warnings; clippy clean for touched files); `cargo build --manifest-path shield/Cargo.toml` (unchanged, builds); controller `go build ./... && go test ./...` (connector DB tests run on throwaway DBs; only skip is the pre-existing unconditional `TestEnroll_CSRSignatureInvalid`).
-- [ ] **Live acceptance — PENDING / NOT YET RUN** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). G-2b is done; still needs Phase E (M1): the controller gRPC cert shares `CONNECTOR_CERT_TTL`.
+- [ ] **Live acceptance — RUN, NOT PASSED** (`CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`). Run sheet G1–G3 and G5–G8 PASS (auto-renewal every 5 min; direct, relayed and shield paths work after the original `NotAfter` with no restart). **G9 / AT-G.6 FAIL:** the client drops long-lived tunnels on each transport change (Finding 15). **G4 / AT-G.1 not exercised** live (unit-tested). Later evidence on newer code: the 2026-10-10 long hold PASS ([[Sprint20/Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]); that doesn't retro-pass this commit.
 
 ## Final Build Gates
 
@@ -243,7 +243,9 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 
 ## Live Acceptance
 
-All code phases (A–G) are merged. The remaining unchecked boxes are **live dev-stack checks**:
+> **Run and closed out.** The live run took place on 2026-09-26/28 (at `5a4f940`, code-identical to `46ab87d`) and was closed out on 2026-10-17: 40 PASS, 1 PASS only under a TEMP patch (U2), 3 FAIL (U5 hold, G9, R2), 1 not exercised (G4). The boxes above are ticked only where the run sheet shows PASS. See [[Sprint20/Live-Acceptance-Run-Sheet]] → "Close-out — 2026-10-17".
+
+All code phases (A–G) are merged. The two boxes still unticked (Phase G live, "all scenarios pass") are **failures, not pending checks**. Passing them needs Fix02 (F35) plus a re-run of R2 with `RESOURCE_TEST_SHIELD_ID`, and a decision on G9 / AT-G.6. For reference, the original instructions were:
 - **Runbook:** `docs/sprint20-live-acceptance-runbook.md`, one ~95 min sitting that covers A, B, C, D, E, F and G.
 - **Run sheet** to fill in: [[Sprint20/Live-Acceptance-Run-Sheet]]. Each row names the box below that it closes.
 - **Operator:** Sathiya (M1).
@@ -273,16 +275,18 @@ Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
 
 ## Acceptance Criteria (sprint level)
 
-- [ ] A relay heartbeating normally with unchanged metadata stays `active` across ≥ 2 DB-write intervals (≥ 10 min). *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
-- [ ] A relay that stops heartbeating becomes `inactive` within expiry + sweep interval (≤ 150 s) and returns to `active` on its first heartbeat after recovery. *(Phase A code + tests done; live check PENDING / NOT YET RUN.)*
-- [ ] A revoked connector remains `revoked` after its stream closes, after reconnect attempts, after `Goodbye`, and after `RenewCert` attempts.
-- [ ] A revoked shield remains `revoked` while its connector keeps sending shield status batches.
-- [ ] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Phase C code + tests done; live check PENDING / NOT YET RUN.)*
-- [ ] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event.
-- [ ] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Phase E code + tests done, incl. PF-1 threshold fix; `TestRotatorHandshakeRotation` proves it in-process; live dev-stack check PENDING / NOT YET RUN.)*
-- [ ] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Controller (F-1) + relay runtime (F-2) done and tested; live check PENDING / NOT YET RUN.)*
-- [ ] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Controller trigger (G-1) and connector hot-swap (G-2a, G-2b) done and tested; live check PENDING / NOT YET RUN.)*
-- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass.
+*Live results: [[Sprint20/Live-Acceptance-Run-Sheet]] (2026-09-26/28 at `5a4f940`, code-identical to `46ab87d`; closed out 2026-10-17).*
+
+- [x] A relay heartbeating normally with unchanged metadata stays `active` across ≥ 2 DB-write intervals (≥ 10 min). *(Live PASS: A1–A2.)*
+- [x] A relay that stops heartbeating becomes `inactive` within expiry + sweep interval (≤ 150 s) and returns to `active` on its first heartbeat after recovery. *(Live PASS: A3–A5.)*
+- [x] A revoked connector remains `revoked` after its stream closes, after reconnect attempts, after `Goodbye`, and after `RenewCert` attempts. *(Live PASS: B1–B2 for the DB state and refused reconnects; `Goodbye` and `RenewCert` covered by `revocation_test.go`, since the connector never sends `Goodbye`.)* **Open security gap (Finding 34): a revoked connector keeps serving existing tunnels until its process restarts. Connector revocation is at Phase A only, not fail-closed** ([[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]).
+- [x] A revoked shield remains `revoked` while its connector keeps sending shield status batches. *(Live PASS: B3.)* **At this commit a revoked shield still carried traffic (Finding 33).** Fixed later in code (bug 3, PR #123); live end-to-end check still pending (`docs/certificate-audit-2026-10-15.md`).
+- [x] A relay cannot obtain a DNS/IP SAN outside its operator-registered allowlist; the rejection does not consume the provisioning token. *(Live PASS: C1–C3.)*
+- [x] A connector marked `disconnected` by the watcher disappears from the next `GetTransportSnapshot` without any other event. *(Live PASS: D1–D2, on try 3 with `kill -STOP`. The runbook's `kill -9` goes through the stream-close path instead of the watcher (Finding 30).)*
+- [x] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Live PASS: E1–E4; 6 rotations, 10-min cadence, 0 failures.)*
+- [x] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Live PASS: F1–F7. The concurrent-revoke race is covered by `store_renew_integration_test.go`.)*
+- [x] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Live PASS: G1–G3, G5–G8. The shield-renewal part rests on evidence from before 17:16, while the shield TTL was 24h. Established tunnels during a swap are AT-G.6, which FAILED; see Phase G.)*
+- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **Not met:** G9 / AT-G.6 FAIL (Finding 15); R2 regression gate FAIL (Finding 35, 4 `graph/resolvers` tests, **still failing on `fixed-pendings` 2026-10-17**); G4 / AT-G.1 not exercised live.
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
 
@@ -320,3 +324,23 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
 - **Phase G-2a — renewal wrote `connector.crt` as leaf only** (pre-existing in `connector/src/renewal.rs`). Enrollment stores leaf + Workspace CA; renewal overwrote it with the bare leaf. `CertHolder::install_renewed` now writes the enrollment shape. Details: [[Sprint20/Member2-Go-Rust/Phase4-Connector-Cert-Renewal]] → Post-Phase Fixes.
 - **Phase A — `ClearHeartbeatThrottle` multi-key DEL panic** (caught by `TestHeartbeat_FirstHeartbeatAfterEvictionPersists` before commit). valkey-go panics on a multi-key `DEL` whose keys hash to different slots, so the markers are now deleted one key at a time. Details: [[Sprint20/Member2-Go-Rust/Phase1-Relay-Liveness]] → Post-Phase Fixes.
 - **Phase E — rotation threshold measured from the backdated `NotBefore` (PF-1).** `GenerateControllerServerTLS` backdates `NotBefore` by 1 h (`internal/pki/controller.go:39-41`), so a threshold computed from `NotBefore` made every cert due at issuance for any `CONNECTOR_CERT_TTL` ≤ 30m — the rotator reissued once per minute instead of once per 2/3 lifetime. Fix: `rotatedCert.issuedAt` records the rotator clock at store time; `rotationDue()` = `start + 2/3·(notAfter − start)` with `start = max(notBefore, issuedAt)`; `needsRotation` and `nextDue` both use it. Regression test `TestNeedsRotationBackdatedNotBefore` (10m/30m/2h/7d) failed on the old code and passes now. Details: [[Sprint20/Member1-Go/Phase3-Controller-gRPC-Cert-Rotation]] → Post-Phase Fixes.
+- **Connector revocation — Phase A (controller–connector authorization protocol), `4cb5a6a`.** heartbeat_seq / AuthorizationAck / ConnectorRevoked / AgentPolicy.authorization_acks; structured `zecurity-connector-state` trailer marker (revoked/unknown); DB failure → Unavailable unmarked. Development intermediate: the connector is **not fail-closed** until Phase B1. **Continue from:** [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]] (next = Phase B1, needs O9 + go-ahead). Record: [[Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseA-Implementation-2026-10-15]].
+- **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
+  - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
+  - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.
+  - **F28 — High: the client never passes the server's TCP close (FIN) to the app**, so browsers reuse dead connections. Tracked as Fix 05 Phase 5-A (`Fixes/fix 5/`, [[Sprint20/Handoff-Fix05-5A-2026-10-06]]).
+  - **F15 — High (AT-G.6 FAIL): the client restarts the tunnel on every transport snapshot change**, dropping long-lived connections. Fix01 (`status: partial`); live long hold PASS on later code 2026-10-10 ([[Sprint20/Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]).
+  - **F35 — Medium (R2 FAIL): 4 `graph/resolvers` ACL-coherence tests fail, hidden from CI** (they skip without `RESOURCE_TEST_SHIELD_ID`). **Still failing on `fixed-pendings` 2026-10-17** (run with a seeded shield). 3 are real double or extra `NotifyPolicyChange` calls (over-invalidation only); `TestProtectResource_DoesNotInvalidate` is outdated since migration 021. [[Sprint20/Fixes/Fix02-Resource-ACL-Double-Notify]] (`status: planned`).
+  - **F36 — Medium (R2): the auth integration test always skipped** (`/15` in the Valkey URL). **Fixed** in `411e216` (Sprint 21 K6); passes on `fixed-pendings` 2026-10-17. [[Sprint20/Fixes/Fix03-Auth-Integration-Test-Skip-Valkey-URL]] (doc still says `planned`).
+  - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. U2 passed only under a TEMP patch. No fix recorded. Phase A → Post-Phase Fixes.
+  - **F7 / F18 / F23 / F31 — High (test validity): install scripts enable update timers that replace branch binaries**, ignoring `AUTO_UPDATE_ENABLED=false`; the units can't be masked. No fix recorded.
+  - **F19 / F20 / F24 / F25 — Medium (admin):**
+    - deleting a connector silently deletes its shield;
+    - one orphaned protected resource blocks the whole ACL push;
+    - a resource's host can't be edited;
+    - deleting a resource silently deletes its access rules.
+
+    No fix recorded.
+  - **F30 — Medium (runbook): `kill -9` doesn't exercise the disconnect watcher**; use `kill -STOP`. Runbook not yet updated. Phase D → Post-Phase Fixes.
+  - **F32 — Low: a revoked relay retries its heartbeat every 5 s forever.** No fix recorded. Phase F → Post-Phase Fixes.
+- **Regression gate on current code (2026-10-17, `1c164c7`):** `go build`, `go vet` OK; `go test ./...` 1161 PASS, 0 FAIL, **32 SKIP**. 30 of the skips need `RESOURCE_TEST_SHIELD_ID`, and with it set, 4 tests fail (F35). CI looks green only because they skip.

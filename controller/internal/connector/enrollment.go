@@ -40,6 +40,11 @@ type EnrollmentHandler struct {
 	TransportNotifier TransportChangeNotifier // ADR-017 Track B: topology-change notifier for relay-placement changes
 
 	Recon reconcileState // ADR-004 Phase 3 reconciliation hysteresis (zero value ready)
+
+	// lookupOverride replaces lookupConnector's query in unit tests that need
+	// a lookup failure the real database can't produce on demand. nil in
+	// production.
+	lookupOverride func(ctx context.Context, connectorID, trustDomain string) (connectorAuthState, connectorRecord, error)
 }
 
 // Enroll implements the ConnectorService.Enroll gRPC handler.

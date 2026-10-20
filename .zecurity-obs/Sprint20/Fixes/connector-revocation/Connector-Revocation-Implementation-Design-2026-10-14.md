@@ -2,9 +2,9 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 2, 2026-10-15) — IMPLEMENTATION NOT AUTHORIZED
+status: PROPOSED (revision 3, 2026-10-15) — IMPLEMENTATION NOT AUTHORIZED
 branch: feat/sprint20-m1-phase2
-revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9
+revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
   - Connector-Revocation-Enforcement-Feasibility-2026-10-14.md
   - Connector-Identity-Revocation-Architecture-Investigation-2026-10-13.md
@@ -41,6 +41,12 @@ based_on:
 - Fail-closed was redefined step by step.
 - Decision statuses were re-classified.
 
+**Revision 3 (2026-10-15):**
+- O2 accepted (D10): a machine-readable gRPC status marker carries the authoritative connector state; human-readable message text is never used.
+- O3 accepted (D11): an unknown/deleted connector identity never serves; it enters its own terminal non-serving state (`UnknownIdentity`), distinct from `Revoked`.
+- §4.5 error classification, §5 state machine, §7, §13 Phase A, §14 tests (T19–T28), §16 and §17 updated accordingly. Phase A is unblocked **with respect to O2/O3 only**.
+- New source facts verified at `12e43ac`: `activateStream` maps `ErrNoRows` to `PermissionDenied "connector is revoked"` (`control_stream.go:621-622`) and only logs other DB errors (`:624-625`); the connector certificate interceptor maps a workspace-CA load failure to `Unauthenticated` (`control_stream.go:1008-1011`, `spiffe.go:256-260`); the relay path already separates `Unavailable` (state unavailable) from `PermissionDenied` (revoked) (`:1018-1024`).
+
 Raw evidence isn't repeated. See:
 - [Feasibility report](Connector-Revocation-Enforcement-Feasibility-2026-10-14.md) ("FR");
 - [Identity investigation](Connector-Identity-Revocation-Architecture-Investigation-2026-10-13.md);
@@ -67,8 +73,9 @@ This document turns the feasibility findings into a design and a phased plan tha
 - Fix 01 Q3 (the client's transient-absence policy). Revocation enforcement here uses an **explicit** revoked signal, never snapshot absence, so Q3 is unaffected.
 
 **Revision and working tree:**
-- Branch `feat/sprint20-m1-phase2`, HEAD `38e38c6`.
-- **Working-tree note (recorded at the start of revision 2).** The checked-out tree no longer contains the `client/`, `connector/` and `relay/` directories: `git status` shows 106 tracked files deleted (36 client, 50 connector, 20 relay). A new untracked `.worktrees/` holds a worktree `s20-live` at `46ab87d`. Neither change was made by this design work.
+- Revisions 1–2: branch `feat/sprint20-m1-phase2`, HEAD `38e38c6`.
+- **Revision 3:** HEAD `12e43ac` (same branch, = `origin/fixed-pendings` after PR #119). `git diff 38e38c6 12e43ac -- controller connector proto` is empty, so every controller/connector/proto citation below is unchanged; line numbers were re-checked in the restored working tree. The `client/`, `connector/` and `relay/` deletions described next were restored from the index on 2026-10-15; the working tree now has only untracked `.localdev/`, `.worktrees/` and `.zecurity-obs/Sprint20/live-lab-scripts/`.
+- **Working-tree note (historical, recorded at the start of revision 2).** The checked-out tree no longer contains the `client/`, `connector/` and `relay/` directories: `git status` shows 106 tracked files deleted (36 client, 50 connector, 20 relay). A new untracked `.worktrees/` holds a worktree `s20-live` at `46ab87d`. Neither change was made by this design work.
 - The earlier uncommitted F-1 edits to `client/src/daemon.rs` / `daemon_tests.rs` are no longer present in the working tree. No commit or worktree checked contains them.
 - Every source reference in this revision was therefore verified against **`HEAD` (`git show 38e38c6:<path>`)**, not the working tree. `client/src/daemon.rs` line numbers below are HEAD numbers.
 
@@ -104,7 +111,10 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 | Ping/Pong | `shield.v1.Ping/Pong{timestamp_unix}` (`proto/shield/v1/shield.proto:190-196`). The controller sends **one** Ping per stream at open, after `activateStream` (`control_stream.go:511-520`). Pong is only logged (`:582-583`) | — |
 | Healthy heartbeat | `handleConnectorHealth` (`control_stream.go:749`) runs a guarded UPDATE (`:754-778`). `ErrNoRows` → `Control` returns `PermissionDenied "connector revoked"` (`:566-568`); other DB errors are only logged (`:785-786`). Then notify, ReEnroll (`:804-806`), relay placement, `pushACLSnapshot` (`:837`, version-gated `:910-913`). **Nothing is sent when the ACL is current and no renewal is due** | — |
 | Ordering | one mailbox + one writer goroutine per stream (`runWriter:222-234`) → FIFO; the writer exits on ctx cancel **without flushing** | — |
-| Revoked at open | `Control:433-441` → `PermissionDenied "connector is revoked"`; **any** `Scan` error → `NotFound "connector not found: …"` (`:436-437`) | — |
+| Revoked at open | `Control:433-441` → `PermissionDenied "connector is revoked"`; **any** `Scan` error, including a DB/infrastructure failure, → `NotFound "connector not found: …"` (`:436-437`). This conflates an infrastructure failure with an authoritatively absent row | — |
+| Activation | `activateStream` (`control_stream.go:604-628`) runs a second guarded UPDATE. `ErrNoRows` → `PermissionDenied "connector is revoked"` (`:621-622`), even when the row was **deleted** rather than revoked; any other DB error is only logged and the stream is still registered (`:624-627`) | — |
+| Cert interceptor | `verifyConnectorCertificate` (`spiffe.go:256`); a workspace-CA load failure (`:258-259`) or chain failure → `Unauthenticated` (`control_stream.go:1008-1011`). Relay precedent in the same interceptor: `Unavailable` when revocation state is unavailable, `PermissionDenied` when revoked (`:1018-1024`) | — |
+| Connector error handling | `connector/src/control_stream.rs` never inspects a gRPC code, message or metadata; every failure is flattened into `anyhow` and retried (`:443`, `open_stream:240`). No text matching exists today, and none may be introduced | — |
 | Revoke mutation | `RevokeConnector` = UPDATE + two notifies (`graph/resolvers/connector.resolvers.go:113-155`); nothing is sent to the stream. Resolvers hold `ConnectorRegistry` (`resolver.go:26`); `get` is unexported (`control_stream.go:256`) | — |
 | `AgentPolicy` | field 18, enqueued at every open (`control_stream.go:522-523`), **but** `agentPolicyMessage` returns nil when the shield renewal window ≤ 0 (`:184-188`) | — |
 | Connector retry | `run_control_stream:76-110`, backoff 2 → 60 s forever; errors flattened to `anyhow` (`:443`, `open_stream:240`) | — |
@@ -129,7 +139,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 ### 4.1 Where the controller can attest authorization (CONFIRMED BY SOURCE)
 
 - **The guarded statement.** The guarded UPDATE in `handleConnectorHealth` (`:754-778`) is a per-heartbeat authoritative check: it updates only `WHERE … status NOT IN ('revoked','deleted') AND revoked_at IS NULL`.
-- **What `ErrNoRows` (`:779`) covers.** It conflates "row missing" (deleted/unknown) with "guard refused" (revoked); the statement can't tell them apart. Any other error is a DB/internal failure.
+- **What `ErrNoRows` (`:779`) covers.** It conflates "row missing" (deleted/unknown) with "guard refused" (revoked); the statement can't tell them apart. Any other error is a DB/internal failure. The same conflation exists in `activateStream` (`:621-622`).
 - **The `'deleted'` literal never matches**: `connectors.status` has no such value.
 - **Ordering.** FIFO per stream: a message enqueued after `pushACLSnapshot` (`:837`) is delivered after that ACL.
 
@@ -151,7 +161,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
    - any required ACL push for this heartbeat has been enqueued.
 
    The ack is enqueued last for that heartbeat. Note that "ACL push completes" means **enqueued ahead of the ack** on the same FIFO stream; the controller has no delivery receipt (INFERRED).
-2. Never ack on `ErrNoRows`, on any DB error, on `heartbeat_seq = 0`, or for non-health messages.
+2. Never ack on `ErrNoRows`, on any DB error, on `heartbeat_seq = 0`, or for non-health messages. A DB error in `activateStream` (today only logged, `:624-625`) therefore never yields serving: no ack can follow until a health report's guarded UPDATE succeeds.
 3. A health report with `heartbeat_seq = 0` comes from a connector without the contract. The controller logs it and doesn't ack (RECOMMENDED: also reject the stream with an unmarked `FailedPrecondition`, so a stale build in a dev lab is obvious).
 4. There is no open-time ack. The connector's initial health on every open is acked like any other report.
 
@@ -159,13 +169,13 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 
 The connector records `sent[seq] = Instant` when it **enqueues** the report (monotonic `tokio::time::Instant`; enqueue precedes the wire send, so the anchor is conservative). Seqs are process-global, start at 1 and never reset per stream.
 
-Let `D` be the current deadline (undefined in `Starting`), and `lost_at` the instant authorization was last lost (process start, entry to `Disabled`, or entry to `Recovering`).
+Let `D` be the current deadline (undefined in `Starting` and in the terminal states), and `lost_at` the instant authorization was last lost (process start, entry to `Disabled`, or entry to `Recovering`).
 
 Ack k is **accepted** only if **all** of these hold:
 
 | Condition | Rejects |
 |---|---|
-| state ≠ `Revoked` | anything after terminal revocation |
+| state ∉ {`Revoked`, `UnknownIdentity`} | anything after a terminal state |
 | k ≥ 1 and k ∈ `sent` | zero, unknown, forged or already pruned |
 | k > highest accepted seq | duplicates, out-of-order older acks |
 | `now < sent[k] + H` | acks whose request is already older than H (they would confer nothing) |
@@ -174,32 +184,48 @@ Ack k is **accepted** only if **all** of these hold:
 
 On acceptance: `D = sent[k] + H` (monotonic; it can only increase because k > highest accepted), `highest = k`, and drop `sent` entries ≤ k. Every rejection is logged with its reason.
 
-### 4.5 Terminal signal and error classification
+### 4.5 Terminal signals and error classification (D10 = O2 ACCEPTED, D11 = O3 ACCEPTED)
 
-**Active stream (immediate):**
-- `RevokeConnector` enqueues `ConnectorRevoked{}` on the live registry stream after the UPDATE commits. That needs an exported registry accessor.
-- Delivery takes about one RTT (INFERRED).
-- If the connector isn't registered on this controller, the reconnect path below applies.
+**Security rule (ACCEPTED D10).** Authoritative connector states are carried by a **structured, machine-readable gRPC status marker**. A gRPC status code alone can't distinguish every outcome (today `PermissionDenied` covers revoked, wrong role and deleted-at-activation; `NotFound` covers absent rows *and* DB failures, §3). The marker carries the authoritative reason. **Human-readable message text is never used to decide that a connector is revoked or unknown**, on either side.
 
-**Reconnect / next heartbeat:**
-- A machine-readable marker on the error status.
-- **RECOMMENDED, AWAITING APPROVAL (O2):** a trailer metadata key, `zecurity-connector-state: revoked | unknown`. It needs no new dependency: tonic exposes `Status::metadata()`; Go sets trailers on the stream.
-- `google.rpc.ErrorInfo` details are the alternative. They would need `tonic-types` (or manual decoding) in the connector, plus a direct Go dependency.
-- Trailer propagation on a trailers-only error response is INFERRED and must be proven by test T8.
+**Mechanism (ACCEPTED, from the revision-2 recommendation):** trailer metadata on the error status, key `zecurity-connector-state`, values `revoked` (REVOKED) and `unknown` (UNKNOWN_CONNECTOR).
+- Compatible with the source: Go sets stream trailers before returning the status; tonic 0.14 exposes `Status::metadata()` (§3), so no new dependency is needed. `google.rpc.ErrorInfo` details are no longer proposed.
+- The final key/value spelling and casing are a **protocol implementation detail** fixed in Phase A; they are not an open question about whether a structured marker is required.
+- Trailer propagation on a trailers-only error response is INFERRED and must be proven by T8 before the connector relies on it. If it can't be proven, Phase A must carry the same marker by another structured channel; text matching is never the fallback.
+- The marker is only attached after a **successful** authoritative lookup. Unmarked statuses are never terminal, whatever their code.
 
-| Condition | Controller response (proposed) | Connector state |
+**Two delivery cases:**
+- **A. Connected connector.** `RevokeConnector` enqueues `ConnectorRevoked{}` on the live registry stream after the UPDATE commits (needs an exported registry accessor). Delivery is about one RTT (INFERRED). The connector enters `Revoked` immediately, without waiting for D. A connected connector whose row is **deleted** learns it at its next authorization request: the guarded UPDATE returns `ErrNoRows`, the follow-up SELECT finds no row, and the stream ends with the `unknown` marker. (Whether `DeleteConnector` should also close the live stream proactively is a Phase A implementation detail; O3 doesn't require it, and D1 bounds service either way.)
+- **B. Disconnected connector.** No live event can be delivered. Authorization expires at D (D1) and the connector fails closed. When it reconnects, `Control`'s lookup returns the authoritative result: `revoked` or `unknown` marker.
+
+**Outcome classes:**
+
+| Class | Controller determination | Controller response (proposed) | Connector result |
+|---|---|---|---|
+| **A. REVOKED** | a successful lookup shows `status='revoked'` or `revoked_at` set. Mid-stream: health `ErrNoRows` followed by a successful SELECT that finds the revoked row | `PermissionDenied` + marker `revoked`; or `ConnectorRevoked{}` on a live stream | **`Revoked`** (terminal administrative revocation), immediately; fail-closed §7; reconnection can't restore serving |
+| **B. UNKNOWN_CONNECTOR** | a successful lookup returns no row for the authenticated identity (`id` + `trust_domain`). Mid-stream: health `ErrNoRows` followed by a successful SELECT with no row. Activation: `activateStream` `ErrNoRows` followed by the same follow-up classification | `NotFound` + marker `unknown` | **`UnknownIdentity`** (terminal non-serving state for this process); fail-closed §7; distinct from `Revoked`; recovery only through an explicitly authorized re-enrollment or replacement (§5.1) |
+| **C. Temporary / internal failure** | the lookup or follow-up SELECT **failed** (DB/pool/controller error), so the state is undetermined | `Unavailable`, **no marker** | authorization unavailable → no ack; retries allowed; serving ends at D (`Disabled`/`Recovering`) |
+| **D. Transport failure** | no reliable response (reset, timeout, controller unreachable, tonic-generated status) | — | nothing inferred: no ack, no marker; D1 expiry applies; fail closed at D |
+| **E. Successful authorization** | guarded UPDATE returned a row; required ACL push enqueued first (D9) | `AuthorizationAck{seq}` | only a valid, timely ack (§4.4) enables or refreshes serving |
+
+**Other unmarked statuses (all recoverable, never terminal):**
+
+| Condition | Response | Connector |
 |---|---|---|
-| Explicitly revoked (`status='revoked'` or `revoked_at` set) | `PermissionDenied` + marker `revoked`. Mid-stream, after a health `ErrNoRows`, a follow-up SELECT confirms it | **`Revoked`** (terminal) |
-| Authoritatively deleted/unknown (a plain SELECT returns `ErrNoRows`) | `NotFound` + marker `unknown` | **never serves**. Terminal vs another lifecycle class is **OPEN (O3)**. Until decided: closed, no automatic recovery path exists anyway (no un-delete, enrollment needs `pending`) |
-| DB / internal error (any other error) | `Unavailable`, **no marker**. Requires changing `Control:436-437`, which today maps every `Scan` error to `NotFound` | recoverable (`Disabled`/`Recovering`) |
-| Health `ErrNoRows`, follow-up SELECT fails | `Unavailable`, no marker | recoverable |
-| Wrong role / trust domain (`:427`, `:1005`) | unchanged `PermissionDenied`, no marker | recoverable (misconfiguration) |
-| Temporary network failure / controller unreachable | transport error or a tonic-generated status, no marker | recoverable; authorization expires per D1; no service after the deadline |
-| Unsupported protocol (controller doesn't advertise or doesn't ack) | no ack ever arrives | stays closed (`Starting`/`Recovering`/`Disabled`); never serves (§4.6) |
-| Expired certificate | interceptor `Unauthenticated`, no marker | recoverable state; closed until a fresh ack, which requires a valid cert. Renewal rules unchanged; never confused with revocation |
+| Wrong role / trust domain (`:427`, `:1005`) | unchanged `PermissionDenied`, no marker | recoverable (misconfiguration); never serves without an ack |
+| Expired certificate or failed chain verification | interceptor `Unauthenticated`, no marker | recoverable; closed until a fresh ack, which needs a valid cert; never confused with revocation |
+| Workspace-CA load failure in the interceptor (`spiffe.go:258-259`) | `Unauthenticated` today, no marker. INFERRED: it would be more accurate as `Unavailable`, but because it carries no marker it is already non-terminal, so changing it is optional for O2/O3 | recoverable |
+| `heartbeat_seq = 0` (contract missing) | logged, no ack (optional unmarked `FailedPrecondition`, §4.3) | n/a for a contract build |
+| Unsupported protocol (no capability, no ack) | no ack ever arrives | stays closed; never serves (§4.6) |
 | Make-before-break renewal | no error; acks continue on either stream (§5.4) | continuity preserved |
 
-**Rule:** only a `ConnectorRevoked` message or a status carrying the `revoked` marker enters `Revoked`. An unmarked `PermissionDenied`/`NotFound` is never terminal, and **a DB failure is never converted into a deleted or revoked result**.
+**Required error-handling corrections for Phase A (documented, not implemented):**
+1. `Control:436-437`: split the `Scan` result three ways. `pgx.ErrNoRows` → `NotFound` + `unknown`. A row with revoked state → `PermissionDenied` + `revoked` (`:439-441` today, marker added). **Any other error → `Unavailable`, no marker.** A DB failure must never become `NotFound` or carry a terminal marker.
+2. `handleConnectorHealth` `ErrNoRows` (`:779`) and the `Control` close path (`:566-568`): the guarded UPDATE can't tell deleted from revoked, so run an authoritative follow-up SELECT and map it to class A, B or C. If the follow-up fails → `Unavailable`, no marker.
+3. `activateStream` `ErrNoRows` (`:621-622`): same follow-up classification; today it returns `PermissionDenied "connector is revoked"` even for a deleted row. Other DB errors (`:624-625`) need no marker; serving is impossible without an ack anyway (§4.3 rule 2).
+4. Connector: classify only on `ConnectorRevoked`, the trailer marker and the absence of an ack. Do not inspect message text; an unmarked status of any code is class C or D.
+
+**Rules:** only `ConnectorRevoked` or the `revoked` marker enters `Revoked`; only the `unknown` marker enters `UnknownIdentity`; an unmarked `PermissionDenied`/`NotFound` is never terminal; **a DB failure is never converted into an unknown or revoked result.**
 
 ### 4.6 Capability flag: still useful? (RECOMMENDED, AWAITING APPROVAL)
 
@@ -225,44 +251,70 @@ The flag never grants anything; only accepted acks do.
 
 No existing type represents serving state (CONFIRMED BY SOURCE); this is a new model.
 
-| State | Meaning | Data plane |
-|---|---|---|
-| `Starting` (authorization pending) | no accepted ack since process start | closed |
-| `Serving` | `now < D`, control stream up | open |
-| `ServingDisconnected` | stream down or reconnecting, `now < D` | open **only** until D; it can't outlive D (§6.3) |
-| `Disabled` | `now ≥ D` without an accepted ack, or a recoverable failure | closed (§7) |
-| `Recovering` | `Disabled` with a (re)established stream, awaiting an accepted ack for a request sent at or after `lost_at` | closed |
-| `Revoked` (terminal) | `ConnectorRevoked` or the `revoked` marker | closed permanently for this identity |
+| State | Meaning | Data plane | Kind |
+|---|---|---|---|
+| `Starting` (authorization pending) | no accepted ack since process start; every process starts here | closed | recoverable |
+| `Serving` | `now < D`, control stream up | open | — |
+| `ServingDisconnected` | stream down or reconnecting, `now < D` | open **only** until D; it can't outlive D (§6.3) | — |
+| `Disabled` | `now ≥ D` without an accepted ack, or authorization unavailable (class C/D, §4.5), certificate expiry or renewal failure | closed (§7) | recoverable |
+| `Recovering` | `Disabled` with a (re)established stream, awaiting an accepted ack for a request sent at or after `lost_at` | closed | recoverable |
+| `Revoked` | `ConnectorRevoked` or the `revoked` marker (class A) | closed permanently for this identity | **terminal** (administrative revocation) |
+| `UnknownIdentity` | the `unknown` marker (class B): the controller authoritatively has no record of this identity | closed for the rest of this process | **terminal** for the process (unknown/deleted identity); **not** a revocation |
 
-No transition leaves `Revoked`. Recovery after permanent revocation is **OPEN (O10)**; today the only path is a new connector identity, and any future operation must first change the controller's authoritative state.
+- No transition leaves `Revoked` or `UnknownIdentity`.
+- **Recovery after `Revoked`** is **OPEN (O10)**; today the only path is a new connector identity, and any future operation must first change the controller's authoritative state.
+- **Recovery after `UnknownIdentity` (ACCEPTED D11):** only an explicitly authorized re-enrollment or replacement that establishes a valid connector identity and authoritative authorization. Routine reconnection, transport success or a still-valid certificate never reactivates it. The workflow itself is not designed here. Today, enrollment requires a `pending` row (`enrollment.go:109`), so a deleted connector needs a new connector record and token.
+
+**Kept distinct (none of these conflate):**
+
+| Situation | State |
+|---|---|
+| Administrative revocation | `Revoked` |
+| Unknown/deleted identity | `UnknownIdentity` |
+| DB failure at the controller (`Unavailable`) | `Disabled`/`Recovering` after D |
+| Controller unavailable / transport error | `ServingDisconnected` until D, then `Disabled` |
+| Certificate expiry / renewal failure | `ServingDisconnected` or `Disabled`; never terminal |
 
 ### 5.2 Transitions
 
 | From | Event | To |
 |---|---|---|
 | Starting / Recovering / Disabled | ack accepted (§4.4) | Serving |
-| Serving | stream ends / write fails | ServingDisconnected |
+| Serving | stream ends / write fails / unmarked error | ServingDisconnected |
 | ServingDisconnected | ack accepted (before D) | Serving |
 | Serving / ServingDisconnected | `now ≥ D` | Disabled (`lost_at = D`) |
 | Disabled | stream accepted (first controller message received) | Recovering (`lost_at` unchanged) |
-| Recovering | stream ends | Disabled |
-| any except Revoked | `ConnectorRevoked` / `revoked` marker | Revoked |
-| Revoked | anything | Revoked (reconnect loop exits) |
+| Recovering | stream ends / unmarked error | Disabled |
+| any non-terminal | `ConnectorRevoked` / `revoked` marker | Revoked (immediately; fail-closed §7) |
+| any non-terminal | `unknown` marker | UnknownIdentity (immediately; fail-closed §7) |
+| Revoked | anything | Revoked (reconnect loop stops) |
+| UnknownIdentity | anything, including a marker of another kind | UnknownIdentity (reconnect loop stops) |
+| process restart | — | Starting (in every case) |
+
+**Restart (ACCEPTED D11).** Terminal states are in-memory; whether they are also persisted locally is **OPEN (O9)**. Protection **does not depend on that persistence**: every restart begins in `Starting`, and only the controller's authoritative response can open the data plane.
+- A valid connector becomes `Serving` only after a fresh accepted ack.
+- A revoked identity is rejected again by the controller (`revoked` marker) and returns to `Revoked`.
+- An unknown identity gets the `unknown` marker again and returns to `UnknownIdentity`; it never serves in between.
+- A DB failure remains a recoverable authorization failure (`Unavailable`), never a terminal state.
 
 ### 5.3 Guarantees
 
 | # | Guarantee | Mechanism |
 |---|---|---|
-| 1 | No serving before initial authorization | start in `Starting`; admission requires `Serving`/`ServingDisconnected` **and** `now < D` (§6.3) |
-| 2 | Only an accepted, timely ack enables or refreshes | §4.4 |
+| 1 | No serving before initial authorization (also after restart) | start in `Starting`; admission requires `Serving`/`ServingDisconnected` **and** `now < D` (§6.3) |
+| 2 | Only a valid, timely ack enables or refreshes; a missing or invalid ack never does | §4.4 |
 | 3 | A reconnect doesn't authorize | stream events only move `Disabled → Recovering` |
-| 4 | A revoked connector can't resume via reconnect | `Revoked` is absorbing; the reconnect loop exits; the controller refuses anyway (`Control:439-441`) |
-| 5 | Expiry disables and invalidates stale authorization | `now ≥ D` → `Disabled`; acks for pre-expiry requests rejected (`sent[k] ≥ lost_at`) |
-| 6 | Terminal ≠ temporary | separate states; only explicit signals reach `Revoked` |
-| 7 | Reversing revocation needs an explicit recovery process | none defined (O10) |
-| 8 | Renewal can't reopen service | renewal emits no ack; only the controller's ack does |
-| 9 | Events are serialized | single supervisor (§5.4) |
-| 10 | No state bypasses D1 | every open state is additionally bounded by `now < D` at admission |
+| 4 | `revoked` → `Revoked` immediately, without waiting for D | §4.5 class A |
+| 5 | `unknown` prevents serving and routine reactivation | §4.5 class B; `UnknownIdentity` is absorbing for the process; controller repeats `unknown` after restart |
+| 6 | `Unavailable` doesn't mean revoked or deleted | class C is unmarked → recoverable states only |
+| 7 | A revoked connector can't resume via reconnect | `Revoked` is absorbing; the controller refuses anyway (`Control:439-441`) |
+| 8 | Expiry disables and invalidates stale authorization | `now ≥ D` → `Disabled`; acks for pre-expiry requests rejected (`sent[k] ≥ lost_at`) |
+| 9 | Terminal ≠ temporary, and revoked ≠ unknown | separate states; only the explicit, matching signal reaches each terminal state |
+| 10 | Reversing revocation needs an explicit recovery process | none defined (O10) |
+| 11 | Renewal can't reopen service, and isn't mistaken for revocation | renewal emits no ack and no marker; only the controller's ack opens service |
+| 12 | Events are serialized | single supervisor (§5.4) |
+| 13 | No state bypasses D1; no extra grace | every open state is additionally bounded by `now < D` at admission; D1 unchanged |
+| 14 | Existing sessions end on `Disabled`, `Revoked` and `UnknownIdentity` | §7 |
 
 ### 5.4 Serialization and races
 
@@ -270,13 +322,14 @@ No transition leaves `Revoked`. Recovery after permanent revocation is **OPEN (O
   - `ReportEnqueued{seq, at}`;
   - `Ack{seq}`;
   - `Revoked`;
+  - `UnknownIdentity`;
   - `StreamUp` / `StreamDown`;
   - `Capability{bool}`.
 
   The control-stream task stays the single owner of streams (CONFIRMED BY SOURCE `run_session`) and only forwards events.
 - **Published state.** The supervisor publishes `{state, D}` through a `watch` / atomic snapshot; readers never mutate it.
 - **Ordering:**
-  - `Revoked` before or after an `Ack` → `Revoked` wins (rule 1 in §4.4);
+  - a terminal signal (`Revoked` or `UnknownIdentity`) before or after an `Ack` → the terminal state wins (rule 1 in §4.4); the first terminal signal processed is kept;
   - an expiry and an `Ack` racing → both are judged on `now` at processing against D;
   - a late ack is rejected.
 - **Renewal (make-before-break):**
@@ -300,7 +353,7 @@ No transition leaves `Revoked`. Recovery after permanent revocation is **OPEN (O
 6. `D = sent[k] + H`, from the send time, not the receipt time.
 7. Duplicate, out-of-order, unknown, zero, revoked-state or otherwise invalid acks don't refresh anything.
 8. `now ≥ D` → fail closed (§7).
-9. Explicit revocation → `Revoked` immediately, without waiting for D.
+9. Explicit revocation → `Revoked` immediately, without waiting for D; an authoritative `unknown` result → `UnknownIdentity` immediately. A DB or transport failure does neither: it only withholds the ack, and D1 expiry applies.
 10. A late ack (arriving at or after D, or for a request sent before authorization was lost) can't restore authorization.
 
 ### 6.2 Today's schedule can't meet D1 (CONFIRMED BY SOURCE)
@@ -357,23 +410,23 @@ The ack is sent only after any required ACL push for that heartbeat (per the tas
 
 B, P and the O6 choice are recorded with these results before phase B2 starts.
 
-## 7. Fail-closed (D5 ACCEPTED): what `Disabled` and `Revoked` stop
+## 7. Fail-closed (D5 ACCEPTED): what `Disabled`, `Revoked` and `UnknownIdentity` stop
 
-Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE; HISTORICAL LIVE EVIDENCE 10-13 R3-V). `Disabled` is recoverable; `Revoked` is terminal. Both run the steps below; the differences are marked.
+Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE; HISTORICAL LIVE EVIDENCE 10-13 R3-V). `Disabled` is recoverable; `Revoked` and `UnknownIdentity` are terminal. All three run the steps below; the differences are marked ("terminal" = both terminal states).
 
 | Step | Existing mechanism (reusable) | Missing (source change) | Concurrency / lifecycle risk | Regression test |
 |---|---|---|---|---|
 | 1. Publish the closed state atomically | none | a supervisor-owned `watch`/atomic `{state, D}` | readers must see state and D together (one snapshot) | T2, T9 |
 | 2. Refuse new client connections and streams at the transport level | single funnel `device_tunnel::handle_stream:151` for QUIC, TLS and relay-routed; `quinn::Incoming::refuse()` (`incoming.rs:44`) | funnel check of the state + `now < D`. Refuse by **stream reset / no `TunnelResponse`** (the client treats ConnectionReset as a transport failure → next connector + resync). Never send `ok:false`, which blocks fallback (`net_stack.rs:1166-1167`). Refuse new QUIC connections; drop new TLS sockets | a stream accepted just before step 1 and registered after step 3 → step 3 must re-check after registration (mirror the existing post-register `is_allowed` re-check, `device_tunnel.rs:252-258`) | T9, T2 |
 | 3. Cancel all connector-routed and shield-routed sessions | `SessionRegistry` tokens on every session; both copy paths `select!` on them | `cancel_every_session()` (only per-key `cancel_all` exists) | the race above; cancellation timing depends on scheduling (§6.3) | T9 |
-| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **`Revoked`: close.** **`Disabled`: close or disable is OPEN (O8)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended on `Revoked`; possibly disruptive for short `Disabled` periods) | T13 |
-| 5. Stop stale ACL/cache state reopening access | `PolicyCache` (memory only; starts `None`) | admission keyed on state + D, not cache presence; keep applying ACLs while closed (so re-enable starts with the ACL delivered just before the ack, FIFO); `PolicyCache::clear()` on `Revoked` | an ACL arriving while closed must not open anything (it can't: admission ignores it) | T6, T7 |
-| 6. Stop retries and listeners re-enabling serving | `run_control_stream` reconnect loop; listener accept loops | they only **read** the state; only the supervisor transitions; the reconnect loop exits on `Revoked`; restart starts in `Starting` | none if writes are confined to the supervisor | T6, T7 |
+| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **Terminal states: close.** **`Disabled`: close or disable is OPEN (O8)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended in the terminal states; possibly disruptive for short `Disabled` periods) | T13 |
+| 5. Stop stale ACL/cache state reopening access | `PolicyCache` (memory only; starts `None`) | admission keyed on state + D, not cache presence; keep applying ACLs while closed (so re-enable starts with the ACL delivered just before the ack, FIFO); `PolicyCache::clear()` in the terminal states | an ACL arriving while closed must not open anything (it can't: admission ignores it) | T6, T7 |
+| 6. Stop retries and listeners re-enabling serving | `run_control_stream` reconnect loop; listener accept loops | they only **read** the state; only the supervisor transitions; the reconnect loop stops in either terminal state; restart starts in `Starting` | none if writes are confined to the supervisor | T6, T7 |
 
 **Other items:**
 - Relay attachment: relay-routed streams are already covered by steps 2–3. Detaching from relays is **OPEN (O8)**.
 - Tracking and closing existing client QUIC connections is **OPEN (O8)**.
-- Persisting `Revoked` across restart is **OPEN (O9)**. Today, controller refusal plus the empty ACL keeps a restarted revoked connector closed, and with `Starting` it stays closed regardless.
+- Persisting `Revoked`/`UnknownIdentity` across restart is **OPEN (O9)**. Safety doesn't depend on it: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
 
 **Failure handling:** a step that fails is logged and doesn't revert step 1. Fail-closed never depends on later steps succeeding.
 
@@ -431,7 +484,7 @@ Revocation enforcement, failover and migration are separate deliverables with se
 
 | Concern | Carrier | Enforced by |
 |---|---|---|
-| Administrative **identity** revocation (unit: the SPIFFE ID, i.e. `connectors.id`) | controller DB → no ack + `revoked` marker / `ConnectorRevoked` (connector); `ACLSnapshot.revoked_connectors` (clients; connectors → shields); relay heartbeat response (relays) | controller (existing), connector, client, relay, shield (via connector) |
+| Administrative **identity** revocation (unit: the SPIFFE ID, i.e. `connectors.id`) | controller DB → no ack + `revoked` marker / `ConnectorRevoked` (connector; an absent row yields the separate `unknown` marker, which is not a revocation); `ACLSnapshot.revoked_connectors` (clients; connectors → shields); relay heartbeat response (relays) | controller (existing), connector, client, relay, shield (via connector) |
 | Individual **certificate** revocation (unit: the serial) | workspace CRL `/ca.crl` | relay (accept + proposed re-check), connector (client serials, existing) |
 
 - A standard X.509 CRL lists certificate serials under an issuer. **It is not a mechanism for revoking a SPIFFE ID**, and no SPIFFE ID is placed in it.
@@ -454,7 +507,7 @@ No schema or database change is authorized by this document.
 
 ```
 M0 (dev-stack baseline: coordinated build/install procedure, §15)
-A  (controller contract, markers, error classification, revoked list compile, relay heartbeat field) ─┬─> B1 (supervisor, states, funnel gate, terminal handling)
+A  (controller contract, revoked/unknown markers, error classification, revoked list compile, relay heartbeat field) ─┬─> B1 (supervisor, states, funnel gate, terminal handling)
                                                                                                         ├─> C (client)
                                                                                                         └─> D (relay)
 M  (timing measurements on an A build) ─> B2 (schedule P, deadline expiry, fail-closed steps 3–6)
@@ -465,9 +518,9 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 
 | Phase | Prerequisites | Files / interfaces (HEAD paths) | Conceptual changes | Tests (§14) | Acceptance | Blocking decisions |
 |---|---|---|---|---|---|---|
-| **A** Controller contract | §17 gate | `proto/connector/v1/connector.proto`; `controller/internal/connector/control_stream.go` (`handleConnectorHealth`, `Control`, `activateStream`, `agentPolicyMessage`, exported registry accessor); `graph/resolvers/connector.resolvers.go`; policy compiler/store (revoked list); `proto/client/v1/client.proto` | ack rules §4.3; `ConnectorRevoked` push; markers; `Scan` error → `Unavailable`; follow-up classification; `AgentPolicy` always sent; revoked-connector list compiled | T5, T8 (controller), T14 | new controller suite tests; existing suite green | O2, O3 |
+| **A** Controller contract | §17 gate | `proto/connector/v1/connector.proto`; `controller/internal/connector/control_stream.go` (`handleConnectorHealth`, `Control`, `activateStream`, `agentPolicyMessage`, exported registry accessor); `graph/resolvers/connector.resolvers.go`; policy compiler/store (revoked list); `proto/client/v1/client.proto` | ack rules §4.3; `ConnectorRevoked` push; `revoked`/`unknown` trailer markers (D10); the four §4.5 corrections (`Scan` error → `Unavailable`; follow-up classification in health and activation); `AgentPolicy` always sent; revoked-connector list compiled | T5, T8, T19–T22, T14 | new controller suite tests; existing suite green | O2, O3 **resolved** (D10, D11); remaining gate items in §17 |
 | **M** Measurements | A in the lab | instrumentation only | §6.6 | T17 | B, P, O6 recorded | — |
-| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5, §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16 | unit tests | O9 |
+| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 |
 | **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | O5, O8 |
 | **C** Client | A | `client/src/daemon.rs`, `transport.rs`, `net_stack.rs`, `tunnel_pool.rs` | §8 | T11 | unit + live | O11 |
 | **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + **live relay lab (BLOCKED today)** | O12 |
@@ -477,7 +530,7 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 
 ## 14. Test and acceptance strategy
 
-**No test listed here has been written or executed.**
+**No test listed here has been written or executed.** Coverage of the O2/O3 requirements: revoked marker T5; unknown marker T19; distinguishable T20; DB failure T21; no `NotFound` from DB error T22; transport failure T23; unknown + reconnect T24; unknown + restart T25; authorized start T26; revoked + reconnect T7; D1 on failures T27; renewal T28.
 
 | # | Requirement | Level |
 |---|---|---|
@@ -485,10 +538,10 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 | T2 | Missing ack → new traffic refused exactly at `D = sent[k] + H`, sessions cancelled at expiry (assert the instant) | paused clock + live control-plane block |
 | T3 | A send alone never moves D | unit |
 | T4 | Duplicate, out-of-order, unknown, zero, stale (`now ≥ sent+H`), post-expiry, pre-`lost_at` and mismatched acks are all rejected (one case per §4.4 row) | unit |
-| T5 | `ConnectorRevoked` / `revoked` marker → `Revoked` immediately | unit + live |
+| T5 | `ConnectorRevoked` (connected) and the `revoked` marker (reconnect) → `Revoked` immediately, without waiting for D; sessions cancelled | unit + live |
 | T6 | Reconnect after a temporary interruption doesn't serve until an accepted ack | unit + live |
-| T7 | A revoked connector never reactivates (reconnect, restart) | unit + live |
-| T8 | DB error / unmarked `NotFound` / unmarked `PermissionDenied` / transport error → recoverable, never `Revoked`; trailer marker survives a trailers-only response | controller + connector unit, integration |
+| T7 | A revoked connector never reactivates by reconnecting or restarting | unit + live |
+| T8 | Unmarked `NotFound` / unmarked `PermissionDenied` / other unmarked codes → recoverable, never terminal; the trailer marker survives a trailers-only response (tonic client against the Go server) | controller + connector unit, integration |
 | T9 | Fail-closed cancels all connector-routed sessions and refuses new streams on QUIC, TLS and relay paths at the transport level; the client classifies the refusal as a transport failure | unit (`handle_stream` harness, as `acl_diff_session_tests`) + live holds |
 | T10 | Make-before-break renewal under load stays uninterrupted; outstanding-seq reuse covers a lost in-flight ack | unit + live (≥ 3 renewals) |
 | T11 | Client closes existing flows on a revoked connector, keeps others, rejects new ones, exact direct verifier | unit (`FlowTable`) + live |
@@ -499,6 +552,16 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 | T16 | `Revoked` and `Disabled` are distinguished (separate states, logs and recovery paths) | unit |
 | T17 | Authorization scheduling and controller load measured against B at the candidate P (the §6.6 table) | lab measurement run |
 | T18 | Full development-stack version consistency before release: every component built from one commit, binary shas recorded, update timers disabled, T14 green | release checklist + live |
+| T19 | The `unknown` marker → `UnknownIdentity` (non-serving, terminal for the process); sessions cancelled | unit + live (delete a disposable connector) |
+| T20 | `Revoked` and `UnknownIdentity` stay distinguishable: controller emits `revoked` vs `unknown` for a revoked vs absent row (at open, mid-stream after a health `ErrNoRows`, and at activation); connector reaches the matching state and logs it | controller unit + connector unit |
+| T21 | A DB lookup failure (open, health follow-up, activation follow-up) returns `Unavailable` with **no** marker; the connector stays recoverable | controller unit (failing pool) + connector unit |
+| T22 | `NotFound` is never produced from a DB error (regression for `Control:436-437`) and a marker is never attached without a successful lookup | controller unit |
+| T23 | Transport failure (reset, timeout, controller down) never produces `Revoked` or `UnknownIdentity` | connector unit + live control-plane block |
+| T24 | A connector in `UnknownIdentity` doesn't resume serving after a plain transport reconnect | connector unit |
+| T25 | Restarting an unknown connector doesn't expose any data-plane entry path before an accepted ack (it returns to `UnknownIdentity`) | connector unit + live |
+| T26 | A legitimately authorized connector starts, receives an accepted ack and becomes `Serving` | unit + live |
+| T27 | D1 still applies to authorization failures: under `Unavailable` or transport failure, serving ends at exactly `D = sent[k] + H` with no extra interval | paused clock |
+| T28 | Normal make-before-break renewal produces no marker and no terminal state (with T10) | unit + live (≥ 3 renewals) |
 
 Mutation checks (disable each enforcement line; the matching test must fail) follow existing team practice. Live rows are graded OBSERVED_* with fresh disposable connectors.
 
@@ -539,20 +602,22 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D7 | Identity revocation and CRL serial revocation stay distinct; a SPIFFE ID isn't a CRL entry |
 | D8 | Unreleased: no legacy compatibility; nothing without the contract may serve; coordinated dev rollout |
 | D9 | The ack is sent only after any required ACL push (§6.5) |
+| D10 (= O2) | A structured, machine-readable gRPC status marker (trailer metadata, §4.5) distinguishes REVOKED and UNKNOWN_CONNECTOR from ordinary errors; message text is never used for security decisions; markers only after a successful lookup |
+| D11 (= O3) | An unknown/deleted identity never serves; it enters `UnknownIdentity`, a terminal non-serving state for the process, distinct from `Revoked`; recovery only through explicitly authorized re-enrollment or replacement; DB failures stay recoverable |
 
 ### Former open items O1–O14 (re-classified)
 
 | ID | Question | Status |
 |---|---|---|
 | O1 | Deadline anchor | **ACCEPTED**: send time of the acknowledged request (§6.1) |
-| O2 | Terminal marker form | **RECOMMENDED, AWAITING APPROVAL**: trailer metadata key (§4.5); `ErrorInfo` alternative |
-| O3 | Deleted/unknown connector: terminal or another lifecycle class | **OPEN** (never serves meanwhile) |
+| O2 | Terminal marker form | **ACCEPTED (D10)**: structured trailer marker (§4.5); exact key/value spelling is a Phase A protocol implementation detail |
+| O3 | Deleted/unknown connector: terminal or another lifecycle class | **ACCEPTED (D11)**: separate terminal non-serving state `UnknownIdentity` (§5.1); recovery workflow not designed here |
 | O4 | Legacy mode for a new connector with an old controller | **NOT APPLICABLE (UNRELEASED)**: removed. The remaining question, whether to keep `AgentPolicy.authorization_acks` as a fail-closed assertion, is **RECOMMENDED, AWAITING APPROVAL** (keep, §4.6) |
 | O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **OPEN** (informed by reconnect-latency measurement) |
 | O6 | Full health report vs lightweight authorization request at period P | **BLOCKED ON MEASUREMENT** |
 | O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **BLOCKED ON MEASUREMENT** |
 | O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **OPEN** (shield traffic must stop either way, §7 step 4) |
-| O9 | Persist `Revoked` across restart; exit vs idle | **OPEN** |
+| O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **OPEN** (safety doesn't depend on it, §5.2) |
 | O10 | Recovery after permanent revocation | **OPEN** (today: new identity only) |
 | O11 | Retention of `revoked_connectors`; client offline staleness bound | **OPEN** |
 | O12 | Relay behaviour when its revoked list is stale | **OPEN** |
@@ -567,9 +632,9 @@ Release requirement (not a decision): the new development stack's protocol behav
 
 | Gate item | Status |
 |---|---|
-| Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker form O2 |
+| Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker ACCEPTED (D10 = O2) |
 | Exact deadline and scheduling semantics | ACCEPTED (D1, O1); B/P BLOCKED ON MEASUREMENT (O7); request type O6 |
-| Terminal vs recoverable states | ACCEPTED (D4); deleted/unknown O3 and persistence O9 OPEN |
+| Terminal vs recoverable states | ACCEPTED (D4, D11 = O3); persistence O9 OPEN |
 | Complete fail-closed definition | ACCEPTED (D5, §7); O8 OPEN |
 | Enforcement ownership: client, relay, shield | directions ACCEPTED (D6); O11–O13 OPEN |
 | Rollout sequence | ACCEPTED (D8, §15) |
@@ -577,7 +642,7 @@ Release requirement (not a decision): the new development stack's protocol behav
 | Recovery after permanent revocation | O10 OPEN |
 
 Each phase needs its own explicit go-ahead with a pre-written acceptance list:
-- **A** needs O2 approved and O3 decided.
+- **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1** needs O9.
 - **B2** needs the M results (O6/O7), plus O5 and O8.

@@ -107,6 +107,16 @@ message ConnectorControlMessage {
     // Authoritative: sent when the Control stream opens and after every
     // revocation. Until a connector has applied it, it accepts no shields.
     ShieldRevocationList shield_revocations = 19;
+    // Controller → Connector — authorization acknowledgement for the
+    // ConnectorHealthReport carrying the same heartbeat_seq. Sent only after
+    // the revocation-guarded health UPDATE succeeded and any required ACL push
+    // for that report was enqueued ahead of it on this stream. A heartbeat or
+    // a missing acknowledgement never counts as authorization.
+    AuthorizationAck authorization_ack = 20;
+    // Controller → Connector — terminal administrative revocation of this
+    // connector's identity, delivered on every live Control stream. Never
+    // sent for a temporary failure.
+    ConnectorRevoked connector_revoked = 21;
   }
   // Reserve the retired TransportSnapshot field number so it is never reused.
   // (reserved must be at message scope, not inside the oneof.)
@@ -120,7 +130,23 @@ message AgentPolicy {
   // min(SHIELD_RENEWAL_WINDOW, 2/5 × SHIELD_CERT_TTL). 0 = not set: the
   // Connector keeps its current window (48 h default).
   uint64 shield_renewal_window_secs = 1;
+  // True when this controller implements the authorization contract
+  // (heartbeat_seq / AuthorizationAck / ConnectorRevoked). Sent first on
+  // every Control stream. A fail-closed capability assertion and diagnostic
+  // only: it never grants authorization; only an accepted AuthorizationAck
+  // does. Absent/false means no acknowledgement on that stream is accepted.
+  bool authorization_acks = 2;
 }
+
+// Acknowledges the authorization-bearing ConnectorHealthReport whose
+// heartbeat_seq equals this value.
+message AuthorizationAck {
+  uint64 heartbeat_seq = 1;
+}
+
+// The controller authoritatively determined that this connector's identity
+// was administratively revoked. Terminal; not a transport failure.
+message ConnectorRevoked {}
 
 message ConnectorLog {
   string connector_id = 1;
@@ -166,6 +192,13 @@ message ConnectorHealthReport {
   string relay_id               = 6;
   string relay_spiffe_id        = 7; // optional, for debug / cross-check
   int64  relay_attached_at_unix = 8; // unix seconds; 0 when not attached
+
+  // Authorization request sequence number. Process-global on the connector,
+  // starts at 1, never reset by a reconnect or a renewal stream switch; a
+  // renewal replacement stream re-sends the outstanding seq. 0 means the
+  // sender lacks the authorization contract: the controller closes the
+  // stream with FailedPrecondition and never acknowledges it.
+  uint64 heartbeat_seq = 9;
 }
 
 // Sent on the existing Control stream whenever the connector's relay

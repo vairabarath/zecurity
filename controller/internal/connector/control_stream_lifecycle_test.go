@@ -17,7 +17,6 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/grpc/status"
 
 	pb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
 	"github.com/yourorg/ztna/controller/internal/spiffe"
@@ -363,9 +362,10 @@ func TestControlLifecycle_RevokedStaysRevoked(t *testing.T) {
 
 	// A revoked connector can never be (re)registered by activation.
 	c := testClient(f.connID, f.wsID)
-	_, err := f.h.activateStream(f.ctx, c)
-	if st, ok := status.FromError(err); !ok || st.Code() != codes.PermissionDenied {
-		t.Fatalf("activate revoked: err=%v, want PermissionDenied", err)
+	c.trustDomain = f.td
+	_, rej := f.h.activateStream(f.ctx, c)
+	if rej == nil || rej.code != codes.PermissionDenied || rej.marker != ConnectorStateRevoked {
+		t.Fatalf("activate revoked: rejection=%s, want PermissionDenied + revoked marker", describeRejection(rej))
 	}
 	if f.h.Registry.get(f.connID) != nil {
 		t.Fatal("revoked connector was registered")

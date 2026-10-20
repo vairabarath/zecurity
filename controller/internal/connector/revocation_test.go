@@ -579,7 +579,8 @@ func TestRenewCert_RaceRevokeReturnsNoCert(t *testing.T) {
 }
 
 // TestHandleConnectorHealth_RevokedClosesStream verifies that when a connector's
-// row is revoked, handleConnectorHealth returns false to signal stream teardown.
+// row is revoked, handleConnectorHealth returns the marked revoked rejection
+// (stream teardown) and enqueues nothing — in particular no AuthorizationAck.
 func TestHandleConnectorHealth_RevokedClosesStream(t *testing.T) {
 	pool, ctx := setupRevocationTestDB(t)
 	slug := fmt.Sprintf("hc-rev-%d", time.Now().UnixNano())
@@ -597,13 +598,18 @@ func TestHandleConnectorHealth_RevokedClosesStream(t *testing.T) {
 	}
 
 	client := testClient(connID, wsID)
-	ok := h.handleConnectorHealth(ctx, client, &pb.ConnectorHealthReport{
-		Version:    "test",
-		Hostname:   "h",
-		AclVersion: 0,
+	client.trustDomain = trustDomain
+	rej := h.handleConnectorHealth(ctx, client, &pb.ConnectorHealthReport{
+		Version:      "test",
+		Hostname:     "h",
+		AclVersion:   0,
+		HeartbeatSeq: 1,
 	})
-	if ok {
-		t.Fatal("expected handleConnectorHealth to return false for revoked connector, got true")
+	if rej == nil || rej.code != codes.PermissionDenied || rej.marker != ConnectorStateRevoked {
+		t.Fatalf("revoked connector health: rejection=%s, want PermissionDenied + revoked marker", describeRejection(rej))
+	}
+	if n := len(client.outbound); n != 0 {
+		t.Fatalf("revoked connector received %d message(s), want none (no AuthorizationAck)", n)
 	}
 
 	// Assert row is still status=revoked and revoked_at is unchanged (non-nil)

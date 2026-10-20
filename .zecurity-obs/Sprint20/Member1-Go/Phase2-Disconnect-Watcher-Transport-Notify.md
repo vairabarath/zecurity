@@ -118,4 +118,7 @@ cd controller && go test ./internal/connector/...
 
 ## Post-Phase Fixes
 
-_None yet._
+### Live finding (runbook, not fixed): `kill -9` doesn't exercise the watcher (Finding 30)
+**Issue:** in the live run (D1, 2026-09-28), `kill -9` and an nft blackhole both went through the controller's stream-close path, not the disconnect watcher, because the kernel closes the TCP socket.
+
+**Fix applied:** none in code (the watcher works: D1–D2 PASS on try 3). The method is to freeze the connector with `kill -STOP <pid>` for about 150 s, so the socket stays open with no heartbeats, then `kill -CONT` / kill. `docs/sprint20-live-acceptance-runbook.md` §11 still says `pkill -9` (checked 2026-10-17) and should be updated. Details: [[Sprint20/Live-Acceptance-Run-Sheet]] → Finding 30.
