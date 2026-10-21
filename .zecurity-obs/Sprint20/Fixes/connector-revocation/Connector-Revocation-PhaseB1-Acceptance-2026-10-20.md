@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase B1 acceptance list (connector states + serving gate)
 date: 2026-10-20
 type: acceptance list (pre-written, design §17)
-status: SIGNED OFF 2026-10-20 — B1-Q1 = option (a) ACCEPTED; implementation NOT STARTED (deferred by the user; start on their explicit go)
+status: SIGNED OFF 2026-10-20 — B1-Q1 = option (a) ACCEPTED; IMPLEMENTED 2026-10-21 (`da5b12f`), record: Connector-Revocation-PhaseB1-Implementation-2026-10-21.md
 branch: feat/sprint20-m1-phase2
 revision: 4d10fb9 (in sync with origin); source surveyed, no source changed
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (rev 4)

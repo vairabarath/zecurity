@@ -2761,3 +2761,27 @@ serves on `127.0.0.1:9102`.
 - **Hygiene:** `.worktrees/s20-live`, `.localdev/s20-relay1`, nft `s20test` (needs sudo), lab-host update timers and test objects, and `zecurity-shield` reporting `activating` on this machine.
 
 **What's next:** Barath: Fix02 (F35) and connector revocation Phase B1 (F34). Sathiya: live end-to-end check of shield revocation (bug 3); Sprint 21 live AT-K.
+
+---
+
+## 2026-10-21 — Claude Code — Connector revocation Phase B1 (F34)
+
+**What was done:**
+- **Decisions recorded (2026-10-20):** O9 accepted as D12 (no persistence of terminal states; idle, don't exit). B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. The B1 acceptance list was signed off.
+- **B1 implemented** (`da5b12f`, connector only):
+  - serving-state machine in `AckTracker`: 7 states, D = sent + H, `lost_at`, `{state, D}` published over `watch`;
+  - admission gate on TLS, QUIC (connection refuse, stream reset), relay streams, the `handle_stream` funnel (also re-checked after registration; never `ok:false`) and the shield `control()`;
+  - terminal states stop the reconnect loop and park forever (`Infallible`).
+- **Tests:**
+  - lib 198 → 217, 5 green runs in a row;
+  - scenario4 4/4;
+  - cross-language test passes;
+  - 18/18 mutants killed;
+  - three Phase A tests tightened to the B1 behaviour.
+- **Record:** `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseB1-Implementation-2026-10-21.md`.
+
+**For the user to confirm:** `lost_at` follows design §5.2 (unchanged on `Disabled → Recovering`), not the §4.4 wording (record §2.3).
+
+**What's next:**
+- **Do not deploy a B1 build to the lab.**
+- Phase M measurements on the Phase A lab build, then B2 (schedule P, session cancellation and shield close, paused-clock tests). B2 needs O5, O6/O7 and O8.
