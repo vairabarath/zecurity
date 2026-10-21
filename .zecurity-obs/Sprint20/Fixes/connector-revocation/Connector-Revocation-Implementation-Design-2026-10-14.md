@@ -609,6 +609,9 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D10 (= O2) | A structured, machine-readable gRPC status marker (trailer metadata, §4.5) distinguishes REVOKED and UNKNOWN_CONNECTOR from ordinary errors; message text is never used for security decisions; markers only after a successful lookup |
 | D11 (= O3) | An unknown/deleted identity never serves; it enters `UnknownIdentity`, a terminal non-serving state for the process, distinct from `Revoked`; recovery only through explicitly authorized re-enrollment or replacement; DB failures stay recoverable |
 | D12 (= O9) | Terminal states are not persisted across restart; in `Revoked`/`UnknownIdentity` the connector idles (process alive, data plane closed, reconnect loop stopped, terminal state logged periodically) rather than exiting, because `restart: unless-stopped` restarts any exit |
+| D13 (= O5) | Control-stream reconnect backoff resets after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter; env-configurable (connector) |
+| D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; env-configurable within 500–14000 ms |
+| D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; env-configurable |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -618,10 +621,10 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | O2 | Terminal marker form | **ACCEPTED (D10)**: structured trailer marker (§4.5); exact key/value spelling is a Phase A protocol implementation detail |
 | O3 | Deleted/unknown connector: terminal or another lifecycle class | **ACCEPTED (D11)**: separate terminal non-serving state `UnknownIdentity` (§5.1); recovery workflow not designed here |
 | O4 | Legacy mode for a new connector with an old controller | **NOT APPLICABLE (UNRELEASED)**: removed. The remaining question, whether to keep `AgentPolicy.authorization_acks` as a fail-closed assertion, is **RECOMMENDED, AWAITING APPROVAL** (keep, §4.6) |
-| O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **OPEN** (informed by reconnect-latency measurement) |
+| O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **ACCEPTED (D13, 2026-10-21)**: reset the backoff after a session receives an accepted ack; while not serving start at 1 s, ×2, cap 5 s, ±20 % jitter (`CONTROL_RECONNECT_BASE_MS` / `_MAX_MS` / `_JITTER_PCT`) |
 | O6 | Full health report vs lightweight authorization request at period P | **BLOCKED ON MEASUREMENT** |
-| O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **BLOCKED ON MEASUREMENT** |
-| O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **OPEN** (shield traffic must stop either way, §7 step 4) |
+| O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **ACCEPTED (D14, 2026-10-21)**: measured B p99 ≤ 79 ms / max 83 ms (Phase M); B budgeted at 1 s; **P = 4.5 s** (`AUTHZ_REQUEST_PERIOD_MS`, range 500–14000), tolerating two consecutive lost requests |
+| O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **ACCEPTED (D15, 2026-10-21)**: keep shield streams, relay attachment and client QUIC connections open but carry nothing (new streams refused, sessions cancelled); close the shield streams after 30 s in `Disabled` (`DISABLED_SHIELD_CLOSE_SECS`). To be checked live once a shield host is available |
 | O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **ACCEPTED (D12)**: no persistence; idle, don't exit |
 | O10 | Recovery after permanent revocation | **OPEN** (today: new identity only) |
 | O11 | Retention of `revoked_connectors`; client offline staleness bound | **OPEN** |
@@ -650,7 +653,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
-- **B2** needs the M results (O6/O7), plus O5 and O8.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; values in `connector/.env.example`, defaults in `connector/src/config.rs`). Still needs **O6** (full report vs lightweight request) and its own go-ahead with an acceptance list.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
 
