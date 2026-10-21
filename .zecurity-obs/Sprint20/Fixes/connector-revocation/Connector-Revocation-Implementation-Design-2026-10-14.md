@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 4, 2026-10-20) — Phase A done; Phase B1 IMPLEMENTED 2026-10-21 (`da5b12f`, unit-tested intermediate, not for live deployment before B2); other phases NOT AUTHORIZED
+status: PROPOSED (revision 5, 2026-10-21) — Phase A done; Phase B1 IMPLEMENTED 2026-10-21 (`da5b12f`, unit-tested intermediate, not for live deployment before B2); Phase M done; B2 decisions complete (D13–D16), B2 awaiting its acceptance list and go-ahead; other phases NOT AUTHORIZED
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -50,6 +50,17 @@ based_on:
 **Revision 4 (2026-10-20):**
 - O9 accepted (D12): `Revoked`/`UnknownIdentity` are **not persisted** across restart, and the connector **idles** in a terminal state (stays alive with the data plane closed and the reconnect loop stopped) instead of exiting. Reason for idle: the Docker deployment uses `restart: unless-stopped` (`connector/docker-compose.yml:17`), which restarts after any exit, including exit 0; the systemd unit uses `Restart=on-failure` (`connector/systemd/zecurity-connector.service:24`). Exiting would cause a restart loop against the controller under Docker. Reason for no persistence: safety doesn't depend on it (§5.2), and a persisted flag would need clearing rules on re-enrollment (O10, undesigned).
 - §5.2, §7, §16 and §17 updated. Phase B1 acceptance list: [B1 acceptance](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md).
+
+**Revision 5 (2026-10-21):**
+- Phase M measured B, the controller cost per request, renewal and reconnect latency ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)).
+- Accepted from those results:
+  - **O5 → D13:** backoff reset after an accepted ack; 1 s → 5 s cap, ±20 % jitter while not serving;
+  - **O7 → D14:** P = 4.5 s, B budget 1 s;
+  - **O8 → D15:** `Disabled` keeps connections but carries nothing; shield streams close after 30 s;
+  - **O6 → D16:** full health report every P now; a lightweight authorization request is a later improvement.
+- The timing values are fixed at build time (`connector/.env` → `connector/build.rs` → `crate::authz_timing`); they are not runtime configuration.
+- B2 live-lab substitutions: shield host **udaya**, relay **manojinkyank**, client with one resource or a `down`/`up` per resource change (§15).
+- §6.3, §6.6, §7, §13, §16 and §17 updated.
 
 Raw evidence isn't repeated. See:
 - [Feasibility report](Connector-Revocation-Enforcement-Feasibility-2026-10-14.md) ("FR");
@@ -366,7 +377,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 - With `D = sent[k] + H`, the ack for request k+1 must be processed before `sent[k] + H`. With period H, that requires zero latency, so **every** cycle would miss.
 - The controller acks nothing today.
 
-### 6.3 Required scheduling (design; values BLOCKED ON MEASUREMENT)
+### 6.3 Required scheduling (design; values ACCEPTED: D13, D14, D16)
 
 - **Quantities:**
   - `H`: maximum freshness (accepted);
@@ -383,14 +394,14 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
   - **Guaranteed:** no new stream is admitted at or after D; no ack processed at or after D is accepted.
   - **Not guaranteed:** that already-established sessions are cancelled exactly at D. Cancellation runs when the supervisor's timer task is polled, so a starved runtime delays it by the starvation time. A late send can only cause an earlier fail-closed, never a later one.
   - This residual risk is stated, not hidden.
-- **Reconnect backoff** doesn't affect D. A 60 s maximum backoff delays recovery from `Disabled` (O5, OPEN).
+- **Reconnect backoff** doesn't affect D. Today's 60 s cap, which never resets after a successful reconnect, delays recovery from `Disabled` by up to 60 s (measured in Phase M R3). **ACCEPTED (D13):** reset after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter.
 - **If measurements show B can't fit within H**, fail-closed stays mandatory. H isn't extended and no grace is added. The outcome is either a change elsewhere (e.g. faster controller path, O6) or reduced availability, recorded explicitly.
 
 ### 6.4 Trade-offs (recorded)
 
 | Trade-off | Detail |
 |---|---|
-| A. Controller load | P < H − B means more reports per connector than today's one per 15 s. Each full report runs the guarded UPDATE, notifications, the ReEnroll check, the relay-placement upsert and the ACL compare (`handleConnectorHealth:749-840`). A lighter authorization-only request (guarded SELECT) is an alternative; **O6, BLOCKED ON MEASUREMENT** |
+| A. Controller load | P < H − B means more reports per connector than today's one per 15 s. Each full report runs the guarded UPDATE, notifications, the ReEnroll check, the relay-placement upsert and the ACL compare (`handleConnectorHealth:749-840`). Measured about 3 ms per report, 2.3 ms of it DB (Phase M). **D16:** keep the full report at P; a lighter authorization-only request is a later improvement |
 | B. Scheduler stalls | the starvation limit above; new-traffic refusal is stall-proof, session cancellation is not |
 | C. Budget doesn't fit | fail closed stays mandatory; no extension |
 
@@ -398,7 +409,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 
 The ack is sent only after any required ACL push for that heartbeat (per the task). So ACL compile and push latency are part of B, and a cache-miss compile (`GetOrCompile`) lies on the ack path. The earlier "ack before ACL" idea is withdrawn.
 
-### 6.6 Measurements required before the schedule is implemented (BLOCKED ON MEASUREMENT)
+### 6.6 Measurements required before the schedule is implemented (DONE 2026-10-21: [Phase M results](Connector-Revocation-PhaseM-Results-2026-10-21.md); WAN emulation R4 not run)
 
 | Measure | Where |
 |---|---|
@@ -412,7 +423,7 @@ The ack is sent only after any required ACL push for that heartbeat (per the tas
 | Runtime scheduling lag under data-plane load | connector (timer drift / tokio metrics) |
 | Controller DB load at the candidate P per connector × expected connector count | controller + DB |
 
-B, P and the O6 choice are recorded with these results before phase B2 starts.
+B, P and the O6 choice are recorded (D14, D16) with these results. The measured B was p99 ≤ 79 ms and max 83 ms on the LAN. Its tail is the renewal awaited inline in the connector's Control-stream loop (61–80 ms), plus controller DB spikes (≤ 41 ms).
 
 ## 7. Fail-closed (D5 ACCEPTED): what `Disabled`, `Revoked` and `UnknownIdentity` stop
 
@@ -423,13 +434,13 @@ Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE
 | 1. Publish the closed state atomically | none | a supervisor-owned `watch`/atomic `{state, D}` | readers must see state and D together (one snapshot) | T2, T9 |
 | 2. Refuse new client connections and streams at the transport level | single funnel `device_tunnel::handle_stream:151` for QUIC, TLS and relay-routed; `quinn::Incoming::refuse()` (`incoming.rs:44`) | funnel check of the state + `now < D`. Refuse by **stream reset / no `TunnelResponse`** (the client treats ConnectionReset as a transport failure → next connector + resync). Never send `ok:false`, which blocks fallback (`net_stack.rs:1166-1167`). Refuse new QUIC connections; drop new TLS sockets | a stream accepted just before step 1 and registered after step 3 → step 3 must re-check after registration (mirror the existing post-register `is_allowed` re-check, `device_tunnel.rs:252-258`) | T9, T2 |
 | 3. Cancel all connector-routed and shield-routed sessions | `SessionRegistry` tokens on every session; both copy paths `select!` on them | `cancel_every_session()` (only per-key `cancel_all` exists) | the race above; cancellation timing depends on scheduling (§6.3) | T9 |
-| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **Terminal states: close.** **`Disabled`: close or disable is OPEN (O8)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended in the terminal states; possibly disruptive for short `Disabled` periods) | T13 |
+| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **Terminal states: close.** **`Disabled`: keep the streams open, carrying nothing, and close them after 30 s in `Disabled` (ACCEPTED D15)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended in the terminal states; possibly disruptive for short `Disabled` periods) | T13 |
 | 5. Stop stale ACL/cache state reopening access | `PolicyCache` (memory only; starts `None`) | admission keyed on state + D, not cache presence; keep applying ACLs while closed (so re-enable starts with the ACL delivered just before the ack, FIFO); `PolicyCache::clear()` in the terminal states | an ACL arriving while closed must not open anything (it can't: admission ignores it) | T6, T7 |
 | 6. Stop retries and listeners re-enabling serving | `run_control_stream` reconnect loop; listener accept loops | they only **read** the state; only the supervisor transitions; the reconnect loop stops in either terminal state; restart starts in `Starting` | none if writes are confined to the supervisor | T6, T7 |
 
 **Other items:**
-- Relay attachment: relay-routed streams are already covered by steps 2–3. Detaching from relays is **OPEN (O8)**.
-- Tracking and closing existing client QUIC connections is **OPEN (O8)**.
+- Relay attachment: relay-routed streams are already covered by steps 2–3. **`Disabled` stays attached** (ACCEPTED D15).
+- Existing client QUIC connections **stay open in `Disabled`**; new streams are reset and sessions cancelled (ACCEPTED D15). The terminal states close them.
 - `Revoked`/`UnknownIdentity` are not persisted across restart, and the process idles rather than exits (ACCEPTED D12 = O9). Safety doesn't depend on persistence: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
 
 **Failure handling:** a step that fails is logged and doesn't revert step 1. Fail-closed never depends on later steps succeeding.
@@ -525,7 +536,7 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 | **A** Controller contract | §17 gate | `proto/connector/v1/connector.proto`; `controller/internal/connector/control_stream.go` (`handleConnectorHealth`, `Control`, `activateStream`, `agentPolicyMessage`, exported registry accessor); `graph/resolvers/connector.resolvers.go`; policy compiler/store (revoked list); `proto/client/v1/client.proto` | ack rules §4.3; `ConnectorRevoked` push; `revoked`/`unknown` trailer markers (D10); the four §4.5 corrections (`Scan` error → `Unavailable`; follow-up classification in health and activation); `AgentPolicy` always sent; revoked-connector list compiled | T5, T8, T19–T22, T14 | new controller suite tests; existing suite green | O2, O3 **resolved** (D10, D11); remaining gate items in §17 |
 | **M** Measurements | A in the lab | instrumentation only | §6.6 | T17 | B, P, O6 recorded | — |
 | **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 resolved (D12); B1-Q1 = (a) |
-| **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | O5, O8 |
+| **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | none: O5, O6, O7, O8 resolved (D13–D16) |
 | **C** Client | A | `client/src/daemon.rs`, `transport.rs`, `net_stack.rs`, `tunnel_pool.rs` | §8 | T11 | unit + live | O11 |
 | **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + **live relay lab (BLOCKED today)** | O12 |
 | **E** Shield pruning | B2, C | `proto/shield/v1/shield.proto`, `connector/src/agent_server.rs`, `shield/src/control_stream.rs` | §10 | T13 | live (two connectors) | O13 |
@@ -591,6 +602,20 @@ Mutation checks (disable each enforcement line; the matching test must fail) fol
 
 Rollback = redeploy the previous coordinated build. Mixed pairings fail closed by design (T14).
 
+**B2 live lab (user decision, 2026-10-21):**
+
+| Role | Host | Notes |
+|---|---|---|
+| Controller | this PC (192.168.1.164) | private binary path; other agents must not restart it during runs |
+| Connector | inkyank (192.168.1.75) | update timer disabled |
+| **Shield** | **udaya (192.168.1.37)**, replacing nika | a shield has to be installed and enrolled there (sudo on udaya); T13 and the D15 30 s shield-close check run here |
+| **Relay** | **manojinkyank (192.168.1.49)** | relay-path rows of T9/T12 run here instead of being unit-only |
+| Client | this PC | one resource, or `zecurity-client down` / `up` after each resource change |
+
+**Why one resource or a `down`/`up` cycle:** the client's resource hot-apply (`167ffa5`) admits only one new resource IP. The cap is `smoltcp::config::IFACE_MAX_ADDR_COUNT` = 2 minus 1 reserved address (Phase M results, "Lab finding"). This is a client issue, outside B2.
+
+Access to the lab hosts is through the user's Orca SSH terminals. sudo on each host needs the user's password.
+
 ## 16. Decisions
 
 ### Accepted
@@ -612,6 +637,7 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D13 (= O5) | Control-stream reconnect backoff resets after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter; fixed at build time (`connector/.env` → `build.rs` → `authz_timing.rs`) |
 | D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; fixed at build time, allowed 500–14000 ms |
 | D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; fixed at build time |
+| D16 (= O6) | The authorization request every P is the full health report (no protocol or controller change). A lightweight request is a later improvement |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -622,7 +648,7 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | O3 | Deleted/unknown connector: terminal or another lifecycle class | **ACCEPTED (D11)**: separate terminal non-serving state `UnknownIdentity` (§5.1); recovery workflow not designed here |
 | O4 | Legacy mode for a new connector with an old controller | **NOT APPLICABLE (UNRELEASED)**: removed. The remaining question, whether to keep `AgentPolicy.authorization_acks` as a fail-closed assertion, is **RECOMMENDED, AWAITING APPROVAL** (keep, §4.6) |
 | O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **ACCEPTED (D13, 2026-10-21)**: reset the backoff after a session receives an accepted ack; while not serving start at 1 s, ×2, cap 5 s, ±20 % jitter (`CONTROL_RECONNECT_BASE_MS` / `_MAX_MS` / `_JITTER_PCT`) |
-| O6 | Full health report vs lightweight authorization request at period P | **BLOCKED ON MEASUREMENT** |
+| O6 | Full health report vs lightweight authorization request at period P | **ACCEPTED (D16, 2026-10-21)**: (a) full health report every P now. (b) a lightweight request (guarded UPDATE only, about 25–30 % cheaper per Phase M) is a **later improvement**, not part of B2 |
 | O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **ACCEPTED (D14, 2026-10-21)**: measured B p99 ≤ 79 ms / max 83 ms (Phase M); B budgeted at 1 s; **P = 4.5 s** (`AUTHZ_REQUEST_PERIOD_MS`, range 500–14000), tolerating two consecutive lost requests |
 | O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **ACCEPTED (D15, 2026-10-21)**: keep shield streams, relay attachment and client QUIC connections open but carry nothing (new streams refused, sessions cancelled); close the shield streams after 30 s in `Disabled` (`DISABLED_SHIELD_CLOSE_SECS`). To be checked live once a shield host is available |
 | O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **ACCEPTED (D12)**: no persistence; idle, don't exit |
@@ -641,9 +667,9 @@ Release requirement (not a decision): the new development stack's protocol behav
 | Gate item | Status |
 |---|---|
 | Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker ACCEPTED (D10 = O2) |
-| Exact deadline and scheduling semantics | ACCEPTED (D1, O1); B/P BLOCKED ON MEASUREMENT (O7); request type O6 |
+| Exact deadline and scheduling semantics | ACCEPTED (D1, O1, D14 = O7, D16 = O6) |
 | Terminal vs recoverable states | ACCEPTED (D4, D11 = O3, D12 = O9) |
-| Complete fail-closed definition | ACCEPTED (D5, §7); O8 OPEN |
+| Complete fail-closed definition | ACCEPTED (D5, §7, D15 = O8) |
 | Enforcement ownership: client, relay, shield | directions ACCEPTED (D6); O11–O13 OPEN |
 | Rollout sequence | ACCEPTED (D8, §15) |
 | Schema changes needing approval | O14 BLOCKED ON SCHEMA APPROVAL; none authorized |
@@ -653,7 +679,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
-- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). Still needs **O6** (full report vs lightweight request) and its own go-ahead with an acceptance list.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report). **Remaining before B2:** formal approval of the Phase A protocol details (§4.2 field numbers, §4.4 rules, §4.6 capability flag; built and tested in A/B1); whether the renewal head-of-line fix is in B2's scope; and B2's own go-ahead with an acceptance list. Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
 
