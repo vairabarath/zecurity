@@ -2780,7 +2780,7 @@ serves on `127.0.0.1:9102`.
   - three Phase A tests tightened to the B1 behaviour.
 - **Record:** `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseB1-Implementation-2026-10-21.md`.
 
-**For the user to confirm:** `lost_at` follows design §5.2 (unchanged on `Disabled → Recovering`), not the §4.4 wording (record §2.3).
+**Confirmed by the user (2026-10-21):** `lost_at` follows design §5.2 (not reset on reconnect); §4.4 wording corrected.
 
 **What's next:**
 - **Do not deploy a B1 build to the lab.**

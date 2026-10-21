@@ -173,7 +173,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 
 The connector records `sent[seq] = Instant` when it **enqueues** the report (monotonic `tokio::time::Instant`; enqueue precedes the wire send, so the anchor is conservative). Seqs are process-global, start at 1 and never reset per stream.
 
-Let `D` be the current deadline (undefined in `Starting` and in the terminal states), and `lost_at` the instant authorization was last lost (process start, entry to `Disabled`, or entry to `Recovering`).
+Let `D` be the current deadline (undefined in `Starting` and in the terminal states), and `lost_at` the instant authorization was last lost (process start or entry to `Disabled`; **not** reset on `Disabled → Recovering`, per §5.2 — confirmed by the user 2026-10-21).
 
 Ack k is **accepted** only if **all** of these hold:
 
