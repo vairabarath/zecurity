@@ -2275,6 +2275,69 @@ mod renewal_switch_tests {
         }
     }
 
+    /// AB2-2 (T2, T27), transport-failure half: the stream drops and no
+    /// reconnect succeeds → `ServingDisconnected` stays open until D, then
+    /// at exactly D the state is `Disabled` (lost_at = D) and every session
+    /// is cancelled.
+    #[tokio::test(start_paused = true)]
+    async fn dropped_stream_closes_exactly_at_the_deadline() {
+        let mut e = env();
+        let authz = e.authz.clone();
+        let registry = e.registry.clone();
+        let _expiry = crate::authorization::spawn_expiry(authz.clone());
+        let _enforcer = crate::fail_closed::spawn(
+            &authz.lock().gate(),
+            crate::fail_closed::FailClosed {
+                sessions: registry.clone(),
+                shields: e.shield_registry.clone(),
+                policy: e.policy_cache.clone(),
+                disabled_shield_close: Duration::from_secs(30),
+            },
+        );
+        let (session_token, _guard) = registry.register(
+            ("spiffe://c/1".into(), "res-a".into()),
+            crate::session_registry::SessionTransport::Quic,
+        );
+        let (s1, peer) = fake_stream_stamped(far_future(), &authz);
+        let ack = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (acker, _) = spawn_acker(peer, Duration::from_millis(100), ack);
+        let gate = authz.lock().gate();
+        // First attempt runs the session on s1; every later one hangs (the
+        // controller is unreachable).
+        let mut attempt = SessionAttempt {
+            e: &mut e,
+            streams: vec![s1].into(),
+        };
+        let driver = async {
+            wait_for("serving", || gate.admits_now()).await;
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            // Transport failure: the controller side disappears.
+            acker.abort();
+            wait_for("stream lost", || {
+                authz.lock().state() == ServingState::ServingDisconnected
+            })
+            .await;
+            let d = authz.lock().deadline().expect("ServingDisconnected keeps D");
+            assert!(gate.admits_now(), "ServingDisconnected stays open until D");
+            tokio::time::sleep_until(d - Duration::from_millis(1)).await;
+            assert!(gate.admits_now(), "still open 1 ms before D");
+            assert!(!session_token.is_cancelled());
+            tokio::time::sleep_until(d).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(Instant::now(), d, "checked at the instant D");
+            assert!(!gate.admits_now(), "refused at D");
+            assert!(session_token.is_cancelled(), "sessions cancelled at D");
+            assert_eq!(authz.lock().state(), ServingState::Disabled);
+            assert_eq!(authz.lock().lost_at(), Some(d));
+        };
+        tokio::select! {
+            never = reconnect_loop(&mut attempt, &authz, RECONNECT_TIMING) => match never {},
+            _ = driver => {}
+        }
+    }
+
     /// AB2-3 (§6.3): after a stall the schedule resumes with one request and
     /// then the normal period — never a burst of catch-up requests.
     #[tokio::test(start_paused = true)]

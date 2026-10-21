@@ -565,16 +565,27 @@ pub fn observe_controller_msg(
         }
         Some(CBody::AuthorizationAck(a)) => {
             let seq = a.heartbeat_seq;
-            let result = tracker.lock().on_ack(seq, stream.capable, Instant::now());
+            let now = Instant::now();
+            let (sent_at, result) = {
+                let mut t = tracker.lock();
+                let sent_at = t.sent_at(seq);
+                (sent_at, t.on_ack(seq, stream.capable, now))
+            };
+            // Transport send → ack processed (≈ B; -1 = no such request).
+            let since_send_us = sent_at
+                .map(|s| now.saturating_duration_since(s).as_micros() as i64)
+                .unwrap_or(-1);
             match result {
                 Ok(()) => info!(
                     authz_event = "ack_accepted",
                     heartbeat_seq = seq,
+                    since_send_us,
                     "AuthorizationAck accepted"
                 ),
                 Err(reason) => warn!(
                     authz_event = "ack_rejected",
                     heartbeat_seq = seq,
+                    since_send_us,
                     reason = %reason,
                     "AuthorizationAck rejected"
                 ),
