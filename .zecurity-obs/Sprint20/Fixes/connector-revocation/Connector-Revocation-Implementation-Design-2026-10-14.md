@@ -58,6 +58,7 @@ based_on:
   - **O7 → D14:** P = 4.5 s, B budget 1 s;
   - **O8 → D15:** `Disabled` keeps connections but carries nothing; shield streams close after 30 s;
   - **O6 → D16:** full health report every P now; a lightweight authorization request is a later improvement.
+- D17: the Phase A contract details (§4.2, §4.4, §4.6) are approved as built. D18: the renewal head-of-line fix is in B2's scope.
 - The timing values are fixed at build time (`connector/.env` → `connector/build.rs` → `crate::authz_timing`); they are not runtime configuration.
 - B2 live-lab substitutions: shield host **udaya**, relay **manojinkyank**, client with one resource or a `down`/`up` per resource change (§15).
 - §6.3, §6.6, §7, §13, §16 and §17 updated.
@@ -158,7 +159,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 - **The `'deleted'` literal never matches**: `connectors.status` has no such value.
 - **Ordering.** FIFO per stream: a message enqueued after `pushACLSnapshot` (`:837`) is delivered after that ACL.
 
-### 4.2 Contract (D2 ACCEPTED direction; field details RECOMMENDED, AWAITING APPROVAL)
+### 4.2 Contract (D2 ACCEPTED direction; field details ACCEPTED D17)
 
 **Messages (additive; all numbers free at `38e38c6`):**
 - `ConnectorHealthReport.heartbeat_seq = 9` (uint64; ≥ 1 for every authorization-bearing report);
@@ -242,7 +243,7 @@ On acceptance: `D = sent[k] + H` (monotonic; it can only increase because k > hi
 
 **Rules:** only `ConnectorRevoked` or the `revoked` marker enters `Revoked`; only the `unknown` marker enters `UnknownIdentity`; an unmarked `PermissionDenied`/`NotFound` is never terminal; **a DB failure is never converted into an unknown or revoked result.**
 
-### 4.6 Capability flag: still useful? (RECOMMENDED, AWAITING APPROVAL)
+### 4.6 Capability flag: still useful? (ACCEPTED D17: keep it as a fail-closed assertion)
 
 **Without the flag**, a connector paired with a controller lacking the contract never receives acks. It stays `Starting`/`Disabled`, which is already fail-closed. So the flag is **not needed for security**.
 
@@ -638,6 +639,8 @@ Access to the lab hosts is through the user's Orca SSH terminals. sudo on each h
 | D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; fixed at build time, allowed 500–14000 ms |
 | D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; fixed at build time |
 | D16 (= O6) | The authorization request every P is the full health report (no protocol or controller change). A lightweight request is a later improvement |
+| D17 | The Phase A contract details are approved as built: field numbers (§4.2), ack acceptance rules (§4.4, with `lost_at` per §5.2) and the `AgentPolicy.authorization_acks` capability flag kept as a fail-closed assertion (§4.6) |
+| D18 | B2 includes the renewal head-of-line fix: a certificate renewal must not delay processing of `AuthorizationAck` or `ConnectorRevoked` on the current Control stream (Phase M: all 61–80 ms ack tails) |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -666,7 +669,7 @@ Release requirement (not a decision): the new development stack's protocol behav
 
 | Gate item | Status |
 |---|---|
-| Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker ACCEPTED (D10 = O2) |
+| Final heartbeat acknowledgement contract | ACCEPTED: direction (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) (D17); marker (D10 = O2) |
 | Exact deadline and scheduling semantics | ACCEPTED (D1, O1, D14 = O7, D16 = O6) |
 | Terminal vs recoverable states | ACCEPTED (D4, D11 = O3, D12 = O9) |
 | Complete fail-closed definition | ACCEPTED (D5, §7, D15 = O8) |
@@ -679,7 +682,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
-- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report). **Remaining before B2:** formal approval of the Phase A protocol details (§4.2 field numbers, §4.4 rules, §4.6 capability flag; built and tested in A/B1); whether the renewal head-of-line fix is in B2's scope; and B2's own go-ahead with an acceptance list. Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). **Remaining before B2:** sign-off of the [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) and the go-ahead. Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
 
