@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 5, 2026-10-21) — Phase A done; Phase B1 IMPLEMENTED 2026-10-21 (`da5b12f`, unit-tested intermediate, not for live deployment before B2); Phase M done; B2 decisions complete (D13–D16), B2 awaiting its acceptance list and go-ahead; other phases NOT AUTHORIZED
+status: PROPOSED (revision 5, 2026-10-21) — Phase A done; Phase B1 IMPLEMENTED 2026-10-21 (`da5b12f`, unit-tested intermediate, not for live deployment before B2); Phase M done; Phase B2 unit level IMPLEMENTED 2026-10-21 (`76a0130`, `cd03540`), live acceptance pending; other phases NOT AUTHORIZED
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -682,7 +682,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
-- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). **Remaining before B2:** sign-off of the [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) and the go-ahead. Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) signed off; **B2 unit level implemented 2026-10-21** ([record](Connector-Revocation-PhaseB2-Implementation-2026-10-21.md)); live L-1…L-8 pending (udaya shield, manojinkyank relay). Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
 

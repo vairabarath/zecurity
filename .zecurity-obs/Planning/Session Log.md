@@ -2785,3 +2785,34 @@ serves on `127.0.0.1:9102`.
 **What's next:**
 - **Do not deploy a B1 build to the lab.**
 - Phase M measurements on the Phase A lab build, then B2 (schedule P, session cancellation and shield close, paused-clock tests). B2 needs O5, O6/O7 and O8.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation: Phase M, decisions D13–D18, Phase B2 (unit level)
+
+**What was done:**
+- **Phase M** on a Phase A base (`measure/phase-m` `08ad699`, not merged): R1 idle 1 h, R2 under about 230 Mbit/s for 30 min, R3 five controller restarts.
+  - B p50 about 4 ms, p99 ≤ 79 ms.
+  - Tail = renewal awaited inline (61–80 ms) plus controller DB spikes.
+  - Backoff ratchet confirmed (16 → 60 s).
+  - Results: `Connector-Revocation-PhaseM-Results-2026-10-21.md`.
+- **Decisions (user):**
+  - D13 backoff 1 → 5 s, ±20 %, reset after an ack;
+  - D14 P = 4.5 s;
+  - D15 `Disabled` keeps connections, shield close after 30 s;
+  - D16 full report every P (lightweight request later);
+  - D17 Phase A contract details approved;
+  - D18 renewal head-of-line fix in B2.
+  - Timing values are build-time (`connector/.env` → `build.rs` → `crate::authz_timing`).
+- **B2 unit level** (`76a0130`, `cd03540`): request schedule, fail-closed enforcer, terminal QUIC close, D13 backoff, concurrent renewal. 233 lib tests; 15/15 mutants killed.
+- **Lab findings:**
+  - client hot-apply admits only one new resource IP (smoltcp `IFACE_MAX_ADDR_COUNT = 2`);
+  - another agent overwrote the shared `/tmp/lab` controller binary.
+
+**State:** branch `feat/sprint20-m1-phase2` is 10+ commits ahead of origin. **Nothing pushed (user rule).** The lab still runs the Phase M measurement build (controller on this PC, `pm-conn` on inkyank).
+
+**What's next:** B2 live acceptance:
+- coordinated B2 build;
+- shield on udaya (sudo), relay on manojinkyank (sudo);
+- `zecurity-client login`, because the session expired;
+- one resource, or `down`/`up` after each change.
