@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,7 +17,8 @@ use crate::session_registry::SessionRegistry;
 
 use crate::agent_server::ShieldRegistry;
 use crate::authorization::{
-    observe_controller_msg, observe_status, stamp_sends, AckTracker, SharedAckTracker, StreamAuthz,
+    observe_controller_msg, observe_status, stamp_sends, SharedAckTracker, StreamAuthz,
+    TerminalSignal,
 };
 use crate::config::ConnectorConfig;
 use crate::controller_client::{
@@ -40,23 +42,144 @@ const BACKOFF_INITIAL_SECS: u64 = 2;
 const BACKOFF_MAX_SECS: u64 = 60;
 const HEALTH_INTERVAL_SECS: u64 = 15;
 /// H — maximum authorization freshness (design D1): one heartbeat interval.
-/// Phase A uses it only to reject acknowledgements for requests already
-/// older than H; the deadline itself is Phase B.
-const AUTHORIZATION_FRESHNESS: Duration = Duration::from_secs(HEALTH_INTERVAL_SECS);
+/// The deadline is D = sent[k] + H of the latest accepted acknowledgement.
+pub const AUTHORIZATION_FRESHNESS: Duration = Duration::from_secs(HEALTH_INTERVAL_SECS);
+/// How often a connector parked in a terminal state repeats its log line.
+const TERMINAL_LOG_INTERVAL: Duration = Duration::from_secs(300);
 const DISCOVERY_FLUSH_SECS: u64 = 5;
 
-/// Outer reconnect loop. Blocks indefinitely — run via tokio::spawn or await directly from main.
-pub async fn run_control_stream(
-    cfg: &ConnectorConfig,
-    state: &EnrollmentState,
+/// Delays of the outer reconnect loop.
+#[derive(Debug, Clone, Copy)]
+struct ReconnectTiming {
+    /// After a clean end of a session.
+    clean: Duration,
+    backoff_initial: Duration,
+    backoff_max: Duration,
+    /// Repeat interval of the terminal-state log line.
+    terminal_log: Duration,
+}
+
+const RECONNECT_TIMING: ReconnectTiming = ReconnectTiming {
+    clean: Duration::from_secs(1),
+    backoff_initial: Duration::from_secs(BACKOFF_INITIAL_SECS),
+    backoff_max: Duration::from_secs(BACKOFF_MAX_SECS),
+    terminal_log: TERMINAL_LOG_INTERVAL,
+};
+
+/// One pass of the outer loop: open a Control stream and run its session to
+/// the end. Production is [`LiveAttempt`]; tests script the outcomes.
+trait Attempt {
+    fn attempt(&mut self) -> impl Future<Output = Result<()>>;
+}
+
+/// Outer reconnect loop. Every end of an attempt is a stream end for the
+/// serving state. In `Revoked`/`UnknownIdentity` the loop stops for good:
+/// no reconnects, health reports or renewals. It never returns — the process
+/// stays alive with the data plane closed (design D12), because an exit
+/// would be restarted by the service manager.
+async fn reconnect_loop<A: Attempt>(
+    attempt: &mut A,
+    authz: &SharedAckTracker,
+    timing: ReconnectTiming,
+) -> Infallible {
+    let mut backoff = timing.backoff_initial;
+    loop {
+        let result = attempt.attempt().await;
+        authz.lock().stream_down(Instant::now());
+        let terminal = authz.lock().terminal();
+        if let Some(signal) = terminal {
+            return park_terminal(signal, timing.terminal_log).await;
+        }
+        match result {
+            Ok(()) => {
+                backoff = timing.backoff_initial;
+                info!("control stream closed cleanly, reconnecting");
+                tokio::time::sleep(timing.clean).await;
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    backoff_secs = backoff.as_secs(),
+                    "control stream error, reconnecting with backoff"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(timing.backoff_max);
+            }
+        }
+    }
+}
+
+/// Idle in a terminal state for the rest of the process lifetime.
+async fn park_terminal(signal: TerminalSignal, every: Duration) -> Infallible {
+    loop {
+        error!(
+            authz_event = "terminal_idle",
+            terminal = ?signal,
+            "connector is in a terminal state — data plane closed, reconnect loop stopped; the process stays up. Recovery needs a new, explicitly authorized enrollment"
+        );
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// Production [`Attempt`]: everything `run_once` needs, for the process
+/// lifetime.
+struct LiveAttempt<'a> {
+    cfg: &'a ConnectorConfig,
+    state: EnrollmentState,
     shield_registry: ShieldRegistry,
-    mut ack_rx: mpsc::Receiver<(String, ResourceAck)>,
-    mut log_rx: mpsc::Receiver<crate::ControlMessage>,
+    ack_rx: mpsc::Receiver<(String, ResourceAck)>,
+    log_rx: mpsc::Receiver<crate::ControlMessage>,
+    lan_addr: String,
+    hostname: String,
+    version: String,
+    public_ip: String,
     policy_cache: Arc<PolicyCache>,
     registry: Arc<SessionRegistry>,
     relay_attachment_slot: RelayAttachmentSlot,
     relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
     certs: Arc<CertHolder>,
+    authz: SharedAckTracker,
+}
+
+impl Attempt for LiveAttempt<'_> {
+    async fn attempt(&mut self) -> Result<()> {
+        run_once(
+            self.cfg,
+            &mut self.state,
+            &self.shield_registry,
+            &mut self.ack_rx,
+            &mut self.log_rx,
+            &self.lan_addr,
+            &self.hostname,
+            &self.version,
+            &self.public_ip,
+            &self.policy_cache,
+            &self.registry,
+            &self.relay_attachment_slot,
+            &self.relay_list_tx,
+            &self.certs,
+            &self.authz,
+        )
+        .await
+    }
+}
+
+/// Outer reconnect loop. Blocks indefinitely — run via tokio::spawn or await directly from main.
+/// `authz` is the process-global tracker created in `main`, whose gate the
+/// data-plane entry paths already hold.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_control_stream(
+    cfg: &ConnectorConfig,
+    state: &EnrollmentState,
+    shield_registry: ShieldRegistry,
+    ack_rx: mpsc::Receiver<(String, ResourceAck)>,
+    log_rx: mpsc::Receiver<crate::ControlMessage>,
+    policy_cache: Arc<PolicyCache>,
+    registry: Arc<SessionRegistry>,
+    relay_attachment_slot: RelayAttachmentSlot,
+    relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
+    certs: Arc<CertHolder>,
+    authz: SharedAckTracker,
 ) -> Result<()> {
     let hostname = util::read_hostname();
     let public_ip = fetch_public_ip().await;
@@ -77,48 +200,24 @@ pub async fn run_control_stream(
         );
     }
 
-    let mut current_state = state.clone();
-    let mut backoff_secs = BACKOFF_INITIAL_SECS;
-    // Process-global authorization bookkeeping: survives reconnects and
-    // renewal switches, so heartbeat sequence numbers never reset.
-    let authz = AckTracker::shared(AUTHORIZATION_FRESHNESS);
-
-    loop {
-        match run_once(
-            cfg,
-            &mut current_state,
-            &shield_registry,
-            &mut ack_rx,
-            &mut log_rx,
-            &lan_addr,
-            &hostname,
-            &version,
-            &public_ip,
-            &policy_cache,
-            &registry,
-            &relay_attachment_slot,
-            &relay_list_tx,
-            &certs,
-            &authz,
-        )
-        .await
-        {
-            Ok(()) => {
-                backoff_secs = BACKOFF_INITIAL_SECS;
-                info!("control stream closed cleanly, reconnecting");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    backoff_secs = backoff_secs,
-                    "control stream error, reconnecting with backoff"
-                );
-                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
-                backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
-            }
-        }
-    }
+    let mut attempt = LiveAttempt {
+        cfg,
+        state: state.clone(),
+        shield_registry,
+        ack_rx,
+        log_rx,
+        lan_addr,
+        hostname,
+        version,
+        public_ip,
+        policy_cache,
+        registry,
+        relay_attachment_slot,
+        relay_list_tx,
+        certs,
+        authz: authz.clone(),
+    };
+    match reconnect_loop(&mut attempt, &authz, RECONNECT_TIMING).await {}
 }
 
 /// Send a message on the outbound control stream.
@@ -280,8 +379,8 @@ async fn open_stream(
 
 /// A Control() call refused by the controller. The refusal may carry the
 /// authoritative revoked/unknown marker (a trailers-only response); it is
-/// classified on the marker only, then surfaced as an ordinary open error
-/// (Phase A takes no serving action on it).
+/// classified on the marker only (a marker moves the tracker to its terminal
+/// state), then surfaced as an ordinary open error.
 fn open_refused(status: tonic::Status, authz: &SharedAckTracker) -> anyhow::Error {
     observe_status(&status, authz, "control_open");
     anyhow::Error::new(status).context("failed to open Control stream")
@@ -496,6 +595,11 @@ async fn run_session<O: StreamOps>(
                     }
                     Some(Ok(msg)) => {
                         observe_controller_msg(&msg, &mut stream.authz, authz);
+                        // Terminal: end the session now — no further health
+                        // reports, renewals or message handling (§7 step 6).
+                        if authz.lock().terminal().is_some() {
+                            return Ok(());
+                        }
                         match handle_controller_msg(msg, shield_registry, &stream.out_tx, policy_cache, registry, relay_list_tx).await {
                             MsgAction::Continue => {}
                             MsgAction::Fatal(e) => return Err(e),
@@ -542,6 +646,10 @@ async fn run_session<O: StreamOps>(
                         info!("switched to renewed Control stream — old stream dropped");
                     }
                     Err(e) => {
+                        // A replacement refused with a terminal marker.
+                        if authz.lock().terminal().is_some() {
+                            return Err(e);
+                        }
                         if let Some(p) = pending.as_mut() {
                             warn!(
                                 error = %e,
@@ -743,6 +851,7 @@ mod renewal_switch_tests {
     //! initial-health step (`establish_stream`) are the production code.
 
     use super::*;
+    use crate::authorization::{AckTracker, ServingState};
     use crate::client::v1::AclSnapshot;
     use crate::shield_proto::{Ping, ReEnrollSignal};
     use parking_lot::Mutex;
@@ -899,6 +1008,7 @@ mod renewal_switch_tests {
                 crate::test_support::CONNECTOR_ID.to_string(),
                 shield_ack_tx,
                 policy_cache.clone(),
+                crate::authorization::AuthzGate::open_for_tests(),
             ),
             ack_tx,
             ack_rx,
@@ -1506,6 +1616,12 @@ mod renewal_switch_tests {
             new_peer.in_tx.send(Ok(authz_ack(s1))).await.unwrap();
             wait_for("ack accepted", || authz.lock().highest_accepted() == s1).await;
             assert_eq!(authz.lock().latest_accepted_sent_at(), Some(first_sent));
+            // B1 (AB1-13): the switch extends nothing — D is the ORIGINAL send
+            // time + H.
+            assert_eq!(
+                authz.lock().deadline(),
+                Some(first_sent + AUTHORIZATION_FRESHNESS)
+            );
 
             // A second ack for the same request (e.g. from the other stream) is
             // a duplicate: nothing changes.
@@ -1572,29 +1688,18 @@ mod renewal_switch_tests {
             _ = wait_for("replacement open in flight", || shared.lock().opens.len() == 1) => {}
         }
         old_peer.in_tx.send(Ok(revoked_event())).await.unwrap();
-        tokio::select! {
-            r = &mut session => panic!("session ended early: {r:?}"),
-            _ = wait_for("Revoked recorded", || {
-                authz.lock().terminal() == Some(crate::authorization::TerminalSignal::Revoked)
-            }) => {}
-        }
-        // The controller then ends the old stream with the revoked marker.
-        old_peer
-            .in_tx
-            .send(Err(marked_status(
-                tonic::Code::PermissionDenied,
-                Some("revoked"),
-            )))
-            .await
-            .unwrap();
+        // B1: the session ends on the event itself, without waiting for the
+        // controller's marker, and the pending replacement is abandoned.
         let r = tokio::time::timeout(WAIT, session)
             .await
-            .expect("session ends");
-        assert!(r.is_err());
+            .expect("session ends on ConnectorRevoked");
+        assert!(r.is_ok(), "{r:?}");
         assert_eq!(
             authz.lock().terminal(),
             Some(crate::authorization::TerminalSignal::Revoked)
         );
+        assert_eq!(authz.lock().state(), ServingState::Revoked);
+        assert_eq!(shared.lock().opens.len(), 1, "no further open attempts");
     }
 
     /// Revocation after the switch: delivered on the replacement stream the
@@ -1607,19 +1712,26 @@ mod renewal_switch_tests {
         let (new, mut new_peer) = fake_stream(far_future());
         let (mut ops, _) = fake_ops_with(vec![Script::Ok(new)], true, &old, authz.clone());
         let session = run_session(into_stream(old), &mut ops, io(&mut e));
+        tokio::pin!(session);
         let driver = async {
             old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
             let _initial = recv(&mut new_peer.out_rx).await; // switched
             new_peer.in_tx.send(Ok(revoked_event())).await.unwrap();
-            wait_for("Revoked recorded", || {
-                authz.lock().terminal() == Some(crate::authorization::TerminalSignal::Revoked)
-            })
-            .await;
         };
         tokio::select! {
-            r = session => panic!("session ended unexpectedly: {r:?}"),
+            r = &mut session => panic!("session ended before the switch: {r:?}"),
             _ = driver => {}
         }
+        // B1: the session ends on the event; no further health report.
+        let r = tokio::time::timeout(WAIT, session)
+            .await
+            .expect("session ends on ConnectorRevoked");
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(authz.lock().state(), ServingState::Revoked);
+        assert!(
+            new_peer.out_rx.try_recv().is_err(),
+            "nothing is sent after the terminal signal"
+        );
     }
 
     /// Revocation racing a renewal, other order: the revoke committed before
@@ -1641,22 +1753,24 @@ mod renewal_switch_tests {
             authz.clone(),
         );
         let session = run_session(into_stream(old), &mut ops, io(&mut e));
-        let driver = async {
-            old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
-            wait_for("refused open", || shared.lock().opens.len() == 1).await;
-            wait_for("Revoked recorded", || {
-                authz.lock().terminal() == Some(crate::authorization::TerminalSignal::Revoked)
-            })
-            .await;
-            // Phase A records only: the session itself is unchanged (no
-            // serving gate yet — Phase B1).
-            old_peer.in_tx.send(Ok(ping(7))).await.unwrap();
-            expect_pong(&mut old_peer, 7).await;
-        };
-        tokio::select! {
-            r = session => panic!("session ended unexpectedly: {r:?}"),
-            _ = driver => {}
-        }
+        old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
+        // B1: the marked refusal is terminal; the session ends with it
+        // instead of retrying the replacement on the old stream.
+        let r = tokio::time::timeout(WAIT, session)
+            .await
+            .expect("session ends on the marked refusal");
+        assert!(r.is_err());
+        assert_eq!(shared.lock().opens.len(), 1, "no retry of the replacement");
+        assert_eq!(
+            authz.lock().terminal(),
+            Some(crate::authorization::TerminalSignal::Revoked)
+        );
+        assert_eq!(authz.lock().state(), ServingState::Revoked);
+        old_peer.in_tx.send(Ok(ping(7))).await.ok();
+        assert!(
+            old_peer.out_rx.try_recv().is_err(),
+            "the old stream is no longer served"
+        );
     }
 
     /// T20/T23 (connector side): only the matching marker reaches each
@@ -1698,6 +1812,242 @@ mod renewal_switch_tests {
             t.lock().terminal(),
             Some(crate::authorization::TerminalSignal::UnknownIdentity)
         );
+    }
+
+    // ── Phase B1: reconnect loop, terminal idle (D12) ──────────────────────
+
+    const FAST: ReconnectTiming = ReconnectTiming {
+        clean: Duration::from_millis(1),
+        backoff_initial: Duration::from_millis(1),
+        backoff_max: Duration::from_millis(4),
+        terminal_log: Duration::from_secs(3600),
+    };
+
+    enum Outcome {
+        Ok,
+        /// Transport-style failure (no status).
+        Err,
+        /// Control() refused with this code and optional marker (production
+        /// `open_refused`).
+        Refused(tonic::Code, Option<&'static str>),
+        /// An authorization round trip succeeds, then the stream fails.
+        ServeThenErr,
+        /// The attempt never completes.
+        Hang,
+    }
+
+    struct ScriptedAttempt {
+        authz: SharedAckTracker,
+        script: std::collections::VecDeque<Outcome>,
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Attempt for ScriptedAttempt {
+        async fn attempt(&mut self) -> Result<()> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            match self.script.pop_front().unwrap_or(Outcome::Err) {
+                Outcome::Ok => Ok(()),
+                Outcome::Err => Err(anyhow::anyhow!("simulated transport failure")),
+                Outcome::Refused(code, marker) => {
+                    Err(open_refused(marked_status(code, marker), &self.authz))
+                }
+                Outcome::ServeThenErr => {
+                    let mut t = self.authz.lock();
+                    let s = t.next_seq();
+                    let now = Instant::now();
+                    t.record_sent(s, now);
+                    t.stream_up(now);
+                    t.on_ack(s, true, now).expect("ack accepted");
+                    drop(t);
+                    Err(anyhow::anyhow!("stream lost after authorization"))
+                }
+                Outcome::Hang => std::future::pending().await,
+            }
+        }
+    }
+
+    fn scripted(
+        authz: &SharedAckTracker,
+        script: Vec<Outcome>,
+    ) -> (ScriptedAttempt, Arc<std::sync::atomic::AtomicUsize>) {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        (
+            ScriptedAttempt {
+                authz: authz.clone(),
+                script: script.into(),
+                attempts: attempts.clone(),
+            },
+            attempts,
+        )
+    }
+
+    fn attempts_of(a: &Arc<std::sync::atomic::AtomicUsize>) -> usize {
+        a.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// AB1-10 (D12), AB1-9 (T7/T25), AB1-8 (T24): a terminal marker stops the
+    /// reconnect loop for good — no further attempts (no opens, health
+    /// reports or renewals) — and the loop never returns, so the process
+    /// stays up. A fresh tracker (a restarted process) starts closed and
+    /// returns to the same terminal state without ever opening.
+    #[tokio::test]
+    async fn terminal_marker_stops_reconnecting_and_the_loop_never_returns() {
+        for (marker, code, state) in [
+            ("revoked", tonic::Code::PermissionDenied, ServingState::Revoked),
+            ("unknown", tonic::Code::NotFound, ServingState::UnknownIdentity),
+        ] {
+            let authz = AckTracker::shared(AUTHORIZATION_FRESHNESS);
+            let gate = authz.lock().gate();
+            assert_eq!(gate.snapshot().state(), ServingState::Starting);
+            let (mut attempt, attempts) = scripted(
+                &authz,
+                vec![
+                    Outcome::Err,
+                    Outcome::Ok,
+                    Outcome::Refused(code, Some(marker)),
+                    // Would be reached only if the loop kept reconnecting.
+                    Outcome::Ok,
+                    Outcome::Ok,
+                ],
+            );
+            let loop_authz = authz.clone();
+            let task = tokio::spawn(async move {
+                reconnect_loop(&mut attempt, &loop_authz, FAST).await
+            });
+            wait_for("terminal marker attempt", || attempts_of(&attempts) == 3).await;
+            // Many backoff periods (≤ 4 ms each) later: still parked.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(attempts_of(&attempts), 3, "{marker}: no reconnect after the terminal marker");
+            assert!(!task.is_finished(), "{marker}: the loop must never return (D12)");
+            assert_eq!(authz.lock().state(), state);
+            assert_eq!(authz.lock().highest_accepted(), 0, "never opened in between");
+            assert!(!gate.admits_now());
+            task.abort();
+        }
+    }
+
+    /// AB1-11 (T8/T21/T23): unmarked refusals of any code and transport
+    /// failures are never terminal; the loop keeps reconnecting.
+    #[tokio::test]
+    async fn unmarked_failures_keep_reconnecting_and_are_never_terminal() {
+        let authz = AckTracker::shared(AUTHORIZATION_FRESHNESS);
+        let (mut attempt, attempts) = scripted(
+            &authz,
+            vec![
+                Outcome::Refused(tonic::Code::NotFound, None),
+                Outcome::Refused(tonic::Code::PermissionDenied, None),
+                Outcome::Refused(tonic::Code::Unavailable, None),
+                Outcome::Refused(tonic::Code::Unauthenticated, None),
+                Outcome::Refused(tonic::Code::PermissionDenied, Some("REVOKED")),
+                Outcome::Err,
+                Outcome::Ok,
+            ],
+        );
+        let loop_authz = authz.clone();
+        let task = tokio::spawn(async move { reconnect_loop(&mut attempt, &loop_authz, FAST).await });
+        wait_for("reconnects continue", || attempts_of(&attempts) >= 10).await;
+        assert_eq!(authz.lock().terminal(), None);
+        assert_eq!(authz.lock().state(), ServingState::Starting);
+        task.abort();
+    }
+
+    /// Every end of an attempt is a stream end: Serving → ServingDisconnected.
+    #[tokio::test]
+    async fn an_ended_attempt_is_a_stream_end() {
+        let authz = AckTracker::shared(AUTHORIZATION_FRESHNESS);
+        let (mut attempt, attempts) = scripted(&authz, vec![Outcome::ServeThenErr, Outcome::Hang]);
+        let loop_authz = authz.clone();
+        let task = tokio::spawn(async move { reconnect_loop(&mut attempt, &loop_authz, FAST).await });
+        wait_for("second attempt", || attempts_of(&attempts) == 2).await;
+        assert_eq!(authz.lock().state(), ServingState::ServingDisconnected);
+        assert!(authz.lock().gate().admits_now(), "open until D");
+        task.abort();
+    }
+
+    /// One real session per attempt over scripted fake streams.
+    struct SessionAttempt<'a> {
+        e: &'a mut Env,
+        streams: std::collections::VecDeque<Parts>,
+    }
+
+    impl Attempt for SessionAttempt<'_> {
+        async fn attempt(&mut self) -> Result<()> {
+            let Some(parts) = self.streams.pop_front() else {
+                return std::future::pending().await;
+            };
+            let (mut ops, _) = fake_ops_with(vec![], true, &parts, self.e.authz.clone());
+            let seq = self.e.authz.lock().next_seq();
+            let initial = self.e.health.report(&self.e.policy_cache, &self.e.slot, seq);
+            let stream = establish_stream(
+                parts.out_tx,
+                parts.inbound,
+                initial,
+                parts.cert_not_after_unix,
+                None,
+            )
+            .await?;
+            run_session(stream, &mut ops, io(self.e)).await
+        }
+    }
+
+    /// AB1-8 (T6): after the deadline passed during an interruption, a
+    /// reconnect alone doesn't serve — not on stream open, not on the
+    /// controller's first message — only a fresh accepted ack reopens.
+    #[tokio::test]
+    async fn reconnect_after_expiry_serves_only_after_a_fresh_ack() {
+        let h = Duration::from_millis(400);
+        let mut e = env();
+        e.authz = AckTracker::shared(h);
+        let authz = e.authz.clone();
+        let gate = authz.lock().gate();
+        let (s1, mut p1) = fake_stream_stamped(far_future(), &authz);
+        let (s2, mut p2) = fake_stream_stamped(far_future(), &authz);
+        let mut attempt = SessionAttempt {
+            e: &mut e,
+            streams: vec![s1, s2].into(),
+        };
+        let driver = async {
+            let a = health_seq(&recv(&mut p1.out_rx).await);
+            p1.in_tx.send(Ok(policy_msg(true))).await.unwrap();
+            p1.in_tx.send(Ok(authz_ack(a))).await.unwrap();
+            wait_for("serving", || gate.admits_now()).await;
+
+            // Interruption: the controller ends stream 1.
+            drop(p1);
+            wait_for("disconnected", || {
+                authz.lock().state() == ServingState::ServingDisconnected
+            })
+            .await;
+            assert!(gate.admits_now(), "ServingDisconnected stays open until D");
+
+            // Stream 2 opens (initial report sent) while D passes.
+            let b = health_seq(&recv(&mut p2.out_rx).await);
+            tokio::time::sleep(h).await;
+            assert!(!gate.admits_now(), "closed at D");
+            p2.in_tx.send(Ok(policy_msg(true))).await.unwrap();
+            p2.in_tx.send(Ok(ping(1))).await.unwrap();
+            expect_pong(&mut p2, 1).await;
+            assert_eq!(authz.lock().state(), ServingState::Recovering);
+            assert!(!gate.admits_now(), "a reconnect alone doesn't serve");
+            // The stream-2 initial report was sent before the deadline passed
+            // (before lost_at, and by now older than H): its ack can't reopen.
+            p2.in_tx.send(Ok(authz_ack(b))).await.unwrap();
+            p2.in_tx.send(Ok(ping(2))).await.unwrap();
+            expect_pong(&mut p2, 2).await;
+            assert!(!gate.admits_now(), "pre-loss request can't restore authorization");
+            assert_eq!(authz.lock().state(), ServingState::Recovering);
+            // A request sent after the loss, acknowledged: serving again.
+            let c = authz.lock().next_seq();
+            authz.lock().record_sent(c, Instant::now());
+            p2.in_tx.send(Ok(authz_ack(c))).await.unwrap();
+            wait_for("serving again", || gate.admits_now()).await;
+            assert_eq!(authz.lock().state(), ServingState::Serving);
+        };
+        tokio::select! {
+            never = reconnect_loop(&mut attempt, &authz, FAST) => match never {},
+            _ = driver => {}
+        }
     }
 }
 
@@ -1836,6 +2186,7 @@ mod acl_diff_session_tests {
                 crate::test_support::CONNECTOR_ID.to_string(),
                 shield_ack_tx,
                 policy.clone(),
+                crate::authorization::AuthzGate::open_for_tests(),
             ),
             policy,
             registry: Arc::new(SessionRegistry::new()),
@@ -1909,6 +2260,7 @@ mod acl_diff_session_tests {
                 crl,
                 crate::test_support::CONNECTOR_ID,
                 &log_tx,
+                &crate::authorization::AuthzGate::open_for_tests(),
             )
             .await
         });
@@ -1921,6 +2273,119 @@ mod acl_diff_session_tests {
             .await
             .expect("tunnel response");
         (client, task, resp)
+    }
+
+    /// Spawns the production `handle_stream` with `gate`; the request is
+    /// written after `delay`. Returns everything the client received before
+    /// EOF and the handler result.
+    async fn gated(
+        e: &Env,
+        port: u16,
+        gate: crate::authorization::AuthzGate,
+        delay: Duration,
+        crl: Option<CrlManager>,
+    ) -> (Vec<u8>, anyhow::Result<()>) {
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let (acl, reg, hub, crl, log_tx) = (
+            e.policy.clone(),
+            e.registry.clone(),
+            e.hub.clone(),
+            crl.unwrap_or_else(|| e.crl.clone()),
+            e.log_tx.clone(),
+        );
+        let task = tokio::spawn(async move {
+            crate::device_tunnel::handle_stream(
+                server,
+                SPIFFE.to_string(),
+                vec![0x01, 0x02],
+                acl,
+                reg,
+                SessionTransport::Quic,
+                hub,
+                crl,
+                crate::test_support::CONNECTOR_ID,
+                &log_tx,
+                &gate,
+            )
+            .await
+        });
+        tokio::time::sleep(delay).await;
+        let body = serde_json::to_vec(
+            &serde_json::json!({"destination": "127.0.0.1", "port": port, "protocol": "tcp"}),
+        )
+        .unwrap();
+        // The handler may already have dropped its end.
+        let _ = client.write_all(&(body.len() as u32).to_be_bytes()).await;
+        let _ = client.write_all(&body).await;
+        let mut got = Vec::new();
+        tokio::time::timeout(WAIT, client.read_to_end(&mut got))
+            .await
+            .expect("handler ends the stream")
+            .expect("read");
+        let result = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+        (got, result)
+    }
+
+    /// AB1-1 (§7 step 2): the funnel refuses every stream while the connector
+    /// isn't serving — Starting, past D, terminal — and writes nothing (no
+    /// TunnelResponse, never ok:false); an allowed request is still served
+    /// when it is.
+    #[tokio::test]
+    async fn funnel_refuses_without_a_tunnel_response_when_not_serving() {
+        use crate::authorization::{AuthzGate, ServingState};
+        crate::test_support::install_crypto_provider();
+        let port = echo_server().await;
+        let e = env();
+        push(&e, acl(1, vec![entry("res-a", port)])).await;
+        for (what, gate) in [
+            ("starting", AuthzGate::closed_for_tests()),
+            (
+                "past deadline",
+                AuthzGate::fixed(ServingState::Serving, Some(Instant::now())),
+            ),
+            ("disabled", AuthzGate::fixed(ServingState::Disabled, None)),
+            ("revoked", AuthzGate::fixed(ServingState::Revoked, None)),
+            (
+                "unknown",
+                AuthzGate::fixed(ServingState::UnknownIdentity, None),
+            ),
+        ] {
+            let (got, result) = gated(&e, port, gate.clone(), Duration::ZERO, None).await;
+            assert!(got.is_empty(), "{what}: nothing may be written, got {got:?}");
+            assert!(result.is_err(), "{what}: refused");
+            // Requests that would otherwise get an ok:false TunnelResponse
+            // (and so stop the client's fallback): still nothing written.
+            let (got, _) = gated(&e, port + 1, gate.clone(), Duration::ZERO, None).await;
+            assert!(got.is_empty(), "{what}, no ACL match: nothing written, got {got:?}");
+            let (got, _) = gated(&e, port, gate, Duration::ZERO, Some(CrlManager::new())).await;
+            assert!(got.is_empty(), "{what}, CRL unavailable: nothing written, got {got:?}");
+        }
+        // Serving (`open` uses an open gate): admitted and answered.
+        let (_client, _task, resp) = open(&e, port).await;
+        assert_eq!(resp["ok"], true, "serving: admitted: {resp}");
+    }
+
+    /// AB1-1 (§7 step 2): a stream that passed the entry check is re-checked
+    /// after session registration; if D passed in between it is refused there,
+    /// still without a TunnelResponse.
+    #[tokio::test]
+    async fn funnel_rechecks_the_serving_state_after_registration() {
+        use crate::authorization::{AuthzGate, ServingState};
+        crate::test_support::install_crypto_provider();
+        let port = echo_server().await;
+        let e = env();
+        push(&e, acl(1, vec![entry("res-a", port)])).await;
+        let gate = AuthzGate::fixed(
+            ServingState::Serving,
+            Some(Instant::now() + Duration::from_millis(150)),
+        );
+        let (got, result) = gated(&e, port, gate, Duration::from_millis(300), None).await;
+        assert!(got.is_empty(), "nothing may be written, got {got:?}");
+        let err = result.expect_err("refused after registration");
+        assert!(
+            err.to_string().contains("after registration"),
+            "{err}"
+        );
     }
 
     async fn echo_ok(client: &mut DuplexStream, msg: &[u8]) {

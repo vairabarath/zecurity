@@ -25,7 +25,7 @@ use enrollment::EnrollmentState;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 use zecurity_connector::{
-    agent_server, appmeta, config::ConnectorConfig, control_stream, controller_client, crl,
+    agent_server, appmeta, authorization, config::ConnectorConfig, control_stream, controller_client, crl,
     device_tunnel, enrollment, net_util, policy, quic_listener, relay_attachment, relay_handler,
     relay_selector,session_registry, tls, updater, watchdog, ControlMessage,
 };
@@ -111,12 +111,21 @@ async fn main() -> anyhow::Result<()> {
 
  let session_registry = Arc::new(session_registry::SessionRegistry::new());
 
+    // Connector-revocation B1: the process-global authorization state. Every
+    // start begins in `Starting` (nothing persisted, D12); every data-plane
+    // entry path holds its gate and stays closed until the controller's
+    // first accepted acknowledgement.
+    let authz = authorization::AckTracker::shared(control_stream::AUTHORIZATION_FRESHNESS);
+    let gate = authz.lock().gate();
+    authorization::spawn_expiry(authz.clone());
+
     let shield_registry = agent_server::ShieldRegistry::new(
         controller_channel,
         enrollment_state.trust_domain.clone(),
         enrollment_state.connector_id.clone(),
         ack_tx,
         policy_cache.clone(),
+        gate.clone(),
     );
     // Rebuild the Shield-proxy controller channel with the renewed identity
     // whenever the certificate holder publishes.
@@ -202,9 +211,10 @@ async fn main() -> anyhow::Result<()> {
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
+        let gate = gate.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                device_tunnel::listen("0.0.0.0:9092", store, acl,registry, hub, crl, cid, tx).await
+                device_tunnel::listen("0.0.0.0:9092", store, acl,registry, hub, crl, cid, tx, gate).await
             {
                 error!(error = %e, "device tunnel (TLS) on :9092 failed");
             }
@@ -220,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
         let crl = crl_manager.clone();
         let cid = connector_id.clone();
         let tx = ctrl_tx.clone();
+        let gate = gate.clone();
         tokio::spawn(async move {
             if let Err(e) = quic_listener::listen(
                 "0.0.0.0:9092",
@@ -231,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
                 crl,
                 cid,
                 tx,
+                gate,
             )
             .await
             {
@@ -258,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
             ctrl_tx.clone(),
             cfg.relay_inner_handshake_timeout_secs,
             cfg.relay_max_tunnel_streams as usize,
+            gate.clone(),
         )
         .context("build Connector Relay stream handler")?,
     );
@@ -308,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
         relay_attachment_slot,
         relay_list_tx,
         certs,
+        authz,
     )
     .await
 }

@@ -3,6 +3,7 @@
 // The core of the RDE: connection handler that enforces ACL and routes
 // either direct or via Shield relay.
 
+use crate::authorization::AuthzGate;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -67,6 +68,7 @@ pub async fn listen(
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    gate: AuthzGate,
 ) -> Result<()> {
     use std::sync::Arc as StdArc;
     use tokio::net::TcpListener;
@@ -82,6 +84,14 @@ pub async fn listen(
 
     loop {
         let (stream, peer_addr) = listener.accept().await?;
+        // Connector-revocation B1 (§7 step 2): refuse at the transport level
+        // — drop the socket before the TLS handshake, no TunnelResponse.
+        if !gate.admits_now() {
+            tracing::debug!(peer = %peer_addr, state = ?gate.snapshot().state(), "device tunnel (TLS) connection refused: connector not authorized to serve");
+            drop(stream);
+            continue;
+        }
+        let gate_clone = gate.clone();
         let acl_clone = acl.clone();
         let registry_clone = registry.clone();
         let hub_clone = tunnel_hub.clone();
@@ -127,6 +137,7 @@ pub async fn listen(
                 crl_clone,
                 &conn_id_clone,
                 &tx_clone,
+                &gate_clone,
             )
             .await
             {
@@ -159,10 +170,21 @@ pub async fn handle_stream<S>(
     crl_manager: CrlManager,
     connector_id: &str,
     control_tx: &mpsc::Sender<ControlMessage>,
+    gate: &AuthzGate,
 ) -> Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Connector-revocation B1 (§7 step 2): the funnel for every transport.
+    // Checked first, before anything is written: a refusal sends no
+    // TunnelResponse (never ok:false, which would stop the client's
+    // fallback); dropping the stream is a transport failure to the client.
+    if !gate.admits_now() {
+        return Err(anyhow!(
+            "connector not authorized to serve (state {:?}) — stream refused",
+            gate.snapshot().state()
+        ));
+    }
     if let Err(message) = revocation_action(crl_manager.check(&cert_serial)) {
         let response = TunnelResponse {
             ok: false,
@@ -255,6 +277,15 @@ where
     // miss a real content change across a controller restart.
     if !acl.is_allowed(&acl_entry.resource_id, &client_spiffe_id) {
         cancel_token.cancel();
+    }
+    // Same window for the serving state: a stream that passed the first
+    // check just before the connector closed is refused here, still without
+    // a TunnelResponse.
+    if !gate.admits_now() {
+        return Err(anyhow!(
+            "connector not authorized to serve (state {:?}) — stream refused after registration",
+            gate.snapshot().state()
+        ));
     }
 
     if acl_entry.route_type == "shield" {

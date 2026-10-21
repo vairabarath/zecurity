@@ -1,4 +1,5 @@
 use parking_lot::{Mutex, RwLock};
+use crate::authorization::AuthzGate;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -118,6 +119,9 @@ pub struct ShieldRegistry {
     /// accepted — not at TCP accept, not on any RPC.
     revocations_synced: Arc<AtomicBool>,
     next_stream_id: Arc<AtomicU64>,
+    /// Connector serving state (connector-revocation B1): no new shield
+    /// Control stream while the connector itself isn't authorized to serve.
+    serving_gate: AuthzGate,
 }
 
 impl ShieldRegistry {
@@ -127,6 +131,7 @@ impl ShieldRegistry {
         connector_id: String,
         ack_tx: mpsc::Sender<(String, ResourceAck)>,
         policy_cache: Arc<crate::policy::PolicyCache>,
+        serving_gate: AuthzGate,
     ) -> Self {
         Self {
             maps: Arc::new(Mutex::new(ShieldMaps {
@@ -150,6 +155,7 @@ impl ShieldRegistry {
             policy_cache,
             revocations_synced: Arc::new(AtomicBool::new(false)),
             next_stream_id: Arc::new(AtomicU64::new(0)),
+            serving_gate,
         }
     }
 
@@ -860,6 +866,11 @@ impl ShieldService for ShieldRegistry {
                     "connector has not yet applied the controller's shield revocation list",
                 ));
             }
+            // Connector-revocation B1 (§7 step 2): not while the connector
+            // itself is unauthorized (Starting, Disabled, terminal, past D).
+            if !self.serving_gate.admits_now() {
+                return Err(Status::unavailable("connector is not authorized to serve"));
+            }
             if maps.revoked.contains(&identity.shield_id) {
                 return Err(Status::permission_denied("shield is revoked"));
             }
@@ -1118,6 +1129,7 @@ mod tests {
             "connector-1".to_string(),
             ack_tx,
             policy_cache,
+            crate::authorization::AuthzGate::open_for_tests(),
         )
     }
 
@@ -1196,6 +1208,7 @@ mod controller_channel_refresh_tests {
             crate::test_support::CONNECTOR_ID.to_string(),
             ack_tx,
             Arc::new(crate::policy::PolicyCache::new()),
+            crate::authorization::AuthzGate::open_for_tests(),
         )
     }
 
@@ -1262,6 +1275,12 @@ mod shield_server_tls_tests {
     }
 
     fn unsynced_base_registry() -> ShieldRegistry {
+        unsynced_base_registry_with_gate(crate::authorization::AuthzGate::open_for_tests())
+    }
+
+    fn unsynced_base_registry_with_gate(
+        gate: crate::authorization::AuthzGate,
+    ) -> ShieldRegistry {
         let (ack_tx, _ack_rx) = mpsc::channel(8);
         // A peer in this connector's remote network: every Shield health
         // report is then answered with a PeerConnectorList, which these tests
@@ -1289,6 +1308,7 @@ mod shield_server_tls_tests {
             CONNECTOR_ID.to_string(),
             ack_tx,
             policy_cache,
+            gate,
         )
     }
 
@@ -1901,6 +1921,39 @@ mod shield_server_tls_tests {
 
         r.apply_revocations(vec![]);
         assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+    }
+
+    /// Connector-revocation B1 (AB1-1, T15): no shield Control stream while
+    /// the connector itself is not authorized — Starting, then terminal — and
+    /// admitted once the connector serves.
+    #[tokio::test]
+    async fn shield_control_follows_the_connector_serving_state() {
+        use crate::authorization::{AckTracker, TerminalSignal};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let authz = AckTracker::shared(Duration::from_secs(3600));
+        let r = unsynced_base_registry_with_gate(authz.lock().gate());
+        r.set_shield_renewal_window(1);
+        r.apply_revocations(vec![]);
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was admitted while the connector was Starting"
+        );
+        {
+            let mut t = authz.lock();
+            let s = t.next_seq();
+            let now = tokio::time::Instant::now();
+            t.record_sent(s, now);
+            t.on_ack(s, true, now).unwrap();
+        }
+        assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+        authz.lock().on_terminal(TerminalSignal::Revoked);
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was admitted by a revoked connector"
+        );
     }
 
     /// Connector restart: revocation state is not trusted across processes —

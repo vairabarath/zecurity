@@ -28,6 +28,8 @@ pub mod relay_selector;
 pub mod renewal;
 #[cfg(test)]
 mod renewal_consumers_tests;
+#[cfg(test)]
+mod serving_gate_tests;
 pub mod session_registry;
 #[cfg(test)]
 pub mod test_support;
