@@ -34,6 +34,9 @@ type Service struct {
 	heartbeatDBWriteInterval time.Duration
 	labelHoldDown            time.Duration
 	onPoolChange             func(ctx context.Context)
+	// allowPrivateAddrs: development-only — advertise relays seen on a
+	// private (RFC 1918) address so a LAN lab can exercise the relay path.
+	allowPrivateAddrs bool
 }
 
 func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration) *Service {
@@ -44,6 +47,15 @@ func NewService(pkiSvc pki.Service, store heartbeatStore, certTTL time.Duration)
 		heartbeatDBWriteInterval: 5 * time.Minute,
 		labelHoldDown:            60 * time.Second,
 	}
+}
+
+// WithPrivateRelayAddrs lets relays whose observed address is private
+// (RFC 1918) advertise ip:listen_port like public ones. Development labs
+// only: main.go enables it solely when ENV=development and
+// RELAY_DEV_ALLOW_PRIVATE_ADDR=true.
+func (s *Service) WithPrivateRelayAddrs(allow bool) *Service {
+	s.allowPrivateAddrs = allow
+	return s
 }
 
 // WithLabelHoldDown overrides RELAY_LABEL_HOLDDOWN_SECS (default 60s). A

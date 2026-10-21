@@ -222,7 +222,8 @@ func main() {
 		WithHeartbeatCache(
 			valkeycompat.NewAdapter(connectorValkey),
 			mustDuration("RELAY_HEARTBEAT_DB_WRITE_INTERVAL", 5*time.Minute),
-		).WithProvisioningAuth(mustEnv("JWT_SECRET"))
+		).WithProvisioningAuth(mustEnv("JWT_SECRET")).
+		WithPrivateRelayAddrs(devAllowPrivateRelayAddrs())
 	relayRevChecker := connector.NewRelayRevocationChecker(func(ctx context.Context) ([]string, error) {
 		rs, err := relayStore.ListRevokedRelaySerials(ctx)
 		if err != nil {
@@ -1257,4 +1258,20 @@ func registerOutboxHandlers(reg *outbox.HandlerRegistry, pool *pgxpool.Pool, not
 		return fmt.Errorf("%s: %w", policy.EventPolicyInvalidationRequested, err)
 	}
 	return nil
+}
+
+// devAllowPrivateRelayAddrs reports whether relays on private (RFC 1918)
+// addresses are advertised to connectors and clients. Development labs only:
+// RELAY_DEV_ALLOW_PRIVATE_ADDR=true takes effect only with ENV=development;
+// anywhere else it is ignored with a warning.
+func devAllowPrivateRelayAddrs() bool {
+	if os.Getenv("RELAY_DEV_ALLOW_PRIVATE_ADDR") != "true" {
+		return false
+	}
+	if os.Getenv("ENV") != "development" {
+		log.Printf("WARNING: RELAY_DEV_ALLOW_PRIVATE_ADDR ignored — only honoured with ENV=development")
+		return false
+	}
+	log.Printf("DEV: relays on private addresses are advertised (RELAY_DEV_ALLOW_PRIVATE_ADDR=true, ENV=development)")
+	return true
 }

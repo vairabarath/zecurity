@@ -135,7 +135,7 @@ func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
 	})
 
 	// listen_port reported by relay — should override the hardcoded default.
-	got := observeRelayPeerAddress(ctx, 9093)
+	got := observeRelayPeerAddress(ctx, 9093, false)
 	if got.ObservedIP != "8.8.8.8" ||
 		got.ObservedPort != 54321 ||
 		got.Scope != "public" ||
@@ -144,15 +144,36 @@ func TestObserveRelayPeerAddressClassifiesPublicAddress(t *testing.T) {
 	}
 
 	// Zero listen_port falls back to the hardcoded default.
-	gotFallback := observeRelayPeerAddress(ctx, 0)
+	gotFallback := observeRelayPeerAddress(ctx, 0, false)
 	if gotFallback.PublicAddr != "8.8.8.8:9093" {
 		t.Fatalf("expected fallback to default port, got: %+v", gotFallback)
 	}
 
 	// Non-default listen_port is used as-is.
-	gotCustom := observeRelayPeerAddress(ctx, 19093)
+	gotCustom := observeRelayPeerAddress(ctx, 19093, false)
 	if gotCustom.PublicAddr != "8.8.8.8:19093" {
 		t.Fatalf("expected custom port in PublicAddr, got: %+v", gotCustom)
+	}
+}
+
+// A private (RFC 1918) relay is advertised only with the development-only
+// WithPrivateRelayAddrs option; loopback never is.
+func TestObserveRelayPeerAddressPrivateOnlyWhenAllowed(t *testing.T) {
+	priv := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("192.168.1.49"), Port: 40000},
+	})
+	if got := observeRelayPeerAddress(priv, 9093, false); got.Scope != "private" || got.PublicAddr != "" {
+		t.Fatalf("default: private relay must not be advertised, got %+v", got)
+	}
+	got := observeRelayPeerAddress(priv, 9093, true)
+	if got.Scope != "private" || got.PublicAddr != "192.168.1.49:9093" {
+		t.Fatalf("allowed: want private scope advertised at 192.168.1.49:9093, got %+v", got)
+	}
+	loop := peer.NewContext(context.Background(), &peer.Peer{
+		Addr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40000},
+	})
+	if got := observeRelayPeerAddress(loop, 9093, true); got.PublicAddr != "" {
+		t.Fatalf("loopback must never be advertised, got %+v", got)
 	}
 }
 

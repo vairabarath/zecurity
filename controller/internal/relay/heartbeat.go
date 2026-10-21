@@ -68,7 +68,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Relay heartbeat store is not configured")
 	}
-	addr := observeRelayPeerAddress(ctx, req.ListenPort)
+	addr := observeRelayPeerAddress(ctx, req.ListenPort, s.allowPrivateAddrs)
 	log.Printf("relay heartbeat: received from relay=%s version=%s hostname=%s cert_serial=%s cert_not_after=%s",
 		relayID, req.Version, req.Hostname, leaf.SerialNumber.Text(16), leaf.NotAfter.Format(time.RFC3339))
 
@@ -307,7 +307,7 @@ func authenticatedLeaf(ctx context.Context) (*x509.Certificate, error) {
 	return tlsInfo.State.PeerCertificates[0], nil
 }
 
-func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddressObservation {
+func observeRelayPeerAddress(ctx context.Context, listenPort uint32, allowPrivate bool) relayAddressObservation {
 	observation := relayAddressObservation{Scope: "unknown"}
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.Addr == nil {
@@ -328,20 +328,28 @@ func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddres
 		observation.ObservedPort = port
 	}
 
+	advertise := func() string {
+		port := defaultRelayPublicPort
+		if listenPort > 0 && listenPort <= 65535 {
+			port = strconv.FormatUint(uint64(listenPort), 10)
+		}
+		return net.JoinHostPort(ip.String(), port)
+	}
 	switch {
 	case ip.IsLoopback():
 		observation.Scope = "loopback"
 	case ip.IsPrivate():
 		observation.Scope = "private"
+		// Development labs only (WithPrivateRelayAddrs): a LAN relay is
+		// advertised at its private address. The scope stays "private".
+		if allowPrivate {
+			observation.PublicAddr = advertise()
+		}
 	case ip.IsLinkLocalUnicast():
 		observation.Scope = "link_local"
 	case ip.IsGlobalUnicast():
 		observation.Scope = "public"
-		port := defaultRelayPublicPort
-		if listenPort > 0 && listenPort <= 65535 {
-			port = strconv.FormatUint(uint64(listenPort), 10)
-		}
-		observation.PublicAddr = net.JoinHostPort(ip.String(), port)
+		observation.PublicAddr = advertise()
 	default:
 		observation.Scope = "unknown"
 	}
