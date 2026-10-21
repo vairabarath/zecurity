@@ -146,9 +146,9 @@ With D = sent[k] + H and H = 15 s:
 
 | P | Lost requests tolerated before D passes |
 |---|---|
-| 7 s | 1 |
-| 4.5 s | 2 |
-| 3.5 s | 3 |
+| 6.5 s | 1 (2·6.5 + 1 = 14 < 15) |
+| 4.5 s | 2 (3·4.5 + 1 = 14.5 < 15) |
+| 3.4 s | 3 (4·3.4 + 1 = 14.6 < 15) |
 
 The controller cost per request is small: handler p50 about 3 ms, DB about 2.3 ms. At P = 5 s that is about 0.5 ms of DB time per connector per second, or about 0.5 s/s per 1000 connectors. That is an estimate from these single-connector numbers, not measured at scale.
 
