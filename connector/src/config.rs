@@ -22,11 +22,6 @@
 //   connector_id                — None until enrollment completes (Phase 5 writes it)
 //   auto_update_enabled         — false (Phase 7 updater checks this)
 //   log_level                   — "info"
-//   authz_request_period_ms     — 4500 (P; B2)
-//   control_reconnect_base_ms   — 1000 (O5; B2)
-//   control_reconnect_max_ms    — 5000 (O5; B2)
-//   control_reconnect_jitter_pct — 20  (O5; B2)
-//   disabled_shield_close_secs  — 30   (O8; B2)
 //   update_check_interval_secs  — 86400 seconds = 24 hours (Phase 7 updater)
 //   state_dir                   — /var/lib/zecurity-connector (where certs, keys, state.json are saved)
 //
@@ -51,17 +46,6 @@ const DEFAULT_RELAY_RECONNECT_BASE_SECS: u64 = 5;
 const DEFAULT_RELAY_RECONNECT_MAX_SECS: u64 = 120;
 const DEFAULT_RELAY_RECONNECT_BACKOFF_FACTOR: f64 = 2.0;
 const DEFAULT_RELAY_DRAIN_TIMEOUT_SECS: u64 = 120;
-// Connector-revocation timing (decided 2026-10-21 from the Phase M
-// measurements; consumed by Phase B2). H itself — 15 s,
-// control_stream::AUTHORIZATION_FRESHNESS — is fixed (design D1) and not
-// configurable.
-const DEFAULT_AUTHZ_REQUEST_PERIOD_MS: u64 = 4_500; // P
-const DEFAULT_CONTROL_RECONNECT_BASE_MS: u64 = 1_000; // O5
-const DEFAULT_CONTROL_RECONNECT_MAX_MS: u64 = 5_000; // O5
-const DEFAULT_CONTROL_RECONNECT_JITTER_PCT: u8 = 20; // O5
-const DEFAULT_DISABLED_SHIELD_CLOSE_SECS: u64 = 30; // O8
-/// Budget kept for B (enqueue → ack processed) when bounding P: P + B < H.
-const MIN_RESPONSE_BUDGET_MS: u64 = 1_000;
 
 /// Connector configuration.
 ///
@@ -133,34 +117,6 @@ pub struct ConnectorConfig {
     #[serde(default = "default_relay_drain_timeout_secs")]
     pub relay_drain_timeout_secs: u64,
 
-    /// P: period of authorization requests to the controller, in ms. Must
-    /// leave a response budget inside H (P ≤ H − 1 s). 4.5 s tolerates two
-    /// consecutive lost requests before the deadline. Phase B2 consumes.
-    #[serde(default = "default_authz_request_period_ms")]
-    pub authz_request_period_ms: u64,
-
-    /// Control-stream reconnect backoff while not serving: initial delay
-    /// (ms). The backoff resets after a session receives an accepted
-    /// authorization ack (O5). Phase B2 consumes.
-    #[serde(default = "default_control_reconnect_base_ms")]
-    pub control_reconnect_base_ms: u64,
-
-    /// Control-stream reconnect backoff ceiling while not serving (ms).
-    /// Phase B2 consumes.
-    #[serde(default = "default_control_reconnect_max_ms")]
-    pub control_reconnect_max_ms: u64,
-
-    /// ± jitter applied to each reconnect delay, in percent (0–50).
-    /// Phase B2 consumes.
-    #[serde(default = "default_control_reconnect_jitter_pct")]
-    pub control_reconnect_jitter_pct: u8,
-
-    /// O8: how long a recoverable `Disabled` state keeps shield streams open
-    /// (carrying nothing) before closing them so shields fail over (s).
-    /// Phase B2 consumes.
-    #[serde(default = "default_disabled_shield_close_secs")]
-    pub disabled_shield_close_secs: u64,
-
     /// Whether automatic binary updates are enabled (Phase 7 updater).
     #[serde(default)]
     pub auto_update_enabled: bool,
@@ -217,22 +173,6 @@ fn default_relay_max_concurrent_probes() -> usize {
     DEFAULT_RELAY_MAX_CONCURRENT_PROBES
 }
 
-fn default_authz_request_period_ms() -> u64 {
-    DEFAULT_AUTHZ_REQUEST_PERIOD_MS
-}
-fn default_control_reconnect_base_ms() -> u64 {
-    DEFAULT_CONTROL_RECONNECT_BASE_MS
-}
-fn default_control_reconnect_max_ms() -> u64 {
-    DEFAULT_CONTROL_RECONNECT_MAX_MS
-}
-fn default_control_reconnect_jitter_pct() -> u8 {
-    DEFAULT_CONTROL_RECONNECT_JITTER_PCT
-}
-fn default_disabled_shield_close_secs() -> u64 {
-    DEFAULT_DISABLED_SHIELD_CLOSE_SECS
-}
-
 fn default_relay_reconnect_base_secs() -> u64 {
     DEFAULT_RELAY_RECONNECT_BASE_SECS
 }
@@ -265,94 +205,8 @@ impl ConnectorConfig {
         // Env-only. systemd's EnvironmentFile= injects vars from
         // /etc/zecurity/connector.conf (KEY=VALUE format) into our process
         // env before we run, and figment picks them up here.
-        Self::from_figment(
-            Figment::new().merge(Env::raw().map(|key| key.as_str().to_ascii_lowercase().into())),
-        )
-    }
-
-    fn from_figment(figment: Figment) -> Result<Self, figment::Error> {
-        let cfg: Self = figment.extract()?;
-        cfg.validate_authz_timing().map_err(figment::Error::from)?;
-        Ok(cfg)
-    }
-
-    /// Range checks for the connector-revocation timing values. A value
-    /// that would weaken the authorization deadline is refused at startup,
-    /// never silently clamped.
-    fn validate_authz_timing(&self) -> Result<(), String> {
-        let h_ms = crate::control_stream::AUTHORIZATION_FRESHNESS.as_millis() as u64;
-        let p = self.authz_request_period_ms;
-        if p < 500 || p > h_ms - MIN_RESPONSE_BUDGET_MS {
-            return Err(format!(
-                "AUTHZ_REQUEST_PERIOD_MS={p} must be between 500 and {} (H = {h_ms} ms minus a {MIN_RESPONSE_BUDGET_MS} ms response budget)",
-                h_ms - MIN_RESPONSE_BUDGET_MS
-            ));
-        }
-        let (base, max) = (self.control_reconnect_base_ms, self.control_reconnect_max_ms);
-        if base < 100 || max < base || max > 60_000 {
-            return Err(format!(
-                "CONTROL_RECONNECT_BASE_MS={base} / CONTROL_RECONNECT_MAX_MS={max}: need 100 ≤ base ≤ max ≤ 60000"
-            ));
-        }
-        if self.control_reconnect_jitter_pct > 50 {
-            return Err(format!(
-                "CONTROL_RECONNECT_JITTER_PCT={} must be 0–50",
-                self.control_reconnect_jitter_pct
-            ));
-        }
-        if self.disabled_shield_close_secs == 0 || self.disabled_shield_close_secs > 3_600 {
-            return Err(format!(
-                "DISABLED_SHIELD_CLOSE_SECS={} must be 1–3600",
-                self.disabled_shield_close_secs
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod authz_timing_tests {
-    use super::*;
-    use figment::providers::{Format, Toml};
-
-    fn load(extra: &str) -> Result<ConnectorConfig, figment::Error> {
-        ConnectorConfig::from_figment(Figment::new().merge(Toml::string(&format!(
-            "controller_addr = \"c:9090\"\n{extra}"
-        ))))
-    }
-
-    #[test]
-    fn defaults_are_the_accepted_values() {
-        let c = load("").unwrap();
-        assert_eq!(c.authz_request_period_ms, 4_500);
-        assert_eq!(c.control_reconnect_base_ms, 1_000);
-        assert_eq!(c.control_reconnect_max_ms, 5_000);
-        assert_eq!(c.control_reconnect_jitter_pct, 20);
-        assert_eq!(c.disabled_shield_close_secs, 30);
-    }
-
-    #[test]
-    fn overrides_within_range_are_accepted() {
-        let c = load("authz_request_period_ms = 6500\ncontrol_reconnect_max_ms = 8000\ndisabled_shield_close_secs = 60").unwrap();
-        assert_eq!(c.authz_request_period_ms, 6_500);
-        assert_eq!(c.control_reconnect_max_ms, 8_000);
-        assert_eq!(c.disabled_shield_close_secs, 60);
-    }
-
-    #[test]
-    fn values_that_break_the_deadline_or_ranges_are_refused() {
-        for bad in [
-            "authz_request_period_ms = 14001", // P + 1 s budget > H
-            "authz_request_period_ms = 15000",
-            "authz_request_period_ms = 499",
-            "control_reconnect_base_ms = 50",
-            "control_reconnect_base_ms = 6000", // base > max
-            "control_reconnect_max_ms = 60001",
-            "control_reconnect_jitter_pct = 51",
-            "disabled_shield_close_secs = 0",
-        ] {
-            assert!(load(bad).is_err(), "{bad} must be refused");
-        }
-        assert!(load("authz_request_period_ms = 14000").is_ok(), "boundary P = H − 1 s");
+        Figment::new()
+            .merge(Env::raw().map(|key| key.as_str().to_ascii_lowercase().into()))
+            .extract()
     }
 }

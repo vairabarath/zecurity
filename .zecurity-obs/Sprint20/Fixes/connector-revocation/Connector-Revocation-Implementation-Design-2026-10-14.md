@@ -609,9 +609,9 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D10 (= O2) | A structured, machine-readable gRPC status marker (trailer metadata, §4.5) distinguishes REVOKED and UNKNOWN_CONNECTOR from ordinary errors; message text is never used for security decisions; markers only after a successful lookup |
 | D11 (= O3) | An unknown/deleted identity never serves; it enters `UnknownIdentity`, a terminal non-serving state for the process, distinct from `Revoked`; recovery only through explicitly authorized re-enrollment or replacement; DB failures stay recoverable |
 | D12 (= O9) | Terminal states are not persisted across restart; in `Revoked`/`UnknownIdentity` the connector idles (process alive, data plane closed, reconnect loop stopped, terminal state logged periodically) rather than exiting, because `restart: unless-stopped` restarts any exit |
-| D13 (= O5) | Control-stream reconnect backoff resets after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter; env-configurable (connector) |
-| D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; env-configurable within 500–14000 ms |
-| D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; env-configurable |
+| D13 (= O5) | Control-stream reconnect backoff resets after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter; fixed at build time (`connector/.env` → `build.rs` → `authz_timing.rs`) |
+| D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; fixed at build time, allowed 500–14000 ms |
+| D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; fixed at build time |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -653,7 +653,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
-- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; values in `connector/.env.example`, defaults in `connector/src/config.rs`). Still needs **O6** (full report vs lightweight request) and its own go-ahead with an acceptance list.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). Still needs **O6** (full report vs lightweight request) and its own go-ahead with an acceptance list.
 - **C**, **D** and **E** need O11, O12 and O13 respectively.
 - **F** needs schema approval (O14).
 
