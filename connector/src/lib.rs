@@ -17,6 +17,7 @@ pub mod crypto;
 pub mod device_tunnel;
 pub mod discovery;
 pub mod enrollment;
+pub mod fail_closed;
 pub mod net_util;
 pub mod policy;
 pub mod quic_listener;

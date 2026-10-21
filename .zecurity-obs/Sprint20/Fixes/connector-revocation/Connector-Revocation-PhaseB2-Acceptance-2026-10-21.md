@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase B2 acceptance list (deadline schedule + fail-closed)
 date: 2026-10-21
 type: acceptance list (pre-written, design §17)
-status: DRAFT — AWAITING SIGN-OFF (B2 implementation not started)
+status: SIGNED OFF 2026-10-21 — implementation authorized
 branch: feat/sprint20-m1-phase2
 revision: 39c4257 + D17/D18 docs
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (rev 5)

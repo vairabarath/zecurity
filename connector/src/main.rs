@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tracing::{error, info};
 use zecurity_connector::{
     agent_server, appmeta, authorization, config::ConnectorConfig, control_stream, controller_client, crl,
-    device_tunnel, enrollment, net_util, policy, quic_listener, relay_attachment, relay_handler,
+    device_tunnel, enrollment, fail_closed, net_util, policy, quic_listener, relay_attachment, relay_handler,
     relay_selector,session_registry, tls, updater, watchdog, ControlMessage,
 };
 
@@ -127,6 +127,18 @@ async fn main() -> anyhow::Result<()> {
         policy_cache.clone(),
         gate.clone(),
     );
+    // Connector-revocation fail-closed (B2): on every loss of authorization
+    // cancel all sessions; terminal → close shield streams and clear the ACL;
+    // Disabled → close shield streams after the D15 grace.
+    fail_closed::spawn(
+        &gate,
+        fail_closed::FailClosed::new(
+            session_registry.clone(),
+            shield_registry.clone(),
+            policy_cache.clone(),
+        ),
+    );
+
     // Rebuild the Shield-proxy controller channel with the renewed identity
     // whenever the certificate holder publishes.
     {

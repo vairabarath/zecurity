@@ -105,6 +105,10 @@ impl ServingState {
 pub struct AuthzSnapshot {
     state: ServingState,
     deadline: Option<Instant>,
+    /// Number of open → closed transitions so far. A reader that only sees
+    /// the latest snapshot still notices every loss of authorization, even a
+    /// brief one that reopened before it looked (fail-closed, B2).
+    closures: u64,
 }
 
 impl AuthzSnapshot {
@@ -113,6 +117,9 @@ impl AuthzSnapshot {
     }
     pub fn deadline(&self) -> Option<Instant> {
         self.deadline
+    }
+    pub fn closures(&self) -> u64 {
+        self.closures
     }
     /// The admission rule (§5.3 guarantee 1, §6.3): an open state AND
     /// `now < D`. Independent of the expiry timer, so a starved timer never
@@ -138,12 +145,20 @@ impl AuthzGate {
     pub fn admits_now(&self) -> bool {
         self.snapshot().admits(Instant::now())
     }
+    /// A receiver for state changes (read-only).
+    pub(crate) fn subscribe(&self) -> watch::Receiver<AuthzSnapshot> {
+        self.rx.clone()
+    }
 
     /// A gate fixed at `snapshot` (the sender is dropped; `borrow` still
     /// returns the last value).
     #[cfg(test)]
     pub fn fixed(state: ServingState, deadline: Option<Instant>) -> Self {
-        let (_tx, rx) = watch::channel(AuthzSnapshot { state, deadline });
+        let (_tx, rx) = watch::channel(AuthzSnapshot {
+            state,
+            deadline,
+            closures: 0,
+        });
         Self { rx }
     }
     /// Serving with a deadline far in the future.
@@ -228,6 +243,7 @@ pub struct AckTracker {
     /// When authorization was last lost. None = never since process start:
     /// every recorded send is after the start, so nothing is excluded.
     lost_at: Option<Instant>,
+    closures: u64,
     publish: watch::Sender<AuthzSnapshot>,
 }
 
@@ -238,6 +254,7 @@ impl AckTracker {
         let (publish, _) = watch::channel(AuthzSnapshot {
             state: ServingState::Starting,
             deadline: None,
+            closures: 0,
         });
         Self {
             freshness,
@@ -249,6 +266,7 @@ impl AckTracker {
             state: ServingState::Starting,
             deadline: None,
             lost_at: None,
+            closures: 0,
             publish,
         }
     }
@@ -273,6 +291,7 @@ impl AckTracker {
         AuthzSnapshot {
             state: self.state,
             deadline: self.deadline,
+            closures: self.closures,
         }
     }
 
@@ -280,6 +299,10 @@ impl AckTracker {
     /// snapshot and logs the transition.
     fn transition(&mut self, to: ServingState, reason: &'static str) {
         let from = self.state;
+        let open = |s: ServingState| matches!(s, ServingState::Serving | ServingState::ServingDisconnected);
+        if open(from) && !open(to) {
+            self.closures += 1;
+        }
         self.state = to;
         if !matches!(to, ServingState::Serving | ServingState::ServingDisconnected) {
             self.deadline = None;

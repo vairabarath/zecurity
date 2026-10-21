@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
-use tokio::time::{interval, sleep_until, Instant};
+use tokio::time::{interval, interval_at, sleep_until, Instant, Interval, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::Request;
@@ -48,23 +48,34 @@ pub const AUTHORIZATION_FRESHNESS: Duration = Duration::from_secs(HEALTH_INTERVA
 const TERMINAL_LOG_INTERVAL: Duration = Duration::from_secs(300);
 const DISCOVERY_FLUSH_SECS: u64 = 5;
 
-/// Delays of the outer reconnect loop.
+/// P — period of authorization requests (design D14), fixed at build time.
+pub const AUTHZ_REQUEST_PERIOD: Duration =
+    Duration::from_millis(crate::authz_timing::AUTHZ_REQUEST_PERIOD_MS);
+
+/// Delays of the outer reconnect loop (design D13).
 #[derive(Debug, Clone, Copy)]
 struct ReconnectTiming {
-    /// After a clean end of a session.
-    clean: Duration,
     backoff_initial: Duration,
     backoff_max: Duration,
+    /// ± jitter applied to each delay, in percent.
+    jitter_pct: u64,
     /// Repeat interval of the terminal-state log line.
     terminal_log: Duration,
 }
 
 const RECONNECT_TIMING: ReconnectTiming = ReconnectTiming {
-    clean: Duration::from_secs(1),
-    backoff_initial: Duration::from_secs(BACKOFF_INITIAL_SECS),
-    backoff_max: Duration::from_secs(BACKOFF_MAX_SECS),
+    backoff_initial: Duration::from_millis(crate::authz_timing::CONTROL_RECONNECT_BASE_MS),
+    backoff_max: Duration::from_millis(crate::authz_timing::CONTROL_RECONNECT_MAX_MS),
+    jitter_pct: crate::authz_timing::CONTROL_RECONNECT_JITTER_PCT,
     terminal_log: TERMINAL_LOG_INTERVAL,
 };
+
+/// `d` scaled by a uniformly random factor in [1 − pct %, 1 + pct %].
+fn jittered(d: Duration, pct: u64) -> Duration {
+    let unit = (uuid::Uuid::new_v4().as_u128() % 10_001) as f64 / 10_000.0; // 0..=1
+    let factor = 1.0 - pct as f64 / 100.0 + 2.0 * (pct as f64 / 100.0) * unit;
+    d.mul_f64(factor)
+}
 
 /// One pass of the outer loop: open a Control stream and run its session to
 /// the end. Production is [`LiveAttempt`]; tests script the outcomes.
@@ -77,6 +88,10 @@ trait Attempt {
 /// no reconnects, health reports or renewals. It never returns — the process
 /// stays alive with the data plane closed (design D12), because an exit
 /// would be restarted by the service manager.
+///
+/// Backoff (D13): starts at `backoff_initial`, doubles per attempt up to
+/// `backoff_max`, each delay jittered; it resets once an attempt received an
+/// accepted authorization ack, so it can't ratchet up over a long uptime.
 async fn reconnect_loop<A: Attempt>(
     attempt: &mut A,
     authz: &SharedAckTracker,
@@ -84,28 +99,30 @@ async fn reconnect_loop<A: Attempt>(
 ) -> Infallible {
     let mut backoff = timing.backoff_initial;
     loop {
+        let accepted_before = authz.lock().highest_accepted();
         let result = attempt.attempt().await;
         authz.lock().stream_down(Instant::now());
         let terminal = authz.lock().terminal();
         if let Some(signal) = terminal {
             return park_terminal(signal, timing.terminal_log).await;
         }
-        match result {
-            Ok(()) => {
-                backoff = timing.backoff_initial;
-                info!("control stream closed cleanly, reconnecting");
-                tokio::time::sleep(timing.clean).await;
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    backoff_secs = backoff.as_secs(),
-                    "control stream error, reconnecting with backoff"
-                );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(timing.backoff_max);
-            }
+        if authz.lock().highest_accepted() > accepted_before {
+            backoff = timing.backoff_initial;
         }
+        let delay = jittered(backoff, timing.jitter_pct);
+        match result {
+            Ok(()) => info!(
+                delay_ms = delay.as_millis() as u64,
+                "control stream closed cleanly, reconnecting"
+            ),
+            Err(e) => error!(
+                error = %e,
+                delay_ms = delay.as_millis() as u64,
+                "control stream error, reconnecting with backoff"
+            ),
+        }
+        tokio::time::sleep(delay).await;
+        backoff = (backoff * 2).min(timing.backoff_max);
     }
 }
 
@@ -139,6 +156,8 @@ struct LiveAttempt<'a> {
     relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
     certs: Arc<CertHolder>,
     authz: SharedAckTracker,
+    /// Authorization request schedule (period P); lives across sessions.
+    schedule: Interval,
 }
 
 impl Attempt for LiveAttempt<'_> {
@@ -159,9 +178,18 @@ impl Attempt for LiveAttempt<'_> {
             &self.relay_list_tx,
             &self.certs,
             &self.authz,
+            &mut self.schedule,
         )
         .await
     }
+}
+
+/// The authorization request schedule (design §6.3, D14): period P,
+/// `MissedTickBehavior::Delay` so a stall never produces a burst of requests.
+fn request_schedule() -> Interval {
+    let mut schedule = interval_at(Instant::now() + AUTHZ_REQUEST_PERIOD, AUTHZ_REQUEST_PERIOD);
+    schedule.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    schedule
 }
 
 /// Outer reconnect loop. Blocks indefinitely — run via tokio::spawn or await directly from main.
@@ -216,6 +244,7 @@ pub async fn run_control_stream(
         relay_list_tx,
         certs,
         authz: authz.clone(),
+        schedule: request_schedule(),
     };
     match reconnect_loop(&mut attempt, &authz, RECONNECT_TIMING).await {}
 }
@@ -394,11 +423,21 @@ trait StreamOps {
     /// control-stream task itself — never a second owner task).
     fn open(&self, initial_health: ConnectorControlMessage) -> OpenFuture;
 
-    /// Handle a ReEnroll: Ok(true) when a renewed certificate was installed
-    /// and published, Ok(false) for a duplicate or failed renewal (non-fatal,
-    /// as before).
-    fn renew(&mut self) -> impl Future<Output = bool> + Send;
+    /// What a finished renewal hands back to [`StreamOps::renewed`].
+    type Renewal: Send + 'static;
+
+    /// Start a renewal for a ReEnroll. The future is owned and polled by the
+    /// session loop next to the stream, so `AuthorizationAck` and
+    /// `ConnectorRevoked` keep being processed while it runs (design D18).
+    fn renew(&mut self) -> RenewFuture<Self::Renewal>;
+
+    /// Apply a finished renewal: true when a renewed certificate was
+    /// installed and published, false for a duplicate or failed renewal
+    /// (non-fatal, as before).
+    fn renewed(&mut self, renewal: Self::Renewal) -> bool;
 }
+
+type RenewFuture<R> = Pin<Box<dyn Future<Output = R> + Send>>;
 
 struct LiveStreamOps<'a> {
     cfg: &'a ConnectorConfig,
@@ -420,23 +459,37 @@ impl StreamOps for LiveStreamOps<'_> {
         ))
     }
 
-    async fn renew(&mut self) -> bool {
+    type Renewal = Option<EnrollmentState>;
+
+    fn renew(&mut self) -> RenewFuture<Self::Renewal> {
         info!("controller requested cert renewal — starting renewal");
-        match renewal::renew_cert(self.state, self.cfg, self.certs).await {
-            Ok(Some(new_state)) => {
-                info!(
-                    "cert renewed successfully, new expiry: {}",
-                    new_state.cert_not_after
-                );
+        let (state, cfg, certs) = (self.state.clone(), self.cfg.clone(), self.certs.clone());
+        Box::pin(async move {
+            match renewal::renew_cert(&state, &cfg, &certs).await {
+                Ok(Some(new_state)) => {
+                    info!(
+                        "cert renewed successfully, new expiry: {}",
+                        new_state.cert_not_after
+                    );
+                    Some(new_state)
+                }
+                // Duplicate of an in-flight or just-completed renewal.
+                Ok(None) => None,
+                Err(e) => {
+                    error!(error = %e, "cert renewal failed");
+                    None
+                }
+            }
+        })
+    }
+
+    fn renewed(&mut self, renewal: Self::Renewal) -> bool {
+        match renewal {
+            Some(new_state) => {
                 *self.state = new_state;
                 true
             }
-            // Duplicate of an in-flight or just-completed renewal.
-            Ok(None) => false,
-            Err(e) => {
-                error!(error = %e, "cert renewal failed");
-                false
-            }
+            None => false,
         }
     }
 }
@@ -452,6 +505,8 @@ struct SessionIo<'a> {
     relay_list_tx: &'a watch::Sender<Option<LabelledRelayList>>,
     health: &'a HealthInfo,
     authz: &'a SharedAckTracker,
+    /// Authorization request schedule (period P), owned by the outer loop.
+    schedule: &'a mut Interval,
 }
 
 /// A renewed certificate is waiting for its replacement stream.
@@ -492,6 +547,7 @@ async fn run_once(
     relay_list_tx: &watch::Sender<Option<LabelledRelayList>>,
     certs: &Arc<CertHolder>,
     authz: &SharedAckTracker,
+    schedule: &mut Interval,
 ) -> Result<()> {
     let health = HealthInfo {
         lan_addr: lan_addr.to_string(),
@@ -521,6 +577,7 @@ async fn run_once(
         relay_list_tx,
         health: &health,
         authz,
+        schedule,
     };
     run_session(stream, &mut ops, io).await
 }
@@ -556,6 +613,7 @@ async fn run_session<O: StreamOps>(
         relay_list_tx,
         health,
         authz,
+        schedule,
     } = io;
 
     // Certificate audit bug 3: only a revocation list received on the current
@@ -565,6 +623,12 @@ async fn run_session<O: StreamOps>(
 
     let mut pending: Option<PendingSwitch> = None;
     let mut opening: Option<OpenFuture> = None;
+    // D18: a renewal in flight, polled next to the stream.
+    let mut renewing: Option<RenewFuture<O::Renewal>> = None;
+
+    // The new stream's initial report was the request for now; the next one
+    // is due one period later (design §6.3).
+    schedule.reset();
 
     let mut health_ticker = interval(Duration::from_secs(HEALTH_INTERVAL_SECS));
     // Consume the immediate first tick so we don't double-send health on connect.
@@ -604,24 +668,42 @@ async fn run_session<O: StreamOps>(
                             MsgAction::Continue => {}
                             MsgAction::Fatal(e) => return Err(e),
                             MsgAction::ReEnroll => {
-                                if ops.renew().await {
-                                    // Open the replacement now, with the renewed
-                                    // certificate (open reads certs.current()). If a
-                                    // replacement is already pending, keep it: an
-                                    // in-flight open is never cancelled, because the
-                                    // controller may already have registered it.
-                                    if pending.is_none() {
-                                        pending = Some(PendingSwitch {
-                                            next_attempt: Instant::now(),
-                                            backoff_secs: BACKOFF_INITIAL_SECS,
-                                        });
-                                    }
-                                    info!("certificate renewed — opening replacement Control stream (old stream stays active)");
+                                // D18: start the renewal without waiting for it;
+                                // the stream keeps being read meanwhile.
+                                if renewing.is_none() {
+                                    renewing = Some(ops.renew());
+                                } else {
+                                    info!("renewal already in progress — ReEnroll ignored");
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            renewal = async { renewing.as_mut().expect("guarded by is_some").await }, if renewing.is_some() => {
+                renewing = None;
+                if ops.renewed(renewal) {
+                    // Open the replacement now, with the renewed
+                    // certificate (open reads certs.current()). If a
+                    // replacement is already pending, keep it: an
+                    // in-flight open is never cancelled, because the
+                    // controller may already have registered it.
+                    if pending.is_none() {
+                        pending = Some(PendingSwitch {
+                            next_attempt: Instant::now(),
+                            backoff_secs: BACKOFF_INITIAL_SECS,
+                        });
+                    }
+                    info!("certificate renewed — opening replacement Control stream (old stream stays active)");
+                }
+            }
+
+            _ = schedule.tick() => {
+                // Authorization request every P (design §6.3, D14, D16: the
+                // full health report).
+                let seq = authz.lock().next_seq();
+                send_msg(&stream.out_tx, health.report(policy_cache, relay_attachment_slot, seq)).await?;
             }
 
             _ = sleep_until(next_attempt), if pending.is_some() && opening.is_none() => {
@@ -677,7 +759,8 @@ async fn run_session<O: StreamOps>(
             }
 
             _ = health_ticker.tick() => {
-                info!("health tick — sending ConnectorHealthReport");
+                // Periodic upstream flushes. Authorization requests have their
+                // own schedule (period P) above.
                 // Drain any pending acks into a batch alongside the health tick.
                 let mut acks = Vec::new();
                 while let Ok((_, ack)) = ack_rx.try_recv() {
@@ -686,9 +769,6 @@ async fn run_session<O: StreamOps>(
                 if !acks.is_empty() {
                     send_msg(&stream.out_tx, ConnectorControlMessage { body: Some(CBody::ResourceAcks(ResourceAckBatch { acks })), }).await?;
                 }
-
-                let seq = authz.lock().next_seq();
-                send_msg(&stream.out_tx, health.report(policy_cache, relay_attachment_slot, seq)).await?;
 
                 let status = shield_registry.get_shield_status_batch();
                 if !status.shields.is_empty() {
@@ -944,6 +1024,8 @@ mod renewal_switch_tests {
     struct FakeOps {
         shared: Arc<Mutex<Shared>>,
         renew_result: bool,
+        /// How long a renewal takes (D18 tests); zero = immediate.
+        renew_delay: Duration,
         /// Weak handle to the session's original stream sender.
         old_out: mpsc::WeakSender<ConnectorControlMessage>,
         authz: SharedAckTracker,
@@ -976,9 +1058,21 @@ mod renewal_switch_tests {
             })
         }
 
-        async fn renew(&mut self) -> bool {
+        type Renewal = bool;
+
+        fn renew(&mut self) -> RenewFuture<bool> {
             self.shared.lock().renew_calls += 1;
-            self.renew_result
+            let (result, delay) = (self.renew_result, self.renew_delay);
+            Box::pin(async move {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+                result
+            })
+        }
+
+        fn renewed(&mut self, renewal: bool) -> bool {
+            renewal
         }
     }
 
@@ -994,6 +1088,7 @@ mod renewal_switch_tests {
         relay_list_tx: watch::Sender<Option<LabelledRelayList>>,
         health: HealthInfo,
         authz: SharedAckTracker,
+        schedule: Interval,
     }
 
     fn env() -> Env {
@@ -1025,6 +1120,7 @@ mod renewal_switch_tests {
                 public_ip: String::new(),
             },
             authz: AckTracker::shared(AUTHORIZATION_FRESHNESS),
+            schedule: request_schedule(),
         }
     }
 
@@ -1091,6 +1187,7 @@ mod renewal_switch_tests {
             relay_list_tx: &e.relay_list_tx,
             health: &e.health,
             authz: &e.authz,
+            schedule: &mut e.schedule,
         }
     }
 
@@ -1131,6 +1228,7 @@ mod renewal_switch_tests {
             FakeOps {
                 shared: shared.clone(),
                 renew_result,
+                renew_delay: Duration::ZERO,
                 old_out: old.out_tx.downgrade(),
                 authz,
             },
@@ -1817,12 +1915,13 @@ mod renewal_switch_tests {
     // ── Phase B1: reconnect loop, terminal idle (D12) ──────────────────────
 
     const FAST: ReconnectTiming = ReconnectTiming {
-        clean: Duration::from_millis(1),
         backoff_initial: Duration::from_millis(1),
         backoff_max: Duration::from_millis(4),
+        jitter_pct: 0,
         terminal_log: Duration::from_secs(3600),
     };
 
+    #[derive(Clone, Copy)]
     enum Outcome {
         Ok,
         /// Transport-style failure (no status).
@@ -2048,6 +2147,266 @@ mod renewal_switch_tests {
             never = reconnect_loop(&mut attempt, &authz, FAST) => match never {},
             _ = driver => {}
         }
+    }
+
+    // ── Phase B2: schedule, deadline, backoff, renewal (paused clock) ──────
+
+    /// The controller side of a fake stream: answers every health report
+    /// with AgentPolicy (first) and an AuthorizationAck after `delay`, while
+    /// `ack` allows it. Returns the number of reports seen.
+    fn spawn_acker(
+        mut peer: Peer,
+        delay: Duration,
+        ack: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (tokio::task::JoinHandle<()>, Arc<std::sync::atomic::AtomicUsize>) {
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = seen.clone();
+        let task = tokio::spawn(async move {
+            let mut first = true;
+            while let Some(m) = peer.out_rx.recv().await {
+                let Some(CBody::ConnectorHealth(h)) = &m.body else { continue };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if first {
+                    first = false;
+                    let _ = peer.in_tx.send(Ok(policy_msg(true))).await;
+                }
+                if ack.load(std::sync::atomic::Ordering::SeqCst) {
+                    let (tx, seq) = (peer.in_tx.clone(), h.heartbeat_seq);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = tx.send(Ok(authz_ack(seq))).await;
+                    });
+                }
+            }
+        });
+        (task, seen)
+    }
+
+    /// AB2-1 (T1): with acks arriving within the budget, an hour of the real
+    /// schedule never leaves Serving; a request goes out every P.
+    #[tokio::test(start_paused = true)]
+    async fn healthy_hour_never_disables() {
+        let mut e = env();
+        let authz = e.authz.clone();
+        let _expiry = crate::authorization::spawn_expiry(authz.clone());
+        let (stream, peer) = fake_stream_stamped(far_future(), &authz);
+        let s1 = authz.lock().next_seq();
+        stream.out_tx.send(e.health.report(&e.policy_cache, &e.slot, s1)).await.unwrap();
+        let ack = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (_acker, seen) = spawn_acker(peer, Duration::from_millis(250), ack);
+        let (mut ops, _) = fake_ops_with(vec![], true, &stream, authz.clone());
+        let gate = authz.lock().gate();
+        let session = run_session(into_stream(stream), &mut ops, io(&mut e));
+        let driver = async {
+            wait_for("first ack", || gate.admits_now()).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        };
+        tokio::select! {
+            r = session => panic!("session ended: {r:?}"),
+            _ = driver => {}
+        }
+        assert_eq!(authz.lock().state(), ServingState::Serving);
+        assert_eq!(gate.snapshot().closures(), 0, "never closed in the hour");
+        let n = seen.load(std::sync::atomic::Ordering::SeqCst);
+        let expected = (3600.0 / AUTHZ_REQUEST_PERIOD.as_secs_f64()) as usize;
+        assert!(
+            (expected..=expected + 2).contains(&n),
+            "{n} requests in an hour, expected about {expected} (one every P)"
+        );
+    }
+
+    /// AB2-2 (T2, T27): acks stop (controller silent / Unavailable) → new
+    /// traffic refused and every session cancelled exactly at D = sent[k] + H.
+    #[tokio::test(start_paused = true)]
+    async fn missing_acks_close_exactly_at_the_deadline() {
+        let mut e = env();
+        let authz = e.authz.clone();
+        let _expiry = crate::authorization::spawn_expiry(authz.clone());
+        let _enforcer = crate::fail_closed::spawn(
+            &authz.lock().gate(),
+            crate::fail_closed::FailClosed {
+                sessions: e.registry.clone(),
+                shields: e.shield_registry.clone(),
+                policy: e.policy_cache.clone(),
+                disabled_shield_close: Duration::from_secs(30),
+            },
+        );
+        let (session_token, _guard) = e.registry.register(
+            ("spiffe://c/1".into(), "res-a".into()),
+            crate::session_registry::SessionTransport::Quic,
+        );
+        let (stream, peer) = fake_stream_stamped(far_future(), &authz);
+        let s1 = authz.lock().next_seq();
+        stream.out_tx.send(e.health.report(&e.policy_cache, &e.slot, s1)).await.unwrap();
+        let ack = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (_acker, _) = spawn_acker(peer, Duration::from_millis(100), ack.clone());
+        let (mut ops, _) = fake_ops_with(vec![], true, &stream, authz.clone());
+        let gate = authz.lock().gate();
+        let session = run_session(into_stream(stream), &mut ops, io(&mut e));
+        let driver = async {
+            wait_for("serving", || gate.admits_now()).await;
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            // The controller stops acknowledging (DB down / silent).
+            ack.store(false, std::sync::atomic::Ordering::SeqCst);
+            let highest = authz.lock().highest_accepted();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            // Let any ack still in flight land, then D is final.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(authz.lock().highest_accepted() >= highest);
+            let d = authz.lock().deadline().expect("serving has a deadline");
+            let sent = authz.lock().latest_accepted_sent_at().unwrap();
+            assert_eq!(d, sent + AUTHORIZATION_FRESHNESS, "D = sent[k] + H");
+            tokio::time::sleep_until(d - Duration::from_millis(1)).await;
+            assert!(gate.admits_now(), "still open 1 ms before D");
+            assert!(!session_token.is_cancelled());
+            tokio::time::sleep_until(d).await;
+            assert!(!gate.snapshot().admits(d), "refused at D");
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(tokio::time::Instant::now(), d, "checked at the instant D");
+            assert!(session_token.is_cancelled(), "sessions cancelled at D");
+            assert_eq!(authz.lock().state(), ServingState::Disabled);
+            assert_eq!(authz.lock().lost_at(), Some(d));
+        };
+        tokio::select! {
+            r = session => panic!("session ended: {r:?}"),
+            _ = driver => {}
+        }
+    }
+
+    /// AB2-3 (§6.3): after a stall the schedule resumes with one request and
+    /// then the normal period — never a burst of catch-up requests.
+    #[tokio::test(start_paused = true)]
+    async fn schedule_never_bursts_after_a_stall() {
+        let mut schedule = request_schedule();
+        schedule.tick().await; // first tick at +P
+        tokio::time::advance(AUTHZ_REQUEST_PERIOD * 5).await; // stalled
+        schedule.tick().await; // one overdue tick, immediately
+        let after_overdue = Instant::now();
+        schedule.tick().await;
+        assert_eq!(
+            Instant::now() - after_overdue,
+            AUTHZ_REQUEST_PERIOD,
+            "Delay: the next tick is a full period later, not a burst"
+        );
+    }
+
+    /// AB2-8 (D13): reconnect delays follow 1 s → ×2 → 5 s cap, each within
+    /// ±20 %, and reset after an accepted ack (no ratchet as in Phase M R3).
+    #[tokio::test(start_paused = true)]
+    async fn backoff_doubles_to_the_cap_and_resets_after_an_ack() {
+        let authz = AckTracker::shared(AUTHORIZATION_FRESHNESS);
+        let mut script = vec![Outcome::Err; 7];
+        script.push(Outcome::ServeThenErr);
+        script.extend(vec![Outcome::Err; 2]);
+        script.push(Outcome::Hang);
+        let (attempt, attempts) = scripted(&authz, script);
+        let times = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        struct Timed(ScriptedAttempt, Arc<Mutex<Vec<Instant>>>);
+        impl Attempt for Timed {
+            async fn attempt(&mut self) -> Result<()> {
+                self.1.lock().push(Instant::now());
+                self.0.attempt().await
+            }
+        }
+        let mut timed = Timed(attempt, times.clone());
+        let loop_authz = authz.clone();
+        let task = tokio::spawn(async move {
+            reconnect_loop(&mut timed, &loop_authz, RECONNECT_TIMING).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(120); // simulated
+        while attempts_of(&attempts) < 11 {
+            assert!(Instant::now() < deadline, "attempts stalled at {}", attempts_of(&attempts));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        task.abort();
+        let t = times.lock().clone();
+        let gaps: Vec<f64> = t.windows(2).map(|w| (w[1] - w[0]).as_secs_f64()).collect();
+        // After attempts 1..7 (errors): 1, 2, 4, 5, 5, 5, 5; after attempt 8
+        // (accepted ack): reset to 1; then 2.
+        let nominal = [1.0, 2.0, 4.0, 5.0, 5.0, 5.0, 5.0, 1.0, 2.0, 4.0];
+        for (i, (g, n)) in gaps.iter().zip(nominal).enumerate() {
+            assert!(
+                *g >= n * 0.8 - 1e-6 && *g <= n * 1.2 + 1e-6,
+                "gap {i}: {g:.3} s not within ±20 % of {n} s (gaps {gaps:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_stays_within_its_bound_and_varies() {
+        let base = Duration::from_secs(1);
+        let samples: Vec<Duration> = (0..500).map(|_| jittered(base, 20)).collect();
+        assert!(samples.iter().all(|d| *d >= base.mul_f64(0.8) && *d <= base.mul_f64(1.2)));
+        assert!(samples.iter().any(|d| *d < base.mul_f64(0.95)));
+        assert!(samples.iter().any(|d| *d > base.mul_f64(1.05)));
+        assert_eq!(jittered(base, 0), base);
+    }
+
+    /// AB2-9 (D18): an AuthorizationAck that arrives while a renewal is in
+    /// flight is processed at once, not after the renewal; the renewal then
+    /// still switches make-before-break.
+    #[tokio::test]
+    async fn acks_are_processed_while_a_renewal_runs() {
+        let mut e = env();
+        let authz = e.authz.clone();
+        let (old, mut old_peer) = fake_stream_stamped(far_future(), &authz);
+        let (new, mut new_peer) = fake_stream_stamped(far_future(), &authz);
+        let s1 = authz.lock().next_seq();
+        old.out_tx.send(e.health.report(&e.policy_cache, &e.slot, s1)).await.unwrap();
+        let _ = recv(&mut old_peer.out_rx).await;
+        let (mut ops, shared) = fake_ops_with(vec![Script::Ok(new)], true, &old, authz.clone());
+        ops.renew_delay = Duration::from_millis(1500);
+        let session = run_session(into_stream(old), &mut ops, io(&mut e));
+        let driver = async {
+            old_peer.in_tx.send(Ok(policy_msg(true))).await.unwrap();
+            old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
+            wait_for("renewal started", || shared.lock().renew_calls == 1).await;
+            let t = Instant::now();
+            old_peer.in_tx.send(Ok(authz_ack(s1))).await.unwrap();
+            wait_for("ack accepted", || authz.lock().highest_accepted() == s1).await;
+            assert!(
+                t.elapsed() < Duration::from_millis(500),
+                "ack waited {:?} — blocked behind the renewal",
+                t.elapsed()
+            );
+            assert!(shared.lock().opens.is_empty(), "renewal still in flight");
+            // The renewal completes and the switch happens as before.
+            let initial = recv(&mut new_peer.out_rx).await;
+            assert!(matches!(initial.body, Some(CBody::ConnectorHealth(_))));
+            assert_eq!(shared.lock().opens.len(), 1);
+        };
+        tokio::select! {
+            r = session => panic!("session ended: {r:?}"),
+            _ = driver => {}
+        }
+    }
+
+    /// AB2-9 (D18): ConnectorRevoked during a renewal ends the session at
+    /// once.
+    #[tokio::test]
+    async fn revocation_during_a_renewal_is_immediate() {
+        let mut e = env();
+        let authz = e.authz.clone();
+        let (old, old_peer) = fake_stream(far_future());
+        let (mut ops, shared) = fake_ops_with(vec![], true, &old, authz.clone());
+        ops.renew_delay = Duration::from_secs(30);
+        let session = run_session(into_stream(old), &mut ops, io(&mut e));
+        tokio::pin!(session);
+        old_peer.in_tx.send(Ok(reenroll())).await.unwrap();
+        tokio::select! {
+            r = &mut session => panic!("ended early: {r:?}"),
+            _ = wait_for("renewal started", || shared.lock().renew_calls == 1) => {}
+        }
+        let t = Instant::now();
+        old_peer.in_tx.send(Ok(revoked_event())).await.unwrap();
+        let r = tokio::time::timeout(Duration::from_secs(2), session)
+            .await
+            .expect("session ends without waiting for the renewal");
+        assert!(r.is_ok());
+        assert!(t.elapsed() < Duration::from_secs(1));
+        assert_eq!(authz.lock().state(), ServingState::Revoked);
     }
 }
 

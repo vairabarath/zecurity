@@ -30,6 +30,13 @@ impl PolicyCache {
         *self.snapshot.write() = Some(snapshot);
     }
 
+    /// Connector-revocation fail-closed (§7 step 5): drop the cached ACL in a
+    /// terminal state. A snapshot pushed later is still applied, but
+    /// admission is keyed on the serving state, so it admits nothing.
+    pub fn clear(&self) {
+        *self.snapshot.write() = None;
+    }
+
     /// Atomically replaces the stored snapshot and returns the (spiffe_id,
     /// resource_id) pairs that were allowed under the previous snapshot but
     /// are not allowed under the new one — exactly the live sessions that

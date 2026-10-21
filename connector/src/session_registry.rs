@@ -126,6 +126,26 @@ impl SessionRegistry {
         }
     }
 
+    /// Connector-revocation fail-closed (§7 step 3): cancel every live
+    /// session — connector-routed and shield-routed — whatever its key.
+    /// Returns how many were cancelled.
+    pub fn cancel_every_session(&self, reason: &'static str) -> usize {
+        let mut cancelled = 0;
+        for entry in self.inner.iter() {
+            for (token, _) in entry.value().values() {
+                token.cancel();
+                cancelled += 1;
+            }
+        }
+        info!(cancelled, reason, "fail-closed: every session cancelled");
+        cancelled
+    }
+
+    #[cfg(test)]
+    pub fn total_sessions(&self) -> usize {
+        self.inner.iter().map(|e| e.value().len()).sum()
+    }
+
     #[cfg(test)]
     pub fn session_count(&self, key: &SessionKey) -> usize {
         self.inner.get(key).map(|s| s.value().len()).unwrap_or(0)

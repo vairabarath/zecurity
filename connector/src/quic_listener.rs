@@ -56,6 +56,26 @@ pub fn spawn_quic_config_updates(
     })
 }
 
+/// Connector-revocation fail-closed (design D15, B2): in a terminal state
+/// (`Revoked`/`UnknownIdentity`) close every client QUIC connection and the
+/// endpoint. A recoverable `Disabled` keeps connections; their new streams
+/// are reset by the admission gate (B1).
+pub fn spawn_terminal_close(endpoint: quinn::Endpoint, gate: &AuthzGate) -> JoinHandle<()> {
+    let mut rx = gate.subscribe();
+    tokio::spawn(async move {
+        loop {
+            if rx.borrow_and_update().state().is_terminal() {
+                warn!("fail-closed: terminal state — closing every client QUIC connection");
+                endpoint.close(0u32.into(), b"connector not authorized");
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
 pub async fn listen(
     addr: &str,
     advertise_addr: &str,
@@ -75,6 +95,7 @@ pub async fn listen(
         .map_err(|e| anyhow::anyhow!("bad QUIC addr '{}': {}", addr, e))?;
     let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
     let _config_updates = spawn_quic_config_updates(endpoint.clone(), certs.subscribe());
+    let _terminal_close = spawn_terminal_close(endpoint.clone(), &gate);
 
     // Register the QUIC advertise address so device_tunnel includes it in responses.
     device_tunnel::set_quic_advertise_addr(advertise_addr.to_string());

@@ -136,7 +136,9 @@ async fn quic_request(conn: &quinn::Connection) -> Result<Vec<u8>, String> {
 }
 
 /// QUIC device tunnel: new connections refused while closed; on an
-/// established connection, new streams are reset (no TunnelResponse).
+/// established connection, new streams are reset (no TunnelResponse) while
+/// `Disabled`, and the connection itself is closed in a terminal state (B2,
+/// D15).
 #[tokio::test]
 async fn quic_listener_follows_the_serving_state() {
     install_crypto_provider();
@@ -174,15 +176,30 @@ async fn quic_listener_follows_the_serving_state() {
     let served = quic_request(&conn).await.expect("serving: stream answered");
     assert!(!served.is_empty(), "serving: a TunnelResponse is sent");
 
-    authz.lock().on_terminal(TerminalSignal::UnknownIdentity);
+    // Recoverable Disabled (D15): the connection is kept, but a new stream
+    // on it is reset and a new connection is refused.
+    authz.lock().expire(Instant::now() + H);
     let refused = quic_request(&conn).await;
     assert!(
         matches!(&refused, Err(e) if e.contains("reset")),
-        "existing connection: a new stream must be reset, got {refused:?}"
+        "Disabled, existing connection: a new stream must be reset, got {refused:?}"
     );
+    assert!(conn.close_reason().is_none(), "Disabled keeps the client connection (D15)");
     assert!(
         quic_connect(&client, addr).await.is_none(),
-        "a new QUIC connection must be refused"
+        "Disabled: a new QUIC connection must be refused"
+    );
+
+    // Terminal (B2): the client connection itself is closed.
+    authz.lock().on_terminal(TerminalSignal::UnknownIdentity);
+    let deadline = Instant::now() + WAIT;
+    while conn.close_reason().is_none() {
+        assert!(Instant::now() < deadline, "terminal: client QUIC connection not closed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        quic_connect(&client, addr).await.is_none(),
+        "terminal: a new QUIC connection must be refused"
     );
 }
 

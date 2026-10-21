@@ -122,6 +122,10 @@ pub struct ShieldRegistry {
     /// Connector serving state (connector-revocation B1): no new shield
     /// Control stream while the connector itself isn't authorized to serve.
     serving_gate: AuthzGate,
+    /// Connector-revocation fail-closed (§7 step 4, B2): bumped to close every
+    /// open shield Control stream with `Unavailable` (the connector stopped
+    /// serving), as distinct from a shield revocation (`PermissionDenied`).
+    close_all: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl ShieldRegistry {
@@ -156,7 +160,23 @@ impl ShieldRegistry {
             revocations_synced: Arc::new(AtomicBool::new(false)),
             next_stream_id: Arc::new(AtomicU64::new(0)),
             serving_gate,
+            close_all: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// Close every open shield Control stream because this connector stopped
+    /// serving (terminal state, or `Disabled` past the D15 grace). Shields see
+    /// `Unavailable` and fail over; new streams are refused by the serving
+    /// gate. Revocation state, caches and buffered instructions are kept.
+    pub fn close_all_streams(&self, reason: &'static str) {
+        self.close_all.send_modify(|n| *n += 1);
+        warn!(reason, "fail-closed: closing every shield Control stream");
+    }
+
+    /// How many close-all requests were made (tests).
+    #[cfg(test)]
+    pub fn close_all_count(&self) -> u64 {
+        *self.close_all.borrow()
     }
 
     /// Apply the controller's authoritative, complete list of revoked shield
@@ -858,6 +878,10 @@ impl ShieldService for ShieldRegistry {
         // its cancel token and closes it. The hub keeps its own revoked set for
         // the same reason (revocation updates the maps first, then the hub).
         let cancel = CancellationToken::new();
+        // Subscribed before admission: a close requested after this point
+        // ends this stream too.
+        let mut close_rx = self.close_all.subscribe();
+        close_rx.borrow_and_update();
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut maps = self.maps.lock();
@@ -951,6 +975,12 @@ impl ShieldService for ShieldRegistry {
                     // Certificate audit bug 3: the shield was revoked.
                     _ = cancel.cancelled() => {
                         let _ = out_tx.try_send(Err(Status::permission_denied("shield is revoked")));
+                        break;
+                    }
+                    // Connector-revocation fail-closed: this connector stopped
+                    // serving; the shield should fail over.
+                    _ = close_rx.changed() => {
+                        let _ = out_tx.try_send(Err(Status::unavailable("connector is not authorized to serve")));
                         break;
                     }
                     msg = in_stream.message() => {
@@ -1954,6 +1984,27 @@ mod shield_server_tls_tests {
             !control_admitted(&pki, server.addr, SHIELD_ID).await,
             "a shield was admitted by a revoked connector"
         );
+    }
+
+    /// Connector-revocation B2 (AB2-5): when the connector stops serving, an
+    /// open shield Control stream ends with `Unavailable` — so the shield
+    /// fails over — not with the `PermissionDenied` of a shield revocation;
+    /// the shield itself is not marked revoked.
+    #[tokio::test]
+    async fn closing_all_streams_ends_them_with_unavailable() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        r.close_all_streams("test");
+        match tokio::time::timeout(WAIT, replies.message()).await {
+            Ok(Err(status)) => assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}"),
+            other => panic!("expected the stream to end with Unavailable, got {other:?}"),
+        }
+        assert!(!r.is_revoked(SHIELD_ID), "closing for the connector's sake revokes nothing");
     }
 
     /// Connector restart: revocation state is not trusted across processes —
