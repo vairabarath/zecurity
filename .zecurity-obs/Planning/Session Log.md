@@ -2816,3 +2816,29 @@ serves on `127.0.0.1:9102`.
 - shield on udaya (sudo), relay on manojinkyank (sudo);
 - `zecurity-client login`, because the session expired;
 - one resource, or `down`/`up` after each change.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation B2 live acceptance: PASS
+
+**Results:**
+- Live L-1…L-8 PASS on controller (this PC), connector inkyank, shield udaya and relay manojinkyank. L-1 was shortened to 15 min / 3 renewals at the user's request.
+- B p99 8.2 ms (Phase M: 66–79 ms).
+- Cut-off at D within 1 ms; shield close at D + 30.00 s.
+- Restarts recover in about 1 s; after a 90 s outage, `Serving` 3.8 s after the controller returned.
+- Revoke: everything closed within 0.3 ms, the process idles. Delete + restart: `UnknownIdentity`, never serves.
+
+**Code:** `6174053` dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR` (user decision, so the LAN relay could be tested).
+
+**Findings outside B2:**
+- admin UI can't protect a resource created before its shield;
+- relay selector doesn't refresh its list while not attached;
+- sessions invalid after controller restarts;
+- client hot-apply cap;
+- client direct-retry lag (KI-5).
+
+**Lab state:**
+- `pm-conn` revoked (needs a new connector to continue);
+- the nftables block on this PC is still in place (`~/.cache/zecurity-b2/l7-unblock.sh`).
+
+**Nothing pushed.**

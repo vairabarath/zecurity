@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (revision 5; D1
 acceptance: Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md (signed off 2026-10-21)
 branch: feat/sprint20-m1-phase2
 commits: 76a0130 (implementation + tests), cd03540 (dropped-stream deadline test, since_send_us)
-status: UNIT LEVEL DONE — live acceptance (L-1 … L-8) pending lab setup (udaya shield, manojinkyank relay). Committed locally, NOT pushed.
+status: DONE — unit level + live acceptance L-1…L-8 PASS (2026-10-21; L-1 shortened to 15 min / 3 renewals by user decision). Committed locally, NOT pushed.
 ---
 
 # Phase B2 — request schedule and full fail-closed
@@ -80,12 +80,41 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 | B14 shield stream obeys close-all | `closing_all_streams_ends_them_with_unavailable` |
 | B15 close-all says `Unavailable` | `closing_all_streams_ends_them_with_unavailable` |
 
-## 5. Live acceptance (L-1 … L-8): pending
+## 5. Live acceptance (2026-10-21): L-1 … L-8 PASS
 
-**Lab per design §15:**
-- controller (this PC) and connector (inkyank), both built from **one B2 commit**;
-- controller with `CONNECTOR_CERT_TTL=15m` and `CONNECTOR_RENEWAL_WINDOW=10m`, so the runs include renewals;
-- **shield on udaya**, **relay on manojinkyank**;
-- client with one resource, or `down`/`up` after each change.
+**Lab:**
+- controller on this PC (user unit `k2-controller`; `CONNECTOR_CERT_TTL=15m`, `CONNECTOR_RENEWAL_WINDOW=10m`, `RELAY_CERT_TTL=1h`);
+- connector `pm-conn` on inkyank (192.168.1.75);
+- shield `pm-udaya-shield` on udaya (192.168.1.37), protecting `pm-udaya-web` (tcp/8090);
+- relay `pm-relay-manoj` on manojinkyank (192.168.1.49:9093);
+- client on this PC.
 
-**For L-1/L-2:** B is read from `since_send_us` on `ack_accepted` (permanent in B2). The B2 connector has no `health_enqueued` log; Phase M showed that transport-send → ack and enqueue → ack differ by about 0.1 ms.
+**Binaries:**
+- controller `d32cecc0b692` (`f71fba6`) for L-1…L-4/L-8, then `ff4772b994fe` (`6174053`, plus the dev relay setting) for L-7/L-5/L-6;
+- connector `6c442e1b40b9`, shield `2910b0e297aa`, relay `8a47a3e8a65e` (all `f71fba6`);
+- `6174053` touches the controller only (`git diff f71fba6 6174053 -- connector shield relay proto` is empty), so this is still one coordinated build;
+- update timers off.
+
+| # | What was done | Result |
+|---|---|---|
+| L-1 / L-2 (T1, T10, D18) | 11:03:07–11:18:14 UTC, **15 min / 3 renewals** (user shortened it from ≥ 1 h; the 1 h schedule is covered by the paused-clock unit test). One HTTP/1.1 connection held through connector + shield, a GET every 2 s | 205 acks accepted, 0 rejected, **0 Disabled**, 0 reconnects, 0 sessions cancelled; 3/3 renewals; 451 requests delivered via the shield, no failure, one socket. **B (since_send_us): p50 3.9 ms, p99 8.2 ms, max 9.3 ms** (Phase M: p99 66–79 ms; the D18 fix confirmed) |
+| L-3 (T2) | Held flow; controller stopped 11:19:18 (10 s drain, still acking); down 90 s; restarted | Last ack seq 274, sent 11:19:25.3585 → **D = 11:19:40.3585**. `Disabled` logged 11:19:40.3595 (+1 ms); every session cancelled 11:19:40.3596; the flow saw a reset; new attempts reset, never `ok:false`. Backoff while down: 2.1, 3.4, 5.2, 5.6, … s (capped about 5 s ± 20 %). Controller back 11:20:58.6 → **`Serving` 11:21:02.38 (3.8 s)** |
+| L-8 (D15, T13) | Same run | Shield streams kept during `Disabled`, **closed at 11:20:10.3607 = Disabled + 30.00 s** |
+| L-4 (D13) | 3 restarts, 60 s apart | Lost → `Serving` in **1.04 s, 1.22 s, 0.93 s**; backoff 990 / 1155 / 850 ms (reset after an ack); 0 Disabled, 0 cancellations (Phase M R3: 16–60 s) |
+| L-7 (T9 relay) | Controller with `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`6174053`); connector restarted; direct UDP :9092 blocked on the client host (nftables) | Client: "direct path failed; used relay fallback relay_addr=192.168.1.49:9093"; relay "bridging Client to Connector through Relay"; 200 OK via the relay |
+| L-5 (T5) | Held flow over the relay; `pm-conn` revoked in the admin UI | Connector 12:00:30.811: `Serving → Revoked`; within 0.3 ms every session cancelled, client QUIC connections closed, shield streams closed, ACL cleared; reconnect loop stopped (**0 attempts since**); **process stays up** (same instance, D12). Shield: stream ended with **`Unavailable` "connector is not authorized to serve"**, reconnect refused the same way. Relay: bridge ended 12:00:30.83; new bridge attempts reset; client flow refused from 12:00:31.887 on |
+| L-6 (T19, T25) | Throwaway connector `pm-disposable` on udaya (user-level process): enrolled (`Starting → Serving` in 0.4 s), revoked, row deleted (the API deletes only pending or revoked connectors), process restarted twice | Each restart: `Starting → **UnknownIdentity**` (the controller's `unknown` marker), **0 acks**, never served, reconnect loop stopped, process alive |
+
+**Observed, outside B2** (logged as findings):
+1. **Client recovery lag.** After L-3 the client's held flow resumed about 21 s after the connector was serving again: client direct-path retry backoff (runbook KI-5).
+2. **Admin UI: a resource created before its shield can't be protected.** The button requires `resource.shield`, though the backend `MarkProtecting` would bind it. Workaround: delete and recreate the resource.
+3. **Connector `relay_selector::run` never refreshes its relay list while not attached.** An initially empty list keeps it in backoff until the process restarts.
+4. **Admin and client sessions became invalid after controller restarts** (re-login needed, three times today). Root cause not investigated.
+5. **Client hot-apply admits one new resource IP** (smoltcp `IFACE_MAX_ADDR_COUNT = 2`); a `down`/`up` cycle was needed.
+6. **Relays on private IPs were never advertised.** Addressed for dev labs by `6174053` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
+
+**Lab state after the run:**
+- `pm-conn` is **revoked** (inkyank connector idles; the lab needs a new connector enrollment for further use);
+- `pm-disposable` deleted and stopped;
+- shield and relay still running;
+- **the nftables block on this PC is still in place** (`sudo bash ~/.cache/zecurity-b2/l7-unblock.sh` removes it).
