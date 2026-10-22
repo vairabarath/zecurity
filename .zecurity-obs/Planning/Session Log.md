@@ -2870,3 +2870,15 @@ serves on `127.0.0.1:9102`.
 - **Gate:** cargo test 237 + 4 PASS.
 - **Live on the fix:** wake + dial of `192.168.1.49:9093` in the same millisecond as the push; the empty push is followed too; backoff 40 s → 120 s.
 - Record: `Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 08: shield re-attach lag after a connector Disabled period (B2 finding 1)
+
+- **Re-diagnosis:** the L-3 client journal shows `shield not attached` until 11:21:19. The lag was the shield's 5 → 60 s backoff against the `Disabled` connector's refusals, not the client's KI-5 cooldown.
+- **Live repro:**
+  - local connector + disposable unprivileged shield `s3-shield` (k2-net);
+  - 90 s controller outage (`outage.sh`);
+  - baseline: connector Serving 09:07:10.959 → shield attached 09:07:48.297 (**37.3 s**).
+- **Fix:** `shield/src/control_stream.rs`, a 2 s fixed retry with backoff reset for the connector's "not serving" `Unavailable`; the mid-stream `Status` is kept. 3 new tests (mutant: all 3 fail); shield tests 35 PASS.
+- **Live on the fix:** 09:10:33.973 → 09:10:34.210 (**0.24 s**).
+- Follow-up: shield failover away from a `Disabled` connector.
+- Record: `Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled.md`. Committed locally, not pushed.

@@ -335,6 +335,12 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Fix: `wait_backoff` selects on `sleep` vs `relay_list_rx.changed()`; a pushed list ends the backoff and is dialed next. The backoff keeps growing (no tight loop).
   - Tests: 4 new paused-clock tests (2 fail on the old code). Live: empty list → relay pushed → dial at the same millisecond.
   - Details: [[Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected]].
+- **Fix 08 — the shield re-attached up to ~40 s after the connector served again (B2 live finding 1, mis-attributed to client KI-5), 2026-10-22.**
+  - Cause: the shield's `reconnect_loop` backed off 5 → 60 s on the `Disabled` connector's `Unavailable("connector is not authorized to serve")` refusals.
+  - Fix: `connector_not_serving()` recognises those refusals (at open and mid-stream; `run_once` now keeps the `Status`). The shield retries every 2 s and resets the backoff; other errors keep the exponential backoff.
+  - Tests: 3 new (all fail on the old code). Live: 37.3 s → 0.24 s.
+  - Follow-up: the shield doesn't fail over away from a TLS-reachable but `Disabled` connector.
+  - Details: [[Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled]].
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
   - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.

@@ -107,6 +107,8 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 
 **Observed, outside B2** (logged as findings):
 1. **Client recovery lag.** After L-3 the client's held flow resumed about 21 s after the connector was serving again: client direct-path retry backoff (runbook KI-5).
+   - **Corrected and fixed 2026-10-22: [[Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled]].** The cause was not the client. The client journal shows `shield not attached` until 11:21:19: the shield's exponential reconnect backoff (5 → 60 s) against the `Disabled` connector's refusals.
+   - The shield now retries every 2 s while the connector says "not authorized to serve". Live re-attach lag: 37.3 s → 0.24 s.
 2. **Admin UI: a resource created before its shield can't be protected.** The button requires `resource.shield`, though the backend `MarkProtecting` would bind it. Workaround: delete and recreate the resource.
 3. **Connector `relay_selector::run` never refreshes its relay list while not attached.** An initially empty list keeps it in backoff until the process restarts. **Fixed 2026-10-22: [[Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected]].** The backoff now wakes on a pushed list and adopts it. Verified live: the dial starts in the same millisecond as the push, and the backoff still grows.
 4. **Admin and client sessions became invalid after controller restarts** (re-login needed, three times today). **Fixed 2026-10-22: [[Sprint20/Fixes/Fix06-Session-Refresh-Per-Login]].**
