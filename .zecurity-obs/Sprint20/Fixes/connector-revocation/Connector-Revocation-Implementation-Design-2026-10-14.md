@@ -641,6 +641,9 @@ Access to the lab hosts is through the user's Orca SSH terminals. sudo on each h
 | D16 (= O6) | The authorization request every P is the full health report (no protocol or controller change). A lightweight request is a later improvement |
 | D17 | The Phase A contract details are approved as built: field numbers (§4.2), ack acceptance rules (§4.4, with `lost_at` per §5.2) and the `AgentPolicy.authorization_acks` capability flag kept as a fail-closed assertion (§4.6) |
 | D18 | B2 includes the renewal head-of-line fix: a certificate renewal must not delay processing of `AuthorizationAck` or `ConnectorRevoked` on the current Control stream (Phase M: all 61–80 ms ack tails) |
+| D19 (= O11) | Client: revoked connectors listed until revoked_at + connector cert TTL; the client stops using connectors after 1 h without a successful ACL sync |
+| D20 (= O12) | Relay: a stale revoked list is kept; the relay keeps serving; no new timeout |
+| D21 (= O13) | Shield: prune field approved; prune immediately from any connector's list, never re-add while listed, memory only; hostile-connector limit accepted and documented |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -656,9 +659,9 @@ Access to the lab hosts is through the user's Orca SSH terminals. sudo on each h
 | O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **ACCEPTED (D15, 2026-10-21)**: keep shield streams, relay attachment and client QUIC connections open but carry nothing (new streams refused, sessions cancelled); close the shield streams after 30 s in `Disabled` (`DISABLED_SHIELD_CLOSE_SECS`). To be checked live once a shield host is available |
 | O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **ACCEPTED (D12)**: no persistence; idle, don't exit |
 | O10 | Recovery after permanent revocation | **OPEN** (today: new identity only) |
-| O11 | Retention of `revoked_connectors`; client offline staleness bound | **OPEN** |
-| O12 | Relay behaviour when its revoked list is stale | **OPEN** |
-| O13 | Shield prune rule; hostile-connector limit | prune field **RECOMMENDED, AWAITING APPROVAL**; prune rule and hostile limit **OPEN** |
+| O11 | Retention of `revoked_connectors`; client offline staleness bound | **ACCEPTED (D19, 2026-10-22)**: a revoked connector stays listed until its last certificate can no longer be valid (revoked_at + connector cert TTL); the client stops using connectors after **1 h** without a successful ACL sync |
+| O12 | Relay behaviour when its revoked list is stale | **ACCEPTED (D20, 2026-10-22)**: keep the last known list, keep serving, no new timeout |
+| O13 | Shield prune rule; hostile-connector limit | **ACCEPTED (D21, 2026-10-22)**: `PeerConnectorList.revoked_connector_ids` approved; a revoked id from any connector prunes it immediately and it is never re-added while listed (in memory only); the hostile-connector limit is accepted and documented (bounded by connector certificate lifetime) |
 | O14 | Cert history, historical-serial CRL coverage, serials after deletion, tombstones, reuse prevention | **BLOCKED ON SCHEMA APPROVAL** (each separately, §12) |
 
 Release requirement (not a decision): the new development stack's protocol behaviour must be validated by T14/T18 before release. Support for old production connectors is not required.
