@@ -2908,3 +2908,16 @@ serves on `127.0.0.1:9102`.
   - Connector `s3-luffy` (pid 6321, empty list since 10:36) got the push at 10:51:12.750 and registered with the relay at 10:51:12.790: **no restart**.
 - **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
 - Committed locally, not pushed.
+
+## 2026-10-22 — B2 findings full live retest (final build e5fee1a): 6/6 PASS
+
+- **Preflight:** no component changed since its fix commit; HEAD builds were hash-compared with deployed binaries. The connector differed (its build reads `.env`/env), so it was redeployed from the HEAD build on luffy and locally.
+- **Results:**
+  - F4: two admin sessions + client, logout isolation, 3 controller restarts, client proactive refresh 11:04:26, admin B 200 after it.
+  - F1: shield re-attach 1.67 s after `Serving` (first retry exactly Disabled + 30 s, then ~2.4 s steps).
+  - F6: flag off → luffy `relay_count=0`; on → `relay_count=1`.
+  - F5: non-SSH resources (two web servers sharing :18081 + .75:9092): hot-add 2 in 16 ms, all tunnelled, `s3-ok-omarchy` via the tunnel; restart all tunnelled.
+  - F2: unbound `s3-ui2` → Protect enabled → bound to `s3-shield`.
+  - F3: relay stopped (sudo by the user) → connector empty-list backoff → relay started → registered 36 ms after the push, same pid.
+- **Not covered:** a client flow through a root shield end to end (lab root shields are tied to revoked/disconnected connectors).
+- Report: `Sprint20/Fixes/B2-Findings-Retest-2026-10-22.md`. Committed locally, not pushed.

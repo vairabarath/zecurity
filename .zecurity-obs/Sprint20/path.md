@@ -353,6 +353,10 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Tests: 8 new (the button tests fail on the old page); admin 114 PASS. Live: the old UI was disabled; the fixed UI bound the shield.
   - Details: [[Sprint20/Fixes/Fix10-Admin-Protect-Resource-Created-Before-Shield]].
 - **Fix 07 addendum (2026-10-22):** a real relay attach was verified. A new relay `s3-relay-manoj` replaced `pm-relay-manoj`, whose cert expired (`RELAY_CERT_TTL=1h` in B2). Connector `s3-luffy` registered with it 40 ms after the list push, with no restart.
+- **B2 findings full live retest on the final build `e5fee1a` (2026-10-22): 6/6 PASS.**
+  - Every component was rebuilt from HEAD and hash-compared; the connector was redeployed because its earlier binary wasn't provably HEAD.
+  - Results: F4 sessions incl. client gRPC refresh; F1 shield re-attach 1.67 s; F6 dev flag off/on; F5 3-step hot-add with shared-port attribution; F2 admin UI binds the shield; F3 real relay stop/start, attach 36 ms after the push, no restart.
+  - Details: [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]].
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
   - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.
