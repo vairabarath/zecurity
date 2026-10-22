@@ -62,17 +62,15 @@ type Service interface {
 	// see idp_adapter.go / providers.IdentityProvider — rather than a single
 	// service method.)
 
-	// IssueAccessToken signs and returns a Zecurity access JWT for the given
-	// user, plus its TTL in seconds (so callers can populate expires_in).
+	// IssueSession starts one login: it stores a new refresh session and
+	// returns an access JWT bound to it (sid claim), the access TTL in seconds
+	// (so callers can populate expires_in) and the raw refresh token.
 	// generation is stamped as the "gen" claim for session-generation revocation
-	// (PENDING-04 Phase 5).
-	IssueAccessToken(userID, tenantID, role, email string, generation int) (token string, expiresIn int64, err error)
+	// (PENDING-04 Phase 5). Sessions are per login: a new one never displaces
+	// the user's other sessions (admin UI, client daemon).
+	IssueSession(ctx context.Context, userID, tenantID, role, email string, generation int) (accessToken string, expiresIn int64, refreshToken string, err error)
 
-	// IssueRefreshToken generates a fresh refresh token, stores it in Redis,
-	// and returns the raw value.
-	IssueRefreshToken(ctx context.Context, userID string) (string, error)
-
-	// InvalidateUserSessions deletes the user's server-side refresh session so a
+	// InvalidateUserSessions deletes all of the user's server-side refresh sessions so a
 	// generation bump (identity.Revoker) takes effect immediately rather than at
 	// the current access token's expiry. Satisfies identity.SessionInvalidator.
 	InvalidateUserSessions(ctx context.Context, userID string) error

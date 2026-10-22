@@ -2,9 +2,7 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -158,18 +156,27 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 			email = dbEmail
 		}
 		if err := identity.CheckLifecycle(status); err != nil {
-			s.redisClient.DeleteRefreshToken(ctx, userID)
+			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
 			return "", "", dead("session revoked")
 		}
 		if err := identity.CheckGeneration(claims.IdentityGeneration, currentGen); err != nil {
-			s.redisClient.DeleteRefreshToken(ctx, userID)
+			s.redisClient.DeleteAllRefreshSessions(ctx, userID)
 			return "", "", dead("session revoked")
 		}
 	}
 
-	// Step 3 — Look up stored refresh session in Redis by user_id.
+	// Step 3 — Look up this login's refresh session in Redis by
+	// (user_id, sid). The sid travels in the refresh token ("<sid>.<secret>");
+	// a token without one predates per-login sessions and maps to the legacy
+	// refresh:<user_id> key. When the access token names a session, it must be
+	// the same one — an access token is never paired with another login's
+	// refresh token.
+	sid, _ := splitRefreshToken(refreshToken)
+	if claims.SessionID != "" && claims.SessionID != sid {
+		return "", "", dead("refresh token mismatch")
+	}
 	// Called: valkey.go → GetRefreshSession()
-	stored, found, err := s.redisClient.GetRefreshSession(ctx, userID)
+	stored, found, err := s.redisClient.GetRefreshSession(ctx, userID, sid)
 	if err != nil {
 		return "", "", serverError("server error")
 	}
@@ -190,13 +197,23 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// issued before this code shipped; treat as still-valid for the rolling
 	// TTL window.
 	if stored.MaxLifetimeAt != 0 && time.Now().Unix() > stored.MaxLifetimeAt {
-		s.redisClient.DeleteRefreshToken(ctx, userID)
+		s.redisClient.DeleteRefreshSession(ctx, userID, sid)
 		return "", "", dead("refresh token max lifetime exceeded")
 	}
 
-	// Step 6 — Issue new access JWT stamped with the current generation.
-	// Called: session.go → issueAccessToken()
-	newAccessToken, err = s.issueAccessToken(userID, tenantID, role, email, currentGen)
+	// A legacy session moves to a per-login key on this rotation; its old key
+	// is deleted once the new one is stored.
+	newSID := sid
+	if newSID == "" {
+		if newSID, err = randomToken(16); err != nil {
+			return "", "", serverError("token rotate failed")
+		}
+	}
+
+	// Step 6 — Issue new access JWT stamped with the current generation and
+	// bound to this session.
+	// Called: session.go → issueSessionAccessToken()
+	newAccessToken, err = s.issueSessionAccessToken(userID, tenantID, role, email, currentGen, newSID)
 	if err != nil {
 		return "", "", serverError("token issue failed")
 	}
@@ -205,19 +222,22 @@ func (s *serviceImpl) RefreshSession(ctx context.Context, accessToken, refreshTo
 	// token and replace the stored value (preserving OriginalIAT and
 	// MaxLifetimeAt). The old token value is now invalid — a replay of a
 	// stolen token fails the constant-time compare on its next refresh.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
+	secret, err := randomToken(32)
+	if err != nil {
 		return "", "", serverError("token rotate failed")
 	}
-	newRefreshToken = base64.RawURLEncoding.EncodeToString(raw)
+	newRefreshToken = newSID + "." + secret
 
 	rotated := RefreshSession{
 		Token:         newRefreshToken,
 		OriginalIAT:   stored.OriginalIAT,
 		MaxLifetimeAt: stored.MaxLifetimeAt,
 	}
-	if err := s.redisClient.SetRefreshSession(ctx, userID, rotated, s.refreshTTL()); err != nil {
+	if err := s.redisClient.SetRefreshSession(ctx, userID, newSID, rotated, s.refreshTTL()); err != nil {
 		return "", "", serverError("token rotate failed")
+	}
+	if sid == "" {
+		s.redisClient.DeleteRefreshSession(ctx, userID, "")
 	}
 	return newAccessToken, newRefreshToken, nil
 }

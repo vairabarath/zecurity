@@ -89,22 +89,22 @@ func TestEndSession(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	svc := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	ctx := context.Background()
-	access, _ := svc.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
-	refresh, _ := svc.issueRefreshToken(ctx, "user-1")
+	access, _, refresh, _ := svc.IssueSession(ctx, "user-1", "tenant-1", "member", "user-1@example.com", 1)
+	sid := sidOf(t, refresh)
 
 	other := &serviceImpl{cfg: testConfig(), redisClient: rc}
 	other.cfg.JWTSecret = "a-different-secret-32-bytes-long!"
-	forged, _ := other.issueAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1)
+	forged, _ := other.issueSessionAccessToken("user-1", "tenant-1", "member", "user-1@example.com", 1, sid)
 
 	svc.EndSession(ctx, "")
 	svc.EndSession(ctx, "not-a-jwt")
 	svc.EndSession(ctx, forged)
-	if _, found, _ := rc.GetRefreshSession(ctx, "user-1"); !found {
+	if _, found, _ := rc.GetRefreshSession(ctx, "user-1", sid); !found {
 		t.Fatal("a token that does not verify ended the session")
 	}
 
 	svc.EndSession(ctx, access)
-	if _, found, _ := rc.GetRefreshSession(ctx, "user-1"); found {
+	if _, found, _ := rc.GetRefreshSession(ctx, "user-1", sid); found {
 		t.Fatal("session survived EndSession")
 	}
 	_, _, err := svc.RefreshSession(ctx, access, refresh)

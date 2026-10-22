@@ -50,7 +50,9 @@ func (s *serviceImpl) LogoutHandler() http.Handler {
 	})
 }
 
-// EndSession deletes the refresh session of the user the access token names.
+// EndSession deletes the refresh session the access token belongs to (its sid
+// claim; the legacy per-user key for a token without one). The user's other
+// sessions — other tabs, the client daemon — stay signed in.
 // The token may be expired (the user is logging out) but its signature is
 // enforced (HS256 only). Idempotent and silent: a malformed token, no session,
 // or a Redis failure all look the same to the caller, so nothing leaks about
@@ -74,7 +76,7 @@ func (s *serviceImpl) EndSession(ctx context.Context, accessToken string) {
 		// Malformed / wrong signature — do not touch Redis.
 		return
 	}
-	if err := s.redisClient.DeleteRefreshToken(ctx, claims.Subject); err != nil {
+	if err := s.redisClient.DeleteRefreshSession(ctx, claims.Subject, claims.SessionID); err != nil {
 		// Logged server-side only — reporting it would leak liveness.
 		log.Printf("auth logout: delete refresh session user=%s: %v", claims.Subject, err)
 	}

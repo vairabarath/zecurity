@@ -109,7 +109,9 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 1. **Client recovery lag.** After L-3 the client's held flow resumed about 21 s after the connector was serving again: client direct-path retry backoff (runbook KI-5).
 2. **Admin UI: a resource created before its shield can't be protected.** The button requires `resource.shield`, though the backend `MarkProtecting` would bind it. Workaround: delete and recreate the resource.
 3. **Connector `relay_selector::run` never refreshes its relay list while not attached.** An initially empty list keeps it in backoff until the process restarts.
-4. **Admin and client sessions became invalid after controller restarts** (re-login needed, three times today). Root cause not investigated.
+4. **Admin and client sessions became invalid after controller restarts** (re-login needed, three times today). **Fixed 2026-10-22: [[Sprint20/Fixes/Fix06-Session-Refresh-Per-Login]].**
+   - Root cause, reproduced live: one refresh slot per user (`refresh:<userID>`), shared by the admin UI and the client daemon. Each login or rotation of one killed the other with `refresh token mismatch`. The restarts only coincided with a re-login.
+   - Now one refresh session per login.
 5. **Client hot-apply admits one new resource IP** (smoltcp `IFACE_MAX_ADDR_COUNT = 2`); a `down`/`up` cycle was needed.
 6. **Relays on private IPs were never advertised.** Addressed for dev labs by `6174053` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
 

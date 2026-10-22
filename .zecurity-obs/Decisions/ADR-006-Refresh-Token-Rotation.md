@@ -72,6 +72,7 @@ Implement **refresh token rotation with an absolute lifetime cap**, in two piece
 On each successful refresh:
 1. Generate a NEW random 256-bit token.
 2. Replace the stored token in Redis with the new value (under the same `refresh:<userID>` key).
+   **Amended 2026-10-22 (Sprint 20 Fix 06):** the key is now per login, `refresh:{<userID>}:<sid>` (token `<sid>.<secret>`, access JWT `sid` claim). The single per-user slot let the admin UI and the client daemon of one user log each other out. Rotation keeps the sid. Revoking the user still ends every session. See [[Sprint20/Fixes/Fix06-Session-Refresh-Per-Login]].
 3. Set the new cookie with the new value.
 4. The OLD token is now invalid — any future request presenting it fails the
    constant-time compare.

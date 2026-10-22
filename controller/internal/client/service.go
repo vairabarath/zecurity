@@ -407,13 +407,9 @@ func (s *Service) TokenExchange(ctx context.Context, req *clientv1.TokenExchange
 	}
 	_ = created
 
-	accessToken, expiresIn, err := s.authSvc.IssueAccessToken(user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
+	accessToken, expiresIn, refreshToken, err := s.authSvc.IssueSession(ctx, user.ID, sess.WorkspaceID, user.Role, sess.Email, gen)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "issue access token: %v", err)
-	}
-	refreshToken, err := s.authSvc.IssueRefreshToken(ctx, user.ID)
-	if err != nil {
-		return nil, status.Errorf(codes.Internal, "issue refresh token: %v", err)
+		return nil, status.Errorf(codes.Internal, "issue session: %v", err)
 	}
 
 	return &clientv1.TokenExchangeResponse{

@@ -124,17 +124,12 @@ func (s *serviceImpl) CallbackHandler() http.Handler {
 		}
 		core := principal.Core
 
-		// Step 8 — issue access JWT stamped with the identity generation.
-		accessToken, err := s.issueAccessToken(core.UserID, core.TenantID, core.Role, core.Email, core.Generation)
+		// Steps 8–9 — start a new login session: refresh token (httpOnly
+		// cookie) plus an access JWT stamped with the identity generation and
+		// bound to the session.
+		accessToken, _, refreshToken, err := s.IssueSession(ctx, core.UserID, core.TenantID, core.Role, core.Email, core.Generation)
 		if err != nil {
 			fail("token_issue_failed")
-			return
-		}
-
-		// Step 9 — issue refresh token as an httpOnly cookie.
-		refreshToken, err := s.issueRefreshToken(ctx, core.UserID)
-		if err != nil {
-			fail("refresh_issue_failed")
 			return
 		}
 		ttl, _ := time.ParseDuration(s.cfg.JWTRefreshTTL)

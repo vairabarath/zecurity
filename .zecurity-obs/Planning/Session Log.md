@@ -2842,3 +2842,19 @@ serves on `127.0.0.1:9102`.
 - the nftables block on this PC is still in place (`~/.cache/zecurity-b2/l7-unblock.sh`).
 
 **Nothing pushed.**
+
+## 2026-10-22 — Sprint 20 Fix 06: sessions per login (B2 finding 4)
+
+- **Live repro** (baseline `9503ad2`, local test identity provider, scripted admin logins + the real client daemon):
+  - a second admin login kills the first (`refresh token mismatch`);
+  - a client login kills the admin session;
+  - an admin login kills the client (12:45:10, `refresh session dead`).
+- **Cause:** one refresh slot per user, `refresh:<userID>`, shared by the admin UI and the client.
+- **Fix:**
+  - token `<sid>.<secret>` at `refresh:{<userID>}:<sid>` + index `refresh_sids:{<userID>}`;
+  - access-JWT `sid` claim; `auth.Service.IssueSession` replaces `IssueAccessToken` + `IssueRefreshToken`;
+  - logout ends only its own session, user revocation ends all; legacy tokens migrate on their next refresh;
+  - ADR-006 amended.
+- **Tests:** 7 new; auth/client/identity with DB + Valkey: 161 PASS, 0 SKIP.
+- **Live on the fixed binary, all PASS:** legacy migration, 4 coexisting sessions, controller restart, logout isolation, client gRPC refresh (12:59:36) with the admin sessions intact.
+- Record: `Sprint20/Fixes/Fix06-Session-Refresh-Per-Login.md`. Committed locally, not pushed.
