@@ -90,7 +90,24 @@ Times are UTC (IST = UTC+5:30).
 
 Compared with the baseline, the connector now acts on each relay list the controller pushes, within milliseconds, without a restart.
 
-**Not covered live:** a successful attach to a running relay, because 192.168.1.49 was offline. The dial and `bootstrap` code are unchanged. Re-check when the relay host is back: start the relay → the connector should attach without a restart.
+**Successful attach: verified 2026-10-22 (addendum below).**
+
+## Addendum: attach to a real relay without a restart (2026-10-22, 10:51 UTC)
+
+- **Connector:** `s3-luffy` (Fix 07 build `6a4970c`), a user-level process on luffy (192.168.1.40, pid 6321), started 10:36 with an empty relay list. It logged 29 × `LabelledRelayList is empty; entering backoff`.
+- **Relay:** the old `pm-relay-manoj` couldn't heartbeat: its certificate expired 2026-10-21 13:17:33 UTC, because B2 ran with `RELAY_CERT_TTL=1h`. The controller refused every Heartbeat RPC. So:
+  - a new relay `s3-relay-manoj` (`ad5966f0-…`) was registered with the provider API (provider password typed by the user in an Orca tab);
+  - it was reinstalled on manojinkyank (.49) with sudo typed by the user. The expired state was kept as `/var/lib/zecurity-relay/pki.expired-*`.
+
+| Time (UTC) | Event |
+|---|---|
+| 10:51:12 | relay provisioned, cert until 2026-11-21, `active` in the controller |
+| **10:51:12.750** | connector: `received LabelledRelayList push … relay_count=1` |
+| **10:51:12.750** | connector: `New LabelledRelayList during backoff; retrying now` |
+| **10:51:12.790** | connector: **`Connector registered with Relay`** (40 ms after the push) |
+| 10:51:12 | controller: `relay state connector=65303ae3… relay=ad5966f0… reason=connected`; placement `s3-luffy → s3-relay-manoj` |
+
+Same process throughout (pid 6321, `Relay selector starting` logged once): **no restart**. Before Fix 07, this needed a connector restart (B2 finding 3).
 
 ## Lab state after the run
 

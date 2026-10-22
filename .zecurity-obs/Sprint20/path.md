@@ -347,6 +347,12 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Tests: 5 new (all fail on the old code); 252 client tests PASS.
   - Live (connector `s3-luffy` on .40, 4 SSH resources): hot-add of 3 IPs is now 1 pass, all tunnelled (baseline: all 3 pending, direct over the LAN); startup all tunnelled (baseline: 2 silently dropped).
   - Details: [[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]].
+- **Fix 10 — the admin UI couldn't protect a resource created before its shield (B2 live finding 2), 2026-10-22; `admin/` change approved by the user.**
+  - Cause: `ResourceDetail.tsx` gated Protect on the *bound* shield, while `CreateResource` binds only a shield already active and `MarkProtecting` picks any active shield on the host.
+  - Fix: `lib/protectShield.ts` mirrors `MarkProtecting` over `GetShields` (+`lanIp`).
+  - Tests: 8 new (the button tests fail on the old page); admin 114 PASS. Live: the old UI was disabled; the fixed UI bound the shield.
+  - Details: [[Sprint20/Fixes/Fix10-Admin-Protect-Resource-Created-Before-Shield]].
+- **Fix 07 addendum (2026-10-22):** a real relay attach was verified. A new relay `s3-relay-manoj` replaced `pm-relay-manoj`, whose cert expired (`RELAY_CERT_TTL=1h` in B2). Connector `s3-luffy` registered with it 40 ms after the list push, with no restart.
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
   - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.

@@ -7,8 +7,9 @@ import {
   UnprotectResourceDocument,
   DeleteResourceDocument,
   ForceDeleteResourceDocument,
-  ShieldStatus,
+  GetShieldsDocument,
 } from '@/generated/graphql'
+import { protectTargetShield, hostShield, type ShieldLike } from '@/lib/protectShield'
 import { Button } from '@/components/ui/button'
 import { EditResourceModal } from '@/components/EditResourceModal'
 import { StatusPill, relativeTime } from '@/lib/console'
@@ -81,6 +82,16 @@ export default function ResourceDetail() {
   })
 
   const resource = data?.allResources.find((r) => r.id === resourceId)
+
+  // Shields of the resource's remote network: the protect target is chosen the
+  // way the controller's MarkProtecting chooses it (Fix 10), not from the
+  // bound shield alone.
+  const { data: shieldsData } = useQuery(GetShieldsDocument, {
+    variables: { remoteNetworkId: resource?.remoteNetwork.id ?? '' },
+    skip: !resource,
+    fetchPolicy: 'cache-and-network',
+    pollInterval: 10000,
+  })
 
   useEffect(() => {
     if (!resource) return
@@ -182,10 +193,15 @@ export default function ResourceDetail() {
 
   const isProtected = resource.status === 'protected'
   const isDeleting = resource.status === 'deleting'
-  const shield = resource.shield
-  // Mirror the backend gate: MarkProtecting requires the bound shield to be 'active'
-  // (controller maps DB status → enum verbatim, so 'active' ⇔ ShieldStatus.Active).
-  const canProtect = shield?.status === ShieldStatus.Active
+  const boundShield: ShieldLike | null = resource.shield ?? null
+  const rnShields: readonly ShieldLike[] = shieldsData?.shields ?? []
+  // Mirror the backend gate (MarkProtecting): an ACTIVE shield in this remote
+  // network on the resource host, the bound one preferred. A resource created
+  // before its shield has no bound shield but is still protectable.
+  const protectTarget = protectTargetShield(resource.host, boundShield, rnShields)
+  const shield = protectTarget ?? hostShield(resource.host, boundShield, rnShields)
+  const canProtect = protectTarget !== null
+  const targetIsBound = protectTarget !== null && protectTarget.id === boundShield?.id
   const transitional = ['protecting', 'deleting'].includes(resource.status)
 
   return (
@@ -213,12 +229,12 @@ export default function ResourceDetail() {
                 <Globe className="h-3 w-3" />
                 {resource.remoteNetwork.name}
               </div>
-              {shield && (
+              {boundShield && (
                 <>
                   <span className="opacity-40">→</span>
                   <div className="flex items-center gap-1.5 rounded-lg bg-secondary px-2 py-0.5 text-xs font-bold">
                     <Shield className="h-3 w-3" />
-                    {shield.name}
+                    {boundShield.name}
                   </div>
                 </>
               )}
@@ -336,7 +352,7 @@ export default function ResourceDetail() {
               <div className="text-sm text-muted-foreground">
                 {canProtect ? (
                   <>
-                    A shield is available on{' '}
+                    The shield <strong>{protectTarget.name}</strong> is available on{' '}
                     <code className="rounded bg-secondary px-1 font-mono text-xs">{resource.host}</code>
                     . Click <strong>Protect this resource</strong> above to enable enforcement.
                   </>
@@ -566,7 +582,7 @@ export default function ResourceDetail() {
                   {canProtect ? (
                     <>
                       <p className="mb-3 mt-3 text-xs text-muted-foreground">
-                        This resource is bound to the shield on{' '}
+                        {targetIsBound ? 'This resource is bound to the shield on' : 'Protecting binds this resource to the shield on'}{' '}
                         <code className="rounded bg-secondary px-1 font-mono">{resource.host}</code>. Click{' '}
                         <strong>Protect this resource</strong> to enable enforcement.
                       </p>
@@ -577,7 +593,7 @@ export default function ResourceDetail() {
                     </>
                   ) : (
                     <p className="mt-3 text-xs text-muted-foreground">
-                      The bound shield is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect
+                      The shield is <strong>{shield.status.toLowerCase()}</strong>. It must reconnect
                       before this resource can be protected.
                     </p>
                   )}

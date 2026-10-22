@@ -2895,3 +2895,16 @@ serves on `127.0.0.1:9102`.
   - Fixed: hot-add 3 in one pass, all tunnelled; startup all tunnelled.
 - Also: the client session died after unclean power losses because Valkey is RDB-only (noted in Fix 06, not a Fix 06 defect); lab hosts rebooted ~14:06, udaya is now .41 and nika .40.
 - Record: `Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 10 (admin protect gate) + Fix 07 relay attach addendum
+
+- **Fix 10:**
+  - `ResourceDetail.tsx` gated Protect on the bound shield only. The new `lib/protectShield.ts` mirrors `MarkProtecting` (an active shield in the RN with `lanIp == host`, bound preferred) using `GetShields` (+`lanIp`).
+  - 8 tests (the button tests fail on the old page); admin 114 PASS; lint and build clean.
+  - Live via vite + Orca's browser (local test login): `s3-ui` created while `s3-shield` was inactive. Old page: disabled / "No shield installed". Fixed: enabled, and Protect bound `s3-shield` (nft apply failed only because the test shield is unprivileged).
+  - `admin/` change approved by the user.
+- **Fix 07 addendum:**
+  - `pm-relay-manoj`'s cert expired (B2 `RELAY_CERT_TTL=1h`), so heartbeats were refused. The new relay `s3-relay-manoj` was provisioned (provider password) and installed on .49 (sudo), both typed by the user in Orca tabs.
+  - Connector `s3-luffy` (pid 6321, empty list since 10:36) got the push at 10:51:12.750 and registered with the relay at 10:51:12.790: **no restart**.
+- **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
+- Committed locally, not pushed.
