@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
@@ -638,6 +638,7 @@ async fn handle_up(
     let transports = match build_transports_by_resource_with_crl(
         &allowed_entries,
         &acl.remote_networks,
+        &revoked_connector_ids(&acl),
         transport.as_ref(),
         &device,
         relay_crl,
@@ -698,7 +699,10 @@ async fn handle_up(
     };
 
     let allowed_entries_count = allowed_entries.len();
-    let relay_resync = { state.read().await.relay_resync.clone() };
+    let (relay_resync, blocked) = {
+        let s = state.read().await;
+        (s.relay_resync.clone(), s.blocked_connectors.clone())
+    };
     // Fix 05 Phase 5-C: resource hot-apply commands into the running net_stack.
     let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
     let task = tokio::spawn(async move {
@@ -708,6 +712,7 @@ async fn handle_up(
             transport_rx,
             resource_rx,
             relay_resync,
+            blocked,
         )
         .await
         {
@@ -1545,6 +1550,7 @@ async fn perform_tunnel_restart(
             build_transports_by_resource_with_crl(
                 entries,
                 &acl.remote_networks,
+                &revoked_connector_ids(acl),
                 transport,
                 device,
                 relay_crl,
@@ -1994,6 +2000,7 @@ mod restart_decision_tests {
         AclSnapshot {
             version: 1,
             workspace_id: "ws1".to_string(),
+            revoked_connectors: vec![],
             generated_at: 1000,
             relay_addr: "relay:9093".to_string(),
             relay_spiffe_id: "spiffe://r".to_string(),
@@ -2084,7 +2091,7 @@ mod restart_decision_tests {
         let mut map = net_stack::TransportMap::new();
         for e in entries {
             let ip: Ipv4Addr = e.address.parse().unwrap();
-            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id);
+            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
             let ts: Vec<Arc<crate::transport::ClientTransport>> = coords
                 .iter()
                 .map(|_| {
@@ -2287,6 +2294,10 @@ mod restart_decision_tests {
                         ctl.add,
                         ack,
                     ),
+                    net_stack::ResourceCmd::CloseConnectorFlows { ack, .. } => {
+                        let _ = ack.send(Ok(0));
+                        continue;
+                    }
                 };
                 log.lock()
                     .unwrap()
@@ -4960,7 +4971,7 @@ async fn sync_and_restart_if_changed(
         return;
     }
 
-    let acl_changed = match sync_acl_now(state, conf, tun_slot).await {
+    let mut acl_changed = match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => result.changed,
         Err(e) => {
             warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
@@ -4973,6 +4984,27 @@ async fn sync_and_restart_if_changed(
             false
         }
     };
+    // Connector-revocation Phase C (D19): an ACL not refreshed for an hour is
+    // no longer trusted — every resource is withdrawn (flows reset) until the
+    // next successful sync, which fetches a full snapshot again.
+    {
+        let mut s = state.write().await;
+        let stale = acl_is_stale(s.acl_last_ok, std::time::Instant::now(), ACL_STALE_AFTER);
+        if stale {
+            if let Some(acl) = s.acl_snapshot.as_ref() {
+                if !is_stale_acl_placeholder(acl) {
+                    warn!(
+                        stale_after_secs = ACL_STALE_AFTER.as_secs(),
+                        "ACL not refreshed within the staleness bound — no connector is used until the next successful sync"
+                    );
+                    let placeholder = stale_acl_placeholder(acl);
+                    set_blocked_connectors(&s.blocked_connectors, &placeholder);
+                    s.acl_snapshot = Some(placeholder);
+                    acl_changed = true;
+                }
+            }
+        }
+    }
     let transport_changed = match fetch_and_store_transport(state, conf).await {
         Ok(changed) => changed,
         Err(e) => {
@@ -5002,6 +5034,83 @@ async fn sync_and_restart_if_changed(
             warn!(error = %e, "background sync: tunnel configuration apply failed");
         }
     }
+    // Phase C: a new ACL may revoke connectors that still carry flows. The
+    // config apply above never closes flows on a connector map change, so
+    // cut them explicitly (idempotent).
+    if acl_changed {
+        close_revoked_connector_flows(state).await;
+    }
+}
+
+/// Phase C (D19): how long an ACL may go without a successful refresh.
+const ACL_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Whether the ACL is older than `max` since its last successful sync.
+/// Never synced → not stale (there is no ACL to distrust).
+fn acl_is_stale(
+    last_ok: Option<std::time::Instant>,
+    now: std::time::Instant,
+    max: std::time::Duration,
+) -> bool {
+    last_ok.is_some_and(|t| now.saturating_duration_since(t) >= max)
+}
+
+/// The ACL used while the real one is stale: no entries, no networks, and
+/// version 0 so the next fetch returns a full snapshot.
+fn stale_acl_placeholder(acl: &AclSnapshot) -> AclSnapshot {
+    AclSnapshot {
+        version: 0,
+        workspace_id: acl.workspace_id.clone(),
+        generated_at: 0,
+        ..Default::default()
+    }
+}
+
+fn is_stale_acl_placeholder(acl: &AclSnapshot) -> bool {
+    acl.version == 0 && acl.entries.is_empty() && acl.remote_networks.is_empty()
+}
+
+/// Phase C: replace the shared blocked set with `acl`'s revoked connectors.
+fn set_blocked_connectors(blocked: &net_stack::BlockedConnectors, acl: &AclSnapshot) {
+    let ids = revoked_connector_ids(acl);
+    match blocked.write() {
+        Ok(mut set) => *set = ids,
+        Err(poisoned) => *poisoned.into_inner() = ids,
+    }
+}
+
+/// Phase C: reset live flows carried by a revoked connector (if a tunnel is up).
+async fn close_revoked_connector_flows(state: &SharedState) {
+    let (ids, tx) = {
+        let s = state.read().await;
+        let ids: HashSet<String> = match s.blocked_connectors.read() {
+            Ok(set) => set.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let tx = s.tun_handle.as_ref().map(|h| h.resource_tx.clone());
+        (ids, tx)
+    };
+    let Some(tx) = tx else { return };
+    if ids.is_empty() {
+        return;
+    }
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let cmd = net_stack::ResourceCmd::CloseConnectorFlows {
+        connector_ids: ids,
+        ack: ack_tx,
+    };
+    let exchange = async {
+        tx.send(cmd).await.ok()?;
+        ack_rx.await.ok()
+    };
+    match tokio::time::timeout(RESOURCE_ACK_TIMEOUT, exchange).await {
+        Ok(Some(Ok(closed))) => {
+            if closed > 0 {
+                info!(closed, "revoked connectors: live flows reset");
+            }
+        }
+        _ => warn!("revoked connectors: flow close not acknowledged"),
+    }
 }
 
 /// Fetch and store the ACL snapshot. On failure, keeps the existing snapshot
@@ -5021,8 +5130,10 @@ async fn fetch_and_store_acl(
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             info!(version, "ACL snapshot stored");
         }
         Ok(AclFetchOutcome::UpToDate) => {
@@ -5346,6 +5457,7 @@ async fn sync_acl_now_with(
             let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             let cached = s.acl_snapshot.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("controller reported ACL up_to_date but no cached snapshot")
             })?;
@@ -5371,8 +5483,10 @@ async fn sync_acl_now_with(
             };
 
             let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(result.synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             info!(
                 version = result.version,
                 entries = result.entry_count,
@@ -5488,6 +5602,28 @@ pub(crate) fn resolve_entry_coords(
     entry: &AclEntry,
     rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
     trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
+    revoked: &HashSet<String>,
+) -> Vec<ConnCoords> {
+    // Connector-revocation Phase C: a revoked connector is dropped from both
+    // planes (a stale transport snapshot may still list it).
+    let mut coords = resolve_entry_coords_unfiltered(entry, rn_by_id, trn_by_id);
+    coords.retain(|c| !revoked.contains(&c.connector_id));
+    coords
+}
+
+/// Phase C: the ACL's revoked connector ids.
+pub(crate) fn revoked_connector_ids(acl: &AclSnapshot) -> HashSet<String> {
+    acl.revoked_connectors
+        .iter()
+        .map(|r| r.connector_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+fn resolve_entry_coords_unfiltered(
+    entry: &AclEntry,
+    rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
+    trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
 ) -> Vec<ConnCoords> {
     match trn_by_id.get(entry.remote_network_id.as_str()) {
         Some(trn) => ordered_transport_connectors_for_entry(entry, trn)
@@ -5526,9 +5662,10 @@ pub(crate) fn effective_config(
         }
     }
 
+    let revoked = revoked_connector_ids(acl);
     let mut entries = Vec::new();
     for entry in allowed_entries {
-        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, &revoked);
         let mut applied_coords: Vec<AppliedCoords> = coords
             .into_iter()
             .map(|c| AppliedCoords {
@@ -5616,6 +5753,7 @@ pub(crate) fn build_transports_by_resource(
     build_transports_by_resource_with_crl(
         entries,
         remote_networks,
+        &HashSet::new(),
         transport,
         device,
         crate::crl::CrlManager::new(),
@@ -5625,6 +5763,7 @@ pub(crate) fn build_transports_by_resource(
 fn build_transports_by_resource_with_crl(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
+    revoked: &HashSet<String>,
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
     relay_crl: crate::crl::CrlManager,
@@ -5650,7 +5789,7 @@ fn build_transports_by_resource_with_crl(
         };
         let IpAddr::V4(v4) = ip else { continue };
 
-        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, revoked);
 
         let mut transports = Vec::new();
         for c in &coords {
@@ -5701,11 +5840,14 @@ fn build_transport_from_coords(
             format!("connector tunnel address {connector_addr} resolved to no addresses")
         })?;
 
-    let direct = Arc::new(TunnelPool::new(
+    // Connector-revocation Phase C: the direct path accepts only THIS
+    // connector's exact SPIFFE id (not any connector of the trust domain).
+    let direct = Arc::new(TunnelPool::new_for_connector(
         &device.certificate_pem,
         &device.private_key_pem,
         device.tpm_key_material.as_deref(),
         &device.ca_cert_pem,
+        &c.connector_spiffe,
     )?);
 
     // Empty relay coords → this connector has no relay assignment (direct only).
@@ -5732,11 +5874,10 @@ fn build_transport_from_coords(
         None
     };
 
-    Ok(Arc::new(ClientTransport::new(
-        direct,
-        connector_socket,
-        relay,
-    )))
+    Ok(Arc::new(
+        ClientTransport::new(direct, connector_socket, relay)
+            .with_connector_id(c.connector_id.clone()),
+    ))
 }
 
 fn now_unix() -> i64 {
@@ -5945,6 +6086,110 @@ mod fetch_tests {
             8,
             "new ACL snapshot must be stored"
         );
+    }
+
+    // ── Connector-revocation Phase C ───────────────────────────────────────
+
+    struct RevokingAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for RevokingAcl {
+        async fn fetch(&self, known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
+                version: known + 1,
+                revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector {
+                    connector_id: "conn-r".into(),
+                    connector_spiffe: "spiffe://td/connector/conn-r".into(),
+                }],
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A synced ACL replaces the shared blocked set and records a monotonic
+    /// success time (the staleness clock).
+    #[tokio::test]
+    async fn acl_sync_updates_the_blocked_set_and_staleness_clock() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot { version: 3, ..Default::default() });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let before = std::time::Instant::now();
+        sync_acl_now_with(&state, &conf, &tun_slot, &RevokingAcl).await.unwrap();
+        let s = state.read().await;
+        assert!(s.blocked_connectors.read().unwrap().contains("conn-r"));
+        assert!(s.acl_last_ok.is_some_and(|t| t >= before));
+    }
+
+    /// AC-5: under 1 h nothing is stale; at 1 h the ACL is stale; never
+    /// synced is not stale.
+    #[test]
+    fn acl_staleness_bound_is_one_hour() {
+        let t0 = std::time::Instant::now();
+        let h = std::time::Duration::from_secs(3600);
+        assert_eq!(ACL_STALE_AFTER, h);
+        assert!(!acl_is_stale(Some(t0), t0 + h - std::time::Duration::from_millis(1), h));
+        assert!(acl_is_stale(Some(t0), t0 + h, h));
+        assert!(!acl_is_stale(None, t0 + h * 10, h));
+    }
+
+    /// AC-5: the stale placeholder withdraws every resource and connector,
+    /// and has version 0 so the next sync fetches a full snapshot.
+    #[test]
+    fn stale_placeholder_withdraws_everything() {
+        let acl = AclSnapshot {
+            version: 9,
+            workspace_id: "ws".into(),
+            entries: vec![AclEntry::default()],
+            remote_networks: vec![AclRemoteNetwork::default()],
+            revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector::default()],
+            ..Default::default()
+        };
+        let p = stale_acl_placeholder(&acl);
+        assert_eq!(p.version, 0);
+        assert!(p.entries.is_empty() && p.remote_networks.is_empty());
+        assert!(is_stale_acl_placeholder(&p));
+        assert!(!is_stale_acl_placeholder(&acl));
+    }
+
+    /// The flow-close helper sends CloseConnectorFlows with the blocked set
+    /// to the running tunnel, and sends nothing when no connector is blocked.
+    #[tokio::test]
+    async fn close_revoked_connector_flows_sends_the_blocked_set() {
+        let state = crate::runtime::new_shared();
+        let (resource_tx, mut resource_rx) = tokio::sync::mpsc::channel(4);
+        let (transport_tx, _rx) = tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new()));
+        let task = tokio::spawn(async {});
+        state.write().await.tun_handle = Some(Arc::new(crate::runtime::TunHandle {
+            abort: task.abort_handle(),
+            route_count: 0,
+            applied: crate::runtime::AppliedConfig {
+                spiffe_id: String::new(),
+                certificate_pem: String::new(),
+                private_key_pem: String::new(),
+                tpm_key_material: None,
+                ca_cert_pem: String::new(),
+                entries: Vec::new(),
+            },
+            transport_tx: Arc::new(transport_tx),
+            resource_tx: Arc::new(resource_tx),
+        }));
+        // Nothing blocked: nothing sent.
+        close_revoked_connector_flows(&state).await;
+        assert!(resource_rx.try_recv().is_err());
+        // Blocked: the set is sent and acknowledged.
+        state.read().await.blocked_connectors.write().unwrap().insert("conn-r".into());
+        let responder = tokio::spawn(async move {
+            match resource_rx.recv().await {
+                Some(net_stack::ResourceCmd::CloseConnectorFlows { connector_ids, ack }) => {
+                    let _ = ack.send(Ok(1));
+                    connector_ids
+                }
+                _ => panic!("expected CloseConnectorFlows"),
+            }
+        });
+        close_revoked_connector_flows(&state).await;
+        let sent = responder.await.unwrap();
+        assert_eq!(sent, HashSet::from(["conn-r".to_string()]));
     }
 }
 

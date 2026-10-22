@@ -134,6 +134,13 @@ pub struct RuntimeState {
     pub acl_snapshot: Option<AclSnapshot>,
     /// Unix timestamp of the last successful ACL snapshot fetch.
     pub acl_last_sync_at: Option<i64>,
+    /// Connector-revocation Phase C (D19): monotonic time of the last
+    /// successful ACL sync (snapshot or up_to_date). Drives the 1 h
+    /// staleness bound; wall-clock time is not used for that.
+    pub acl_last_ok: Option<std::time::Instant>,
+    /// Phase C: connectors the client must not use (the ACL's
+    /// `revoked_connectors`). Shared with every relay task; survives restarts.
+    pub blocked_connectors: crate::net_stack::BlockedConnectors,
     /// Transport (connectivity) snapshot — per-connector relay coords keyed by
     /// remote_network_id (ADR-015 Track B). Independent of the ACL. None = fall
     /// back to the ACL's transitional relay fields (ACLConnector 4+5).
@@ -234,6 +241,8 @@ pub fn new_shared() -> SharedState {
         session: None,
         acl_snapshot: None,
         acl_last_sync_at: None,
+        acl_last_ok: None,
+        blocked_connectors: crate::net_stack::new_blocked_connectors(),
         transport_snapshot: None,
         transport_last_sync_at: None,
         relay_crl: None,

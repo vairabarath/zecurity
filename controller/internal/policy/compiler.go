@@ -292,6 +292,18 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		}
 	}
 
+	revokedRows, err := store.GetRevokedConnectors(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("compile acl: %w", err)
+	}
+	revoked := make([]*clientv1.RevokedConnector, 0, len(revokedRows))
+	for _, r := range revokedRows {
+		revoked = append(revoked, &clientv1.RevokedConnector{
+			ConnectorId:     r.ConnectorID,
+			ConnectorSpiffe: appmeta.ConnectorSPIFFEID(r.TrustDomain, r.ConnectorID),
+		})
+	}
+
 	snapshot := &clientv1.ACLSnapshot{
 		WorkspaceId:    workspaceID,
 		Version:        notifier.Version(workspaceID),
@@ -300,6 +312,8 @@ func CompileACLSnapshot(ctx context.Context, store *Store, postureStore *posture
 		RemoteNetworks: remoteNetworks,
 		RelayAddr:      relayAddr,
 		RelaySpiffeId:  relaySPIFFEID,
+		// Connector-revocation Phase C (D19).
+		RevokedConnectors: revoked,
 	}
 
 	return &CompiledACL{

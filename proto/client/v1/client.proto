@@ -241,6 +241,17 @@ message ACLSnapshot {
   reserved 8;                               // was: connector_spiffe
   string relay_spiffe_id                    = 9; // SPIFFE URI of the relay. Required whenever relay_addr is set.
   repeated ACLRemoteNetwork remote_networks = 10;
+  // Connector-revocation Phase C (design §8, D19): connectors whose identity
+  // is revoked (or revoked then deleted) while any of their certificates can
+  // still be valid. The client never uses a listed connector and cuts flows
+  // on it. Only an explicit entry blocks; absence keeps today's behaviour.
+  repeated RevokedConnector revoked_connectors = 11;
+}
+
+// RevokedConnector identifies one revoked connector identity.
+message RevokedConnector {
+  string connector_id     = 1;
+  string connector_spiffe = 2;
 }
 
 message ACLEntry {

@@ -1,7 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -229,6 +229,32 @@ enum RelayEnd {
     Failed,
 }
 
+/// Connector-revocation Phase C: connector ids this client must not use
+/// (the ACL's `revoked_connectors`). Shared by the daemon (writer) and every
+/// relay task (reader), and survives tunnel restarts.
+pub type BlockedConnectors = Arc<RwLock<HashSet<String>>>;
+
+pub fn new_blocked_connectors() -> BlockedConnectors {
+    Arc::new(RwLock::new(HashSet::new()))
+}
+
+/// Whether `connector_id` is blocked. A poisoned lock fails closed.
+fn is_blocked(blocked: &BlockedConnectors, connector_id: &str) -> bool {
+    match blocked.read() {
+        Ok(set) => set.contains(connector_id),
+        Err(_) => true,
+    }
+}
+
+/// Per-flow revocation controls handed to the relay task (Phase C).
+#[derive(Clone, Default)]
+pub(crate) struct RelayCtl {
+    /// Read before each candidate connector and again once its tunnel is open.
+    blocked: BlockedConnectors,
+    /// Set to the connector that carries the flow once its tunnel is open.
+    selected: Arc<OnceLock<String>>,
+}
+
 struct ActiveRelay {
     // smoltcp loop → relay task: client payload going to the resource.
     // `None` once the client side has closed (CLOSE-WAIT) — dropping the
@@ -249,6 +275,9 @@ struct ActiveRelay {
     // Phase 5-C: set when this flow was closed because its resource was
     // removed/changed; the removal ack waits until no relay carries the tag.
     close_tag: Option<u64>,
+    // Phase C: the connector carrying this flow, set by the relay task once
+    // its tunnel is open (empty while the flow is still selecting).
+    selected: Arc<OnceLock<String>>,
 }
 
 impl ActiveRelay {
@@ -267,6 +296,7 @@ impl ActiveRelay {
             last_state: tcp::State::SynReceived,
             terminated: false,
             close_tag: None,
+            selected: Arc::new(OnceLock::new()),
         }
     }
 
@@ -283,6 +313,7 @@ impl ActiveRelay {
             last_state: tcp::State::Closed,
             terminated: true,
             close_tag: None,
+            selected: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -519,6 +550,8 @@ struct RelaySpawn {
     /// The spawner must store RELAY_ENDED_OK / RELAY_FAILED here BEFORE the last
     /// `quic_to_tcp` sender is dropped.
     outcome: Arc<AtomicU8>,
+    /// Phase C: where the relay task records the connector it selected.
+    selected: Arc<OnceLock<String>>,
 }
 
 /// Listener + relay-socket bookkeeping for the smoltcp loop (Fix 05-A).
@@ -601,6 +634,37 @@ impl FlowTable {
         tag
     }
 
+    /// Phase C: reset every live flow carried by one of `connector_ids` (the
+    /// application gets a RST). Listeners stay. Flows still selecting a
+    /// connector are left alone: their relay task re-checks the blocked set
+    /// itself. Idempotent. Returns how many flows were reset.
+    fn close_connector_flows(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+        connector_ids: &HashSet<String>,
+    ) -> usize {
+        let mut closed = 0;
+        for (handle, relay) in self.active_relays.iter_mut() {
+            if relay.terminated {
+                continue;
+            }
+            let Some(id) = relay.selected.get() else {
+                continue;
+            };
+            if !connector_ids.contains(id) {
+                continue;
+            }
+            sockets.get_mut::<tcp::Socket>(*handle).abort();
+            relay.terminated = true;
+            relay.tcp_to_quic_tx = None;
+            // Dropping the receiver ends the relay task (`quic_to_tcp_tx.closed()`).
+            relay.quic_to_tcp_rx = None;
+            relay.write_buf.clear();
+            closed += 1;
+        }
+        closed
+    }
+
     /// True while any socket closed under `tag` is still in the SocketSet.
     fn close_pending(&self, tag: u64) -> bool {
         self.active_relays
@@ -652,10 +716,10 @@ impl FlowTable {
                     let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
                     let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
                     let outcome = Arc::new(AtomicU8::new(RELAY_RUNNING));
-                    self.active_relays.insert(
-                        handle,
-                        ActiveRelay::new(tcp_to_quic_tx, quic_to_tcp_rx, outcome.clone(), now),
-                    );
+                    let relay =
+                        ActiveRelay::new(tcp_to_quic_tx, quic_to_tcp_rx, outcome.clone(), now);
+                    let selected = relay.selected.clone();
+                    self.active_relays.insert(handle, relay);
                     spawn(RelaySpawn {
                         transports: list,
                         dest,
@@ -663,6 +727,7 @@ impl FlowTable {
                         tcp_to_quic_rx,
                         quic_to_tcp_tx,
                         outcome,
+                        selected,
                     });
                 }
                 other => {
@@ -743,6 +808,12 @@ pub enum ResourceCmd {
         keys: Vec<(Ipv4Addr, u16)>,
         ack: oneshot::Sender<Result<()>>,
     },
+    /// Connector-revocation Phase C: reset every live flow carried by one of
+    /// these connectors. Idempotent; acks with the number of flows reset.
+    CloseConnectorFlows {
+        connector_ids: HashSet<String>,
+        ack: oneshot::Sender<Result<usize>>,
+    },
 }
 
 /// A removal waiting for its sockets to be reset and reaped.
@@ -768,6 +839,17 @@ fn apply_resource_cmd(
         ResourceCmd::Add { keys, ack } => {
             flows.add_listeners(sockets, &keys);
             let _ = ack.send(Ok(()));
+        }
+        ResourceCmd::CloseConnectorFlows { connector_ids, ack } => {
+            let closed = flows.close_connector_flows(sockets, &connector_ids);
+            if closed > 0 {
+                tracing::warn!(
+                    closed,
+                    connectors = ?connector_ids,
+                    "revoked connector: flows on it reset"
+                );
+            }
+            let _ = ack.send(Ok(closed));
         }
     }
 }
@@ -814,6 +896,7 @@ pub async fn run(
     transports: watch::Receiver<Arc<TransportMap>>,
     mut resource_rx: mpsc::Receiver<ResourceCmd>,
     relay_resync: Arc<Notify>,
+    blocked: BlockedConnectors,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
     let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -885,8 +968,13 @@ pub async fn run(
             tcp_to_quic_rx,
             quic_to_tcp_tx,
             outcome,
+            selected,
         } = spawn;
         let resync = relay_resync.clone();
+        let ctl = RelayCtl {
+            blocked: blocked.clone(),
+            selected,
+        };
         // Keep one sender alive until the outcome is stored, so the poll loop
         // can't observe the disconnect first.
         let outcome_guard = quic_to_tcp_tx.clone();
@@ -894,13 +982,14 @@ pub async fn run(
             // relay_tcp_to_quic fires `resync` itself at the transport-failure
             // points (open failure and mid-session drop). A normal close does
             // not, so we don't resync on every finished connection.
-            let result = relay_tcp_to_quic(
+            let result = relay_tcp_to_quic_ctl(
                 transports,
                 dest,
                 port,
                 tcp_to_quic_rx,
                 quic_to_tcp_tx,
                 resync,
+                ctl,
             )
             .await;
             // Fix 05-A: record how the relay ended, THEN drop the last sender.
@@ -1036,9 +1125,34 @@ async fn relay_tcp_to_quic(
     transports: Vec<Arc<ClientTransport>>,
     destination: String,
     port: u16,
+    tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
+    quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
+    resync: Arc<Notify>,
+) -> Result<RelayEnd> {
+    relay_tcp_to_quic_ctl(
+        transports,
+        destination,
+        port,
+        tcp_to_quic_rx,
+        quic_to_tcp_tx,
+        resync,
+        RelayCtl::default(),
+    )
+    .await
+}
+
+/// `relay_tcp_to_quic` with the Phase C revocation controls: a blocked
+/// connector is never tried, and a tunnel that opened on a connector blocked
+/// meanwhile is dropped (race re-check) — the flow then fails closed.
+#[allow(clippy::too_many_arguments)]
+async fn relay_tcp_to_quic_ctl(
+    transports: Vec<Arc<ClientTransport>>,
+    destination: String,
+    port: u16,
     mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
     quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
     resync: Arc<Notify>,
+    ctl: RelayCtl,
 ) -> Result<RelayEnd> {
     let mut selected_stream = None;
     // Whether any failure was a network/transport failure (relay/connector
@@ -1047,6 +1161,15 @@ async fn relay_tcp_to_quic(
     let mut saw_transport_failure = false;
 
     for transport in transports {
+        if is_blocked(&ctl.blocked, transport.connector_id()) {
+            tracing::warn!(
+                destination = %destination,
+                port,
+                connector_id = transport.connector_id(),
+                "connector is revoked — not used"
+            );
+            continue;
+        }
         let (candidate, probe) = match transport.open_authenticated_stream_probed().await {
             Ok(opened) => opened,
 
@@ -1117,6 +1240,18 @@ async fn relay_tcp_to_quic(
         };
 
         if resp.ok {
+            // Phase C race re-check: the connector may have been revoked while
+            // this flow was connecting.
+            if is_blocked(&ctl.blocked, transport.connector_id()) {
+                tracing::warn!(
+                    dest = %destination,
+                    port,
+                    connector_id = transport.connector_id(),
+                    "connector revoked while the tunnel was opening — dropped"
+                );
+                continue;
+            }
+            let _ = ctl.selected.set(transport.connector_id().to_string());
             tracing::info!(
                 dest = %destination,
                 port,
@@ -2691,5 +2826,158 @@ mod tests {
         assert_eq!(routable_key("db.internal", "tcp", 80), None);
         // Existing `as u16` conversion is preserved.
         assert_eq!(routable_key("10.0.0.1", "tcp", 65_536 + 22), Some((ip, 22)));
+    }
+
+    // ── Connector-revocation Phase C ───────────────────────────────────────
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn pipe_transport_for(
+        connector_id: &str,
+    ) -> (
+        Arc<ClientTransport>,
+        mpsc::UnboundedReceiver<DuplexStream>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let t = Arc::new(
+            ClientTransport::new(
+                Arc::new(PipeOpener {
+                    peers: tx,
+                    opens: opens.clone(),
+                }),
+                "127.0.0.1:9092".parse().unwrap(),
+                None,
+            )
+            .with_connector_id(connector_id.to_string()),
+        );
+        (t, rx, opens)
+    }
+
+    fn blocked_with(ids: &[&str]) -> BlockedConnectors {
+        let b = new_blocked_connectors();
+        *b.write().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        b
+    }
+
+    /// AC-4: a revoked connector is never tried; the next candidate carries
+    /// the flow and is recorded as the flow's connector.
+    #[tokio::test]
+    async fn revoked_connector_is_never_tried_and_selection_is_recorded() {
+        let (a, _ra, a_opens) = pipe_transport_for("conn-a");
+        let (b, mut rb, _) = pipe_transport_for("conn-b");
+        let ctl = RelayCtl {
+            blocked: blocked_with(&["conn-a"]),
+            selected: Arc::new(OnceLock::new()),
+        };
+        let selected = ctl.selected.clone();
+        let (_tcp_tx, tcp_rx) = mpsc::channel(8);
+        let (quic_tx, _quic_rx) = mpsc::channel(8);
+        let task = tokio::spawn(relay_tcp_to_quic_ctl(
+            vec![a, b],
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            Arc::new(Notify::new()),
+            ctl,
+        ));
+        let mut peer = tokio::time::timeout(WAIT, rb.recv()).await.unwrap().unwrap();
+        accept_tunnel(&mut peer).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while selected.get().is_none() {
+            assert!(tokio::time::Instant::now() < deadline, "no connector recorded");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(selected.get().map(String::as_str), Some("conn-b"));
+        assert_eq!(a_opens.load(Ordering::SeqCst), 0, "revoked connector never opened");
+        task.abort();
+    }
+
+    /// AC-4 (race re-check): the connector is revoked while its tunnel is
+    /// opening — the opened tunnel is dropped and the flow fails closed.
+    #[tokio::test]
+    async fn connector_revoked_while_opening_is_dropped() {
+        let (a, mut ra, _) = pipe_transport_for("conn-a");
+        let blocked = new_blocked_connectors();
+        let ctl = RelayCtl {
+            blocked: blocked.clone(),
+            selected: Arc::new(OnceLock::new()),
+        };
+        let selected = ctl.selected.clone();
+        let (_tcp_tx, tcp_rx) = mpsc::channel(8);
+        let (quic_tx, _quic_rx) = mpsc::channel(8);
+        let task = tokio::spawn(relay_tcp_to_quic_ctl(
+            vec![a],
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            Arc::new(Notify::new()),
+            ctl,
+        ));
+        let mut peer = tokio::time::timeout(WAIT, ra.recv()).await.unwrap().unwrap();
+        // Revoked after the open, before the connector accepts the tunnel.
+        blocked.write().unwrap().insert("conn-a".to_string());
+        accept_tunnel(&mut peer).await;
+        let end = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+        assert!(end.is_err(), "the flow must fail closed, got {end:?}");
+        assert!(selected.get().is_none(), "never recorded as carried by the revoked connector");
+    }
+
+    /// AC-3: CloseConnectorFlows resets exactly the flows on the listed
+    /// connectors; other flows, flows still selecting and the listener stay.
+    /// A repeat is a no-op.
+    #[test]
+    fn close_connector_flows_resets_only_flows_on_revoked_connectors() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        let (h_a, spawn_a) = establish(&mut lab, 40_201);
+        let (h_b, mut spawn_b) = establish(&mut lab, 40_202);
+        let (h_sel, _spawn_sel) = establish(&mut lab, 40_203);
+        spawn_a.selected.set("conn-a".to_string()).unwrap();
+        spawn_b.selected.set("conn-b".to_string()).unwrap();
+        // h_sel: still selecting (no connector recorded).
+        lab_step(&mut lab, &mut pending, 3);
+
+        let (ack, mut ack_rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::CloseConnectorFlows {
+                connector_ids: HashSet::from(["conn-a".to_string()]),
+                ack,
+            },
+            &mut pending,
+        );
+        assert_eq!(ack_rx.try_recv().unwrap().unwrap(), 1, "exactly one flow reset");
+        assert!(spawn_a.quic_to_tcp_tx.is_closed(), "its relay task told to stop");
+        lab_step(&mut lab, &mut pending, 3);
+        assert_eq!(lab.app(h_a).state(), tcp::State::Closed, "RST received");
+        assert_eq!(lab.app(h_b).state(), tcp::State::Established, "other connector untouched");
+        assert_eq!(lab.app(h_sel).state(), tcp::State::Established, "selecting flow untouched");
+        lab.app(h_b).send_slice(b"still here").unwrap();
+        lab_step(&mut lab, &mut pending, 3);
+        assert_eq!(spawn_b.tcp_to_quic_rx.try_recv().unwrap(), b"still here");
+        assert!(lab.flows.listen_handles.contains_key(&res_key(RES_PORT)), "listener kept");
+
+        // Idempotent.
+        let (ack, mut ack_rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::CloseConnectorFlows {
+                connector_ids: HashSet::from(["conn-a".to_string()]),
+                ack,
+            },
+            &mut pending,
+        );
+        assert_eq!(ack_rx.try_recv().unwrap().unwrap(), 0);
+
+        // A new connection on the same resource is still accepted (the
+        // connector choice is the transport map's job).
+        let spawned_before = lab.spawned.len();
+        let _h_new = lab.connect(40_204);
+        lab_step(&mut lab, &mut pending, 5);
+        assert_eq!(lab.spawned.len(), spawned_before + 1);
     }
 }

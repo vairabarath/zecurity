@@ -299,7 +299,7 @@ fn resolve_prefers_transport_plane_when_rn_present() {
     let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
     let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
 
-    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
     assert_eq!(coords.len(), 1);
     assert_eq!(coords[0].relay_addr, "relay-new:9093");
 }
@@ -315,7 +315,7 @@ fn resolve_falls_back_to_acl_when_transport_lacks_rn() {
     let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
     let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
 
-    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
     assert_eq!(coords.len(), 1);
     assert_eq!(coords[0].relay_addr, "relay-old:9093");
 }
@@ -325,7 +325,7 @@ fn resolve_empty_when_neither_plane_has_rn() {
     let e = tp_entry("rn-missing", "");
     let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     let trn_by_id: HashMap<&str, &TransportRemoteNetwork> = HashMap::new();
-    assert!(resolve_entry_coords(&e, &rn_by_id, &trn_by_id).is_empty());
+    assert!(resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new()).is_empty());
 }
 
 #[test]
@@ -341,7 +341,7 @@ fn resolve_honors_preferred_connector_in_transport() {
     let rn_by_id: HashMap<&str, &AclRemoteNetwork> = HashMap::new();
     let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
 
-    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id);
+    let coords = resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
     assert_eq!(coords.len(), 2);
     assert_eq!(coords[0].connector_id, "c2");
 }
@@ -367,7 +367,7 @@ fn resolve_present_empty_transport_rn_does_not_fall_back() {
     let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
 
     assert!(
-        resolve_entry_coords(&e, &rn_by_id, &trn_by_id).is_empty(),
+        resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new()).is_empty(),
         "present-but-empty transport RN must resolve to no connector, not the ACL fallback"
     );
 }
@@ -519,6 +519,7 @@ fn effective_config_metadata_differences_equal() {
     let acl1 = AclSnapshot {
         version: 1,
         workspace_id: "ws-1".to_string(),
+        revoked_connectors: vec![],
         generated_at: 1000,
         relay_addr: "global-relay-1:9093".to_string(),
         relay_spiffe_id: "spiffe://global/relay/1".to_string(),
@@ -543,6 +544,7 @@ fn effective_config_metadata_differences_equal() {
     let acl2 = AclSnapshot {
         version: 2,
         workspace_id: "ws-2".to_string(),
+        revoked_connectors: vec![],
         generated_at: 2000,
         relay_addr: "global-relay-2:9093".to_string(),
         relay_spiffe_id: "spiffe://global/relay/2".to_string(),
@@ -1065,4 +1067,110 @@ fn genuine_restart_log_lines_unchanged() {
             "restart log line missing: {line}"
         );
     }
+}
+
+// ── Connector-revocation Phase C ──────────────────────────────────────────
+
+fn revoked(ids: &[&str]) -> Vec<crate::grpc::client_v1::RevokedConnector> {
+    ids.iter()
+        .map(|id| crate::grpc::client_v1::RevokedConnector {
+            connector_id: id.to_string(),
+            connector_spiffe: format!("spiffe://td/connector/{id}"),
+        })
+        .collect()
+}
+
+/// AC-2: a revoked connector is dropped from BOTH planes — the transport
+/// plane (a stale transport snapshot may still list it) and the ACL plane.
+#[test]
+fn resolve_drops_revoked_connectors_from_both_planes() {
+    let e = tp_entry("rn1", "");
+    let blocked = std::collections::HashSet::from(["c1".to_string()]);
+    let tp_rn = TransportRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        connectors: vec![tp_transport_conn("c1", ""), tp_transport_conn("c2", "")],
+    };
+    let acl_rn = AclRemoteNetwork {
+        remote_network_id: "rn1".into(),
+        name: String::new(),
+        connectors: vec![tp_acl_conn("c1", ""), tp_acl_conn("c2", "")],
+    };
+    let rn_by_id = HashMap::from([("rn1", &acl_rn)]);
+    let trn_by_id = HashMap::from([("rn1", &tp_rn)]);
+    let ids = |v: Vec<crate::daemon::ConnCoords>| v.into_iter().map(|c| c.connector_id).collect::<Vec<_>>();
+    assert_eq!(ids(resolve_entry_coords(&e, &rn_by_id, &trn_by_id, &blocked)), vec!["c2"]);
+    let no_transport = HashMap::new();
+    assert_eq!(ids(resolve_entry_coords(&e, &rn_by_id, &no_transport, &blocked)), vec!["c2"]);
+}
+
+/// AC-2: the effective config (and so the transport map) excludes the ACL's
+/// revoked connectors; a resource left with only revoked connectors fails
+/// closed (no coords → Some(None) in the transport map).
+#[test]
+fn effective_config_excludes_revoked_and_fails_closed_when_none_left() {
+    let device = fake_device_info();
+    let mut entry = tp_entry("rn1", "");
+    entry.address = "10.9.0.1".into();
+    entry.port = 8080;
+    entry.protocol = "tcp".into();
+    entry.allowed_spiffe_ids = vec![device.spiffe_id.clone()];
+    let acl = AclSnapshot {
+        version: 2,
+        entries: vec![entry.clone()],
+        remote_networks: vec![AclRemoteNetwork {
+            remote_network_id: "rn1".into(),
+            name: String::new(),
+            connectors: vec![tp_acl_conn("c1", ""), tp_acl_conn("c2", "")],
+        }],
+        revoked_connectors: revoked(&["c1"]),
+        ..Default::default()
+    };
+    assert_eq!(crate::daemon::revoked_connector_ids(&acl), std::collections::HashSet::from(["c1".to_string()]));
+    let applied = effective_config(&acl, None, &device);
+    let coords: Vec<_> = applied.entries[0].coords.iter().map(|c| c.connector_id.as_str()).collect();
+    assert_eq!(coords, vec!["c2"]);
+
+    let all_revoked = AclSnapshot {
+        revoked_connectors: revoked(&["c1", "c2"]),
+        ..acl
+    };
+    let applied = effective_config(&all_revoked, None, &device);
+    assert!(applied.entries[0].coords.is_empty(), "only revoked connectors → no coords");
+}
+
+/// AC-6 (production wiring): the transport map builds per-connector pools
+/// with the EXACT connector identity — a connector without a SPIFFE id, or
+/// one outside the device's trust domain, can't get a direct pool (the build
+/// fails closed, all-or-nothing), and every transport carries its connector id.
+#[tokio::test]
+async fn transport_build_requires_an_exact_connector_identity() {
+    install_crypto_provider();
+    let device = test_device_info();
+    let entry = AclEntry {
+        resource_id: "res1".to_string(),
+        address: "10.0.0.1".to_string(),
+        port: 80,
+        remote_network_id: "rn1".to_string(),
+        protocol: "tcp".to_string(),
+        ..Default::default()
+    };
+    let rn = |spiffe: &str| AclRemoteNetwork {
+        remote_network_id: "rn1".to_string(),
+        connectors: vec![AclConnector {
+            connector_id: "conn1".to_string(),
+            connector_tunnel_addr: "127.0.0.1:9092".to_string(),
+            connector_spiffe: spiffe.to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let ok = build_transports_by_resource(&[entry.clone()], &[rn("spiffe://test.example/connector/conn1")], None, &device)
+        .expect("exact identity in the device trust domain builds");
+    let ts = ok.values().next().unwrap().as_ref().unwrap();
+    assert_eq!(ts[0].connector_id(), "conn1");
+    assert!(build_transports_by_resource(&[entry.clone()], &[rn("")], None, &device).is_err(), "empty identity");
+    assert!(
+        build_transports_by_resource(&[entry], &[rn("spiffe://other.example/connector/conn1")], None, &device).is_err(),
+        "foreign trust domain"
+    );
 }
