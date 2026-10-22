@@ -463,7 +463,7 @@ Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE
 | Exact identity on the direct path | `ExactSpiffeVerifier` with `ConnCoords.connector_spiffe` instead of the prefix verifier | `tunnel_pool.rs:72` |
 | Reconnect sync | apply the list on the first successful sync, before the next flow is accepted | — |
 | Absence ≠ revocation | only the explicit list triggers termination; absence keeps today's behaviour (Q3 untouched) | — |
-| Offline staleness bound | **OPEN (O11)** | — |
+| Offline staleness bound | **ACCEPTED (D19)**: 1 h; implemented in Phase C | — |
 
 Mixed versions aren't supported (D8): the client and controller ship together. An empty list from a contract-capable controller means "none revoked".
 

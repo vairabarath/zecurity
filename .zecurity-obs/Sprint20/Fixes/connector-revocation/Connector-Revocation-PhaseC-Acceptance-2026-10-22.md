@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase C acceptance list (client enforcement)
 date: 2026-10-22
 type: acceptance list (design §8, §17)
-status: AUTHORIZED 2026-10-22 — user: "implement and check it and if it working correctly then move on" (C → D → E)
+status: DONE 2026-10-22 — unit + 13/13 mutants + live AC-L PASS (record: Connector-Revocation-PhaseC-Implementation-2026-10-22.md)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (D6, D19)
 ---
 
