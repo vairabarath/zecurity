@@ -330,6 +330,11 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Fix: one session per login. Token `<sid>.<secret>` at `refresh:{<userID>}:<sid>`, index `refresh_sids:{<userID>}`, access-JWT `sid` claim.
   - Behaviour: logout ends only its own session; user revocation ends all. Legacy tokens migrate on their next refresh.
   - ADR-006 amended. Details: [[Sprint20/Fixes/Fix06-Session-Refresh-Per-Login]].
+- **Fix 07 — a disconnected connector never re-read the relay list (B2 live finding 3; second half of F4/F5/F22), 2026-10-22.**
+  - Cause: `relay_selector::run` refreshed `current_list` only before the first list and inside `connected_step`, so a list pushed during `Disconnected`/`Backoff` was ignored until restart.
+  - Fix: `wait_backoff` selects on `sleep` vs `relay_list_rx.changed()`; a pushed list ends the backoff and is dialed next. The backoff keeps growing (no tight loop).
+  - Tests: 4 new paused-clock tests (2 fail on the old code). Live: empty list → relay pushed → dial at the same millisecond.
+  - Details: [[Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected]].
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
   - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.
@@ -337,7 +342,7 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - **F15 — High (AT-G.6 FAIL): the client restarts the tunnel on every transport snapshot change**, dropping long-lived connections. Fix01 (`status: partial`); live long hold PASS on later code 2026-10-10 ([[Sprint20/Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]).
   - **F35 — Medium (R2 FAIL): 4 `graph/resolvers` ACL-coherence tests fail, hidden from CI** (they skip without `RESOURCE_TEST_SHIELD_ID`). **Still failing on `fixed-pendings` 2026-10-17** (run with a seeded shield). 3 are real double or extra `NotifyPolicyChange` calls (over-invalidation only); `TestProtectResource_DoesNotInvalidate` is outdated since migration 021. [[Sprint20/Fixes/Fix02-Resource-ACL-Double-Notify]] (`status: planned`).
   - **F36 — Medium (R2): the auth integration test always skipped** (`/15` in the Valkey URL). **Fixed** in `411e216` (Sprint 21 K6); passes on `fixed-pendings` 2026-10-17. [[Sprint20/Fixes/Fix03-Auth-Integration-Test-Skip-Valkey-URL]] (doc still says `planned`).
-  - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. U2 passed only under a TEMP patch. No fix recorded. Phase A → Post-Phase Fixes.
+  - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. (Selector half **fixed**: Fix 07, 2026-10-22.) U2 passed only under a TEMP patch. No fix recorded. Phase A → Post-Phase Fixes.
   - **F7 / F18 / F23 / F31 — High (test validity): install scripts enable update timers that replace branch binaries**, ignoring `AUTO_UPDATE_ENABLED=false`; the units can't be masked. No fix recorded.
   - **F19 / F20 / F24 / F25 — Medium (admin):**
     - deleting a connector silently deletes its shield;

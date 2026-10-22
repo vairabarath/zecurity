@@ -2858,3 +2858,15 @@ serves on `127.0.0.1:9102`.
 - **Tests:** 7 new; auth/client/identity with DB + Valkey: 161 PASS, 0 SKIP.
 - **Live on the fixed binary, all PASS:** legacy migration, 4 coexisting sessions, controller restart, logout isolation, client gRPC refresh (12:59:36) with the admin sessions intact.
 - Record: `Sprint20/Fixes/Fix06-Session-Refresh-Per-Login.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 07: connector re-reads relay lists while disconnected (B2 finding 3)
+
+- **Cause:** `connector/src/relay_selector.rs` `run()` never read `relay_list_rx` in `Disconnected`/`Backoff`.
+- **Live repro:**
+  - disposable user-level connector `s3-relaylist` enrolled via the admin API;
+  - relay row set active in the local DB + controller restart (`.49` offline);
+  - the baseline got `relay_count=1` and kept logging "list is empty".
+- **Fix:** `wait_backoff` (sleep vs `changed()`), backoff growth kept. 4 new tests; mutation check: the 2 wake tests fail on the old code.
+- **Gate:** cargo test 237 + 4 PASS.
+- **Live on the fix:** wake + dial of `192.168.1.49:9093` in the same millisecond as the push; the empty push is followed too; backoff 40 s → 120 s.
+- Record: `Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected.md`. Committed locally, not pushed.
