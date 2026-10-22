@@ -5056,12 +5056,15 @@ fn acl_is_stale(
 }
 
 /// The ACL used while the real one is stale: no entries, no networks, and
-/// version 0 so the next fetch returns a full snapshot.
+/// version 0 so the next fetch returns a full snapshot. The last known
+/// revoked connectors are KEPT: going stale must never lift a revocation
+/// (a flow still choosing a connector keeps its re-check).
 fn stale_acl_placeholder(acl: &AclSnapshot) -> AclSnapshot {
     AclSnapshot {
         version: 0,
         workspace_id: acl.workspace_id.clone(),
         generated_at: 0,
+        revoked_connectors: acl.revoked_connectors.clone(),
         ..Default::default()
     }
 }
@@ -6147,6 +6150,10 @@ mod fetch_tests {
         let p = stale_acl_placeholder(&acl);
         assert_eq!(p.version, 0);
         assert!(p.entries.is_empty() && p.remote_networks.is_empty());
+        assert_eq!(
+            p.revoked_connectors, acl.revoked_connectors,
+            "going stale never lifts a revocation"
+        );
         assert!(is_stale_acl_placeholder(&p));
         assert!(!is_stale_acl_placeholder(&acl));
     }
@@ -6179,7 +6186,10 @@ mod fetch_tests {
         // Blocked: the set is sent and acknowledged.
         state.read().await.blocked_connectors.write().unwrap().insert("conn-r".into());
         let responder = tokio::spawn(async move {
-            match resource_rx.recv().await {
+            let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), resource_rx.recv())
+                .await
+                .expect("CloseConnectorFlows must be sent");
+            match cmd {
                 Some(net_stack::ResourceCmd::CloseConnectorFlows { connector_ids, ack }) => {
                     let _ = ack.send(Ok(1));
                     connector_ids

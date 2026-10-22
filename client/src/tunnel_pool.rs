@@ -323,8 +323,10 @@ pub struct TunnelPool {
 }
 
 impl TunnelPool {
-    /// A pool that accepts any connector of the device's trust domain
-    /// (`spiffe://<td>/connector/*`).
+    /// Test-only: a pool that accepts any connector of the device's trust
+    /// domain (`spiffe://<td>/connector/*`). Production builds only
+    /// exact-identity pools (`new_for_connector`, Phase C).
+    #[cfg(test)]
     pub fn new(
         cert_pem: &str,
         key_pem: &str,

@@ -1121,6 +1121,9 @@ fn configure_capture_iface(iface: &mut Interface) -> Result<()> {
 /// `Ok(RelayEnd::Failed)` on a mid-session transport failure, and
 /// `Ok(RelayEnd::Normal)` on a normal close. The poll loop maps these to RST /
 /// RST / FIN towards the client (Fix 05-A).
+/// Test-only: a relay with no revocation controls. Production always goes
+/// through `relay_tcp_to_quic_ctl` with the shared blocked set.
+#[cfg(test)]
 async fn relay_tcp_to_quic(
     transports: Vec<Arc<ClientTransport>>,
     destination: String,
