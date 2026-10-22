@@ -114,7 +114,10 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 4. **Admin and client sessions became invalid after controller restarts** (re-login needed, three times today). **Fixed 2026-10-22: [[Sprint20/Fixes/Fix06-Session-Refresh-Per-Login]].**
    - Root cause, reproduced live: one refresh slot per user (`refresh:<userID>`), shared by the admin UI and the client daemon. Each login or rotation of one killed the other with `refresh token mismatch`. The restarts only coincided with a re-login.
    - Now one refresh session per login.
-5. **Client hot-apply admits one new resource IP** (smoltcp `IFACE_MAX_ADDR_COUNT = 2`); a `down`/`up` cycle was needed.
+5. **Client hot-apply admits one new resource IP** (smoltcp `IFACE_MAX_ADDR_COUNT = 2`); a `down`/`up` cycle was needed. **Fixed 2026-10-22: [[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]].**
+   - The client now uses AnyIP plus IP-bound listeners: no per-resource smoltcp addresses, so no limit.
+   - This also fixed shared-port misrouting and the silent drop at startup.
+   - Verified live: 3 IPs hot-added in one pass, all tunnelled; at startup all tunnelled.
 6. **Relays on private IPs were never advertised.** Addressed for dev labs by `6174053` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
 
 **Lab state after the run:**

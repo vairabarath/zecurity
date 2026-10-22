@@ -341,6 +341,12 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Tests: 3 new (all fail on the old code). Live: 37.3 s → 0.24 s.
   - Follow-up: the shield doesn't fail over away from a TLS-reachable but `Disabled` connector.
   - Details: [[Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled]].
+- **Fix 09 — the client served only one hot-added resource IP; shared-port resources were misrouted (B2 live finding 5), 2026-10-22.**
+  - Cause: smoltcp `IFACE_MAX_ADDR_COUNT=2` with one address per resource IP. Pending IPs went **direct over the LAN**, and startup silently dropped IPs beyond 2. Port-only listeners sent a connection to `a:80` to another resource on `:80`.
+  - Fix: `configure_capture_iface` (only `100.64.0.1`, AnyIP, default route via it) plus listeners bound to `(ip, port)`. The planner capacity and address commands are removed; **H1 is superseded**.
+  - Tests: 5 new (all fail on the old code); 252 client tests PASS.
+  - Live (connector `s3-luffy` on .40, 4 SSH resources): hot-add of 3 IPs is now 1 pass, all tunnelled (baseline: all 3 pending, direct over the LAN); startup all tunnelled (baseline: 2 silently dropped).
+  - Details: [[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]].
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
   - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes.

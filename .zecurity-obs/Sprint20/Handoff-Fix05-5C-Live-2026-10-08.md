@@ -132,6 +132,9 @@ Cause, from source (`~/.hermes/hermes-agent/apps/desktop/src/app/session/hooks/u
 
 Capacity reminder: smoltcp `IFACE_MAX_ADDR_COUNT=2` (one slot is 100.64.0.1), so the client holds **one resource IP**. A second new IP must go **pending** (H1), and that is not a defect.
 
+> **Superseded 2026-10-22 by Sprint 20 Fix 09** ([[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]]): the client uses AnyIP, so there is no smoltcp address capacity and rule H1 no longer applies. Every resource addition is hot-applied.
+
+
 | # | Row | Expect |
 |---|---|---|
 | 1 | add A2 (same IP .34, new port) | hot-applied, reachable, A hold 0 FAIL, ifindex same (L2/L5) |

@@ -33,6 +33,12 @@ So two sessions of the **same user** overwrite each other. Whichever writes seco
 
 **Why it showed up "after restarts":** in the lab the admin and the client are the same user (local test login). After a controller restart someone signs in again in one of them, and that new login replaces the other's refresh token. The restart itself invalidates nothing: `JWT_SECRET` comes from `controller/.env`, and Valkey keeps its data (container not recreated, RDB save on).
 
+## Follow-up observation (2026-10-22, not a Fix 06 defect)
+
+- After two unclean power losses of the lab PC (12:24 and 13:43, no shutdown record), the client's session was dead: `session expired; re-login required`.
+- **Cause:** Valkey runs with RDB snapshots only (`save 3600 1 300 100 60 10000`, no AOF). It reloaded a snapshot older than the client's 13:13 rotation, so the client presented a newer refresh token than the stored one.
+- The old one-slot design fails the same way. Production durability of the refresh store (AOF / `appendfsync`) is a separate deployment concern.
+
 ## Live reproduction (2026-10-22, baseline controller `9503ad2`)
 
 - **Setup:**

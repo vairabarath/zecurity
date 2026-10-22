@@ -14,6 +14,9 @@ tags:
   - fix-05
 ---
 
+> **Superseded 2026-10-22 by Sprint 20 Fix 09** ([[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]]): the client uses AnyIP, so there is no smoltcp address capacity and rule H1 no longer applies. Every resource addition is hot-applied.
+
+
 # Fix 05 · Phase 5-C — Resource Hot-Apply (implementation plan)
 
 > Source design: [[Fix05-Resource-Hot-Apply-Investigation]] (§6–§8, §15–§18).

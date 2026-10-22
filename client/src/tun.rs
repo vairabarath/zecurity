@@ -78,11 +78,6 @@ pub trait ResourceKernel {
     /// Ensure exactly one `fwmark 0x5a lookup 105` rule exists; never adds a
     /// duplicate and never deletes it.
     fn ensure_fwmark_rule(&mut self) -> Result<()>;
-    /// Usable smoltcp interface-address capacity (an apply-environment query,
-    /// overridable in tests). Default: smoltcp's compile-time limit.
-    fn addr_capacity(&self) -> usize {
-        smoltcp::config::IFACE_MAX_ADDR_COUNT
-    }
 }
 
 /// Runs external commands for the Phase 5-C operations. A seam so the exact

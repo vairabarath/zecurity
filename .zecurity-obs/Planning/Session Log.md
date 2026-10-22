@@ -2882,3 +2882,16 @@ serves on `127.0.0.1:9102`.
 - **Live on the fix:** 09:10:33.973 → 09:10:34.210 (**0.24 s**).
 - Follow-up: shield failover away from a `Disabled` connector.
 - Record: `Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 09: client AnyIP, no resource-IP capacity (B2 finding 5)
+
+- **Cause:**
+  - smoltcp `IFACE_MAX_ADDR_COUNT=2` with one address per resource IP, so hot-add admitted 1 new IP (H1) and startup silently dropped IPs beyond 2;
+  - also found: port-only listeners misrouted shared-port resources (unit test: `10.0.0.3:80` → `10.0.0.1:80`).
+- **Fix:** `configure_capture_iface` (`100.64.0.1` only, `set_any_ip`, default route) + `listen((ip, port))`; planner capacity, `RemoveAddrs` and `addr_capacity` removed; H1 superseded (5-C docs annotated).
+- **Tests:** 5 new; mutants fail; client 252 PASS.
+- **Live:** user-level connector `s3-luffy` on luffy via Orca (no sudo); resources `s3-r1..r4` = SSH on .75/.41/.49/.40. The user ran the sudo install of the fixed client in an Orca terminal.
+  - Baseline: 3 hot-added IPs pending and **direct over the LAN**; startup .75/.49 captured and dropped.
+  - Fixed: hot-add 3 in one pass, all tunnelled; startup all tunnelled.
+- Also: the client session died after unclean power losses because Valkey is RDB-only (noted in Fix 06, not a Fix 06 defect); lab hosts rebooted ~14:06, udaya is now .41 and nika .40.
+- Record: `Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity.md`. Committed locally, not pushed.

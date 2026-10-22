@@ -1130,8 +1130,7 @@ async fn transport_apply_pending(state: &SharedState) -> bool {
 }
 
 /// True when the running tunnel has a pending ResourceDelta that was not (fully)
-/// applied: an earlier apply failed before mutation, or additions are waiting
-/// for smoltcp address capacity (H1). The 60 s tick retries it without a
+/// applied: an earlier apply failed before mutation. The 60 s tick retries it without a
 /// version bump. (`transport_apply_pending` keeps its frozen 2-A meaning.)
 async fn resource_apply_pending(state: &SharedState) -> bool {
     let s = state.read().await;
@@ -1150,26 +1149,23 @@ async fn resource_apply_pending(state: &SharedState) -> bool {
 
 type ResourceKey = (Ipv4Addr, u16);
 
-/// The pure plan for one resource apply (Phase 5-C, H1).
+/// The pure plan for one resource apply (Phase 5-C; capacity rule H1 retired
+/// by Fix 09: with AnyIP every addition applies).
 #[derive(Debug, Clone)]
 pub(crate) struct ResourcePlan {
     /// Routable keys to stop serving (their flows are reset).
     pub(crate) removed: BTreeSet<ResourceKey>,
-    /// Routable keys applied by this pass (existing-IP + admitted new-IP).
+    /// Routable keys applied by this pass.
     pub(crate) added: BTreeSet<ResourceKey>,
-    /// Additions that don't fit the smoltcp address capacity: NOT applied,
-    /// not in `target`, retried on later ticks.
-    pub(crate) unapplied: BTreeSet<ResourceKey>,
-    /// Interface addresses / table-105 routes to remove.
+    /// Table-105 routes to remove (IPs no longer served).
     pub(crate) addr_del: BTreeSet<Ipv4Addr>,
-    /// Interface addresses / table-105 routes to add (admitted new IPs).
+    /// Table-105 routes to add (newly served IPs).
     pub(crate) addr_add: BTreeSet<Ipv4Addr>,
     /// Capture rules after the remove side (= kept keys).
     pub(crate) flows_after_removal: BTreeSet<ResourceKey>,
     /// Capture rules after the whole apply.
     pub(crate) flows_after: BTreeSet<ResourceKey>,
-    /// What `AppliedConfig` becomes on success: the candidate minus every
-    /// entry whose key is unapplied.
+    /// What `AppliedConfig` becomes on success (the candidate).
     pub(crate) target: AppliedConfig,
 }
 
@@ -1184,59 +1180,36 @@ fn ips_of(keys: &BTreeSet<ResourceKey>) -> BTreeSet<Ipv4Addr> {
     keys.iter().map(|(ip, _)| *ip).collect()
 }
 
-/// Number of smoltcp interface addresses reserved for the tunnel itself
-/// (`100.64.0.1/32`).
-const RESERVED_IFACE_ADDRS: usize = 1;
-
-/// Plan a resource apply (pure; Phase 5-C H1):
-/// * removals free capacity first;
-/// * an addition whose IP already has an address always applies;
-/// * new IPs are admitted in ascending IPv4 order until the capacity
-///   (`addr_capacity` − the reserved tunnel address) is full;
-/// * the rest stay unapplied/pending — never silently dropped;
-/// * removals, connector changes and non-routable changes never depend on
-///   capacity.
+/// Plan a resource apply (pure; Phase 5-C):
+/// * removals first, then additions;
+/// * every addition applies: the capture interface accepts any number of
+///   resource IPs (Fix 09, AnyIP), so nothing waits for address capacity;
+/// * `addr_add` / `addr_del` are the table-105 route changes (IPs newly
+///   served / no longer served by any key);
+/// * removals, connector changes and non-routable changes are independent.
 pub(crate) fn plan_resource_apply(
     applied: &AppliedConfig,
     candidate: &AppliedConfig,
-    addr_capacity: usize,
 ) -> ResourcePlan {
     let applied_keys = routable_keys(applied);
     let cand_keys = routable_keys(candidate);
     let kept: BTreeSet<ResourceKey> = applied_keys.intersection(&cand_keys).copied().collect();
     let removed: BTreeSet<ResourceKey> = applied_keys.difference(&cand_keys).copied().collect();
-    let added_all: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
+    let added: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
 
     let current_ips = ips_of(&applied_keys);
-    let (existing_ip_adds, new_ip_adds): (BTreeSet<ResourceKey>, BTreeSet<ResourceKey>) = added_all
-        .iter()
-        .partition(|(ip, _)| current_ips.contains(ip));
-
-    let mut retained_ips = ips_of(&kept);
-    retained_ips.extend(ips_of(&existing_ip_adds));
-    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&retained_ips).copied().collect();
-
-    let free = addr_capacity.saturating_sub(RESERVED_IFACE_ADDRS + retained_ips.len());
-    // BTreeSet<Ipv4Addr> iterates in ascending numeric order.
-    let addr_add: BTreeSet<Ipv4Addr> = ips_of(&new_ip_adds).into_iter().take(free).collect();
-
-    let mut added = existing_ip_adds;
-    added.extend(new_ip_adds.iter().filter(|(ip, _)| addr_add.contains(ip)));
-    let unapplied: BTreeSet<ResourceKey> = added_all.difference(&added).copied().collect();
+    let cand_ips = ips_of(&cand_keys);
+    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&cand_ips).copied().collect();
+    let addr_add: BTreeSet<Ipv4Addr> = cand_ips.difference(&current_ips).copied().collect();
 
     let mut flows_after = kept.clone();
     flows_after.extend(added.iter().copied());
 
-    let mut target = candidate.clone();
-    target.entries.retain(|e| {
-        net_stack::routable_key(&e.address, &e.protocol, e.port)
-            .is_none_or(|key| !unapplied.contains(&key))
-    });
+    let target = candidate.clone();
 
     ResourcePlan {
         removed,
         added,
-        unapplied,
         addr_del,
         addr_add,
         flows_after_removal: kept,
@@ -1252,31 +1225,6 @@ fn to_flows(keys: &BTreeSet<ResourceKey>) -> BTreeSet<AllowedFlow> {
             port: *port,
         })
         .collect()
-}
-
-/// Logs the capacity-pending set once per distinct set (rate limit).
-static LAST_CAPACITY_PENDING: std::sync::Mutex<Option<BTreeSet<ResourceKey>>> =
-    std::sync::Mutex::new(None);
-
-fn log_capacity_pending(unapplied: &BTreeSet<ResourceKey>) {
-    let Ok(mut last) = LAST_CAPACITY_PENDING.lock() else {
-        return;
-    };
-    if unapplied.is_empty() {
-        *last = None;
-        return;
-    }
-    if last.as_ref() != Some(unapplied) {
-        let pending: Vec<String> = unapplied
-            .iter()
-            .map(|(ip, port)| format!("{ip}:{port}"))
-            .collect();
-        warn!(
-            pending = ?pending,
-            "resource additions pending: address capacity"
-        );
-        *last = Some(unapplied.clone());
-    }
 }
 
 /// Send one resource command and wait (bounded, H4) for the loop's ack.
@@ -1312,7 +1260,7 @@ async fn send_resource_cmd(
 enum ResourceApplyOutcome {
     /// Applied; `applied` now equals the plan target.
     Applied,
-    /// Nothing applicable (only capacity-pending additions remain).
+    /// Nothing to apply (the plan target equals what is applied).
     NothingToApply,
     /// The configuration moved between the decision and this apply; the
     /// coordinator's next pass (requested by whoever stored it) re-evaluates.
@@ -1328,7 +1276,7 @@ enum ResourceApplyOutcome {
 /// Fix 05 Phase 5-C: apply a ResourceDelta (possibly combined with connector
 /// changes) to the running tunnel without a restart.
 ///
-/// Pre-mutation: snapshot → plan (H1 capacity) → build the full transport map
+/// Pre-mutation: snapshot → plan → build the full transport map
 /// for the plan target → lock `tun_slot` (serialises against `handle_down`)
 /// → re-check the tunnel handle.
 /// Mutation (H2 order): R1 close flows + remove listeners (ack after reset +
@@ -1371,22 +1319,14 @@ where
     if classify_applied(&handle.applied, &candidate) != ConfigDelta::ResourceDelta {
         return ResourceApplyOutcome::Superseded;
     }
-    let addr_capacity = match kernel_slot.lock().await.as_ref() {
-        Some(kernel) => kernel.addr_capacity(),
-        None => return ResourceApplyOutcome::TunnelGone,
-    };
-    let plan = plan_resource_apply(&handle.applied, &candidate, addr_capacity);
-    log_capacity_pending(&plan.unapplied);
+    if kernel_slot.lock().await.is_none() {
+        return ResourceApplyOutcome::TunnelGone;
+    }
+    let plan = plan_resource_apply(&handle.applied, &candidate);
     if plan.target == handle.applied {
         return ResourceApplyOutcome::NothingToApply;
     }
-    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device)
-        .into_iter()
-        .filter(|e| {
-            net_stack::routable_key(&e.address, &e.protocol, e.port)
-                .is_none_or(|key| !plan.unapplied.contains(&key))
-        })
-        .collect();
+    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device);
     let map = match build(&entries, &acl, transport.as_ref(), &device, relay_crl) {
         Ok(map) => map,
         Err(e) => {
@@ -1409,7 +1349,6 @@ where
     info!(
         removed = plan.removed.len(),
         added = plan.added.len(),
-        pending = plan.unapplied.len(),
         "resource change, hot-applying"
     );
 
@@ -1427,11 +1366,6 @@ where
                 .context("nft desired state (remove side)")?;
         }
         if !plan.addr_del.is_empty() {
-            let ips: Vec<Ipv4Addr> = plan.addr_del.iter().copied().collect();
-            send_resource_cmd(&handle.resource_tx, "remove interface addresses", |ack| {
-                net_stack::ResourceCmd::RemoveAddrs { ips, ack }
-            })
-            .await?;
             kernel
                 .del_routes(&plan.addr_del)
                 .context("delete resource routes")?;
@@ -1444,10 +1378,9 @@ where
         // Add side: fwmark → addresses + listeners → routes → nft LAST.
         if !plan.added.is_empty() {
             kernel.ensure_fwmark_rule().context("ensure fwmark rule")?;
-            let addrs: Vec<Ipv4Addr> = plan.addr_add.iter().copied().collect();
             let keys: Vec<ResourceKey> = plan.added.iter().copied().collect();
-            send_resource_cmd(&handle.resource_tx, "add addresses and listeners", |ack| {
-                net_stack::ResourceCmd::Add { addrs, keys, ack }
+            send_resource_cmd(&handle.resource_tx, "add listeners", |ack| {
+                net_stack::ResourceCmd::Add { keys, ack }
             })
             .await?;
             if !plan.addr_add.is_empty() {
@@ -1485,7 +1418,6 @@ where
         resources = plan.flows_after.len(),
         removed = plan.removed.len(),
         added = plan.added.len(),
-        pending = plan.unapplied.len(),
         "resources hot-applied"
     );
     if plan.flows_after.is_empty() {
@@ -2207,10 +2139,6 @@ mod restart_decision_tests {
 
     type Log = Arc<std::sync::Mutex<Vec<String>>>;
 
-    /// Address capacity of the fake kernel: room for several resource IPs so
-    /// the non-capacity tests are not affected by H1 admission.
-    const TEST_ADDR_CAPACITY: usize = 8;
-
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Reply {
         Ack,
@@ -2222,7 +2150,6 @@ mod restart_decision_tests {
     #[derive(Clone, Copy, Debug)]
     struct LoopCtl {
         remove: Reply,
-        remove_addrs: Reply,
         add: Reply,
     }
 
@@ -2230,7 +2157,6 @@ mod restart_decision_tests {
         fn default() -> Self {
             Self {
                 remove: Reply::Ack,
-                remove_addrs: Reply::Ack,
                 add: Reply::Ack,
             }
         }
@@ -2292,7 +2218,6 @@ mod restart_decision_tests {
     struct FakeKernel {
         log: Log,
         published: Published,
-        capacity: usize,
         /// Fail the first call whose log entry starts with this prefix.
         fail_on: Option<&'static str>,
         /// Number of fwmark rules "installed" (starts at 1: the tunnel is up).
@@ -2338,9 +2263,6 @@ mod restart_decision_tests {
             }
             Ok(())
         }
-        fn addr_capacity(&self) -> usize {
-            self.capacity
-        }
     }
 
     /// Fake net_stack loop: logs and answers resource commands.
@@ -2360,17 +2282,8 @@ mod restart_decision_tests {
                         ctl.remove,
                         ack,
                     ),
-                    net_stack::ResourceCmd::RemoveAddrs { ips, ack } => (
-                        format!("loop:addr- [{}]", ips_str(&ips)),
-                        ctl.remove_addrs,
-                        ack,
-                    ),
-                    net_stack::ResourceCmd::Add { addrs, keys, ack } => (
-                        format!(
-                            "loop:add addrs=[{}] keys=[{}]",
-                            ips_str(&addrs),
-                            keys_str(&keys)
-                        ),
+                    net_stack::ResourceCmd::Add { keys, ack } => (
+                        format!("loop:add keys=[{}]", keys_str(&keys)),
                         ctl.add,
                         ack,
                     ),
@@ -2439,7 +2352,6 @@ mod restart_decision_tests {
         let kernel = FakeKernel {
             log: log.clone(),
             published: published.clone(),
-            capacity: TEST_ADDR_CAPACITY,
             fail_on: None,
             fwmark_rules: 1,
             routes: route_ips,
@@ -2837,7 +2749,7 @@ mod restart_decision_tests {
             &h,
             &[
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1",
+                "loop:add keys=[10.0.0.2:443] pub=1",
                 "route+ [10.0.0.2] pub=1",
                 "nft [10.0.0.1:80,10.0.0.2:443] pub=1",
             ],
@@ -2867,7 +2779,6 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
             ],
         )
@@ -2892,10 +2803,9 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.9] keys=[10.0.0.9:80] pub=1",
+                "loop:add keys=[10.0.0.9:80] pub=1",
                 "route+ [10.0.0.9] pub=1",
                 "nft [10.0.0.9:80] pub=1",
             ],
@@ -2915,7 +2825,7 @@ mod restart_decision_tests {
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[] keys=[10.0.0.1:8080] pub=1",
+                "loop:add keys=[10.0.0.1:8080] pub=1",
                 "nft [10.0.0.1:8080] pub=1",
             ],
         )
@@ -2934,7 +2844,6 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
             ],
         )
@@ -2976,7 +2885,7 @@ mod restart_decision_tests {
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[] keys=[10.0.0.1:8443] pub=1",
+                "loop:add keys=[10.0.0.1:8443] pub=1",
                 "nft [10.0.0.1:8443] pub=1",
             ],
         )
@@ -3159,7 +3068,7 @@ mod restart_decision_tests {
             log_of(&h),
             vec![
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
                 "route+ [10.0.0.1] pub=1",
                 "nft [10.0.0.1:80] pub=1",
             ]
@@ -3278,7 +3187,7 @@ mod restart_decision_tests {
             log_of(&h),
             vec![
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
                 "route+ [10.0.0.1] pub=1",
                 "nft [10.0.0.1:80] pub=1",
             ]
@@ -3316,159 +3225,99 @@ mod restart_decision_tests {
         assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
     }
 
-    // ---- Phase 5-C: capacity (H1) ----------------------------------------------------
+    // ---- Fix 09: no address capacity (AnyIP); every addition applies ----------------
 
     fn keys(v: &BTreeSet<ResourceKey>) -> Vec<String> {
         v.iter().map(|(ip, p)| format!("{ip}:{p}")).collect()
     }
 
+    /// B2 finding 5 / H1 retired: more new IPs than the old smoltcp
+    /// capacity (2, one reserved) all apply in one pass, with a route each.
     #[test]
-    fn plan_admits_new_ips_ascending_and_keeps_overflow_pending() {
+    fn plan_applies_every_new_ip() {
         let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
         let cand = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.7", 80, "tcp", "rn1"),
             ("10.0.0.3", 80, "tcp", "rn1"),
-            ("10.0.0.5", 80, "tcp", "rn1"),
+            ("10.0.0.5", 443, "tcp", "rn1"),
         ]);
-        // capacity 4 = 100.64.0.1 + 10.0.0.1 + two new IPs.
-        let plan = plan_resource_apply(&applied, &cand, 4);
-        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.5:80"]);
-        assert_eq!(keys(&plan.unapplied), vec!["10.0.0.7:80"]);
-        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5");
-        assert!(
-            !plan.target.entries.iter().any(|e| e.address == "10.0.0.7"),
-            "pending is not in applied"
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(
+            keys(&plan.added),
+            vec!["10.0.0.3:80", "10.0.0.5:443", "10.0.0.7:80"]
         );
-        assert_eq!(plan.target.entries.len(), 3);
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5,10.0.0.7");
+        assert!(plan.addr_del.is_empty() && plan.removed.is_empty());
+        assert!(plan.target == cand, "the whole candidate is applied");
     }
 
     #[test]
-    fn plan_existing_ip_addition_always_applies() {
+    fn plan_addition_on_a_served_ip_adds_no_route() {
         let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
         let cand = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.1", 443, "tcp", "rn1"),
         ]);
-        // capacity 2: no free slot, but the IP already has its address.
-        let plan = plan_resource_apply(&applied, &cand, 2);
+        let plan = plan_resource_apply(&applied, &cand);
         assert_eq!(keys(&plan.added), vec!["10.0.0.1:443"]);
-        assert!(plan.unapplied.is_empty());
         assert!(plan.addr_add.is_empty());
     }
 
     #[test]
-    fn plan_removals_free_capacity_first() {
-        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
-        let cand = applied_with(&[("10.0.0.2", 80, "tcp", "rn1")]);
-        let plan = plan_resource_apply(&applied, &cand, 2);
-        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:80"]);
-        assert_eq!(keys(&plan.added), vec!["10.0.0.2:80"]);
-        assert!(
-            plan.unapplied.is_empty(),
-            "freed slot reused in the same pass"
-        );
+    fn plan_route_is_kept_while_another_key_uses_the_ip() {
+        let applied = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.1", 443, "tcp", "rn1"),
+        ]);
+        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:443"]);
+        assert!(plan.addr_del.is_empty(), "10.0.0.1 is still served");
     }
 
     #[test]
-    fn plan_removals_never_blocked_by_capacity() {
-        // Startup already over capacity (silent drop at handle_up): removal still plans.
+    fn plan_removal_and_addition_in_one_pass() {
         let applied = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.2", 80, "tcp", "rn1"),
-            ("10.0.0.3", 80, "tcp", "rn1"),
         ]);
-        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
-        let plan = plan_resource_apply(&applied, &cand, 2);
-        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80", "10.0.0.3:80"]);
-        assert!(plan.added.is_empty() && plan.unapplied.is_empty());
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+            ("10.0.0.4", 80, "tcp", "rn1"),
+        ]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80"]);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.4:80"]);
+        assert_eq!(ips_str(&plan.addr_del), "10.0.0.2");
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.4");
     }
 
-    async fn set_capacity(h: &Harness, cap: usize) {
-        h.kernel.lock().await.as_mut().unwrap().capacity = cap;
-    }
-
-    /// Overflow + removal + connector change in one delta: removal and
-    /// connector change apply, admitted additions apply, the rest stays
-    /// pending (not in applied), retried without mutation while it can't fit.
+    /// The live B2 case: three new resource IPs while the tunnel is up are
+    /// hot-applied in one pass. No restart, nothing left pending.
     #[tokio::test]
-    async fn capacity_overflow_applies_the_rest_and_keeps_pending() {
+    async fn several_new_resource_ips_hot_apply_in_one_pass() {
         let h = harness_with(&["c1"], "").await;
-        add_entry(&h, "10.0.0.4", 80, "tcp").await;
-        set_capacity(&h, 8).await;
-        decide(&h, false).await.unwrap(); // applied: .1, .4
-        rebaseline(&h);
-        let builds_before = h.builds.load(Ordering::SeqCst);
-        set_capacity(&h, 3).await; // 100.64.0.1 + two resource IPs
-        set_transport_connectors(&h, &["c1", "c2"]).await;
-        {
-            let mut s = h.state.write().await;
-            let acl = s.acl_snapshot.as_mut().unwrap();
-            acl.entries.retain(|e| e.address != "10.0.0.4"); // removal
-        }
-        add_entry(&h, "10.0.0.3", 80, "tcp").await;
         add_entry(&h, "10.0.0.2", 80, "tcp").await;
+        add_entry(&h, "10.0.0.3", 80, "tcp").await;
+        add_entry(&h, "10.0.0.4", 8080, "tcp").await;
         decide(&h, false).await.unwrap();
-        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            h.builds.load(Ordering::SeqCst),
-            builds_before + 1,
-            "one publish"
-        );
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
         assert_eq!(
             log_of(&h),
             vec![
-                "loop:remove [10.0.0.4:80] pub=0",
-                "nft [10.0.0.1:80] pub=0",
-                "loop:addr- [10.0.0.4] pub=0",
-                "route- [10.0.0.4] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:80] pub=1",
-                "route+ [10.0.0.2] pub=1",
-                "nft [10.0.0.1:80,10.0.0.2:80] pub=1",
+                "loop:add keys=[10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
+                "route+ [10.0.0.2,10.0.0.3,10.0.0.4] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
             ]
         );
         let applied = applied_now(&h).await;
-        let addrs: Vec<&str> = applied.entries.iter().map(|e| e.address.as_str()).collect();
-        assert!(addrs.contains(&"10.0.0.2") && !addrs.contains(&"10.0.0.3"));
-        assert!(!addrs.contains(&"10.0.0.4"));
-        assert_eq!(
-            applied_coord_ids(&h.state).await,
-            vec!["c1", "c2"],
-            "connector change applied"
-        );
-        assert!(
-            h.rx.borrow()
-                .get(&("10.0.0.3".parse().unwrap(), 80))
-                .is_none(),
-            "no slot for the pending key"
-        );
-        assert!(
-            resource_apply_pending(&h.state).await,
-            "pending retried on the tick"
-        );
-
-        // Next tick, still no room: no mutation, no publish, no restart.
-        rebaseline(&h);
-        let builds = h.builds.load(Ordering::SeqCst);
-        decide(&h, false).await.unwrap();
-        assert!(log_of(&h).is_empty());
-        assert_eq!(h.builds.load(Ordering::SeqCst), builds);
-        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
-
-        // Room appears (another resource removed) → the pending one applies.
-        h.state
-            .write()
-            .await
-            .acl_snapshot
-            .as_mut()
-            .unwrap()
-            .entries
-            .retain(|e| e.address != "10.0.0.2");
-        decide(&h, false).await.unwrap();
-        let applied = applied_now(&h).await;
-        assert!(applied.entries.iter().any(|e| e.address == "10.0.0.3"));
-        assert!(!resource_apply_pending(&h.state).await);
+        for ip in ["10.0.0.2", "10.0.0.3", "10.0.0.4"] {
+            assert!(applied.entries.iter().any(|e| e.address == ip), "{ip} applied");
+        }
+        assert!(!resource_apply_pending(&h.state).await, "nothing pending");
     }
 
     // ---- Phase 5-C: failure / recovery -----------------------------------------------
@@ -3531,17 +3380,11 @@ mod restart_decision_tests {
     }
 
     #[tokio::test]
-    async fn loop_error_on_address_removal_triggers_recovery_restart() {
-        let h = loop_failure_case(|c| c.remove_addrs = Reply::Fail, true).await;
-        assert_eq!(log_of(&h).last().unwrap(), "loop:addr- [10.0.0.1] pub=0");
-    }
-
-    #[tokio::test]
     async fn loop_error_on_add_triggers_recovery_restart() {
         let h = loop_failure_case(|c| c.add = Reply::Fail, false).await;
         assert_eq!(
             log_of(&h).last().unwrap(),
-            "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1"
+            "loop:add keys=[10.0.0.2:443] pub=1"
         );
         assert!(
             !log_of(&h).iter().any(|l| l.starts_with("nft")),
@@ -5141,8 +4984,8 @@ async fn sync_and_restart_if_changed(
     // Fix 01 Phase 2-A (D2): a transport-map build that failed earlier left a
     // pending connector-only change; retry it on this tick even without a bump.
     let transport_pending = !acl_changed && !transport_changed && transport_apply_pending(state).await;
-    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (pre-mutation
-    // failure, or additions waiting for address capacity — H1).
+    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (an apply that
+    // failed before mutation).
     let resource_pending = !acl_changed
         && !transport_changed
         && !transport_pending
