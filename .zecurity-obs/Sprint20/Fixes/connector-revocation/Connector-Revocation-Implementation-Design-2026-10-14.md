@@ -488,11 +488,11 @@ The shield's only channel is its connector (CONFIRMED BY SOURCE). With an **hone
 |---|---|
 | Current connector revoked | the connector closes shield streams and refuses new ones (§7) |
 | Channel closed | existing failover to the next peer (`run_once:126-142`) |
-| Stale peer list | RECOMMENDED: `PeerConnectorList.revoked_connector_ids = 2` from any connector's ACL `revoked_connectors`; the shield prunes; lists are sent even when the sender's own id is absent. That is a shield proto + code change. Prune rule: **OPEN (O13)** |
+| Stale peer list | RECOMMENDED: `PeerConnectorList.revoked_connector_ids = 2` from any connector's ACL `revoked_connectors`; the shield prunes; lists are sent even when the sender's own id is absent. That is a shield proto + code change. Prune rule: **ACCEPTED (D21)**; implemented and verified live in Phase E (2026-10-23) |
 | Alternative eligible connector | attaches via existing failover; new protected flows then work through it |
 | Existing protected application session | terminated; **not migrated** (PENDING-18) |
 | Controller/connector unavailable | the connector's `Disabled` handling (O8) |
-| Hostile revoked connector | can't be enforced at the shield with current interfaces (FR §19.8); **OPEN (O13)** |
+| Hostile revoked connector | can't be enforced at the shield with current interfaces (FR §19.8); **limit ACCEPTED (D21)**, bounded by certificate lifetime; client (C) and relay (D) refuse it |
 
 Revocation enforcement, failover and migration are separate deliverables with separate tests.
 
@@ -540,7 +540,7 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 | **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | none: O5, O6, O7, O8 resolved (D13–D16) |
 | **C** Client | A | `client/src/daemon.rs`, `transport.rs`, `net_stack.rs`, `tunnel_pool.rs` | §8 | T11 | unit + live | O11 |
 | **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + live relay lab: **DONE 2026-10-23** ([record](Connector-Revocation-PhaseD-Implementation-2026-10-23.md)) | O12 → D20 |
-| **E** Shield pruning | B2, C | `proto/shield/v1/shield.proto`, `connector/src/agent_server.rs`, `shield/src/control_stream.rs` | §10 | T13 | live (two connectors) | O13 |
+| **E** Shield pruning | B2, C | `proto/shield/v1/shield.proto`, `connector/src/agent_server.rs`, `shield/src/control_stream.rs` | §10 | T13 | live (two connectors): **DONE 2026-10-23** ([record](Connector-Revocation-PhaseE-Implementation-2026-10-23.md)) | O13 → D21 |
 | **F** History / lifecycle | schema approval | migrations 038+, `enrollment.go`, `pki/workspace.go`, `DeleteConnector` | §12 | CRL history / delete tests | — | O14 |
 | **G** Live acceptance | each phase | live-lab scripts | §14 | — | OBSERVED_* records | relay lab |
 
@@ -686,7 +686,7 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **M** needs an A lab build.
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
 - **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) signed off; **B2 unit level implemented 2026-10-21** ([record](Connector-Revocation-PhaseB2-Implementation-2026-10-21.md)); **live L-1…L-8 PASS 2026-10-21** (udaya shield, manojinkyank relay). Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
-- **C**, **D** and **E**: O11, O12 and O13 accepted (D19–D21). **C done 2026-10-22, D done 2026-10-23** (records in this folder); E in progress.
+- **C**, **D** and **E**: O11, O12 and O13 accepted (D19–D21). **C done 2026-10-22, D and E done 2026-10-23** (records in this folder).
 - **F** needs schema approval (O14).
 
 This revision changed only this document. No source, test, protocol, configuration, migration or runtime state was modified, and nothing was committed.

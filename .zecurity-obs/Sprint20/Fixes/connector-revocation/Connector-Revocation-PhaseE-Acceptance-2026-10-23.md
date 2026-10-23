@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase E acceptance list (shield pruning)
 date: 2026-10-23
 type: acceptance list (design §10, §17)
-status: AUTHORIZED 2026-10-22 — user: "implement and check it and if it working correctly then move on" (C → D → E)
+status: DONE 2026-10-23 — unit + 11/11 mutants + live AE-L PASS (record: Connector-Revocation-PhaseE-Implementation-2026-10-23.md)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (D6, D21)
 ---
 

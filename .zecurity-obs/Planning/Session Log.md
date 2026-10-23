@@ -2931,3 +2931,14 @@ serves on `127.0.0.1:9102`.
 - **Tests:** relay 110 → 116; controller full suite + DB integration; connector 237; client 265. Mutants 14/14 killed.
 - **Live AD-L:** Phase A (revocation-ignoring) connector `pd-hostile` on udaya, registered with the upgraded manojinkyank relay (binary installed by the user with sudo). Revoked 04:37:40.70 UTC; the relay closed and removed it at 04:38:06.56 (25.9 s). Reconnects were refused by the existing accept-time CRL check, so the Register refusal is defence in depth live. The connector kept running; stopped afterwards.
 - Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseD-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase E (shield pruning): DONE
+
+- **Code** (`8b2dff4`):
+  - `PeerConnectorList.revoked_connector_ids = 2`;
+  - the connector fills it from its ACL, drops revoked peers, and sends it for revoked ids alone;
+  - the shield prunes at once from any connector's list, never re-adds while running, keeps the set in memory only (it survives renewal), and dials none if all peers are revoked (`state.json` stays loadable).
+- **Tests:** shield 35 → 40, connector 237 → 239; controller, client and relay green. Mutants 11/11 killed.
+- **Live AE-L:** new `pe-net` with `pe-honest` + `pe-shield` (HEAD builds, user-level on this PC) and the Phase A `pe-hostile` on udaya. Revoked 04:52:59.466; the honest connector's ACL arrived 8 ms later; the shield pruned at 04:53:08.364 (8.9 s); `state.json` = [pe-honest]. In this topology the existing full-list replacement would also have removed it; the Phase E-only cases are unit/mutation-tested. The D21 hostile-only-attachment limit is documented.
+- **Lab hygiene:** a `cargo fmt` run touched unrelated connector/shield files; that churn was reverted before the commit. Test processes stopped; `pe-*` rows remain in the DB.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseE-Implementation-2026-10-23.md`. Committed locally, not pushed.
