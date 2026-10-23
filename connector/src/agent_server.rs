@@ -93,6 +93,11 @@ struct ShieldEntry {
     lan_ip: String,
 }
 
+/// Shield Control stream refusal from a connector in a terminal state. Must
+/// match the Shield's `CONNECTOR_TERMINAL_MESSAGE`.
+pub(crate) const CONNECTOR_TERMINAL_MESSAGE: &str =
+    "connector is revoked or unknown to the controller";
+
 /// Shared state for Shield-facing Control streams.
 #[derive(Debug, Clone)]
 pub struct ShieldRegistry {
@@ -161,6 +166,18 @@ impl ShieldRegistry {
             next_stream_id: Arc::new(AtomicU64::new(0)),
             serving_gate,
             close_all: Arc::new(tokio::sync::watch::Sender::new(0)),
+        }
+    }
+
+    /// Refusal for a shield while this connector is not serving. A terminal
+    /// state (revoked, unknown identity) gets its own message: this connector
+    /// will never serve again, so the Shield fails over at once instead of
+    /// waiting for it (connector-revocation Phase F, finding B).
+    fn not_serving_status(&self) -> Status {
+        if self.serving_gate.snapshot().state().is_terminal() {
+            Status::unavailable(CONNECTOR_TERMINAL_MESSAGE)
+        } else {
+            Status::unavailable("connector is not authorized to serve")
         }
     }
 
@@ -899,7 +916,7 @@ impl ShieldService for ShieldRegistry {
             // Connector-revocation B1 (§7 step 2): not while the connector
             // itself is unauthorized (Starting, Disabled, terminal, past D).
             if !self.serving_gate.admits_now() {
-                return Err(Status::unavailable("connector is not authorized to serve"));
+                return Err(self.not_serving_status());
             }
             if maps.revoked.contains(&identity.shield_id) {
                 return Err(Status::permission_denied("shield is revoked"));
@@ -986,7 +1003,7 @@ impl ShieldService for ShieldRegistry {
                     // Connector-revocation fail-closed: this connector stopped
                     // serving; the shield should fail over.
                     _ = close_rx.changed() => {
-                        let _ = out_tx.try_send(Err(Status::unavailable("connector is not authorized to serve")));
+                        let _ = out_tx.try_send(Err(registry.not_serving_status()));
                         break;
                     }
                     msg = in_stream.message() => {
@@ -2077,6 +2094,93 @@ mod shield_server_tls_tests {
             other => panic!("expected the stream to end with Unavailable, got {other:?}"),
         }
         assert!(!r.is_revoked(SHIELD_ID), "closing for the connector's sake revokes nothing");
+    }
+
+    /// The status a refused Control stream ends with: refused at open, or
+    /// ended before the first reply.
+    async fn control_refusal(pki: &TestPki, addr: SocketAddr) -> tonic::Status {
+        let (out, out_rx) = mpsc::channel(8);
+        match ShieldServiceClient::new(shield_channel(pki, addr).await)
+            .control(ReceiverStream::new(out_rx))
+            .await
+        {
+            Err(status) => status,
+            Ok(replies) => {
+                let mut replies = replies.into_inner();
+                let _ = out.send(health_report()).await;
+                match tokio::time::timeout(WAIT, replies.message()).await {
+                    Ok(Err(status)) => status,
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Connector-revocation Phase F (finding B, AF-3): a terminal connector
+    /// refuses shields with its own message, so they fail over instead of
+    /// waiting; non-terminal states keep the not-serving message.
+    #[tokio::test]
+    async fn terminal_connector_refuses_shields_with_the_terminal_message() {
+        use crate::authorization::{AuthzGate, ServingState};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        for (state, want) in [
+            (ServingState::Revoked, CONNECTOR_TERMINAL_MESSAGE),
+            (ServingState::UnknownIdentity, CONNECTOR_TERMINAL_MESSAGE),
+            (
+                ServingState::Starting,
+                "connector is not authorized to serve",
+            ),
+            (
+                ServingState::Disabled,
+                "connector is not authorized to serve",
+            ),
+        ] {
+            let r = unsynced_base_registry_with_gate(AuthzGate::fixed(state, None));
+            r.apply_revocations(vec![]);
+            let server = start_with(r, holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+            let status = control_refusal(&pki, server.addr).await;
+            assert_eq!(
+                status.code(),
+                tonic::Code::Unavailable,
+                "{state:?}: {status:?}"
+            );
+            assert_eq!(status.message(), want, "{state:?}");
+        }
+    }
+
+    /// AF-4: an open stream closed by the terminal transition ends with the
+    /// terminal message; a close while Disabled keeps the not-serving one.
+    #[tokio::test]
+    async fn open_stream_closed_by_a_terminal_transition_carries_the_terminal_message() {
+        use crate::authorization::{AuthzGate, ServingState};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        for (state, want) in [
+            (ServingState::Revoked, CONNECTOR_TERMINAL_MESSAGE),
+            (
+                ServingState::Disabled,
+                "connector is not authorized to serve",
+            ),
+        ] {
+            let (gate, control) = AuthzGate::controllable_for_tests();
+            let r = unsynced_base_registry_with_gate(gate);
+            r.set_shield_renewal_window(1);
+            r.apply_revocations(vec![]);
+            let server = start_with(r.clone(), holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+            let (out, mut replies) = open_control(&pki, server.addr).await;
+            health_round_trip(&out, &mut replies, false).await;
+
+            control.set(state);
+            r.close_all_streams("test");
+            match tokio::time::timeout(WAIT, replies.message()).await {
+                Ok(Err(status)) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+                    assert_eq!(status.message(), want, "{state:?}");
+                }
+                other => panic!("expected the stream to end with Unavailable, got {other:?}"),
+            }
+        }
     }
 
     /// Connector restart: revocation state is not trusted across processes —

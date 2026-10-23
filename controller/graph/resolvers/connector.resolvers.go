@@ -167,17 +167,36 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 func (r *mutationResolver) DeleteConnector(ctx context.Context, id string) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	// Connector-revocation Phase F (finding A): the delete cascades to the
+	// shields rows attached to this connector without revoking them, which
+	// would leave enrolled shields with valid, unrevoked certificates and no
+	// row. So it is refused while an enrolled, non-revoked shield is attached
+	// (pending shields have no certificate; revoked ones keep their
+	// tombstone). One statement: a revoked connector gains no shields.
 	var discardedID string
 	err := r.TenantDB.QueryRow(ctx,
 		`DELETE FROM connectors
 		  WHERE id = $1
 		    AND tenant_id = $2
 		    AND status IN ('pending', 'revoked')
+		    AND NOT EXISTS (
+		          SELECT 1 FROM shields s
+		           WHERE s.connector_id = connectors.id
+		             AND s.status IN ('active', 'disconnected'))
 		 RETURNING id`,
 		id, tc.TenantID,
 	).Scan(&discardedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			var attached int
+			if qErr := r.TenantDB.QueryRow(ctx,
+				`SELECT count(*) FROM shields
+				  WHERE connector_id = $1 AND tenant_id = $2
+				    AND status IN ('active', 'disconnected')`,
+				id, tc.TenantID,
+			).Scan(&attached); qErr == nil && attached > 0 {
+				return false, fmt.Errorf("delete connector: %d shield(s) still attached; let them fail over to another connector or revoke them first", attached)
+			}
 			return false, fmt.Errorf("delete connector: connector not found or must be revoked before deletion")
 		}
 		return false, fmt.Errorf("delete connector: %w", err)

@@ -40,6 +40,10 @@ const CONNECTOR_NOT_SERVING_MESSAGES: [&str; 2] = [
     "connector is not authorized to serve",
     "connector has not yet applied the controller's shield revocation list",
 ];
+/// The Connector's refusal in a terminal state (revoked, unknown identity):
+/// it will never serve again, so the Shield fails over instead of waiting.
+/// Must match the Connector's `CONNECTOR_TERMINAL_MESSAGE`.
+const CONNECTOR_TERMINAL_MESSAGE: &str = "connector is revoked or unknown to the controller";
 const HEALTH_INTERVAL_SECS: u64 = 15;
 /// Ignore a ReEnroll this soon after a successful renewal (Sprint 21 K2).
 /// After renewing, the Shield reconnects and its first health report may
@@ -121,6 +125,21 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 info!("control stream closed cleanly, reconnecting");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
+            Err(e) if connector_terminal(&e) => {
+                // Connector-revocation Phase F (finding B): the head refused
+                // for good. Move it to the tail so the next attempt walks to
+                // the next peer; in memory only — the failover that follows
+                // persists the new head.
+                if current_state.connectors.len() > 1 {
+                    current_state.connectors.rotate_left(1);
+                }
+                warn!(
+                    retry_secs = NOT_SERVING_RETRY_SECS,
+                    "connector is revoked or unknown; trying the next peer connector"
+                );
+                tokio::time::sleep(Duration::from_secs(NOT_SERVING_RETRY_SECS)).await;
+                backoff_secs = BACKOFF_INITIAL_SECS;
+            }
             Err(e) if connector_not_serving(&e) => {
                 // The Connector is up but not serving (e.g. Disabled while
                 // the Controller is unreachable). Poll it at a short fixed
@@ -152,6 +171,15 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
 /// True when `err` carries the Connector's "not serving" refusal (see
 /// `CONNECTOR_NOT_SERVING_MESSAGES`), whether the stream was refused at open
 /// or ended by the Connector mid-stream.
+fn connector_terminal(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            status.code() == tonic::Code::Unavailable
+                && status.message() == CONNECTOR_TERMINAL_MESSAGE
+        })
+    })
+}
+
 fn connector_not_serving(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
@@ -817,6 +845,7 @@ mod tests {
     struct OutcomeSession {
         script: std::collections::VecDeque<Result<()>>,
         starts: Arc<std::sync::Mutex<Vec<u64>>>,
+        heads: Arc<std::sync::Mutex<Vec<String>>>,
         t0: tokio::time::Instant,
         done: Option<tokio::sync::oneshot::Sender<()>>,
     }
@@ -824,10 +853,14 @@ mod tests {
     impl ControlSession for OutcomeSession {
         async fn run(
             &mut self,
-            _state: &mut ShieldState,
+            state: &mut ShieldState,
             _debounce: &mut RenewalDebounce,
         ) -> Result<()> {
             self.starts.lock().unwrap().push(self.t0.elapsed().as_secs());
+            self.heads
+                .lock()
+                .unwrap()
+                .push(state.connectors[0].connector_id.clone());
             match self.script.pop_front() {
                 Some(outcome) => outcome,
                 None => {
@@ -841,19 +874,65 @@ mod tests {
     }
 
     async fn attempt_times(script: Vec<Result<()>>) -> Vec<u64> {
+        attempts(test_state(), script).await.0
+    }
+
+    /// (start time, head connector) of every connection attempt.
+    async fn attempts(state: ShieldState, script: Vec<Result<()>>) -> (Vec<u64>, Vec<String>) {
         let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let session = OutcomeSession {
             script: script.into(),
             starts: starts.clone(),
+            heads: heads.clone(),
             t0: tokio::time::Instant::now(),
             done: Some(done_tx),
         };
-        let task = tokio::spawn(reconnect_loop(test_state(), session));
+        let task = tokio::spawn(reconnect_loop(state, session));
         done_rx.await.expect("script finished");
         task.abort();
         let times = starts.lock().unwrap().clone();
-        times
+        let heads = heads.lock().unwrap().clone();
+        (times, heads)
+    }
+
+    fn terminal_refusal() -> anyhow::Error {
+        anyhow::Error::new(tonic::Status::unavailable(CONNECTOR_TERMINAL_MESSAGE))
+            .context("failed to open Shield Control stream")
+    }
+
+    fn two_peer_state() -> ShieldState {
+        let mut state = test_state();
+        state.connectors.push(ConnectorRef {
+            connector_id: "conn-2".into(),
+            connector_addr: "127.0.0.1:2".into(),
+        });
+        state
+    }
+
+    /// Connector-revocation Phase F (finding B, AF-5): a revoked connector's
+    /// refusal moves it to the tail, so the next attempt (after the short
+    /// retry) starts at the next peer; "not serving yet" keeps the head.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_refusal_fails_over_but_not_serving_waits() {
+        let (times, heads) = attempts(two_peer_state(), vec![Err(terminal_refusal())]).await;
+        assert_eq!(times, vec![0, 2]);
+        assert_eq!(heads, vec!["conn-1", "conn-2"]);
+
+        let (_, heads) = attempts(two_peer_state(), vec![Err(not_serving_at_open())]).await;
+        assert_eq!(
+            heads,
+            vec!["conn-1", "conn-1"],
+            "not serving yet: keep waiting for it"
+        );
+
+        let (times, heads) = attempts(test_state(), vec![Err(terminal_refusal())]).await;
+        assert_eq!(
+            (times, heads),
+            (vec![0, 2], vec!["conn-1".into(), "conn-1".into()]),
+            "single connector: retry"
+        );
     }
 
     /// B2 live finding 1: a Connector that is Disabled (Controller outage)

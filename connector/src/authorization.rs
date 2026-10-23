@@ -173,6 +173,37 @@ impl AuthzGate {
     pub fn closed_for_tests() -> Self {
         Self::fixed(ServingState::Starting, None)
     }
+    /// A Serving gate whose state a test can change.
+    #[cfg(test)]
+    pub fn controllable_for_tests() -> (Self, TestGateControl) {
+        let (tx, rx) = watch::channel(AuthzSnapshot {
+            state: ServingState::Serving,
+            deadline: Some(Instant::now() + Duration::from_secs(365 * 24 * 3600)),
+            closures: 0,
+        });
+        (Self { rx }, TestGateControl(tx))
+    }
+}
+
+/// Test handle for `AuthzGate::controllable_for_tests`.
+#[cfg(test)]
+pub struct TestGateControl(watch::Sender<AuthzSnapshot>);
+
+#[cfg(test)]
+impl TestGateControl {
+    /// Publish `state`; leaving Serving clears D and counts a closure.
+    pub fn set(&self, state: ServingState) {
+        self.0.send_modify(|s| {
+            s.state = state;
+            if !matches!(
+                state,
+                ServingState::Serving | ServingState::ServingDisconnected
+            ) {
+                s.deadline = None;
+                s.closures += 1;
+            }
+        });
+    }
 }
 
 /// Why an `AuthorizationAck` was not accepted (§4.4).
