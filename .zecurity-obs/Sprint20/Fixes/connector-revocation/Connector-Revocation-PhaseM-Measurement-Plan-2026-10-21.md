@@ -3,7 +3,7 @@ title: Connector Revocation — Phase M measurement plan
 date: 2026-10-21
 type: measurement plan (design §6.6)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (rev 4)
-status: PLAN — instrumentation being built; live run needs the user's lab hosts
+status: DONE — measurements recorded in Connector-Revocation-PhaseM-Results-2026-10-21.md (R4 WAN optional, not run)
 ---
 
 # Phase M — timing measurements for B2

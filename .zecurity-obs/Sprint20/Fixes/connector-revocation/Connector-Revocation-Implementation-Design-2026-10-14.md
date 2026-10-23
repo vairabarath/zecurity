@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 5, 2026-10-21) — Phase A done; Phase B1 IMPLEMENTED 2026-10-21 (`da5b12f`, unit-tested intermediate, not for live deployment before B2); Phase M done; Phase B2 DONE 2026-10-21 (unit + live L-1…L-8 PASS); other phases NOT AUTHORIZED
+status: IMPLEMENTED (revision 5, 2026-10-21; implementation complete 2026-10-23) — phases A, B1, M, B2, C, D, E and F (fixes + migration 041) done, each unit + mutation + live tested; end-to-end live run PASS 2026-10-23 (Connector-Revocation-E2E-Live-2026-10-23.md). Still open: O10 (recovery after revocation), PENDING-18 (session migration), same-key connector renewal.
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -235,7 +235,7 @@ On acceptance: `D = sent[k] + H` (monotonic; it can only increase because k > hi
 | Unsupported protocol (no capability, no ack) | no ack ever arrives | stays closed; never serves (§4.6) |
 | Make-before-break renewal | no error; acks continue on either stream (§5.4) | continuity preserved |
 
-**Required error-handling corrections for Phase A (documented, not implemented):**
+**Required error-handling corrections for Phase A** (implemented in Phase A, 2026-10-15: `classifyRefusal` in `controller/internal/connector/control_stream.go`; tests T2/T3/T20/T21/T22 in `authorization_test.go`):
 1. `Control:436-437`: split the `Scan` result three ways. `pgx.ErrNoRows` → `NotFound` + `unknown`. A row with revoked state → `PermissionDenied` + `revoked` (`:439-441` today, marker added). **Any other error → `Unavailable`, no marker.** A DB failure must never become `NotFound` or carry a terminal marker.
 2. `handleConnectorHealth` `ErrNoRows` (`:779`) and the `Control` close path (`:566-568`): the guarded UPDATE can't tell deleted from revoked, so run an authoritative follow-up SELECT and map it to class A, B or C. If the follow-up fails → `Unavailable`, no marker.
 3. `activateStream` `ErrNoRows` (`:621-622`): same follow-up classification; today it returns `PermissionDenied "connector is revoked"` even for a deleted row. Other DB errors (`:624-625`) need no marker; serving is impossible without an ack anyway (§4.3 rule 2).
@@ -676,9 +676,9 @@ Release requirement (not a decision): the new development stack's protocol behav
 | Exact deadline and scheduling semantics | ACCEPTED (D1, O1, D14 = O7, D16 = O6) |
 | Terminal vs recoverable states | ACCEPTED (D4, D11 = O3, D12 = O9) |
 | Complete fail-closed definition | ACCEPTED (D5, §7, D15 = O8) |
-| Enforcement ownership: client, relay, shield | directions ACCEPTED (D6); O11–O13 OPEN |
+| Enforcement ownership: client, relay, shield | ACCEPTED (D6; O11–O13 = D19–D21); implemented in phases C, D, E |
 | Rollout sequence | ACCEPTED (D8, §15) |
-| Schema changes needing approval | O14 BLOCKED ON SCHEMA APPROVAL; none authorized |
+| Schema changes needing approval | O14 DONE: history/CRL by `52c16fa` (039); tombstone + no reuse by migration 041 (approved by the user 2026-10-23) |
 | Recovery after permanent revocation | O10 OPEN |
 
 Each phase needs its own explicit go-ahead with a pre-written acceptance list:

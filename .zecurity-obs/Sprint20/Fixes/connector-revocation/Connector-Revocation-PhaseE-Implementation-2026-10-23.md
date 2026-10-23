@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, D6, D21)
 acceptance: Connector-Revocation-PhaseE-Acceptance-2026-10-23.md
 branch: feat/sprint20-m1-phase2
 commits: c9d9cda (implementation + tests)
-status: DONE — unit + 11/11 mutants + live AE-L PASS. Committed locally, NOT pushed.
+status: DONE — unit + 11/11 mutants + live AE-L PASS. Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 ---
 
 # Phase E — the shield prunes revoked connectors from its peer list

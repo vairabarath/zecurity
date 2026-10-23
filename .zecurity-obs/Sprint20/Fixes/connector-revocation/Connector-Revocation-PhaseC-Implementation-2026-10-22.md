@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (§8, D19)
 acceptance: Connector-Revocation-PhaseC-Acceptance-2026-10-22.md
 branch: feat/sprint20-m1-phase2
 commits: af30176 (implementation + tests), 5c55bc9 (security-review fixes)
-status: DONE — unit + mutation + live AC-L PASS. Committed locally, NOT pushed.
+status: DONE — unit + mutation + live AC-L PASS. Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 ---
 
 # Phase C — the client refuses and cuts revoked connectors

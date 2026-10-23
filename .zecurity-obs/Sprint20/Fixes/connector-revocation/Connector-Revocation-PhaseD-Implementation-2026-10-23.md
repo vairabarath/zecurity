@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (§9, D6, D20)
 acceptance: Connector-Revocation-PhaseD-Acceptance-2026-10-22.md
 branch: feat/sprint20-m1-phase2
 commits: c27d733 (implementation + tests), 1005c12 + 8e09c18 (tests added for the mutation run)
-status: DONE — unit + 14/14 mutants + live AD-L PASS. Committed locally, NOT pushed.
+status: DONE — unit + 14/14 mutants + live AD-L PASS. Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 ---
 
 # Phase D — the relay refuses and drops revoked connectors

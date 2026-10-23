@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§12, O14)
 branch: feat/sprint20-m1-phase2
 commits: 3995af6 (041 + tests) [schema: reset DB], b2ad199 (tests tightened after the mutation run)
-status: DONE — DB tests + 8/8 mutants + live on the lab DB. Committed locally, NOT pushed.
+status: DONE — DB tests + 8/8 mutants + live on the lab DB. Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 approval: user "ok now do the update in schema" (2026-10-23); live check option 2, "apply only 041 to the lab DB by hand" (user choice)
 ---
 

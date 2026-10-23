@@ -2990,3 +2990,11 @@ serves on `127.0.0.1:9102`.
 - **Earlier runs:** run 1 was invalid (client tunnel down, fixed with `zecurity-client up` and left up); run 2 had a topology loop (peer on the client's host).
 - **Open:** one shield failover took 12.9 s (connect to .49:9091 stalled ~11 s, unexplained); isolated single refusals around client ACL hot-applies.
 - Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23.md`. Not pushed.
+
+## 2026-10-23 — Connector revocation records brought up to date; PR to fixed-pendings
+
+- **Design doc:** status set to IMPLEMENTED. Phase A error-handling corrections marked implemented (`classifyRefusal`, tests T2/T3/T20–T22). O11–O13 shown as accepted (D19–D21) and implemented. O14 done (039 + 041). Still open: O10, PENDING-18, same-key connector renewal.
+- **Superseded statuses:** Phase A and B1 intermediates, Phase M plan, two pre-design evidence docs.
+- **Sprint 20:** `path.md` Finding 34 marked closed (end-to-end live PASS); the Phase V run sheet follow-up row updated.
+- **Fix09 and phase records:** "not pushed" statuses replaced by the 2026-10-23 push.
+- **PR:** opened from `feat/sprint20-m1-phase2` to `fixed-pendings`.

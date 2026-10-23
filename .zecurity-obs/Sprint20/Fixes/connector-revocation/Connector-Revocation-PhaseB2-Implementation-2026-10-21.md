@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (revision 5; D1
 acceptance: Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md (signed off 2026-10-21)
 branch: feat/sprint20-m1-phase2
 commits: 63e9e90 (implementation + tests), 4f00448 (dropped-stream deadline test, since_send_us)
-status: DONE — unit level + live acceptance L-1…L-8 PASS (2026-10-21; L-1 shortened to 15 min / 3 renewals by user decision). Committed locally, NOT pushed.
+status: DONE — unit level + live acceptance L-1…L-8 PASS (2026-10-21; L-1 shortened to 15 min / 3 renewals by user decision). Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 ---
 
 # Phase B2 — request schedule and full fail-closed

@@ -2,7 +2,7 @@
 title: Connector Revocation — Remaining Live Tests (R1–R4)
 date: 2026-10-13
 type: live-verification-evidence
-status: evidence-recorded-awaiting-review
+status: historical evidence (pre-design) — reviewed; superseded by the implementation records (phases A–F) and the end-to-end live run 2026-10-23
 branch: feat/sprint20-m1-phase2
 baseline: 9844a00
 previous_record: Connector-Revocation-Live-Verification-2026-10-12.md (historical, unchanged)

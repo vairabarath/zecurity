@@ -3,7 +3,7 @@ type: fix
 sprint: 20
 fix: 9
 title: Client serves only one hot-added resource IP (smoltcp address limit); shared-port resources misrouted
-status: fixed and verified live (2026-10-22). Committed locally, not pushed.
+status: fixed and verified live (2026-10-22). Pushed 2026-10-23 on `feat/sprint20-m1-phase2` (PR to `fixed-pendings` pending).
 source: Phase B2 live run 2026-10-21, finding 5 ("client hot-apply admits one new resource IP"); Phase M results (Lab finding)
 supersedes: Phase 5-C rule H1 (capacity admission, approved 2026-10-08), which is now moot
 severity: medium (a resource IP outside the tunnel goes straight over the LAN, bypassing Zecurity)

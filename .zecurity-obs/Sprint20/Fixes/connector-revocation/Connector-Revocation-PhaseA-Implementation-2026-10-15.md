@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (revision 3)
 branch: feat/sprint20-m1-phase2
 base: 12e43ac (uncommitted working tree; nothing committed)
-status: PHASE A IMPLEMENTED (protocol + controller + connector plumbing) — DEVELOPMENT INTERMEDIATE, NOT FAIL-CLOSED, NOT FOR LIVE SECURITY ACCEPTANCE
+status: PHASE A IMPLEMENTED (protocol + controller + connector plumbing) — the intermediate is superseded: B1/B2 made the connector fail-closed (2026-10-21) and phases C–F added client/relay/shield enforcement (end-to-end live PASS 2026-10-23).
 ---
 
 # Phase A — Controller ↔ Connector Authorization Protocol

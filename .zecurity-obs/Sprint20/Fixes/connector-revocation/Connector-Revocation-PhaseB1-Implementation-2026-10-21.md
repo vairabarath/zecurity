@@ -7,7 +7,7 @@ acceptance: Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md (signed off 20
 branch: feat/sprint20-m1-phase2
 base: 6a6b52a
 commit: da5b12f (implementation + tests)
-status: PHASE B1 IMPLEMENTED — UNIT-TESTED DEVELOPMENT INTERMEDIATE. DO NOT DEPLOY TO THE LIVE LAB BEFORE B2.
+status: PHASE B1 IMPLEMENTED — was a unit-tested intermediate; superseded by B2 (2026-10-21, live L-1…L-8 PASS), which made it deployable. See the B2 record.
 ---
 
 # Phase B1 — Connector serving states and data-plane admission gate

@@ -7,7 +7,7 @@ findings: Connector-Revocation-PhaseF-Shield-Cascade-Check-2026-10-23.md (A, B)
 acceptance: Connector-Revocation-PhaseF-Fixes-Acceptance-2026-10-23.md
 branch: feat/sprint20-m1-phase2
 commits: faa957f (implementation + tests), 4994638 (both sides pin the terminal text)
-status: DONE — unit + 12/12 mutants + live AF-L PASS. Committed locally, NOT pushed.
+status: DONE — unit + 12/12 mutants + live AF-L PASS. Pushed 2026-10-23 on `feat/sprint20-m1-phase2`.
 ---
 
 # Phase F fixes
