@@ -73,6 +73,9 @@ func TestConnectorRevocations_RevokedAtAloneCounts(t *testing.T) {
 	f := newCertHistoryFixture(t)
 	id := f.connector(t, "revoked-at-only", []string{"f3f3f3f3"}, valid)
 	f.exec(t, `UPDATE connectors SET revoked_at = NOW() WHERE id = $1`, id)
+	if n := f.count(t, `connector_revocations WHERE connector_id = $1`, id); n != "1" {
+		t.Fatalf("revoked_at alone: tombstones = %s, want 1", n)
+	}
 	f.exec(t, `UPDATE connectors SET status = 'revoked' WHERE id = $1`, id)
 	if n := f.count(t, `connector_revocations WHERE connector_id = $1`, id); n != "1" {
 		t.Fatalf("tombstones = %s, want 1", n)
@@ -157,7 +160,10 @@ func TestConnectorRevocations_Backfill(t *testing.T) {
 	revokedRow := mk("revoked-row", "revoked")
 	revokedDeleted := mk("revoked-deleted", "revoked")
 	active := mk("active", "active")
-	if _, err := pool.Exec(ctx, `DELETE FROM connectors WHERE id = $1`, revokedDeleted); err != nil {
+	// Deleted without being revoked (raw delete): its certificate is in the
+	// history but not revoked, so it is not a revoked identity.
+	deletedNotRevoked := mk("deleted-not-revoked", "active")
+	if _, err := pool.Exec(ctx, `DELETE FROM connectors WHERE id IN ($1, $2)`, revokedDeleted, deletedNotRevoked); err != nil {
 		t.Fatal(err)
 	}
 
@@ -167,7 +173,7 @@ func TestConnectorRevocations_Backfill(t *testing.T) {
 	want := []string{revokedRow, revokedDeleted}
 	sort.Strings(want)
 	if got != strings.Join(want, ",") {
-		t.Fatalf("backfilled tombstones = %q, want %q (active %s must be absent)", got, strings.Join(want, ","), active)
+		t.Fatalf("backfilled tombstones = %q, want %q (%s and %s must be absent)", got, strings.Join(want, ","), active, deletedNotRevoked)
 	}
 	if n := q(`SELECT count(*)::text FROM connector_revocations WHERE tenant_id = $1`, ws); n != "2" {
 		t.Fatalf("tombstones in the workspace = %s, want 2", n)
