@@ -897,6 +897,16 @@ mod tests {
         (times, heads)
     }
 
+    /// Matched by text against the Connector
+    /// (`connector/src/agent_server.rs`); both sides pin the same literal.
+    #[test]
+    fn terminal_message_matches_the_connector() {
+        assert_eq!(
+            CONNECTOR_TERMINAL_MESSAGE,
+            "connector is revoked or unknown to the controller"
+        );
+    }
+
     fn terminal_refusal() -> anyhow::Error {
         anyhow::Error::new(tonic::Status::unavailable(CONNECTOR_TERMINAL_MESSAGE))
             .context("failed to open Shield Control stream")

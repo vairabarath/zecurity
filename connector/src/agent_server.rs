@@ -2149,6 +2149,16 @@ mod shield_server_tls_tests {
         }
     }
 
+    /// The terminal message is matched by text in the Shield
+    /// (`shield/src/control_stream.rs`); both sides pin the same literal.
+    #[test]
+    fn terminal_message_matches_the_shield() {
+        assert_eq!(
+            CONNECTOR_TERMINAL_MESSAGE,
+            "connector is revoked or unknown to the controller"
+        );
+    }
+
     /// AF-4: an open stream closed by the terminal transition ends with the
     /// terminal message; a close while Disabled keeps the not-serving one.
     #[tokio::test]
