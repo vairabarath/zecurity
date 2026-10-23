@@ -51,6 +51,29 @@ No Go code changed. Phases C and D keep using the certificate history, which is 
   - re-inserting that id → `ERROR: connector identity 0b69e532-… was revoked and cannot be reused`.
 - No controller errors after the apply. `pf-c4` stopped.
 
+## Real-time run with a new and an old connector (2026-10-23)
+
+**Question answered:** the first live check (`pf-c4`) used a **new** connector (HEAD build); old connectors were covered only by the backfill. This run used both builds side by side.
+
+- `rt-new` (`ea36e671-…`): HEAD connector `e174ee78`, on this PC.
+- `rt-old` (`b68b7033-…`): the **old Phase A build** `aac7cbea`, which isn't fail-closed, on udaya.
+- A watcher polled the DB every 0.5 s and logged changes.
+
+| Time (UTC) | Watcher / event |
+|---|---|
+| 09:51:52.448 | `rt-new row=active tombstone=0 \| rt-old row=active tombstone=0` |
+| 09:51:57.296 | both revoked at the same moment |
+| 09:51:57.516 | `rt-new row=revoked tombstone=1 \| rt-old row=revoked tombstone=1` (first tick, within 0.22 s; **identical for both builds**) |
+| 09:51:57.30 | `rt-new`: `fail-closed: terminal — sessions cancelled, shield streams closed, ACL cleared` |
+| 09:52:02.5 | the relay refused both re-registrations with `connector is revoked` (the Phase D Register refusal, seen live for the first time) |
+| 09:52:03.33 | `rt-old`: logs `connector is REVOKED (authoritative marker; terminal)` but keeps running and retrying (not fail-closed) |
+| 09:52:25.551 | both deleted (`deleteConnector` → true) |
+| 09:52:25.902 | `rt-new row=(deleted) tombstone=1 \| rt-old row=(deleted) tombstone=1` |
+| after | re-inserting either id → `connector identity … was revoked and cannot be reused` |
+| 09:52:27.38 | `rt-old` (row gone): `connector identity is UNKNOWN (authoritative marker)`, still running; then stopped by us |
+
+**Observation:** after the delete, the controller answers the old connector with the `unknown` marker, not `revoked`. Authorization isn't classified from the tombstone; that would be a separate controller code change. Both markers are terminal, and the client, relay and CRL keep refusing through the certificate history.
+
 **Teammates:** pull and recreate the local DB (`cd controller && docker compose down -v && docker compose up -d`), per the `[schema: reset DB]` rule.
 
 Nothing is pushed (user rule).

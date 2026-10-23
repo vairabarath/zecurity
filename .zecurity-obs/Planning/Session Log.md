@@ -2971,3 +2971,8 @@ serves on `127.0.0.1:9102`.
   - `pf-c4`: revoke → tombstone the same second; delete → tombstone kept; re-insert refused;
   - no controller errors.
 - **Teammates:** recreate the local DB after pulling. Committed locally, not pushed.
+- **041 real-time run** (same day): `rt-new` (HEAD) and `rt-old` (old Phase A build) revoked together.
+  - Both tombstoned within 0.22 s (DB watcher), identically.
+  - Both deleted → tombstones kept; reuse of both ids refused.
+  - The relay refused re-registration with "connector is revoked" (Phase D, first live sighting).
+  - Deleted connectors get the `unknown` marker, not `revoked` (unchanged controller behaviour; noted).
