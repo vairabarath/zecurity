@@ -469,7 +469,7 @@ Mixed versions aren't supported (D8): the client and controller ship together. A
 
 ## 9. Relay enforcement (D6 ACCEPTED direction; details RECOMMENDED, AWAITING APPROVAL)
 
-**Runtime status: UNVERIFIED LIVE** (blocked 10-12 and 10-13). No runtime claim is made.
+**Runtime status: IMPLEMENTED AND VERIFIED LIVE (Phase D, 2026-10-23)**: a revocation-ignoring connector's registration was dropped 25.9 s after revocation. The periodic CRL re-check bullet below was not implemented; the heartbeat answer covers established sessions. See `Connector-Revocation-PhaseD-Implementation-2026-10-23.md`.
 
 - **Identity channel:** the existing unary heartbeat.
   - Request field 8: `registered_connector_spiffe_ids`.
@@ -477,7 +477,7 @@ Mixed versions aren't supported (D8): the client and controller ship together. A
 - **New connections:** refuse `Register` for a listed identity (after the authenticated binding, `session.rs:123-128`); keep the CRL check at accept.
 - **Established sessions:** `ConnectorEntry.connection.close()` + `remove_connector`. Bridged client streams are `open_bi` on that connection, so they end too (INFERRED).
 - **CRL path:** a periodic re-check of registered connectors' serials, following the existing 1 s relay-revocation monitors (`client/src/relay_pool.rs:253`, `connector/src/relay_client.rs:466`).
-- **Stale information:** **OPEN (O12)**; no new timeout invented.
+- **Stale information:** **ACCEPTED (D20)**: sticky set, keep serving, no new timeout.
 - **Unrelated connectors:** untouched (per-entry close).
 
 ## 10. Shield enforcement (D6 ACCEPTED direction; details RECOMMENDED, AWAITING APPROVAL)

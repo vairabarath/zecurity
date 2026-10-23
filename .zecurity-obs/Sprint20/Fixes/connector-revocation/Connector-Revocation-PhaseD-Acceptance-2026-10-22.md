@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase D acceptance list (relay enforcement)
 date: 2026-10-22
 type: acceptance list (design §9, §17)
-status: AUTHORIZED 2026-10-22 — user: "implement and check it and if it working correctly then move on" (C → D → E)
+status: DONE 2026-10-23 — unit + 12/12 mutants + live AD-L PASS (record: Connector-Revocation-PhaseD-Implementation-2026-10-23.md)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (D6, D20)
 ---
 
