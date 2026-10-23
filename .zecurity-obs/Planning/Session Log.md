@@ -3010,3 +3010,10 @@ serves on `127.0.0.1:9102`.
   - D: the shield's shutdown goodbye uses the startup peer list.
 - The 12.9 s shield failover was not reproduced (2.35 s).
 - Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 (end of day) — findings filed; handoff for 2026-10-24
+
+- **Filed in `Sprint20/path.md` → Post-Sprint Fixes:**
+  - F37 (client resets concurrent connections, High), F38–F41 (Low), F42 (unexplained 12.9 s failover, watch), F43 (5-B leftovers);
+  - F7 updated (reproduced again, still open), F19 marked fixed (delete guard), F34 marked closed.
+- **Handoff:** `Sprint20/Handoff-Connector-Revocation-Next-2026-10-24.md` (lab state, PR #133, order: F7 → F37 → low items → Phase V remainder).

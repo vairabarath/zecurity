@@ -62,6 +62,8 @@ The source address in the web server log shows which connector carried each requ
 
 ## Observations / not covered
 
+> Filed in `Sprint20/path.md` → Post-Sprint Fixes (2026-10-23): isolated refusals → **F37** (explained by the systemd run); 12.9 s shield failover → **F42**.
+
 - **Probe limitation:** the test web server speaks HTTP/1.0 and closes each connection, so the "held" probe reconnected on every request. Cutting a truly long-lived flow was not re-shown here; Phase C's live run (AC-L) showed it.
 - **Isolated single connection refusals** appear around client ACL hot-applies, also when nothing is revoked (10:09:12, 10:09:30, 10:14:40). They are not caused by revocation; not investigated.
 - **The client tunnel was found down** although `status` said "Running". It was brought up for this test and **left up**: `zecurity-client down` restores the previous state.

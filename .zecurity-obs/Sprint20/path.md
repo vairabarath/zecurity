@@ -359,15 +359,15 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - Details: [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]].
 - **Live acceptance findings (2026-09-26/28), filed 2026-10-17.** Full text: [[Sprint20/Live-Acceptance-Run-Sheet]] → Findings 1–36. Medium and higher, with tracking doc and current status:
   - **F33 — High (security): a revoked shield still carried traffic.** **Fixed in code:** bug 3, PR #123 (`86a436d`, `b2b00b5`). Live end-to-end acceptance still pending. `docs/certificate-audit-2026-10-15.md`. Phase B → Post-Phase Fixes.
-  - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **Open.** Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes. *Update 2026-10-23:* the connector is fail-closed since B2 (live L-1…L-8 PASS 2026-10-21), and phases C/D/E make the client, relay and shield refuse a revoked connector that ignores its revocation (see the connector-revocation entry above). Phase F (fixes + migration 041) done 2026-10-23; end-to-end live run PASS. **Closed.**
+  - **F34 — High (security): a revoked connector keeps serving tunnels until its process restarts.** **CLOSED 2026-10-23** (was open on 2026-10-17). Connector revocation is at Phase A only (`4cb5a6a`), not fail-closed; Phase B1 not started. [[Sprint20/Handoff-Connector-Revocation-PhaseA-2026-10-15]]. Phase B → Post-Phase Fixes. *Update 2026-10-23:* the connector is fail-closed since B2 (live L-1…L-8 PASS 2026-10-21), and phases C/D/E make the client, relay and shield refuse a revoked connector that ignores its revocation (see the connector-revocation entry above). Phase F (fixes + migration 041) done 2026-10-23; end-to-end live run PASS. **Closed.**
   - **F28 — High: the client never passes the server's TCP close (FIN) to the app**, so browsers reuse dead connections. Tracked as Fix 05 Phase 5-A (`Fixes/fix 5/`, [[Sprint20/Handoff-Fix05-5A-2026-10-06]]).
   - **F15 — High (AT-G.6 FAIL): the client restarts the tunnel on every transport snapshot change**, dropping long-lived connections. Fix01 (`status: partial`); live long hold PASS on later code 2026-10-10 ([[Sprint20/Fixes/fix 1/U5-Connector-Route-Long-Hold-Live-Acceptance-2026-10-10]]).
   - **F35 — Medium (R2 FAIL): 4 `graph/resolvers` ACL-coherence tests fail, hidden from CI** (they skip without `RESOURCE_TEST_SHIELD_ID`). **Still failing on `fixed-pendings` 2026-10-17** (run with a seeded shield). 3 are real double or extra `NotifyPolicyChange` calls (over-invalidation only); `TestProtectResource_DoesNotInvalidate` is outdated since migration 021. [[Sprint20/Fixes/Fix02-Resource-ACL-Double-Notify]] (`status: planned`).
   - **F36 — Medium (R2): the auth integration test always skipped** (`/15` in the Valkey URL). **Fixed** in `411e216` (Sprint 21 K6); passes on `fixed-pendings` 2026-10-17. [[Sprint20/Fixes/Fix03-Auth-Integration-Test-Skip-Valkey-URL]] (doc still says `planned`).
   - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. (Selector half **fixed**: Fix 07, 2026-10-22.) U2 passed only under a TEMP patch. No fix recorded. Phase A → Post-Phase Fixes.
-  - **F7 / F18 / F23 / F31 — High (test validity): install scripts enable update timers that replace branch binaries**, ignoring `AUTO_UPDATE_ENABLED=false`; the units can't be masked. No fix recorded.
+  - **F7 / F18 / F23 / F31 — High (test validity): install scripts enable update timers that replace branch binaries**, ignoring `AUTO_UPDATE_ENABLED=false`; the units can't be masked. No fix recorded. **Reproduced again 2026-10-23 on current code** with the product installers: sd-a replaced by release `983a4ac2` 5 s after install, sd-shield by release v1.0.11 (`0131b3a8`) 4 s after start, so a revocation-capable build was silently replaced by a release without it. Lab workaround `sd-pin.sh`; see [[Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23]] Finding A. **Still open; fix first.**
   - **F19 / F20 / F24 / F25 — Medium (admin):**
-    - deleting a connector silently deletes its shield;
+    - deleting a connector silently deletes its shield; **fixed 2026-10-23** (`faa957f`): `deleteConnector` is refused while an enrolled, non-revoked shield is attached (live AF-L and systemd run);
     - one orphaned protected resource blocks the whole ACL push;
     - a resource's host can't be edited;
     - deleting a resource silently deletes its access rules.
@@ -375,4 +375,25 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
     No fix recorded.
   - **F30 — Medium (runbook): `kill -9` doesn't exercise the disconnect watcher**; use `kill -STOP`. Runbook not yet updated. Phase D → Post-Phase Fixes.
   - **F32 — Low: a revoked relay retries its heartbeat every 5 s forever.** No fix recorded. Phase F → Post-Phase Fixes.
+- **Connector-revocation live findings (2026-10-23)**, from the end-to-end run ([[Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23]]) and the systemd / root-shield run ([[Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23]]). Revocation itself PASSED on every layer; these are separate issues found along the way. All **open** unless noted.
+  - **F37 — High (client data plane): the client resets concurrent new connections to the same resource.**
+    - Cause: one smoltcp listening socket per `(ip, port)` (`client/src/net_stack.rs` `new_listen_socket`), re-armed only on a later tick. SYNs arriving before that get RST and never reach the flow table.
+    - Evidence: same resource, same minute, **24/24 sequential OK vs 5/24 OK in parallel bursts of 8**; the refused attempts have no `new TCP connection` line.
+    - Impact: browsers open ~6 parallel connections per host. It also explains the "isolated single refusals" seen at probe start and around ACL hot-apply.
+    - Suggested fix: keep a small pool (backlog) of listening sockets per key, topped up every poll.
+  - **F38 — Low: a revoked (terminal) connector keeps retrying relay registration** with backoff (10 s, 20 s, …); the relay refuses each attempt. The control loop stops as designed, but the relay selector doesn't. Fix: stop the relay selector on entering a terminal state. (Similar to F32 for relays.)
+  - **F39 — Low: the shield's shutdown goodbye uses the connector list loaded at startup** (`shield/src/main.rs:211`), so after a revocation/failover it contacts the pruned or stale head first. Non-fatal. Fix: give the shutdown path the live state.
+  - **F40 — Low: a deleted revoked connector is told `UNKNOWN`, not `revoked`.** The controller doesn't consult the 041 tombstone. Both are terminal, and the client/relay/CRL still refuse it. Fix: classify a tombstoned id as revoked.
+  - **F41 — Low (noise): shields log `ignored empty PeerConnectorList` every 15 s** while any revoked connector's certificate is valid, if the shield's network has no resources (connectors now send lists holding only revoked ids, by design). Fix: log at debug when the list carried revoked ids.
+  - **F42 — Observation (unexplained): one shield failover took 12.9 s** (the connect to manojinkyank .49:9091 stalled ~11 s, nothing logged on either side). Not reproduced: the same failover to .49 took 2.35 s in the systemd run, and the restart re-attach 0.34 s. Watch for it.
+  - **F43 — Low (client, from Fix 05-B's record, never tracked here):**
+    - cooldown expiry re-dials a dead or frozen connector (2 × 2 s), and the backoff then delays reuse of a recovered one (5-B "Finding 3");
+    - the `relay_pool.rs` close-on-age finding is unfixed.
+
+    See [[Sprint20/Fixes/fix 5/Fix05-Stale-QUIC-Pool-Live-Acceptance-2026-10-06]] §15.
+  - **Deployment notes (not defects):**
+    - the Phase F shield-failover fix needs both the new connector and the new shield;
+    - a connector must not run on a host whose client captures that connector's resources (the capture loops its own traffic);
+    - test web servers for held-flow checks must use `--protocol HTTP/1.1`.
+  - **Open design decisions (connector revocation):** O10 (recovery after revocation; today only a new identity), PENDING-18 (sessions are cut, not migrated), same-key connector renewal.
 - **Regression gate on current code (2026-10-17, `1c164c7`):** `go build`, `go vet` OK; `go test ./...` 1161 PASS, 0 FAIL, **32 SKIP**. 30 of the skips need `RESOURCE_TEST_SHIELD_ID`, and with it set, 4 tests fail (F35). CI looks green only because they skip.

@@ -69,6 +69,8 @@ status: PASS for revocation on installed services; 4 findings (1 pre-existing re
 
 ## Findings
 
+> Filed in `Sprint20/path.md` → Post-Sprint Fixes: **A = F7** (updated, still open), **B = F37**, **C = F38**, **D = F39**; also F40–F43.
+
 | # | Finding | Evidence | Severity | Status |
 |---|---|---|---|---|
 | **A** | **Installing silently replaces the local build with an older GitHub release.** The installers enable `zecurity-{connector,shield}-update.timer`; it is `Persistent=true`, so it fires immediately. `--check-update` then ignores `AUTO_UPDATE_ENABLED=false` (written by the installer) and replaces the binary | sd-a replaced by release `983a4ac2` at 16:39:16 local, 5 s after start; shield replaced by release v1.0.11 (`0131b3a8`) at 16:40:30, 4 s after start. The updater also spawned a detached "restart + health-check" process | **High**: a revocation-capable build is replaced by a release without the revocation work; any local or test install is silently changed | **Pre-existing = Sprint 20 Finding 7, still unfixed.** Lab workaround: `sd-pin.sh` (disable timer + service, reinstall, restart). Fix: installers must not enable the timer when auto-update is off, `--check-update` must honour the setting, and the unit's `Environment=AUTO_UPDATE_ENABLED=true` override should go |
