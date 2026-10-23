@@ -2942,3 +2942,17 @@ serves on `127.0.0.1:9102`.
 - **Live AE-L:** new `pe-net` with `pe-honest` + `pe-shield` (HEAD builds, user-level on this PC) and the Phase A `pe-hostile` on udaya. Revoked 04:52:59.466; the honest connector's ACL arrived 8 ms later; the shield pruned at 04:53:08.364 (8.9 s); `state.json` = [pe-honest]. In this topology the existing full-list replacement would also have removed it; the Phase E-only cases are unit/mutation-tested. The D21 hostile-only-attachment limit is documented.
 - **Lab hygiene:** a `cargo fmt` run touched unrelated connector/shield files; that churn was reverted before the commit. Test processes stopped; `pe-*` rows remain in the DB.
 - Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseE-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F: check + fixes (A option a, B)
+
+- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`2151541`).
+- **Live check** (`3f300f7`):
+  - A: deleting a connector cascaded its shield rows without tombstones; the orphan was accepted by a peer connector, bounded by its 7 d certificate.
+  - B: a shield never failed over away from a revoked connector (same "not serving" refusal, so it waited).
+- **Fixes** (`96b7d15`, `6d729a7`):
+  - `deleteConnector` is refused while an active/disconnected shield is attached (one statement; the count is in the error);
+  - a terminal connector refuses/closes shields with "connector is revoked or unknown to the controller";
+  - the shield rotates that head to the tail and retries after 2 s.
+- **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
+- **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
+- Controller now runs `6d729a7` from `~/.cache/zecurity-f`. Committed locally, not pushed.

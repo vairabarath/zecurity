@@ -4,7 +4,7 @@ date: 2026-10-23
 type: live check + findings (no code change)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, §12, O14)
 branch: feat/sprint20-m1-phase2
-status: FINDINGS OPEN — fixes need the user's choice
+status: BOTH FINDINGS FIXED 2026-10-23 (A option a + B; commits 96b7d15, 6d729a7; record: Connector-Revocation-PhaseF-Fixes-Implementation-2026-10-23.md)
 ---
 
 # Phase F check — what deleting a revoked connector does to its shields

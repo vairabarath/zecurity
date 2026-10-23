@@ -2,7 +2,7 @@
 title: Connector Revocation — Phase F fixes acceptance list (delete guard, shield failover from a revoked connector)
 date: 2026-10-23
 type: acceptance list
-status: AUTHORIZED 2026-10-23 — user chose "A-a and B" for the findings in Connector-Revocation-PhaseF-Shield-Cascade-Check-2026-10-23.md
+status: DONE 2026-10-23 — unit + 12/12 mutants + live AF-L PASS (record: Connector-Revocation-PhaseF-Fixes-Implementation-2026-10-23.md)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, §12)
 ---
 
