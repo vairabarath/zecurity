@@ -8,7 +8,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (D6, D21)
 
 # Phase E — the shield prunes revoked connectors from its peer list
 
-**Goal:** a shield never fails over to (or restarts onto) a connector that any of its connectors reports revoked.
+**Goal:** while it runs, a shield never fails over to a connector that any of its connectors reports revoked, and its saved list drops that connector. One exception: when every peer is revoked, `state.json` keeps its last list (AE-4), so after a restart the shield may dial a revoked connector again until a new list arrives. An honest one refuses it; a hostile one is the D21 limit.
 
 With an honest connector, enforcement needs no shield change: the revoked connector closes its own shield streams (§7). Phase E covers the **stale peer list**. The shield keeps its connector list in `state.json` and only replaces it on a non-empty `PeerConnectorList`. A revoked connector is dropped from new lists (the controller lists only active connectors), but it stays in the shield's saved list until a list arrives, and it would be dialled on failover or restart.
 
@@ -20,7 +20,7 @@ With an honest connector, enforcement needs no shield change: the revoked connec
    - Sends the list when there are peers **or** revoked ids, so a connector in no remote network still lets the shield prune.
 3. **Shield (D21).**
    - **Immediate prune:** revoked ids from **any** connector's list are added to an in-memory set and pruned from the current list at once. The pruned list is saved.
-   - **Never re-added while the process runs:** later lists are filtered by the set.
+   - **Never re-added while the process runs:** later lists are filtered by the set. D21 says "never re-added while listed". The stricter in-process rule is equivalent, because revocation is terminal: a revoked connector stays listed while any of its certificates is valid, and it can never become an active peer again.
    - **Memory only:** the set is never written to `state.json`. It survives a certificate renewal (the renewal rebuilds the state).
    - **All peers revoked:** the shield dials none. `state.json` keeps its last non-empty list, because the shield refuses to start from an empty one.
 4. **Accepted limit (D21).** A **hostile** revoked connector never sends its own id. A shield attached only to it is not protected by Phase E. That is bounded by the connector's certificate lifetime and by the client (Phase C) and relay (Phase D) refusing it.
