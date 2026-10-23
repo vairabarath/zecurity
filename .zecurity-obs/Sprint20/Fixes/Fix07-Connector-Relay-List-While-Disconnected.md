@@ -34,10 +34,10 @@ The `Disconnected → bootstrap → Backoff → sleep → Disconnected` loop nev
 
 The control stream did receive and publish the list (`control_stream.rs:912`, `relay_list_tx.send`); the selector just never looked.
 
-## Live reproduction (2026-10-22, baseline connector = `bda9244`, unchanged selector)
+## Live reproduction (2026-10-22, baseline connector = `071c0de`, unchanged selector)
 
 **Setup:**
-- controller `bda9244` (`~/.cache/zecurity-s3/controller-head`), run with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true` (`ENV=development`);
+- controller `071c0de` (`~/.cache/zecurity-s3/controller-head`), run with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true` (`ENV=development`);
 - a disposable **user-level connector** `s3-relaylist` on this PC, enrolled into `k2-net` via the admin API (`generateConnectorToken` + `POST /api/connectors/{id}/token`), state in `~/.cache/zecurity-s3/conn/`, runner `run-conn.sh`.
 
 **Simulating "a relay becomes available":** the lab relay `pm-relay-manoj` (192.168.1.49) is offline, so the relay row in the disposable local DB was set `status='active', last_heartbeat_at=now()`. The controller was then restarted. The connector's control stream reconnects and the controller sends the current list on every connect (`internal/connector/control_stream.go:597-607`). About 90 s later the controller's relay sweep marks the row `inactive` again and broadcasts an empty list. This tests exactly the selector path at fault. A real relay attach is not exercised (host offline); the unit tests cover the logic.
@@ -94,7 +94,7 @@ Compared with the baseline, the connector now acts on each relay list the contro
 
 ## Addendum: attach to a real relay without a restart (2026-10-22, 10:51 UTC)
 
-- **Connector:** `s3-luffy` (Fix 07 build `6a4970c`), a user-level process on luffy (192.168.1.40, pid 6321), started 10:36 with an empty relay list. It logged 29 × `LabelledRelayList is empty; entering backoff`.
+- **Connector:** `s3-luffy` (Fix 07 build `3f0d604`), a user-level process on luffy (192.168.1.40, pid 6321), started 10:36 with an empty relay list. It logged 29 × `LabelledRelayList is empty; entering backoff`.
 - **Relay:** the old `pm-relay-manoj` couldn't heartbeat: its certificate expired 2026-10-21 13:17:33 UTC, because B2 ran with `RELAY_CERT_TTL=1h`. The controller refused every Heartbeat RPC. So:
   - a new relay `s3-relay-manoj` (`ad5966f0-…`) was registered with the provider API (provider password typed by the user in an Orca tab);
   - it was reinstalled on manojinkyank (.49) with sudo typed by the user. The expired state was kept as `/var/lib/zecurity-relay/pki.expired-*`.
@@ -113,4 +113,4 @@ Same process throughout (pid 6321, `Relay selector starting` logged once): **no 
 
 - The connector `s3-relaylist` (k2-net) is **enrolled and active, process stopped**. Restart it with `~/.cache/zecurity-s3/run-conn.sh ~/.cache/zecurity-s3/connector-fix`. Revoke it in the admin UI when it's no longer needed.
 - `pm-relay-manoj` is back to `inactive` (sweep).
-- The controller `controller-head` (`bda9244`) is running with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true`, log `~/.cache/zecurity-s3/controller-head.log`.
+- The controller `controller-head` (`071c0de`) is running with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true`, log `~/.cache/zecurity-s3/controller-head.log`.

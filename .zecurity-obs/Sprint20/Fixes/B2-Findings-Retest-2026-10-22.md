@@ -2,7 +2,7 @@
 type: live retest
 sprint: 20
 date: 2026-10-22
-build: e5fee1a (branch feat/sprint20-m1-phase2)
+build: 40e25f3 (branch feat/sprint20-m1-phase2)
 scope: B2 live findings 1–6 (Connector-Revocation-PhaseB2-Implementation-2026-10-21.md, "Observed, outside B2")
 result: 6 / 6 PASS
 status: Committed locally, not pushed.
@@ -15,11 +15,11 @@ Every result below comes from a log line, DB row or HTTP response captured durin
 ## Preflight: what was actually running
 
 - `git diff <fix commit> HEAD -- <component>` is empty for every component:
-  - controller since `bda9244`;
-  - connector since `6a4970c`;
-  - shield since `bb7adc1`;
-  - client since `8969745`;
-  - admin since `e5fee1a`.
+  - controller since `071c0de`;
+  - connector since `3f0d604`;
+  - shield since `1d806de`;
+  - client since `3f8f9f7`;
+  - admin since `40e25f3`.
 
   The working tree was clean.
 - Each component was rebuilt from HEAD and compared with what was deployed:
@@ -41,7 +41,7 @@ Every result below comes from a log line, DB row or HTTP response captured durin
 |---|---|---|---|---|
 | **4** | Admin and client sessions invalid after restarts (Fix 06) | Fresh client login + two admin logins (A, B); interleaved refreshes; logout A; 3 controller restarts; the client's own scheduled refresh | 10:57:41 client login, admin A + B. Refresh A, B, A, B: **200 ×4**. Logout A 204 → A **401 `refresh token expired`**, B **200**. Controller restarted 10:58:27, 10:59:57, 11:01:47. **11:04:26 client `session refreshed proactively`** (gRPC path). Then B **200** | **PASS** |
 | **1** | Client recovery lag: shield re-attach after `Disabled` (Fix 08) | Shield `s3-shield` attached to the local connector; controller down 90 s (`outage.sh`) | 10:58:27.6 stop → 10:58:50.2 `Disabled` → 10:59:20.2 (= Disabled + 30 s) first `connector is not serving yet; retrying`, then 18 retries every ~2.4 s → 11:00:02.892 connector `Serving` → **11:00:04.564 shield `Control stream established` (1.67 s)**. Baseline 37.3 s | **PASS** |
-| **6** | Relays on private IPs never advertised (dev flag `6174053`) | Controller restarted **without**, then **with** `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`ENV=development`); relay `s3-relay-manoj` (192.168.1.49) active both times | Without: no `DEV: relays…` log; luffy 10:59:59.71 `received LabelledRelayList … relay_count=0`. With: 11:01:47 `DEV: relays on private addresses are advertised …`; luffy 11:01:57.97 **`relay_count=1`** | **PASS** |
+| **6** | Relays on private IPs never advertised (dev flag `c76c783`) | Controller restarted **without**, then **with** `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`ENV=development`); relay `s3-relay-manoj` (192.168.1.49) active both times | Without: no `DEV: relays…` log; luffy 10:59:59.71 `received LabelledRelayList … relay_count=0`. With: 11:01:47 `DEV: relays on private addresses are advertised …`; luffy 11:01:57.97 **`relay_count=1`** | **PASS** |
 | **5** | Client hot-apply admits one new resource IP (Fix 09) | Resources `s3-w40` 192.168.1.40:18081, `s3-w49` 192.168.1.49:**18081** (same port, different host), `s3-t75` 192.168.1.75:9092. Test web servers on luffy/manoj return their hostname. A: only w40, `down`/`up`. B: add w49 + t75 **while up**. C: `down`/`up` with all | A: w40 routed, `s3-ok-luffy`, tunnelled. **B (11:03:06): `hot-applying removed=0 added=2` → `hot-applied resources=5` (16 ms); w40 `s3-ok-luffy`, w49 `s3-ok-omarchy`, t75 connect-ok, all routed and tunnelled.** C: 5 routes, all three tunnelled, 0 capacity messages. `s3-ok-omarchy` through the tunnel shows shared-port resources reach the right host | **PASS** |
 | **2** | Admin UI can't protect a resource created before its shield (Fix 10) | `s3-shield` stopped (DB `disconnected` after ~120 s) → resource `s3-ui2` 192.168.1.164:18082 created (`shield: null`) → shield started (`active`) → page in Orca's browser → click Protect | Page: "Protect this resource" **enabled** (×3), "…is available on…", **Ready**, "Protecting binds…" (`retest-ui.png`). 11:06:31 click → DB `s3-ui2` **bound to `s3-shield`**, `pending_action=apply`. The shield then logged `nftables apply failed` (unprivileged test shield, no nftables; outside the fix) | **PASS** |
 | **3** | Connector never re-reads the relay list while not attached (Fix 07) | Relay on .49 stopped (sudo by the user), then started again; connector `s3-luffy` left running | 11:04:47 relay stopped → luffy 11:06:03 `Active relay session failed; failing over` → 11:06:47 `relay_count=0` → 11:07:11 / 11:07:31 / 11:08:11 `LabelledRelayList is empty; entering backoff` (**not attached, empty list**) → relay started (DB heartbeat 11:08:44.88) → **11:08:44.888 `relay_count=1` → `New LabelledRelayList during backoff; retrying now` → 11:08:44.924 `Connector registered with Relay`** (36 ms). Same pid 6582 throughout. Controller 16:38:44 local `reason=connected` | **PASS** |

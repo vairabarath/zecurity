@@ -2804,7 +2804,7 @@ serves on `127.0.0.1:9102`.
   - D17 Phase A contract details approved;
   - D18 renewal head-of-line fix in B2.
   - Timing values are build-time (`connector/.env` → `build.rs` → `crate::authz_timing`).
-- **B2 unit level** (`76a0130`, `cd03540`): request schedule, fail-closed enforcer, terminal QUIC close, D13 backoff, concurrent renewal. 233 lib tests; 15/15 mutants killed.
+- **B2 unit level** (`63e9e90`, `4f00448`): request schedule, fail-closed enforcer, terminal QUIC close, D13 backoff, concurrent renewal. 233 lib tests; 15/15 mutants killed.
 - **Lab findings:**
   - client hot-apply admits only one new resource IP (smoltcp `IFACE_MAX_ADDR_COUNT = 2`);
   - another agent overwrote the shared `/tmp/lab` controller binary.
@@ -2828,7 +2828,7 @@ serves on `127.0.0.1:9102`.
 - Restarts recover in about 1 s; after a 90 s outage, `Serving` 3.8 s after the controller returned.
 - Revoke: everything closed within 0.3 ms, the process idles. Delete + restart: `UnknownIdentity`, never serves.
 
-**Code:** `6174053` dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR` (user decision, so the LAN relay could be tested).
+**Code:** `c76c783` dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR` (user decision, so the LAN relay could be tested).
 
 **Findings outside B2:**
 - admin UI can't protect a resource created before its shield;
@@ -2845,7 +2845,7 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-22 — Sprint 20 Fix 06: sessions per login (B2 finding 4)
 
-- **Live repro** (baseline `9503ad2`, local test identity provider, scripted admin logins + the real client daemon):
+- **Live repro** (baseline `bf3abed`, local test identity provider, scripted admin logins + the real client daemon):
   - a second admin login kills the first (`refresh token mismatch`);
   - a client login kills the admin session;
   - an admin login kills the client (12:45:10, `refresh session dead`).
@@ -2909,7 +2909,7 @@ serves on `127.0.0.1:9102`.
 - **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
 - Committed locally, not pushed.
 
-## 2026-10-22 — B2 findings full live retest (final build e5fee1a): 6/6 PASS
+## 2026-10-22 — B2 findings full live retest (final build 40e25f3): 6/6 PASS
 
 - **Preflight:** no component changed since its fix commit; HEAD builds were hash-compared with deployed binaries. The connector differed (its build reads `.env`/env), so it was redeployed from the HEAD build on luffy and locally.
 - **Results:**
@@ -2924,7 +2924,7 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase D (relay enforcement): DONE
 
-- **Code** (`a2af01e`, `56e0496`, `80773f7`):
+- **Code** (`ba000f2`, `fba1a93`, `c7d49b7`):
   - relay heartbeat proto fields 8/3;
   - the controller answers which registered connectors are revoked (Phase C rule, cross-workspace, both heartbeat paths, empty on DB error);
   - the relay keeps a sticky revoked set, closes listed registrations, and refuses Register (pre-check + post-insert re-check; the ack is delivered before close).
@@ -2934,7 +2934,7 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase E (shield pruning): DONE
 
-- **Code** (`8b2dff4`):
+- **Code** (`4a74ec8`):
   - `PeerConnectorList.revoked_connector_ids = 2`;
   - the connector fills it from its ACL, drops revoked peers, and sends it for revoked ids alone;
   - the shield prunes at once from any connector's list, never re-adds while running, keeps the set in memory only (it survives renewal), and dials none if all peers are revoked (`state.json` stays loadable).
@@ -2945,21 +2945,21 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase F: check + fixes (A option a, B)
 
-- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`2151541`).
-- **Live check** (`3f300f7`):
+- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`c9c4854`).
+- **Live check** (`2b59e02`):
   - A: deleting a connector cascaded its shield rows without tombstones; the orphan was accepted by a peer connector, bounded by its 7 d certificate.
   - B: a shield never failed over away from a revoked connector (same "not serving" refusal, so it waited).
-- **Fixes** (`96b7d15`, `6d729a7`):
+- **Fixes** (`f1518d6`, `4f4f00a`):
   - `deleteConnector` is refused while an active/disconnected shield is attached (one statement; the count is in the error);
   - a terminal connector refuses/closes shields with "connector is revoked or unknown to the controller";
   - the shield rotates that head to the tail and retries after 2 s.
 - **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
 - **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
-- Controller now runs `6d729a7` from `~/.cache/zecurity-f`. Committed locally, not pushed.
+- Controller now runs `4f4f00a` from `~/.cache/zecurity-f`. Committed locally, not pushed.
 
 ## 2026-10-23 — Connector revocation Phase F schema: migration 041 (tombstone + no reuse)
 
-- **`041_connector_revocations.sql`** (`e72623b` **[schema: reset DB]**, tests `8dd191b`):
+- **`041_connector_revocations.sql`** (`2950acc` **[schema: reset DB]**, tests `0bff44f`):
   - a `connector_revocations` tombstone written by a trigger on every revocation;
   - no FK, so it outlives a deleted row;
   - a trigger refuses reuse of a revoked id (insert or update of id);

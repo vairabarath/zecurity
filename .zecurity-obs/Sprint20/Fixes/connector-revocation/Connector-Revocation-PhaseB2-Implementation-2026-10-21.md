@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (revision 5; D13–D18)
 acceptance: Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md (signed off 2026-10-21)
 branch: feat/sprint20-m1-phase2
-commits: 76a0130 (implementation + tests), cd03540 (dropped-stream deadline test, since_send_us)
+commits: 63e9e90 (implementation + tests), 4f00448 (dropped-stream deadline test, since_send_us)
 status: DONE — unit level + live acceptance L-1…L-8 PASS (2026-10-21; L-1 shortened to 15 min / 3 renewals by user decision). Committed locally, NOT pushed.
 ---
 
@@ -60,7 +60,7 @@ status: DONE — unit level + live acceptance L-1…L-8 PASS (2026-10-21; L-1 sh
 
 ## 4. Mutation checks
 
-Each check disabled one enforcement line against `76a0130`, ran the full `cargo test --lib`, then restored the tree. **15 mutants, 15 killed; none skipped, none failing to compile.**
+Each check disabled one enforcement line against `63e9e90`, ran the full `cargo test --lib`, then restored the tree. **15 mutants, 15 killed; none skipped, none failing to compile.**
 
 | Mutant | Killed by |
 |---|---|
@@ -90,9 +90,9 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 - client on this PC.
 
 **Binaries:**
-- controller `d32cecc0b692` (`f71fba6`) for L-1…L-4/L-8, then `ff4772b994fe` (`6174053`, plus the dev relay setting) for L-7/L-5/L-6;
-- connector `6c442e1b40b9`, shield `2910b0e297aa`, relay `8a47a3e8a65e` (all `f71fba6`);
-- `6174053` touches the controller only (`git diff f71fba6 6174053 -- connector shield relay proto` is empty), so this is still one coordinated build;
+- controller `d32cecc0b692` (`150fb66`) for L-1…L-4/L-8, then `ff4772b994fe` (`c76c783`, plus the dev relay setting) for L-7/L-5/L-6;
+- connector `6c442e1b40b9`, shield `2910b0e297aa`, relay `8a47a3e8a65e` (all `150fb66`);
+- `c76c783` touches the controller only (`git diff 150fb66 c76c783 -- connector shield relay proto` is empty), so this is still one coordinated build;
 - update timers off.
 
 | # | What was done | Result |
@@ -101,7 +101,7 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
 | L-3 (T2) | Held flow; controller stopped 11:19:18 (10 s drain, still acking); down 90 s; restarted | Last ack seq 274, sent 11:19:25.3585 → **D = 11:19:40.3585**. `Disabled` logged 11:19:40.3595 (+1 ms); every session cancelled 11:19:40.3596; the flow saw a reset; new attempts reset, never `ok:false`. Backoff while down: 2.1, 3.4, 5.2, 5.6, … s (capped about 5 s ± 20 %). Controller back 11:20:58.6 → **`Serving` 11:21:02.38 (3.8 s)** |
 | L-8 (D15, T13) | Same run | Shield streams kept during `Disabled`, **closed at 11:20:10.3607 = Disabled + 30.00 s** |
 | L-4 (D13) | 3 restarts, 60 s apart | Lost → `Serving` in **1.04 s, 1.22 s, 0.93 s**; backoff 990 / 1155 / 850 ms (reset after an ack); 0 Disabled, 0 cancellations (Phase M R3: 16–60 s) |
-| L-7 (T9 relay) | Controller with `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`6174053`); connector restarted; direct UDP :9092 blocked on the client host (nftables) | Client: "direct path failed; used relay fallback relay_addr=192.168.1.49:9093"; relay "bridging Client to Connector through Relay"; 200 OK via the relay |
+| L-7 (T9 relay) | Controller with `RELAY_DEV_ALLOW_PRIVATE_ADDR` (`c76c783`); connector restarted; direct UDP :9092 blocked on the client host (nftables) | Client: "direct path failed; used relay fallback relay_addr=192.168.1.49:9093"; relay "bridging Client to Connector through Relay"; 200 OK via the relay |
 | L-5 (T5) | Held flow over the relay; `pm-conn` revoked in the admin UI | Connector 12:00:30.811: `Serving → Revoked`; within 0.3 ms every session cancelled, client QUIC connections closed, shield streams closed, ACL cleared; reconnect loop stopped (**0 attempts since**); **process stays up** (same instance, D12). Shield: stream ended with **`Unavailable` "connector is not authorized to serve"**, reconnect refused the same way. Relay: bridge ended 12:00:30.83; new bridge attempts reset; client flow refused from 12:00:31.887 on |
 | L-6 (T19, T25) | Throwaway connector `pm-disposable` on udaya (user-level process): enrolled (`Starting → Serving` in 0.4 s), revoked, row deleted (the API deletes only pending or revoked connectors), process restarted twice | Each restart: `Starting → **UnknownIdentity**` (the controller's `unknown` marker), **0 acks**, never served, reconnect loop stopped, process alive |
 
@@ -118,18 +118,18 @@ Each check disabled one enforcement line against `76a0130`, ran the full `cargo 
    - The client now uses AnyIP plus IP-bound listeners: no per-resource smoltcp addresses, so no limit.
    - This also fixed shared-port misrouting and the silent drop at startup.
    - Verified live: 3 IPs hot-added in one pass, all tunnelled; at startup all tunnelled.
-6. **Relays on private IPs were never advertised.** Addressed for dev labs by `6174053` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
+6. **Relays on private IPs were never advertised.** Addressed for dev labs by `c76c783` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
 
-**All six findings were fixed and passed a full live retest on 2026-10-22** (build `e5fee1a`; report [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]], `d90eeac`):
+**All six findings were fixed and passed a full live retest on 2026-10-22** (build `40e25f3`; report [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]], `4edee56`):
 
 | Finding | Fix | Retest result |
 |---|---|---|
-| 1. Client recovery lag after a connector outage (shield retry wait) | Fix 08 `bb7adc1`: the shield polls a "not serving" connector every 2 s | shield back 1.67 s after the connector served (was 37.3 s) |
-| 2. Admin UI couldn't protect a resource created before its shield | Fix 10 `e5fee1a`: the Protect gate mirrors `MarkProtecting`'s shield choice | button enabled, resource bound to the shield |
-| 3. Relay selector ignored new lists while unattached | Fix 07 `6a4970c` | registered 36 ms after the relay returned, same process, no restart |
-| 4. Sessions invalid after controller restarts / logged each other out | Fix 06 `bda9244`: one refresh session per login | interleaved refreshes, logout and 3 restarts all OK |
-| 5. Client hot-apply admitted one new resource IP | Fix 09 `8969745`: AnyIP capture interface and IP-bound listeners | 2 resources added in 16 ms; no "capacity" messages |
-| 6. Relays on private IPs never advertised | dev setting `6174053` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only) | relay_count 0 without, 1 with |
+| 1. Client recovery lag after a connector outage (shield retry wait) | Fix 08 `1d806de`: the shield polls a "not serving" connector every 2 s | shield back 1.67 s after the connector served (was 37.3 s) |
+| 2. Admin UI couldn't protect a resource created before its shield | Fix 10 `40e25f3`: the Protect gate mirrors `MarkProtecting`'s shield choice | button enabled, resource bound to the shield |
+| 3. Relay selector ignored new lists while unattached | Fix 07 `3f0d604` | registered 36 ms after the relay returned, same process, no restart |
+| 4. Sessions invalid after controller restarts / logged each other out | Fix 06 `071c0de`: one refresh session per login | interleaved refreshes, logout and 3 restarts all OK |
+| 5. Client hot-apply admitted one new resource IP | Fix 09 `3f8f9f7`: AnyIP capture interface and IP-bound listeners | 2 resources added in 16 ms; no "capacity" messages |
+| 6. Relays on private IPs never advertised | dev setting `c76c783` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only) | relay_count 0 without, 1 with |
 
 **Lab state after the run:**
 - `pm-conn` is **revoked** (inkyank connector idles; the lab needs a new connector enrollment for further use);

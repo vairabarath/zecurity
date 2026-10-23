@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§9, D6, D20)
 acceptance: Connector-Revocation-PhaseD-Acceptance-2026-10-22.md
 branch: feat/sprint20-m1-phase2
-commits: a2af01e (implementation + tests), 56e0496 + 80773f7 (tests added for the mutation run)
+commits: ba000f2 (implementation + tests), fba1a93 + c7d49b7 (tests added for the mutation run)
 status: DONE — unit + 14/14 mutants + live AD-L PASS. Committed locally, NOT pushed.
 ---
 
@@ -59,12 +59,12 @@ status: DONE — unit + 14/14 mutants + live AD-L PASS. Committed locally, NOT p
 | D13 | post-insert re-check removed (pre-check kept) | `revocation_inside_the_register_window…` |
 | D14 | pre-check removed (re-check kept): a revoked identity briefly enters the registry | `revoked_connector_cannot_register` (insert attempted) |
 
-The first run (12 mutants) showed that removing only one of the two Register checks survived. Two tests were added (`80773f7`) so each check is now tested on its own (D13, D14).
+The first run (12 mutants) showed that removing only one of the two Register checks survived. Two tests were added (`c7d49b7`) so each check is now tested on its own (D13, D14).
 
 ## Live check AD-L (2026-10-23): PASS
 
 **Setup:**
-- controller `56e0496` (HEAD build, same env as Phase C: `RELAY_CERT_TTL=1h`, `RELAY_DEV_ALLOW_PRIVATE_ADDR=true`);
+- controller `fba1a93` (HEAD build, same env as Phase C: `RELAY_CERT_TTL=1h`, `RELAY_DEV_ALLOW_PRIVATE_ADDR=true`);
 - relay on manojinkyank (`omarchy`, 192.168.1.49:9093) upgraded binary-only to `51d35a2a…` by the user with sudo; backup `~/zecurity-relay.pre-phased`;
 - **hostile stand-in connector** `pd-hostile` (`57612a17-23c8-4777-8cf1-590b2df5ddc0`) = the Phase A measurement build `aac7cbea…`, which ignores revocation, run as the normal user on udaya in `pc-hostile-net`. The token was sent through a hidden prompt and shredded.
 

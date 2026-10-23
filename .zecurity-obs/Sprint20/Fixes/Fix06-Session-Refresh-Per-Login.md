@@ -39,10 +39,10 @@ So two sessions of the **same user** overwrite each other. Whichever writes seco
 - **Cause:** Valkey runs with RDB snapshots only (`save 3600 1 300 100 60 10000`, no AOF). It reloaded a snapshot older than the client's 13:13 rotation, so the client presented a newer refresh token than the stored one.
 - The old one-slot design fails the same way. Production durability of the refresh store (AOF / `appendfsync`) is a separate deployment concern.
 
-## Live reproduction (2026-10-22, baseline controller `9503ad2`)
+## Live reproduction (2026-10-22, baseline controller `bf3abed`)
 
 - **Setup:**
-  - controller built from `9503ad2` into `~/.cache/zecurity-s3/controller-base`, started at 12:29:17;
+  - controller built from `bf3abed` into `~/.cache/zecurity-s3/controller-base`, started at 12:29:17;
   - workspace `xiyo`, local test identity provider, admin user `sathiyaseelank326@gmail.com`;
   - admin-UI logins through that provider, refreshes via `POST /auth/refresh`;
   - the real client daemon on this PC.
