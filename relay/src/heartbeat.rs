@@ -300,6 +300,90 @@ mod tests {
         }
     }
 
+    /// Answers the first heartbeat with a revoked id, then fails every call.
+    #[derive(Clone, Default)]
+    struct FailingAfterFirstTransport {
+        revoked: String,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HeartbeatTransport for FailingAfterFirstTransport {
+        type Conn = ();
+
+        async fn connect(&self, _material: &CertMaterial) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _conn: &mut (),
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            if self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Ok(HeartbeatResponse {
+                    server_time_unix: 0,
+                    next_heartbeat_seconds: 1,
+                    revoked_connector_spiffe_ids: vec![self.revoked.clone()],
+                })
+            } else {
+                anyhow::bail!("controller unreachable")
+            }
+        }
+    }
+
+    /// AD-5 (D20): a failing heartbeat keeps the revoked set.
+    #[tokio::test]
+    async fn heartbeat_error_keeps_the_revoked_set() {
+        let pki = TestPki::new();
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-hb-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let state = RelayState::new();
+        let revoked = crate::state::canonical_connector_spiffe(
+            "ws.zecurity.in",
+            "4f1c2d7e-1111-4a2b-9c3d-000000000001",
+        );
+        let transport = FailingAfterFirstTransport {
+            revoked: revoked.clone(),
+            sends: Arc::default(),
+        };
+        let settings = HeartbeatSettings {
+            listen_port: 9093,
+            max_connections: 16,
+            default_interval: Duration::from_secs(3600),
+        };
+        let task = tokio::spawn(run_with(
+            transport.clone(),
+            settings,
+            manager,
+            state.clone(),
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while transport.sends.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "second heartbeat never sent"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        assert!(
+            state.is_revoked(&revoked),
+            "a failed heartbeat must not unblock"
+        );
+    }
+
     /// AD-5: the heartbeat reports the registered connectors and applies the
     /// controller's revoked answer — the revoked connector is closed and
     /// removed, the other one stays.

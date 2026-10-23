@@ -496,6 +496,13 @@ mod tests {
         let (client, server) = crate::test_support::quic_pair().await;
         let state = RelayState::new();
         state.apply_revoked(&[canonical()]);
+        // The pre-check refuses before the insert: a revoked identity is
+        // never visible in the registry, even briefly.
+        let inserted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = inserted.clone();
+        *state.before_insert.lock().unwrap() = Some(Box::new(move || {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
         let task = tokio::spawn(handle_connection(
             server,
             connector_identity(),
@@ -504,6 +511,38 @@ mod tests {
         ));
         let ack = register(&client, &connector_identity()).await;
         assert!(!ack.ok, "revoked connector must be refused");
+        assert_eq!(ack.error.as_deref(), Some("connector is revoked"));
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(state.connector_count(), 0);
+        assert!(
+            !inserted.load(std::sync::atomic::Ordering::SeqCst),
+            "a revoked identity must be refused before the insert"
+        );
+    }
+
+    /// AD-4 race: a revocation applied between the Register check and the
+    /// insert (the sweep misses the not-yet-inserted entry) is caught by the
+    /// post-insert re-check.
+    #[tokio::test]
+    async fn revocation_inside_the_register_window_is_caught_by_the_recheck() {
+        let (client, server) = crate::test_support::quic_pair().await;
+        let state = RelayState::new();
+        let hook_state = state.clone();
+        *state.before_insert.lock().unwrap() = Some(Box::new(move || {
+            assert_eq!(
+                hook_state.apply_revoked(&[canonical()]),
+                0,
+                "sweep finds nothing yet"
+            );
+        }));
+        let task = tokio::spawn(handle_connection(
+            server,
+            connector_identity(),
+            state.clone(),
+            limits(),
+        ));
+        let ack = register(&client, &connector_identity()).await;
+        assert!(!ack.ok, "re-check must refuse");
         assert_eq!(ack.error.as_deref(), Some("connector is revoked"));
         assert!(task.await.unwrap().is_err());
         assert_eq!(state.connector_count(), 0);

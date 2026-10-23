@@ -30,6 +30,10 @@ pub struct RelayState {
     /// Only ever added to for the life of the process: a stale or empty
     /// heartbeat answer never unblocks an identity.
     revoked: Mutex<HashSet<String>>,
+    /// Test seam: runs at the start of `insert_connector`, before the map
+    /// insert, to put a revocation inside the Register check→insert window.
+    #[cfg(test)]
+    pub before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl RelayState {
@@ -37,6 +41,8 @@ impl RelayState {
         Arc::new(Self {
             connectors: DashMap::new(),
             revoked: Mutex::new(HashSet::new()),
+            #[cfg(test)]
+            before_insert: Mutex::new(None),
         })
     }
 
@@ -92,6 +98,10 @@ impl RelayState {
         spiffe_id: String,
         trust_domain: String,
     ) -> Uuid {
+        #[cfg(test)]
+        if let Some(hook) = self.before_insert.lock().unwrap().as_ref() {
+            hook();
+        }
         let registration_id = Uuid::new_v4();
 
         self.connectors.insert(
