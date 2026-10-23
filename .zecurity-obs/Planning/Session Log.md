@@ -2956,3 +2956,18 @@ serves on `127.0.0.1:9102`.
 - **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
 - **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
 - Controller now runs `6d729a7` from `~/.cache/zecurity-f`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F schema: migration 041 (tombstone + no reuse)
+
+- **`041_connector_revocations.sql`** (`e72623b` **[schema: reset DB]**, tests `8dd191b`):
+  - a `connector_revocations` tombstone written by a trigger on every revocation;
+  - no FK, so it outlives a deleted row;
+  - a trigger refuses reuse of a revoked id (insert or update of id);
+  - backfill from revoked rows plus revoked-then-deleted connectors in the certificate history.
+  - Follows 038. No Go changes.
+- **Tests:** 3 DB tests (including the backfill on a DB seeded under 040); full controller suite green. Mutants 8/8 killed (3 test gaps fixed after the first run).
+- **Live** (user chose option 2: apply only 041 to the lab DB, after a pg_dump backup in `~/.cache/zecurity-f`):
+  - the backfill wrote exactly 8 tombstones (4 rows + 4 deleted);
+  - `pf-c4`: revoke → tombstone the same second; delete → tombstone kept; re-insert refused;
+  - no controller errors.
+- **Teammates:** recreate the local DB after pulling. Committed locally, not pushed.
