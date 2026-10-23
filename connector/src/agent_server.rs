@@ -313,10 +313,11 @@ impl ShieldRegistry {
     }
 
     /// Build the current peer-Connector list for this Connector's Remote
-    /// Network, sorted deterministically by `connector_id`. Returns `None`
-    /// when the ACL snapshot is missing or this Connector isn't in any RN
-    /// (per design — the Shield ignores empty lists, and we prefer not to
-    /// send them at all).
+    /// Network, sorted deterministically by `connector_id`, plus the ACL's
+    /// revoked connector ids (Phase E, D21). Revoked ids are never offered
+    /// as peers. Returns `None` only when there are neither peers nor
+    /// revoked ids; a list with no peers is still sent so the Shield can
+    /// prune revoked connectors (it ignores the empty `peers`).
     ///
     /// Address derivation: `connector_tunnel_addr` in the ACL snapshot is
     /// `host:9092` (QUIC data plane). The Shield needs `host:9091` (gRPC).
@@ -324,20 +325,25 @@ impl ShieldRegistry {
     pub(crate) fn build_peer_connector_list(
         &self,
     ) -> Option<crate::shield_proto::PeerConnectorList> {
+        let revoked_connector_ids = self.policy_cache.revoked_connector_ids();
         let mut peers: Vec<crate::shield_proto::PeerConnector> = self
             .policy_cache
             .peers_of_connector(&self.connector_id)
             .into_iter()
+            .filter(|(id, _)| !revoked_connector_ids.contains(id))
             .map(|(id, tunnel_addr)| crate::shield_proto::PeerConnector {
                 connector_id: id,
                 connector_addr: derive_grpc_addr(&tunnel_addr),
             })
             .collect();
-        if peers.is_empty() {
+        if peers.is_empty() && revoked_connector_ids.is_empty() {
             return None;
         }
         peers.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-        Some(crate::shield_proto::PeerConnectorList { peers })
+        Some(crate::shield_proto::PeerConnectorList {
+            peers,
+            revoked_connector_ids,
+        })
     }
 
     /// Deliver instructions to a shield via Control stream, or buffer until the shield reconnects.
@@ -1340,6 +1346,72 @@ mod shield_server_tls_tests {
             policy_cache,
             gate,
         )
+    }
+
+    // ── Connector-revocation Phase E (D21) ─────────────────────────────────
+
+    fn snapshot_for_peers(peers: &[&str], revoked: &[&str]) -> crate::client::v1::AclSnapshot {
+        crate::client::v1::AclSnapshot {
+            version: 2,
+            workspace_id: "ws-test".into(),
+            remote_networks: if peers.is_empty() {
+                vec![]
+            } else {
+                vec![crate::client::v1::AclRemoteNetwork {
+                    remote_network_id: "rn-1".into(),
+                    name: "rn-1".into(),
+                    connectors: peers
+                        .iter()
+                        .map(|id| crate::client::v1::AclConnector {
+                            connector_id: id.to_string(),
+                            connector_tunnel_addr: format!("{id}.lan:9092"),
+                            ..Default::default()
+                        })
+                        .collect(),
+                }]
+            },
+            revoked_connectors: revoked
+                .iter()
+                .map(|id| crate::client::v1::RevokedConnector {
+                    connector_id: id.to_string(),
+                    connector_spiffe: format!("spiffe://{TRUST_DOMAIN}/connector/{id}"),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// AE-6: the peer list carries the ACL's revoked ids and never offers a
+    /// revoked connector as a peer.
+    #[tokio::test]
+    async fn peer_list_carries_revoked_ids_and_drops_revoked_peers() {
+        let r = registry();
+        r.policy_cache.update(snapshot_for_peers(
+            &[CONNECTOR_ID, "peer-b", "peer-a"],
+            &["peer-b", "gone-x"],
+        ));
+        let list = r.build_peer_connector_list().expect("list");
+        let peers: Vec<_> = list.peers.iter().map(|p| p.connector_id.as_str()).collect();
+        let mut want = vec![CONNECTOR_ID, "peer-a"];
+        want.sort();
+        assert_eq!(peers, want);
+        assert_eq!(list.revoked_connector_ids, vec!["gone-x", "peer-b"]);
+    }
+
+    /// AE-6: sent even when this connector is in no RN (no peers), so the
+    /// Shield can still prune; nothing to send without either.
+    #[tokio::test]
+    async fn peer_list_is_sent_for_revoked_ids_alone() {
+        let r = registry();
+        r.policy_cache.update(snapshot_for_peers(&[], &["peer-b"]));
+        let list = r
+            .build_peer_connector_list()
+            .expect("revoked ids alone are sent");
+        assert!(list.peers.is_empty());
+        assert_eq!(list.revoked_connector_ids, vec!["peer-b"]);
+
+        r.policy_cache.update(snapshot_for_peers(&[], &[]));
+        assert!(r.build_peer_connector_list().is_none());
     }
 
     /// Aborts the server task when the test ends.

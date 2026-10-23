@@ -1,5 +1,6 @@
 // types.rs — Shared data structures used across multiple shield modules
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
@@ -56,6 +57,12 @@ pub struct ShieldState {
     /// Unix timestamp of the certificate's NotAfter field.
     /// Updated after RenewCert so the next control stream uses fresh credentials.
     pub cert_not_after: i64,
+
+    /// Connector-revocation Phase E (D21): connector ids any peer list has
+    /// reported revoked. Pruned from `connectors` at once and never re-added
+    /// while the process runs. Memory only: never written to state.json.
+    #[serde(skip)]
+    pub revoked_connectors: HashSet<String>,
 }
 
 /// On-disk representation with both the new `connectors` list and the legacy
@@ -104,6 +111,7 @@ impl From<ShieldStateOnDisk> for ShieldState {
             interface_addr: v.interface_addr,
             enrolled_at: v.enrolled_at,
             cert_not_after: v.cert_not_after,
+            revoked_connectors: HashSet::new(),
         }
     }
 }
@@ -230,6 +238,7 @@ mod tests {
             interface_addr: "100.64.0.5".into(),
             enrolled_at: "2026-07-01T00:00:00Z".into(),
             cert_not_after: 1793491200,
+            revoked_connectors: HashSet::new(),
         };
         original.save(dir.to_str().unwrap()).unwrap();
         let loaded = ShieldState::load(dir.to_str().unwrap()).unwrap();

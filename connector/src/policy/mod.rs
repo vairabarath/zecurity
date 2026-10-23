@@ -134,6 +134,24 @@ impl PolicyCache {
         Vec::new()
     }
 
+    /// Connector-revocation Phase E (D21): connector ids the current ACL lists
+    /// as revoked, sorted. Empty when no snapshot is present.
+    pub fn revoked_connector_ids(&self) -> Vec<String> {
+        let guard = self.snapshot.read();
+        let Some(snapshot) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = snapshot
+            .revoked_connectors
+            .iter()
+            .map(|r| r.connector_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Look up a resource by its network tuple (address + port + protocol).
     /// Returns `None` when no snapshot is present or no entry matches — callers must deny.
     pub fn resolve_resource(
