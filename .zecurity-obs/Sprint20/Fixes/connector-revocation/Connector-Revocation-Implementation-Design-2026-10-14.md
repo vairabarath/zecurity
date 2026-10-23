@@ -510,9 +510,9 @@ Revocation enforcement, failover and migration are separate deliverables with se
 
 | Decision | Options / facts | Status |
 |---|---|---|
-| Per-certificate connector history | precedent: `relay_certificates` (027). A `connector_certificates` table would need migration 038+ | BLOCKED ON SCHEMA APPROVAL (recommended as defence in depth) |
-| CRL coverage of every still-valid historical certificate | needs the history table; identity revocation already covers them where identity state reaches | BLOCKED ON SCHEMA APPROVAL |
-| Revoked serials surviving deletion | today a hard delete removes the CRL entry (`DeleteConnector`); migration 029's "Rows are never deleted" comment contradicts the code | BLOCKED ON SCHEMA APPROVAL (or a code-only "forbid delete" policy, OPEN) |
+| Per-certificate connector history | precedent: `relay_certificates` (027) | **DONE** by `52c16fa` (certificate audit bug 9, migration `039_certificate_history.sql`): `connector_certificates`, filled by a trigger on `connectors`, no FK, so it outlives the row. Phases C and D build on it |
+| CRL coverage of every still-valid historical certificate | the workspace CRL is built from `connector_certificates` (`pki/workspace.go:597`); revocation marks every certificate of the connector | **DONE** by `52c16fa` |
+| Revoked serials surviving deletion | `DeleteConnector` removes only the `connectors` row; the serials stay in `connector_certificates` and so in the CRL. Phases C/D also treat a deleted connector as revoked while a certificate is valid | **DONE** by `52c16fa` (re-checked 2026-10-23); a "forbid delete" policy is not needed for the CRL. **New finding (2026-10-23):** the delete cascades to `shields` rows attached to the connector without recording them in `shield_revocations`; see the Phase F shield-cascade check |
 | Tombstone / durable lifecycle record | `status` has no `deleted` value; a tombstone needs a schema change | BLOCKED ON SCHEMA APPROVAL |
 | Identity reuse prevention | UUID randomness only today | depends on the tombstone decision |
 | Same-key renewal | not enforced for connectors (relays and devices do enforce it) | OPEN; not required by Q1–Q6 |
@@ -662,7 +662,7 @@ Access to the lab hosts is through the user's Orca SSH terminals. sudo on each h
 | O11 | Retention of `revoked_connectors`; client offline staleness bound | **ACCEPTED (D19, 2026-10-22)**: a revoked connector stays listed until its last certificate can no longer be valid (revoked_at + connector cert TTL); the client stops using connectors after **1 h** without a successful ACL sync |
 | O12 | Relay behaviour when its revoked list is stale | **ACCEPTED (D20, 2026-10-22)**: keep the last known list, keep serving, no new timeout |
 | O13 | Shield prune rule; hostile-connector limit | **ACCEPTED (D21, 2026-10-22)**: `PeerConnectorList.revoked_connector_ids` approved; a revoked id from any connector prunes it immediately and it is never re-added while listed (in memory only); the hostile-connector limit is accepted and documented (bounded by connector certificate lifetime) |
-| O14 | Cert history, historical-serial CRL coverage, serials after deletion, tombstones, reuse prevention | **BLOCKED ON SCHEMA APPROVAL** (each separately, §12) |
+| O14 | Cert history, historical-serial CRL coverage, serials after deletion, tombstones, reuse prevention | History, CRL coverage and serials after deletion **DONE** by `52c16fa` (migration 039). Tombstone and reuse prevention: **BLOCKED ON SCHEMA APPROVAL** (§12) |
 
 Release requirement (not a decision): the new development stack's protocol behaviour must be validated by T14/T18 before release. Support for old production connectors is not required.
 
@@ -687,6 +687,6 @@ Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
 - **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) signed off; **B2 unit level implemented 2026-10-21** ([record](Connector-Revocation-PhaseB2-Implementation-2026-10-21.md)); **live L-1…L-8 PASS 2026-10-21** (udaya shield, manojinkyank relay). Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
 - **C**, **D** and **E**: O11, O12 and O13 accepted (D19–D21). **C done 2026-10-22, D and E done 2026-10-23** (records in this folder).
-- **F** needs schema approval (O14).
+- **F**: history, CRL coverage and serials after deletion are already done by `52c16fa`. Tombstone and reuse prevention still need schema approval (O14). New: the shield cascade on connector delete (2026-10-23).
 
 This revision changed only this document. No source, test, protocol, configuration, migration or runtime state was modified, and nothing was committed.
