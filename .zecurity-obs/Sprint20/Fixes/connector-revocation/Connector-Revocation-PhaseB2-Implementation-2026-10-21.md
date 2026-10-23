@@ -120,12 +120,12 @@ Each check disabled one enforcement line against `63e9e90`, ran the full `cargo 
    - Verified live: 3 IPs hot-added in one pass, all tunnelled; at startup all tunnelled.
 6. **Relays on private IPs were never advertised.** Addressed for dev labs by `c76c783` (`RELAY_DEV_ALLOW_PRIVATE_ADDR`, `ENV=development` only), as the user decided.
 
-**All six findings were fixed and passed a full live retest on 2026-10-22** (build `40e25f3`; report [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]], `4edee56`):
+**All six findings were fixed and passed a full live retest on 2026-10-22** (build `0c72900`; report [[Sprint20/Fixes/B2-Findings-Retest-2026-10-22]], `5f3e06b`):
 
 | Finding | Fix | Retest result |
 |---|---|---|
 | 1. Client recovery lag after a connector outage (shield retry wait) | Fix 08 `1d806de`: the shield polls a "not serving" connector every 2 s | shield back 1.67 s after the connector served (was 37.3 s) |
-| 2. Admin UI couldn't protect a resource created before its shield | Fix 10 `40e25f3`: the Protect gate mirrors `MarkProtecting`'s shield choice | button enabled, resource bound to the shield |
+| 2. Admin UI couldn't protect a resource created before its shield | Fix 10 `0c72900`: the Protect gate mirrors `MarkProtecting`'s shield choice | button enabled, resource bound to the shield |
 | 3. Relay selector ignored new lists while unattached | Fix 07 `3f0d604` | registered 36 ms after the relay returned, same process, no restart |
 | 4. Sessions invalid after controller restarts / logged each other out | Fix 06 `071c0de`: one refresh session per login | interleaved refreshes, logout and 3 restarts all OK |
 | 5. Client hot-apply admitted one new resource IP | Fix 09 `3f8f9f7`: AnyIP capture interface and IP-bound listeners | 2 resources added in 16 ms; no "capacity" messages |

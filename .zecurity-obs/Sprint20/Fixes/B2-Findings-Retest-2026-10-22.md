@@ -2,7 +2,7 @@
 type: live retest
 sprint: 20
 date: 2026-10-22
-build: 40e25f3 (branch feat/sprint20-m1-phase2)
+build: 0c72900 (branch feat/sprint20-m1-phase2)
 scope: B2 live findings 1–6 (Connector-Revocation-PhaseB2-Implementation-2026-10-21.md, "Observed, outside B2")
 result: 6 / 6 PASS
 status: Committed locally, not pushed.
@@ -19,7 +19,7 @@ Every result below comes from a log line, DB row or HTTP response captured durin
   - connector since `3f0d604`;
   - shield since `1d806de`;
   - client since `3f8f9f7`;
-  - admin since `40e25f3`.
+  - admin since `0c72900`.
 
   The working tree was clean.
 - Each component was rebuilt from HEAD and compared with what was deployed:

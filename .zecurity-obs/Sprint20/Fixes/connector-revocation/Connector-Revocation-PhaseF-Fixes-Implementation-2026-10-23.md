@@ -6,7 +6,7 @@ design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, §12)
 findings: Connector-Revocation-PhaseF-Shield-Cascade-Check-2026-10-23.md (A, B)
 acceptance: Connector-Revocation-PhaseF-Fixes-Acceptance-2026-10-23.md
 branch: feat/sprint20-m1-phase2
-commits: f1518d6 (implementation + tests), 4f4f00a (both sides pin the terminal text)
+commits: 3492967 (implementation + tests), 14c4243 (both sides pin the terminal text)
 status: DONE — unit + 12/12 mutants + live AF-L PASS. Committed locally, NOT pushed.
 ---
 
@@ -49,7 +49,7 @@ status: DONE — unit + 12/12 mutants + live AF-L PASS. Committed locally, NOT p
 ## Live check AF-L (2026-10-23): PASS
 
 **Setup:**
-- controller `4f4f00a` (`k2-controller` restarted from `~/.cache/zecurity-f/controller`, same env);
+- controller `14c4243` (`k2-controller` restarted from `~/.cache/zecurity-f/controller`, same env);
 - network `pf-net`;
 - `pf-c3` (`edf18dff-…`): HEAD connector `e174ee78`, user-level on this PC;
 - `pf-c2` (`1130a22b-…`): the same HEAD build, user-level on udaya;

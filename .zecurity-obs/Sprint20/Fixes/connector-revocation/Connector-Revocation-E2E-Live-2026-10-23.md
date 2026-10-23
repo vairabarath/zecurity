@@ -3,7 +3,7 @@ title: Connector Revocation — end-to-end live run (all layers, one revocation)
 date: 2026-10-23
 type: live test record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md
-branch: feat/sprint20-m1-phase2 (code at 4f4f00a; schema 041 applied to the lab DB)
+branch: feat/sprint20-m1-phase2 (code at 14c4243; schema 041 applied to the lab DB)
 status: PASS for revocation enforcement on every layer; the open observations are listed below
 ---
 
@@ -21,7 +21,7 @@ status: PASS for revocation enforcement on every layer; the open observations ar
 
 | Component | Where | Build |
 |---|---|---|
-| controller | this PC (`k2-controller`) | `4f4f00a` |
+| controller | this PC (`k2-controller`) | `14c4243` |
 | relay | manojinkyank (installed, systemd) | Phase D `51d35a2a` |
 | client | this PC (installed daemon, logged in) | Phase C build; the **tunnel was down at the start** (no `zecurity0`), so it was brought up with `zecurity-client up` |
 | `e2e-d` (the connector revoked) | manojinkyank .49, user-level | HEAD `e174ee78` |

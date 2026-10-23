@@ -2909,7 +2909,7 @@ serves on `127.0.0.1:9102`.
 - **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
 - Committed locally, not pushed.
 
-## 2026-10-22 — B2 findings full live retest (final build 40e25f3): 6/6 PASS
+## 2026-10-22 — B2 findings full live retest (final build 0c72900): 6/6 PASS
 
 - **Preflight:** no component changed since its fix commit; HEAD builds were hash-compared with deployed binaries. The connector differed (its build reads `.env`/env), so it was redeployed from the HEAD build on luffy and locally.
 - **Results:**
@@ -2924,7 +2924,7 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase D (relay enforcement): DONE
 
-- **Code** (`ba000f2`, `fba1a93`, `c7d49b7`):
+- **Code** (`9492167`, `a3a42da`, `45f010f`):
   - relay heartbeat proto fields 8/3;
   - the controller answers which registered connectors are revoked (Phase C rule, cross-workspace, both heartbeat paths, empty on DB error);
   - the relay keeps a sticky revoked set, closes listed registrations, and refuses Register (pre-check + post-insert re-check; the ack is delivered before close).
@@ -2934,7 +2934,7 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase E (shield pruning): DONE
 
-- **Code** (`4a74ec8`):
+- **Code** (`2f05bc5`):
   - `PeerConnectorList.revoked_connector_ids = 2`;
   - the connector fills it from its ACL, drops revoked peers, and sends it for revoked ids alone;
   - the shield prunes at once from any connector's list, never re-adds while running, keeps the set in memory only (it survives renewal), and dials none if all peers are revoked (`state.json` stays loadable).
@@ -2945,21 +2945,21 @@ serves on `127.0.0.1:9102`.
 
 ## 2026-10-23 — Connector revocation Phase F: check + fixes (A option a, B)
 
-- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`c9c4854`).
-- **Live check** (`2b59e02`):
+- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`1b853da`).
+- **Live check** (`e4244c0`):
   - A: deleting a connector cascaded its shield rows without tombstones; the orphan was accepted by a peer connector, bounded by its 7 d certificate.
   - B: a shield never failed over away from a revoked connector (same "not serving" refusal, so it waited).
-- **Fixes** (`f1518d6`, `4f4f00a`):
+- **Fixes** (`3492967`, `14c4243`):
   - `deleteConnector` is refused while an active/disconnected shield is attached (one statement; the count is in the error);
   - a terminal connector refuses/closes shields with "connector is revoked or unknown to the controller";
   - the shield rotates that head to the tail and retries after 2 s.
 - **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
 - **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
-- Controller now runs `4f4f00a` from `~/.cache/zecurity-f`. Committed locally, not pushed.
+- Controller now runs `14c4243` from `~/.cache/zecurity-f`. Committed locally, not pushed.
 
 ## 2026-10-23 — Connector revocation Phase F schema: migration 041 (tombstone + no reuse)
 
-- **`041_connector_revocations.sql`** (`2950acc` **[schema: reset DB]**, tests `0bff44f`):
+- **`041_connector_revocations.sql`** (`2fb97fe` **[schema: reset DB]**, tests `8333e39`):
   - a `connector_revocations` tombstone written by a trigger on every revocation;
   - no FK, so it outlives a deleted row;
   - a trigger refuses reuse of a revoked id (insert or update of id);
