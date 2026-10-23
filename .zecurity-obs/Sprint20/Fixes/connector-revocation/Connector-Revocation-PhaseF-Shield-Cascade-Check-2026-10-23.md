@@ -56,7 +56,7 @@ Tokens went through 0600 files or the hidden prompt and were shredded.
 
 ## Finding B — a shield never fails over away from a revoked connector
 
-- The connector refuses the shield with `Unavailable("connector is not authorized to serve")` in **every** non-serving state (`connector/src/agent_server.rs:902`, and the close path at `:981`).
+- The connector refuses the shield with `Unavailable("connector is not authorized to serve")` in **every** non-serving state (`connector/src/agent_server.rs:902`, and the close path at `:989`).
 - That includes the **terminal** `Revoked` and `UnknownIdentity` states.
 - The shield treats that message as "the connector will be back soon" (`CONNECTOR_NOT_SERVING_MESSAGES`, B2 live finding 1). It retries the same head every 2 s and resets the backoff. `build_client` always picks the first connector that completes TLS, so it **never fails over** while the revoked connector's process runs.
 - Verified live on restart (step 3). For a shield attached when the revocation happens, the stream ends with the same message, so the same loop follows. That is from reading the code, not run live.
