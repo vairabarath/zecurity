@@ -4,7 +4,7 @@ date: 2026-10-23
 type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§12, O14)
 branch: feat/sprint20-m1-phase2
-commits: 2fb97fe (041 + tests) [schema: reset DB], 8333e39 (tests tightened after the mutation run)
+commits: 3995af6 (041 + tests) [schema: reset DB], b2ad199 (tests tightened after the mutation run)
 status: DONE — DB tests + 8/8 mutants + live on the lab DB. Committed locally, NOT pushed.
 approval: user "ok now do the update in schema" (2026-10-23); live check option 2, "apply only 041 to the lab DB by hand" (user choice)
 ---
@@ -34,7 +34,7 @@ No Go code changed. Phases C and D keep using the certificate history, which is 
 | `TestConnectorRevocations_RevokedAtAloneCounts` | `revoked_at` alone tombstones (checked before `status` changes); a second change adds none |
 | `TestConnectorRevocations_Backfill` | 041 applied to a database seeded under 040: a revoked row and a revoked-then-deleted connector are tombstoned; an active one and a deleted never-revoked one are not |
 
-**Mutation checks: 8/8 killed** (S1 tombstone write, S2 reuse guard, S3 trigger column `revoked_at`, S4 `revoked_at` predicate, S5/S6/S7 backfill parts, S8 update-of-id guard). The first run had S3, S4 and S7 surviving because of test gaps; the tests were tightened (`8333e39`) and all are now killed.
+**Mutation checks: 8/8 killed** (S1 tombstone write, S2 reuse guard, S3 trigger column `revoked_at`, S4 `revoked_at` predicate, S5/S6/S7 backfill parts, S8 update-of-id guard). The first run had S3, S4 and S7 surviving because of test gaps; the tests were tightened (`b2ad199`) and all are now killed.
 
 ## Live (lab DB, 2026-10-23)
 
@@ -44,7 +44,7 @@ No Go code changed. Phases C and D keep using the certificate history, which is 
   - 4 rows: `pc-hostile`, `pd-hostile`, `pe-hostile`, `pm-conn`.
   - 4 deleted: `pf-c1`, `pf-c2`, `pf-c3`, `9ce7912b`.
   - Each `revoked_at` matches its original revocation.
-- **Through the running controller (`14c4243`):**
+- **Through the running controller (`4994638`):**
   - enrolled `pf-c4` (`0b69e532-…`, HEAD connector, user-level on this PC);
   - 09:48:18 `revokeConnector` → tombstone written at 09:48:18, and the connector got `ConnectorRevoked` as before;
   - `deleteConnector` → row gone, tombstone and revoked certificate kept;

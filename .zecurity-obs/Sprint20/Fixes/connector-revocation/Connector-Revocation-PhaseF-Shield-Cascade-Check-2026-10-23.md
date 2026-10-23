@@ -4,18 +4,18 @@ date: 2026-10-23
 type: live check + findings (no code change)
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, §12, O14)
 branch: feat/sprint20-m1-phase2
-status: BOTH FINDINGS FIXED 2026-10-23 (A option a + B; commits 3492967, 14c4243; record: Connector-Revocation-PhaseF-Fixes-Implementation-2026-10-23.md)
+status: BOTH FINDINGS FIXED 2026-10-23 (A option a + B; commits faa957f, 4994638; record: Connector-Revocation-PhaseF-Fixes-Implementation-2026-10-23.md)
 ---
 
 # Phase F check — what deleting a revoked connector does to its shields
 
 ## Background
 
-The user chose "2a": forbid deleting a revoked connector while its certificates are valid. On inspection, the CRL part was **already done** by `52c16fa` (migration 039). `connector_certificates` has no foreign key, outlives the row, and feeds the CRL, so the design doc §12 and O14 were corrected (`1b853da`). The same inspection showed that `DeleteConnector` cascades to `shields` (`003_shield_schema.sql`: `shields.connector_id … ON DELETE CASCADE`). This check verifies that live.
+The user chose "2a": forbid deleting a revoked connector while its certificates are valid. On inspection, the CRL part was **already done** by `52c16fa` (migration 039). `connector_certificates` has no foreign key, outlives the row, and feeds the CRL, so the design doc §12 and O14 were corrected (`d9d4bb6`). The same inspection showed that `DeleteConnector` cascades to `shields` (`003_shield_schema.sql`: `shields.connector_id … ON DELETE CASCADE`). This check verifies that live.
 
 ## Setup
 
-- controller `a3a42da` (`k2-controller`);
+- controller `1005c12` (`k2-controller`);
 - new network `pf-net` (`218a40ea-…`) with resource `pf-res` (192.168.1.164:18098, nothing listening) in an empty group `pf-group`;
 - `pf-c1` (`856e95b6-…`): HEAD connector `d3a26e8f`, user-level on this PC;
 - `pf-shield` (`038e8e87-…`): HEAD shield `5ba9d7d4`, user-level on this PC, attached to `pf-c1`;

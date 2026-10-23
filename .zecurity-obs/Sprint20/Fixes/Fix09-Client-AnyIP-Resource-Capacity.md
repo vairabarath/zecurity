@@ -93,7 +93,7 @@ H1's design (Fix 05 investigation, Q8/H1) was a rule for *what to do when capaci
 ## Live reproduction and verification (2026-10-22)
 
 **Setup:**
-- controller `071c0de`;
+- controller `26e7779`;
 - connector **`s3-luffy`**, a user-level process on luffy (192.168.1.40), no sudo. It was started from luffy's Orca terminal with a one-shot launcher served from this PC; the token-bearing launcher was deleted afterwards. It runs on a different host from the client, so the client's capture rules don't catch the connector's own connections.
 - resources `s3-r1` `192.168.1.75:22`, `s3-r2` `.41:22`, `s3-r3` `.49:22`, `s3-r4` `.40:22` (unprotected, k2-net), assigned to `g9-users`;
 - the ACL also still holds `pm-udaya-web` (.37) and `g9-nika-web` (.39), both stale since the hosts' IPs changed.

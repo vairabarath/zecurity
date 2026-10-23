@@ -65,7 +65,7 @@ In B2 (2026-10-21), "Protect this resource" stayed disabled for a resource creat
 
 ## Live verification (2026-10-22)
 
-- **Setup:** controller `071c0de`; `npm run dev` (vite, :5173); local test login in Orca's built-in browser.
+- **Setup:** controller `26e7779`; `npm run dev` (vite, :5173); local test login in Orca's built-in browser.
 - **Repro:**
   1. resource `s3-ui` (k2-net, `192.168.1.164:18080`) created while shield `s3-shield` (lan_ip `192.168.1.164`) was **disconnected** → `shield: null`;
   2. then `s3-shield` started → **active**.

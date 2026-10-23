@@ -37,10 +37,10 @@ So the lag was the **shield** re-attaching to the connector:
 
 The client's direct-path cooldown (KI-5) wasn't involved. The client's QUIC connection to the connector stayed up.
 
-## Live reproduction (2026-10-22, baseline shield = `3f0d604`)
+## Live reproduction (2026-10-22, baseline shield = `ef7e498`)
 
 **Setup:**
-- controller `071c0de` (`controller-head`);
+- controller `26e7779` (`controller-head`);
 - connector `s3-relaylist` (Fix 07 build, connector code unchanged by this fix);
 - disposable **user-level shield** `s3-shield` on this PC, enrolled into `k2-net` (`generateShieldToken` + `POST /api/shields/{id}/token`), state in `~/.cache/zecurity-s3/shield/`, runner `run-shield.sh`. The shield needs no root until it applies nftables rules, so its Control stream runs unprivileged.
 - **Outage** (`outage.sh`, as in L-3): sha-check the running controller, stop it for 90 s, restart it. `outage-report.sh` prints the connector authz states and the shield's stream events.
@@ -109,4 +109,4 @@ Times are UTC.
   - `~/.cache/zecurity-s3/run-shield.sh ~/.cache/zecurity-s3/shield-fix`
 
   Revoke both in the admin UI when no longer needed.
-- Controller `controller-head` (`071c0de`) is running.
+- Controller `controller-head` (`26e7779`) is running.

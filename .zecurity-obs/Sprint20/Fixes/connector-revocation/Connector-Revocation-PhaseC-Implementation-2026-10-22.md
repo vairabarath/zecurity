@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§8, D19)
 acceptance: Connector-Revocation-PhaseC-Acceptance-2026-10-22.md
 branch: feat/sprint20-m1-phase2
-commits: 84d3a76 (implementation + tests), 51acaf7 (security-review fixes)
+commits: af30176 (implementation + tests), 5c55bc9 (security-review fixes)
 status: DONE — unit + mutation + live AC-L PASS. Committed locally, NOT pushed.
 ---
 
@@ -41,7 +41,7 @@ status: DONE — unit + mutation + live AC-L PASS. Committed locally, NOT pushed
 
 **Security review (automated) during the run:**
 - Two findings were read off temporary mutants (C3, C11) and don't apply to the committed code.
-- Two valid points were fixed in `51acaf7`:
+- Two valid points were fixed in `5c55bc9`:
   - the stale placeholder now keeps the revoked list;
   - the unguarded relay and the prefix pool are now test-only.
 

@@ -5,7 +5,7 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§10, D6, D21)
 acceptance: Connector-Revocation-PhaseE-Acceptance-2026-10-23.md
 branch: feat/sprint20-m1-phase2
-commits: 2f05bc5 (implementation + tests)
+commits: c9d9cda (implementation + tests)
 status: DONE — unit + 11/11 mutants + live AE-L PASS. Committed locally, NOT pushed.
 ---
 
@@ -57,7 +57,7 @@ status: DONE — unit + 11/11 mutants + live AE-L PASS. Committed locally, NOT p
 ## Live check AE-L (2026-10-23): PASS
 
 **Setup** (a separate topology, so other sessions' lab state isn't touched):
-- controller `a3a42da`;
+- controller `1005c12`;
 - new network `pe-net` (`c57b54d2-…`) with resource `pe-res` (192.168.1.164:18099/tcp, nothing listening) in a new **empty** group `pe-group` (`989a8b40-…`), so no user's client captures it; the resource only puts `pe-net` into the ACL;
 - **honest connector** `pe-honest` (`5efef87a-…`): HEAD build `d3a26e8f…`, run as the normal user on this PC (`~/.cache/zecurity-e`);
 - **shield** `pe-shield` (`233e7886-…`): HEAD build `5ba9d7d4…`, run as the normal user on this PC, enrolled while `pe-honest` was the only connector, so it attached to `pe-honest`;
