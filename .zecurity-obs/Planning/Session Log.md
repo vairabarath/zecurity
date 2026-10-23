@@ -2998,3 +2998,15 @@ serves on `127.0.0.1:9102`.
 - **Sprint 20:** `path.md` Finding 34 marked closed (end-to-end live PASS); the Phase V run sheet follow-up row updated.
 - **Fix09 and phase records:** "not pushed" statuses replaced by the 2026-10-23 push.
 - **PR:** opened from `feat/sprint20-m1-phase2` to `fixed-pendings`.
+
+## 2026-10-23 — Connector revocation live check on installed systemd services + root shield: PASS, 4 findings
+
+- **Setup:** sd-a (inkyank) and sd-b (manojinkyank) installed with `connector-local-install.sh`; sd-shield (udaya) with `shield-local-install.sh` (root, nftables, protecting `sd-web`).
+- **Results:** revoke sd-a → shield refusal ~0 ms, sd-a fail-closed 16 ms, long-lived HTTP/1.1 flow cut 437 ms, shield on sd-b 2.35 s, client back 2.5–2.8 s, relay drop 22.5 s. Delete refused, then allowed; tombstone kept; reuse refused. **Direct LAN access blocked throughout**, including both systemd restarts. No restart loops.
+- **Findings:**
+  - A = Sprint 20 Finding 7 still open: the installer's update timer replaces local builds with GitHub releases;
+  - B **new**: the client resets concurrent connections to the same resource (one listening socket per ip:port; 19/24 parallel failed vs 0/24 sequential). It explains the "isolated refusals";
+  - C: a terminal connector keeps retrying the relay;
+  - D: the shield's shutdown goodbye uses the startup peer list.
+- The 12.9 s shield failover was not reproduced (2.35 s).
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23.md`. Committed locally, not pushed.
