@@ -541,6 +541,14 @@ mod tests {
             state.is_revoked(&canonical()),
             "sticky: an empty answer unblocks nothing"
         );
+        state.apply_revoked(&[crate::state::canonical_connector_spiffe(
+            "workspace-a.zecurity.in",
+            "9b2d5cae-5820-4702-adf4-231680852b11",
+        )]);
+        assert!(
+            state.is_revoked(&canonical()),
+            "sticky: a later answer without it unblocks nothing"
+        );
         let (client, server) = crate::test_support::quic_pair().await;
         tokio::spawn(handle_connection(
             server,
