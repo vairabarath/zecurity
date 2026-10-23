@@ -2976,3 +2976,17 @@ serves on `127.0.0.1:9102`.
   - Both deleted → tombstones kept; reuse of both ids refused.
   - The relay refused re-registration with "connector is revoked" (Phase D, first live sighting).
   - Deleted connectors get the `unknown` marker, not `revoked` (unchanged controller behaviour; noted).
+
+## 2026-10-23 — Connector revocation end-to-end live run: PASS
+
+- **Setup:** one revocation of `e2e-d` (manojinkyank, carrying 100 % of the client traffic and holding the shield); peer `e2e-e` on udaya; resource on udaya :18090; installed client on this PC; manojinkyank relay.
+- **Results:**
+  - `e2e-d` failed closed in 7 ms;
+  - all traffic moved to `e2e-e` within 1.2 s, with none through the revoked connector afterwards;
+  - the delete was refused while the shield was attached;
+  - the shield moved to `e2e-e`;
+  - the relay dropped it in 26 s;
+  - the delete then succeeded with the tombstone kept, and reuse was refused.
+- **Earlier runs:** run 1 was invalid (client tunnel down, fixed with `zecurity-client up` and left up); run 2 had a topology loop (peer on the client's host).
+- **Open:** one shield failover took 12.9 s (connect to .49:9091 stalled ~11 s, unexplained); isolated single refusals around client ACL hot-applies.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23.md`. Not pushed.
