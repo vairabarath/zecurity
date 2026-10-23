@@ -473,3 +473,32 @@ impl AttackerPki {
         sign_csr(csr_der, relay_id, &self.root, &self.root_key)
     }
 }
+
+/// Connector-revocation Phase D tests: a plain loopback QUIC connection pair
+/// (self-signed server certificate trusted by the client). Returns
+/// (client side, server side). The endpoints are leaked so the connections
+/// outlive the call.
+pub async fn quic_pair() -> (quinn::Connection, quinn::Connection) {
+    install_crypto_provider();
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+    let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der()),
+    );
+    let server_cfg =
+        quinn::ServerConfig::with_single_cert(vec![cert_der.clone()], key_der).unwrap();
+    let server = quinn::Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert_der).unwrap();
+    let client_cfg =
+        quinn::ClientConfig::with_root_certificates(std::sync::Arc::new(roots)).unwrap();
+    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+    client.set_default_client_config(client_cfg);
+    let addr = server.local_addr().unwrap();
+    let connecting = client.connect(addr, "localhost").unwrap();
+    let server_side = server.accept().await.unwrap().await.unwrap();
+    let client_side = connecting.await.unwrap();
+    std::mem::forget(server);
+    std::mem::forget(client);
+    (client_side, server_side)
+}

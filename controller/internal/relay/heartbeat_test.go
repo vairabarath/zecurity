@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"math/big"
 	"net"
 	"net/url"
@@ -34,6 +35,15 @@ type fakeHeartbeatStore struct {
 	maxConnections        uint32
 	err                   error
 	connectorsByWorkspace map[string][]string // returned (as ws→connIDs) by ListConnectorsForRelay
+	// Phase D: answer and calls of RevokedConnectorSPIFFEIDs.
+	revokedAnswer []string
+	revokedErr    error
+	revokedAsked  [][]string
+}
+
+func (s *fakeHeartbeatStore) RevokedConnectorSPIFFEIDs(_ context.Context, ids []string) ([]string, error) {
+	s.revokedAsked = append(s.revokedAsked, ids)
+	return s.revokedAnswer, s.revokedErr
 }
 
 type fakeNotifier struct {
@@ -382,5 +392,87 @@ func TestHeartbeat_FirstHeartbeatAfterEvictionPersists(t *testing.T) {
 	}
 	if poolChanges != 2 {
 		t.Fatalf("first beat after eviction did not re-broadcast the relay list: poolChanges=%d, want 2", poolChanges)
+	}
+}
+
+// ── Connector-revocation Phase D ──────────────────────────────────────────
+
+const (
+	phaseDRevoked = "spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111"
+	phaseDActive  = "spiffe://ws-a.zecurity.in/connector/22222222-2222-4222-8222-222222222222"
+)
+
+// AD-2: both the throttled (Valkey) and the full heartbeat path answer the
+// revoked subset of the relay's registered connectors.
+func TestHeartbeat_ReturnsRevokedConnectorsOnBothPaths(t *testing.T) {
+	rdb := newProvisionTestValkey(t)
+	store := &countingHeartbeatStore{fakeHeartbeatStore: &fakeHeartbeatStore{revokedAnswer: []string{phaseDRevoked}}}
+	service := NewService(nil, store, time.Hour).WithHeartbeatCache(rdb, 5*time.Minute)
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	req := &relaypb.HeartbeatRequest{Version: "1.0.0", Hostname: "relay-a",
+		RegisteredConnectorSpiffeIds: []string{phaseDRevoked, phaseDActive}}
+
+	full, err := service.Heartbeat(hbCtx, req) // first beat → full path (Postgres write)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	throttled, err := service.Heartbeat(hbCtx, req) // unchanged → throttled early return
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if store.recordCalls != 1 {
+		t.Fatalf("expected one full and one throttled beat, recordCalls=%d", store.recordCalls)
+	}
+	for name, resp := range map[string]*relaypb.HeartbeatResponse{"full": full, "throttled": throttled} {
+		if len(resp.RevokedConnectorSpiffeIds) != 1 || resp.RevokedConnectorSpiffeIds[0] != phaseDRevoked {
+			t.Errorf("%s path: revoked = %v, want [%s]", name, resp.RevokedConnectorSpiffeIds, phaseDRevoked)
+		}
+	}
+	if len(store.revokedAsked) != 2 || len(store.revokedAsked[0]) != 2 {
+		t.Errorf("store asked %v, want the registered ids on each beat", store.revokedAsked)
+	}
+}
+
+// AD-2: a lookup failure answers an empty list (the relay keeps its sticky
+// set, D20) instead of failing the heartbeat; nothing registered → no lookup.
+func TestHeartbeat_RevokedLookupFailureAnswersEmpty(t *testing.T) {
+	store := &fakeHeartbeatStore{revokedErr: errors.New("db down")}
+	service := NewService(nil, store, time.Hour)
+	hbCtx := relayHeartbeatContext(t, appmeta.SPIFFERoleRelay, testRelayID, testRelayID, time.Now().UTC().Add(time.Hour))
+	resp, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0",
+		RegisteredConnectorSpiffeIds: []string{phaseDRevoked}})
+	if err != nil {
+		t.Fatalf("a revoked-lookup failure must not fail the heartbeat: %v", err)
+	}
+	if len(resp.RevokedConnectorSpiffeIds) != 0 {
+		t.Fatalf("revoked = %v, want empty on lookup failure", resp.RevokedConnectorSpiffeIds)
+	}
+	store.revokedAsked = nil
+	if _, err := service.Heartbeat(hbCtx, &relaypb.HeartbeatRequest{Version: "1.0.0"}); err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if len(store.revokedAsked) != 0 {
+		t.Fatalf("no registered connectors must not query the store")
+	}
+}
+
+func TestParseConnectorSPIFFEID(t *testing.T) {
+	for raw, want := range map[string]string{
+		phaseDRevoked: "ws-a.zecurity.in|11111111-1111-4111-8111-111111111111",
+		"spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-11111111111A":   "ws-a.zecurity.in|11111111-1111-4111-8111-11111111111a",
+		"spiffe://ws-a.zecurity.in/relay/11111111-1111-4111-8111-111111111111":       "",
+		"spiffe://ws-a.zecurity.in/connector/not-a-uuid":                             "",
+		"spiffe:///connector/11111111-1111-4111-8111-111111111111":                   "",
+		"https://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111":    "",
+		"spiffe://ws-a.zecurity.in/connector/11111111-1111-4111-8111-111111111111/x": "",
+	} {
+		td, id, ok := parseConnectorSPIFFEID(raw)
+		got := ""
+		if ok {
+			got = td + "|" + id
+		}
+		if got != want {
+			t.Errorf("parse %q = %q, want %q", raw, got, want)
+		}
 	}
 }

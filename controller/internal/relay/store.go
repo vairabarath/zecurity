@@ -8,8 +8,10 @@ import (
 	"log"
 	"net"
 	"sort"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	connectorpb "github.com/yourorg/ztna/controller/gen/go/proto/connector/v1"
@@ -491,6 +493,69 @@ func (s *Store) ListWorkspacesForRelay(ctx context.Context, relayID string) ([]s
 // (ADR-017): a relay online/metadata/eviction event affects only the connectors
 // on that relay, so the caller notifies exactly those via NotifyTopologyChange
 // rather than recompiling the whole workspace ACL.
+// RevokedConnectorSPIFFEIDs returns which of `spiffeIDs` (connector SPIFFE
+// ids, any workspace) belong to a revoked connector identity — row revoked,
+// or revoked then deleted — while any of its certificates is still valid
+// (connector-revocation Phase D; the Phase C rule, design D19). Malformed
+// ids are ignored. Results are canonical `appmeta.ConnectorSPIFFEID` strings.
+func (s *Store) RevokedConnectorSPIFFEIDs(ctx context.Context, spiffeIDs []string) ([]string, error) {
+	var tds, ids []string
+	for _, raw := range spiffeIDs {
+		if td, id, ok := parseConnectorSPIFFEID(raw); ok {
+			tds = append(tds, td)
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT r.td, r.cid::text
+		   FROM unnest($1::text[], $2::uuid[]) AS r(td, cid)
+		   JOIN workspaces w ON w.trust_domain = r.td
+		   JOIN connector_certificates cc ON cc.tenant_id = w.id AND cc.connector_id = r.cid
+		   LEFT JOIN connectors c ON c.id = cc.connector_id
+		  WHERE cc.not_after > NOW()
+		    AND (c.id IS NULL OR c.status = 'revoked' OR c.revoked_at IS NOT NULL)`,
+		tds, ids)
+	if err != nil {
+		return nil, fmt.Errorf("revoked connector spiffe ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var td, id string
+		if err := rows.Scan(&td, &id); err != nil {
+			return nil, fmt.Errorf("scan revoked connector: %w", err)
+		}
+		out = append(out, appmeta.ConnectorSPIFFEID(td, id))
+	}
+	sort.Strings(out)
+	return out, rows.Err()
+}
+
+// parseConnectorSPIFFEID splits spiffe://<td>/connector/<uuid> into its
+// trust domain and canonical (lower-case) connector id.
+func parseConnectorSPIFFEID(raw string) (trustDomain, connectorID string, ok bool) {
+	const scheme = "spiffe://"
+	if !strings.HasPrefix(raw, scheme) {
+		return "", "", false
+	}
+	td, path, found := strings.Cut(strings.TrimPrefix(raw, scheme), "/")
+	if !found || td == "" {
+		return "", "", false
+	}
+	role, id, found := strings.Cut(path, "/")
+	if !found || role != appmeta.SPIFFERoleConnector || strings.Contains(id, "/") {
+		return "", "", false
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return "", "", false
+	}
+	return td, u.String(), true
+}
+
 func (s *Store) ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT c.tenant_id::text, c.id::text

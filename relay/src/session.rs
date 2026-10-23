@@ -124,12 +124,26 @@ pub async fn handle_connection(
             spiffe_id,
         } => {
             validate_register(&identity, &connector_id, &spiffe_id)?;
+            // Connector-revocation Phase D: a revoked identity never registers.
+            let canonical =
+                crate::state::canonical_connector_spiffe(&identity.trust_domain, &connector_id);
+            if state.is_revoked(&canonical) {
+                refuse_revoked(&connection, &mut send).await;
+                bail!("revoked connector refused: {canonical}");
+            }
             let registration_id = state.insert_connector(
                 connector_id.clone(),
                 connection.clone(),
                 identity.uri.clone(),
                 identity.trust_domain.clone(),
             );
+            // Race re-check: a heartbeat may have revoked it between the check
+            // and the insert (its sweep may have missed this entry).
+            if state.is_revoked(&canonical) {
+                state.remove_connector(&connector_id, registration_id);
+                refuse_revoked(&connection, &mut send).await;
+                bail!("revoked connector refused after registration: {canonical}");
+            }
             write_ack(&mut send, true, None).await?;
 
             info!(
@@ -292,6 +306,19 @@ async fn read_message_inner<T: for<'a> serde::Deserialize<'a>>(recv: &mut RecvSt
     decode_message(&body)
 }
 
+/// Sends the refusal ack and lets it reach the peer (bounded wait) before
+/// closing the connection; closing at once would discard the unsent ack.
+async fn refuse_revoked(connection: &Connection, send: &mut SendStream) {
+    if write_ack(send, false, Some("connector is revoked"))
+        .await
+        .is_ok()
+        && send.finish().is_ok()
+    {
+        let _ = tokio::time::timeout(Duration::from_secs(2), send.stopped()).await;
+    }
+    connection.close(0u32.into(), b"connector revoked");
+}
+
 async fn write_ack(send: &mut SendStream, ok: bool, error: Option<&str>) -> Result<()> {
     let encoded = encode_message(&RelayAck {
         ok,
@@ -426,5 +453,134 @@ mod tests {
         assert!(limits.lookup_permits.clone().try_acquire_owned().is_err());
         drop(permit);
         assert!(limits.lookup_permits.clone().try_acquire_owned().is_ok());
+    }
+
+    // ── Connector-revocation Phase D ───────────────────────────────────────
+
+    fn limits() -> SessionLimits {
+        SessionLimits::new(&RuntimeLimits {
+            max_connections: 8,
+            max_lookup_bridges: 8,
+            max_bidi_streams: 8,
+            idle_timeout: Duration::from_secs(30),
+            handshake_timeout: Duration::from_secs(5),
+            message_timeout: Duration::from_secs(5),
+            max_probe_rate: 10,
+            max_concurrent_probes: 4,
+            probe_timeout: Duration::from_secs(2),
+        })
+    }
+
+    /// Plays the connector: sends Register on a new stream, returns the ack.
+    async fn register(client: &quinn::Connection, identity: &ParsedSpiffe) -> RelayAck {
+        let (mut send, mut recv) = client.open_bi().await.unwrap();
+        let msg = encode_message(&HandshakeMsg::Register {
+            connector_id: identity.entity_id.clone(),
+            spiffe_id: identity.uri.clone(),
+        })
+        .unwrap();
+        send.write_all(&msg).await.unwrap();
+        read_message(&mut recv, Duration::from_secs(5))
+            .await
+            .unwrap()
+    }
+
+    fn canonical() -> String {
+        crate::state::canonical_connector_spiffe("workspace-a.zecurity.in", CONNECTOR_ID)
+    }
+
+    /// AD-4: a revoked identity is refused at Register (ok:false) and never
+    /// enters the registry.
+    #[tokio::test]
+    async fn revoked_connector_cannot_register() {
+        let (client, server) = crate::test_support::quic_pair().await;
+        let state = RelayState::new();
+        state.apply_revoked(&[canonical()]);
+        let task = tokio::spawn(handle_connection(
+            server,
+            connector_identity(),
+            state.clone(),
+            limits(),
+        ));
+        let ack = register(&client, &connector_identity()).await;
+        assert!(!ack.ok, "revoked connector must be refused");
+        assert_eq!(ack.error.as_deref(), Some("connector is revoked"));
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(state.connector_count(), 0);
+    }
+
+    /// AD-3: a registered connector reported revoked is dropped (its
+    /// connection closed, registry emptied); the set is sticky — an empty
+    /// later answer unblocks nothing, and it can't re-register.
+    #[tokio::test]
+    async fn registered_connector_is_dropped_when_revoked_and_stays_blocked() {
+        let (client, server) = crate::test_support::quic_pair().await;
+        let state = RelayState::new();
+        let task = tokio::spawn(handle_connection(
+            server,
+            connector_identity(),
+            state.clone(),
+            limits(),
+        ));
+        assert!(register(&client, &connector_identity()).await.ok);
+        assert_eq!(state.registered_connector_spiffe_ids(), vec![canonical()]);
+
+        assert_eq!(state.apply_revoked(&[canonical()]), 1);
+        tokio::time::timeout(Duration::from_secs(5), client.closed())
+            .await
+            .expect("connection closed");
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.connector_count(), 0, "removed from the registry");
+
+        assert_eq!(state.apply_revoked(&[]), 0);
+        assert!(
+            state.is_revoked(&canonical()),
+            "sticky: an empty answer unblocks nothing"
+        );
+        let (client, server) = crate::test_support::quic_pair().await;
+        tokio::spawn(handle_connection(
+            server,
+            connector_identity(),
+            state.clone(),
+            limits(),
+        ));
+        assert!(
+            !register(&client, &connector_identity()).await.ok,
+            "can't re-register"
+        );
+    }
+
+    /// AD-3: only the listed connector is dropped; the registered ids are
+    /// canonical (lower-case uuid) even for an upper-case certificate id.
+    #[tokio::test]
+    async fn only_listed_connectors_are_dropped_and_ids_are_canonical() {
+        let (c1, s1) = crate::test_support::quic_pair().await;
+        let (c2, s2) = crate::test_support::quic_pair().await;
+        let state = RelayState::new();
+        let other = "9b2d5cae-5820-4702-adf4-231680852b11";
+        state.insert_connector(
+            CONNECTOR_ID.to_uppercase(),
+            s1,
+            "u1".into(),
+            "workspace-a.zecurity.in".into(),
+        );
+        state.insert_connector(
+            other.into(),
+            s2,
+            "u2".into(),
+            "workspace-b.zecurity.in".into(),
+        );
+        let ids = state.registered_connector_spiffe_ids();
+        assert!(ids.contains(&canonical()), "{ids:?}");
+        assert_eq!(state.apply_revoked(&[canonical()]), 1);
+        tokio::time::timeout(Duration::from_secs(5), c1.closed())
+            .await
+            .expect("listed closed");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(c2.close_reason().is_none(), "unlisted connector untouched");
     }
 }
