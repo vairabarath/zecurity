@@ -2921,3 +2921,13 @@ serves on `127.0.0.1:9102`.
   - F3: relay stopped (sudo by the user) → connector empty-list backoff → relay started → registered 36 ms after the push, same pid.
 - **Not covered:** a client flow through a root shield end to end (lab root shields are tied to revoked/disconnected connectors).
 - Report: `Sprint20/Fixes/B2-Findings-Retest-2026-10-22.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase D (relay enforcement): DONE
+
+- **Code** (`a2af01e`, `56e0496`, `80773f7`):
+  - relay heartbeat proto fields 8/3;
+  - the controller answers which registered connectors are revoked (Phase C rule, cross-workspace, both heartbeat paths, empty on DB error);
+  - the relay keeps a sticky revoked set, closes listed registrations, and refuses Register (pre-check + post-insert re-check; the ack is delivered before close).
+- **Tests:** relay 110 → 116; controller full suite + DB integration; connector 237; client 265. Mutants 14/14 killed.
+- **Live AD-L:** Phase A (revocation-ignoring) connector `pd-hostile` on udaya, registered with the upgraded manojinkyank relay (binary installed by the user with sudo). Revoked 04:37:40.70 UTC; the relay closed and removed it at 04:38:06.56 (25.9 s). Reconnects were refused by the existing accept-time CRL check, so the Register refusal is defence in depth live. The connector kept running; stopped afterwards.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseD-Implementation-2026-10-23.md`. Committed locally, not pushed.

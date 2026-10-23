@@ -5,8 +5,8 @@ type: implementation record
 design: Connector-Revocation-Implementation-Design-2026-10-14.md (§9, D6, D20)
 acceptance: Connector-Revocation-PhaseD-Acceptance-2026-10-22.md
 branch: feat/sprint20-m1-phase2
-commits: a2af01e (implementation + tests), 56e0496 (sticky-set test strengthened for the mutation run)
-status: DONE — unit + 12/12 mutants + live AD-L PASS. Committed locally, NOT pushed.
+commits: a2af01e (implementation + tests), 56e0496 + 80773f7 (tests added for the mutation run)
+status: DONE — unit + 14/14 mutants + live AD-L PASS. Committed locally, NOT pushed.
 ---
 
 # Phase D — the relay refuses and drops revoked connectors
@@ -22,12 +22,13 @@ status: DONE — unit + 12/12 mutants + live AD-L PASS. Committed locally, NOT p
 | relay `session.rs` | `Register` of a listed identity is refused after the authenticated binding. A second check after the insert closes the race with a concurrent apply. `refuse_revoked` writes `RelayAck{ok:false,"connector is revoked"}`, finishes the stream and waits at most 2 s for delivery before closing; closing at once would discard the ack, which the first test run caught |
 | relay `heartbeat.rs` | The request carries `registered_connector_spiffe_ids()`; the response's list is applied, and a warning is logged when it is non-empty |
 | relay `test_support.rs` | `quic_pair()`: a loopback QUIC connection pair for the session and heartbeat tests |
+| relay `state.rs` (test only) | `#[cfg(test)] before_insert` hook at the start of `insert_connector`, so a test can apply a revocation inside the Register check→insert window |
 
 **Not done (design §9 "CRL path" bullet):** the periodic CRL re-check of registered connectors' serials. Established sessions are covered by the heartbeat answer instead. New connections are still refused at accept by the existing CRL check (see AD-L).
 
 ## Tests
 
-- Relay **110 → 114**.
+- Relay **110 → 116**.
 - Controller full `go test ./...` green with the DB env; the DB test ran (not skipped).
 - Connector 237, client 265.
 
@@ -36,10 +37,10 @@ status: DONE — unit + 12/12 mutants + live AD-L PASS. Committed locally, NOT p
 | AD-1 | `TestRevokedConnectorSPIFFEIDsIntegration`: two workspaces with active, revoked, revoked-in-the-other-workspace, all-certs-expired, revoked-then-deleted, malformed and wrong-workspace identities |
 | AD-2 | `TestHeartbeat_ReturnsRevokedConnectorsOnBothPaths` (Valkey-throttled and full), `TestHeartbeat_RevokedLookupFailureAnswersEmpty`, `TestParseConnectorSPIFFEID` |
 | AD-3 | `registered_connector_is_dropped_when_revoked_and_stays_blocked`: closed and removed; neither an empty answer nor an answer listing only another connector unblocks it; it can't re-register. `only_listed_connectors_are_dropped_and_ids_are_canonical` |
-| AD-4 | `revoked_connector_cannot_register` (`ok:false`, reason delivered, registry empty) |
-| AD-5 | `heartbeat_reports_registered_ids_and_applies_revoked_answer` (fake transport: the request carries both registered ids; the listed connector is closed and the other kept) |
+| AD-4 | `revoked_connector_cannot_register` (`ok:false`, reason delivered, registry empty, **insert never attempted**). `revocation_inside_the_register_window_is_caught_by_the_recheck` (the hook revokes after the pre-check; the sweep finds nothing; the re-check refuses) |
+| AD-5 | `heartbeat_reports_registered_ids_and_applies_revoked_answer` (fake transport: the request carries both registered ids; the listed connector is closed and the other kept). `heartbeat_error_keeps_the_revoked_set` (D20: a failing heartbeat does not unblock) |
 
-**Mutation checks: 12/12 killed** (one source edit per mutant, suite run, file restored):
+**Mutation checks: 14/14 killed** (one source edit per mutant, suite run, file restored):
 
 | # | Mutant | Killed by |
 |---|---|---|
@@ -55,8 +56,10 @@ status: DONE — unit + 12/12 mutants + live AD-L PASS. Committed locally, NOT p
 | D10 | heartbeat ignores the answer | AD-5 test |
 | D11 | request without registered ids | AD-5 test |
 | D12 | ids not lower-cased | `…ids_are_canonical` |
+| D13 | post-insert re-check removed (pre-check kept) | `revocation_inside_the_register_window…` |
+| D14 | pre-check removed (re-check kept): a revoked identity briefly enters the registry | `revoked_connector_cannot_register` (insert attempted) |
 
-**Limit, stated honestly:** removing only one of the two Register checks survives, because the other check refuses the same connector. The post-insert re-check exists for a race (apply between check and insert) that a unit test can't hit deterministically. Its correctness rests on review: the set is extended before the sweep, and the re-check reads the set after the insert.
+The first run (12 mutants) showed that removing only one of the two Register checks survived. Two tests were added (`80773f7`) so each check is now tested on its own (D13, D14).
 
 ## Live check AD-L (2026-10-23): PASS
 
