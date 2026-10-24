@@ -3017,3 +3017,19 @@ serves on `127.0.0.1:9102`.
   - F37 (client resets concurrent connections, High), F38–F41 (Low), F42 (unexplained 12.9 s failover, watch), F43 (5-B leftovers);
   - F7 updated (reproduced again, still open), F19 marked fixed (delete guard), F34 marked closed.
 - **Handoff:** `Sprint20/Handoff-Connector-Revocation-Next-2026-10-24.md` (lab state, PR #133, order: F7 → F37 → low items → Phase V remainder).
+
+## 2026-10-24 — Sprint 20 Fix 11 (F7: the update timer ignored AUTO_UPDATE_ENABLED): FIXED, live PASS
+
+- **Root cause:** four defects.
+  - `--check-update` never read the flag;
+  - the timers had `Requires=` on their service (so enabling a timer ran an update at once);
+  - the services hard-coded `Environment=AUTO_UPDATE_ENABLED=true`;
+  - all four installers enabled the timer unconditionally.
+- **Fix** (`905989a2`, approved design):
+  - fail-safe gate in the connector and the shield;
+  - `Requires=` and the env override removed;
+  - the release installers enable the timer only for true; the local installers always disable it.
+- **Tests:** connector 244, shield 44, `scripts/test-update-timer-gate.sh` 28/28; mutants 10/10.
+- **Live:** f11-a (inkyank) and f11-shield (udaya) installed with the fixed installers → timers disabled, 0 update runs, binaries unchanged after ≥ 2 min; a manual update-service run logged `auto-update is disabled; skipping update check`.
+- **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
+- Committed locally, not pushed.
