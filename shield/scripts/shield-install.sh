@@ -308,8 +308,25 @@ enable_service() {
     log "enabling and starting zecurity-shield.service"
     systemctl enable --now zecurity-shield.service
 
-    log "enabling zecurity-shield-update.timer"
-    systemctl enable --now zecurity-shield-update.timer
+    configure_update_timer
+}
+
+# Sprint 20 Fix 11: the update timer runs only when AUTO_UPDATE_ENABLED is
+# true (same values the binary accepts: true/1/yes). Otherwise it is disabled,
+# also on a re-install, so an install never replaces its own binary. The timer
+# has no Requires= on its service, so enabling it doesn't run an update now.
+configure_update_timer() {
+    case "${AUTO_UPDATE_ENABLED,,}" in
+        true|1|yes)
+            log "AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}: enabling zecurity-shield-update.timer (first check at its next scheduled time)"
+            systemctl enable --now zecurity-shield-update.timer
+            ;;
+        *)
+            log "AUTO_UPDATE_ENABLED=${AUTO_UPDATE_ENABLED}: auto-update off, zecurity-shield-update.timer disabled"
+            systemctl disable --now zecurity-shield-update.timer 2>/dev/null || true
+            systemctl stop zecurity-shield-update.service 2>/dev/null || true
+            ;;
+    esac
 }
 
 final_status() {

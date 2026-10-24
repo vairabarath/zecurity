@@ -116,18 +116,48 @@ pub async fn run_update_loop(cfg: &ConnectorConfig) -> Result<()> {
     }
 }
 
-/// Run a single update check and exit. Called when --check-update is passed.
+/// Run a single update check and exit. Called when --check-update is passed
+/// (the systemd oneshot update service).
 ///
-/// This is the entry point for the systemd oneshot update service.
-/// Returns Ok(()) after the check (whether or not an update was applied).
+/// Sprint 20 Fix 11: honours `AUTO_UPDATE_ENABLED` like the background loop.
+/// systemd fills it from the `.conf` via `EnvironmentFile=`. Off unless set to
+/// a true value, so an install never replaces its binary unless asked to.
 pub async fn run_single_check() -> Result<()> {
-    let client = reqwest::Client::builder()
-        .user_agent(format!("zecurity-connector/{}", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .context("build HTTP client")?;
+    run_single_check_gated(auto_update_enabled_from_env(), || async {
+        let client = reqwest::Client::builder()
+            .user_agent(format!("zecurity-connector/{}", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("build HTTP client")?;
+        check_and_update(&client).await
+    })
+    .await
+}
 
-    check_and_update(&client).await
+/// Runs `check` only when auto-update is enabled; otherwise does nothing.
+async fn run_single_check_gated<F, Fut>(enabled: bool, check: F) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    if !enabled {
+        info!("auto-update is disabled; skipping update check");
+        return Ok(());
+    }
+    check().await
+}
+
+/// `AUTO_UPDATE_ENABLED` from the environment, fail-safe: only `true`, `1` or
+/// `yes` (any case, surrounding spaces ignored) enable it.
+fn auto_update_enabled_from_env() -> bool {
+    parse_auto_update(std::env::var("AUTO_UPDATE_ENABLED").ok().as_deref())
+}
+
+fn parse_auto_update(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()).as_deref(),
+        Some("true" | "1" | "yes")
+    )
 }
 
 // ── Core update logic ───────────────────────────────────────────────────────
@@ -446,4 +476,52 @@ fi
     info!("restart + health-check process spawned (detached)");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod check_update_gate_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Fix 11 (AF11-1/2): only an explicit true value enables auto-update.
+    #[test]
+    fn auto_update_is_off_unless_explicitly_true() {
+        for off in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("0"),
+            Some("no"),
+            Some("off"),
+            Some("garbage"),
+            Some(" false "),
+        ] {
+            assert!(!parse_auto_update(off), "{off:?} must be off");
+        }
+        for on in ["true", "TRUE", " True ", "1", "yes", "YES"] {
+            assert!(parse_auto_update(Some(on)), "{on:?} must be on");
+        }
+    }
+
+    /// Fix 11: with auto-update off, `--check-update` runs no check at all
+    /// (no HTTP client, no request, no binary replacement).
+    #[tokio::test]
+    async fn check_update_does_nothing_when_disabled() {
+        let calls = AtomicUsize::new(0);
+        run_single_check_gated(false, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        run_single_check_gated(true, || async {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 }

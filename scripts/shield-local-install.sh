@@ -124,7 +124,12 @@ chown root:"$SERVICE_USER" "$CONFIG_FILE"
 log "reloading systemd"
 systemctl daemon-reload
 systemctl enable --now zecurity-shield.service
-systemctl enable --now zecurity-shield-update.timer || warn "failed to enable update timer"
+# Sprint 20 Fix 11: a local install runs a branch build and writes
+# AUTO_UPDATE_ENABLED=false, so the update timer stays disabled (enabling it
+# replaced this build with the latest release seconds after install).
+systemctl disable --now zecurity-shield-update.timer 2>/dev/null || true
+systemctl stop zecurity-shield-update.service 2>/dev/null || true
+log "auto-update off: zecurity-shield-update.timer disabled"
 
 log "install complete"
 systemctl status zecurity-shield.service --no-pager --lines=5 || true
