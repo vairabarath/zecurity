@@ -167,14 +167,14 @@ Sources: this tracker, `git log` on `fixed-pendings`, and the Sprint 21 test rep
 | 7 — revoked connector renews shield certificates | `cccd1e1` tests, `473d953` fix, `f7c3e3b` docs | #125 merged | Go tests; 31 mutations, all caught | not validated | stream interceptor does not check standing; shields renewed before revocation stay valid ≤ 7 days | verified locally |
 | 8 — re-issued enrollment token not cancelled | `e2eb952` tests, `a4a14c9` fix, `ee35d77` tests, `c803ea0` docs | #128 merged | 23 Go tests (16 failed pre-fix); 34 + 6 mutations, 6 unreachable under the lock | not validated | Valkey/Postgres not atomic (no usable stale token); ambiguous commit error needs re-creation | verified locally |
 | 9 — workspace CRL covered only the newest certificate | `34f088f` tests, `52c16fa` fix, `2d14935` tests, `6cd032e` docs | #129 merged | 18 Go tests (12 failed pre-fix); 21 mutations, all caught | not validated | serials overwritten before migration 039 unrecoverable (≤ 7-day window); no pruning | verified locally |
-| 10 — renewal accepted a different key | `cb95534` tests, `12614ae` fix, `c740fae` and `40b0e14` tests, tracker update | **not merged** | 14 Go tests (4 failed pre-fix, 5 schema-absent); 13 mutations, 2 shown equivalent | not validated | pre-040 shields must re-enroll; no key rotation | **pending review** |
+| 10 — renewal accepted a different key | `cb95534` tests, `12614ae` fix, `c740fae` and `40b0e14` tests, tracker update | #130 merged | 14 Go tests (4 failed pre-fix, 5 schema-absent); 13 mutations, 2 shown equivalent | not validated | pre-040 shields must re-enroll; no key rotation | verified locally |
 
 **The certificate system is not closed.** Still open:
 - **F34 (High, Sprint 20 live finding): a revoked connector keeps serving tunnels.** Connector-side enforcement is at Phase A (#127) and does not fail closed; Phase B1 is pending.
 - **Shield revocation is not enforced by the shield** (follow-up found during bug 6).
 - **F33:** live acceptance of the bug 3 shield revocation is pending.
 - **F32 (Low):** a revoked relay keeps reconnecting its heartbeat.
-- Live end-to-end validation of bugs 1–10.
+- Live end-to-end validation of bugs 1–10: runbook `docs/certificate-audit-live-runbook.md`.
 - The open items under "Found during the bug 1 work" and "Risks" below.
 
 ## Found during the bug 1 work (2026-10-16)
