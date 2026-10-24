@@ -11,7 +11,7 @@ use tokio::time::interval;
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::ShieldConfig;
 use crate::discovery;
@@ -541,6 +541,7 @@ fn apply_peer_connector_list(
     cfg: &ShieldConfig,
     list: crate::proto::PeerConnectorList,
 ) {
+    let carried_revoked = !list.revoked_connector_ids.is_empty();
     prune_revoked_connectors(state, cfg, list.revoked_connector_ids);
     let peers: Vec<crate::proto::PeerConnector> = list
         .peers
@@ -548,7 +549,11 @@ fn apply_peer_connector_list(
         .filter(|p| !state.revoked_connectors.contains(&p.connector_id))
         .collect();
     if peers.is_empty() {
-        warn!("ignored empty PeerConnectorList");
+        if empty_list_is_expected(carried_revoked) {
+            debug!("PeerConnectorList carried only revoked connectors");
+        } else {
+            warn!("ignored empty PeerConnectorList");
+        }
         return;
     }
     let mut new_list: Vec<ConnectorRef> = peers
@@ -589,6 +594,13 @@ fn apply_peer_connector_list(
     } else {
         info!(peers = peer_count, "peer connector list refreshed");
     }
+}
+
+/// Fix 13 (F41): a list holding only revoked ids is expected (a connector
+/// on a network without resources sends one every heartbeat while a revoked
+/// peer's certificate is valid); a list with nothing at all is not.
+fn empty_list_is_expected(carried_revoked: bool) -> bool {
+    carried_revoked
 }
 
 /// Phase E (D21): remember `revoked_ids` and drop them from the current list.
@@ -1320,6 +1332,19 @@ mod tests {
         assert_eq!(bye.shield_id, startup.shield_id);
         goodbye(&bye, &cfg).await; // returns without dialling (no cert files here)
     }
+    /// Fix 13 (F41, AF13-7): only a list with nothing at all is warned
+    /// about; one holding revoked ids still prunes them.
+    #[test]
+    fn an_empty_list_warns_only_when_it_carried_nothing() {
+        assert!(empty_list_is_expected(true));
+        assert!(!empty_list_is_expected(false));
+        let (mut state, cfg) = three_peer_state("f41");
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &[]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"], "ignored, list kept");
+    }
+
     /// AE-4: when every peer is revoked the Shield dials none; state.json
     /// keeps its last non-empty list so the Shield can still start.
     #[tokio::test]
