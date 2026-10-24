@@ -3045,7 +3045,7 @@ serves on `127.0.0.1:9102`.
 ## 2026-10-24 — Sprint 20 Fix 12 (F37: client reset concurrent connections): FIXED, live PASS
 
 - **Cause:** one smoltcp listening socket per resource, re-armed only after `iface.poll`, so further SYNs in the same poll got a RST.
-- **Fix** (`c01ae337`, design approved, D-1 = 16): a pool of 16 listening sockets per resource; every accepted one is promoted and refilled each poll; removal handles the whole pool.
+- **Fix** (`d654879`, design approved, D-1 = 16): a pool of 16 listening sockets per resource; every accepted one is promoted and refilled each poll; removal handles the whole pool.
 - **Tests:** client 268 (+3); mutants 6/6.
 - **Live** (installed client, resource on udaya .59:18091):
   - 3×8 parallel 4/24 → **24/24**;

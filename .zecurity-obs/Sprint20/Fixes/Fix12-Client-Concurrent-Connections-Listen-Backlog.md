@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 12 — the client must accept concurrent connections to the same resource (F37)
 date: 2026-10-24
 type: fix (investigation + design + acceptance list)
-status: FIXED and verified live (2026-10-24) — 3 new tests, 6/6 mutants, live burst test PASS. Commit c01ae337 (local).
+status: FIXED and verified live (2026-10-24) — 3 new tests, 6/6 mutants, live burst test PASS. Commit d654879 (local).
 owner: Sathiya (M1)
 finding: F37 (Sprint20/path.md → Post-Sprint Fixes), found in Connector-Revocation-Systemd-Live-2026-10-23.md (Finding B)
 ---
@@ -65,7 +65,7 @@ Each socket has 64 KiB receive + 64 KiB send buffers, allocated zero-filled (`ve
 
 **Decision D-1 (user, 2026-10-24):** `LISTEN_BACKLOG = 16`.
 
-## Implementation (`c01ae337`)
+## Implementation (`d654879`)
 
 - `client/src/net_stack.rs`:
   - `LISTEN_BACKLOG = 16`;
@@ -95,7 +95,7 @@ Each socket has 64 KiB receive + 64 KiB send buffers, allocated zero-filled (`ve
 **Setup:**
 - installed client on this PC, through the tunnel (every attempt logged as `new TCP connection`);
 - resource `f12-web` = udaya `192.168.1.59:18091` (`python3 -m http.server --protocol HTTP/1.1`), connector-routed;
-- baseline = the installed Phase C client `2485de8f`; Fix 12 = `d87fa33e` (built from `c01ae337` with `client/scripts/dev-build.sh --release`, installed by the user with sudo; backup `/usr/local/bin/zecurity-client.pre-fix12`).
+- baseline = the installed Phase C client `2485de8f`; Fix 12 = `d87fa33e` (built from `d654879` with `client/scripts/dev-build.sh --release`, installed by the user with sudo; backup `/usr/local/bin/zecurity-client.pre-fix12`).
 
 | Test | Baseline `2485de8f` | Fix 12 `d87fa33e` |
 |---|---|---|
