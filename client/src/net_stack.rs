@@ -39,6 +39,13 @@ const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
 const TUN_TX_QUEUE_CAP: usize = 1024;
 const FLOW_QUEUE_CAP: usize = 64;
+/// Sprint 20 Fix 12 (F37): listening sockets kept per resource `(ip, port)`.
+/// smoltcp handles every SYN that arrives in one `iface.poll`; each needs its
+/// own socket still in `Listen`, or it gets a RST. A pool of 16 lets that many
+/// new connections to one resource arrive in the same 5 ms tick (browsers open
+/// ~6 in parallel). Idle listeners' buffers are zero-filled allocations, so
+/// they cost address space rather than resident memory until used.
+const LISTEN_BACKLOG: usize = 16;
 const FLOW_WRITE_BUF_CAP: usize = 1024 * 1024;
 
 /// Fix 05-A back-stop: a relay socket that sits in a closing state
@@ -559,7 +566,8 @@ struct RelaySpawn {
 /// Shared by `run` and the unit tests so the tests exercise the production
 /// accept/lifecycle code against a real smoltcp interface.
 struct FlowTable {
-    listen_handles: HashMap<(Ipv4Addr, u16), SocketHandle>,
+    /// Fix 12: a pool of `LISTEN_BACKLOG` listening sockets per resource.
+    listen_handles: HashMap<(Ipv4Addr, u16), Vec<SocketHandle>>,
     active_relays: HashMap<SocketHandle, ActiveRelay>,
     stats: LifecycleStats,
     // Phase 5-C: next tag for a resource-removal close batch.
@@ -570,7 +578,7 @@ impl FlowTable {
     fn new(sockets: &mut SocketSet<'_>, resources: &[(Ipv4Addr, u16)]) -> Self {
         let mut listen_handles = HashMap::new();
         for (ip, port) in resources {
-            listen_handles.insert((*ip, *port), new_listen_socket(sockets, (*ip, *port)));
+            listen_handles.insert((*ip, *port), new_listen_pool(sockets, (*ip, *port)));
         }
         Self {
             listen_handles,
@@ -594,19 +602,21 @@ impl FlowTable {
         let tag = self.next_close_tag;
         self.next_close_tag += 1;
         for key in keys {
-            let Some(handle) = self.listen_handles.remove(key) else {
+            let Some(pool) = self.listen_handles.remove(key) else {
                 continue;
             };
-            let socket = sockets.get_mut::<tcp::Socket>(handle);
-            if socket.is_listening() {
-                sockets.remove(handle);
-            } else {
-                // A SYN already arrived on this listener: reset it and let the
-                // lifecycle reap it once the RST is out.
-                socket.abort();
-                let mut relay = ActiveRelay::fail_closed(now);
-                relay.close_tag = Some(tag);
-                self.active_relays.insert(handle, relay);
+            for handle in pool {
+                let socket = sockets.get_mut::<tcp::Socket>(handle);
+                if socket.is_listening() {
+                    sockets.remove(handle);
+                } else {
+                    // A SYN already arrived on this listener: reset it and let
+                    // the lifecycle reap it once the RST is out.
+                    socket.abort();
+                    let mut relay = ActiveRelay::fail_closed(now);
+                    relay.close_tag = Some(tag);
+                    self.active_relays.insert(handle, relay);
+                }
             }
         }
         for (handle, relay) in self.active_relays.iter_mut() {
@@ -677,7 +687,7 @@ impl FlowTable {
         for key in keys {
             if !self.listen_handles.contains_key(key) {
                 self.listen_handles
-                    .insert(*key, new_listen_socket(sockets, *key));
+                    .insert(*key, new_listen_pool(sockets, *key));
             }
         }
     }
@@ -694,17 +704,19 @@ impl FlowTable {
         // --- Promote listening sockets that have accepted a connection ---
         //
         // When smoltcp receives a SYN, the socket leaves Listen (is_active).
-        // We immediately replace it with a new listener so further
-        // connections to the same resource still work.
-        let listen_snapshot: Vec<_> = self.listen_handles.iter().map(|(k, v)| (*k, *v)).collect();
-        for ((ip, port), handle) in listen_snapshot {
-            if !sockets.get_mut::<tcp::Socket>(handle).is_active() {
-                continue;
+        // Fix 12: every pooled socket that took one is promoted and its slot
+        // refilled with a fresh listener, so the pool is full again before
+        // the next poll.
+        let mut accepted = Vec::new();
+        for (key, pool) in self.listen_handles.iter_mut() {
+            for slot in pool.iter_mut() {
+                if sockets.get_mut::<tcp::Socket>(*slot).is_active() {
+                    accepted.push((*key, *slot));
+                    *slot = new_listen_socket(sockets, *key);
+                }
             }
-            // Fresh listener for the next connection.
-            self.listen_handles
-                .insert((ip, port), new_listen_socket(sockets, (ip, port)));
-
+        }
+        for ((ip, port), handle) in accepted {
             let dest = ip.to_string();
             tracing::info!(dest = %dest, port, "new TCP connection");
 
@@ -947,8 +959,9 @@ pub async fn run(
 
     let mut sockets = SocketSet::new(vec![]);
 
-    // ONE listening TCP socket per resource, created BEFORE the loop and
-    // re-created each time a connection is accepted (see FlowTable).
+    // A pool of LISTEN_BACKLOG listening sockets per resource (Fix 12),
+    // created BEFORE the loop and refilled as connections are accepted
+    // (see FlowTable).
     let mut flows = FlowTable::new(&mut sockets, &resource_entries);
     let mut stats_last_logged: (usize, usize, LifecycleStats) = (0, 0, LifecycleStats::default());
     let mut stats_next_at = tokio::time::Instant::now() + LIFECYCLE_STATS_INTERVAL;
@@ -1070,6 +1083,13 @@ pub async fn run(
 
         tokio::time::sleep(poll_delay.min(Duration::from_millis(SMOL_TICK_MS))).await;
     }
+}
+
+/// Fix 12: `LISTEN_BACKLOG` listeners for one resource (see the constant).
+fn new_listen_pool(sockets: &mut SocketSet<'_>, key: (Ipv4Addr, u16)) -> Vec<SocketHandle> {
+    (0..LISTEN_BACKLOG)
+        .map(|_| new_listen_socket(sockets, key))
+        .collect()
 }
 
 /// A listener for exactly one resource `(ip, port)`. Bound to the IP too, not
@@ -2285,6 +2305,121 @@ mod tests {
         (h, spawn)
     }
 
+    // ---- Fix 12 (F37): a listen backlog per resource ----
+
+    fn res_key_default() -> (Ipv4Addr, u16) {
+        (Ipv4Addr::from(RES_IP), RES_PORT)
+    }
+
+    /// Listening sockets left in a resource's pool.
+    fn listening(lab: &Lab, key: (Ipv4Addr, u16)) -> usize {
+        lab.flows.listen_handles[&key]
+            .iter()
+            .filter(|h| lab.s_sockets.get::<tcp::Socket>(**h).is_listening())
+            .count()
+    }
+
+    /// AF12-1/2: `LISTEN_BACKLOG` connections whose SYNs arrive in the same
+    /// poll are all accepted (before Fix 12 only the first was; the rest got
+    /// a RST), the pool is refilled, and a second burst works too.
+    #[test]
+    fn a_burst_of_connections_in_one_poll_is_accepted_and_the_pool_refills() {
+        let mut lab = Lab::new(true);
+        let key = res_key_default();
+        for round in 0..2u16 {
+            let handles: Vec<_> = (0..LISTEN_BACKLOG as u16)
+                .map(|i| lab.connect(40_000 + round * 100 + i))
+                .collect();
+            lab.step(10); // every SYN of the burst reaches the stack in one poll
+            lab.pump(5);
+            for h in &handles {
+                assert_eq!(
+                    lab.app(*h).state(),
+                    tcp::State::Established,
+                    "round {round}: every connection of the burst is accepted"
+                );
+            }
+            assert_eq!(lab.spawned.len(), LISTEN_BACKLOG * (round as usize + 1));
+            assert_eq!(listening(&lab, key), LISTEN_BACKLOG, "pool refilled");
+        }
+        assert_eq!(lab.flows.stats.rst_fail_closed, 0);
+    }
+
+    /// AF12-3: two resources sharing a port each take a full burst, and every
+    /// flow is tunnelled to its own destination (Fix 09 binding kept).
+    #[test]
+    fn bursts_to_resources_sharing_a_port_go_to_their_own_destinations() {
+        let a = (Ipv4Addr::new(10, 0, 0, 1), 80);
+        let b = (Ipv4Addr::new(10, 0, 0, 3), 80);
+        let mut lab = Lab::multi(&[a, b], |iface| {
+            iface.update_ip_addrs(|addrs| {
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 32))
+                    .unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(10, 0, 0, 3), 32))
+                    .unwrap();
+            });
+        });
+        let mut handles = Vec::new();
+        for i in 0..LISTEN_BACKLOG as u16 {
+            handles.push(lab.connect_to(a.0, a.1, 41_000 + i));
+            handles.push(lab.connect_to(b.0, b.1, 42_000 + i));
+        }
+        lab.step(10);
+        lab.pump(5);
+        for h in &handles {
+            assert_eq!(lab.app(*h).state(), tcp::State::Established);
+        }
+        let to = |ip: Ipv4Addr| {
+            lab.spawned
+                .iter()
+                .filter(|s| s.dest == ip.to_string())
+                .count()
+        };
+        assert_eq!(to(a.0), LISTEN_BACKLOG);
+        assert_eq!(to(b.0), LISTEN_BACKLOG);
+    }
+
+    /// AF12-4: removing a resource removes its whole pool, including a socket
+    /// caught mid-handshake (reset, then reaped); `add_listeners` is
+    /// idempotent and builds a full pool.
+    #[test]
+    fn removing_a_resource_removes_its_whole_pool() {
+        let mut lab = Lab::new(true);
+        let key = res_key_default();
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
+
+        // A SYN reaches the stack but the FlowTable hasn't serviced it yet.
+        let h = lab.connect(43_000);
+        let now = lab.now();
+        lab.c_iface.poll(now, &mut lab.c_dev, &mut lab.c_sockets);
+        lab.s_iface.poll(now, &mut lab.s_dev, &mut lab.s_sockets);
+        assert_eq!(
+            listening(&lab, key),
+            LISTEN_BACKLOG - 1,
+            "one listener mid-handshake"
+        );
+
+        let tag = lab
+            .flows
+            .remove_listeners_and_close(&mut lab.s_sockets, &[key], now);
+        assert!(!lab.flows.listen_handles.contains_key(&key));
+        assert!(
+            lab.flows.close_pending(tag),
+            "the mid-handshake socket is being reset"
+        );
+        lab.pump(5);
+        assert!(!lab.flows.close_pending(tag));
+        assert_eq!(lab.stack_sockets(), 0, "nothing of the pool is left");
+        assert_ne!(lab.app(h).state(), tcp::State::Established);
+
+        lab.flows.add_listeners(&mut lab.s_sockets, &[key]);
+        lab.flows.add_listeners(&mut lab.s_sockets, &[key]);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG, "idempotent, full pool");
+        assert_eq!(listening(&lab, key), LISTEN_BACKLOG);
+    }
+
     // ---- Fix 09: resources sharing a port go to their own destination ----
 
     #[test]
@@ -2402,7 +2537,11 @@ mod tests {
         lab.app(h).close();
         lab.pump(10);
         assert_eq!(lab.relay_sockets(), 0, "relay socket removed");
-        assert_eq!(lab.stack_sockets(), 1, "only the listener is left");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the listener pool is left"
+        );
         assert!(matches!(
             lab.app(h).state(),
             tcp::State::Closed | tcp::State::TimeWait
@@ -2421,7 +2560,7 @@ mod tests {
         assert_eq!(lab.flows.stats.rst_on_relay_failure, 1);
         assert_eq!(lab.flows.stats.fin_on_relay_end, 0);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
     }
 
     /// A relay task that dies without recording an outcome (e.g. a panic)
@@ -2465,7 +2604,7 @@ mod tests {
         end_relay(spawn, RELAY_ENDED_OK);
         lab.pump(5);
         assert_eq!(lab.relay_sockets(), 0, "no CLOSE-WAIT socket left behind");
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
         assert!(matches!(
             lab.app(h).state(),
             tcp::State::TimeWait | tcp::State::Closed
@@ -2486,7 +2625,11 @@ mod tests {
         assert_eq!(lab.app(h).state(), tcp::State::Closed, "RST, not a hang");
         assert_eq!(lab.flows.stats.rst_fail_closed, 1);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1, "only the listener is left");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the listener pool is left"
+        );
     }
 
     /// (5) Back-stop: a socket stuck in a closing state (here CLOSE-WAIT with a
@@ -2506,7 +2649,7 @@ mod tests {
         lab.pump(2);
         assert_eq!(lab.flows.stats.backstop_aborts, 1);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
     }
 
     /// The back-stop never touches a healthy idle ESTABLISHED flow.
@@ -2550,7 +2693,11 @@ mod tests {
             lab.pump(1);
         }
         assert_eq!(lab.flows.stats.fin_on_relay_end, 5);
-        assert_eq!(lab.stack_sockets(), 1, "bounded: only the listener");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "bounded: only the listener pool"
+        );
     }
 
     /// Control for the regression: while a socket IS stuck holding the

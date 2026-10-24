@@ -3033,3 +3033,25 @@ serves on `127.0.0.1:9102`.
 - **Live:** f11-a (inkyank) and f11-shield (udaya) installed with the fixed installers → timers disabled, 0 update runs, binaries unchanged after ≥ 2 min; a manual update-service run logged `auto-update is disabled; skipping update check`.
 - **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
 - Committed locally, not pushed.
+
+## 2026-10-24 — PR #133 CI fixed (infra, not code)
+
+- **Cause:** the connector, shield and relay jobs failed at `Install protoc`. `apt-get install` ran without `apt-get update`, and Ubuntu had replaced protobuf `3.21.12-8.2ubuntu0.3`, so the stale runner index returned 404. The client job already updated first and passed. It would affect every PR, since `ci.yml` is the same on `fixed-pendings`.
+- **Fix:** `2352a390`, `apt-get update && apt-get install -y protobuf-compiler`.
+- **Pre-checked locally, crate by crate:** CI's build `--all-targets`, clippy and test for connector (also without `connector/.env`; build.rs uses its defaults), shield, relay and client, each cleaned afterwards (~20 GiB of `target/` freed plus the Go build cache).
+- **Pushed** with Fix 11 (`905989a2`, `3132935d`) after a clean pre-push scan. CI run 40069658645: **7/7 pass**; PR #133 mergeable.
+- `fixed-pendings` gained docs-only PR #132 meanwhile (no overlap).
+
+## 2026-10-24 — Sprint 20 Fix 12 (F37: client reset concurrent connections): FIXED, live PASS
+
+- **Cause:** one smoltcp listening socket per resource, re-armed only after `iface.poll`, so further SYNs in the same poll got a RST.
+- **Fix** (`d654879`, design approved, D-1 = 16): a pool of 16 listening sockets per resource; every accepted one is promoted and refilled each poll; removal handles the whole pool.
+- **Tests:** client 268 (+3); mutants 6/6.
+- **Live** (installed client, resource on udaya .59:18091):
+  - 3×8 parallel 4/24 → **24/24**;
+  - 3×16 8/48 → **48/48**;
+  - 24 sequential 24/24;
+  - 60 s keep-alive hold, 0 failures during the bursts;
+  - RSS 18.6 → 23.0 MB.
+- **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
+- Committed locally, not pushed.
