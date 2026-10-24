@@ -194,8 +194,10 @@ jobs:
 
       - name: Install protoc
         # client/connector/shield/relay generate their gRPC stubs at build
-        # time via tonic-build, which shells out to protoc.
-        run: sudo apt-get install -y protobuf-compiler
+        # time via tonic-build, which shells out to protoc. `apt-get update`
+        # first: the runner image's package index goes stale when Ubuntu
+        # replaces a package version, and the install then 404s (2026-10-24).
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: cargo build
         working-directory: ${{ matrix.crate }}
