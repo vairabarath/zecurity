@@ -87,4 +87,28 @@ All tokens went through 0600 files (or the hidden prompt for udaya) and were shr
 - `pe-net`, `pe-res`, `pe-group`, `pe-honest` (active row, process stopped), `pe-shield` (process stopped), and `pe-hostile` (revoked, process stopped) remain in the DB.
 - Local files are in `~/.cache/zecurity-e`.
 
+## Post-Phase Fixes
+
+### Fix: the shutdown goodbye used the startup peer list (F39, Sprint 20 Fix 13, `0289eba`)
+**Issue:** after a prune or failover, the SIGTERM goodbye dialled the startup head (possibly the revoked connector).
+
+**Root Cause:** `main.rs` called `goodbye(&state, …)` with the state loaded at startup; the control stream works on its own copy.
+
+**Fix Applied (`shield/src/control_stream.rs`, `shield/src/main.rs`):**
+```rust
+// BEFORE:
+control_stream::goodbye(&state, &cfg).await;
+
+// AFTER:
+control_stream::goodbye(&control_stream::with_live_peers(&state, &live_peers), &cfg).await;
+```
+`PeerPublisher` publishes the list after a terminal rotation, a connect-time failover and each `PeerConnectorList`; an empty list sends no goodbye.
+
+### Fix: `ignored empty PeerConnectorList` warning noise (F41, Sprint 20 Fix 13, `f1412b8`)
+**Issue:** a list holding only revoked ids (sent every heartbeat on a network without resources) warned every 15 s.
+
+**Fix Applied (`apply_peer_connector_list`):** note `carried_revoked` before the prune; empty peers → `debug` if it carried revoked ids, `warn` otherwise.
+
+Details: [[Sprint20/Fixes/Fix13-Connector-Revocation-Low-Findings]].
+
 Nothing is pushed (user rule).

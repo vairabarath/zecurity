@@ -76,4 +76,21 @@ No Go code changed. Phases C and D keep using the certificate history, which is 
 
 **Teammates:** pull and recreate the local DB (`cd controller && docker compose down -v && docker compose up -d`), per the `[schema: reset DB]` rule.
 
+## Post-Phase Fixes
+
+### Fix: a deleted revoked connector was told `unknown` (F40, Sprint 20 Fix 13, `95af83e`, decision D-1 = A)
+**Issue:** once a revoked connector's row was deleted, its Control stream was refused with NotFound + `unknown`.
+
+**Root Cause:** `lookupConnector` read only `connectors`; the 041 tombstone wasn't consulted.
+
+**Fix Applied (`controller/internal/connector/authorization.go`):**
+```go
+// BEFORE:
+if errors.Is(err, pgx.ErrNoRows) { return connectorStateAbsent, rec, nil }
+
+// AFTER: no row → EXISTS(connector_revocations ⋈ workspaces ON same trust_domain)
+//        tombstoned → connectorStateRevoked (PermissionDenied + "revoked"); query error → Unavailable
+```
+`unknown` now means: never existed here, or deleted without having been revoked. Details: [[Sprint20/Fixes/Fix13-Connector-Revocation-Low-Findings]].
+
 Nothing is pushed (user rule).

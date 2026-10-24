@@ -3055,3 +3055,24 @@ serves on `127.0.0.1:9102`.
   - RSS 18.6 → 23.0 MB.
 - **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
 - Committed locally, not pushed.
+
+## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS
+
+- **Design approved;** D-1 = A (a tombstoned identity is reported as revoked). One commit per finding:
+  - F38 `14acdf1`: the connector's relay selector stops on a terminal state (aborts its session, clears the attachment).
+  - F39 `0289eba`: the shield's goodbye uses the live peer list.
+  - F41 `f1412b8`: an empty peer list that carried revoked ids is logged at debug.
+  - F40 `95af83e`: `lookupConnector` checks the 041 tombstone (same trust domain) → `revoked`.
+- **Tests:**
+  - connector 250 (+6), shield 49 (+5), controller +2 DB-backed tests;
+  - Go↔Rust marker harness pass (new case);
+  - client and relay not re-run (untouched by this diff);
+  - mutants: 19, 17 killed, 2 documented survivors (wiring that needs live TLS; an equivalent log-only mutant).
+- **Lab:** the relay on manojinkyank was down since boot (`relay.conf` missing). Re-provisioned as `f13-relay-manoj` on **.53** (manoj's IP changed .49 → .53). Controller runs the Fix 13 build.
+- **Live:**
+  - F38: revoke f11-a → selector stopped in the same ms, 0 relay attempts in 150 s.
+  - F39: shield failed over to sd-b in 2.3 s; its goodbye reached sd-b.
+  - F40: deleted f11-a refused with PermissionDenied + `revoked`.
+  - F41: not reproducible in the lab (sd-net has resources).
+- **Lab after:** f11-a revoked + deleted (to uninstall); f11-shield stopped. Build artifacts cleaned.
+- Committed locally, not pushed.
