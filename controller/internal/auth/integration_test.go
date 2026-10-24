@@ -45,7 +45,7 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	valkeyOpts, valkeyClient := mustConnectAuthTestValkey(t, ctx, valkeyURL)
 
 	// Never FlushDB: this may be a developer's shared Valkey. The service only
-	// writes pkce:<random state> (consumed at callback) and refresh:<user id>
+	// writes pkce:<random state> (consumed at callback) and refresh:{<user id>}:<sid>
 	// (a fresh UUID in this run's throwaway database); the test deletes exactly
 	// its own keys, and a sentinel under a unique prefix proves nothing else
 	// in the database was touched.
@@ -184,9 +184,12 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 		t.Fatalf("expected first callback to create user without last_login_at")
 	}
 
-	t.Cleanup(func() { _ = valkeyClient.Del(context.Background(), refreshKey(userID)).Err() })
+	refreshSID := sidOf(t, firstRefreshCookie.Value)
+	t.Cleanup(func() {
+		_ = svc.redisClient.DeleteAllRefreshSessions(context.Background(), userID)
+	})
 
-	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID)
+	storedRefresh, found, err := svc.redisClient.GetRefreshSession(ctx, userID, refreshSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -200,12 +203,12 @@ func TestAuthIntegration_LoginBootstrapAndJWTIssue(t *testing.T) {
 	// The URL's database index is honoured: the service wrote the refresh key
 	// into that database (read here through the test's own client, which
 	// selected the same index), and not into database 0.
-	if n, err := valkeyClient.Exists(ctx, refreshKey(userID)).Result(); err != nil || n != 1 {
+	if n, err := valkeyClient.Exists(ctx, refreshKey(userID, refreshSID)).Result(); err != nil || n != 1 {
 		t.Fatalf("refresh key not found in db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
 	}
 	if valkeyOpts.DB != 0 {
 		db0 := mustConnectAuthTestValkeyDB(t, ctx, valkeyOpts.Addr, 0)
-		if n, err := db0.Exists(ctx, refreshKey(userID)).Result(); err != nil || n != 0 {
+		if n, err := db0.Exists(ctx, refreshKey(userID, refreshSID)).Result(); err != nil || n != 0 {
 			t.Fatalf("refresh key leaked into db 0 although the URL selects db %d (exists=%d, err=%v)", valkeyOpts.DB, n, err)
 		}
 	}

@@ -3,6 +3,9 @@
 # Triggered weekly by zecurity-shield-update.timer.
 # Runs as root because it needs to replace /usr/local/bin/zecurity-shield
 # and call systemctl to restart the main service.
+#
+# AUTO_UPDATE_ENABLED comes only from /etc/zecurity/shield.conf; the
+# --check-update run does nothing unless it is true (Sprint 20 Fix 11).
 
 [Unit]
 Description=ZECURITY Shield Auto-Update Check
@@ -14,5 +17,4 @@ Wants=network-online.target
 Type=oneshot
 User=root
 EnvironmentFile=-/etc/zecurity/shield.conf
-Environment=AUTO_UPDATE_ENABLED=true
 ExecStart=/usr/local/bin/zecurity-shield --check-update

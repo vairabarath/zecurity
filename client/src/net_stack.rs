@@ -1,7 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -229,6 +229,32 @@ enum RelayEnd {
     Failed,
 }
 
+/// Connector-revocation Phase C: connector ids this client must not use
+/// (the ACL's `revoked_connectors`). Shared by the daemon (writer) and every
+/// relay task (reader), and survives tunnel restarts.
+pub type BlockedConnectors = Arc<RwLock<HashSet<String>>>;
+
+pub fn new_blocked_connectors() -> BlockedConnectors {
+    Arc::new(RwLock::new(HashSet::new()))
+}
+
+/// Whether `connector_id` is blocked. A poisoned lock fails closed.
+fn is_blocked(blocked: &BlockedConnectors, connector_id: &str) -> bool {
+    match blocked.read() {
+        Ok(set) => set.contains(connector_id),
+        Err(_) => true,
+    }
+}
+
+/// Per-flow revocation controls handed to the relay task (Phase C).
+#[derive(Clone, Default)]
+pub(crate) struct RelayCtl {
+    /// Read before each candidate connector and again once its tunnel is open.
+    blocked: BlockedConnectors,
+    /// Set to the connector that carries the flow once its tunnel is open.
+    selected: Arc<OnceLock<String>>,
+}
+
 struct ActiveRelay {
     // smoltcp loop → relay task: client payload going to the resource.
     // `None` once the client side has closed (CLOSE-WAIT) — dropping the
@@ -249,6 +275,9 @@ struct ActiveRelay {
     // Phase 5-C: set when this flow was closed because its resource was
     // removed/changed; the removal ack waits until no relay carries the tag.
     close_tag: Option<u64>,
+    // Phase C: the connector carrying this flow, set by the relay task once
+    // its tunnel is open (empty while the flow is still selecting).
+    selected: Arc<OnceLock<String>>,
 }
 
 impl ActiveRelay {
@@ -267,6 +296,7 @@ impl ActiveRelay {
             last_state: tcp::State::SynReceived,
             terminated: false,
             close_tag: None,
+            selected: Arc::new(OnceLock::new()),
         }
     }
 
@@ -283,6 +313,7 @@ impl ActiveRelay {
             last_state: tcp::State::Closed,
             terminated: true,
             close_tag: None,
+            selected: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -519,6 +550,8 @@ struct RelaySpawn {
     /// The spawner must store RELAY_ENDED_OK / RELAY_FAILED here BEFORE the last
     /// `quic_to_tcp` sender is dropped.
     outcome: Arc<AtomicU8>,
+    /// Phase C: where the relay task records the connector it selected.
+    selected: Arc<OnceLock<String>>,
 }
 
 /// Listener + relay-socket bookkeeping for the smoltcp loop (Fix 05-A).
@@ -537,7 +570,7 @@ impl FlowTable {
     fn new(sockets: &mut SocketSet<'_>, resources: &[(Ipv4Addr, u16)]) -> Self {
         let mut listen_handles = HashMap::new();
         for (ip, port) in resources {
-            listen_handles.insert((*ip, *port), new_listen_socket(sockets, *port));
+            listen_handles.insert((*ip, *port), new_listen_socket(sockets, (*ip, *port)));
         }
         Self {
             listen_handles,
@@ -601,6 +634,37 @@ impl FlowTable {
         tag
     }
 
+    /// Phase C: reset every live flow carried by one of `connector_ids` (the
+    /// application gets a RST). Listeners stay. Flows still selecting a
+    /// connector are left alone: their relay task re-checks the blocked set
+    /// itself. Idempotent. Returns how many flows were reset.
+    fn close_connector_flows(
+        &mut self,
+        sockets: &mut SocketSet<'_>,
+        connector_ids: &HashSet<String>,
+    ) -> usize {
+        let mut closed = 0;
+        for (handle, relay) in self.active_relays.iter_mut() {
+            if relay.terminated {
+                continue;
+            }
+            let Some(id) = relay.selected.get() else {
+                continue;
+            };
+            if !connector_ids.contains(id) {
+                continue;
+            }
+            sockets.get_mut::<tcp::Socket>(*handle).abort();
+            relay.terminated = true;
+            relay.tcp_to_quic_tx = None;
+            // Dropping the receiver ends the relay task (`quic_to_tcp_tx.closed()`).
+            relay.quic_to_tcp_rx = None;
+            relay.write_buf.clear();
+            closed += 1;
+        }
+        closed
+    }
+
     /// True while any socket closed under `tag` is still in the SocketSet.
     fn close_pending(&self, tag: u64) -> bool {
         self.active_relays
@@ -613,7 +677,7 @@ impl FlowTable {
         for key in keys {
             if !self.listen_handles.contains_key(key) {
                 self.listen_handles
-                    .insert(*key, new_listen_socket(sockets, key.1));
+                    .insert(*key, new_listen_socket(sockets, *key));
             }
         }
     }
@@ -639,7 +703,7 @@ impl FlowTable {
             }
             // Fresh listener for the next connection.
             self.listen_handles
-                .insert((ip, port), new_listen_socket(sockets, port));
+                .insert((ip, port), new_listen_socket(sockets, (ip, port)));
 
             let dest = ip.to_string();
             tracing::info!(dest = %dest, port, "new TCP connection");
@@ -652,10 +716,10 @@ impl FlowTable {
                     let (tcp_to_quic_tx, tcp_to_quic_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
                     let (quic_to_tcp_tx, quic_to_tcp_rx) = mpsc::channel::<Vec<u8>>(FLOW_QUEUE_CAP);
                     let outcome = Arc::new(AtomicU8::new(RELAY_RUNNING));
-                    self.active_relays.insert(
-                        handle,
-                        ActiveRelay::new(tcp_to_quic_tx, quic_to_tcp_rx, outcome.clone(), now),
-                    );
+                    let relay =
+                        ActiveRelay::new(tcp_to_quic_tx, quic_to_tcp_rx, outcome.clone(), now);
+                    let selected = relay.selected.clone();
+                    self.active_relays.insert(handle, relay);
                     spawn(RelaySpawn {
                         transports: list,
                         dest,
@@ -663,6 +727,7 @@ impl FlowTable {
                         tcp_to_quic_rx,
                         quic_to_tcp_tx,
                         outcome,
+                        selected,
                     });
                 }
                 other => {
@@ -737,17 +802,17 @@ pub enum ResourceCmd {
         keys: Vec<(Ipv4Addr, u16)>,
         ack: oneshot::Sender<Result<()>>,
     },
-    /// R4: remove smoltcp interface addresses.
-    RemoveAddrs {
-        ips: Vec<Ipv4Addr>,
-        ack: oneshot::Sender<Result<()>>,
-    },
-    /// A2: add smoltcp interface addresses (checked, never silently dropped),
-    /// then listeners for `keys`.
+    /// A2: add listeners for `keys`. No smoltcp address is needed per
+    /// resource IP (Fix 09: AnyIP, `configure_capture_iface`).
     Add {
-        addrs: Vec<Ipv4Addr>,
         keys: Vec<(Ipv4Addr, u16)>,
         ack: oneshot::Sender<Result<()>>,
+    },
+    /// Connector-revocation Phase C: reset every live flow carried by one of
+    /// these connectors. Idempotent; acks with the number of flows reset.
+    CloseConnectorFlows {
+        connector_ids: HashSet<String>,
+        ack: oneshot::Sender<Result<usize>>,
     },
 }
 
@@ -757,52 +822,10 @@ struct PendingClose {
     ack: oneshot::Sender<Result<()>>,
 }
 
-fn smol_v4(ip: Ipv4Addr) -> IpAddress {
-    IpAddress::Ipv4(Ipv4Address::from(ip))
-}
-
-/// R4: drop the given /32s from the interface (never `100.64.0.1`).
-fn remove_iface_addrs(iface: &mut Interface, ips: &[Ipv4Addr]) {
-    iface.update_ip_addrs(|addrs| {
-        addrs.retain(|cidr| !ips.iter().any(|ip| cidr.address() == smol_v4(*ip)));
-    });
-}
-
-/// A2: add the given /32s. Checks capacity BEFORE pushing anything, so an
-/// overflow is an error with no partial change — an address is never
-/// silently dropped (unlike the startup `let _ = addrs.push`).
-fn add_iface_addrs(iface: &mut Interface, ips: &[Ipv4Addr]) -> Result<()> {
-    let mut result = Ok(());
-    iface.update_ip_addrs(|addrs| {
-        let missing: Vec<Ipv4Addr> = ips
-            .iter()
-            .copied()
-            .filter(|ip| !addrs.iter().any(|c| c.address() == smol_v4(*ip)))
-            .collect();
-        if addrs.len() + missing.len() > addrs.capacity() {
-            result = Err(anyhow!(
-                "smoltcp interface address capacity exceeded: {} present + {} new > {}",
-                addrs.len(),
-                missing.len(),
-                addrs.capacity()
-            ));
-            return;
-        }
-        for ip in missing {
-            if addrs.push(IpCidr::new(smol_v4(ip), 32)).is_err() {
-                result = Err(anyhow!("smoltcp interface address push failed for {ip}"));
-                return;
-            }
-        }
-    });
-    result
-}
-
 /// Apply one resource command inside the loop. Remove acks are deferred into
 /// `pending` until `complete_pending_closes` sees their sockets reaped.
 fn apply_resource_cmd(
     cmd: ResourceCmd,
-    iface: &mut Interface,
     sockets: &mut SocketSet<'_>,
     flows: &mut FlowTable,
     now: SmolInstant,
@@ -813,16 +836,20 @@ fn apply_resource_cmd(
             let tag = flows.remove_listeners_and_close(sockets, &keys, now);
             pending.push(PendingClose { tag, ack });
         }
-        ResourceCmd::RemoveAddrs { ips, ack } => {
-            remove_iface_addrs(iface, &ips);
+        ResourceCmd::Add { keys, ack } => {
+            flows.add_listeners(sockets, &keys);
             let _ = ack.send(Ok(()));
         }
-        ResourceCmd::Add { addrs, keys, ack } => {
-            let res = add_iface_addrs(iface, &addrs);
-            if res.is_ok() {
-                flows.add_listeners(sockets, &keys);
+        ResourceCmd::CloseConnectorFlows { connector_ids, ack } => {
+            let closed = flows.close_connector_flows(sockets, &connector_ids);
+            if closed > 0 {
+                tracing::warn!(
+                    closed,
+                    connectors = ?connector_ids,
+                    "revoked connector: flows on it reset"
+                );
             }
-            let _ = ack.send(res);
+            let _ = ack.send(Ok(closed));
         }
     }
 }
@@ -869,6 +896,7 @@ pub async fn run(
     transports: watch::Receiver<Arc<TransportMap>>,
     mut resource_rx: mpsc::Receiver<ResourceCmd>,
     relay_resync: Arc<Notify>,
+    blocked: BlockedConnectors,
 ) -> Result<()> {
     let (rx_sync_tx, rx_sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
     let (tx_async_tx, mut tx_async_rx) = mpsc::channel::<Vec<u8>>(TUN_TX_QUEUE_CAP);
@@ -913,14 +941,9 @@ pub async fn run(
         .filter_map(|e| routable_key(&e.address, &e.protocol, e.port))
         .collect();
 
-    // Assign one /32 address per resource so smoltcp accepts inbound packets.
-    iface.update_ip_addrs(|addrs| {
-        for (ip, _) in &resource_entries {
-            let cidr = IpCidr::new(IpAddress::Ipv4(Ipv4Address::from(*ip)), 32);
-            let _ = addrs.push(cidr);
-        }
-        let _ = addrs.push(IpCidr::new(IpAddress::v4(100, 64, 0, 1), 32));
-    });
+    // Fix 09: AnyIP instead of one smoltcp address per resource IP, so any
+    // number of resources is served (no IFACE_MAX_ADDR_COUNT limit).
+    configure_capture_iface(&mut iface)?;
 
     let mut sockets = SocketSet::new(vec![]);
 
@@ -945,8 +968,13 @@ pub async fn run(
             tcp_to_quic_rx,
             quic_to_tcp_tx,
             outcome,
+            selected,
         } = spawn;
         let resync = relay_resync.clone();
+        let ctl = RelayCtl {
+            blocked: blocked.clone(),
+            selected,
+        };
         // Keep one sender alive until the outcome is stored, so the poll loop
         // can't observe the disconnect first.
         let outcome_guard = quic_to_tcp_tx.clone();
@@ -954,13 +982,14 @@ pub async fn run(
             // relay_tcp_to_quic fires `resync` itself at the transport-failure
             // points (open failure and mid-session drop). A normal close does
             // not, so we don't resync on every finished connection.
-            let result = relay_tcp_to_quic(
+            let result = relay_tcp_to_quic_ctl(
                 transports,
                 dest,
                 port,
                 tcp_to_quic_rx,
                 quic_to_tcp_tx,
                 resync,
+                ctl,
             )
             .await;
             // Fix 05-A: record how the relay ended, THEN drop the last sender.
@@ -992,7 +1021,6 @@ pub async fn run(
         while let Ok(cmd) = resource_rx.try_recv() {
             apply_resource_cmd(
                 cmd,
-                &mut iface,
                 &mut sockets,
                 &mut flows,
                 smol_now,
@@ -1044,12 +1072,44 @@ pub async fn run(
     }
 }
 
-fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
+/// A listener for exactly one resource `(ip, port)`. Bound to the IP too, not
+/// just the port (Fix 09): with AnyIP the interface no longer filters by
+/// destination, and two resources sharing a port must each get their own
+/// connections (a port-only listener took SYNs for every IP on that port, and
+/// `FlowTable::service` then tunnelled them to the wrong resource).
+fn new_listen_socket(sockets: &mut SocketSet<'_>, key: (Ipv4Addr, u16)) -> SocketHandle {
     let rx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let tx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-    let _ = socket.listen(port);
+    let _ = socket.listen((IpAddress::Ipv4(Ipv4Address::from(key.0)), key.1));
     sockets.add(socket)
+}
+
+/// The tunnel's own interface address. It is the only smoltcp address.
+pub(crate) const TUNNEL_IFACE_ADDR: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 1);
+
+/// Set up the capture interface (Fix 09). AnyIP plus a default route through
+/// the tunnel address makes smoltcp accept packets for every destination the
+/// kernel routes into `zecurity0` (table 105 holds only resource /32s and nft
+/// marks only allowed flows). Each listener is bound to its exact
+/// `(ip, port)`, so only resource flows are accepted; anything else gets a
+/// RST. This replaces one smoltcp address per resource IP, which
+/// `IFACE_MAX_ADDR_COUNT` (2) capped at one resource IP.
+fn configure_capture_iface(iface: &mut Interface) -> Result<()> {
+    iface.update_ip_addrs(|addrs| {
+        addrs.clear();
+        // Capacity is at least 1, so this cannot fail.
+        let _ = addrs.push(IpCidr::new(
+            IpAddress::Ipv4(Ipv4Address::from(TUNNEL_IFACE_ADDR)),
+            32,
+        ));
+    });
+    iface.set_any_ip(true);
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(Ipv4Address::from(TUNNEL_IFACE_ADDR))
+        .map_err(|_| anyhow!("smoltcp route table full"))?;
+    Ok(())
 }
 
 /// Bidirectional relay between the smoltcp TCP socket and the QUIC stream.
@@ -1061,13 +1121,41 @@ fn new_listen_socket(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
 /// `Ok(RelayEnd::Failed)` on a mid-session transport failure, and
 /// `Ok(RelayEnd::Normal)` on a normal close. The poll loop maps these to RST /
 /// RST / FIN towards the client (Fix 05-A).
+/// Test-only: a relay with no revocation controls. Production always goes
+/// through `relay_tcp_to_quic_ctl` with the shared blocked set.
+#[cfg(test)]
 async fn relay_tcp_to_quic(
+    transports: Vec<Arc<ClientTransport>>,
+    destination: String,
+    port: u16,
+    tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
+    quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
+    resync: Arc<Notify>,
+) -> Result<RelayEnd> {
+    relay_tcp_to_quic_ctl(
+        transports,
+        destination,
+        port,
+        tcp_to_quic_rx,
+        quic_to_tcp_tx,
+        resync,
+        RelayCtl::default(),
+    )
+    .await
+}
+
+/// `relay_tcp_to_quic` with the Phase C revocation controls: a blocked
+/// connector is never tried, and a tunnel that opened on a connector blocked
+/// meanwhile is dropped (race re-check) — the flow then fails closed.
+#[allow(clippy::too_many_arguments)]
+async fn relay_tcp_to_quic_ctl(
     transports: Vec<Arc<ClientTransport>>,
     destination: String,
     port: u16,
     mut tcp_to_quic_rx: mpsc::Receiver<Vec<u8>>,
     quic_to_tcp_tx: mpsc::Sender<Vec<u8>>,
     resync: Arc<Notify>,
+    ctl: RelayCtl,
 ) -> Result<RelayEnd> {
     let mut selected_stream = None;
     // Whether any failure was a network/transport failure (relay/connector
@@ -1076,6 +1164,15 @@ async fn relay_tcp_to_quic(
     let mut saw_transport_failure = false;
 
     for transport in transports {
+        if is_blocked(&ctl.blocked, transport.connector_id()) {
+            tracing::warn!(
+                destination = %destination,
+                port,
+                connector_id = transport.connector_id(),
+                "connector is revoked — not used"
+            );
+            continue;
+        }
         let (candidate, probe) = match transport.open_authenticated_stream_probed().await {
             Ok(opened) => opened,
 
@@ -1146,6 +1243,18 @@ async fn relay_tcp_to_quic(
         };
 
         if resp.ok {
+            // Phase C race re-check: the connector may have been revoked while
+            // this flow was connecting.
+            if is_blocked(&ctl.blocked, transport.connector_id()) {
+                tracing::warn!(
+                    dest = %destination,
+                    port,
+                    connector_id = transport.connector_id(),
+                    "connector revoked while the tunnel was opening — dropped"
+                );
+                continue;
+            }
+            let _ = ctl.selected.set(transport.connector_id().to_string());
             tracing::info!(
                 dest = %destination,
                 port,
@@ -2033,6 +2142,45 @@ mod tests {
             }
         }
 
+        /// Fix 09: a lab serving every key in `keys` (all online), with the
+        /// net_stack interface set up by `server_setup` instead of the
+        /// default `10.0.0.1/24`. The app side routes every destination to
+        /// the pipe.
+        fn multi(keys: &[(Ipv4Addr, u16)], server_setup: impl FnOnce(&mut Iface)) -> Self {
+            let mut lab = Self::new(true);
+            lab.s_iface.update_ip_addrs(|a| a.clear());
+            server_setup(&mut lab.s_iface);
+            lab.c_iface
+                .routes_mut()
+                .add_default_ipv4_route(Ipv4Address::new(10, 0, 0, 2))
+                .unwrap();
+            let mut map = TransportMap::new();
+            for key in keys {
+                map.insert(*key, Some(vec![pipe_transport().0]));
+            }
+            let (tx, rx) = watch::channel(Arc::new(map));
+            lab.transports = rx;
+            lab._transports_tx = tx;
+            lab.s_sockets = SocketSet::new(vec![]);
+            lab.flows = FlowTable::new(&mut lab.s_sockets, keys);
+            lab
+        }
+
+        /// Open an application connection to `ip:port` from `local_port`.
+        fn connect_to(&mut self, ip: Ipv4Addr, port: u16, local_port: u16) -> SocketHandle {
+            let mut s = tcp::Socket::new(
+                tcp::SocketBuffer::new(vec![0u8; 64 * 1024]),
+                tcp::SocketBuffer::new(vec![0u8; 64 * 1024]),
+            );
+            s.connect(
+                self.c_iface.context(),
+                (IpAddress::Ipv4(Ipv4Address::from(ip)), port),
+                local_port,
+            )
+            .unwrap();
+            self.c_sockets.add(s)
+        }
+
         fn now(&self) -> SmolInstant {
             SmolInstant::from_millis(self.now_ms)
         }
@@ -2135,6 +2283,87 @@ mod tests {
             b"GET / HTTP/1.1\r\n\r\n"
         );
         (h, spawn)
+    }
+
+    // ---- Fix 09: resources sharing a port go to their own destination ----
+
+    #[test]
+    fn connection_is_attributed_to_its_real_destination_when_ports_are_shared() {
+        let a = (Ipv4Addr::new(10, 0, 0, 1), 80);
+        let b = (Ipv4Addr::new(10, 0, 0, 3), 80);
+        let mut lab = Lab::multi(&[a, b], |iface| {
+            // Baseline-compatible: per-resource addresses (fits capacity 2).
+            iface.update_ip_addrs(|addrs| {
+                addrs.push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 32)).unwrap();
+                addrs.push(IpCidr::new(IpAddress::v4(10, 0, 0, 3), 32)).unwrap();
+            });
+        });
+        for (key, local_port) in [(b, 40_301), (a, 40_302)] {
+            let h = lab.connect_to(key.0, key.1, local_port);
+            lab.pump(5);
+            assert_eq!(lab.app(h).state(), tcp::State::Established, "{key:?}");
+            let spawn = lab.spawned.pop().expect("relay spawned");
+            assert_eq!(
+                (spawn.dest.as_str(), spawn.port),
+                (key.0.to_string().as_str(), key.1),
+                "a connection to {key:?} must be tunnelled to {key:?}"
+            );
+        }
+    }
+
+    /// Fix 09: with the production capture interface (AnyIP, only
+    /// 100.64.0.1), more resource IPs than IFACE_MAX_ADDR_COUNT are all
+    /// served, two of them on a shared port, each tunnelled to its own
+    /// destination, with data both ways (the SYN-ACK and replies leave with
+    /// the resource IP as source).
+    #[test]
+    fn anyip_serves_more_resource_ips_than_the_address_limit() {
+        let keys = [
+            (Ipv4Addr::new(10, 9, 0, 5), 80),
+            (Ipv4Addr::new(10, 9, 0, 6), 80),
+            (Ipv4Addr::new(10, 9, 0, 7), 443),
+            (Ipv4Addr::new(192, 168, 50, 8), 22),
+        ];
+        assert!(keys.len() > smoltcp::config::IFACE_MAX_ADDR_COUNT);
+        let mut lab = Lab::multi(&keys, |iface| configure_capture_iface(iface).unwrap());
+        assert_eq!(lab.s_iface.ip_addrs().len(), 1, "only the tunnel address");
+
+        for (i, key) in keys.iter().enumerate() {
+            let h = lab.connect_to(key.0, key.1, 40_400 + i as u16);
+            lab.pump(5);
+            assert_eq!(lab.app(h).state(), tcp::State::Established, "{key:?}");
+            let mut spawn = lab.spawned.pop().expect("relay spawned");
+            assert_eq!((spawn.dest.clone(), spawn.port), (key.0.to_string(), key.1));
+
+            lab.app(h).send_slice(b"ping").unwrap();
+            lab.pump(3);
+            assert_eq!(spawn.tcp_to_quic_rx.try_recv().unwrap(), b"ping", "{key:?}");
+            spawn.quic_to_tcp_tx.try_send(b"pong".to_vec()).unwrap();
+            lab.pump(3);
+            assert_eq!(lab.app_read_all(h), b"pong", "{key:?}");
+        }
+    }
+
+    /// Fix 09: AnyIP must not widen what is served. A destination that is not
+    /// a resource (other IP, or a resource IP on another port) is refused
+    /// with a RST and never tunnelled.
+    #[test]
+    fn anyip_refuses_destinations_that_are_not_resources() {
+        let key = (Ipv4Addr::new(10, 9, 0, 5), 80);
+        let mut lab = Lab::multi(&[key], |iface| configure_capture_iface(iface).unwrap());
+        for (ip, port, local) in [
+            (Ipv4Addr::new(10, 9, 0, 99), 80, 40_501), // not a resource IP
+            (key.0, 81, 40_502),                       // resource IP, other port
+        ] {
+            let h = lab.connect_to(ip, port, local);
+            lab.pump(5);
+            assert!(
+                matches!(lab.app(h).state(), tcp::State::Closed),
+                "{ip}:{port} must be refused, got {:?}",
+                lab.app(h).state()
+            );
+            assert!(lab.spawned.is_empty(), "{ip}:{port} must not be tunnelled");
+        }
     }
 
     /// (1) Relay ends normally → the app gets every byte, then a FIN; after
@@ -2362,7 +2591,6 @@ mod tests {
         let now = lab.now();
         apply_resource_cmd(
             cmd,
-            &mut lab.s_iface,
             &mut lab.s_sockets,
             &mut lab.flows,
             now,
@@ -2401,7 +2629,6 @@ mod tests {
         lab_cmd(
             lab,
             ResourceCmd::Add {
-                addrs: vec![],
                 keys: vec![res_key(port)],
                 ack,
             },
@@ -2543,7 +2770,6 @@ mod tests {
         lab_cmd(
             &mut lab,
             ResourceCmd::Add {
-                addrs: vec![],
                 keys: vec![res_key(RES_PORT)],
                 ack,
             },
@@ -2553,78 +2779,43 @@ mod tests {
         let (_h2, _s2) = establish(&mut lab, 40_202);
     }
 
+    /// Fix 09 (B2 finding 5): resource IPs added at runtime, more than the
+    /// old smoltcp address limit, are all served without any interface
+    /// address per IP (only the tunnel address exists).
     #[test]
-    fn interface_addresses_add_checked_and_remove() {
-        let mut lab = Lab::new(true);
+    fn hot_added_resource_ips_beyond_the_address_limit_are_served() {
+        let first = (Ipv4Addr::new(10, 9, 0, 1), 80);
+        let mut lab = Lab::multi(&[first], |iface| configure_capture_iface(iface).unwrap());
         let mut pending = Pending::new();
-        let n = |lab: &Lab| lab.s_iface.ip_addrs().len();
-        assert_eq!(n(&lab), 1);
-        let cap = smoltcp::config::IFACE_MAX_ADDR_COUNT;
-
-        // Fill to capacity.
-        let fill: Vec<Ipv4Addr> = (0..cap - 1)
-            .map(|i| Ipv4Addr::new(10, 9, 0, i as u8 + 1))
-            .collect();
+        let added = [
+            (Ipv4Addr::new(10, 9, 0, 2), 80),
+            (Ipv4Addr::new(10, 9, 0, 3), 443),
+            (Ipv4Addr::new(10, 9, 0, 4), 8080),
+        ];
         let (ack, mut rx) = oneshot::channel();
         lab_cmd(
             &mut lab,
             ResourceCmd::Add {
-                addrs: fill.clone(),
-                keys: vec![],
+                keys: added.to_vec(),
                 ack,
             },
             &mut pending,
         );
-        assert!(rx.try_recv().unwrap().is_ok());
-        assert_eq!(n(&lab), cap);
+        assert!(rx.try_recv().unwrap().is_ok(), "add acked");
+        let mut map = (**lab.transports.borrow()).clone();
+        for key in added {
+            map.insert(key, Some(vec![pipe_transport().0]));
+        }
+        lab._transports_tx.send(Arc::new(map)).unwrap();
 
-        // Overflow: error, no partial change, listeners not added.
-        let (ack, mut rx) = oneshot::channel();
-        lab_cmd(
-            &mut lab,
-            ResourceCmd::Add {
-                addrs: vec![Ipv4Addr::new(10, 9, 9, 9)],
-                keys: vec![(Ipv4Addr::new(10, 9, 9, 9), 443)],
-                ack,
-            },
-            &mut pending,
-        );
-        let err = rx.try_recv().unwrap().unwrap_err().to_string();
-        assert!(err.contains("capacity exceeded"), "{err}");
-        assert_eq!(n(&lab), cap, "never silently dropped, never partial");
-        assert!(!lab
-            .flows
-            .listen_handles
-            .contains_key(&(Ipv4Addr::new(10, 9, 9, 9), 443)));
-
-        // Re-adding a present address is a no-op.
-        let (ack, mut rx) = oneshot::channel();
-        lab_cmd(
-            &mut lab,
-            ResourceCmd::Add {
-                addrs: fill.clone(),
-                keys: vec![],
-                ack,
-            },
-            &mut pending,
-        );
-        assert!(rx.try_recv().unwrap().is_ok());
-        assert_eq!(n(&lab), cap);
-
-        // Remove only the given addresses.
-        let (ack, mut rx) = oneshot::channel();
-        lab_cmd(
-            &mut lab,
-            ResourceCmd::RemoveAddrs { ips: fill, ack },
-            &mut pending,
-        );
-        assert!(rx.try_recv().unwrap().is_ok());
-        assert_eq!(n(&lab), 1);
-        assert_eq!(
-            lab.s_iface.ip_addrs()[0].address(),
-            IpAddress::v4(10, 0, 0, 1),
-            "unrelated address kept"
-        );
+        for (i, key) in added.iter().enumerate() {
+            let h = lab.connect_to(key.0, key.1, 40_600 + i as u16);
+            lab_step(&mut lab, &mut pending, 5);
+            assert_eq!(lab.app(h).state(), tcp::State::Established, "{key:?}");
+            let spawn = lab.spawned.pop().expect("relay spawned");
+            assert_eq!((spawn.dest.clone(), spawn.port), (key.0.to_string(), key.1));
+        }
+        assert_eq!(lab.s_iface.ip_addrs().len(), 1, "no address per resource IP");
     }
 
     #[test]
@@ -2638,5 +2829,158 @@ mod tests {
         assert_eq!(routable_key("db.internal", "tcp", 80), None);
         // Existing `as u16` conversion is preserved.
         assert_eq!(routable_key("10.0.0.1", "tcp", 65_536 + 22), Some((ip, 22)));
+    }
+
+    // ── Connector-revocation Phase C ───────────────────────────────────────
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn pipe_transport_for(
+        connector_id: &str,
+    ) -> (
+        Arc<ClientTransport>,
+        mpsc::UnboundedReceiver<DuplexStream>,
+        Arc<AtomicUsize>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let opens = Arc::new(AtomicUsize::new(0));
+        let t = Arc::new(
+            ClientTransport::new(
+                Arc::new(PipeOpener {
+                    peers: tx,
+                    opens: opens.clone(),
+                }),
+                "127.0.0.1:9092".parse().unwrap(),
+                None,
+            )
+            .with_connector_id(connector_id.to_string()),
+        );
+        (t, rx, opens)
+    }
+
+    fn blocked_with(ids: &[&str]) -> BlockedConnectors {
+        let b = new_blocked_connectors();
+        *b.write().unwrap() = ids.iter().map(|s| s.to_string()).collect();
+        b
+    }
+
+    /// AC-4: a revoked connector is never tried; the next candidate carries
+    /// the flow and is recorded as the flow's connector.
+    #[tokio::test]
+    async fn revoked_connector_is_never_tried_and_selection_is_recorded() {
+        let (a, _ra, a_opens) = pipe_transport_for("conn-a");
+        let (b, mut rb, _) = pipe_transport_for("conn-b");
+        let ctl = RelayCtl {
+            blocked: blocked_with(&["conn-a"]),
+            selected: Arc::new(OnceLock::new()),
+        };
+        let selected = ctl.selected.clone();
+        let (_tcp_tx, tcp_rx) = mpsc::channel(8);
+        let (quic_tx, _quic_rx) = mpsc::channel(8);
+        let task = tokio::spawn(relay_tcp_to_quic_ctl(
+            vec![a, b],
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            Arc::new(Notify::new()),
+            ctl,
+        ));
+        let mut peer = tokio::time::timeout(WAIT, rb.recv()).await.unwrap().unwrap();
+        accept_tunnel(&mut peer).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while selected.get().is_none() {
+            assert!(tokio::time::Instant::now() < deadline, "no connector recorded");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(selected.get().map(String::as_str), Some("conn-b"));
+        assert_eq!(a_opens.load(Ordering::SeqCst), 0, "revoked connector never opened");
+        task.abort();
+    }
+
+    /// AC-4 (race re-check): the connector is revoked while its tunnel is
+    /// opening — the opened tunnel is dropped and the flow fails closed.
+    #[tokio::test]
+    async fn connector_revoked_while_opening_is_dropped() {
+        let (a, mut ra, _) = pipe_transport_for("conn-a");
+        let blocked = new_blocked_connectors();
+        let ctl = RelayCtl {
+            blocked: blocked.clone(),
+            selected: Arc::new(OnceLock::new()),
+        };
+        let selected = ctl.selected.clone();
+        let (_tcp_tx, tcp_rx) = mpsc::channel(8);
+        let (quic_tx, _quic_rx) = mpsc::channel(8);
+        let task = tokio::spawn(relay_tcp_to_quic_ctl(
+            vec![a],
+            "10.0.0.1".into(),
+            80,
+            tcp_rx,
+            quic_tx,
+            Arc::new(Notify::new()),
+            ctl,
+        ));
+        let mut peer = tokio::time::timeout(WAIT, ra.recv()).await.unwrap().unwrap();
+        // Revoked after the open, before the connector accepts the tunnel.
+        blocked.write().unwrap().insert("conn-a".to_string());
+        accept_tunnel(&mut peer).await;
+        let end = tokio::time::timeout(WAIT, task).await.unwrap().unwrap();
+        assert!(end.is_err(), "the flow must fail closed, got {end:?}");
+        assert!(selected.get().is_none(), "never recorded as carried by the revoked connector");
+    }
+
+    /// AC-3: CloseConnectorFlows resets exactly the flows on the listed
+    /// connectors; other flows, flows still selecting and the listener stay.
+    /// A repeat is a no-op.
+    #[test]
+    fn close_connector_flows_resets_only_flows_on_revoked_connectors() {
+        let mut lab = Lab::new(true);
+        let mut pending = Pending::new();
+        let (h_a, spawn_a) = establish(&mut lab, 40_201);
+        let (h_b, mut spawn_b) = establish(&mut lab, 40_202);
+        let (h_sel, _spawn_sel) = establish(&mut lab, 40_203);
+        spawn_a.selected.set("conn-a".to_string()).unwrap();
+        spawn_b.selected.set("conn-b".to_string()).unwrap();
+        // h_sel: still selecting (no connector recorded).
+        lab_step(&mut lab, &mut pending, 3);
+
+        let (ack, mut ack_rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::CloseConnectorFlows {
+                connector_ids: HashSet::from(["conn-a".to_string()]),
+                ack,
+            },
+            &mut pending,
+        );
+        assert_eq!(ack_rx.try_recv().unwrap().unwrap(), 1, "exactly one flow reset");
+        assert!(spawn_a.quic_to_tcp_tx.is_closed(), "its relay task told to stop");
+        lab_step(&mut lab, &mut pending, 3);
+        assert_eq!(lab.app(h_a).state(), tcp::State::Closed, "RST received");
+        assert_eq!(lab.app(h_b).state(), tcp::State::Established, "other connector untouched");
+        assert_eq!(lab.app(h_sel).state(), tcp::State::Established, "selecting flow untouched");
+        lab.app(h_b).send_slice(b"still here").unwrap();
+        lab_step(&mut lab, &mut pending, 3);
+        assert_eq!(spawn_b.tcp_to_quic_rx.try_recv().unwrap(), b"still here");
+        assert!(lab.flows.listen_handles.contains_key(&res_key(RES_PORT)), "listener kept");
+
+        // Idempotent.
+        let (ack, mut ack_rx) = oneshot::channel();
+        lab_cmd(
+            &mut lab,
+            ResourceCmd::CloseConnectorFlows {
+                connector_ids: HashSet::from(["conn-a".to_string()]),
+                ack,
+            },
+            &mut pending,
+        );
+        assert_eq!(ack_rx.try_recv().unwrap().unwrap(), 0);
+
+        // A new connection on the same resource is still accepted (the
+        // connector choice is the transport map's job).
+        let spawned_before = lab.spawned.len();
+        let _h_new = lab.connect(40_204);
+        lab_step(&mut lab, &mut pending, 5);
+        assert_eq!(lab.spawned.len(), spawned_before + 1);
     }
 }

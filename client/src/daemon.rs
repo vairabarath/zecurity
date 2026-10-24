@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
@@ -638,6 +638,7 @@ async fn handle_up(
     let transports = match build_transports_by_resource_with_crl(
         &allowed_entries,
         &acl.remote_networks,
+        &revoked_connector_ids(&acl),
         transport.as_ref(),
         &device,
         relay_crl,
@@ -698,7 +699,10 @@ async fn handle_up(
     };
 
     let allowed_entries_count = allowed_entries.len();
-    let relay_resync = { state.read().await.relay_resync.clone() };
+    let (relay_resync, blocked) = {
+        let s = state.read().await;
+        (s.relay_resync.clone(), s.blocked_connectors.clone())
+    };
     // Fix 05 Phase 5-C: resource hot-apply commands into the running net_stack.
     let (resource_tx, resource_rx) = tokio::sync::mpsc::channel(RESOURCE_CMD_QUEUE_CAP);
     let task = tokio::spawn(async move {
@@ -708,6 +712,7 @@ async fn handle_up(
             transport_rx,
             resource_rx,
             relay_resync,
+            blocked,
         )
         .await
         {
@@ -1130,8 +1135,7 @@ async fn transport_apply_pending(state: &SharedState) -> bool {
 }
 
 /// True when the running tunnel has a pending ResourceDelta that was not (fully)
-/// applied: an earlier apply failed before mutation, or additions are waiting
-/// for smoltcp address capacity (H1). The 60 s tick retries it without a
+/// applied: an earlier apply failed before mutation. The 60 s tick retries it without a
 /// version bump. (`transport_apply_pending` keeps its frozen 2-A meaning.)
 async fn resource_apply_pending(state: &SharedState) -> bool {
     let s = state.read().await;
@@ -1150,26 +1154,23 @@ async fn resource_apply_pending(state: &SharedState) -> bool {
 
 type ResourceKey = (Ipv4Addr, u16);
 
-/// The pure plan for one resource apply (Phase 5-C, H1).
+/// The pure plan for one resource apply (Phase 5-C; capacity rule H1 retired
+/// by Fix 09: with AnyIP every addition applies).
 #[derive(Debug, Clone)]
 pub(crate) struct ResourcePlan {
     /// Routable keys to stop serving (their flows are reset).
     pub(crate) removed: BTreeSet<ResourceKey>,
-    /// Routable keys applied by this pass (existing-IP + admitted new-IP).
+    /// Routable keys applied by this pass.
     pub(crate) added: BTreeSet<ResourceKey>,
-    /// Additions that don't fit the smoltcp address capacity: NOT applied,
-    /// not in `target`, retried on later ticks.
-    pub(crate) unapplied: BTreeSet<ResourceKey>,
-    /// Interface addresses / table-105 routes to remove.
+    /// Table-105 routes to remove (IPs no longer served).
     pub(crate) addr_del: BTreeSet<Ipv4Addr>,
-    /// Interface addresses / table-105 routes to add (admitted new IPs).
+    /// Table-105 routes to add (newly served IPs).
     pub(crate) addr_add: BTreeSet<Ipv4Addr>,
     /// Capture rules after the remove side (= kept keys).
     pub(crate) flows_after_removal: BTreeSet<ResourceKey>,
     /// Capture rules after the whole apply.
     pub(crate) flows_after: BTreeSet<ResourceKey>,
-    /// What `AppliedConfig` becomes on success: the candidate minus every
-    /// entry whose key is unapplied.
+    /// What `AppliedConfig` becomes on success (the candidate).
     pub(crate) target: AppliedConfig,
 }
 
@@ -1184,59 +1185,36 @@ fn ips_of(keys: &BTreeSet<ResourceKey>) -> BTreeSet<Ipv4Addr> {
     keys.iter().map(|(ip, _)| *ip).collect()
 }
 
-/// Number of smoltcp interface addresses reserved for the tunnel itself
-/// (`100.64.0.1/32`).
-const RESERVED_IFACE_ADDRS: usize = 1;
-
-/// Plan a resource apply (pure; Phase 5-C H1):
-/// * removals free capacity first;
-/// * an addition whose IP already has an address always applies;
-/// * new IPs are admitted in ascending IPv4 order until the capacity
-///   (`addr_capacity` − the reserved tunnel address) is full;
-/// * the rest stay unapplied/pending — never silently dropped;
-/// * removals, connector changes and non-routable changes never depend on
-///   capacity.
+/// Plan a resource apply (pure; Phase 5-C):
+/// * removals first, then additions;
+/// * every addition applies: the capture interface accepts any number of
+///   resource IPs (Fix 09, AnyIP), so nothing waits for address capacity;
+/// * `addr_add` / `addr_del` are the table-105 route changes (IPs newly
+///   served / no longer served by any key);
+/// * removals, connector changes and non-routable changes are independent.
 pub(crate) fn plan_resource_apply(
     applied: &AppliedConfig,
     candidate: &AppliedConfig,
-    addr_capacity: usize,
 ) -> ResourcePlan {
     let applied_keys = routable_keys(applied);
     let cand_keys = routable_keys(candidate);
     let kept: BTreeSet<ResourceKey> = applied_keys.intersection(&cand_keys).copied().collect();
     let removed: BTreeSet<ResourceKey> = applied_keys.difference(&cand_keys).copied().collect();
-    let added_all: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
+    let added: BTreeSet<ResourceKey> = cand_keys.difference(&applied_keys).copied().collect();
 
     let current_ips = ips_of(&applied_keys);
-    let (existing_ip_adds, new_ip_adds): (BTreeSet<ResourceKey>, BTreeSet<ResourceKey>) = added_all
-        .iter()
-        .partition(|(ip, _)| current_ips.contains(ip));
-
-    let mut retained_ips = ips_of(&kept);
-    retained_ips.extend(ips_of(&existing_ip_adds));
-    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&retained_ips).copied().collect();
-
-    let free = addr_capacity.saturating_sub(RESERVED_IFACE_ADDRS + retained_ips.len());
-    // BTreeSet<Ipv4Addr> iterates in ascending numeric order.
-    let addr_add: BTreeSet<Ipv4Addr> = ips_of(&new_ip_adds).into_iter().take(free).collect();
-
-    let mut added = existing_ip_adds;
-    added.extend(new_ip_adds.iter().filter(|(ip, _)| addr_add.contains(ip)));
-    let unapplied: BTreeSet<ResourceKey> = added_all.difference(&added).copied().collect();
+    let cand_ips = ips_of(&cand_keys);
+    let addr_del: BTreeSet<Ipv4Addr> = current_ips.difference(&cand_ips).copied().collect();
+    let addr_add: BTreeSet<Ipv4Addr> = cand_ips.difference(&current_ips).copied().collect();
 
     let mut flows_after = kept.clone();
     flows_after.extend(added.iter().copied());
 
-    let mut target = candidate.clone();
-    target.entries.retain(|e| {
-        net_stack::routable_key(&e.address, &e.protocol, e.port)
-            .is_none_or(|key| !unapplied.contains(&key))
-    });
+    let target = candidate.clone();
 
     ResourcePlan {
         removed,
         added,
-        unapplied,
         addr_del,
         addr_add,
         flows_after_removal: kept,
@@ -1252,31 +1230,6 @@ fn to_flows(keys: &BTreeSet<ResourceKey>) -> BTreeSet<AllowedFlow> {
             port: *port,
         })
         .collect()
-}
-
-/// Logs the capacity-pending set once per distinct set (rate limit).
-static LAST_CAPACITY_PENDING: std::sync::Mutex<Option<BTreeSet<ResourceKey>>> =
-    std::sync::Mutex::new(None);
-
-fn log_capacity_pending(unapplied: &BTreeSet<ResourceKey>) {
-    let Ok(mut last) = LAST_CAPACITY_PENDING.lock() else {
-        return;
-    };
-    if unapplied.is_empty() {
-        *last = None;
-        return;
-    }
-    if last.as_ref() != Some(unapplied) {
-        let pending: Vec<String> = unapplied
-            .iter()
-            .map(|(ip, port)| format!("{ip}:{port}"))
-            .collect();
-        warn!(
-            pending = ?pending,
-            "resource additions pending: address capacity"
-        );
-        *last = Some(unapplied.clone());
-    }
 }
 
 /// Send one resource command and wait (bounded, H4) for the loop's ack.
@@ -1312,7 +1265,7 @@ async fn send_resource_cmd(
 enum ResourceApplyOutcome {
     /// Applied; `applied` now equals the plan target.
     Applied,
-    /// Nothing applicable (only capacity-pending additions remain).
+    /// Nothing to apply (the plan target equals what is applied).
     NothingToApply,
     /// The configuration moved between the decision and this apply; the
     /// coordinator's next pass (requested by whoever stored it) re-evaluates.
@@ -1328,7 +1281,7 @@ enum ResourceApplyOutcome {
 /// Fix 05 Phase 5-C: apply a ResourceDelta (possibly combined with connector
 /// changes) to the running tunnel without a restart.
 ///
-/// Pre-mutation: snapshot → plan (H1 capacity) → build the full transport map
+/// Pre-mutation: snapshot → plan → build the full transport map
 /// for the plan target → lock `tun_slot` (serialises against `handle_down`)
 /// → re-check the tunnel handle.
 /// Mutation (H2 order): R1 close flows + remove listeners (ack after reset +
@@ -1371,22 +1324,14 @@ where
     if classify_applied(&handle.applied, &candidate) != ConfigDelta::ResourceDelta {
         return ResourceApplyOutcome::Superseded;
     }
-    let addr_capacity = match kernel_slot.lock().await.as_ref() {
-        Some(kernel) => kernel.addr_capacity(),
-        None => return ResourceApplyOutcome::TunnelGone,
-    };
-    let plan = plan_resource_apply(&handle.applied, &candidate, addr_capacity);
-    log_capacity_pending(&plan.unapplied);
+    if kernel_slot.lock().await.is_none() {
+        return ResourceApplyOutcome::TunnelGone;
+    }
+    let plan = plan_resource_apply(&handle.applied, &candidate);
     if plan.target == handle.applied {
         return ResourceApplyOutcome::NothingToApply;
     }
-    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device)
-        .into_iter()
-        .filter(|e| {
-            net_stack::routable_key(&e.address, &e.protocol, e.port)
-                .is_none_or(|key| !plan.unapplied.contains(&key))
-        })
-        .collect();
+    let entries: Vec<AclEntry> = allowed_entries_for(&acl, &device);
     let map = match build(&entries, &acl, transport.as_ref(), &device, relay_crl) {
         Ok(map) => map,
         Err(e) => {
@@ -1409,7 +1354,6 @@ where
     info!(
         removed = plan.removed.len(),
         added = plan.added.len(),
-        pending = plan.unapplied.len(),
         "resource change, hot-applying"
     );
 
@@ -1427,11 +1371,6 @@ where
                 .context("nft desired state (remove side)")?;
         }
         if !plan.addr_del.is_empty() {
-            let ips: Vec<Ipv4Addr> = plan.addr_del.iter().copied().collect();
-            send_resource_cmd(&handle.resource_tx, "remove interface addresses", |ack| {
-                net_stack::ResourceCmd::RemoveAddrs { ips, ack }
-            })
-            .await?;
             kernel
                 .del_routes(&plan.addr_del)
                 .context("delete resource routes")?;
@@ -1444,10 +1383,9 @@ where
         // Add side: fwmark → addresses + listeners → routes → nft LAST.
         if !plan.added.is_empty() {
             kernel.ensure_fwmark_rule().context("ensure fwmark rule")?;
-            let addrs: Vec<Ipv4Addr> = plan.addr_add.iter().copied().collect();
             let keys: Vec<ResourceKey> = plan.added.iter().copied().collect();
-            send_resource_cmd(&handle.resource_tx, "add addresses and listeners", |ack| {
-                net_stack::ResourceCmd::Add { addrs, keys, ack }
+            send_resource_cmd(&handle.resource_tx, "add listeners", |ack| {
+                net_stack::ResourceCmd::Add { keys, ack }
             })
             .await?;
             if !plan.addr_add.is_empty() {
@@ -1485,7 +1423,6 @@ where
         resources = plan.flows_after.len(),
         removed = plan.removed.len(),
         added = plan.added.len(),
-        pending = plan.unapplied.len(),
         "resources hot-applied"
     );
     if plan.flows_after.is_empty() {
@@ -1613,6 +1550,7 @@ async fn perform_tunnel_restart(
             build_transports_by_resource_with_crl(
                 entries,
                 &acl.remote_networks,
+                &revoked_connector_ids(acl),
                 transport,
                 device,
                 relay_crl,
@@ -2062,6 +2000,7 @@ mod restart_decision_tests {
         AclSnapshot {
             version: 1,
             workspace_id: "ws1".to_string(),
+            revoked_connectors: vec![],
             generated_at: 1000,
             relay_addr: "relay:9093".to_string(),
             relay_spiffe_id: "spiffe://r".to_string(),
@@ -2152,7 +2091,7 @@ mod restart_decision_tests {
         let mut map = net_stack::TransportMap::new();
         for e in entries {
             let ip: Ipv4Addr = e.address.parse().unwrap();
-            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id);
+            let coords = resolve_entry_coords(e, &rn_by_id, &trn_by_id, &std::collections::HashSet::new());
             let ts: Vec<Arc<crate::transport::ClientTransport>> = coords
                 .iter()
                 .map(|_| {
@@ -2207,10 +2146,6 @@ mod restart_decision_tests {
 
     type Log = Arc<std::sync::Mutex<Vec<String>>>;
 
-    /// Address capacity of the fake kernel: room for several resource IPs so
-    /// the non-capacity tests are not affected by H1 admission.
-    const TEST_ADDR_CAPACITY: usize = 8;
-
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Reply {
         Ack,
@@ -2222,7 +2157,6 @@ mod restart_decision_tests {
     #[derive(Clone, Copy, Debug)]
     struct LoopCtl {
         remove: Reply,
-        remove_addrs: Reply,
         add: Reply,
     }
 
@@ -2230,7 +2164,6 @@ mod restart_decision_tests {
         fn default() -> Self {
             Self {
                 remove: Reply::Ack,
-                remove_addrs: Reply::Ack,
                 add: Reply::Ack,
             }
         }
@@ -2292,7 +2225,6 @@ mod restart_decision_tests {
     struct FakeKernel {
         log: Log,
         published: Published,
-        capacity: usize,
         /// Fail the first call whose log entry starts with this prefix.
         fail_on: Option<&'static str>,
         /// Number of fwmark rules "installed" (starts at 1: the tunnel is up).
@@ -2338,9 +2270,6 @@ mod restart_decision_tests {
             }
             Ok(())
         }
-        fn addr_capacity(&self) -> usize {
-            self.capacity
-        }
     }
 
     /// Fake net_stack loop: logs and answers resource commands.
@@ -2360,20 +2289,15 @@ mod restart_decision_tests {
                         ctl.remove,
                         ack,
                     ),
-                    net_stack::ResourceCmd::RemoveAddrs { ips, ack } => (
-                        format!("loop:addr- [{}]", ips_str(&ips)),
-                        ctl.remove_addrs,
-                        ack,
-                    ),
-                    net_stack::ResourceCmd::Add { addrs, keys, ack } => (
-                        format!(
-                            "loop:add addrs=[{}] keys=[{}]",
-                            ips_str(&addrs),
-                            keys_str(&keys)
-                        ),
+                    net_stack::ResourceCmd::Add { keys, ack } => (
+                        format!("loop:add keys=[{}]", keys_str(&keys)),
                         ctl.add,
                         ack,
                     ),
+                    net_stack::ResourceCmd::CloseConnectorFlows { ack, .. } => {
+                        let _ = ack.send(Ok(0));
+                        continue;
+                    }
                 };
                 log.lock()
                     .unwrap()
@@ -2439,7 +2363,6 @@ mod restart_decision_tests {
         let kernel = FakeKernel {
             log: log.clone(),
             published: published.clone(),
-            capacity: TEST_ADDR_CAPACITY,
             fail_on: None,
             fwmark_rules: 1,
             routes: route_ips,
@@ -2837,7 +2760,7 @@ mod restart_decision_tests {
             &h,
             &[
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1",
+                "loop:add keys=[10.0.0.2:443] pub=1",
                 "route+ [10.0.0.2] pub=1",
                 "nft [10.0.0.1:80,10.0.0.2:443] pub=1",
             ],
@@ -2867,7 +2790,6 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
             ],
         )
@@ -2892,10 +2814,9 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.9] keys=[10.0.0.9:80] pub=1",
+                "loop:add keys=[10.0.0.9:80] pub=1",
                 "route+ [10.0.0.9] pub=1",
                 "nft [10.0.0.9:80] pub=1",
             ],
@@ -2915,7 +2836,7 @@ mod restart_decision_tests {
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[] keys=[10.0.0.1:8080] pub=1",
+                "loop:add keys=[10.0.0.1:8080] pub=1",
                 "nft [10.0.0.1:8080] pub=1",
             ],
         )
@@ -2934,7 +2855,6 @@ mod restart_decision_tests {
             &[
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
-                "loop:addr- [10.0.0.1] pub=0",
                 "route- [10.0.0.1] pub=0",
             ],
         )
@@ -2976,7 +2896,7 @@ mod restart_decision_tests {
                 "loop:remove [10.0.0.1:80] pub=0",
                 "nft [] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[] keys=[10.0.0.1:8443] pub=1",
+                "loop:add keys=[10.0.0.1:8443] pub=1",
                 "nft [10.0.0.1:8443] pub=1",
             ],
         )
@@ -3159,7 +3079,7 @@ mod restart_decision_tests {
             log_of(&h),
             vec![
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
                 "route+ [10.0.0.1] pub=1",
                 "nft [10.0.0.1:80] pub=1",
             ]
@@ -3278,7 +3198,7 @@ mod restart_decision_tests {
             log_of(&h),
             vec![
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.1] keys=[10.0.0.1:80] pub=1",
+                "loop:add keys=[10.0.0.1:80] pub=1",
                 "route+ [10.0.0.1] pub=1",
                 "nft [10.0.0.1:80] pub=1",
             ]
@@ -3316,159 +3236,99 @@ mod restart_decision_tests {
         assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
     }
 
-    // ---- Phase 5-C: capacity (H1) ----------------------------------------------------
+    // ---- Fix 09: no address capacity (AnyIP); every addition applies ----------------
 
     fn keys(v: &BTreeSet<ResourceKey>) -> Vec<String> {
         v.iter().map(|(ip, p)| format!("{ip}:{p}")).collect()
     }
 
+    /// B2 finding 5 / H1 retired: more new IPs than the old smoltcp
+    /// capacity (2, one reserved) all apply in one pass, with a route each.
     #[test]
-    fn plan_admits_new_ips_ascending_and_keeps_overflow_pending() {
+    fn plan_applies_every_new_ip() {
         let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
         let cand = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.7", 80, "tcp", "rn1"),
             ("10.0.0.3", 80, "tcp", "rn1"),
-            ("10.0.0.5", 80, "tcp", "rn1"),
+            ("10.0.0.5", 443, "tcp", "rn1"),
         ]);
-        // capacity 4 = 100.64.0.1 + 10.0.0.1 + two new IPs.
-        let plan = plan_resource_apply(&applied, &cand, 4);
-        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.5:80"]);
-        assert_eq!(keys(&plan.unapplied), vec!["10.0.0.7:80"]);
-        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5");
-        assert!(
-            !plan.target.entries.iter().any(|e| e.address == "10.0.0.7"),
-            "pending is not in applied"
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(
+            keys(&plan.added),
+            vec!["10.0.0.3:80", "10.0.0.5:443", "10.0.0.7:80"]
         );
-        assert_eq!(plan.target.entries.len(), 3);
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.5,10.0.0.7");
+        assert!(plan.addr_del.is_empty() && plan.removed.is_empty());
+        assert!(plan.target == cand, "the whole candidate is applied");
     }
 
     #[test]
-    fn plan_existing_ip_addition_always_applies() {
+    fn plan_addition_on_a_served_ip_adds_no_route() {
         let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
         let cand = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.1", 443, "tcp", "rn1"),
         ]);
-        // capacity 2: no free slot, but the IP already has its address.
-        let plan = plan_resource_apply(&applied, &cand, 2);
+        let plan = plan_resource_apply(&applied, &cand);
         assert_eq!(keys(&plan.added), vec!["10.0.0.1:443"]);
-        assert!(plan.unapplied.is_empty());
         assert!(plan.addr_add.is_empty());
     }
 
     #[test]
-    fn plan_removals_free_capacity_first() {
-        let applied = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
-        let cand = applied_with(&[("10.0.0.2", 80, "tcp", "rn1")]);
-        let plan = plan_resource_apply(&applied, &cand, 2);
-        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:80"]);
-        assert_eq!(keys(&plan.added), vec!["10.0.0.2:80"]);
-        assert!(
-            plan.unapplied.is_empty(),
-            "freed slot reused in the same pass"
-        );
+    fn plan_route_is_kept_while_another_key_uses_the_ip() {
+        let applied = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.1", 443, "tcp", "rn1"),
+        ]);
+        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.1:443"]);
+        assert!(plan.addr_del.is_empty(), "10.0.0.1 is still served");
     }
 
     #[test]
-    fn plan_removals_never_blocked_by_capacity() {
-        // Startup already over capacity (silent drop at handle_up): removal still plans.
+    fn plan_removal_and_addition_in_one_pass() {
         let applied = applied_with(&[
             ("10.0.0.1", 80, "tcp", "rn1"),
             ("10.0.0.2", 80, "tcp", "rn1"),
-            ("10.0.0.3", 80, "tcp", "rn1"),
         ]);
-        let cand = applied_with(&[("10.0.0.1", 80, "tcp", "rn1")]);
-        let plan = plan_resource_apply(&applied, &cand, 2);
-        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80", "10.0.0.3:80"]);
-        assert!(plan.added.is_empty() && plan.unapplied.is_empty());
+        let cand = applied_with(&[
+            ("10.0.0.1", 80, "tcp", "rn1"),
+            ("10.0.0.3", 80, "tcp", "rn1"),
+            ("10.0.0.4", 80, "tcp", "rn1"),
+        ]);
+        let plan = plan_resource_apply(&applied, &cand);
+        assert_eq!(keys(&plan.removed), vec!["10.0.0.2:80"]);
+        assert_eq!(keys(&plan.added), vec!["10.0.0.3:80", "10.0.0.4:80"]);
+        assert_eq!(ips_str(&plan.addr_del), "10.0.0.2");
+        assert_eq!(ips_str(&plan.addr_add), "10.0.0.3,10.0.0.4");
     }
 
-    async fn set_capacity(h: &Harness, cap: usize) {
-        h.kernel.lock().await.as_mut().unwrap().capacity = cap;
-    }
-
-    /// Overflow + removal + connector change in one delta: removal and
-    /// connector change apply, admitted additions apply, the rest stays
-    /// pending (not in applied), retried without mutation while it can't fit.
+    /// The live B2 case: three new resource IPs while the tunnel is up are
+    /// hot-applied in one pass. No restart, nothing left pending.
     #[tokio::test]
-    async fn capacity_overflow_applies_the_rest_and_keeps_pending() {
+    async fn several_new_resource_ips_hot_apply_in_one_pass() {
         let h = harness_with(&["c1"], "").await;
-        add_entry(&h, "10.0.0.4", 80, "tcp").await;
-        set_capacity(&h, 8).await;
-        decide(&h, false).await.unwrap(); // applied: .1, .4
-        rebaseline(&h);
-        let builds_before = h.builds.load(Ordering::SeqCst);
-        set_capacity(&h, 3).await; // 100.64.0.1 + two resource IPs
-        set_transport_connectors(&h, &["c1", "c2"]).await;
-        {
-            let mut s = h.state.write().await;
-            let acl = s.acl_snapshot.as_mut().unwrap();
-            acl.entries.retain(|e| e.address != "10.0.0.4"); // removal
-        }
-        add_entry(&h, "10.0.0.3", 80, "tcp").await;
         add_entry(&h, "10.0.0.2", 80, "tcp").await;
+        add_entry(&h, "10.0.0.3", 80, "tcp").await;
+        add_entry(&h, "10.0.0.4", 8080, "tcp").await;
         decide(&h, false).await.unwrap();
-        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            h.builds.load(Ordering::SeqCst),
-            builds_before + 1,
-            "one publish"
-        );
+        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0, "no restart");
         assert_eq!(
             log_of(&h),
             vec![
-                "loop:remove [10.0.0.4:80] pub=0",
-                "nft [10.0.0.1:80] pub=0",
-                "loop:addr- [10.0.0.4] pub=0",
-                "route- [10.0.0.4] pub=0",
                 "fwmark pub=1",
-                "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:80] pub=1",
-                "route+ [10.0.0.2] pub=1",
-                "nft [10.0.0.1:80,10.0.0.2:80] pub=1",
+                "loop:add keys=[10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
+                "route+ [10.0.0.2,10.0.0.3,10.0.0.4] pub=1",
+                "nft [10.0.0.1:80,10.0.0.2:80,10.0.0.3:80,10.0.0.4:8080] pub=1",
             ]
         );
         let applied = applied_now(&h).await;
-        let addrs: Vec<&str> = applied.entries.iter().map(|e| e.address.as_str()).collect();
-        assert!(addrs.contains(&"10.0.0.2") && !addrs.contains(&"10.0.0.3"));
-        assert!(!addrs.contains(&"10.0.0.4"));
-        assert_eq!(
-            applied_coord_ids(&h.state).await,
-            vec!["c1", "c2"],
-            "connector change applied"
-        );
-        assert!(
-            h.rx.borrow()
-                .get(&("10.0.0.3".parse().unwrap(), 80))
-                .is_none(),
-            "no slot for the pending key"
-        );
-        assert!(
-            resource_apply_pending(&h.state).await,
-            "pending retried on the tick"
-        );
-
-        // Next tick, still no room: no mutation, no publish, no restart.
-        rebaseline(&h);
-        let builds = h.builds.load(Ordering::SeqCst);
-        decide(&h, false).await.unwrap();
-        assert!(log_of(&h).is_empty());
-        assert_eq!(h.builds.load(Ordering::SeqCst), builds);
-        assert_eq!(h.down_ups.load(Ordering::SeqCst), 0);
-
-        // Room appears (another resource removed) → the pending one applies.
-        h.state
-            .write()
-            .await
-            .acl_snapshot
-            .as_mut()
-            .unwrap()
-            .entries
-            .retain(|e| e.address != "10.0.0.2");
-        decide(&h, false).await.unwrap();
-        let applied = applied_now(&h).await;
-        assert!(applied.entries.iter().any(|e| e.address == "10.0.0.3"));
-        assert!(!resource_apply_pending(&h.state).await);
+        for ip in ["10.0.0.2", "10.0.0.3", "10.0.0.4"] {
+            assert!(applied.entries.iter().any(|e| e.address == ip), "{ip} applied");
+        }
+        assert!(!resource_apply_pending(&h.state).await, "nothing pending");
     }
 
     // ---- Phase 5-C: failure / recovery -----------------------------------------------
@@ -3531,17 +3391,11 @@ mod restart_decision_tests {
     }
 
     #[tokio::test]
-    async fn loop_error_on_address_removal_triggers_recovery_restart() {
-        let h = loop_failure_case(|c| c.remove_addrs = Reply::Fail, true).await;
-        assert_eq!(log_of(&h).last().unwrap(), "loop:addr- [10.0.0.1] pub=0");
-    }
-
-    #[tokio::test]
     async fn loop_error_on_add_triggers_recovery_restart() {
         let h = loop_failure_case(|c| c.add = Reply::Fail, false).await;
         assert_eq!(
             log_of(&h).last().unwrap(),
-            "loop:add addrs=[10.0.0.2] keys=[10.0.0.2:443] pub=1"
+            "loop:add keys=[10.0.0.2:443] pub=1"
         );
         assert!(
             !log_of(&h).iter().any(|l| l.starts_with("nft")),
@@ -5117,7 +4971,7 @@ async fn sync_and_restart_if_changed(
         return;
     }
 
-    let acl_changed = match sync_acl_now(state, conf, tun_slot).await {
+    let mut acl_changed = match sync_acl_now(state, conf, tun_slot).await {
         Ok(result) => result.changed,
         Err(e) => {
             warn!(error = %e, "background ACL sync failed — keeping cached snapshot");
@@ -5130,6 +4984,27 @@ async fn sync_and_restart_if_changed(
             false
         }
     };
+    // Connector-revocation Phase C (D19): an ACL not refreshed for an hour is
+    // no longer trusted — every resource is withdrawn (flows reset) until the
+    // next successful sync, which fetches a full snapshot again.
+    {
+        let mut s = state.write().await;
+        let stale = acl_is_stale(s.acl_last_ok, std::time::Instant::now(), ACL_STALE_AFTER);
+        if stale {
+            if let Some(acl) = s.acl_snapshot.as_ref() {
+                if !is_stale_acl_placeholder(acl) {
+                    warn!(
+                        stale_after_secs = ACL_STALE_AFTER.as_secs(),
+                        "ACL not refreshed within the staleness bound — no connector is used until the next successful sync"
+                    );
+                    let placeholder = stale_acl_placeholder(acl);
+                    set_blocked_connectors(&s.blocked_connectors, &placeholder);
+                    s.acl_snapshot = Some(placeholder);
+                    acl_changed = true;
+                }
+            }
+        }
+    }
     let transport_changed = match fetch_and_store_transport(state, conf).await {
         Ok(changed) => changed,
         Err(e) => {
@@ -5141,8 +5016,8 @@ async fn sync_and_restart_if_changed(
     // Fix 01 Phase 2-A (D2): a transport-map build that failed earlier left a
     // pending connector-only change; retry it on this tick even without a bump.
     let transport_pending = !acl_changed && !transport_changed && transport_apply_pending(state).await;
-    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (pre-mutation
-    // failure, or additions waiting for address capacity — H1).
+    // Fix 05 Phase 5-C: likewise retry a pending ResourceDelta (an apply that
+    // failed before mutation).
     let resource_pending = !acl_changed
         && !transport_changed
         && !transport_pending
@@ -5158,6 +5033,86 @@ async fn sync_and_restart_if_changed(
         if let Err(e) = restart_tunnel_if_running(state, conf, tun_slot).await {
             warn!(error = %e, "background sync: tunnel configuration apply failed");
         }
+    }
+    // Phase C: a new ACL may revoke connectors that still carry flows. The
+    // config apply above never closes flows on a connector map change, so
+    // cut them explicitly (idempotent).
+    if acl_changed {
+        close_revoked_connector_flows(state).await;
+    }
+}
+
+/// Phase C (D19): how long an ACL may go without a successful refresh.
+const ACL_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Whether the ACL is older than `max` since its last successful sync.
+/// Never synced → not stale (there is no ACL to distrust).
+fn acl_is_stale(
+    last_ok: Option<std::time::Instant>,
+    now: std::time::Instant,
+    max: std::time::Duration,
+) -> bool {
+    last_ok.is_some_and(|t| now.saturating_duration_since(t) >= max)
+}
+
+/// The ACL used while the real one is stale: no entries, no networks, and
+/// version 0 so the next fetch returns a full snapshot. The last known
+/// revoked connectors are KEPT: going stale must never lift a revocation
+/// (a flow still choosing a connector keeps its re-check).
+fn stale_acl_placeholder(acl: &AclSnapshot) -> AclSnapshot {
+    AclSnapshot {
+        version: 0,
+        workspace_id: acl.workspace_id.clone(),
+        generated_at: 0,
+        revoked_connectors: acl.revoked_connectors.clone(),
+        ..Default::default()
+    }
+}
+
+fn is_stale_acl_placeholder(acl: &AclSnapshot) -> bool {
+    acl.version == 0 && acl.entries.is_empty() && acl.remote_networks.is_empty()
+}
+
+/// Phase C: replace the shared blocked set with `acl`'s revoked connectors.
+fn set_blocked_connectors(blocked: &net_stack::BlockedConnectors, acl: &AclSnapshot) {
+    let ids = revoked_connector_ids(acl);
+    match blocked.write() {
+        Ok(mut set) => *set = ids,
+        Err(poisoned) => *poisoned.into_inner() = ids,
+    }
+}
+
+/// Phase C: reset live flows carried by a revoked connector (if a tunnel is up).
+async fn close_revoked_connector_flows(state: &SharedState) {
+    let (ids, tx) = {
+        let s = state.read().await;
+        let ids: HashSet<String> = match s.blocked_connectors.read() {
+            Ok(set) => set.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        let tx = s.tun_handle.as_ref().map(|h| h.resource_tx.clone());
+        (ids, tx)
+    };
+    let Some(tx) = tx else { return };
+    if ids.is_empty() {
+        return;
+    }
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    let cmd = net_stack::ResourceCmd::CloseConnectorFlows {
+        connector_ids: ids,
+        ack: ack_tx,
+    };
+    let exchange = async {
+        tx.send(cmd).await.ok()?;
+        ack_rx.await.ok()
+    };
+    match tokio::time::timeout(RESOURCE_ACK_TIMEOUT, exchange).await {
+        Ok(Some(Ok(closed))) => {
+            if closed > 0 {
+                info!(closed, "revoked connectors: live flows reset");
+            }
+        }
+        _ => warn!("revoked connectors: flow close not acknowledged"),
     }
 }
 
@@ -5178,8 +5133,10 @@ async fn fetch_and_store_acl(
             let version = snapshot.version;
             let synced_at = now_unix();
             let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             info!(version, "ACL snapshot stored");
         }
         Ok(AclFetchOutcome::UpToDate) => {
@@ -5503,6 +5460,7 @@ async fn sync_acl_now_with(
             let synced_at = now_unix();
             let mut s = state.write().await;
             s.acl_last_sync_at = Some(synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             let cached = s.acl_snapshot.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("controller reported ACL up_to_date but no cached snapshot")
             })?;
@@ -5528,8 +5486,10 @@ async fn sync_acl_now_with(
             };
 
             let mut s = state.write().await;
+            set_blocked_connectors(&s.blocked_connectors, &snapshot);
             s.acl_snapshot = Some(snapshot);
             s.acl_last_sync_at = Some(result.synced_at);
+            s.acl_last_ok = Some(std::time::Instant::now());
             info!(
                 version = result.version,
                 entries = result.entry_count,
@@ -5645,6 +5605,28 @@ pub(crate) fn resolve_entry_coords(
     entry: &AclEntry,
     rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
     trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
+    revoked: &HashSet<String>,
+) -> Vec<ConnCoords> {
+    // Connector-revocation Phase C: a revoked connector is dropped from both
+    // planes (a stale transport snapshot may still list it).
+    let mut coords = resolve_entry_coords_unfiltered(entry, rn_by_id, trn_by_id);
+    coords.retain(|c| !revoked.contains(&c.connector_id));
+    coords
+}
+
+/// Phase C: the ACL's revoked connector ids.
+pub(crate) fn revoked_connector_ids(acl: &AclSnapshot) -> HashSet<String> {
+    acl.revoked_connectors
+        .iter()
+        .map(|r| r.connector_id.clone())
+        .filter(|id| !id.is_empty())
+        .collect()
+}
+
+fn resolve_entry_coords_unfiltered(
+    entry: &AclEntry,
+    rn_by_id: &HashMap<&str, &AclRemoteNetwork>,
+    trn_by_id: &HashMap<&str, &TransportRemoteNetwork>,
 ) -> Vec<ConnCoords> {
     match trn_by_id.get(entry.remote_network_id.as_str()) {
         Some(trn) => ordered_transport_connectors_for_entry(entry, trn)
@@ -5683,9 +5665,10 @@ pub(crate) fn effective_config(
         }
     }
 
+    let revoked = revoked_connector_ids(acl);
     let mut entries = Vec::new();
     for entry in allowed_entries {
-        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, &revoked);
         let mut applied_coords: Vec<AppliedCoords> = coords
             .into_iter()
             .map(|c| AppliedCoords {
@@ -5773,6 +5756,7 @@ pub(crate) fn build_transports_by_resource(
     build_transports_by_resource_with_crl(
         entries,
         remote_networks,
+        &HashSet::new(),
         transport,
         device,
         crate::crl::CrlManager::new(),
@@ -5782,6 +5766,7 @@ pub(crate) fn build_transports_by_resource(
 fn build_transports_by_resource_with_crl(
     entries: &[AclEntry],
     remote_networks: &[AclRemoteNetwork],
+    revoked: &HashSet<String>,
     transport: Option<&TransportSnapshot>,
     device: &DeviceInfo,
     relay_crl: crate::crl::CrlManager,
@@ -5807,7 +5792,7 @@ fn build_transports_by_resource_with_crl(
         };
         let IpAddr::V4(v4) = ip else { continue };
 
-        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id);
+        let coords = resolve_entry_coords(entry, &rn_by_id, &trn_by_id, revoked);
 
         let mut transports = Vec::new();
         for c in &coords {
@@ -5858,11 +5843,14 @@ fn build_transport_from_coords(
             format!("connector tunnel address {connector_addr} resolved to no addresses")
         })?;
 
-    let direct = Arc::new(TunnelPool::new(
+    // Connector-revocation Phase C: the direct path accepts only THIS
+    // connector's exact SPIFFE id (not any connector of the trust domain).
+    let direct = Arc::new(TunnelPool::new_for_connector(
         &device.certificate_pem,
         &device.private_key_pem,
         device.tpm_key_material.as_deref(),
         &device.ca_cert_pem,
+        &c.connector_spiffe,
     )?);
 
     // Empty relay coords → this connector has no relay assignment (direct only).
@@ -5889,11 +5877,10 @@ fn build_transport_from_coords(
         None
     };
 
-    Ok(Arc::new(ClientTransport::new(
-        direct,
-        connector_socket,
-        relay,
-    )))
+    Ok(Arc::new(
+        ClientTransport::new(direct, connector_socket, relay)
+            .with_connector_id(c.connector_id.clone()),
+    ))
 }
 
 fn now_unix() -> i64 {
@@ -6102,6 +6089,117 @@ mod fetch_tests {
             8,
             "new ACL snapshot must be stored"
         );
+    }
+
+    // ── Connector-revocation Phase C ───────────────────────────────────────
+
+    struct RevokingAcl;
+    #[async_trait::async_trait]
+    impl AclFetcher for RevokingAcl {
+        async fn fetch(&self, known: u64) -> Result<AclFetchOutcome> {
+            Ok(AclFetchOutcome::Snapshot(AclSnapshot {
+                version: known + 1,
+                revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector {
+                    connector_id: "conn-r".into(),
+                    connector_spiffe: "spiffe://td/connector/conn-r".into(),
+                }],
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A synced ACL replaces the shared blocked set and records a monotonic
+    /// success time (the staleness clock).
+    #[tokio::test]
+    async fn acl_sync_updates_the_blocked_set_and_staleness_clock() {
+        let state = crate::runtime::new_shared();
+        state.write().await.acl_snapshot = Some(AclSnapshot { version: 3, ..Default::default() });
+        let conf = config::ClientConf::default();
+        let tun_slot: TunSlot = Arc::new(Mutex::new(None));
+        let before = std::time::Instant::now();
+        sync_acl_now_with(&state, &conf, &tun_slot, &RevokingAcl).await.unwrap();
+        let s = state.read().await;
+        assert!(s.blocked_connectors.read().unwrap().contains("conn-r"));
+        assert!(s.acl_last_ok.is_some_and(|t| t >= before));
+    }
+
+    /// AC-5: under 1 h nothing is stale; at 1 h the ACL is stale; never
+    /// synced is not stale.
+    #[test]
+    fn acl_staleness_bound_is_one_hour() {
+        let t0 = std::time::Instant::now();
+        let h = std::time::Duration::from_secs(3600);
+        assert_eq!(ACL_STALE_AFTER, h);
+        assert!(!acl_is_stale(Some(t0), t0 + h - std::time::Duration::from_millis(1), h));
+        assert!(acl_is_stale(Some(t0), t0 + h, h));
+        assert!(!acl_is_stale(None, t0 + h * 10, h));
+    }
+
+    /// AC-5: the stale placeholder withdraws every resource and connector,
+    /// and has version 0 so the next sync fetches a full snapshot.
+    #[test]
+    fn stale_placeholder_withdraws_everything() {
+        let acl = AclSnapshot {
+            version: 9,
+            workspace_id: "ws".into(),
+            entries: vec![AclEntry::default()],
+            remote_networks: vec![AclRemoteNetwork::default()],
+            revoked_connectors: vec![crate::grpc::client_v1::RevokedConnector::default()],
+            ..Default::default()
+        };
+        let p = stale_acl_placeholder(&acl);
+        assert_eq!(p.version, 0);
+        assert!(p.entries.is_empty() && p.remote_networks.is_empty());
+        assert_eq!(
+            p.revoked_connectors, acl.revoked_connectors,
+            "going stale never lifts a revocation"
+        );
+        assert!(is_stale_acl_placeholder(&p));
+        assert!(!is_stale_acl_placeholder(&acl));
+    }
+
+    /// The flow-close helper sends CloseConnectorFlows with the blocked set
+    /// to the running tunnel, and sends nothing when no connector is blocked.
+    #[tokio::test]
+    async fn close_revoked_connector_flows_sends_the_blocked_set() {
+        let state = crate::runtime::new_shared();
+        let (resource_tx, mut resource_rx) = tokio::sync::mpsc::channel(4);
+        let (transport_tx, _rx) = tokio::sync::watch::channel(Arc::new(net_stack::TransportMap::new()));
+        let task = tokio::spawn(async {});
+        state.write().await.tun_handle = Some(Arc::new(crate::runtime::TunHandle {
+            abort: task.abort_handle(),
+            route_count: 0,
+            applied: crate::runtime::AppliedConfig {
+                spiffe_id: String::new(),
+                certificate_pem: String::new(),
+                private_key_pem: String::new(),
+                tpm_key_material: None,
+                ca_cert_pem: String::new(),
+                entries: Vec::new(),
+            },
+            transport_tx: Arc::new(transport_tx),
+            resource_tx: Arc::new(resource_tx),
+        }));
+        // Nothing blocked: nothing sent.
+        close_revoked_connector_flows(&state).await;
+        assert!(resource_rx.try_recv().is_err());
+        // Blocked: the set is sent and acknowledged.
+        state.read().await.blocked_connectors.write().unwrap().insert("conn-r".into());
+        let responder = tokio::spawn(async move {
+            let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), resource_rx.recv())
+                .await
+                .expect("CloseConnectorFlows must be sent");
+            match cmd {
+                Some(net_stack::ResourceCmd::CloseConnectorFlows { connector_ids, ack }) => {
+                    let _ = ack.send(Ok(1));
+                    connector_ids
+                }
+                _ => panic!("expected CloseConnectorFlows"),
+            }
+        });
+        close_revoked_connector_flows(&state).await;
+        let sent = responder.await.unwrap();
+        assert_eq!(sent, HashSet::from(["conn-r".to_string()]));
     }
 }
 

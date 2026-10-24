@@ -51,6 +51,48 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
+// RevokedConnectorRow is one revoked connector identity for the ACL
+// (connector-revocation Phase C).
+type RevokedConnectorRow struct {
+	ConnectorID string
+	TrustDomain string
+}
+
+// GetRevokedConnectors lists the workspace's connectors whose identity is
+// revoked — connector row revoked, or revoked and then deleted — while any of
+// their certificates can still be valid (design D19). It reads the
+// certificate history, which outlives a deleted connector row, so a
+// revoked-then-deleted connector stays listed until its last certificate
+// expires.
+func (s *Store) GetRevokedConnectors(ctx context.Context, workspaceID string) ([]RevokedConnectorRow, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT cc.connector_id::text,
+		        COALESCE(NULLIF(MAX(c.trust_domain), ''), MAX(w.trust_domain), '')
+		   FROM connector_certificates cc
+		   JOIN workspaces w ON w.id = cc.tenant_id
+		   LEFT JOIN connectors c ON c.id = cc.connector_id
+		  WHERE cc.tenant_id = $1
+		    AND cc.not_after > NOW()
+		    AND (c.id IS NULL OR c.status = 'revoked' OR c.revoked_at IS NOT NULL)
+		  GROUP BY cc.connector_id
+		  ORDER BY cc.connector_id`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get revoked connectors: %w", err)
+	}
+	defer rows.Close()
+	var out []RevokedConnectorRow
+	for rows.Next() {
+		var r RevokedConnectorRow
+		if err := rows.Scan(&r.ConnectorID, &r.TrustDomain); err != nil {
+			return nil, fmt.Errorf("scan revoked connector: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ── Groups ────────────────────────────────────────────────────────────────
 
 func (s *Store) CreateGroup(ctx context.Context, workspaceID, name string, description *string) (*GroupRow, error) {

@@ -129,8 +129,12 @@ chown root:"$SERVICE_USER" "$CONFIG_FILE"
 log "reloading systemd"
 systemctl daemon-reload
 systemctl enable --now zecurity-connector.service
-# Update timer might fail if the update script isn't there or misconfigured for local, but we'll enable it anyway
-systemctl enable --now zecurity-connector-update.timer || warn "failed to enable update timer"
+# Sprint 20 Fix 11: a local install runs a branch build and writes
+# AUTO_UPDATE_ENABLED=false, so the update timer stays disabled (enabling it
+# replaced this build with the latest release seconds after install).
+systemctl disable --now zecurity-connector-update.timer 2>/dev/null || true
+systemctl stop zecurity-connector-update.service 2>/dev/null || true
+log "auto-update off: zecurity-connector-update.timer disabled"
 
 log "install complete"
 systemctl status zecurity-connector.service --no-pager --lines=5 || true

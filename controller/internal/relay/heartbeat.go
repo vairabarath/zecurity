@@ -40,6 +40,9 @@ type heartbeatStore interface {
 	RelayCertStatus(ctx context.Context, relayID, serial string) (known, revoked bool, err error)
 	RecordRenewedCert(ctx context.Context, relayID, presentedSerial, newSerial string, notAfter time.Time) (int, error)
 	ListConnectorsForRelay(ctx context.Context, relayID string) (map[string][]string, error)
+	// RevokedConnectorSPIFFEIDs answers Phase D: which of the relay's
+	// registered connector identities are revoked.
+	RevokedConnectorSPIFFEIDs(ctx context.Context, spiffeIDs []string) ([]string, error)
 	EvaluateCapacityLabel(ctx context.Context, relayID string, holdDown time.Duration) (CapacityLabelTransition, error)
 }
 
@@ -68,7 +71,7 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	if s.store == nil {
 		return nil, status.Error(codes.FailedPrecondition, "Relay heartbeat store is not configured")
 	}
-	addr := observeRelayPeerAddress(ctx, req.ListenPort)
+	addr := observeRelayPeerAddress(ctx, req.ListenPort, s.allowPrivateAddrs)
 	log.Printf("relay heartbeat: received from relay=%s version=%s hostname=%s cert_serial=%s cert_not_after=%s",
 		relayID, req.Version, req.Hostname, leaf.SerialNumber.Text(16), leaf.NotAfter.Format(time.RFC3339))
 
@@ -93,10 +96,14 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 	} else {
 		metadataChanged = true // no cache: always notify
 	}
+	// Connector-revocation Phase D: on every heartbeat — throttled or not —
+	// tell the relay which of its registered connectors are revoked.
+	revoked := s.revokedConnectorSubset(ctx, relayID, req.RegisteredConnectorSpiffeIds)
 	if !shouldWriteDB {
 		return &relaypb.HeartbeatResponse{
-			ServerTimeUnix:       time.Now().UTC().Unix(),
-			NextHeartbeatSeconds: uint32(defaultHeartbeatInterval / time.Second),
+			ServerTimeUnix:            time.Now().UTC().Unix(),
+			NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
+			RevokedConnectorSpiffeIds: revoked,
 		}, nil
 	}
 
@@ -145,9 +152,29 @@ func (s *Service) Heartbeat(ctx context.Context, req *relaypb.HeartbeatRequest) 
 		}
 	}
 	return &relaypb.HeartbeatResponse{
-		ServerTimeUnix:       time.Now().UTC().Unix(),
-		NextHeartbeatSeconds: uint32(defaultHeartbeatInterval / time.Second),
+		ServerTimeUnix:            time.Now().UTC().Unix(),
+		NextHeartbeatSeconds:      uint32(defaultHeartbeatInterval / time.Second),
+		RevokedConnectorSpiffeIds: revoked,
 	}, nil
+}
+
+// revokedConnectorSubset looks up which registered connector identities are
+// revoked. A lookup failure is logged and answered with an empty list: the
+// relay's revoked set is sticky (D20), so an empty answer unblocks nothing,
+// and failing the RPC would only make the relay reconnect.
+func (s *Service) revokedConnectorSubset(ctx context.Context, relayID string, registered []string) []string {
+	if len(registered) == 0 {
+		return nil
+	}
+	revoked, err := s.store.RevokedConnectorSPIFFEIDs(ctx, registered)
+	if err != nil {
+		log.Printf("relay heartbeat: revoked connector lookup %s: %v — answering none (relay keeps its last list)", relayID, err)
+		return nil
+	}
+	if len(revoked) > 0 {
+		log.Printf("relay heartbeat: relay %s holds %d revoked connector(s)", relayID, len(revoked))
+	}
+	return revoked
 }
 
 // notifyRelayTopology fires a transport-plane topology change for every
@@ -307,7 +334,7 @@ func authenticatedLeaf(ctx context.Context) (*x509.Certificate, error) {
 	return tlsInfo.State.PeerCertificates[0], nil
 }
 
-func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddressObservation {
+func observeRelayPeerAddress(ctx context.Context, listenPort uint32, allowPrivate bool) relayAddressObservation {
 	observation := relayAddressObservation{Scope: "unknown"}
 	p, ok := peer.FromContext(ctx)
 	if !ok || p.Addr == nil {
@@ -328,20 +355,28 @@ func observeRelayPeerAddress(ctx context.Context, listenPort uint32) relayAddres
 		observation.ObservedPort = port
 	}
 
+	advertise := func() string {
+		port := defaultRelayPublicPort
+		if listenPort > 0 && listenPort <= 65535 {
+			port = strconv.FormatUint(uint64(listenPort), 10)
+		}
+		return net.JoinHostPort(ip.String(), port)
+	}
 	switch {
 	case ip.IsLoopback():
 		observation.Scope = "loopback"
 	case ip.IsPrivate():
 		observation.Scope = "private"
+		// Development labs only (WithPrivateRelayAddrs): a LAN relay is
+		// advertised at its private address. The scope stays "private".
+		if allowPrivate {
+			observation.PublicAddr = advertise()
+		}
 	case ip.IsLinkLocalUnicast():
 		observation.Scope = "link_local"
 	case ip.IsGlobalUnicast():
 		observation.Scope = "public"
-		port := defaultRelayPublicPort
-		if listenPort > 0 && listenPort <= 65535 {
-			port = strconv.FormatUint(uint64(listenPort), 10)
-		}
-		observation.PublicAddr = net.JoinHostPort(ip.String(), port)
+		observation.PublicAddr = advertise()
 	default:
 		observation.Scope = "unknown"
 	}

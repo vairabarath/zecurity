@@ -86,16 +86,36 @@ type RefreshSession struct {
 	MaxLifetimeAt int64  `json:"max_lifetime_at"` // Unix seconds — hard expiry, ignored if 0
 }
 
-func (r *valkeyClient) SetRefreshSession(ctx context.Context, userID string, sess RefreshSession, ttl time.Duration) error {
+// SetRefreshSession stores one login's refresh session under
+// refresh:{<userID>}:<sid> and records sid in the user's index set, so a user
+// can hold several independent sessions (admin UI tabs, the client daemon)
+// without one login or rotation overwriting another. sid "" addresses the
+// legacy single-session key refresh:<userID>, which is only ever read and
+// deleted now, never written. The index TTL is pushed out on every write, so
+// it always outlives the sessions it lists.
+func (r *valkeyClient) SetRefreshSession(ctx context.Context, userID, sid string, sess RefreshSession, ttl time.Duration) error {
 	payload, err := json.Marshal(sess)
 	if err != nil {
 		return fmt.Errorf("marshal refresh session: %w", err)
 	}
-	return r.rdb.Set(ctx, refreshKey(userID), string(payload), ttl).Err()
+	if sid == "" {
+		err = r.rdb.Set(ctx, refreshKey(userID, ""), string(payload), ttl).Err()
+	} else {
+		_, err = r.rdb.TxPipelined(ctx, func(p valkeycompat.Pipeliner) error {
+			p.Set(ctx, refreshKey(userID, sid), string(payload), ttl)
+			p.SAdd(ctx, refreshIndexKey(userID), sid)
+			p.Expire(ctx, refreshIndexKey(userID), ttl)
+			return nil
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("store refresh session: %w", err)
+	}
+	return nil
 }
 
-func (r *valkeyClient) GetRefreshSession(ctx context.Context, userID string) (RefreshSession, bool, error) {
-	val, err := r.rdb.Get(ctx, refreshKey(userID)).Result()
+func (r *valkeyClient) GetRefreshSession(ctx context.Context, userID, sid string) (RefreshSession, bool, error) {
+	val, err := r.rdb.Get(ctx, refreshKey(userID, sid)).Result()
 	if err == valkeycompat.Nil {
 		return RefreshSession{}, false, nil
 	}
@@ -109,14 +129,53 @@ func (r *valkeyClient) GetRefreshSession(ctx context.Context, userID string) (Re
 	return sess, true, nil
 }
 
-func (r *valkeyClient) DeleteRefreshToken(ctx context.Context, userID string) error {
-	return r.rdb.Del(ctx, refreshKey(userID)).Err()
+// DeleteRefreshSession ends one login's session (logout, max-lifetime cap,
+// legacy-key migration). Other sessions of the same user are untouched.
+func (r *valkeyClient) DeleteRefreshSession(ctx context.Context, userID, sid string) error {
+	if sid == "" {
+		return r.rdb.Del(ctx, refreshKey(userID, "")).Err()
+	}
+	_, err := r.rdb.TxPipelined(ctx, func(p valkeycompat.Pipeliner) error {
+		p.Del(ctx, refreshKey(userID, sid))
+		p.SRem(ctx, refreshIndexKey(userID), sid)
+		return nil
+	})
+	return err
+}
+
+// DeleteAllRefreshSessions ends every session of the user, including a legacy
+// single-session key. Used when the user itself is revoked (status or
+// identity_generation), where no session may survive.
+func (r *valkeyClient) DeleteAllRefreshSessions(ctx context.Context, userID string) error {
+	sids, err := r.rdb.SMembers(ctx, refreshIndexKey(userID)).Result()
+	if err != nil && err != valkeycompat.Nil {
+		return fmt.Errorf("list refresh sessions: %w", err)
+	}
+	keys := []string{refreshIndexKey(userID)}
+	for _, sid := range sids {
+		keys = append(keys, refreshKey(userID, sid))
+	}
+	if err := r.rdb.Del(ctx, keys...).Err(); err != nil {
+		return err
+	}
+	return r.rdb.Del(ctx, refreshKey(userID, "")).Err()
 }
 
 func pkceKey(state string) string {
 	return "pkce:" + state
 }
 
-func refreshKey(userID string) string {
-	return "refresh:" + userID
+// refreshKey is refresh:{<userID>}:<sid>, or the legacy refresh:<userID> for
+// sid "". sid is validated by the caller (validSessionID) before it gets here.
+// The {userID} hash tag keeps a user's session keys and index in one slot, so
+// they can be written in one MULTI.
+func refreshKey(userID, sid string) string {
+	if sid == "" {
+		return "refresh:" + userID
+	}
+	return "refresh:{" + userID + "}:" + sid
+}
+
+func refreshIndexKey(userID string) string {
+	return "refresh_sids:{" + userID + "}"
 }

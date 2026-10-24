@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::agent_tunnel::AgentTunnelHub;
+use crate::authorization::AuthzGate;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
@@ -55,6 +56,26 @@ pub fn spawn_quic_config_updates(
     })
 }
 
+/// Connector-revocation fail-closed (design D15, B2): in a terminal state
+/// (`Revoked`/`UnknownIdentity`) close every client QUIC connection and the
+/// endpoint. A recoverable `Disabled` keeps connections; their new streams
+/// are reset by the admission gate (B1).
+pub fn spawn_terminal_close(endpoint: quinn::Endpoint, gate: &AuthzGate) -> JoinHandle<()> {
+    let mut rx = gate.subscribe();
+    tokio::spawn(async move {
+        loop {
+            if rx.borrow_and_update().state().is_terminal() {
+                warn!("fail-closed: terminal state — closing every client QUIC connection");
+                endpoint.close(0u32.into(), b"connector not authorized");
+                return;
+            }
+            if rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+}
+
 pub async fn listen(
     addr: &str,
     advertise_addr: &str,
@@ -65,6 +86,7 @@ pub async fn listen(
     crl_manager: CrlManager,
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
+    gate: AuthzGate,
 ) -> Result<()> {
     let server_config = quic_server_config_for(&certs.current().store)?;
 
@@ -73,6 +95,7 @@ pub async fn listen(
         .map_err(|e| anyhow::anyhow!("bad QUIC addr '{}': {}", addr, e))?;
     let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
     let _config_updates = spawn_quic_config_updates(endpoint.clone(), certs.subscribe());
+    let _terminal_close = spawn_terminal_close(endpoint.clone(), &gate);
 
     // Register the QUIC advertise address so device_tunnel includes it in responses.
     device_tunnel::set_quic_advertise_addr(advertise_addr.to_string());
@@ -85,6 +108,14 @@ pub async fn listen(
         let Some(incoming) = endpoint.accept().await else {
             break;
         };
+        // Connector-revocation B1 (§7 step 2): refuse new QUIC connections
+        // while the connector isn't authorized to serve.
+        if !gate.admits_now() {
+            tracing::debug!(state = ?gate.snapshot().state(), "device tunnel (QUIC) connection refused: connector not authorized to serve");
+            incoming.refuse();
+            continue;
+        }
+        let gate = gate.clone();
 
         let acl = acl.clone();
          let registry = registry.clone();
@@ -130,6 +161,16 @@ pub async fn listen(
                     }
                 };
 
+                // New streams on an established connection: reset, no
+                // TunnelResponse (dropping a SendStream would finish it).
+                if !gate.admits_now() {
+                    tracing::debug!(state = ?gate.snapshot().state(), "device tunnel (QUIC) stream reset: connector not authorized to serve");
+                    let (mut send, mut recv) = (send, recv);
+                    let _ = send.reset(0u32.into());
+                    let _ = recv.stop(0u32.into());
+                    continue;
+                }
+                let gate = gate.clone();
                 let stream = tokio::io::join(recv, send);
                 let acl = acl.clone();
                  let registry = registry.clone();
@@ -152,6 +193,7 @@ pub async fn listen(
                         crl,
                         &conn_id,
                         &ctrl_tx,
+                        &gate,
                     )
                     .await
                     {

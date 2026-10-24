@@ -347,3 +347,7 @@ func TestValidateIPSANs(t *testing.T) {
 		}
 	}
 }
+
+func (f *fakeProvisionStore) RevokedConnectorSPIFFEIDs(context.Context, []string) ([]string, error) {
+	return nil, nil
+}

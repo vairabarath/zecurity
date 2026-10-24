@@ -323,11 +323,41 @@ pub struct TunnelPool {
 }
 
 impl TunnelPool {
+    /// Test-only: a pool that accepts any connector of the device's trust
+    /// domain (`spiffe://<td>/connector/*`). Production builds only
+    /// exact-identity pools (`new_for_connector`, Phase C).
+    #[cfg(test)]
     pub fn new(
         cert_pem: &str,
         key_pem: &str,
         tpm_key_material: Option<&str>,
         ca_pem: &str,
+    ) -> Result<Self> {
+        Self::build(cert_pem, key_pem, tpm_key_material, ca_pem, None)
+    }
+
+    /// Connector-revocation Phase C (design §8): a pool for ONE connector that
+    /// accepts only that connector's exact SPIFFE id. An empty id, or one
+    /// outside `spiffe://<td>/connector/`, fails closed.
+    pub fn new_for_connector(
+        cert_pem: &str,
+        key_pem: &str,
+        tpm_key_material: Option<&str>,
+        ca_pem: &str,
+        connector_spiffe: &str,
+    ) -> Result<Self> {
+        if connector_spiffe.is_empty() {
+            anyhow::bail!("connector SPIFFE id is empty — refusing a direct pool without an exact identity");
+        }
+        Self::build(cert_pem, key_pem, tpm_key_material, ca_pem, Some(connector_spiffe))
+    }
+
+    fn build(
+        cert_pem: &str,
+        key_pem: &str,
+        tpm_key_material: Option<&str>,
+        ca_pem: &str,
+        exact_connector: Option<&str>,
     ) -> Result<Self> {
         let cert_chain = parse_cert_chain(cert_pem, "device certificate")?;
         let trust_domain = extract_client_trust_domain(
@@ -348,9 +378,18 @@ impl TunnelPool {
             .add(ca_bundle.intermediate_ca)
             .context("add intermediate CA trust anchor")?;
 
+        let verifier: Arc<dyn rustls::client::danger::ServerCertVerifier> = match exact_connector {
+            Some(id) => {
+                if !id.starts_with(&expected) || id.len() == expected.len() {
+                    anyhow::bail!("connector SPIFFE id {id} is not a connector of trust domain {trust_domain}");
+                }
+                ExactSpiffeVerifier::new(roots, id)?
+            }
+            None => PrefixSpiffeVerifier::new(roots, expected)?,
+        };
         let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(PrefixSpiffeVerifier::new(roots, expected)?)
+            .with_custom_certificate_verifier(verifier)
             .with_client_cert_resolver(Arc::new(SingleCertAndKey::from(certified_key)));
         tls_config.alpn_protocols = vec![b"ztna-tunnel-v1".to_vec()];
 
@@ -1001,6 +1040,72 @@ mod stale_pool_tests {
     }
 
     const WAIT: Duration = Duration::from_secs(5);
+
+    // ── Connector-revocation Phase C: exact identity on the direct path ────
+
+    fn exact_pool(pki: &Pki, connector_spiffe: &str) -> Result<TunnelPool> {
+        TunnelPool::new_for_connector(
+            &pki.client_cert_pem,
+            &pki.client_key_pem,
+            None,
+            &pki.ca_bundle_pem,
+            connector_spiffe,
+        )
+    }
+
+    /// AC-6: a per-connector pool connects to that connector only.
+    #[tokio::test]
+    async fn exact_pool_accepts_only_its_own_connector() {
+        install_provider();
+        let pki = pki();
+        let server = start_server(&pki, Duration::from_secs(30));
+        let mine = exact_pool(&pki, SERVER_SPIFFE).unwrap();
+        let (mut s, _) = tokio::time::timeout(WAIT, mine.open_probed_stream(server))
+            .await
+            .unwrap()
+            .expect("the connector's own SPIFFE id is accepted");
+        echo(&mut s, b"exact").await;
+
+        let other = exact_pool(&pki, "spiffe://ws.test/connector/c2").unwrap();
+        let res = tokio::time::timeout(WAIT, other.open_probed_stream(server)).await.unwrap();
+        assert!(res.is_err(), "a different connector id must be rejected");
+    }
+
+    /// AC-6: no exact identity → no pool (fail closed).
+    #[test]
+    fn exact_pool_refuses_empty_or_foreign_ids() {
+        install_provider();
+        let pki = pki();
+        assert!(exact_pool(&pki, "").is_err(), "empty id");
+        assert!(exact_pool(&pki, "spiffe://other.test/connector/c1").is_err(), "other trust domain");
+        assert!(exact_pool(&pki, "spiffe://ws.test/connector/").is_err(), "role prefix only");
+        assert!(exact_pool(&pki, "spiffe://ws.test/client/d1").is_err(), "not a connector");
+    }
+
+    /// AC-6: a renewed connector certificate (same SPIFFE id, new key and
+    /// serial) is still accepted.
+    #[tokio::test]
+    async fn exact_pool_accepts_a_renewed_connector_certificate() {
+        install_provider();
+        let (ws_ca, ws_key) = ca("ws-ca");
+        let (inter_ca, _k) = ca("platform-intermediate");
+        let (client, client_key) = leaf(CLIENT_SPIFFE, ExtendedKeyUsagePurpose::ClientAuth, &ws_ca, &ws_key);
+        let (renewed, renewed_key) = leaf(SERVER_SPIFFE, ExtendedKeyUsagePurpose::ServerAuth, &ws_ca, &ws_key);
+        let pki = Pki {
+            ca_bundle_pem: format!("{}{}", ws_ca.pem(), inter_ca.pem()),
+            client_cert_pem: client.pem(),
+            client_key_pem: client_key.serialize_pem(),
+            server_chain: vec![renewed.der().clone()],
+            server_key: PrivateKeyDer::try_from(renewed_key.serialize_der()).unwrap(),
+        };
+        let server = start_server(&pki, Duration::from_secs(30));
+        let pool = exact_pool(&pki, SERVER_SPIFFE).unwrap();
+        let (mut s, _) = tokio::time::timeout(WAIT, pool.open_probed_stream(server))
+            .await
+            .unwrap()
+            .expect("renewed certificate with the same identity is accepted");
+        echo(&mut s, b"renewed").await;
+    }
 
     async fn echo(stream: &mut AuthenticatedStream, msg: &[u8]) {
         stream.write_all(msg).await.unwrap();

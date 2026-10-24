@@ -231,12 +231,12 @@ fn validate_update_times(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::time::{Duration as TimeDuration, OffsetDateTime};
     use rcgen::{
         BasicConstraints, Certificate, CertificateParams, CertificateRevocationListParams, DnType,
         IsCa, KeyIdMethod, KeyPair, KeyUsagePurpose, RevokedCertParams, SerialNumber,
     };
     use std::sync::Once;
-    use ::time::{Duration as TimeDuration, OffsetDateTime};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const KEY_ID: &[u8] = b"zecurity-relay-crl-test-kid";

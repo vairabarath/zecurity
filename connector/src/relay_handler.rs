@@ -11,11 +11,12 @@ use rustls_pemfile::certs;
 use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio::time::timeout;
 use tokio_rustls::TlsAcceptor;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::agent_tunnel::AgentTunnelHub;
+use crate::authorization::AuthzGate;
 use crate::crl::CrlManager;
 use crate::device_tunnel;
 use crate::policy::PolicyCache;
@@ -96,6 +97,8 @@ pub struct RelayHandler {
     control_tx: mpsc::Sender<ControlMessage>,
     handshake_timeout: Duration,
     stream_permits: Arc<Semaphore>,
+    /// Connector serving state (connector-revocation B1).
+    gate: AuthzGate,
 }
 
 impl RelayHandler {
@@ -109,6 +112,7 @@ impl RelayHandler {
         control_tx: mpsc::Sender<ControlMessage>,
         handshake_timeout_secs: u64,
         max_tunnel_streams: usize,
+        gate: AuthzGate,
     ) -> Result<Self> {
         validate_runtime_limits(handshake_timeout_secs, max_tunnel_streams)?;
         let (tls_config, workspace_trust_domain) = build_inner_tls_server_config(certs)?;
@@ -123,6 +127,7 @@ impl RelayHandler {
             control_tx,
             handshake_timeout: Duration::from_secs(handshake_timeout_secs),
             stream_permits: Arc::new(Semaphore::new(max_tunnel_streams)),
+            gate,
         })
     }
 
@@ -137,6 +142,15 @@ impl RelayHandler {
                 .accept_bi()
                 .await
                 .context("accept Relay-opened Connector stream")?;
+            // Connector-revocation B1 (§7 step 2): reset, no TunnelResponse.
+            if !self.gate.admits_now() {
+                debug!(
+                    state = ?self.gate.snapshot().state(),
+                    "Relay tunnel stream reset: connector not authorized to serve"
+                );
+                reject_stream(send, recv);
+                continue;
+            }
             let permit = match self.stream_permits.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -195,6 +209,7 @@ impl RelayHandler {
             self.crl_manager.clone(),
             &self.connector_id,
             &self.control_tx,
+            &self.gate,
         )
         .await
     }

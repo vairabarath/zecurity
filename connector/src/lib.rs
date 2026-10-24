@@ -8,6 +8,7 @@ pub mod agent_server;
 pub mod agent_tunnel;
 pub mod appmeta;
 pub mod authorization;
+pub mod authz_timing;
 pub mod config;
 pub mod control_stream;
 pub mod controller_client;
@@ -16,6 +17,7 @@ pub mod crypto;
 pub mod device_tunnel;
 pub mod discovery;
 pub mod enrollment;
+pub mod fail_closed;
 pub mod net_util;
 pub mod policy;
 pub mod quic_listener;
@@ -28,6 +30,8 @@ pub mod relay_selector;
 pub mod renewal;
 #[cfg(test)]
 mod renewal_consumers_tests;
+#[cfg(test)]
+mod serving_gate_tests;
 pub mod session_registry;
 #[cfg(test)]
 pub mod test_support;

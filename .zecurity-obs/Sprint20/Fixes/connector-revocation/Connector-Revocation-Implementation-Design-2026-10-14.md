@@ -2,7 +2,7 @@
 title: Connector Revocation Enforcement — Implementation Design and Phased Plan
 date: 2026-10-14
 type: design (documentation only)
-status: PROPOSED (revision 3, 2026-10-15) — IMPLEMENTATION NOT AUTHORIZED
+status: IMPLEMENTED (revision 5, 2026-10-21; implementation complete 2026-10-23) — phases A, B1, M, B2, C, D, E and F (fixes + migration 041) done, each unit + mutation + live tested; end-to-end live run PASS 2026-10-23 (Connector-Revocation-E2E-Live-2026-10-23.md). Still open: O10 (recovery after revocation), PENDING-18 (session migration), same-key connector renewal.
 branch: feat/sprint20-m1-phase2
 revision: 38e38c62044dd869e57bc299e7d3e1dbf4ad10a9 (revisions 1–2); 12e43ac (revision 3)
 based_on:
@@ -46,6 +46,22 @@ based_on:
 - O3 accepted (D11): an unknown/deleted connector identity never serves; it enters its own terminal non-serving state (`UnknownIdentity`), distinct from `Revoked`.
 - §4.5 error classification, §5 state machine, §7, §13 Phase A, §14 tests (T19–T28), §16 and §17 updated accordingly. Phase A is unblocked **with respect to O2/O3 only**.
 - New source facts verified at `12e43ac`: `activateStream` maps `ErrNoRows` to `PermissionDenied "connector is revoked"` (`control_stream.go:621-622`) and only logs other DB errors (`:624-625`); the connector certificate interceptor maps a workspace-CA load failure to `Unauthenticated` (`control_stream.go:1008-1011`, `spiffe.go:256-260`); the relay path already separates `Unavailable` (state unavailable) from `PermissionDenied` (revoked) (`:1018-1024`).
+
+**Revision 4 (2026-10-20):**
+- O9 accepted (D12): `Revoked`/`UnknownIdentity` are **not persisted** across restart, and the connector **idles** in a terminal state (stays alive with the data plane closed and the reconnect loop stopped) instead of exiting. Reason for idle: the Docker deployment uses `restart: unless-stopped` (`connector/docker-compose.yml:17`), which restarts after any exit, including exit 0; the systemd unit uses `Restart=on-failure` (`connector/systemd/zecurity-connector.service:24`). Exiting would cause a restart loop against the controller under Docker. Reason for no persistence: safety doesn't depend on it (§5.2), and a persisted flag would need clearing rules on re-enrollment (O10, undesigned).
+- §5.2, §7, §16 and §17 updated. Phase B1 acceptance list: [B1 acceptance](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md).
+
+**Revision 5 (2026-10-21):**
+- Phase M measured B, the controller cost per request, renewal and reconnect latency ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)).
+- Accepted from those results:
+  - **O5 → D13:** backoff reset after an accepted ack; 1 s → 5 s cap, ±20 % jitter while not serving;
+  - **O7 → D14:** P = 4.5 s, B budget 1 s;
+  - **O8 → D15:** `Disabled` keeps connections but carries nothing; shield streams close after 30 s;
+  - **O6 → D16:** full health report every P now; a lightweight authorization request is a later improvement.
+- D17: the Phase A contract details (§4.2, §4.4, §4.6) are approved as built. D18: the renewal head-of-line fix is in B2's scope.
+- The timing values are fixed at build time (`connector/.env` → `connector/build.rs` → `crate::authz_timing`); they are not runtime configuration.
+- B2 live-lab substitutions: shield host **udaya**, relay **manojinkyank**, client with one resource or a `down`/`up` per resource change (§15).
+- §6.3, §6.6, §7, §13, §16 and §17 updated.
 
 Raw evidence isn't repeated. See:
 - [Feasibility report](Connector-Revocation-Enforcement-Feasibility-2026-10-14.md) ("FR");
@@ -143,7 +159,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 - **The `'deleted'` literal never matches**: `connectors.status` has no such value.
 - **Ordering.** FIFO per stream: a message enqueued after `pushACLSnapshot` (`:837`) is delivered after that ACL.
 
-### 4.2 Contract (D2 ACCEPTED direction; field details RECOMMENDED, AWAITING APPROVAL)
+### 4.2 Contract (D2 ACCEPTED direction; field details ACCEPTED D17)
 
 **Messages (additive; all numbers free at `38e38c6`):**
 - `ConnectorHealthReport.heartbeat_seq = 9` (uint64; ≥ 1 for every authorization-bearing report);
@@ -169,7 +185,7 @@ These are R1–R12 of FR §3, condensed. The FR wording stays authoritative.
 
 The connector records `sent[seq] = Instant` when it **enqueues** the report (monotonic `tokio::time::Instant`; enqueue precedes the wire send, so the anchor is conservative). Seqs are process-global, start at 1 and never reset per stream.
 
-Let `D` be the current deadline (undefined in `Starting` and in the terminal states), and `lost_at` the instant authorization was last lost (process start, entry to `Disabled`, or entry to `Recovering`).
+Let `D` be the current deadline (undefined in `Starting` and in the terminal states), and `lost_at` the instant authorization was last lost (process start or entry to `Disabled`; **not** reset on `Disabled → Recovering`, per §5.2 — confirmed by the user 2026-10-21).
 
 Ack k is **accepted** only if **all** of these hold:
 
@@ -219,7 +235,7 @@ On acceptance: `D = sent[k] + H` (monotonic; it can only increase because k > hi
 | Unsupported protocol (no capability, no ack) | no ack ever arrives | stays closed; never serves (§4.6) |
 | Make-before-break renewal | no error; acks continue on either stream (§5.4) | continuity preserved |
 
-**Required error-handling corrections for Phase A (documented, not implemented):**
+**Required error-handling corrections for Phase A** (implemented in Phase A, 2026-10-15: `classifyRefusal` in `controller/internal/connector/control_stream.go`; tests T2/T3/T20/T21/T22 in `authorization_test.go`):
 1. `Control:436-437`: split the `Scan` result three ways. `pgx.ErrNoRows` → `NotFound` + `unknown`. A row with revoked state → `PermissionDenied` + `revoked` (`:439-441` today, marker added). **Any other error → `Unavailable`, no marker.** A DB failure must never become `NotFound` or carry a terminal marker.
 2. `handleConnectorHealth` `ErrNoRows` (`:779`) and the `Control` close path (`:566-568`): the guarded UPDATE can't tell deleted from revoked, so run an authoritative follow-up SELECT and map it to class A, B or C. If the follow-up fails → `Unavailable`, no marker.
 3. `activateStream` `ErrNoRows` (`:621-622`): same follow-up classification; today it returns `PermissionDenied "connector is revoked"` even for a deleted row. Other DB errors (`:624-625`) need no marker; serving is impossible without an ack anyway (§4.3 rule 2).
@@ -227,7 +243,7 @@ On acceptance: `D = sent[k] + H` (monotonic; it can only increase because k > hi
 
 **Rules:** only `ConnectorRevoked` or the `revoked` marker enters `Revoked`; only the `unknown` marker enters `UnknownIdentity`; an unmarked `PermissionDenied`/`NotFound` is never terminal; **a DB failure is never converted into an unknown or revoked result.**
 
-### 4.6 Capability flag: still useful? (RECOMMENDED, AWAITING APPROVAL)
+### 4.6 Capability flag: still useful? (ACCEPTED D17: keep it as a fail-closed assertion)
 
 **Without the flag**, a connector paired with a controller lacking the contract never receives acks. It stays `Starting`/`Disabled`, which is already fail-closed. So the flag is **not needed for security**.
 
@@ -291,7 +307,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 | UnknownIdentity | anything, including a marker of another kind | UnknownIdentity (reconnect loop stops) |
 | process restart | — | Starting (in every case) |
 
-**Restart (ACCEPTED D11).** Terminal states are in-memory; whether they are also persisted locally is **OPEN (O9)**. Protection **does not depend on that persistence**: every restart begins in `Starting`, and only the controller's authoritative response can open the data plane.
+**Restart (ACCEPTED D11).** Terminal states are in-memory only and are **not persisted** (ACCEPTED D12 = O9). In a terminal state the process idles: it stays alive, the data plane stays closed and the reconnect loop is stopped; it does not exit. Protection **does not depend on that persistence**: every restart begins in `Starting`, and only the controller's authoritative response can open the data plane.
 - A valid connector becomes `Serving` only after a fresh accepted ack.
 - A revoked identity is rejected again by the controller (`revoked` marker) and returns to `Revoked`.
 - An unknown identity gets the `unknown` marker again and returns to `UnknownIdentity`; it never serves in between.
@@ -362,7 +378,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 - With `D = sent[k] + H`, the ack for request k+1 must be processed before `sent[k] + H`. With period H, that requires zero latency, so **every** cycle would miss.
 - The controller acks nothing today.
 
-### 6.3 Required scheduling (design; values BLOCKED ON MEASUREMENT)
+### 6.3 Required scheduling (design; values ACCEPTED: D13, D14, D16)
 
 - **Quantities:**
   - `H`: maximum freshness (accepted);
@@ -379,14 +395,14 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
   - **Guaranteed:** no new stream is admitted at or after D; no ack processed at or after D is accepted.
   - **Not guaranteed:** that already-established sessions are cancelled exactly at D. Cancellation runs when the supervisor's timer task is polled, so a starved runtime delays it by the starvation time. A late send can only cause an earlier fail-closed, never a later one.
   - This residual risk is stated, not hidden.
-- **Reconnect backoff** doesn't affect D. A 60 s maximum backoff delays recovery from `Disabled` (O5, OPEN).
+- **Reconnect backoff** doesn't affect D. Today's 60 s cap, which never resets after a successful reconnect, delays recovery from `Disabled` by up to 60 s (measured in Phase M R3). **ACCEPTED (D13):** reset after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter.
 - **If measurements show B can't fit within H**, fail-closed stays mandatory. H isn't extended and no grace is added. The outcome is either a change elsewhere (e.g. faster controller path, O6) or reduced availability, recorded explicitly.
 
 ### 6.4 Trade-offs (recorded)
 
 | Trade-off | Detail |
 |---|---|
-| A. Controller load | P < H − B means more reports per connector than today's one per 15 s. Each full report runs the guarded UPDATE, notifications, the ReEnroll check, the relay-placement upsert and the ACL compare (`handleConnectorHealth:749-840`). A lighter authorization-only request (guarded SELECT) is an alternative; **O6, BLOCKED ON MEASUREMENT** |
+| A. Controller load | P < H − B means more reports per connector than today's one per 15 s. Each full report runs the guarded UPDATE, notifications, the ReEnroll check, the relay-placement upsert and the ACL compare (`handleConnectorHealth:749-840`). Measured about 3 ms per report, 2.3 ms of it DB (Phase M). **D16:** keep the full report at P; a lighter authorization-only request is a later improvement |
 | B. Scheduler stalls | the starvation limit above; new-traffic refusal is stall-proof, session cancellation is not |
 | C. Budget doesn't fit | fail closed stays mandatory; no extension |
 
@@ -394,7 +410,7 @@ No existing type represents serving state (CONFIRMED BY SOURCE); this is a new m
 
 The ack is sent only after any required ACL push for that heartbeat (per the task). So ACL compile and push latency are part of B, and a cache-miss compile (`GetOrCompile`) lies on the ack path. The earlier "ack before ACL" idea is withdrawn.
 
-### 6.6 Measurements required before the schedule is implemented (BLOCKED ON MEASUREMENT)
+### 6.6 Measurements required before the schedule is implemented (DONE 2026-10-21: [Phase M results](Connector-Revocation-PhaseM-Results-2026-10-21.md); WAN emulation R4 not run)
 
 | Measure | Where |
 |---|---|
@@ -408,7 +424,7 @@ The ack is sent only after any required ACL push for that heartbeat (per the tas
 | Runtime scheduling lag under data-plane load | connector (timer drift / tokio metrics) |
 | Controller DB load at the candidate P per connector × expected connector count | controller + DB |
 
-B, P and the O6 choice are recorded with these results before phase B2 starts.
+B, P and the O6 choice are recorded (D14, D16) with these results. The measured B was p99 ≤ 79 ms and max 83 ms on the LAN. Its tail is the renewal awaited inline in the connector's Control-stream loop (61–80 ms), plus controller DB spikes (≤ 41 ms).
 
 ## 7. Fail-closed (D5 ACCEPTED): what `Disabled`, `Revoked` and `UnknownIdentity` stop
 
@@ -419,14 +435,14 @@ Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE
 | 1. Publish the closed state atomically | none | a supervisor-owned `watch`/atomic `{state, D}` | readers must see state and D together (one snapshot) | T2, T9 |
 | 2. Refuse new client connections and streams at the transport level | single funnel `device_tunnel::handle_stream:151` for QUIC, TLS and relay-routed; `quinn::Incoming::refuse()` (`incoming.rs:44`) | funnel check of the state + `now < D`. Refuse by **stream reset / no `TunnelResponse`** (the client treats ConnectionReset as a transport failure → next connector + resync). Never send `ok:false`, which blocks fallback (`net_stack.rs:1166-1167`). Refuse new QUIC connections; drop new TLS sockets | a stream accepted just before step 1 and registered after step 3 → step 3 must re-check after registration (mirror the existing post-register `is_allowed` re-check, `device_tunnel.rs:252-258`) | T9, T2 |
 | 3. Cancel all connector-routed and shield-routed sessions | `SessionRegistry` tokens on every session; both copy paths `select!` on them | `cancel_every_session()` (only per-key `cancel_all` exists) | the race above; cancellation timing depends on scheduling (§6.3) | T9 |
-| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **Terminal states: close.** **`Disabled`: close or disable is OPEN (O8)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended in the terminal states; possibly disruptive for short `Disabled` periods) | T13 |
+| 4. Close or disable shield-facing data-plane channels | `ShieldRegistry` per-shield senders; the shield's existing failover on connection loss | `close_all()` + refuse `control()` while closed. **Terminal states: close.** **`Disabled`: keep the streams open, carrying nothing, and close them after 30 s in `Disabled` (ACCEPTED D15)**; either way no shield traffic flows, because shield sessions start only from step-2-gated streams and existing ones are cancelled in step 3 | closing triggers shield failover to a peer (intended in the terminal states; possibly disruptive for short `Disabled` periods) | T13 |
 | 5. Stop stale ACL/cache state reopening access | `PolicyCache` (memory only; starts `None`) | admission keyed on state + D, not cache presence; keep applying ACLs while closed (so re-enable starts with the ACL delivered just before the ack, FIFO); `PolicyCache::clear()` in the terminal states | an ACL arriving while closed must not open anything (it can't: admission ignores it) | T6, T7 |
 | 6. Stop retries and listeners re-enabling serving | `run_control_stream` reconnect loop; listener accept loops | they only **read** the state; only the supervisor transitions; the reconnect loop stops in either terminal state; restart starts in `Starting` | none if writes are confined to the supervisor | T6, T7 |
 
 **Other items:**
-- Relay attachment: relay-routed streams are already covered by steps 2–3. Detaching from relays is **OPEN (O8)**.
-- Tracking and closing existing client QUIC connections is **OPEN (O8)**.
-- Persisting `Revoked`/`UnknownIdentity` across restart is **OPEN (O9)**. Safety doesn't depend on it: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
+- Relay attachment: relay-routed streams are already covered by steps 2–3. **`Disabled` stays attached** (ACCEPTED D15).
+- Existing client QUIC connections **stay open in `Disabled`**; new streams are reset and sessions cancelled (ACCEPTED D15). The terminal states close them.
+- `Revoked`/`UnknownIdentity` are not persisted across restart, and the process idles rather than exits (ACCEPTED D12 = O9). Safety doesn't depend on persistence: a restarted process starts in `Starting` and the controller repeats the authoritative `revoked`/`unknown` result (§5.2).
 
 **Failure handling:** a step that fails is logged and doesn't revert step 1. Fail-closed never depends on later steps succeeding.
 
@@ -447,13 +463,13 @@ Closing the control stream closes nothing on the data plane (CONFIRMED BY SOURCE
 | Exact identity on the direct path | `ExactSpiffeVerifier` with `ConnCoords.connector_spiffe` instead of the prefix verifier | `tunnel_pool.rs:72` |
 | Reconnect sync | apply the list on the first successful sync, before the next flow is accepted | — |
 | Absence ≠ revocation | only the explicit list triggers termination; absence keeps today's behaviour (Q3 untouched) | — |
-| Offline staleness bound | **OPEN (O11)** | — |
+| Offline staleness bound | **ACCEPTED (D19)**: 1 h; implemented in Phase C | — |
 
 Mixed versions aren't supported (D8): the client and controller ship together. An empty list from a contract-capable controller means "none revoked".
 
 ## 9. Relay enforcement (D6 ACCEPTED direction; details RECOMMENDED, AWAITING APPROVAL)
 
-**Runtime status: UNVERIFIED LIVE** (blocked 10-12 and 10-13). No runtime claim is made.
+**Runtime status: IMPLEMENTED AND VERIFIED LIVE (Phase D, 2026-10-23)**: a revocation-ignoring connector's registration was dropped 25.9 s after revocation. The periodic CRL re-check bullet below was not implemented; the heartbeat answer covers established sessions. See `Connector-Revocation-PhaseD-Implementation-2026-10-23.md`.
 
 - **Identity channel:** the existing unary heartbeat.
   - Request field 8: `registered_connector_spiffe_ids`.
@@ -461,7 +477,7 @@ Mixed versions aren't supported (D8): the client and controller ship together. A
 - **New connections:** refuse `Register` for a listed identity (after the authenticated binding, `session.rs:123-128`); keep the CRL check at accept.
 - **Established sessions:** `ConnectorEntry.connection.close()` + `remove_connector`. Bridged client streams are `open_bi` on that connection, so they end too (INFERRED).
 - **CRL path:** a periodic re-check of registered connectors' serials, following the existing 1 s relay-revocation monitors (`client/src/relay_pool.rs:253`, `connector/src/relay_client.rs:466`).
-- **Stale information:** **OPEN (O12)**; no new timeout invented.
+- **Stale information:** **ACCEPTED (D20)**: sticky set, keep serving, no new timeout.
 - **Unrelated connectors:** untouched (per-entry close).
 
 ## 10. Shield enforcement (D6 ACCEPTED direction; details RECOMMENDED, AWAITING APPROVAL)
@@ -471,12 +487,12 @@ The shield's only channel is its connector (CONFIRMED BY SOURCE). With an **hone
 | Situation | Behaviour |
 |---|---|
 | Current connector revoked | the connector closes shield streams and refuses new ones (§7) |
-| Channel closed | existing failover to the next peer (`run_once:126-142`) |
-| Stale peer list | RECOMMENDED: `PeerConnectorList.revoked_connector_ids = 2` from any connector's ACL `revoked_connectors`; the shield prunes; lists are sent even when the sender's own id is absent. That is a shield proto + code change. Prune rule: **OPEN (O13)** |
+| Channel closed | existing failover to the next peer (`run_once:126-142`). Phase F fix (`faa957f`): a revoked/unknown connector now refuses with its own message, so the shield fails over instead of waiting for it (it used to wait forever while the revoked process ran) |
+| Stale peer list | RECOMMENDED: `PeerConnectorList.revoked_connector_ids = 2` from any connector's ACL `revoked_connectors`; the shield prunes; lists are sent even when the sender's own id is absent. That is a shield proto + code change. Prune rule: **ACCEPTED (D21)**; implemented and verified live in Phase E (2026-10-23) |
 | Alternative eligible connector | attaches via existing failover; new protected flows then work through it |
 | Existing protected application session | terminated; **not migrated** (PENDING-18) |
 | Controller/connector unavailable | the connector's `Disabled` handling (O8) |
-| Hostile revoked connector | can't be enforced at the shield with current interfaces (FR §19.8); **OPEN (O13)** |
+| Hostile revoked connector | can't be enforced at the shield with current interfaces (FR §19.8); **limit ACCEPTED (D21)**, bounded by certificate lifetime; client (C) and relay (D) refuse it |
 
 Revocation enforcement, failover and migration are separate deliverables with separate tests.
 
@@ -494,11 +510,11 @@ Revocation enforcement, failover and migration are separate deliverables with se
 
 | Decision | Options / facts | Status |
 |---|---|---|
-| Per-certificate connector history | precedent: `relay_certificates` (027). A `connector_certificates` table would need migration 038+ | BLOCKED ON SCHEMA APPROVAL (recommended as defence in depth) |
-| CRL coverage of every still-valid historical certificate | needs the history table; identity revocation already covers them where identity state reaches | BLOCKED ON SCHEMA APPROVAL |
-| Revoked serials surviving deletion | today a hard delete removes the CRL entry (`DeleteConnector`); migration 029's "Rows are never deleted" comment contradicts the code | BLOCKED ON SCHEMA APPROVAL (or a code-only "forbid delete" policy, OPEN) |
-| Tombstone / durable lifecycle record | `status` has no `deleted` value; a tombstone needs a schema change | BLOCKED ON SCHEMA APPROVAL |
-| Identity reuse prevention | UUID randomness only today | depends on the tombstone decision |
+| Per-certificate connector history | precedent: `relay_certificates` (027) | **DONE** by `52c16fa` (certificate audit bug 9, migration `039_certificate_history.sql`): `connector_certificates`, filled by a trigger on `connectors`, no FK, so it outlives the row. Phases C and D build on it |
+| CRL coverage of every still-valid historical certificate | the workspace CRL is built from `connector_certificates` (`pki/workspace.go:597`); revocation marks every certificate of the connector | **DONE** by `52c16fa` |
+| Revoked serials surviving deletion | `DeleteConnector` removes only the `connectors` row; the serials stay in `connector_certificates` and so in the CRL. Phases C/D also treat a deleted connector as revoked while a certificate is valid | **DONE** by `52c16fa` (re-checked 2026-10-23); a "forbid delete" policy is not needed for the CRL. **New finding (2026-10-23):** the delete cascades to `shields` rows attached to the connector without recording them in `shield_revocations`; see the Phase F shield-cascade check. **Fixed** (`faa957f`): `deleteConnector` is refused while an enrolled, non-revoked shield is attached |
+| Tombstone / durable lifecycle record | `connector_revocations` (migration 041), written by a trigger on every revocation; no FK, so it outlives the row | **DONE 2026-10-23** (`3995af6`, approved by the user; [record](Connector-Revocation-PhaseF-Schema-041-2026-10-23.md)) |
+| Identity reuse prevention | trigger `connectors_reject_revoked_identity`: a tombstoned id can't be inserted or taken by an update of id | **DONE 2026-10-23** (`3995af6`) |
 | Same-key renewal | not enforced for connectors (relays and devices do enforce it) | OPEN; not required by Q1–Q6 |
 
 No schema or database change is authorized by this document.
@@ -520,11 +536,11 @@ G  (tests) — inside every phase; live rows after B2, C, D, E
 |---|---|---|---|---|---|---|
 | **A** Controller contract | §17 gate | `proto/connector/v1/connector.proto`; `controller/internal/connector/control_stream.go` (`handleConnectorHealth`, `Control`, `activateStream`, `agentPolicyMessage`, exported registry accessor); `graph/resolvers/connector.resolvers.go`; policy compiler/store (revoked list); `proto/client/v1/client.proto` | ack rules §4.3; `ConnectorRevoked` push; `revoked`/`unknown` trailer markers (D10); the four §4.5 corrections (`Scan` error → `Unavailable`; follow-up classification in health and activation); `AgentPolicy` always sent; revoked-connector list compiled | T5, T8, T19–T22, T14 | new controller suite tests; existing suite green | O2, O3 **resolved** (D10, D11); remaining gate items in §17 |
 | **M** Measurements | A in the lab | instrumentation only | §6.6 | T17 | B, P, O6 recorded | — |
-| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 |
-| **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | O5, O8 |
+| **B1** Connector states + gate | A | `connector/src/control_stream.rs`, new supervisor module, `device_tunnel.rs`, `quic_listener.rs`, `main.rs` | §4.4, §5 (incl. `UnknownIdentity`), §7 steps 1–2, terminal handling, capability assertion | T3–T8, T15, T16, T19–T28 (connector side) | unit tests | O9 resolved (D12); B1-Q1 = (a) |
+| **B2** Deadline + fail-closed | B1, M | supervisor schedule; `session_registry.rs`; `agent_server.rs`; `policy/mod.rs`; tokio `test-util` dev-dependency (`full` excludes it) | §6.3, §7 steps 3–6 | T1, T2, T9, T10, T17 | paused-clock + live | none: O5, O6, O7, O8 resolved (D13–D16) |
 | **C** Client | A | `client/src/daemon.rs`, `transport.rs`, `net_stack.rs`, `tunnel_pool.rs` | §8 | T11 | unit + live | O11 |
-| **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + **live relay lab (BLOCKED today)** | O12 |
-| **E** Shield pruning | B2, C | `proto/shield/v1/shield.proto`, `connector/src/agent_server.rs`, `shield/src/control_stream.rs` | §10 | T13 | live (two connectors) | O13 |
+| **D** Relay | A (controller relay heartbeat) | `proto/relay/v1/relay.proto`, `controller/internal/relay/heartbeat.go`, `relay/src/heartbeat.rs`, `state.rs`, `session.rs`, `listener.rs` | §9 | T12 | unit + live relay lab: **DONE 2026-10-23** ([record](Connector-Revocation-PhaseD-Implementation-2026-10-23.md)) | O12 → D20 |
+| **E** Shield pruning | B2, C | `proto/shield/v1/shield.proto`, `connector/src/agent_server.rs`, `shield/src/control_stream.rs` | §10 | T13 | live (two connectors): **DONE 2026-10-23** ([record](Connector-Revocation-PhaseE-Implementation-2026-10-23.md)) | O13 → D21 |
 | **F** History / lifecycle | schema approval | migrations 038+, `enrollment.go`, `pki/workspace.go`, `DeleteConnector` | §12 | CRL history / delete tests | — | O14 |
 | **G** Live acceptance | each phase | live-lab scripts | §14 | — | OBSERVED_* records | relay lab |
 
@@ -587,6 +603,20 @@ Mutation checks (disable each enforcement line; the matching test must fail) fol
 
 Rollback = redeploy the previous coordinated build. Mixed pairings fail closed by design (T14).
 
+**B2 live lab (user decision, 2026-10-21):**
+
+| Role | Host | Notes |
+|---|---|---|
+| Controller | this PC (192.168.1.164) | private binary path; other agents must not restart it during runs |
+| Connector | inkyank (192.168.1.75) | update timer disabled |
+| **Shield** | **udaya (192.168.1.37)**, replacing nika | a shield has to be installed and enrolled there (sudo on udaya); T13 and the D15 30 s shield-close check run here |
+| **Relay** | **manojinkyank (192.168.1.49)** | relay-path rows of T9/T12 run here instead of being unit-only |
+| Client | this PC | one resource, or `zecurity-client down` / `up` after each resource change |
+
+**Why one resource or a `down`/`up` cycle:** the client's resource hot-apply (`167ffa5`) admits only one new resource IP. The cap is `smoltcp::config::IFACE_MAX_ADDR_COUNT` = 2 minus 1 reserved address (Phase M results, "Lab finding"). This is a client issue, outside B2.
+
+Access to the lab hosts is through the user's Orca SSH terminals. sudo on each host needs the user's password.
+
 ## 16. Decisions
 
 ### Accepted
@@ -604,6 +634,16 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | D9 | The ack is sent only after any required ACL push (§6.5) |
 | D10 (= O2) | A structured, machine-readable gRPC status marker (trailer metadata, §4.5) distinguishes REVOKED and UNKNOWN_CONNECTOR from ordinary errors; message text is never used for security decisions; markers only after a successful lookup |
 | D11 (= O3) | An unknown/deleted identity never serves; it enters `UnknownIdentity`, a terminal non-serving state for the process, distinct from `Revoked`; recovery only through explicitly authorized re-enrollment or replacement; DB failures stay recoverable |
+| D12 (= O9) | Terminal states are not persisted across restart; in `Revoked`/`UnknownIdentity` the connector idles (process alive, data plane closed, reconnect loop stopped, terminal state logged periodically) rather than exiting, because `restart: unless-stopped` restarts any exit |
+| D13 (= O5) | Control-stream reconnect backoff resets after an accepted ack; while not serving 1 s → ×2 → 5 s cap, ±20 % jitter; fixed at build time (`connector/.env` → `build.rs` → `authz_timing.rs`) |
+| D14 (= O7) | P = 4.5 s with H = 15 s fixed; B budgeted at 1 s from Phase M; fixed at build time, allowed 500–14000 ms |
+| D15 (= O8) | `Disabled` keeps shield/relay/client connections but carries nothing; shield streams closed after 30 s in `Disabled`; fixed at build time |
+| D16 (= O6) | The authorization request every P is the full health report (no protocol or controller change). A lightweight request is a later improvement |
+| D17 | The Phase A contract details are approved as built: field numbers (§4.2), ack acceptance rules (§4.4, with `lost_at` per §5.2) and the `AgentPolicy.authorization_acks` capability flag kept as a fail-closed assertion (§4.6) |
+| D18 | B2 includes the renewal head-of-line fix: a certificate renewal must not delay processing of `AuthorizationAck` or `ConnectorRevoked` on the current Control stream (Phase M: all 61–80 ms ack tails) |
+| D19 (= O11) | Client: revoked connectors listed until revoked_at + connector cert TTL; the client stops using connectors after 1 h without a successful ACL sync |
+| D20 (= O12) | Relay: a stale revoked list is kept; the relay keeps serving; no new timeout |
+| D21 (= O13) | Shield: prune field approved; prune immediately from any connector's list, never re-add while listed, memory only; hostile-connector limit accepted and documented |
 
 ### Former open items O1–O14 (re-classified)
 
@@ -613,16 +653,16 @@ Rollback = redeploy the previous coordinated build. Mixed pairings fail closed b
 | O2 | Terminal marker form | **ACCEPTED (D10)**: structured trailer marker (§4.5); exact key/value spelling is a Phase A protocol implementation detail |
 | O3 | Deleted/unknown connector: terminal or another lifecycle class | **ACCEPTED (D11)**: separate terminal non-serving state `UnknownIdentity` (§5.1); recovery workflow not designed here |
 | O4 | Legacy mode for a new connector with an old controller | **NOT APPLICABLE (UNRELEASED)**: removed. The remaining question, whether to keep `AgentPolicy.authorization_acks` as a fail-closed assertion, is **RECOMMENDED, AWAITING APPROVAL** (keep, §4.6) |
-| O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **OPEN** (informed by reconnect-latency measurement) |
-| O6 | Full health report vs lightweight authorization request at period P | **BLOCKED ON MEASUREMENT** |
-| O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **BLOCKED ON MEASUREMENT** |
-| O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **OPEN** (shield traffic must stop either way, §7 step 4) |
-| O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **OPEN** (safety doesn't depend on it, §5.2) |
+| O5 | Reconnect backoff cap in `Disabled`/`Recovering` | **ACCEPTED (D13, 2026-10-21)**: reset the backoff after a session receives an accepted ack; while not serving start at 1 s, ×2, cap 5 s, ±20 % jitter (`CONTROL_RECONNECT_BASE_MS` / `_MAX_MS` / `_JITTER_PCT`) |
+| O6 | Full health report vs lightweight authorization request at period P | **ACCEPTED (D16, 2026-10-21)**: (a) full health report every P now. (b) a lightweight request (guarded UPDATE only, about 25–30 % cheaper per Phase M) is a **later improvement**, not part of B2 |
+| O7 | Response budget B and period P (H fixed; ack-after-ACL accepted as D9) | **ACCEPTED (D14, 2026-10-21)**: measured B p99 ≤ 79 ms / max 83 ms (Phase M); B budgeted at 1 s; **P = 4.5 s** (`AUTHZ_REQUEST_PERIOD_MS`, range 500–14000), tolerating two consecutive lost requests |
+| O8 | On `Disabled`: close vs disable shield streams; detach relays; close client QUIC connections | **ACCEPTED (D15, 2026-10-21)**: keep shield streams, relay attachment and client QUIC connections open but carry nothing (new streams refused, sessions cancelled); close the shield streams after 30 s in `Disabled` (`DISABLED_SHIELD_CLOSE_SECS`). To be checked live once a shield host is available |
+| O9 | Persist `Revoked`/`UnknownIdentity` across restart; exit vs idle | **ACCEPTED (D12)**: no persistence; idle, don't exit |
 | O10 | Recovery after permanent revocation | **OPEN** (today: new identity only) |
-| O11 | Retention of `revoked_connectors`; client offline staleness bound | **OPEN** |
-| O12 | Relay behaviour when its revoked list is stale | **OPEN** |
-| O13 | Shield prune rule; hostile-connector limit | prune field **RECOMMENDED, AWAITING APPROVAL**; prune rule and hostile limit **OPEN** |
-| O14 | Cert history, historical-serial CRL coverage, serials after deletion, tombstones, reuse prevention | **BLOCKED ON SCHEMA APPROVAL** (each separately, §12) |
+| O11 | Retention of `revoked_connectors`; client offline staleness bound | **ACCEPTED (D19, 2026-10-22)**: a revoked connector stays listed until its last certificate can no longer be valid (revoked_at + connector cert TTL); the client stops using connectors after **1 h** without a successful ACL sync |
+| O12 | Relay behaviour when its revoked list is stale | **ACCEPTED (D20, 2026-10-22)**: keep the last known list, keep serving, no new timeout |
+| O13 | Shield prune rule; hostile-connector limit | **ACCEPTED (D21, 2026-10-22)**: `PeerConnectorList.revoked_connector_ids` approved; a revoked id from any connector prunes it immediately and it is never re-added while listed (in memory only); the hostile-connector limit is accepted and documented (bounded by connector certificate lifetime) |
+| O14 | Cert history, historical-serial CRL coverage, serials after deletion, tombstones, reuse prevention | History, CRL coverage and serials after deletion **DONE** by `52c16fa` (migration 039). Tombstone and reuse prevention: **DONE 2026-10-23** (migration 041, `3995af6`) |
 
 Release requirement (not a decision): the new development stack's protocol behaviour must be validated by T14/T18 before release. Support for old production connectors is not required.
 
@@ -632,21 +672,21 @@ Release requirement (not a decision): the new development stack's protocol behav
 
 | Gate item | Status |
 |---|---|
-| Final heartbeat acknowledgement contract | direction ACCEPTED (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) RECOMMENDED, AWAITING APPROVAL; marker ACCEPTED (D10 = O2) |
-| Exact deadline and scheduling semantics | ACCEPTED (D1, O1); B/P BLOCKED ON MEASUREMENT (O7); request type O6 |
-| Terminal vs recoverable states | ACCEPTED (D4, D11 = O3); persistence O9 OPEN |
-| Complete fail-closed definition | ACCEPTED (D5, §7); O8 OPEN |
-| Enforcement ownership: client, relay, shield | directions ACCEPTED (D6); O11–O13 OPEN |
+| Final heartbeat acknowledgement contract | ACCEPTED: direction (D2, D9); field numbers, acceptance rules (§4.4) and capability flag (§4.6) (D17); marker (D10 = O2) |
+| Exact deadline and scheduling semantics | ACCEPTED (D1, O1, D14 = O7, D16 = O6) |
+| Terminal vs recoverable states | ACCEPTED (D4, D11 = O3, D12 = O9) |
+| Complete fail-closed definition | ACCEPTED (D5, §7, D15 = O8) |
+| Enforcement ownership: client, relay, shield | ACCEPTED (D6; O11–O13 = D19–D21); implemented in phases C, D, E |
 | Rollout sequence | ACCEPTED (D8, §15) |
-| Schema changes needing approval | O14 BLOCKED ON SCHEMA APPROVAL; none authorized |
+| Schema changes needing approval | O14 DONE: history/CRL by `52c16fa` (039); tombstone + no reuse by migration 041 (approved by the user 2026-10-23) |
 | Recovery after permanent revocation | O10 OPEN |
 
 Each phase needs its own explicit go-ahead with a pre-written acceptance list:
 - **A**: no longer blocked by O2/O3 (accepted as D10/D11). It still needs an explicit implementation go-ahead and approval of the remaining contract details (field numbers, §4.4 acceptance rules, §4.6 capability flag). Other phases' blockers are unchanged.
 - **M** needs an A lab build.
-- **B1** needs O9.
-- **B2** needs the M results (O6/O7), plus O5 and O8.
-- **C**, **D** and **E** need O11, O12 and O13 respectively.
-- **F** needs schema approval (O14).
+- **B1**: O9 resolved (D12). [B1 acceptance list](Connector-Revocation-PhaseB1-Acceptance-2026-10-20.md) signed off 2026-10-20 with B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. **B1 implemented 2026-10-21** (`da5b12f`): [B1 record](Connector-Revocation-PhaseB1-Implementation-2026-10-21.md). Not for live deployment before B2.
+- **B2**: Phase M done ([results](Connector-Revocation-PhaseM-Results-2026-10-21.md)); O5, O7 and O8 accepted (D13–D15; build-time values: `connector/.env` → `connector/build.rs` → `connector/src/authz_timing.rs`; documented in `connector/.env.example`; not runtime config). O6 accepted (D16, full report); Phase A contract details approved (D17); renewal head-of-line fix in scope (D18). [B2 acceptance list](Connector-Revocation-PhaseB2-Acceptance-2026-10-21.md) signed off; **B2 unit level implemented 2026-10-21** ([record](Connector-Revocation-PhaseB2-Implementation-2026-10-21.md)); **live L-1…L-8 PASS 2026-10-21** (udaya shield, manojinkyank relay). Live acceptance uses udaya (shield) and manojinkyank (relay), see §15.
+- **C**, **D** and **E**: O11, O12 and O13 accepted (D19–D21). **C done 2026-10-22, D and E done 2026-10-23** (records in this folder).
+- **F**: history, CRL coverage and serials after deletion are already done by `52c16fa`. Tombstone and reuse prevention: **done 2026-10-23** (migration 041). Shield cascade on connector delete and shield failover from a revoked connector: **fixed 2026-10-23** (`faa957f`, `4994638`).
 
 This revision changed only this document. No source, test, protocol, configuration, migration or runtime state was modified, and nothing was committed.

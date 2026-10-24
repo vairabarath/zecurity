@@ -273,7 +273,7 @@ Closed out by Claude Code for Sathiya (M1). The verdicts in the rows above are *
 | Finding 36 (R2) | **Fixed** in `411e216` (Sprint 21 K6). `TestAuthIntegration_LoginBootstrapAndJWTIssue` PASS on `1c164c7` (2026-10-17) | `Fixes/Fix03-…` (doc still says `planned`) |
 | R2 gate on current code | `1c164c7`, CI env: `go build` OK, `go vet` OK, `go test ./...` exit 0: 1161 PASS, 0 FAIL, **32 SKIP** (30 need `RESOURCE_TEST_SHIELD_ID` and hide Finding 35; 1 `TestEnroll_CSRSignatureInvalid`; 1 SCIM "covered by"). So the gate only looks green because tests skip | this close-out |
 | Finding 33 (revoked shield carries traffic) | **Fixed in code**: bug 3, PR #123 (`86a436d`, `b2b00b5`). **Live end-to-end acceptance still pending** | `docs/certificate-audit-2026-10-15.md` bug 3 |
-| Finding 34 (revoked connector keeps serving) | **Open.** Connector revocation is at Phase A only ("NOT FAIL-CLOSED"); Phase B1 not started | `Handoff-Connector-Revocation-PhaseA-2026-10-15.md` |
+| Finding 34 (revoked connector keeps serving) | **Open** on 2026-10-17 (Phase A only). **Closed 2026-10-23** on later code: connector fail-closed (B1/B2), client/relay/shield enforcement (C/D/E), Phase F fixes + migration 041; end-to-end live run PASS | `Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23.md` |
 | Finding 28 (client never passes FIN) | Tracked as Fix 05 Phase 5-A; see its live acceptance doc | `Fixes/fix 5/`, `Handoff-Fix05-5A-2026-10-06.md` |
 | KI-1 / KI-2 | Fixed in Sprint 21 K1/K2; live check of the 15m relay / 24h shield is Sprint 21 AT-K.1/K.3 (not run live) | `Sprint21/Acceptance-Run-Checklist.md` |
 

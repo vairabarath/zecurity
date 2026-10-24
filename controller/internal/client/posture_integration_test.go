@@ -159,16 +159,13 @@ func (*postureTestAuth) ExchangeCode(context.Context, string, string, string) (*
 func (*postureTestAuth) VerifyIDToken(context.Context, string) (*auth.GoogleClaims, error) {
 	panic("not used")
 }
-func (*postureTestAuth) IssueAccessToken(string, string, string, string, int) (string, int64, error) {
+func (*postureTestAuth) IssueSession(context.Context, string, string, string, string, int) (string, int64, string, error) {
 	panic("not used")
 }
 func (*postureTestAuth) RefreshSession(context.Context, string, string) (string, string, error) {
 	return "", "", nil
 }
 func (*postureTestAuth) EndSession(context.Context, string) {}
-func (*postureTestAuth) IssueRefreshToken(context.Context, string) (string, error) {
-	panic("not used")
-}
 func (*postureTestAuth) InvalidateUserSessions(context.Context, string) error {
 	panic("not used")
 }

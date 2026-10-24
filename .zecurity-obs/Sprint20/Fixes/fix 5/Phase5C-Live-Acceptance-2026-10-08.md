@@ -56,6 +56,9 @@ The phase stays `implemented-pending-live` until the §6a.4 re-run passes.
 | Access | group `s20-summa-users` (members: pv + admin) |
 | Capacity | smoltcp `IFACE_MAX_ADDR_COUNT=2` → one resource IP (one slot is 100.64.0.1). A second IP must go pending (H1). |
 
+> **Superseded 2026-10-22 by Sprint 20 Fix 09** ([[Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity]]): the client uses AnyIP, so there is no smoltcp address capacity and rule H1 no longer applies. Every resource addition is hot-applied.
+
+
 ## 2. Instruments (`~/s20-run`, prefix `f5c5-*`)
 
 | Unit | Log | Samples |

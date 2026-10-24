@@ -30,6 +30,13 @@ impl PolicyCache {
         *self.snapshot.write() = Some(snapshot);
     }
 
+    /// Connector-revocation fail-closed (§7 step 5): drop the cached ACL in a
+    /// terminal state. A snapshot pushed later is still applied, but
+    /// admission is keyed on the serving state, so it admits nothing.
+    pub fn clear(&self) {
+        *self.snapshot.write() = None;
+    }
+
     /// Atomically replaces the stored snapshot and returns the (spiffe_id,
     /// resource_id) pairs that were allowed under the previous snapshot but
     /// are not allowed under the new one — exactly the live sessions that
@@ -125,6 +132,24 @@ impl PolicyCache {
             }
         }
         Vec::new()
+    }
+
+    /// Connector-revocation Phase E (D21): connector ids the current ACL lists
+    /// as revoked, sorted. Empty when no snapshot is present.
+    pub fn revoked_connector_ids(&self) -> Vec<String> {
+        let guard = self.snapshot.read();
+        let Some(snapshot) = guard.as_ref() else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = snapshot
+            .revoked_connectors
+            .iter()
+            .map(|r| r.connector_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Look up a resource by its network tuple (address + port + protocol).

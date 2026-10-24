@@ -1,21 +1,28 @@
-//! Controller ↔ connector authorization contract — connector-side protocol
-//! plumbing (connector-revocation design §4.4–§4.6, Phase A).
+//! Controller ↔ connector authorization contract — connector side
+//! (connector-revocation design §4.4–§4.6, §5; Phases A and B1).
 //!
-//! Phase A scope: this module only *records and validates* the protocol. It
-//! assigns heartbeat sequence numbers, timestamps each authorization request
-//! at the transport-send boundary, validates `AuthorizationAck`s, and
-//! recognises the terminal signals (`ConnectorRevoked`, the `revoked` /
-//! `unknown` trailer markers). It does NOT gate the data plane, run a
-//! deadline, or stop the reconnect loop — that is Phase B1/B2. Nothing here
-//! treats a missing acknowledgement, a missing capability or an unsupported
-//! controller as authorization.
+//! Phase A: assigns heartbeat sequence numbers, timestamps each
+//! authorization request at the transport-send boundary, validates
+//! `AuthorizationAck`s, and recognises the terminal signals
+//! (`ConnectorRevoked`, the `revoked` / `unknown` trailer markers).
+//!
+//! Phase B1: [`AckTracker`] is also the serving-state machine (§5): it owns
+//! the state, the deadline D and `lost_at`, and publishes `{state, D}` as one
+//! [`AuthzSnapshot`] through a `watch` channel. It is the only writer; every
+//! event is serialized by its mutex (the §5.4 single supervisor). Data-plane
+//! entry paths hold an [`AuthzGate`] and admit only while
+//! [`AuthzSnapshot::admits`] holds. Nothing here treats a missing
+//! acknowledgement, a missing capability or an unsupported controller as
+//! authorization.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::time::Instant;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::{sleep_until, Instant};
 use tokio_stream::{Stream, StreamExt};
 use tracing::{error, info, warn};
 
@@ -63,6 +70,142 @@ pub fn classify_status(status: &tonic::Status) -> StatusClass {
     }
 }
 
+/// Connector serving state (design §5.1). Every process starts in
+/// `Starting`; only an accepted acknowledgement opens the data plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServingState {
+    /// No accepted ack since process start. Closed.
+    Starting,
+    /// `now < D`, control stream up. Open.
+    Serving,
+    /// Stream down or reconnecting, `now < D`. Open only until D.
+    ServingDisconnected,
+    /// D passed without an accepted ack, or the stream was lost while
+    /// recovering. Closed, recoverable.
+    Disabled,
+    /// `Disabled` with a (re)established stream, awaiting an accepted ack
+    /// for a request sent at or after `lost_at`. Closed, recoverable.
+    Recovering,
+    /// Administrative revocation. Closed, terminal for the process.
+    Revoked,
+    /// The controller has no record of this identity. Closed, terminal for
+    /// the process, distinct from `Revoked`.
+    UnknownIdentity,
+}
+
+impl ServingState {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, ServingState::Revoked | ServingState::UnknownIdentity)
+    }
+}
+
+/// The published `{state, D}` pair, read together (design §7 step 1).
+/// Fields are private: readers can't build or alter a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthzSnapshot {
+    state: ServingState,
+    deadline: Option<Instant>,
+    /// Number of open → closed transitions so far. A reader that only sees
+    /// the latest snapshot still notices every loss of authorization, even a
+    /// brief one that reopened before it looked (fail-closed, B2).
+    closures: u64,
+}
+
+impl AuthzSnapshot {
+    pub fn state(&self) -> ServingState {
+        self.state
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    pub fn closures(&self) -> u64 {
+        self.closures
+    }
+    /// The admission rule (§5.3 guarantee 1, §6.3): an open state AND
+    /// `now < D`. Independent of the expiry timer, so a starved timer never
+    /// keeps the data plane open past D.
+    pub fn admits(&self, now: Instant) -> bool {
+        matches!(
+            self.state,
+            ServingState::Serving | ServingState::ServingDisconnected
+        ) && self.deadline.is_some_and(|d| now < d)
+    }
+}
+
+/// Read-only view of the serving state for data-plane entry paths.
+#[derive(Debug, Clone)]
+pub struct AuthzGate {
+    rx: watch::Receiver<AuthzSnapshot>,
+}
+
+impl AuthzGate {
+    pub fn snapshot(&self) -> AuthzSnapshot {
+        *self.rx.borrow()
+    }
+    pub fn admits_now(&self) -> bool {
+        self.snapshot().admits(Instant::now())
+    }
+    /// A receiver for state changes (read-only).
+    pub(crate) fn subscribe(&self) -> watch::Receiver<AuthzSnapshot> {
+        self.rx.clone()
+    }
+
+    /// A gate fixed at `snapshot` (the sender is dropped; `borrow` still
+    /// returns the last value).
+    #[cfg(test)]
+    pub fn fixed(state: ServingState, deadline: Option<Instant>) -> Self {
+        let (_tx, rx) = watch::channel(AuthzSnapshot {
+            state,
+            deadline,
+            closures: 0,
+        });
+        Self { rx }
+    }
+    /// Serving with a deadline far in the future.
+    #[cfg(test)]
+    pub fn open_for_tests() -> Self {
+        Self::fixed(
+            ServingState::Serving,
+            Some(Instant::now() + Duration::from_secs(365 * 24 * 3600)),
+        )
+    }
+    #[cfg(test)]
+    pub fn closed_for_tests() -> Self {
+        Self::fixed(ServingState::Starting, None)
+    }
+    /// A Serving gate whose state a test can change.
+    #[cfg(test)]
+    pub fn controllable_for_tests() -> (Self, TestGateControl) {
+        let (tx, rx) = watch::channel(AuthzSnapshot {
+            state: ServingState::Serving,
+            deadline: Some(Instant::now() + Duration::from_secs(365 * 24 * 3600)),
+            closures: 0,
+        });
+        (Self { rx }, TestGateControl(tx))
+    }
+}
+
+/// Test handle for `AuthzGate::controllable_for_tests`.
+#[cfg(test)]
+pub struct TestGateControl(watch::Sender<AuthzSnapshot>);
+
+#[cfg(test)]
+impl TestGateControl {
+    /// Publish `state`; leaving Serving clears D and counts a closure.
+    pub fn set(&self, state: ServingState) {
+        self.0.send_modify(|s| {
+            s.state = state;
+            if !matches!(
+                state,
+                ServingState::Serving | ServingState::ServingDisconnected
+            ) {
+                s.deadline = None;
+                s.closures += 1;
+            }
+        });
+    }
+}
+
 /// Why an `AuthorizationAck` was not accepted (§4.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AckRejection {
@@ -79,6 +222,12 @@ pub enum AckRejection {
     Unknown,
     /// The request is already ≥ H old: the ack would confer nothing.
     Stale { age: Duration },
+    /// The request was sent before authorization was lost
+    /// (`sent[k] < lost_at`). This also covers the §4.4 row "Serving and
+    /// `now ≥ D`": `on_ack` applies `expire` first, so such a state is already
+    /// `Disabled` with `lost_at = D`, and a late ack for a request sent before
+    /// D lands here.
+    BeforeLoss,
 }
 
 impl std::fmt::Display for AckRejection {
@@ -95,13 +244,17 @@ impl std::fmt::Display for AckRejection {
             ),
             AckRejection::Unknown => write!(f, "no outstanding request with this seq"),
             AckRejection::Stale { age } => write!(f, "request is stale ({age:?} old)"),
+            AckRejection::BeforeLoss => {
+                write!(f, "request was sent before authorization was lost")
+            }
         }
     }
 }
 
-/// Process-global authorization-request bookkeeping. Owned by the control
-/// stream's outer loop, so it survives reconnects and renewal switches:
-/// sequence numbers start at 1 and never reset.
+/// Process-global authorization bookkeeping and serving-state machine.
+/// Created once per process (in `main`), so it survives reconnects and
+/// renewal switches: sequence numbers start at 1 and never reset, and the
+/// state starts in `Starting` (nothing is persisted, design D12).
 #[derive(Debug)]
 pub struct AckTracker {
     /// H: maximum authorization freshness.
@@ -111,16 +264,29 @@ pub struct AckTracker {
     /// seq → instant the request was handed to the transport (first send).
     sent: BTreeMap<u64, Instant>,
     highest_accepted: u64,
-    /// Send instant of the request behind the latest accepted ack. Phase B
-    /// derives the deadline D = this + H; Phase A only records it.
+    /// Send instant of the request behind the latest accepted ack.
     latest_accepted_sent_at: Option<Instant>,
     terminal: Option<TerminalSignal>,
+    state: ServingState,
+    /// D = sent[k] + H of the latest accepted ack. Meaningful only in
+    /// `Serving`/`ServingDisconnected`.
+    deadline: Option<Instant>,
+    /// When authorization was last lost. None = never since process start:
+    /// every recorded send is after the start, so nothing is excluded.
+    lost_at: Option<Instant>,
+    closures: u64,
+    publish: watch::Sender<AuthzSnapshot>,
 }
 
 pub type SharedAckTracker = Arc<Mutex<AckTracker>>;
 
 impl AckTracker {
     pub fn new(freshness: Duration) -> Self {
+        let (publish, _) = watch::channel(AuthzSnapshot {
+            state: ServingState::Starting,
+            deadline: None,
+            closures: 0,
+        });
         Self {
             freshness,
             last_assigned: 0,
@@ -128,6 +294,129 @@ impl AckTracker {
             highest_accepted: 0,
             latest_accepted_sent_at: None,
             terminal: None,
+            state: ServingState::Starting,
+            deadline: None,
+            lost_at: None,
+            closures: 0,
+            publish,
+        }
+    }
+
+    /// A read-only gate on this tracker's published state.
+    pub fn gate(&self) -> AuthzGate {
+        AuthzGate {
+            rx: self.publish.subscribe(),
+        }
+    }
+
+    pub fn state(&self) -> ServingState {
+        self.state
+    }
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+    pub fn lost_at(&self) -> Option<Instant> {
+        self.lost_at
+    }
+    pub fn snapshot(&self) -> AuthzSnapshot {
+        AuthzSnapshot {
+            state: self.state,
+            deadline: self.deadline,
+            closures: self.closures,
+        }
+    }
+
+    /// The only place the state changes. Publishes `{state, D}` as one
+    /// snapshot and logs the transition.
+    fn transition(&mut self, to: ServingState, reason: &'static str) {
+        let from = self.state;
+        let open = |s: ServingState| matches!(s, ServingState::Serving | ServingState::ServingDisconnected);
+        if open(from) && !open(to) {
+            self.closures += 1;
+        }
+        self.state = to;
+        if !matches!(to, ServingState::Serving | ServingState::ServingDisconnected) {
+            self.deadline = None;
+        }
+        self.publish.send_replace(self.snapshot());
+        if from == to {
+            return;
+        }
+        match to {
+            ServingState::Serving => info!(
+                authz_event = "state",
+                from = ?from,
+                to = ?to,
+                reason,
+                "connector authorized — data plane open"
+            ),
+            ServingState::ServingDisconnected => warn!(
+                authz_event = "state",
+                from = ?from,
+                to = ?to,
+                reason,
+                "control stream lost — serving only until the authorization deadline"
+            ),
+            ServingState::Disabled | ServingState::Recovering | ServingState::Starting => warn!(
+                authz_event = "state",
+                from = ?from,
+                to = ?to,
+                reason,
+                "connector not authorized — data plane closed (recoverable)"
+            ),
+            ServingState::Revoked => error!(
+                authz_event = "state",
+                from = ?from,
+                to = ?to,
+                reason,
+                "connector identity REVOKED — data plane closed (terminal)"
+            ),
+            ServingState::UnknownIdentity => error!(
+                authz_event = "state",
+                from = ?from,
+                to = ?to,
+                reason,
+                "connector identity UNKNOWN to the controller — data plane closed (terminal)"
+            ),
+        }
+    }
+
+    /// `Serving`/`ServingDisconnected` with `now ≥ D` → `Disabled`, with
+    /// `lost_at = D` exactly (not the processing instant). Applied first by
+    /// every event, so the outcome doesn't depend on timer scheduling.
+    pub fn expire(&mut self, now: Instant) {
+        if let (ServingState::Serving | ServingState::ServingDisconnected, Some(d)) =
+            (self.state, self.deadline)
+        {
+            if now >= d {
+                self.lost_at = Some(d);
+                self.transition(ServingState::Disabled, "authorization deadline reached");
+            }
+        }
+    }
+
+    /// A Control stream delivered its first controller message (§5.2:
+    /// `Disabled → Recovering`, `lost_at` unchanged).
+    pub fn stream_up(&mut self, now: Instant) {
+        self.expire(now);
+        if self.state == ServingState::Disabled {
+            self.transition(ServingState::Recovering, "control stream re-established");
+        }
+    }
+
+    /// The Control stream ended (any return of a session or a failed open).
+    /// A renewal switch is not a stream end.
+    pub fn stream_down(&mut self, now: Instant) {
+        self.expire(now);
+        match self.state {
+            ServingState::Serving => {
+                self.transition(ServingState::ServingDisconnected, "control stream ended")
+            }
+            ServingState::Recovering => {
+                self.lost_at = Some(now);
+                self.transition(ServingState::Disabled, "control stream ended while recovering");
+            }
+            _ => {}
         }
     }
 
@@ -171,6 +460,7 @@ impl AckTracker {
     /// Phase B deadline/state model). On acceptance the sent entries ≤ seq
     /// are dropped and the accepted request's send time is recorded.
     pub fn on_ack(&mut self, seq: u64, capable: bool, now: Instant) -> Result<(), AckRejection> {
+        self.expire(now);
         if let Some(t) = self.terminal {
             return Err(AckRejection::Terminal(t));
         }
@@ -192,9 +482,19 @@ impl AckTracker {
         if age >= self.freshness {
             return Err(AckRejection::Stale { age });
         }
+        // Starting/Disabled/Recovering: only requests sent at or after the
+        // loss count. (Serving/ServingDisconnected are before D here, after
+        // `expire`, and every request since the last loss is admissible.)
+        if self.lost_at.is_some_and(|lost| sent_at < lost) {
+            return Err(AckRejection::BeforeLoss);
+        }
         self.highest_accepted = seq;
         self.latest_accepted_sent_at = Some(sent_at);
         self.sent.retain(|k, _| *k > seq);
+        // D = sent[k] + H; monotonic (k > highest accepted).
+        let d = sent_at + self.freshness;
+        self.deadline = Some(self.deadline.map_or(d, |old| old.max(d)));
+        self.transition(ServingState::Serving, "authorization acknowledgement accepted");
         Ok(())
     }
 
@@ -205,6 +505,15 @@ impl AckTracker {
             return false;
         }
         self.terminal = Some(signal);
+        match signal {
+            TerminalSignal::Revoked => {
+                self.transition(ServingState::Revoked, "controller: connector revoked")
+            }
+            TerminalSignal::UnknownIdentity => self.transition(
+                ServingState::UnknownIdentity,
+                "controller: connector identity unknown",
+            ),
+        }
         true
     }
 
@@ -266,6 +575,9 @@ pub fn observe_controller_msg(
 ) {
     let first = !stream.first_seen;
     stream.first_seen = true;
+    if first {
+        tracker.lock().stream_up(Instant::now());
+    }
     match &msg.body {
         Some(CBody::AgentPolicy(p)) => {
             stream.capable = p.authorization_acks;
@@ -284,16 +596,27 @@ pub fn observe_controller_msg(
         }
         Some(CBody::AuthorizationAck(a)) => {
             let seq = a.heartbeat_seq;
-            let result = tracker.lock().on_ack(seq, stream.capable, Instant::now());
+            let now = Instant::now();
+            let (sent_at, result) = {
+                let mut t = tracker.lock();
+                let sent_at = t.sent_at(seq);
+                (sent_at, t.on_ack(seq, stream.capable, now))
+            };
+            // Transport send → ack processed (≈ B; -1 = no such request).
+            let since_send_us = sent_at
+                .map(|s| now.saturating_duration_since(s).as_micros() as i64)
+                .unwrap_or(-1);
             match result {
                 Ok(()) => info!(
                     authz_event = "ack_accepted",
                     heartbeat_seq = seq,
+                    since_send_us,
                     "AuthorizationAck accepted"
                 ),
                 Err(reason) => warn!(
                     authz_event = "ack_rejected",
                     heartbeat_seq = seq,
+                    since_send_us,
                     reason = %reason,
                     "AuthorizationAck rejected"
                 ),
@@ -304,7 +627,7 @@ pub fn observe_controller_msg(
             error!(
                 authz_event = "connector_revoked",
                 first_terminal = newly,
-                "controller sent ConnectorRevoked: this connector identity is administratively revoked (terminal; Phase A records it, serving gate is Phase B1)"
+                "controller sent ConnectorRevoked: this connector identity is administratively revoked (terminal)"
             );
         }
         _ => {}
@@ -315,6 +638,33 @@ pub fn observe_controller_msg(
             "first controller message on this stream was not AgentPolicy{{authorization_acks:true}}: controller does not support the authorization contract — no acknowledgement on this stream will be accepted"
         );
     }
+}
+
+/// Moves `Serving`/`ServingDisconnected` to `Disabled` when D passes, so
+/// the state (and its log) follows the deadline even with no other event.
+/// Admission doesn't depend on this task: it compares `now` with D itself.
+pub fn spawn_expiry(tracker: SharedAckTracker) -> JoinHandle<()> {
+    let mut rx = tracker.lock().gate().rx;
+    tokio::spawn(async move {
+        loop {
+            let snap = *rx.borrow_and_update();
+            let open_deadline = match snap.state {
+                ServingState::Serving | ServingState::ServingDisconnected => snap.deadline,
+                _ => None,
+            };
+            match open_deadline {
+                Some(d) => tokio::select! {
+                    _ = sleep_until(d) => tracker.lock().expire(Instant::now()),
+                    changed = rx.changed() => if changed.is_err() { return },
+                },
+                None => {
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Classify and log a status received from the controller (stream open or
@@ -512,6 +862,248 @@ mod tests {
         ));
         // Nothing outstanding any more → a new seq.
         assert_eq!(t.seq_for_replacement(), s + 1);
+    }
+
+    // ── Phase B1: serving state, deadline, lost_at (§4.4, §5) ──────────────
+
+    /// A tracker that has sent request 1 at `t0` and accepted its ack.
+    fn serving_at(t0: Instant) -> AckTracker {
+        let mut t = tracker_with_sent(&[1], t0);
+        assert_eq!(t.on_ack(1, true, t0 + Duration::from_millis(10)), Ok(()));
+        t
+    }
+
+    /// Next seq, sent at `at`.
+    fn send(t: &mut AckTracker, at: Instant) -> u64 {
+        let s = t.next_seq();
+        t.record_sent(s, at);
+        s
+    }
+
+    /// AB1-1 (T15/T26): every process starts closed; the first accepted ack
+    /// opens it with D = sent + H (the send time, not the receipt time).
+    #[test]
+    fn starts_closed_and_first_accepted_ack_opens_with_send_time_deadline() {
+        let t0 = Instant::now();
+        let mut t = AckTracker::new(H);
+        let gate = t.gate();
+        assert_eq!(t.state(), ServingState::Starting);
+        assert!(!gate.admits_now(), "nothing is admitted before the first ack");
+        assert!(!t.snapshot().admits(t0));
+        t.next_seq();
+        t.record_sent(1, t0);
+        assert!(!gate.admits_now(), "a send alone opens nothing");
+        assert_eq!(t.on_ack(1, true, t0 + Duration::from_secs(3)), Ok(()));
+        assert_eq!(t.state(), ServingState::Serving);
+        assert_eq!(t.deadline(), Some(t0 + H));
+        let snap = gate.snapshot();
+        assert_eq!(snap.state(), ServingState::Serving, "published");
+        assert_eq!(snap.deadline(), Some(t0 + H), "published with D");
+        assert!(snap.admits(t0 + H - Duration::from_millis(1)));
+        assert!(!snap.admits(t0 + H), "closed exactly at D");
+    }
+
+    /// AB1-2 (T3): sending (or assigning) requests never moves D.
+    #[test]
+    fn a_send_never_moves_the_deadline() {
+        let t0 = Instant::now();
+        let mut t = serving_at(t0);
+        let d = t.deadline();
+        send(&mut t, t0 + Duration::from_secs(5));
+        t.next_seq();
+        t.seq_for_replacement();
+        assert_eq!(t.deadline(), d);
+        assert_eq!(t.gate().snapshot().deadline(), d);
+    }
+
+    /// AB1-3 (T4), the deadline row: in Serving, an ack for a request sent
+    /// before D that arrives at or after D is rejected, and the connector is
+    /// already Disabled with lost_at = D.
+    #[test]
+    fn late_ack_after_deadline_is_rejected() {
+        let t0 = Instant::now();
+        let mut t = serving_at(t0);
+        let s2 = send(&mut t, t0 + Duration::from_secs(10));
+        let at_d = t0 + H;
+        assert_eq!(t.on_ack(s2, true, at_d), Err(AckRejection::BeforeLoss));
+        assert_eq!(t.state(), ServingState::Disabled);
+        assert_eq!(t.lost_at(), Some(t0 + H));
+        assert!(!t.snapshot().admits(at_d));
+    }
+
+    /// AB1-3 (T4), the lost_at row in Disabled and in Recovering; a request
+    /// sent at or after lost_at is accepted and reopens with its own D.
+    #[test]
+    fn pre_loss_acks_rejected_post_loss_ack_accepted() {
+        let t0 = Instant::now();
+        let mut t = serving_at(t0);
+        let before = send(&mut t, t0 + Duration::from_secs(14));
+        t.expire(t0 + H);
+        assert_eq!(t.state(), ServingState::Disabled);
+        let lost = t0 + H;
+        let after = send(&mut t, lost); // sent exactly at lost_at: admissible
+        // Disabled: the pre-loss request is rejected.
+        assert_eq!(
+            t.on_ack(before, true, lost + Duration::from_secs(1)),
+            Err(AckRejection::BeforeLoss)
+        );
+        t.stream_up(lost + Duration::from_secs(1));
+        assert_eq!(t.state(), ServingState::Recovering);
+        assert_eq!(t.lost_at(), Some(lost), "Disabled → Recovering keeps lost_at (§5.2)");
+        // Recovering: still rejected.
+        assert_eq!(
+            t.on_ack(before, true, lost + Duration::from_secs(2)),
+            Err(AckRejection::BeforeLoss)
+        );
+        assert_eq!(t.on_ack(after, true, lost + Duration::from_secs(2)), Ok(()));
+        assert_eq!(t.state(), ServingState::Serving);
+        assert_eq!(t.deadline(), Some(lost + H));
+    }
+
+    /// AB1-4 (§5.2): the transition table, with injected time.
+    #[test]
+    fn transition_table() {
+        use ServingState::*;
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+
+        // Starting: stream events don't open anything.
+        let mut t = AckTracker::new(H);
+        t.stream_up(t0);
+        t.stream_down(t0);
+        assert_eq!(t.state(), Starting);
+        assert_eq!(t.lost_at(), None);
+
+        // Serving → ServingDisconnected on stream end; still open until D.
+        let mut t = serving_at(t0);
+        t.stream_down(t0 + ms(100));
+        assert_eq!(t.state(), ServingDisconnected);
+        assert!(t.snapshot().admits(t0 + H - ms(1)));
+        // ServingDisconnected → Serving on an accepted ack (before D).
+        let s = send(&mut t, t0 + ms(200));
+        assert_eq!(t.on_ack(s, true, t0 + ms(300)), Ok(()));
+        assert_eq!(t.state(), Serving);
+        assert_eq!(t.deadline(), Some(t0 + ms(200) + H));
+
+        // ServingDisconnected → Disabled at D, lost_at = D even when the
+        // event is processed late.
+        let mut t = serving_at(t0);
+        t.stream_down(t0 + ms(100));
+        t.expire(t0 + H + Duration::from_secs(30));
+        assert_eq!(t.state(), Disabled);
+        assert_eq!(t.lost_at(), Some(t0 + H));
+
+        // Serving → Disabled at D; before D nothing changes.
+        let mut t = serving_at(t0);
+        t.expire(t0 + H - ms(1));
+        assert_eq!(t.state(), Serving);
+        t.expire(t0 + H);
+        assert_eq!(t.state(), Disabled);
+        assert_eq!(t.lost_at(), Some(t0 + H));
+        assert_eq!(t.deadline(), None);
+
+        // Disabled → Recovering on a stream; Recovering → Disabled when it
+        // ends, with lost_at moved to that instant.
+        t.stream_up(t0 + H + ms(10));
+        assert_eq!(t.state(), Recovering);
+        assert!(!t.snapshot().admits(t0 + H + ms(10)));
+        t.stream_down(t0 + H + ms(50));
+        assert_eq!(t.state(), Disabled);
+        assert_eq!(t.lost_at(), Some(t0 + H + ms(50)));
+
+        // A stream event after D in Serving first applies the expiry.
+        let mut t = serving_at(t0);
+        t.stream_up(t0 + H + ms(1));
+        assert_eq!(t.state(), Recovering, "expired to Disabled, then stream up");
+        assert_eq!(t.lost_at(), Some(t0 + H));
+    }
+
+    /// AB1-5 / AB1-6 / AB1-7 (T5, T19, T16, T20): terminal signals close at
+    /// once (no wait for D), are distinct, absorbing, and win over acks.
+    #[test]
+    fn terminal_states_close_immediately_and_absorb_everything() {
+        let t0 = Instant::now();
+        for (signal, state) in [
+            (TerminalSignal::Revoked, ServingState::Revoked),
+            (TerminalSignal::UnknownIdentity, ServingState::UnknownIdentity),
+        ] {
+            let mut t = serving_at(t0);
+            let gate = t.gate();
+            let pending = send(&mut t, t0 + Duration::from_secs(1));
+            assert!(t.on_terminal(signal));
+            assert_eq!(t.state(), state);
+            assert!(state.is_terminal());
+            assert_eq!(t.deadline(), None);
+            assert!(!gate.snapshot().admits(t0 + Duration::from_secs(2)), "closed before D");
+            // Absorbing: the other terminal kind, acks, stream and time events.
+            let other = match signal {
+                TerminalSignal::Revoked => TerminalSignal::UnknownIdentity,
+                TerminalSignal::UnknownIdentity => TerminalSignal::Revoked,
+            };
+            assert!(!t.on_terminal(other));
+            assert_eq!(
+                t.on_ack(pending, true, t0 + Duration::from_secs(2)),
+                Err(AckRejection::Terminal(signal))
+            );
+            t.stream_up(t0 + Duration::from_secs(3));
+            t.stream_down(t0 + Duration::from_secs(4));
+            t.expire(t0 + H * 3);
+            assert_eq!(t.state(), state);
+            assert_eq!(gate.snapshot().state(), state);
+        }
+        // Distinct from Disabled.
+        let mut t = serving_at(t0);
+        t.expire(t0 + H);
+        assert_eq!(t.state(), ServingState::Disabled);
+        assert!(!t.state().is_terminal());
+    }
+
+    /// AB1-12 (§4.6): without the capability no ack opens anything, even
+    /// with a valid outstanding request.
+    #[test]
+    fn capability_absent_never_opens() {
+        let t = AckTracker::shared(H);
+        let gate = t.lock().gate();
+        t.lock().next_seq();
+        t.lock().record_sent(1, Instant::now());
+        let mut s = StreamAuthz::default();
+        observe_controller_msg(&ack(1), &mut s, &t);
+        observe_controller_msg(&policy(false), &mut s, &t);
+        observe_controller_msg(&ack(1), &mut s, &t);
+        assert_eq!(t.lock().state(), ServingState::Starting);
+        assert!(!gate.admits_now());
+    }
+
+    /// The first controller message on a stream is the stream-up event.
+    #[test]
+    fn first_controller_message_moves_disabled_to_recovering() {
+        let t0 = Instant::now();
+        let mut inner = serving_at(t0);
+        inner.expire(t0 + H);
+        let t = Arc::new(Mutex::new(inner));
+        let mut s = StreamAuthz::default();
+        observe_controller_msg(&policy(true), &mut s, &t);
+        assert_eq!(t.lock().state(), ServingState::Recovering);
+    }
+
+    /// The expiry task moves Serving to Disabled at D without any other
+    /// event (real time, short H).
+    #[tokio::test]
+    async fn expiry_task_disables_at_deadline() {
+        let h = Duration::from_millis(150);
+        let t = AckTracker::shared(h);
+        let gate = t.lock().gate();
+        let _task = spawn_expiry(t.clone());
+        let t0 = Instant::now();
+        t.lock().next_seq();
+        t.lock().record_sent(1, t0);
+        assert_eq!(t.lock().on_ack(1, true, Instant::now()), Ok(()));
+        assert!(gate.admits_now());
+        tokio::time::sleep(h + Duration::from_millis(150)).await;
+        assert_eq!(t.lock().state(), ServingState::Disabled);
+        assert_eq!(t.lock().lost_at(), Some(t0 + h));
+        assert_eq!(gate.snapshot().state(), ServingState::Disabled);
+        assert!(!gate.admits_now());
     }
 
     // ── send-boundary stamping ─────────────────────────────────────────────

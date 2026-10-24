@@ -151,7 +151,7 @@ func TestIssueRefreshToken_StoredInRedis(t *testing.T) {
 	}
 
 	// Token should be in Redis (now stored as a RefreshSession).
-	stored, found, err := rc.GetRefreshSession(context.Background(), "user-rt")
+	stored, found, err := rc.GetRefreshSession(context.Background(), "user-rt", sidOf(t, token))
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}

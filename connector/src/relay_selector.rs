@@ -176,12 +176,52 @@ pub async fn run(
                 emit_event(SelectorEvent::EnteredBackoff {
                     delay_ms: delay.as_millis() as u64,
                 });
-                tokio::time::sleep(delay).await;
+                if wait_backoff(delay, &mut relay_list_rx, &mut current_list).await
+                    == BackoffWake::ListChanged
+                {
+                    info!("New LabelledRelayList during backoff; retrying now");
+                }
+                // The backoff keeps growing either way, so a controller that
+                // keeps pushing lists of unreachable relays can't make the
+                // selector dial in a tight loop.
                 let next_backoff =
                     next_backoff_delay(delay, cfg.reconnect_backoff_factor, cfg.reconnect_max);
                 State::Disconnected { next_backoff }
             }
         };
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BackoffWake {
+    Elapsed,
+    ListChanged,
+}
+
+/// Sleep out a backoff `delay`, ending early when the controller pushes a new
+/// LabelledRelayList. The new list replaces `current_list`, so the next
+/// bootstrap dials it. Without this, a list pushed while the selector is
+/// disconnected (e.g. the first relay coming up after an empty list) was never
+/// read: `current_list` only refreshed inside `connected_step`, so the
+/// selector retried the stale list until the process restarted.
+async fn wait_backoff(
+    delay: Duration,
+    relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
+    current_list: &mut Option<LabelledRelayList>,
+) -> BackoffWake {
+    tokio::select! {
+        _ = tokio::time::sleep(delay) => BackoffWake::Elapsed,
+        changed = relay_list_rx.changed() => {
+            if changed.is_err() {
+                // Sender gone (shutdown): no list will ever arrive; finish the delay.
+                tokio::time::sleep(delay).await;
+                return BackoffWake::Elapsed;
+            }
+            if let Some(list) = relay_list_rx.borrow_and_update().clone() {
+                *current_list = Some(list);
+            }
+            BackoffWake::ListChanged
+        }
     }
 }
 
@@ -946,6 +986,87 @@ mod tests {
         let order = random_pick_order(&list);
         assert_eq!(order.len(), 1);
         assert_eq!(order[0].relay_id, "t2-a");
+    }
+
+    // ---- Disconnected selector re-reads pushed relay lists (B2 finding 3) ----
+
+    fn one_relay_list(version: u64) -> LabelledRelayList {
+        LabelledRelayList {
+            relays: vec![info("r1", RelayCapacityLabel::RelayCapacityHigh)],
+            version,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_ends_early_and_adopts_a_pushed_list() {
+        let (tx, mut rx) = watch::channel(Some(LabelledRelayList {
+            relays: vec![],
+            version: 1,
+        }));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            tx.send(Some(one_relay_list(2))).unwrap();
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        });
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(Duration::from_secs(120), &mut rx, &mut current).await;
+
+        assert_eq!(wake, BackoffWake::ListChanged);
+        assert_eq!(
+            start.elapsed(),
+            Duration::from_secs(1),
+            "woke at the push, not after 120s"
+        );
+        let list = current.expect("list adopted");
+        assert_eq!((list.version, list.relays.len()), (2, 1));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn list_pushed_before_backoff_is_seen_immediately() {
+        // A push that landed while bootstrap was dialing must not wait a full delay.
+        let (tx, mut rx) = watch::channel(None);
+        let mut current = None;
+        tx.send(Some(one_relay_list(7))).unwrap();
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(Duration::from_secs(60), &mut rx, &mut current).await;
+
+        assert_eq!(wake, BackoffWake::ListChanged);
+        assert_eq!(start.elapsed(), Duration::ZERO);
+        assert_eq!(current.map(|l| l.version), Some(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_without_push_runs_full_delay_and_keeps_list() {
+        let (_tx, mut rx) = watch::channel(Some(one_relay_list(3)));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(Duration::from_secs(20), &mut rx, &mut current).await;
+
+        assert_eq!(wake, BackoffWake::Elapsed);
+        assert_eq!(start.elapsed(), Duration::from_secs(20));
+        assert_eq!(current.map(|l| l.version), Some(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_list_channel_still_waits_out_the_delay() {
+        // No busy loop when the control-stream side is gone.
+        let (tx, mut rx) = watch::channel(Some(one_relay_list(4)));
+        rx.borrow_and_update();
+        let mut current = rx.borrow().clone();
+        drop(tx);
+
+        let start = TokioInstant::now();
+        let wake = wait_backoff(Duration::from_secs(30), &mut rx, &mut current).await;
+
+        assert_eq!(wake, BackoffWake::Elapsed);
+        assert_eq!(start.elapsed(), Duration::from_secs(30));
+        assert_eq!(current.map(|l| l.version), Some(4));
     }
 
     #[test]

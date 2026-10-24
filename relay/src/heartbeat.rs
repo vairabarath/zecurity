@@ -171,8 +171,18 @@ async fn run_connected<T: HeartbeatTransport>(
             listen_port: settings.listen_port,
             connection_count: ACTIVE_STREAMS.load(std::sync::atomic::Ordering::Relaxed),
             max_connections: settings.max_connections,
+            registered_connector_spiffe_ids: state.registered_connector_spiffe_ids(),
         };
         let response = transport.send(&mut conn, request).await?;
+        // Connector-revocation Phase D: drop revoked connectors (sticky set).
+        let closed = state.apply_revoked(&response.revoked_connector_spiffe_ids);
+        if !response.revoked_connector_spiffe_ids.is_empty() {
+            tracing::warn!(
+                revoked = response.revoked_connector_spiffe_ids.len(),
+                closed,
+                "controller reported revoked connectors"
+            );
+        }
 
         info!(
             server_time_unix = response.server_time_unix,
@@ -253,8 +263,184 @@ mod tests {
             Ok(HeartbeatResponse {
                 server_time_unix: 0,
                 next_heartbeat_seconds: 3600,
+                revoked_connector_spiffe_ids: vec![],
             })
         }
+    }
+
+    /// Answers every heartbeat with a fixed revoked list and records the
+    /// registered ids each request carried.
+    #[derive(Clone)]
+    struct RevokingTransport {
+        revoked: Vec<String>,
+        sent_ids: Arc<Mutex<Vec<Vec<String>>>>,
+    }
+
+    impl HeartbeatTransport for RevokingTransport {
+        type Conn = ();
+
+        async fn connect(&self, _material: &CertMaterial) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _conn: &mut (),
+            request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            self.sent_ids
+                .lock()
+                .unwrap()
+                .push(request.registered_connector_spiffe_ids);
+            Ok(HeartbeatResponse {
+                server_time_unix: 0,
+                next_heartbeat_seconds: 3600,
+                revoked_connector_spiffe_ids: self.revoked.clone(),
+            })
+        }
+    }
+
+    /// Answers the first heartbeat with a revoked id, then fails every call.
+    #[derive(Clone, Default)]
+    struct FailingAfterFirstTransport {
+        revoked: String,
+        sends: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl HeartbeatTransport for FailingAfterFirstTransport {
+        type Conn = ();
+
+        async fn connect(&self, _material: &CertMaterial) -> Result<()> {
+            Ok(())
+        }
+
+        async fn send(
+            &self,
+            _conn: &mut (),
+            _request: HeartbeatRequest,
+        ) -> Result<HeartbeatResponse> {
+            if self.sends.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Ok(HeartbeatResponse {
+                    server_time_unix: 0,
+                    next_heartbeat_seconds: 1,
+                    revoked_connector_spiffe_ids: vec![self.revoked.clone()],
+                })
+            } else {
+                anyhow::bail!("controller unreachable")
+            }
+        }
+    }
+
+    /// AD-5 (D20): a failing heartbeat keeps the revoked set.
+    #[tokio::test]
+    async fn heartbeat_error_keeps_the_revoked_set() {
+        let pki = TestPki::new();
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-hb-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+        let state = RelayState::new();
+        let revoked = crate::state::canonical_connector_spiffe(
+            "ws.zecurity.in",
+            "4f1c2d7e-1111-4a2b-9c3d-000000000001",
+        );
+        let transport = FailingAfterFirstTransport {
+            revoked: revoked.clone(),
+            sends: Arc::default(),
+        };
+        let settings = HeartbeatSettings {
+            listen_port: 9093,
+            max_connections: 16,
+            default_interval: Duration::from_secs(3600),
+        };
+        let task = tokio::spawn(run_with(
+            transport.clone(),
+            settings,
+            manager,
+            state.clone(),
+        ));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while transport.sends.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "second heartbeat never sent"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        task.abort();
+        assert!(
+            state.is_revoked(&revoked),
+            "a failed heartbeat must not unblock"
+        );
+    }
+
+    /// AD-5: the heartbeat reports the registered connectors and applies the
+    /// controller's revoked answer — the revoked connector is closed and
+    /// removed, the other one stays.
+    #[tokio::test]
+    async fn heartbeat_reports_registered_ids_and_applies_revoked_answer() {
+        let pki = TestPki::new();
+        let key = pki.relay_key();
+        let dir = std::env::temp_dir().join(format!("relay-hb-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        pki.write_state(&dir, &key, &pki.relay_cert(RELAY_ID, &key, -60, 3600));
+        let manager = CertManager::load(
+            RELAY_ID,
+            CertPaths {
+                key_path: dir.join("relay.key"),
+                certificate_path: dir.join("relay.crt"),
+                intermediate_ca_path: dir.join("intermediate-ca.crt"),
+            },
+        )
+        .unwrap();
+
+        let state = RelayState::new();
+        let revoked_id = "4f1c2d7e-1111-4a2b-9c3d-000000000001";
+        let kept_id = "4f1c2d7e-2222-4a2b-9c3d-000000000002";
+        let (c1, s1) = crate::test_support::quic_pair().await;
+        let (c2, s2) = crate::test_support::quic_pair().await;
+        state.insert_connector(revoked_id.into(), s1, "u1".into(), "ws.zecurity.in".into());
+        state.insert_connector(kept_id.into(), s2, "u2".into(), "ws.zecurity.in".into());
+        let revoked = crate::state::canonical_connector_spiffe("ws.zecurity.in", revoked_id);
+        let kept = crate::state::canonical_connector_spiffe("ws.zecurity.in", kept_id);
+
+        let transport = RevokingTransport {
+            revoked: vec![revoked.clone()],
+            sent_ids: Arc::default(),
+        };
+        let settings = HeartbeatSettings {
+            listen_port: 9093,
+            max_connections: 16,
+            default_interval: Duration::from_secs(3600),
+        };
+        let task = tokio::spawn(run_with(
+            transport.clone(),
+            settings,
+            manager,
+            state.clone(),
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), c1.closed())
+            .await
+            .expect("revoked connector closed");
+        task.abort();
+        let mut sent = transport.sent_ids.lock().unwrap()[0].clone();
+        sent.sort();
+        let mut want = vec![revoked.clone(), kept];
+        want.sort();
+        assert_eq!(sent, want, "request carries the registered ids");
+        assert!(state.is_revoked(&revoked));
+        assert!(c2.close_reason().is_none(), "unlisted connector untouched");
     }
 
     async fn wait_for_connects(transport: &RecordingTransport, n: usize) -> Vec<String> {

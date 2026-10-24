@@ -1,4 +1,5 @@
 use parking_lot::{Mutex, RwLock};
+use crate::authorization::AuthzGate;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
@@ -92,6 +93,11 @@ struct ShieldEntry {
     lan_ip: String,
 }
 
+/// Shield Control stream refusal from a connector in a terminal state. Must
+/// match the Shield's `CONNECTOR_TERMINAL_MESSAGE`.
+pub(crate) const CONNECTOR_TERMINAL_MESSAGE: &str =
+    "connector is revoked or unknown to the controller";
+
 /// Shared state for Shield-facing Control streams.
 #[derive(Debug, Clone)]
 pub struct ShieldRegistry {
@@ -118,6 +124,13 @@ pub struct ShieldRegistry {
     /// accepted — not at TCP accept, not on any RPC.
     revocations_synced: Arc<AtomicBool>,
     next_stream_id: Arc<AtomicU64>,
+    /// Connector serving state (connector-revocation B1): no new shield
+    /// Control stream while the connector itself isn't authorized to serve.
+    serving_gate: AuthzGate,
+    /// Connector-revocation fail-closed (§7 step 4, B2): bumped to close every
+    /// open shield Control stream with `Unavailable` (the connector stopped
+    /// serving), as distinct from a shield revocation (`PermissionDenied`).
+    close_all: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 impl ShieldRegistry {
@@ -127,6 +140,7 @@ impl ShieldRegistry {
         connector_id: String,
         ack_tx: mpsc::Sender<(String, ResourceAck)>,
         policy_cache: Arc<crate::policy::PolicyCache>,
+        serving_gate: AuthzGate,
     ) -> Self {
         Self {
             maps: Arc::new(Mutex::new(ShieldMaps {
@@ -150,7 +164,36 @@ impl ShieldRegistry {
             policy_cache,
             revocations_synced: Arc::new(AtomicBool::new(false)),
             next_stream_id: Arc::new(AtomicU64::new(0)),
+            serving_gate,
+            close_all: Arc::new(tokio::sync::watch::Sender::new(0)),
         }
+    }
+
+    /// Refusal for a shield while this connector is not serving. A terminal
+    /// state (revoked, unknown identity) gets its own message: this connector
+    /// will never serve again, so the Shield fails over at once instead of
+    /// waiting for it (connector-revocation Phase F, finding B).
+    fn not_serving_status(&self) -> Status {
+        if self.serving_gate.snapshot().state().is_terminal() {
+            Status::unavailable(CONNECTOR_TERMINAL_MESSAGE)
+        } else {
+            Status::unavailable("connector is not authorized to serve")
+        }
+    }
+
+    /// Close every open shield Control stream because this connector stopped
+    /// serving (terminal state, or `Disabled` past the D15 grace). Shields see
+    /// `Unavailable` and fail over; new streams are refused by the serving
+    /// gate. Revocation state, caches and buffered instructions are kept.
+    pub fn close_all_streams(&self, reason: &'static str) {
+        self.close_all.send_modify(|n| *n += 1);
+        warn!(reason, "fail-closed: closing every shield Control stream");
+    }
+
+    /// How many close-all requests were made (tests).
+    #[cfg(test)]
+    pub fn close_all_count(&self) -> u64 {
+        *self.close_all.borrow()
     }
 
     /// Apply the controller's authoritative, complete list of revoked shield
@@ -287,10 +330,11 @@ impl ShieldRegistry {
     }
 
     /// Build the current peer-Connector list for this Connector's Remote
-    /// Network, sorted deterministically by `connector_id`. Returns `None`
-    /// when the ACL snapshot is missing or this Connector isn't in any RN
-    /// (per design — the Shield ignores empty lists, and we prefer not to
-    /// send them at all).
+    /// Network, sorted deterministically by `connector_id`, plus the ACL's
+    /// revoked connector ids (Phase E, D21). Revoked ids are never offered
+    /// as peers. Returns `None` only when there are neither peers nor
+    /// revoked ids; a list with no peers is still sent so the Shield can
+    /// prune revoked connectors (it ignores the empty `peers`).
     ///
     /// Address derivation: `connector_tunnel_addr` in the ACL snapshot is
     /// `host:9092` (QUIC data plane). The Shield needs `host:9091` (gRPC).
@@ -298,20 +342,25 @@ impl ShieldRegistry {
     pub(crate) fn build_peer_connector_list(
         &self,
     ) -> Option<crate::shield_proto::PeerConnectorList> {
+        let revoked_connector_ids = self.policy_cache.revoked_connector_ids();
         let mut peers: Vec<crate::shield_proto::PeerConnector> = self
             .policy_cache
             .peers_of_connector(&self.connector_id)
             .into_iter()
+            .filter(|(id, _)| !revoked_connector_ids.contains(id))
             .map(|(id, tunnel_addr)| crate::shield_proto::PeerConnector {
                 connector_id: id,
                 connector_addr: derive_grpc_addr(&tunnel_addr),
             })
             .collect();
-        if peers.is_empty() {
+        if peers.is_empty() && revoked_connector_ids.is_empty() {
             return None;
         }
         peers.sort_by(|a, b| a.connector_id.cmp(&b.connector_id));
-        Some(crate::shield_proto::PeerConnectorList { peers })
+        Some(crate::shield_proto::PeerConnectorList {
+            peers,
+            revoked_connector_ids,
+        })
     }
 
     /// Deliver instructions to a shield via Control stream, or buffer until the shield reconnects.
@@ -852,6 +901,10 @@ impl ShieldService for ShieldRegistry {
         // its cancel token and closes it. The hub keeps its own revoked set for
         // the same reason (revocation updates the maps first, then the hub).
         let cancel = CancellationToken::new();
+        // Subscribed before admission: a close requested after this point
+        // ends this stream too.
+        let mut close_rx = self.close_all.subscribe();
+        close_rx.borrow_and_update();
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         {
             let mut maps = self.maps.lock();
@@ -859,6 +912,11 @@ impl ShieldService for ShieldRegistry {
                 return Err(Status::unavailable(
                     "connector has not yet applied the controller's shield revocation list",
                 ));
+            }
+            // Connector-revocation B1 (§7 step 2): not while the connector
+            // itself is unauthorized (Starting, Disabled, terminal, past D).
+            if !self.serving_gate.admits_now() {
+                return Err(self.not_serving_status());
             }
             if maps.revoked.contains(&identity.shield_id) {
                 return Err(Status::permission_denied("shield is revoked"));
@@ -940,6 +998,12 @@ impl ShieldService for ShieldRegistry {
                     // Certificate audit bug 3: the shield was revoked.
                     _ = cancel.cancelled() => {
                         let _ = out_tx.try_send(Err(Status::permission_denied("shield is revoked")));
+                        break;
+                    }
+                    // Connector-revocation fail-closed: this connector stopped
+                    // serving; the shield should fail over.
+                    _ = close_rx.changed() => {
+                        let _ = out_tx.try_send(Err(registry.not_serving_status()));
                         break;
                     }
                     msg = in_stream.message() => {
@@ -1118,6 +1182,7 @@ mod tests {
             "connector-1".to_string(),
             ack_tx,
             policy_cache,
+            crate::authorization::AuthzGate::open_for_tests(),
         )
     }
 
@@ -1196,6 +1261,7 @@ mod controller_channel_refresh_tests {
             crate::test_support::CONNECTOR_ID.to_string(),
             ack_tx,
             Arc::new(crate::policy::PolicyCache::new()),
+            crate::authorization::AuthzGate::open_for_tests(),
         )
     }
 
@@ -1262,6 +1328,12 @@ mod shield_server_tls_tests {
     }
 
     fn unsynced_base_registry() -> ShieldRegistry {
+        unsynced_base_registry_with_gate(crate::authorization::AuthzGate::open_for_tests())
+    }
+
+    fn unsynced_base_registry_with_gate(
+        gate: crate::authorization::AuthzGate,
+    ) -> ShieldRegistry {
         let (ack_tx, _ack_rx) = mpsc::channel(8);
         // A peer in this connector's remote network: every Shield health
         // report is then answered with a PeerConnectorList, which these tests
@@ -1289,7 +1361,74 @@ mod shield_server_tls_tests {
             CONNECTOR_ID.to_string(),
             ack_tx,
             policy_cache,
+            gate,
         )
+    }
+
+    // ── Connector-revocation Phase E (D21) ─────────────────────────────────
+
+    fn snapshot_for_peers(peers: &[&str], revoked: &[&str]) -> crate::client::v1::AclSnapshot {
+        crate::client::v1::AclSnapshot {
+            version: 2,
+            workspace_id: "ws-test".into(),
+            remote_networks: if peers.is_empty() {
+                vec![]
+            } else {
+                vec![crate::client::v1::AclRemoteNetwork {
+                    remote_network_id: "rn-1".into(),
+                    name: "rn-1".into(),
+                    connectors: peers
+                        .iter()
+                        .map(|id| crate::client::v1::AclConnector {
+                            connector_id: id.to_string(),
+                            connector_tunnel_addr: format!("{id}.lan:9092"),
+                            ..Default::default()
+                        })
+                        .collect(),
+                }]
+            },
+            revoked_connectors: revoked
+                .iter()
+                .map(|id| crate::client::v1::RevokedConnector {
+                    connector_id: id.to_string(),
+                    connector_spiffe: format!("spiffe://{TRUST_DOMAIN}/connector/{id}"),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// AE-6: the peer list carries the ACL's revoked ids and never offers a
+    /// revoked connector as a peer.
+    #[tokio::test]
+    async fn peer_list_carries_revoked_ids_and_drops_revoked_peers() {
+        let r = registry();
+        r.policy_cache.update(snapshot_for_peers(
+            &[CONNECTOR_ID, "peer-b", "peer-a"],
+            &["peer-b", "gone-x"],
+        ));
+        let list = r.build_peer_connector_list().expect("list");
+        let peers: Vec<_> = list.peers.iter().map(|p| p.connector_id.as_str()).collect();
+        let mut want = vec![CONNECTOR_ID, "peer-a"];
+        want.sort();
+        assert_eq!(peers, want);
+        assert_eq!(list.revoked_connector_ids, vec!["gone-x", "peer-b"]);
+    }
+
+    /// AE-6: sent even when this connector is in no RN (no peers), so the
+    /// Shield can still prune; nothing to send without either.
+    #[tokio::test]
+    async fn peer_list_is_sent_for_revoked_ids_alone() {
+        let r = registry();
+        r.policy_cache.update(snapshot_for_peers(&[], &["peer-b"]));
+        let list = r
+            .build_peer_connector_list()
+            .expect("revoked ids alone are sent");
+        assert!(list.peers.is_empty());
+        assert_eq!(list.revoked_connector_ids, vec!["peer-b"]);
+
+        r.policy_cache.update(snapshot_for_peers(&[], &[]));
+        assert!(r.build_peer_connector_list().is_none());
     }
 
     /// Aborts the server task when the test ends.
@@ -1901,6 +2040,157 @@ mod shield_server_tls_tests {
 
         r.apply_revocations(vec![]);
         assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+    }
+
+    /// Connector-revocation B1 (AB1-1, T15): no shield Control stream while
+    /// the connector itself is not authorized — Starting, then terminal — and
+    /// admitted once the connector serves.
+    #[tokio::test]
+    async fn shield_control_follows_the_connector_serving_state() {
+        use crate::authorization::{AckTracker, TerminalSignal};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let authz = AckTracker::shared(Duration::from_secs(3600));
+        let r = unsynced_base_registry_with_gate(authz.lock().gate());
+        r.set_shield_renewal_window(1);
+        r.apply_revocations(vec![]);
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was admitted while the connector was Starting"
+        );
+        {
+            let mut t = authz.lock();
+            let s = t.next_seq();
+            let now = tokio::time::Instant::now();
+            t.record_sent(s, now);
+            t.on_ack(s, true, now).unwrap();
+        }
+        assert!(control_admitted(&pki, server.addr, SHIELD_ID).await);
+        authz.lock().on_terminal(TerminalSignal::Revoked);
+        assert!(
+            !control_admitted(&pki, server.addr, SHIELD_ID).await,
+            "a shield was admitted by a revoked connector"
+        );
+    }
+
+    /// Connector-revocation B2 (AB2-5): when the connector stops serving, an
+    /// open shield Control stream ends with `Unavailable` — so the shield
+    /// fails over — not with the `PermissionDenied` of a shield revocation;
+    /// the shield itself is not marked revoked.
+    #[tokio::test]
+    async fn closing_all_streams_ends_them_with_unavailable() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out, mut replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&out, &mut replies, false).await;
+
+        r.close_all_streams("test");
+        match tokio::time::timeout(WAIT, replies.message()).await {
+            Ok(Err(status)) => assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}"),
+            other => panic!("expected the stream to end with Unavailable, got {other:?}"),
+        }
+        assert!(!r.is_revoked(SHIELD_ID), "closing for the connector's sake revokes nothing");
+    }
+
+    /// The status a refused Control stream ends with: refused at open, or
+    /// ended before the first reply.
+    async fn control_refusal(pki: &TestPki, addr: SocketAddr) -> tonic::Status {
+        let (out, out_rx) = mpsc::channel(8);
+        match ShieldServiceClient::new(shield_channel(pki, addr).await)
+            .control(ReceiverStream::new(out_rx))
+            .await
+        {
+            Err(status) => status,
+            Ok(replies) => {
+                let mut replies = replies.into_inner();
+                let _ = out.send(health_report()).await;
+                match tokio::time::timeout(WAIT, replies.message()).await {
+                    Ok(Err(status)) => status,
+                    other => panic!("expected a refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// Connector-revocation Phase F (finding B, AF-3): a terminal connector
+    /// refuses shields with its own message, so they fail over instead of
+    /// waiting; non-terminal states keep the not-serving message.
+    #[tokio::test]
+    async fn terminal_connector_refuses_shields_with_the_terminal_message() {
+        use crate::authorization::{AuthzGate, ServingState};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        for (state, want) in [
+            (ServingState::Revoked, CONNECTOR_TERMINAL_MESSAGE),
+            (ServingState::UnknownIdentity, CONNECTOR_TERMINAL_MESSAGE),
+            (
+                ServingState::Starting,
+                "connector is not authorized to serve",
+            ),
+            (
+                ServingState::Disabled,
+                "connector is not authorized to serve",
+            ),
+        ] {
+            let r = unsynced_base_registry_with_gate(AuthzGate::fixed(state, None));
+            r.apply_revocations(vec![]);
+            let server = start_with(r, holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+            let status = control_refusal(&pki, server.addr).await;
+            assert_eq!(
+                status.code(),
+                tonic::Code::Unavailable,
+                "{state:?}: {status:?}"
+            );
+            assert_eq!(status.message(), want, "{state:?}");
+        }
+    }
+
+    /// The terminal message is matched by text in the Shield
+    /// (`shield/src/control_stream.rs`); both sides pin the same literal.
+    #[test]
+    fn terminal_message_matches_the_shield() {
+        assert_eq!(
+            CONNECTOR_TERMINAL_MESSAGE,
+            "connector is revoked or unknown to the controller"
+        );
+    }
+
+    /// AF-4: an open stream closed by the terminal transition ends with the
+    /// terminal message; a close while Disabled keeps the not-serving one.
+    #[tokio::test]
+    async fn open_stream_closed_by_a_terminal_transition_carries_the_terminal_message() {
+        use crate::authorization::{AuthzGate, ServingState};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        for (state, want) in [
+            (ServingState::Revoked, CONNECTOR_TERMINAL_MESSAGE),
+            (
+                ServingState::Disabled,
+                "connector is not authorized to serve",
+            ),
+        ] {
+            let (gate, control) = AuthzGate::controllable_for_tests();
+            let r = unsynced_base_registry_with_gate(gate);
+            r.set_shield_renewal_window(1);
+            r.apply_revocations(vec![]);
+            let server = start_with(r.clone(), holder.clone(), SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+            let (out, mut replies) = open_control(&pki, server.addr).await;
+            health_round_trip(&out, &mut replies, false).await;
+
+            control.set(state);
+            r.close_all_streams("test");
+            match tokio::time::timeout(WAIT, replies.message()).await {
+                Ok(Err(status)) => {
+                    assert_eq!(status.code(), tonic::Code::Unavailable, "{status:?}");
+                    assert_eq!(status.message(), want, "{state:?}");
+                }
+                other => panic!("expected the stream to end with Unavailable, got {other:?}"),
+            }
+        }
     }
 
     /// Connector restart: revocation state is not trusted across processes —

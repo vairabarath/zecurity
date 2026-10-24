@@ -6,11 +6,15 @@
 #
 # Persistent=true: if the system was off during the scheduled time,
 # the timer fires on next boot.
+#
+# No Requires= on the service (Sprint 20 Fix 11): it made enabling or
+# starting the timer run an update immediately. The timer activates its
+# same-named service on schedule without it. The installers enable this
+# timer only when AUTO_UPDATE_ENABLED=true.
 
 [Unit]
 Description=Daily ZECURITY Connector update check
 Documentation=https://github.com/vairabarath/zecurity
-Requires=zecurity-connector-update.service
 
 [Timer]
 OnCalendar=daily

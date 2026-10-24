@@ -80,6 +80,7 @@ async fn every_consumer_observes_the_same_serial_after_publication() {
         CONNECTOR_ID.to_string(),
         ack_tx,
         Arc::new(crate::policy::PolicyCache::new()),
+        crate::authorization::AuthzGate::open_for_tests(),
     );
     let proxy_built_with = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorder = proxy_built_with.clone();

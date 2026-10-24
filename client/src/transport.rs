@@ -83,7 +83,10 @@ pub struct ClientTransport {
     direct_addr: SocketAddr,
     relay: Option<RelayContext>,
     direct_failure_count: AtomicU32,
-    direct_unhealthy_until: AtomicI64
+    direct_unhealthy_until: AtomicI64,
+    /// Connector-revocation Phase C: the connector this transport reaches
+    /// (empty when unknown). Lets a flow record which connector carries it.
+    connector_id: String,
 }
 
 impl ClientTransport {
@@ -98,7 +101,18 @@ impl ClientTransport {
             relay,
             direct_failure_count: AtomicU32::new(0),
             direct_unhealthy_until: AtomicI64::new(0),
+            connector_id: String::new(),
         }
+    }
+
+    /// Phase C: tag this transport with its connector id.
+    pub fn with_connector_id(mut self, connector_id: String) -> Self {
+        self.connector_id = connector_id;
+        self
+    }
+
+    pub fn connector_id(&self) -> &str {
+        &self.connector_id
     }
     fn now_unix() -> i64 {
       std::time::SystemTime::now()

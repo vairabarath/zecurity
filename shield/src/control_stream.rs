@@ -27,6 +27,23 @@ use crate::{renewal, resources, tls, util};
 
 const BACKOFF_INITIAL_SECS: u64 = 5;
 const BACKOFF_MAX_SECS: u64 = 60;
+/// Retry interval while the Connector answers but is not serving yet
+/// (`connector_not_serving`). Fixed, not exponential: the Connector is alive
+/// and recovers on its own, so the Shield should re-attach within this
+/// interval of the Connector serving again, not after a grown backoff.
+const NOT_SERVING_RETRY_SECS: u64 = 2;
+/// The `Unavailable` messages a live Connector uses to refuse or end a Shield
+/// Control stream while it is not serving (connector/src/agent_server.rs,
+/// `control()`: B1 admission gate, revocation-list gate, and the fail-closed
+/// close-all). Keep in lockstep with the Connector.
+const CONNECTOR_NOT_SERVING_MESSAGES: [&str; 2] = [
+    "connector is not authorized to serve",
+    "connector has not yet applied the controller's shield revocation list",
+];
+/// The Connector's refusal in a terminal state (revoked, unknown identity):
+/// it will never serve again, so the Shield fails over instead of waiting.
+/// Must match the Connector's `CONNECTOR_TERMINAL_MESSAGE`.
+const CONNECTOR_TERMINAL_MESSAGE: &str = "connector is revoked or unknown to the controller";
 const HEALTH_INTERVAL_SECS: u64 = 15;
 /// Ignore a ReEnroll this soon after a successful renewal (Sprint 21 K2).
 /// After renewing, the Shield reconnects and its first health report may
@@ -108,6 +125,34 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 info!("control stream closed cleanly, reconnecting");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
+            Err(e) if connector_terminal(&e) => {
+                // Connector-revocation Phase F (finding B): the head refused
+                // for good. Move it to the tail so the next attempt walks to
+                // the next peer; in memory only — the failover that follows
+                // persists the new head.
+                if current_state.connectors.len() > 1 {
+                    current_state.connectors.rotate_left(1);
+                }
+                warn!(
+                    retry_secs = NOT_SERVING_RETRY_SECS,
+                    "connector is revoked or unknown; trying the next peer connector"
+                );
+                tokio::time::sleep(Duration::from_secs(NOT_SERVING_RETRY_SECS)).await;
+                backoff_secs = BACKOFF_INITIAL_SECS;
+            }
+            Err(e) if connector_not_serving(&e) => {
+                // The Connector is up but not serving (e.g. Disabled while
+                // the Controller is unreachable). Poll it at a short fixed
+                // interval and reset the backoff: with the exponential
+                // backoff the Shield re-attached up to ~40 s after the
+                // Connector was serving again (B2 live finding 1).
+                warn!(
+                    retry_secs = NOT_SERVING_RETRY_SECS,
+                    "connector is not serving yet; retrying"
+                );
+                tokio::time::sleep(Duration::from_secs(NOT_SERVING_RETRY_SECS)).await;
+                backoff_secs = BACKOFF_INITIAL_SECS;
+            }
             Err(e) => {
                 // Debug formatting includes the full anyhow source chain;
                 // Display would only print the outermost context.
@@ -121,6 +166,27 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
             }
         }
     }
+}
+
+/// True when `err` carries the Connector's "not serving" refusal (see
+/// `CONNECTOR_NOT_SERVING_MESSAGES`), whether the stream was refused at open
+/// or ended by the Connector mid-stream.
+fn connector_terminal(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            status.code() == tonic::Code::Unavailable
+                && status.message() == CONNECTOR_TERMINAL_MESSAGE
+        })
+    })
+}
+
+fn connector_not_serving(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            status.code() == tonic::Code::Unavailable
+                && CONNECTOR_NOT_SERVING_MESSAGES.contains(&status.message())
+        })
+    })
 }
 
 async fn run_once(
@@ -195,7 +261,8 @@ async fn run_once(
         tokio::select! {
             result = inbound.message() => {
                 match result {
-                    Err(e) => return Err(anyhow::anyhow!("control stream recv error: {}", e)),
+                    // Keep the Status in the chain: reconnect_loop inspects it.
+                    Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
                     Ok(None) => return Ok(()),
                     Ok(Some(msg)) => {
                         if let Some(action) = handle_connector_msg(
@@ -273,8 +340,12 @@ where
     }
     info!(shield_id = %state.shield_id, "connector requested cert renewal");
     match renew(state.clone()).await {
-        Ok(new_state) => {
+        Ok(mut new_state) => {
             debounce.record_success(Instant::now());
+            // Phase E (D21): the in-memory revoked set survives the renewal.
+            new_state
+                .revoked_connectors
+                .extend(state.revoked_connectors.drain());
             info!(
                 shield_id = %new_state.shield_id,
                 new_expiry = new_state.cert_not_after,
@@ -376,7 +447,7 @@ async fn handle_connector_msg(
             None
         }
         Some(Body::PeerConnectorList(list)) => {
-            apply_peer_connector_list(state, cfg, list.peers);
+            apply_peer_connector_list(state, cfg, list);
             None
         }
         other => {
@@ -388,8 +459,14 @@ async fn handle_connector_msg(
 
 /// Apply an incoming `PeerConnectorList` to the Shield's persistent state.
 ///
-///   - Empty `peers` is ignored — the Shield's existing list is safer than a
-///     truncated one.
+///   - Revoked ids (Phase E, D21) are added to the in-memory revoked set
+///     first and pruned from the current list at once, whichever Connector
+///     sent them; a revoked Connector is never re-added while the process
+///     runs. A pruned list is saved unless it became empty (state.json must
+///     keep a Connector to start from; the in-memory list stays empty, so
+///     the Shield dials nothing).
+///   - Empty `peers` (after dropping revoked ids) is ignored — the Shield's
+///     existing list is safer than a truncated one.
 ///   - Identical content (order-insensitive by connector_id) is a no-op —
 ///     no rewrite of state.json.
 ///   - New content replaces the list. The current head is preserved when
@@ -397,8 +474,14 @@ async fn handle_connector_msg(
 fn apply_peer_connector_list(
     state: &mut ShieldState,
     cfg: &ShieldConfig,
-    peers: Vec<crate::proto::PeerConnector>,
+    list: crate::proto::PeerConnectorList,
 ) {
+    prune_revoked_connectors(state, cfg, list.revoked_connector_ids);
+    let peers: Vec<crate::proto::PeerConnector> = list
+        .peers
+        .into_iter()
+        .filter(|p| !state.revoked_connectors.contains(&p.connector_id))
+        .collect();
     if peers.is_empty() {
         warn!("ignored empty PeerConnectorList");
         return;
@@ -440,6 +523,34 @@ fn apply_peer_connector_list(
         warn!(error = %e, "failed to persist state.json after peer-list update");
     } else {
         info!(peers = peer_count, "peer connector list refreshed");
+    }
+}
+
+/// Phase E (D21): remember `revoked_ids` and drop them from the current list.
+fn prune_revoked_connectors(state: &mut ShieldState, cfg: &ShieldConfig, revoked_ids: Vec<String>) {
+    state
+        .revoked_connectors
+        .extend(revoked_ids.into_iter().filter(|id| !id.is_empty()));
+    let before = state.connectors.len();
+    let revoked = &state.revoked_connectors;
+    state
+        .connectors
+        .retain(|c| !revoked.contains(&c.connector_id));
+    let pruned = before - state.connectors.len();
+    if pruned == 0 {
+        return;
+    }
+    warn!(
+        pruned,
+        remaining = state.connectors.len(),
+        "revoked connectors pruned from the peer list"
+    );
+    if state.connectors.is_empty() {
+        warn!("every peer connector is revoked; the Shield dials none until a new list arrives (state.json left as is)");
+        return;
+    }
+    if let Err(e) = state.save(&cfg.state_dir) {
+        warn!(error = %e, "failed to persist state.json after pruning revoked connectors");
     }
 }
 
@@ -611,6 +722,7 @@ mod tests {
             interface_addr: "100.64.0.5".into(),
             enrolled_at: "2026-10-09T00:00:00Z".into(),
             cert_not_after: 1_000,
+            revoked_connectors: HashSet::new(),
         }
     }
 
@@ -716,6 +828,173 @@ mod tests {
         }
     }
 
+    // ---- Re-attach promptly when the Connector is up but not serving ----
+
+    fn not_serving_at_open() -> anyhow::Error {
+        anyhow::Error::new(tonic::Status::unavailable("connector is not authorized to serve"))
+            .context("failed to open Shield Control stream")
+    }
+
+    fn not_serving_mid_stream() -> anyhow::Error {
+        anyhow::Error::new(tonic::Status::unavailable("connector is not authorized to serve"))
+            .context("control stream recv error")
+    }
+
+    /// Returns the scripted outcomes in order and records when each
+    /// connection attempt started; pends forever once the script is done.
+    struct OutcomeSession {
+        script: std::collections::VecDeque<Result<()>>,
+        starts: Arc<std::sync::Mutex<Vec<u64>>>,
+        heads: Arc<std::sync::Mutex<Vec<String>>>,
+        t0: tokio::time::Instant,
+        done: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl ControlSession for OutcomeSession {
+        async fn run(
+            &mut self,
+            state: &mut ShieldState,
+            _debounce: &mut RenewalDebounce,
+        ) -> Result<()> {
+            self.starts.lock().unwrap().push(self.t0.elapsed().as_secs());
+            self.heads
+                .lock()
+                .unwrap()
+                .push(state.connectors[0].connector_id.clone());
+            match self.script.pop_front() {
+                Some(outcome) => outcome,
+                None => {
+                    if let Some(done) = self.done.take() {
+                        let _ = done.send(());
+                    }
+                    std::future::pending().await
+                }
+            }
+        }
+    }
+
+    async fn attempt_times(script: Vec<Result<()>>) -> Vec<u64> {
+        attempts(test_state(), script).await.0
+    }
+
+    /// (start time, head connector) of every connection attempt.
+    async fn attempts(state: ShieldState, script: Vec<Result<()>>) -> (Vec<u64>, Vec<String>) {
+        let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let heads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let session = OutcomeSession {
+            script: script.into(),
+            starts: starts.clone(),
+            heads: heads.clone(),
+            t0: tokio::time::Instant::now(),
+            done: Some(done_tx),
+        };
+        let task = tokio::spawn(reconnect_loop(state, session));
+        done_rx.await.expect("script finished");
+        task.abort();
+        let times = starts.lock().unwrap().clone();
+        let heads = heads.lock().unwrap().clone();
+        (times, heads)
+    }
+
+    /// Matched by text against the Connector
+    /// (`connector/src/agent_server.rs`); both sides pin the same literal.
+    #[test]
+    fn terminal_message_matches_the_connector() {
+        assert_eq!(
+            CONNECTOR_TERMINAL_MESSAGE,
+            "connector is revoked or unknown to the controller"
+        );
+    }
+
+    fn terminal_refusal() -> anyhow::Error {
+        anyhow::Error::new(tonic::Status::unavailable(CONNECTOR_TERMINAL_MESSAGE))
+            .context("failed to open Shield Control stream")
+    }
+
+    fn two_peer_state() -> ShieldState {
+        let mut state = test_state();
+        state.connectors.push(ConnectorRef {
+            connector_id: "conn-2".into(),
+            connector_addr: "127.0.0.1:2".into(),
+        });
+        state
+    }
+
+    /// Connector-revocation Phase F (finding B, AF-5): a revoked connector's
+    /// refusal moves it to the tail, so the next attempt (after the short
+    /// retry) starts at the next peer; "not serving yet" keeps the head.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_refusal_fails_over_but_not_serving_waits() {
+        let (times, heads) = attempts(two_peer_state(), vec![Err(terminal_refusal())]).await;
+        assert_eq!(times, vec![0, 2]);
+        assert_eq!(heads, vec!["conn-1", "conn-2"]);
+
+        let (_, heads) = attempts(two_peer_state(), vec![Err(not_serving_at_open())]).await;
+        assert_eq!(
+            heads,
+            vec!["conn-1", "conn-1"],
+            "not serving yet: keep waiting for it"
+        );
+
+        let (times, heads) = attempts(test_state(), vec![Err(terminal_refusal())]).await;
+        assert_eq!(
+            (times, heads),
+            (vec![0, 2], vec!["conn-1".into(), "conn-1".into()]),
+            "single connector: retry"
+        );
+    }
+
+    /// B2 live finding 1: a Connector that is Disabled (Controller outage)
+    /// refuses the Shield. The Shield must keep polling every
+    /// NOT_SERVING_RETRY_SECS instead of backing off 5/10/20/40 s, so it
+    /// re-attaches within 2 s of the Connector serving again.
+    #[tokio::test(start_paused = true)]
+    async fn connector_not_serving_is_polled_at_a_fixed_short_interval() {
+        let script = vec![
+            Err(not_serving_mid_stream()), // streams closed (Disabled + 30 s)
+            Err(not_serving_at_open()),    // refused while still Disabled
+            Err(not_serving_at_open()),
+            Err(not_serving_at_open()),
+            Err(not_serving_at_open()),
+        ];
+        assert_eq!(attempt_times(script).await, vec![0, 2, 4, 6, 8, 10]);
+    }
+
+    /// Other errors keep the exponential backoff, and it starts from the
+    /// initial value after a not-serving period (reset).
+    #[tokio::test(start_paused = true)]
+    async fn other_errors_keep_exponential_backoff_reset_after_not_serving() {
+        let script = vec![
+            Err(anyhow::anyhow!("transport error")), // +5
+            Err(anyhow::anyhow!("transport error")), // +10
+            Err(not_serving_at_open()),              // +2, resets backoff
+            Err(anyhow::anyhow!("transport error")), // +5 (not 20)
+            Err(anyhow::anyhow!("transport error")), // +10
+        ];
+        assert_eq!(attempt_times(script).await, vec![0, 5, 15, 17, 22, 32]);
+    }
+
+    #[test]
+    fn only_the_connectors_not_serving_refusals_are_fast_retried() {
+        assert!(connector_not_serving(&not_serving_at_open()));
+        assert!(connector_not_serving(&not_serving_mid_stream()));
+        assert!(connector_not_serving(&anyhow::Error::new(tonic::Status::unavailable(
+            "connector has not yet applied the controller's shield revocation list"
+        ))));
+        // A different Unavailable (e.g. the Connector process is down).
+        assert!(!connector_not_serving(&anyhow::Error::new(tonic::Status::unavailable(
+            "transport error"
+        ))));
+        // Same text, different code.
+        assert!(!connector_not_serving(&anyhow::Error::new(
+            tonic::Status::permission_denied("connector is not authorized to serve")
+        )));
+        assert!(!connector_not_serving(&anyhow::anyhow!(
+            "connector is not authorized to serve"
+        )));
+    }
+
     /// K2: the debounce survives the reconnect that follows a successful
     /// renewal — the reconnected stream's ReEnrolls are ignored until 60 s
     /// after the renewal, then honoured. Paused Tokio time: deterministic.
@@ -779,5 +1058,142 @@ mod tests {
         let retried = handle_reenroll(&mut state, &mut debounce, fake_renew(&calls, true)).await;
         assert!(matches!(retried, Some(Ok(()))));
         assert_eq!(calls.get(), 2, "retry after a failure is not debounced");
+    }
+
+    // ── Connector-revocation Phase E (D21) ─────────────────────────────────
+
+    fn peer(id: &str) -> crate::proto::PeerConnector {
+        crate::proto::PeerConnector {
+            connector_id: id.into(),
+            connector_addr: format!("{id}.lan:9091"),
+        }
+    }
+
+    fn list(peers: &[&str], revoked: &[&str]) -> crate::proto::PeerConnectorList {
+        crate::proto::PeerConnectorList {
+            peers: peers.iter().map(|p| peer(p)).collect(),
+            revoked_connector_ids: revoked.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    /// A state with peers conn-1, conn-2, conn-3 and a config whose state_dir
+    /// is a fresh temp dir holding that state.json.
+    fn three_peer_state(label: &str) -> (ShieldState, ShieldConfig) {
+        let dir = std::env::temp_dir().join(format!(
+            "zecurity-shield-pe-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg: ShieldConfig = serde_json::from_value(serde_json::json!({
+            "controller_addr": "c:9090",
+            "controller_http_addr": "c:8080",
+            "state_dir": dir.to_str().unwrap(),
+        }))
+        .unwrap();
+        let mut state = test_state();
+        state.connectors = ["conn-1", "conn-2", "conn-3"]
+            .iter()
+            .map(|id| ConnectorRef {
+                connector_id: id.to_string(),
+                connector_addr: format!("{id}.lan:9091"),
+            })
+            .collect();
+        state.save(&cfg.state_dir).unwrap();
+        (state, cfg)
+    }
+
+    fn saved_ids(cfg: &ShieldConfig) -> Vec<String> {
+        ShieldState::load(&cfg.state_dir)
+            .unwrap()
+            .connectors
+            .into_iter()
+            .map(|c| c.connector_id)
+            .collect()
+    }
+
+    fn ids(state: &ShieldState) -> Vec<String> {
+        state
+            .connectors
+            .iter()
+            .map(|c| c.connector_id.clone())
+            .collect()
+    }
+
+    /// AE-1: a revoked id prunes the current list at once and is saved,
+    /// even when the list carries no peers (sender not in any RN).
+    #[test]
+    fn revoked_id_prunes_immediately_even_without_peers() {
+        let (mut state, cfg) = three_peer_state("prune");
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-3"]);
+    }
+
+    /// AE-2: never re-added while the process runs — a later list (from any
+    /// connector) that offers the revoked id as a peer and no longer lists
+    /// it as revoked still leaves it out.
+    #[test]
+    fn revoked_connector_is_never_re_added() {
+        let (mut state, cfg) = three_peer_state("readd");
+        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-3"], &["conn-2"]));
+        apply_peer_connector_list(&mut state, &cfg, list(&["conn-1", "conn-2", "conn-4"], &[]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-4"]);
+        assert!(!saved_ids(&cfg).contains(&"conn-2".to_string()));
+    }
+
+    /// AE-3: memory only — the revoked set is not written to state.json and
+    /// a reload starts empty.
+    #[test]
+    fn revoked_set_is_memory_only() {
+        let (mut state, cfg) = three_peer_state("memory");
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
+        let raw = std::fs::read_to_string(Path::new(&cfg.state_dir).join("state.json")).unwrap();
+        assert!(!raw.contains("revoked"), "{raw}");
+        assert!(ShieldState::load(&cfg.state_dir)
+            .unwrap()
+            .revoked_connectors
+            .is_empty());
+    }
+
+    /// AE-4: when every peer is revoked the Shield dials none; state.json
+    /// keeps its last non-empty list so the Shield can still start.
+    #[tokio::test]
+    async fn all_peers_revoked_dials_none_and_keeps_the_file_loadable() {
+        let (mut state, cfg) = three_peer_state("all");
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        assert!(state.connectors.is_empty());
+        assert_eq!(saved_ids(&cfg), vec!["conn-1", "conn-2", "conn-3"]);
+        for f in ["workspace_ca.crt", "shield.crt", "shield.key"] {
+            std::fs::write(Path::new(&cfg.state_dir).join(f), b"unused").unwrap();
+        }
+        let err = build_client(&state, &cfg)
+            .await
+            .err()
+            .expect("nothing to dial");
+        assert!(err.to_string().contains("no peer connectors"), "{err:#}");
+    }
+
+    /// AE-5: a certificate renewal keeps the in-memory revoked set.
+    #[tokio::test]
+    async fn renewal_keeps_the_revoked_set() {
+        let mut state = test_state();
+        state.revoked_connectors.insert("conn-9".into());
+        let mut debounce = RenewalDebounce::default();
+        let calls = std::cell::Cell::new(0);
+        let out = handle_reenroll(&mut state, &mut debounce, |s| {
+            calls.set(calls.get() + 1);
+            let mut renewed = s;
+            renewed.revoked_connectors.clear(); // renew_cert builds a fresh state
+            renewed.cert_not_after = 2_000;
+            std::future::ready(Ok(renewed))
+        })
+        .await;
+        assert!(matches!(out, Some(Ok(()))));
+        assert_eq!(state.cert_not_after, 2_000);
+        assert!(state.revoked_connectors.contains("conn-9"));
     }
 }

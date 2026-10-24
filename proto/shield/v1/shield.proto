@@ -132,6 +132,10 @@ message ShieldControlMessage {
 // ignored by the Shield (its current list is kept as-is).
 message PeerConnectorList {
   repeated PeerConnector peers = 1;
+  // Connector-revocation Phase E (D21): connector ids the sender's ACL lists
+  // as revoked. The Shield prunes them at once and never re-adds them while
+  // it runs. Sent even when `peers` is empty.
+  repeated string revoked_connector_ids = 2;
 }
 
 message PeerConnector {

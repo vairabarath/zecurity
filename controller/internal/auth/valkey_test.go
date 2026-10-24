@@ -119,11 +119,11 @@ func TestSetAndGetRefreshSession(t *testing.T) {
 	ctx := context.Background()
 
 	want := RefreshSession{Token: "token-abc", OriginalIAT: 1700000000, MaxLifetimeAt: 1700000000 + 30*24*3600}
-	if err := rc.SetRefreshSession(ctx, "user-1", want, 7*24*time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-1", testSID, want, 7*24*time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
-	got, found, err := rc.GetRefreshSession(ctx, "user-1")
+	got, found, err := rc.GetRefreshSession(ctx, "user-1", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestGetRefreshSession_NotFound(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
-	_, found, err := rc.GetRefreshSession(ctx, "nonexistent-user")
+	_, found, err := rc.GetRefreshSession(ctx, "nonexistent-user", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}
@@ -148,20 +148,20 @@ func TestGetRefreshSession_NotFound(t *testing.T) {
 	}
 }
 
-func TestDeleteRefreshToken(t *testing.T) {
+func TestDeleteRefreshSession(t *testing.T) {
 	rc, _ := newTestValkey(t)
 	ctx := context.Background()
 
 	sess := RefreshSession{Token: "token-del"}
-	if err := rc.SetRefreshSession(ctx, "user-del", sess, time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-del", testSID, sess, time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
-	if err := rc.DeleteRefreshToken(ctx, "user-del"); err != nil {
-		t.Fatalf("DeleteRefreshToken: %v", err)
+	if err := rc.DeleteRefreshSession(ctx, "user-del", testSID); err != nil {
+		t.Fatalf("DeleteRefreshSession: %v", err)
 	}
 
-	_, found, err := rc.GetRefreshSession(ctx, "user-del")
+	_, found, err := rc.GetRefreshSession(ctx, "user-del", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession after delete: %v", err)
 	}
@@ -175,14 +175,14 @@ func TestRefreshToken_Expired(t *testing.T) {
 	ctx := context.Background()
 
 	sess := RefreshSession{Token: "token-ttl"}
-	if err := rc.SetRefreshSession(ctx, "user-ttl", sess, time.Hour); err != nil {
+	if err := rc.SetRefreshSession(ctx, "user-ttl", testSID, sess, time.Hour); err != nil {
 		t.Fatalf("SetRefreshSession: %v", err)
 	}
 
 	// Fast-forward past the TTL.
 	mr.FastForward(2 * time.Hour)
 
-	_, found, err := rc.GetRefreshSession(ctx, "user-ttl")
+	_, found, err := rc.GetRefreshSession(ctx, "user-ttl", testSID)
 	if err != nil {
 		t.Fatalf("GetRefreshSession: %v", err)
 	}

@@ -2761,3 +2761,275 @@ serves on `127.0.0.1:9102`.
 - **Hygiene:** `.worktrees/s20-live`, `.localdev/s20-relay1`, nft `s20test` (needs sudo), lab-host update timers and test objects, and `zecurity-shield` reporting `activating` on this machine.
 
 **What's next:** Barath: Fix02 (F35) and connector revocation Phase B1 (F34). Sathiya: live end-to-end check of shield revocation (bug 3); Sprint 21 live AT-K.
+
+---
+
+## 2026-10-21 — Claude Code — Connector revocation Phase B1 (F34)
+
+**What was done:**
+- **Decisions recorded (2026-10-20):** O9 accepted as D12 (no persistence of terminal states; idle, don't exit). B1-Q1 = (a): B1 is a unit-tested intermediate, not deployed live until B2. The B1 acceptance list was signed off.
+- **B1 implemented** (`da5b12f`, connector only):
+  - serving-state machine in `AckTracker`: 7 states, D = sent + H, `lost_at`, `{state, D}` published over `watch`;
+  - admission gate on TLS, QUIC (connection refuse, stream reset), relay streams, the `handle_stream` funnel (also re-checked after registration; never `ok:false`) and the shield `control()`;
+  - terminal states stop the reconnect loop and park forever (`Infallible`).
+- **Tests:**
+  - lib 198 → 217, 5 green runs in a row;
+  - scenario4 4/4;
+  - cross-language test passes;
+  - 18/18 mutants killed;
+  - three Phase A tests tightened to the B1 behaviour.
+- **Record:** `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseB1-Implementation-2026-10-21.md`.
+
+**Confirmed by the user (2026-10-21):** `lost_at` follows design §5.2 (not reset on reconnect); §4.4 wording corrected.
+
+**What's next:**
+- **Do not deploy a B1 build to the lab.**
+- Phase M measurements on the Phase A lab build, then B2 (schedule P, session cancellation and shield close, paused-clock tests). B2 needs O5, O6/O7 and O8.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation: Phase M, decisions D13–D18, Phase B2 (unit level)
+
+**What was done:**
+- **Phase M** on a Phase A base (`measure/phase-m` `08ad699`, not merged): R1 idle 1 h, R2 under about 230 Mbit/s for 30 min, R3 five controller restarts.
+  - B p50 about 4 ms, p99 ≤ 79 ms.
+  - Tail = renewal awaited inline (61–80 ms) plus controller DB spikes.
+  - Backoff ratchet confirmed (16 → 60 s).
+  - Results: `Connector-Revocation-PhaseM-Results-2026-10-21.md`.
+- **Decisions (user):**
+  - D13 backoff 1 → 5 s, ±20 %, reset after an ack;
+  - D14 P = 4.5 s;
+  - D15 `Disabled` keeps connections, shield close after 30 s;
+  - D16 full report every P (lightweight request later);
+  - D17 Phase A contract details approved;
+  - D18 renewal head-of-line fix in B2.
+  - Timing values are build-time (`connector/.env` → `build.rs` → `crate::authz_timing`).
+- **B2 unit level** (`63e9e90`, `4f00448`): request schedule, fail-closed enforcer, terminal QUIC close, D13 backoff, concurrent renewal. 233 lib tests; 15/15 mutants killed.
+- **Lab findings:**
+  - client hot-apply admits only one new resource IP (smoltcp `IFACE_MAX_ADDR_COUNT = 2`);
+  - another agent overwrote the shared `/tmp/lab` controller binary.
+
+**State:** branch `feat/sprint20-m1-phase2` is 10+ commits ahead of origin. **Nothing pushed (user rule).** The lab still runs the Phase M measurement build (controller on this PC, `pm-conn` on inkyank).
+
+**What's next:** B2 live acceptance:
+- coordinated B2 build;
+- shield on udaya (sudo), relay on manojinkyank (sudo);
+- `zecurity-client login`, because the session expired;
+- one resource, or `down`/`up` after each change.
+
+---
+
+## 2026-10-21 (cont.) — Claude Code — Connector revocation B2 live acceptance: PASS
+
+**Results:**
+- Live L-1…L-8 PASS on controller (this PC), connector inkyank, shield udaya and relay manojinkyank. L-1 was shortened to 15 min / 3 renewals at the user's request.
+- B p99 8.2 ms (Phase M: 66–79 ms).
+- Cut-off at D within 1 ms; shield close at D + 30.00 s.
+- Restarts recover in about 1 s; after a 90 s outage, `Serving` 3.8 s after the controller returned.
+- Revoke: everything closed within 0.3 ms, the process idles. Delete + restart: `UnknownIdentity`, never serves.
+
+**Code:** `c76c783` dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR` (user decision, so the LAN relay could be tested).
+
+**Findings outside B2:**
+- admin UI can't protect a resource created before its shield;
+- relay selector doesn't refresh its list while not attached;
+- sessions invalid after controller restarts;
+- client hot-apply cap;
+- client direct-retry lag (KI-5).
+
+**Lab state:**
+- `pm-conn` revoked (needs a new connector to continue);
+- the nftables block on this PC is still in place (`~/.cache/zecurity-b2/l7-unblock.sh`).
+
+**Nothing pushed.**
+
+## 2026-10-22 — Sprint 20 Fix 06: sessions per login (B2 finding 4)
+
+- **Live repro** (baseline `bf3abed`, local test identity provider, scripted admin logins + the real client daemon):
+  - a second admin login kills the first (`refresh token mismatch`);
+  - a client login kills the admin session;
+  - an admin login kills the client (12:45:10, `refresh session dead`).
+- **Cause:** one refresh slot per user, `refresh:<userID>`, shared by the admin UI and the client.
+- **Fix:**
+  - token `<sid>.<secret>` at `refresh:{<userID>}:<sid>` + index `refresh_sids:{<userID>}`;
+  - access-JWT `sid` claim; `auth.Service.IssueSession` replaces `IssueAccessToken` + `IssueRefreshToken`;
+  - logout ends only its own session, user revocation ends all; legacy tokens migrate on their next refresh;
+  - ADR-006 amended.
+- **Tests:** 7 new; auth/client/identity with DB + Valkey: 161 PASS, 0 SKIP.
+- **Live on the fixed binary, all PASS:** legacy migration, 4 coexisting sessions, controller restart, logout isolation, client gRPC refresh (12:59:36) with the admin sessions intact.
+- Record: `Sprint20/Fixes/Fix06-Session-Refresh-Per-Login.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 07: connector re-reads relay lists while disconnected (B2 finding 3)
+
+- **Cause:** `connector/src/relay_selector.rs` `run()` never read `relay_list_rx` in `Disconnected`/`Backoff`.
+- **Live repro:**
+  - disposable user-level connector `s3-relaylist` enrolled via the admin API;
+  - relay row set active in the local DB + controller restart (`.49` offline);
+  - the baseline got `relay_count=1` and kept logging "list is empty".
+- **Fix:** `wait_backoff` (sleep vs `changed()`), backoff growth kept. 4 new tests; mutation check: the 2 wake tests fail on the old code.
+- **Gate:** cargo test 237 + 4 PASS.
+- **Live on the fix:** wake + dial of `192.168.1.49:9093` in the same millisecond as the push; the empty push is followed too; backoff 40 s → 120 s.
+- Record: `Sprint20/Fixes/Fix07-Connector-Relay-List-While-Disconnected.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 08: shield re-attach lag after a connector Disabled period (B2 finding 1)
+
+- **Re-diagnosis:** the L-3 client journal shows `shield not attached` until 11:21:19. The lag was the shield's 5 → 60 s backoff against the `Disabled` connector's refusals, not the client's KI-5 cooldown.
+- **Live repro:**
+  - local connector + disposable unprivileged shield `s3-shield` (k2-net);
+  - 90 s controller outage (`outage.sh`);
+  - baseline: connector Serving 09:07:10.959 → shield attached 09:07:48.297 (**37.3 s**).
+- **Fix:** `shield/src/control_stream.rs`, a 2 s fixed retry with backoff reset for the connector's "not serving" `Unavailable`; the mid-stream `Status` is kept. 3 new tests (mutant: all 3 fail); shield tests 35 PASS.
+- **Live on the fix:** 09:10:33.973 → 09:10:34.210 (**0.24 s**).
+- Follow-up: shield failover away from a `Disabled` connector.
+- Record: `Sprint20/Fixes/Fix08-Shield-Reattach-After-Connector-Disabled.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 09: client AnyIP, no resource-IP capacity (B2 finding 5)
+
+- **Cause:**
+  - smoltcp `IFACE_MAX_ADDR_COUNT=2` with one address per resource IP, so hot-add admitted 1 new IP (H1) and startup silently dropped IPs beyond 2;
+  - also found: port-only listeners misrouted shared-port resources (unit test: `10.0.0.3:80` → `10.0.0.1:80`).
+- **Fix:** `configure_capture_iface` (`100.64.0.1` only, `set_any_ip`, default route) + `listen((ip, port))`; planner capacity, `RemoveAddrs` and `addr_capacity` removed; H1 superseded (5-C docs annotated).
+- **Tests:** 5 new; mutants fail; client 252 PASS.
+- **Live:** user-level connector `s3-luffy` on luffy via Orca (no sudo); resources `s3-r1..r4` = SSH on .75/.41/.49/.40. The user ran the sudo install of the fixed client in an Orca terminal.
+  - Baseline: 3 hot-added IPs pending and **direct over the LAN**; startup .75/.49 captured and dropped.
+  - Fixed: hot-add 3 in one pass, all tunnelled; startup all tunnelled.
+- Also: the client session died after unclean power losses because Valkey is RDB-only (noted in Fix 06, not a Fix 06 defect); lab hosts rebooted ~14:06, udaya is now .41 and nika .40.
+- Record: `Sprint20/Fixes/Fix09-Client-AnyIP-Resource-Capacity.md`. Committed locally, not pushed.
+
+## 2026-10-22 — Sprint 20 Fix 10 (admin protect gate) + Fix 07 relay attach addendum
+
+- **Fix 10:**
+  - `ResourceDetail.tsx` gated Protect on the bound shield only. The new `lib/protectShield.ts` mirrors `MarkProtecting` (an active shield in the RN with `lanIp == host`, bound preferred) using `GetShields` (+`lanIp`).
+  - 8 tests (the button tests fail on the old page); admin 114 PASS; lint and build clean.
+  - Live via vite + Orca's browser (local test login): `s3-ui` created while `s3-shield` was inactive. Old page: disabled / "No shield installed". Fixed: enabled, and Protect bound `s3-shield` (nft apply failed only because the test shield is unprivileged).
+  - `admin/` change approved by the user.
+- **Fix 07 addendum:**
+  - `pm-relay-manoj`'s cert expired (B2 `RELAY_CERT_TTL=1h`), so heartbeats were refused. The new relay `s3-relay-manoj` was provisioned (provider password) and installed on .49 (sudo), both typed by the user in Orca tabs.
+  - Connector `s3-luffy` (pid 6321, empty list since 10:36) got the push at 10:51:12.750 and registered with the relay at 10:51:12.790: **no restart**.
+- **Lab lesson:** SSH `:22` test resources in the client ACL made the client capture and reset the Orca SSH sessions. They were removed from the group (hot-remove of 4 OK). Saved to memory.
+- Committed locally, not pushed.
+
+## 2026-10-22 — B2 findings full live retest (final build 2f5f411): 6/6 PASS
+
+- **Preflight:** no component changed since its fix commit; HEAD builds were hash-compared with deployed binaries. The connector differed (its build reads `.env`/env), so it was redeployed from the HEAD build on luffy and locally.
+- **Results:**
+  - F4: two admin sessions + client, logout isolation, 3 controller restarts, client proactive refresh 11:04:26, admin B 200 after it.
+  - F1: shield re-attach 1.67 s after `Serving` (first retry exactly Disabled + 30 s, then ~2.4 s steps).
+  - F6: flag off → luffy `relay_count=0`; on → `relay_count=1`.
+  - F5: non-SSH resources (two web servers sharing :18081 + .75:9092): hot-add 2 in 16 ms, all tunnelled, `s3-ok-omarchy` via the tunnel; restart all tunnelled.
+  - F2: unbound `s3-ui2` → Protect enabled → bound to `s3-shield`.
+  - F3: relay stopped (sudo by the user) → connector empty-list backoff → relay started → registered 36 ms after the push, same pid.
+- **Not covered:** a client flow through a root shield end to end (lab root shields are tied to revoked/disconnected connectors).
+- Report: `Sprint20/Fixes/B2-Findings-Retest-2026-10-22.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase D (relay enforcement): DONE
+
+- **Code** (`c27d733`, `1005c12`, `8e09c18`):
+  - relay heartbeat proto fields 8/3;
+  - the controller answers which registered connectors are revoked (Phase C rule, cross-workspace, both heartbeat paths, empty on DB error);
+  - the relay keeps a sticky revoked set, closes listed registrations, and refuses Register (pre-check + post-insert re-check; the ack is delivered before close).
+- **Tests:** relay 110 → 116; controller full suite + DB integration; connector 237; client 265. Mutants 14/14 killed.
+- **Live AD-L:** Phase A (revocation-ignoring) connector `pd-hostile` on udaya, registered with the upgraded manojinkyank relay (binary installed by the user with sudo). Revoked 04:37:40.70 UTC; the relay closed and removed it at 04:38:06.56 (25.9 s). Reconnects were refused by the existing accept-time CRL check, so the Register refusal is defence in depth live. The connector kept running; stopped afterwards.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseD-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase E (shield pruning): DONE
+
+- **Code** (`c9d9cda`):
+  - `PeerConnectorList.revoked_connector_ids = 2`;
+  - the connector fills it from its ACL, drops revoked peers, and sends it for revoked ids alone;
+  - the shield prunes at once from any connector's list, never re-adds while running, keeps the set in memory only (it survives renewal), and dials none if all peers are revoked (`state.json` stays loadable).
+- **Tests:** shield 35 → 40, connector 237 → 239; controller, client and relay green. Mutants 11/11 killed.
+- **Live AE-L:** new `pe-net` with `pe-honest` + `pe-shield` (HEAD builds, user-level on this PC) and the Phase A `pe-hostile` on udaya. Revoked 04:52:59.466; the honest connector's ACL arrived 8 ms later; the shield pruned at 04:53:08.364 (8.9 s); `state.json` = [pe-honest]. In this topology the existing full-list replacement would also have removed it; the Phase E-only cases are unit/mutation-tested. The D21 hostile-only-attachment limit is documented.
+- **Lab hygiene:** a `cargo fmt` run touched unrelated connector/shield files; that churn was reverted before the commit. Test processes stopped; `pe-*` rows remain in the DB.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-PhaseE-Implementation-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F: check + fixes (A option a, B)
+
+- **2a was already done:** `52c16fa` (migration 039) keeps revoked serials on the CRL after deletion. Design §12/O14 corrected (`d9d4bb6`).
+- **Live check** (`1a1a82d`):
+  - A: deleting a connector cascaded its shield rows without tombstones; the orphan was accepted by a peer connector, bounded by its 7 d certificate.
+  - B: a shield never failed over away from a revoked connector (same "not serving" refusal, so it waited).
+- **Fixes** (`faa957f`, `4994638`):
+  - `deleteConnector` is refused while an active/disconnected shield is attached (one statement; the count is in the error);
+  - a terminal connector refuses/closes shields with "connector is revoked or unknown to the controller";
+  - the shield rotates that head to the tail and retries after 2 s.
+- **Tests:** controller DB (AF-1/2), connector 239 → 242, shield 40 → 42; all suites green. Mutants 12/12 killed.
+- **Live AF-L:** revoke `pf-c3` → shield got the terminal refusal in 6 ms and was on `pf-c2` 2.36 s later; the immediate delete was refused, then succeeded after the shield moved. Offline shield: delete refused → `revokeShield` → delete OK (tombstone kept).
+- Controller now runs `4994638` from `~/.cache/zecurity-f`. Committed locally, not pushed.
+
+## 2026-10-23 — Connector revocation Phase F schema: migration 041 (tombstone + no reuse)
+
+- **`041_connector_revocations.sql`** (`3995af6` **[schema: reset DB]**, tests `b2ad199`):
+  - a `connector_revocations` tombstone written by a trigger on every revocation;
+  - no FK, so it outlives a deleted row;
+  - a trigger refuses reuse of a revoked id (insert or update of id);
+  - backfill from revoked rows plus revoked-then-deleted connectors in the certificate history.
+  - Follows 038. No Go changes.
+- **Tests:** 3 DB tests (including the backfill on a DB seeded under 040); full controller suite green. Mutants 8/8 killed (3 test gaps fixed after the first run).
+- **Live** (user chose option 2: apply only 041 to the lab DB, after a pg_dump backup in `~/.cache/zecurity-f`):
+  - the backfill wrote exactly 8 tombstones (4 rows + 4 deleted);
+  - `pf-c4`: revoke → tombstone the same second; delete → tombstone kept; re-insert refused;
+  - no controller errors.
+- **Teammates:** recreate the local DB after pulling. Committed locally, not pushed.
+- **041 real-time run** (same day): `rt-new` (HEAD) and `rt-old` (old Phase A build) revoked together.
+  - Both tombstoned within 0.22 s (DB watcher), identically.
+  - Both deleted → tombstones kept; reuse of both ids refused.
+  - The relay refused re-registration with "connector is revoked" (Phase D, first live sighting).
+  - Deleted connectors get the `unknown` marker, not `revoked` (unchanged controller behaviour; noted).
+
+## 2026-10-23 — Connector revocation end-to-end live run: PASS
+
+- **Setup:** one revocation of `e2e-d` (manojinkyank, carrying 100 % of the client traffic and holding the shield); peer `e2e-e` on udaya; resource on udaya :18090; installed client on this PC; manojinkyank relay.
+- **Results:**
+  - `e2e-d` failed closed in 7 ms;
+  - all traffic moved to `e2e-e` within 1.2 s, with none through the revoked connector afterwards;
+  - the delete was refused while the shield was attached;
+  - the shield moved to `e2e-e`;
+  - the relay dropped it in 26 s;
+  - the delete then succeeded with the tombstone kept, and reuse was refused.
+- **Earlier runs:** run 1 was invalid (client tunnel down, fixed with `zecurity-client up` and left up); run 2 had a topology loop (peer on the client's host).
+- **Open:** one shield failover took 12.9 s (connect to .49:9091 stalled ~11 s, unexplained); isolated single refusals around client ACL hot-applies.
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23.md`. Not pushed.
+
+## 2026-10-23 — Connector revocation records brought up to date; PR to fixed-pendings
+
+- **Design doc:** status set to IMPLEMENTED. Phase A error-handling corrections marked implemented (`classifyRefusal`, tests T2/T3/T20–T22). O11–O13 shown as accepted (D19–D21) and implemented. O14 done (039 + 041). Still open: O10, PENDING-18, same-key connector renewal.
+- **Superseded statuses:** Phase A and B1 intermediates, Phase M plan, two pre-design evidence docs.
+- **Sprint 20:** `path.md` Finding 34 marked closed (end-to-end live PASS); the Phase V run sheet follow-up row updated.
+- **Fix09 and phase records:** "not pushed" statuses replaced by the 2026-10-23 push.
+- **PR:** opened from `feat/sprint20-m1-phase2` to `fixed-pendings`.
+
+## 2026-10-23 — Connector revocation live check on installed systemd services + root shield: PASS, 4 findings
+
+- **Setup:** sd-a (inkyank) and sd-b (manojinkyank) installed with `connector-local-install.sh`; sd-shield (udaya) with `shield-local-install.sh` (root, nftables, protecting `sd-web`).
+- **Results:** revoke sd-a → shield refusal ~0 ms, sd-a fail-closed 16 ms, long-lived HTTP/1.1 flow cut 437 ms, shield on sd-b 2.35 s, client back 2.5–2.8 s, relay drop 22.5 s. Delete refused, then allowed; tombstone kept; reuse refused. **Direct LAN access blocked throughout**, including both systemd restarts. No restart loops.
+- **Findings:**
+  - A = Sprint 20 Finding 7 still open: the installer's update timer replaces local builds with GitHub releases;
+  - B **new**: the client resets concurrent connections to the same resource (one listening socket per ip:port; 19/24 parallel failed vs 0/24 sequential). It explains the "isolated refusals";
+  - C: a terminal connector keeps retrying the relay;
+  - D: the shield's shutdown goodbye uses the startup peer list.
+- The 12.9 s shield failover was not reproduced (2.35 s).
+- Record: `Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23.md`. Committed locally, not pushed.
+
+## 2026-10-23 (end of day) — findings filed; handoff for 2026-10-24
+
+- **Filed in `Sprint20/path.md` → Post-Sprint Fixes:**
+  - F37 (client resets concurrent connections, High), F38–F41 (Low), F42 (unexplained 12.9 s failover, watch), F43 (5-B leftovers);
+  - F7 updated (reproduced again, still open), F19 marked fixed (delete guard), F34 marked closed.
+- **Handoff:** `Sprint20/Handoff-Connector-Revocation-Next-2026-10-24.md` (lab state, PR #133, order: F7 → F37 → low items → Phase V remainder).
+
+## 2026-10-24 — Sprint 20 Fix 11 (F7: the update timer ignored AUTO_UPDATE_ENABLED): FIXED, live PASS
+
+- **Root cause:** four defects.
+  - `--check-update` never read the flag;
+  - the timers had `Requires=` on their service (so enabling a timer ran an update at once);
+  - the services hard-coded `Environment=AUTO_UPDATE_ENABLED=true`;
+  - all four installers enabled the timer unconditionally.
+- **Fix** (`905989a2`, approved design):
+  - fail-safe gate in the connector and the shield;
+  - `Requires=` and the env override removed;
+  - the release installers enable the timer only for true; the local installers always disable it.
+- **Tests:** connector 244, shield 44, `scripts/test-update-timer-gate.sh` 28/28; mutants 10/10.
+- **Live:** f11-a (inkyank) and f11-shield (udaya) installed with the fixed installers → timers disabled, 0 update runs, binaries unchanged after ≥ 2 min; a manual update-service run logged `auto-update is disabled; skipping update check`.
+- **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
+- Committed locally, not pushed.
