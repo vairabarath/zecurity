@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 12 — the client must accept concurrent connections to the same resource (F37)
 date: 2026-10-24
 type: fix (investigation + design + acceptance list)
-status: PROPOSED — awaiting the user's sign-off before any code change
+status: FIXED and verified live (2026-10-24) — 3 new tests, 6/6 mutants, live burst test PASS. Commit c01ae337 (local).
 owner: Sathiya (M1)
 finding: F37 (Sprint20/path.md → Post-Sprint Fixes), found in Connector-Revocation-Systemd-Live-2026-10-23.md (Finding B)
 ---
@@ -62,5 +62,53 @@ Each socket has 64 KiB receive + 64 KiB send buffers, allocated zero-filled (`ve
 | AF12-5 | Existing client tests pass (socket-count asserts updated from 1 listener to the pool size); other suites unaffected | suites |
 | AF12-6 | Mutation checks: backlog of 1; no refill; only one promotion per poll; removal leaking a pooled socket | mutants |
 | AF12-L | **Live:** through the installed client, 3 × 8 and 3 × 16 parallel bursts to a lab resource → all 200 (before: 5/24); 24 sequential still 200; a long-lived connection unaffected; client RSS recorded before/after | live |
+
+**Decision D-1 (user, 2026-10-24):** `LISTEN_BACKLOG = 16`.
+
+## Implementation (`c01ae337`)
+
+- `client/src/net_stack.rs`:
+  - `LISTEN_BACKLOG = 16`;
+  - `FlowTable.listen_handles: HashMap<(Ipv4Addr, u16), Vec<SocketHandle>>`;
+  - `new_listen_pool` (used by `FlowTable::new` and `add_listeners`);
+  - `service()` collects **every** pooled socket that left `Listen`, refills each slot, then promotes them (relay or fail-closed, unchanged);
+  - `remove_listeners_and_close` walks the whole pool.
+- Existing asserts "only the listener is left" (6) now expect `LISTEN_BACKLOG`.
+
+## Tests
+
+- Client **265 → 268**:
+  - `a_burst_of_connections_in_one_poll_is_accepted_and_the_pool_refills` (AF12-1/2: 2 rounds of 16 SYNs in one poll, all Established, pool back to 16, 0 fail-closed RSTs);
+  - `bursts_to_resources_sharing_a_port_go_to_their_own_destinations` (AF12-3);
+  - `removing_a_resource_removes_its_whole_pool` (AF12-4: incl. a socket mid-handshake, 0 sockets left, `add_listeners` idempotent).
+- **Mutation checks: 6/6 killed:**
+  - pool of one;
+  - no refill;
+  - one promotion per poll (caught only by the new burst tests);
+  - removal leaking pooled sockets;
+  - `add_listeners` single;
+  - `FlowTable::new` single.
+- rustfmt: no new differences (the file's 11 pre-existing ones unchanged).
+
+## Live check AF12-L (2026-10-24): PASS
+
+**Setup:**
+- installed client on this PC, through the tunnel (every attempt logged as `new TCP connection`);
+- resource `f12-web` = udaya `192.168.1.59:18091` (`python3 -m http.server --protocol HTTP/1.1`), connector-routed;
+- baseline = the installed Phase C client `2485de8f`; Fix 12 = `d87fa33e` (built from `c01ae337` with `client/scripts/dev-build.sh --release`, installed by the user with sudo; backup `/usr/local/bin/zecurity-client.pre-fix12`).
+
+| Test | Baseline `2485de8f` | Fix 12 `d87fa33e` |
+|---|---|---|
+| 24 sequential | 24/24 | 24/24 |
+| 3 × 8 parallel | **4/24** | **24/24** |
+| 3 × 16 parallel | **8/48** | **48/48** |
+| client RSS | 18.6 MB | 23.0 MB |
+| keep-alive hold 60 s during the bursts | — | 118 requests, **0** failures/reconnects |
+
+RSS grew ~4.4 MB with 16 listeners per resource for ~8 captured resources. The idle buffers are lazily backed, so most of the 1 MiB per resource stays virtual.
+
+**Lab notes (not Fix 12):**
+- udaya came back on **192.168.1.59** (was .41) after a reboot.
+- The protected resource `sd-web` (host .41) stayed stale: it is bound to the old `sd-shield`, uninstalled 2026-10-24 but its row still exists, and the controller's host re-sync follows the bound shield. The current shield `f11-shield` reported .59 correctly. This is lab clean-up, related to F20 (orphaned protected resources).
 
 Nothing is pushed until the user asks.
