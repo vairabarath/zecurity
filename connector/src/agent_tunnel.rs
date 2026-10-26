@@ -1,26 +1,39 @@
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::shield_proto::shield_control_message::Body;
 use crate::shield_proto::{ShieldControlMessage, TunnelClose, TunnelData, TunnelOpen};
 
 const MAX_CHUNK: usize = 16 * 1024;
-/// How long a Shield chunk waits for room in a device's tunnel queue before
-/// the session is ended (Fix 14, F48).
-const DEVICE_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// Fix 14 (F48): a session may hold up its Shield's Control stream (waiting
+/// for room in its full device queue) for at most DEVICE_STALL_LIMIT in total
+/// per DEVICE_STALL_WINDOW; then it is ended. Counted across chunks, so a
+/// device reading just under a per-chunk limit cannot stall the stream (and
+/// every other session on it) indefinitely.
+const DEVICE_STALL_LIMIT: Duration = Duration::from_secs(2);
+const DEVICE_STALL_WINDOW: Duration = Duration::from_secs(10);
+/// Fix 14 handover: how many Shield events a session may hold while they
+/// arrive on the Shield's newer stream before its older stream has ended.
+/// More ends the session (never drop and carry on).
+const EARLY_EVENT_LIMIT: usize = 256;
+/// Fix 14 handover: how long device data waits for the session's stream to
+/// be replaced after its send channel closed.
+const HANDOVER_SEND_GRACE: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // Events dispatched from Shield → relay session
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum RelayEvent {
     Opened { ok: bool, error: String },
     Data(Vec<u8>),
@@ -51,6 +64,10 @@ struct HubState {
     /// Fix 14 (F45): keyed by shield, owned by one stream — an older stream's
     /// cleanup must not remove a newer stream's registration.
     shield_txs: HashMap<String, (u64, mpsc::Sender<ShieldControlMessage>)>,
+    /// stream_id → the channel for sending to that live Control stream. A
+    /// session sends on its own stream (`RelayEntry::stream_id`), which may be
+    /// older than the Shield's current one until it is handed over.
+    stream_txs: HashMap<u64, mpsc::Sender<ShieldControlMessage>>,
     /// connection_id → the session's Shield and stream, and the channel
     /// routing events FROM that Shield back to the relay session. The hub
     /// holds the only sender, so removing an entry ends the session.
@@ -65,6 +82,24 @@ struct RelayEntry {
     /// The Control stream the session's tunnel runs on (Fix 14, F44).
     stream_id: u64,
     tx: mpsc::Sender<RelayEvent>,
+    /// Fix 14 handover: Shield events that must wait their turn — they came
+    /// on a newer stream before this session's stream ended, or while the
+    /// held ones are still being delivered (`flushing`).
+    early: VecDeque<RelayEvent>,
+    flushing: bool,
+    /// F48 stall budget: when the current window started, and how long this
+    /// session has held up the Control stream in it.
+    stall_window: tokio::time::Instant,
+    stalled: Duration,
+}
+
+impl RelayEntry {
+    /// Events for this session must queue behind `early` rather than go
+    /// straight to the device: they came on another stream than the
+    /// session's, or held events are still being delivered.
+    fn must_queue(&self, from_stream: u64) -> bool {
+        self.stream_id != from_stream || self.flushing
+    }
 }
 
 impl AgentTunnelHub {
@@ -91,6 +126,7 @@ impl AgentTunnelHub {
         if state.revoked.contains(&shield_id) {
             return false;
         }
+        state.stream_txs.insert(stream_id, tx.clone());
         state.shield_txs.insert(shield_id, (stream_id, tx));
         true
     }
@@ -98,11 +134,20 @@ impl AgentTunnelHub {
     /// Stream `stream_id` of `shield_id` ended. Fix 14:
     /// - F45: the Shield's registration is removed only if it is still this
     ///   stream's; a newer stream that registered first stays.
-    /// - F44: every relay session whose tunnel ran on this stream ends now.
-    ///   Its queued tunnel data died with the stream, so it must not carry on
-    ///   (it would have a hole in its byte stream) nor hang.
-    pub fn unregister_shield(&self, shield_id: &str, stream_id: u64) {
+    /// - Handover (D-1 = B): if the Shield ended this stream cleanly (`clean`:
+    ///   it half-closed it after sending everything) and a newer stream of the
+    ///   same Shield is already registered here, this stream's sessions move
+    ///   to the newer stream and keep running. The Shield does this on a
+    ///   certificate renewal (make before break).
+    /// - Otherwise (F44) every session on this stream ends now: its queued
+    ///   tunnel data died with the stream, so it must not carry on (a hole in
+    ///   its byte stream) nor hang.
+    ///
+    /// Returns the sessions handed over. Each must then get its held events
+    /// with `deliver_held_events`, after this stream's last message.
+    pub fn end_stream(&self, shield_id: &str, stream_id: u64, clean: bool) -> Vec<String> {
         let mut state = self.state.lock();
+        state.stream_txs.remove(&stream_id);
         if state
             .shield_txs
             .get(shield_id)
@@ -110,18 +155,71 @@ impl AgentTunnelHub {
         {
             state.shield_txs.remove(shield_id);
         }
-        let ended: Vec<String> = state
+        let newer = state
+            .shield_txs
+            .get(shield_id)
+            .map(|(id, _)| *id)
+            .filter(|id| clean && *id > stream_id);
+        let on_stream: Vec<String> = state
             .relay_sessions
             .iter()
             .filter(|(_, e)| e.shield_id == shield_id && e.stream_id == stream_id)
             .map(|(cid, _)| cid.clone())
             .collect();
-        for cid in ended {
-            if let Some(entry) = state.relay_sessions.remove(&cid) {
-                // Best effort: dropping the only sender ends the session anyway.
-                let _ = entry
-                    .tx
-                    .try_send(RelayEvent::Close("shield stream ended".to_string()));
+        let mut handed_over = Vec::new();
+        for cid in on_stream {
+            match newer {
+                Some(newer) => {
+                    let entry = state.relay_sessions.get_mut(&cid).expect("listed above");
+                    entry.stream_id = newer;
+                    entry.flushing = !entry.early.is_empty();
+                    handed_over.push(cid);
+                }
+                None => {
+                    if let Some(entry) = state.relay_sessions.remove(&cid) {
+                        // Best effort: dropping the only sender ends the session anyway.
+                        let _ = entry
+                            .tx
+                            .try_send(RelayEvent::Close("shield stream ended".to_string()));
+                    }
+                }
+            }
+        }
+        if !handed_over.is_empty() {
+            info!(
+                shield_id,
+                sessions = handed_over.len(),
+                "shield Control stream handed over: sessions kept"
+            );
+        }
+        handed_over
+    }
+
+    /// Deliver, in order, the Shield events a handed-over session held while
+    /// its old stream was ending. Later events keep queueing behind them
+    /// (`flushing`) until all are delivered.
+    pub async fn deliver_held_events(&self, connection_id: &str) {
+        loop {
+            let (tx, event) = {
+                let mut state = self.state.lock();
+                let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
+                    return;
+                };
+                match entry.early.pop_front() {
+                    None => {
+                        entry.flushing = false;
+                        return;
+                    }
+                    Some(RelayEvent::Close(err)) => {
+                        let entry = state.relay_sessions.remove(connection_id).expect("present");
+                        let _ = entry.tx.try_send(RelayEvent::Close(err));
+                        return;
+                    }
+                    Some(event) => (entry.tx.clone(), event),
+                }
+            };
+            if !self.deliver(connection_id, &tx, event).await {
+                return;
             }
         }
     }
@@ -159,31 +257,102 @@ impl AgentTunnelHub {
         }
     }
 
-    pub async fn dispatch_data(&self, connection_id: &str, data: Vec<u8>) {
-        let Some(tx) = self.session_tx(connection_id) else {
-            return;
+    pub async fn dispatch_data(&self, connection_id: &str, data: Vec<u8>, from_stream: u64) {
+        let tx = {
+            let mut state = self.state.lock();
+            let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
+                return;
+            };
+            if entry.must_queue(from_stream) {
+                // Fix 14 handover: wait behind the session's older stream.
+                if entry.early.len() < EARLY_EVENT_LIMIT {
+                    entry.early.push_back(RelayEvent::Data(data));
+                    return;
+                }
+                drop(state);
+                self.end_stuck_session(connection_id, None, "handover backlog full");
+                return;
+            }
+            entry.tx.clone()
         };
-        // Fix 14 (F48): never drop a chunk and carry on (a hole in the byte
-        // stream). Wait for room: that pauses this Shield's Control stream,
-        // which pushes back to the resource (flow control). A device stuck
-        // for longer than DEVICE_STALL_LIMIT ends its session instead, so it
-        // cannot stall every other session through the Shield for long.
-        match tx
-            .send_timeout(RelayEvent::Data(data), DEVICE_STALL_LIMIT)
-            .await
-        {
-            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {}
-            Ok(()) | Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
+        self.deliver(connection_id, &tx, RelayEvent::Data(data)).await;
+    }
+
+    /// Hand `event` to the session's device side. Fix 14 (F48): never drop a
+    /// chunk and carry on (a hole in the byte stream). If the device queue is
+    /// full, wait for room: that pauses this Shield's Control stream, which
+    /// pushes back to the resource (flow control). The wait comes out of the
+    /// session's stall budget; a session that uses it up is ended, so it
+    /// cannot keep stalling every other session through the Shield. Returns
+    /// whether the session goes on.
+    async fn deliver(
+        &self,
+        connection_id: &str,
+        tx: &mpsc::Sender<RelayEvent>,
+        event: RelayEvent,
+    ) -> bool {
+        let event = match tx.try_send(event) {
+            Ok(()) => return true,
+            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            Err(mpsc::error::TrySendError::Full(event)) => event,
+        };
+        let budget = self.stall_budget_left(connection_id);
+        let started = tokio::time::Instant::now();
+        let sent = if budget.is_zero() {
+            Err(mpsc::error::SendTimeoutError::Timeout(event))
+        } else {
+            tx.send_timeout(event, budget).await
+        };
+        self.record_stall(connection_id, started.elapsed());
+        match sent {
+            Ok(()) => true,
+            Err(mpsc::error::SendTimeoutError::Closed(_)) => false,
+            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
+                self.end_stuck_session(
+                    connection_id,
+                    Some(tx),
+                    "device used up its stall budget with its tunnel queue full",
+                );
+                false
+            }
         }
-        // End the session (only if it is still the one we waited on). Removing
-        // the entry drops the only sender: the device gets the chunks already
-        // queued, then the end.
+    }
+
+    fn stall_budget_left(&self, connection_id: &str) -> Duration {
+        let mut state = self.state.lock();
+        let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
+            return Duration::ZERO;
+        };
+        let now = tokio::time::Instant::now();
+        if now.duration_since(entry.stall_window) >= DEVICE_STALL_WINDOW {
+            entry.stall_window = now;
+            entry.stalled = Duration::ZERO;
+        }
+        DEVICE_STALL_LIMIT.saturating_sub(entry.stalled)
+    }
+
+    fn record_stall(&self, connection_id: &str, waited: Duration) {
+        if let Some(entry) = self.state.lock().relay_sessions.get_mut(connection_id) {
+            entry.stalled += waited;
+        }
+    }
+
+    /// End a session that cannot take more Shield data, and tell the Shield.
+    /// With `only_if`, only if it is still the session behind that channel.
+    /// Removing the entry drops the only sender: the device gets the chunks
+    /// already queued, then the end.
+    fn end_stuck_session(
+        &self,
+        connection_id: &str,
+        only_if: Option<&mpsc::Sender<RelayEvent>>,
+        reason: &'static str,
+    ) {
         let shield_tx = {
             let mut state = self.state.lock();
             if !state
                 .relay_sessions
                 .get(connection_id)
-                .is_some_and(|e| e.tx.same_channel(&tx))
+                .is_some_and(|e| only_if.is_none_or(|tx| e.tx.same_channel(tx)))
             {
                 return;
             }
@@ -191,13 +360,9 @@ impl AgentTunnelHub {
                 .relay_sessions
                 .remove(connection_id)
                 .expect("checked above");
-            state
-                .shield_txs
-                .get(&entry.shield_id)
-                .filter(|(id, _)| *id == entry.stream_id)
-                .map(|(_, tx)| tx.clone())
+            state.stream_txs.get(&entry.stream_id).cloned()
         };
-        warn!(connection_id, "device stalled with its tunnel queue full: ending the session");
+        warn!(connection_id, reason, "ending the session");
         if let Some(tx) = shield_tx {
             let _ = tx.try_send(ShieldControlMessage {
                 body: Some(Body::TunnelClose(TunnelClose {
@@ -208,10 +373,58 @@ impl AgentTunnelHub {
         }
     }
 
-    pub fn dispatch_close(&self, connection_id: &str, error: String) {
+    pub fn dispatch_close(&self, connection_id: &str, error: String, from_stream: u64) {
+        let mut state = self.state.lock();
+        let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
+            return;
+        };
+        if entry.must_queue(from_stream) {
+            // Fix 14 handover: the close waits behind the held data.
+            entry.early.push_back(RelayEvent::Close(error));
+            return;
+        }
         // Remove session — Shield closed its side.
-        if let Some(entry) = self.state.lock().relay_sessions.remove(connection_id) {
-            let _ = entry.tx.try_send(RelayEvent::Close(error));
+        let entry = state.relay_sessions.remove(connection_id).expect("present");
+        let _ = entry.tx.try_send(RelayEvent::Close(error));
+    }
+
+    /// The channel to the Control stream `connection_id`'s tunnel runs on.
+    fn stream_sender(&self, connection_id: &str) -> Option<mpsc::Sender<ShieldControlMessage>> {
+        let state = self.state.lock();
+        let entry = state.relay_sessions.get(connection_id)?;
+        state.stream_txs.get(&entry.stream_id).cloned()
+    }
+
+    /// Send a device-side message for `connection_id` to its Shield. If the
+    /// session's stream closed under it (a handover in progress), retry on the
+    /// stream it moves to; give up when the session is gone or the grace
+    /// passes. The message that failed is retried, so none is lost or
+    /// reordered: everything sent before it went out on the old stream, which
+    /// the Shield reads to its end first.
+    async fn send_to_shield(&self, connection_id: &str, mut msg: ShieldControlMessage) -> bool {
+        let deadline = tokio::time::Instant::now() + HANDOVER_SEND_GRACE;
+        let mut failed: Option<mpsc::Sender<ShieldControlMessage>> = None;
+        loop {
+            let tx = self.stream_sender(connection_id);
+            match tx {
+                Some(tx) if !failed.as_ref().is_some_and(|f| f.same_channel(&tx)) => {
+                    match tx.send(msg).await {
+                        Ok(()) => return true,
+                        Err(mpsc::error::SendError(m)) => {
+                            msg = m;
+                            failed = Some(tx);
+                        }
+                    }
+                }
+                None if !self.state.lock().relay_sessions.contains_key(connection_id) => {
+                    return false;
+                }
+                _ => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -269,6 +482,10 @@ impl AgentTunnelHub {
                     shield_id: shield_id.to_string(),
                     stream_id,
                     tx: event_tx,
+                    early: VecDeque::new(),
+                    flushing: false,
+                    stall_window: tokio::time::Instant::now(),
+                    stalled: Duration::ZERO,
                 },
             );
             shield_tx
@@ -302,7 +519,7 @@ impl AgentTunnelHub {
         Ok(RelaySession {
             connection_id,
             event_rx,
-            shield_tx,
+            hub: self.clone(),
             cancel_token: CancellationToken::new(),
         })
     }
@@ -315,7 +532,9 @@ impl AgentTunnelHub {
 pub struct RelaySession {
     connection_id: String,
     event_rx: mpsc::Receiver<RelayEvent>,
-    shield_tx: mpsc::Sender<ShieldControlMessage>,
+    /// Device data goes to the session's current stream, looked up per send
+    /// (Fix 14 handover), never a sender captured at open time.
+    hub: AgentTunnelHub,
     cancel_token: CancellationToken, // defaults to a token that's never cancelled
 }
 
@@ -348,7 +567,7 @@ impl RelaySession {
         let (mut reader, mut writer) = tokio::io::split(stream);
 
         // Device → Shield in a separate task.
-        let shield_tx = self.shield_tx.clone();
+        let hub = self.hub.clone();
         let conn_id_d2s = self.connection_id.clone();
         let d2s_token = self.cancel_token.clone();
         let d2s = tokio::spawn(async move {
@@ -360,16 +579,13 @@ impl RelaySession {
                         match result {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
-                                if shield_tx
-                                    .send(ShieldControlMessage {
-                                        body: Some(Body::TunnelData(TunnelData {
-                                            connection_id: conn_id_d2s.clone(),
-                                            data: buf[..n].to_vec(),
-                                        })),
-                                    })
-                                    .await
-                                    .is_err()
-                                {
+                                let msg = ShieldControlMessage {
+                                    body: Some(Body::TunnelData(TunnelData {
+                                        connection_id: conn_id_d2s.clone(),
+                                        data: buf[..n].to_vec(),
+                                    })),
+                                };
+                                if !hub.send_to_shield(&conn_id_d2s, msg).await {
                                     break;
                                 }
                             }
@@ -378,14 +594,13 @@ impl RelaySession {
                 }
             }
             // Notify Shield that the device closed its side.
-            let _ = shield_tx
-                .send(ShieldControlMessage {
-                    body: Some(Body::TunnelClose(TunnelClose {
-                        connection_id: conn_id_d2s,
-                        error: String::new(),
-                    })),
-                })
-                .await;
+            let close = ShieldControlMessage {
+                body: Some(Body::TunnelClose(TunnelClose {
+                    connection_id: conn_id_d2s.clone(),
+                    error: String::new(),
+                })),
+            };
+            hub.send_to_shield(&conn_id_d2s, close).await;
         });
 
         // Shield → Device: relay events to the device stream.
@@ -448,7 +663,7 @@ mod stream_ownership_tests {
         let (mut device, relay_end) = tokio::io::duplex(1024);
         let relay = tokio::spawn(session.relay_stream(relay_end));
 
-        hub.unregister_shield(SHIELD, 1);
+        hub.end_stream(SHIELD, 1, false);
 
         tokio::time::timeout(WAIT, relay)
             .await
@@ -484,7 +699,7 @@ mod stream_ownership_tests {
             .await
             .expect("opened on stream 2");
 
-        hub.unregister_shield(SHIELD, 1);
+        hub.end_stream(SHIELD, 1, false);
 
         {
             let state = hub.state.lock();
@@ -517,13 +732,171 @@ mod stream_ownership_tests {
             .await
             .expect("opened");
 
-        hub.unregister_shield(SHIELD, 1);
+        hub.end_stream(SHIELD, 1, false);
 
         assert!(hub
             .state
             .lock()
             .relay_sessions
             .contains_key(&other.connection_id));
+    }
+}
+
+#[cfg(test)]
+mod handover_tests {
+    //! Fix 14, D-1 = B: on a clean end of a Shield's stream, while a newer
+    //! stream of the same Shield is registered, the sessions move to the newer
+    //! stream with no byte lost or reordered in either direction. Any other
+    //! end still closes them.
+
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    async fn open_on(
+        hub: &AgentTunnelHub,
+        shield_rx: &mut mpsc::Receiver<ShieldControlMessage>,
+    ) -> (String, RelaySession) {
+        let opener = hub.clone();
+        let opening = tokio::spawn(async move {
+            opener
+                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+                .await
+        });
+        let Some(Body::TunnelOpen(open)) = shield_rx.recv().await.unwrap().body else {
+            panic!("expected TunnelOpen");
+        };
+        hub.dispatch_opened(&open.connection_id, true, String::new());
+        (open.connection_id, opening.await.unwrap().expect("opened"))
+    }
+
+    async fn next_data(rx: &mut mpsc::Receiver<ShieldControlMessage>) -> Vec<u8> {
+        match tokio::time::timeout(WAIT, rx.recv()).await.expect("data in time") {
+            Some(ShieldControlMessage {
+                body: Some(Body::TunnelData(d)),
+            }) => d.data,
+            other => panic!("expected TunnelData, got {other:?}"),
+        }
+    }
+
+    async fn read_exact_n(device: &mut tokio::io::DuplexStream, n: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; n];
+        tokio::time::timeout(WAIT, device.read_exact(&mut buf))
+            .await
+            .expect("bytes in time")
+            .expect("device open");
+        buf
+    }
+
+    #[tokio::test]
+    async fn a_clean_handover_keeps_the_session_in_order_both_ways() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, session) = open_on(&hub, &mut rx1).await;
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let relay = tokio::spawn(session.relay_stream(relay_end));
+
+        // Shield → device on stream 1, and device → shield on stream 1.
+        hub.dispatch_data(&cid, vec![1], 1).await;
+        hub.dispatch_data(&cid, vec![2], 1).await;
+        device.write_all(b"a").await.unwrap();
+        assert_eq!(next_data(&mut rx1).await, b"a");
+
+        // The Shield opens stream 2 (renewal), switches to it and sends 3;
+        // that overtakes stream 1's last chunk, 4.
+        let (tx2, mut rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        hub.dispatch_data(&cid, vec![3], 2).await;
+        hub.dispatch_data(&cid, vec![4], 1).await;
+        // Stream 1 ends cleanly: the session moves to stream 2.
+        assert_eq!(hub.end_stream(SHIELD, 1, true), vec![cid.clone()]);
+        hub.deliver_held_events(&cid).await;
+        hub.dispatch_data(&cid, vec![5], 2).await;
+
+        assert_eq!(read_exact_n(&mut device, 5).await, vec![1, 2, 4, 3, 5]);
+        // Device → shield now goes out on stream 2.
+        device.write_all(b"b").await.unwrap();
+        assert_eq!(next_data(&mut rx2).await, b"b");
+        assert!(!relay.is_finished(), "the session must survive the handover");
+    }
+
+    #[tokio::test]
+    async fn device_data_whose_stream_closed_is_retried_on_the_new_stream() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (_cid, session) = open_on(&hub, &mut rx1).await;
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let _relay = tokio::spawn(session.relay_stream(relay_end));
+        let (tx2, mut rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+
+        // Stream 1's queue is already closed (its task is draining) when the
+        // device sends: the send fails and must be retried, not lost.
+        rx1.close();
+        device.write_all(b"c").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(hub.end_stream(SHIELD, 1, true).len(), 1);
+        assert_eq!(next_data(&mut rx2).await, b"c");
+    }
+
+    #[tokio::test]
+    async fn a_clean_end_without_a_newer_stream_closes_the_session() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, _session) = open_on(&hub, &mut rx1).await;
+        assert!(hub.end_stream(SHIELD, 1, true).is_empty());
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    #[tokio::test]
+    async fn an_unclean_end_closes_the_session_even_with_a_newer_stream() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, _session) = open_on(&hub, &mut rx1).await;
+        let (tx2, _rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        assert!(hub.end_stream(SHIELD, 1, false).is_empty());
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    #[tokio::test]
+    async fn an_early_close_comes_after_the_held_data() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, mut session) = open_on(&hub, &mut rx1).await;
+        let (tx2, _rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        hub.dispatch_data(&cid, vec![7], 2).await;
+        hub.dispatch_close(&cid, String::new(), 2);
+        hub.dispatch_data(&cid, vec![6], 1).await;
+        assert_eq!(hub.end_stream(SHIELD, 1, true).len(), 1);
+        hub.deliver_held_events(&cid).await;
+
+        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![6]));
+        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![7]));
+        assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Close(_))));
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    #[tokio::test]
+    async fn an_overlong_handover_backlog_ends_the_session() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, _session) = open_on(&hub, &mut rx1).await;
+        let (tx2, _rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        for _ in 0..=EARLY_EVENT_LIMIT {
+            hub.dispatch_data(&cid, vec![0], 2).await;
+        }
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
     }
 }
 
@@ -567,7 +940,7 @@ mod backpressure_tests {
             let cid = cid.clone();
             tokio::spawn(async move {
                 for i in 0..200u8 {
-                    hub.dispatch_data(&cid, vec![i]).await;
+                    hub.dispatch_data(&cid, vec![i], 1).await;
                 }
             })
         };
@@ -584,6 +957,41 @@ mod backpressure_tests {
         assert!(hub.state.lock().relay_sessions.contains_key(&cid));
     }
 
+    /// A device reading one chunk every 1.5 s never stalls a single chunk for
+    /// 2 s, but holds up the Shield stream most of the time: its total stall
+    /// budget runs out and the session ends.
+    #[tokio::test(start_paused = true)]
+    async fn a_trickling_device_uses_up_its_stall_budget() {
+        let hub = AgentTunnelHub::new();
+        let (tx, mut shield_rx) = mpsc::channel(256);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
+        for i in 0..64u8 {
+            hub.dispatch_data(&cid, vec![i], 1).await;
+        }
+        let reader = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                if session.event_rx.recv().await.is_none() {
+                    break;
+                }
+            }
+        });
+        let started = tokio::time::Instant::now();
+        let mut sent = 0;
+        while hub.state.lock().relay_sessions.contains_key(&cid) {
+            hub.dispatch_data(&cid, vec![0], 1).await;
+            sent += 1;
+            assert!(sent < 10, "the trickling device was never ended");
+        }
+        assert!(
+            started.elapsed() <= DEVICE_STALL_LIMIT + Duration::from_millis(100),
+            "the Shield stream was held up for {:?}",
+            started.elapsed()
+        );
+        reader.abort();
+    }
+
     /// A device that stops reading ends its session after the stall limit;
     /// the chunk is never dropped while the session carries on.
     #[tokio::test(start_paused = true)]
@@ -594,10 +1002,10 @@ mod backpressure_tests {
         let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
 
         for i in 0..64u8 {
-            hub.dispatch_data(&cid, vec![i]).await;
+            hub.dispatch_data(&cid, vec![i], 1).await;
         }
         // The queue is full and the device reads nothing.
-        hub.dispatch_data(&cid, vec![64]).await;
+        hub.dispatch_data(&cid, vec![64], 1).await;
 
         assert!(
             !hub.state.lock().relay_sessions.contains_key(&cid),

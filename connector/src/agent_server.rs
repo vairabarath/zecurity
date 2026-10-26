@@ -944,6 +944,10 @@ impl ShieldService for ShieldRegistry {
         // Per-stream ReEnroll throttle (K2): when the last ReEnroll was
         // actually delivered to this Shield's outbound queue.
         let mut last_reenroll_sent: Option<std::time::Instant> = None;
+        // Fix 14 handover: true only when the Shield half-closed this stream
+        // after sending everything (it does so after opening its next stream
+        // on a renewal). Any other end closes this stream's sessions.
+        let mut clean_end = false;
 
         tokio::spawn(async move {
             info!(shield_id = %shield_id, "shield Control stream connected");
@@ -1079,15 +1083,18 @@ impl ShieldService for ShieldRegistry {
                                         registry.tunnel_hub.dispatch_opened(&p.connection_id, p.ok, p.error.clone());
                                     }
                                     Some(Body::TunnelData(p)) => {
-                                        registry.tunnel_hub.dispatch_data(&p.connection_id, p.data.clone()).await;
+                                        registry.tunnel_hub.dispatch_data(&p.connection_id, p.data.clone(), stream_id).await;
                                     }
                                     Some(Body::TunnelClose(p)) => {
-                                        registry.tunnel_hub.dispatch_close(&p.connection_id, p.error.clone());
+                                        registry.tunnel_hub.dispatch_close(&p.connection_id, p.error.clone(), stream_id);
                                     }
                                     _ => {}
                                 }
                             }
-                            Ok(None) => break,
+                            Ok(None) => {
+                                clean_end = true;
+                                break;
+                            }
                             Err(e) => {
                                 warn!(shield_id = %shield_id, error = %e, "shield Control stream error");
                                 break;
@@ -1146,7 +1153,26 @@ impl ShieldService for ShieldRegistry {
                     }
                 }
             }
-            registry.tunnel_hub.unregister_shield(&shield_id, stream_id);
+            let handed_over = registry.tunnel_hub.end_stream(&shield_id, stream_id, clean_end);
+            if !handed_over.is_empty() {
+                // Device data already queued for this stream still goes out on
+                // it, before its end: the Shield reads this stream to its end
+                // before it reads the new one. close() first, then drain — a
+                // send racing the close either lands here or fails and is
+                // retried on the new stream (agent_tunnel::send_to_shield).
+                tunnel_rx.close();
+                while let Some(msg) = tunnel_rx.recv().await {
+                    if out_tx.send(Ok(msg)).await.is_err() {
+                        break;
+                    }
+                }
+                // Shield data that arrived early on the new stream goes to the
+                // devices only now, after everything this stream carried.
+                for connection_id in handed_over {
+                    let hub = registry.tunnel_hub.clone();
+                    tokio::spawn(async move { hub.deliver_held_events(&connection_id).await });
+                }
+            }
             info!(shield_id = %shield_id, "shield Control stream disconnected");
         });
 
@@ -1988,6 +2014,81 @@ mod shield_server_tls_tests {
             matches!(reply.body, Some(Body::ResourceSnapshot(ref s)) if s.generation == 7),
             "the newer stream lost its snapshot channel: got {reply:?}"
         );
+    }
+
+    /// Fix 14, D-1 = B, over real streams: the Shield opens a second Control
+    /// stream (its renewed certificate) and only then half-closes the first;
+    /// the session keeps running on the second stream, both ways.
+    #[tokio::test]
+    async fn a_session_survives_a_make_before_break_stream_handover() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (out1, mut replies1) = open_control(&pki, server.addr).await;
+        health_round_trip(&out1, &mut replies1, false).await;
+
+        let hub = r.tunnel_hub.clone();
+        let opening = tokio::spawn(async move {
+            hub.open_relay_session(SHIELD_ID, "10.0.0.9", 22, "tcp").await
+        });
+        let Some(Body::TunnelOpen(open)) = next_reply(&mut replies1).await.body else {
+            panic!("expected TunnelOpen");
+        };
+        let cid = open.connection_id.clone();
+        out1.send(ShieldControlMessage {
+            body: Some(Body::TunnelOpened(crate::shield_proto::TunnelOpened {
+                connection_id: cid.clone(),
+                ok: true,
+                error: String::new(),
+            })),
+        })
+        .await
+        .unwrap();
+        let session = opening.await.unwrap().expect("session opened");
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let relay = tokio::spawn(session.relay_stream(relay_end));
+
+        // Renewal: stream 2 first (registered once control() returns) ...
+        let (out2, mut replies2) = open_control(&pki, server.addr).await;
+        // ... then stream 1 is half-closed after its last chunk.
+        out1.send(ShieldControlMessage {
+            body: Some(Body::TunnelData(crate::shield_proto::TunnelData {
+                connection_id: cid.clone(),
+                data: b"one".to_vec(),
+            })),
+        })
+        .await
+        .unwrap();
+        drop(out1);
+        expect_closed(&mut replies1).await;
+
+        out2.send(ShieldControlMessage {
+            body: Some(Body::TunnelData(crate::shield_proto::TunnelData {
+                connection_id: cid.clone(),
+                data: b"two".to_vec(),
+            })),
+        })
+        .await
+        .unwrap();
+        let mut got = [0u8; 6];
+        tokio::time::timeout(WAIT, device.read_exact(&mut got))
+            .await
+            .expect("shield data after the handover")
+            .unwrap();
+        assert_eq!(&got, b"onetwo");
+
+        device.write_all(b"up").await.unwrap();
+        let reply = loop {
+            let m = next_reply(&mut replies2).await;
+            if let Some(Body::TunnelData(d)) = m.body {
+                break d;
+            }
+        };
+        assert_eq!(reply.connection_id, cid);
+        assert_eq!(reply.data, b"up");
+        assert!(!relay.is_finished(), "the session must survive the handover");
     }
 
     /// Fix 14 (D-1 expiry rule): a shield Control stream is closed when the
