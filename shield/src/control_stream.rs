@@ -218,15 +218,18 @@ async fn run_once(
     let mut discovery_seq: u64 = 0;
 
     let tunnel_hub: TunnelHub = tunnel::new_hub();
-    // Fix 14 (F44): however this stream ends, its tunnels end with it.
+    // Fix 14 (F44): however this connection ends — other than by a handover,
+    // which keeps them — its tunnels end with it.
     let _close_tunnels = CloseTunnelsOnDrop(tunnel_hub.clone());
 
-    let (out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
+    let (mut out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
     let response = client
         .control(Request::new(ReceiverStream::new(out_rx)))
         .await
         .context("failed to open Shield Control stream")?;
     let mut inbound = response.into_inner();
+    let connector_id = state.connectors[0].connector_id.clone();
+    tunnel_hub.set_upstream(Some(out_tx.clone()));
 
     info!(
         shield_id = %state.shield_id,
@@ -267,7 +270,7 @@ async fn run_once(
                     Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
                     Ok(None) => return Ok(()),
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_connector_msg(
+                        match handle_connector_msg(
                             msg,
                             state,
                             cfg,
@@ -276,7 +279,47 @@ async fn run_once(
                             tunnel_hub.clone(),
                             debounce,
                         ).await {
-                            return action;
+                            None => {}
+                            // The certificate was renewed: move to a stream
+                            // with it, keeping the tunnels (Fix 14, D-1 = B).
+                            Some(Ok(())) => {
+                                if !hand_over(
+                                    state,
+                                    cfg,
+                                    resource_state,
+                                    debounce,
+                                    &tunnel_hub,
+                                    &connector_id,
+                                    &mut client,
+                                    &mut out_tx,
+                                    &mut inbound,
+                                )
+                                .await?
+                                {
+                                    // Not possible here: reconnect as before
+                                    // (the tunnels are closed).
+                                    return Ok(());
+                                }
+                                let tunnels = tunnel_hub.len().await;
+                                info!(
+                                    shield_id = %state.shield_id,
+                                    tunnels,
+                                    "cert renewed — Control stream handed over, tunnels kept"
+                                );
+                                send_health(&out_tx, &version, &hostname, &public_ip, &lan_ip).await?;
+                                match discovery::run_discovery_full_sync(
+                                    &state.shield_id,
+                                    &mut discovery_sent,
+                                    &mut discovery_fingerprint,
+                                    &mut discovery_seq,
+                                )
+                                .await
+                                {
+                                    Ok(diff) => send_discovery_report(diff, &out_tx).await,
+                                    Err(e) => warn!("discovery: full sync error: {:#}", e),
+                                }
+                            }
+                            Some(Err(e)) => return Err(e),
                         }
                     }
                 }
@@ -321,6 +364,98 @@ async fn run_once(
     }
 }
 
+/// Fix 14 (D-1 = B): after a renewal, move from the current Control stream to
+/// one opened with the new certificate, to the same Connector, keeping every
+/// tunnel (make before break). In order:
+/// 1. open the new stream — the Connector registers it before answering;
+/// 2. pause tunnel traffic and half-close the old stream: the Connector gets
+///    everything sent on it, then its end, and hands the sessions over;
+/// 3. read the old stream to its end (the Connector's last device data comes
+///    on it) before reading anything from the new one;
+/// 4. resume tunnel traffic on the new stream.
+///
+/// Returns false, changing nothing, when the new stream cannot be opened to
+/// the same Connector; the caller then reconnects as before. An error after
+/// the old stream was half-closed ends the connection (tunnels closed).
+#[allow(clippy::too_many_arguments)]
+async fn hand_over(
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    resource_state: &Arc<SharedResourceState>,
+    debounce: &mut RenewalDebounce,
+    hub: &TunnelHub,
+    connector_id: &str,
+    client: &mut ShieldServiceClient<tonic::transport::Channel>,
+    out_tx: &mut mpsc::Sender<ShieldControlMessage>,
+    inbound: &mut tonic::Streaming<ShieldControlMessage>,
+) -> Result<bool> {
+    let (mut new_client, idx) = match build_client(state, cfg).await {
+        Ok(found) => found,
+        Err(e) => {
+            warn!(error = %e, "renewed, but no Connector reachable with the new certificate");
+            return Ok(false);
+        }
+    };
+    if state.connectors[idx].connector_id != connector_id {
+        warn!("renewed, but the current Connector is not reachable: reconnecting");
+        return Ok(false);
+    }
+    let (new_out_tx, new_out_rx) = mpsc::channel::<ShieldControlMessage>(32);
+    let new_inbound = match new_client
+        .control(Request::new(ReceiverStream::new(new_out_rx)))
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) => {
+            warn!(error = %status, "renewed, but the new Control stream was refused: reconnecting");
+            return Ok(false);
+        }
+    };
+
+    hub.set_upstream(None);
+    drop(std::mem::replace(out_tx, new_out_tx));
+    let mut old_inbound = std::mem::replace(inbound, new_inbound);
+    let old_client = std::mem::replace(client, new_client);
+
+    let drained = tokio::time::timeout(tunnel::HANDOVER_GRACE, async {
+        loop {
+            match old_inbound.message().await {
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("old Control stream failed during handover"))
+                }
+                Ok(Some(msg)) => {
+                    if let Some(action) = handle_connector_msg(
+                        msg,
+                        state,
+                        cfg,
+                        resource_state,
+                        out_tx,
+                        hub.clone(),
+                        debounce,
+                    )
+                    .await
+                    {
+                        action?;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    drop(old_client);
+    match drained {
+        Ok(Ok(())) => {
+            hub.set_upstream(Some(out_tx.clone()));
+            Ok(true)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!(
+            "old Control stream did not end within the handover grace"
+        )),
+    }
+}
+
 /// Ends every tunnel of a Control stream when the stream's `run_once` returns.
 struct CloseTunnelsOnDrop(TunnelHub);
 
@@ -337,8 +472,8 @@ impl Drop for CloseTunnelsOnDrop {
 }
 
 /// ReEnroll from the connector: renew unless a renewal succeeded within
-/// REENROLL_DEBOUNCE. Success → `Some(Ok(()))` (reconnect with the new
-/// certificate); debounced or failed → `None` (keep the stream).
+/// REENROLL_DEBOUNCE. Success → `Some(Ok(()))` (move to a stream with the new
+/// certificate, `hand_over`); debounced or failed → `None` (keep the stream).
 async fn handle_reenroll<F, Fut>(
     state: &mut ShieldState,
     debounce: &mut RenewalDebounce,
@@ -366,7 +501,7 @@ where
             info!(
                 shield_id = %new_state.shield_id,
                 new_expiry = new_state.cert_not_after,
-                "cert renewed — reconnecting Control stream"
+                "cert renewed — moving to a Control stream with it"
             );
             *state = new_state;
             Some(Ok(()))
@@ -450,13 +585,12 @@ async fn handle_connector_msg(
                 open.destination,
                 open.port,
                 open.protocol,
-                out_tx.clone(),
             )
             .await;
             None
         }
         Some(Body::TunnelData(data)) => {
-            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data, out_tx).await;
+            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data).await;
             None
         }
         Some(Body::TunnelClose(close)) => {
