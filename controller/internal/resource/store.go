@@ -674,7 +674,11 @@ func RunTombstoneSweeper(ctx context.Context, db *pgxpool.Pool, interval, grace 
 			continue
 		}
 		for _, t := range reaped {
-			log.Printf("resource tombstone sweeper: removed resource %s (no removal ack within %s from shield %s)", t.ID, grace, t.ShieldID)
+			shieldID := t.ShieldID
+			if shieldID == "" {
+				shieldID = "(gone)"
+			}
+			log.Printf("resource tombstone sweeper: removed resource %s (no removal ack within %s from shield %s)", t.ID, grace, shieldID)
 			onReaped(t)
 		}
 	}
