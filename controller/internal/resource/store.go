@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -592,6 +593,91 @@ func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error
 		return fmt.Errorf("delete resource: %w", err)
 	}
 	return nil
+}
+
+// DeleteIfShieldGone hard-deletes a resource that may hold a shield rule
+// (protected, failed, or already tombstoned 'deleting') when its bound shield is
+// revoked or gone (Sprint 20 Fix 16, F50). No shield can remove the rule or ack
+// the removal, so waiting for one would leave the row in 'deleting' forever (the
+// delete twin of MarkUnprotecting's Finding 7). Returns true if a row was deleted.
+func DeleteIfShieldGone(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (bool, error) {
+	ct, err := db.Exec(ctx,
+		`DELETE FROM resources
+		  WHERE id = $1 AND tenant_id = $2
+		    AND status IN ('protected', 'failed', 'deleting')
+		    AND COALESCE(
+		            (SELECT s.status FROM shields s WHERE s.id = resources.shield_id),
+		            'revoked'
+		        ) = 'revoked'`,
+		id, tenantID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("delete resource (shield gone): %w", err)
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
+// ReapedTombstone is a 'deleting' resource removed by ReapStaleTombstones.
+type ReapedTombstone struct {
+	ID          string
+	TenantID    string
+	ShieldID    string
+	ConnectorID string
+}
+
+// ReapStaleTombstones hard-deletes every 'deleting' tombstone that has waited
+// longer than olderThan for its shield's removal ack (Sprint 20 Fix 16, F50).
+// A live shield acks a removal within milliseconds (the ack is forwarded at once,
+// not batched); one that has not acked is offline, revoked or gone, and the
+// controller only learns a shield is offline from batched status up to minutes
+// later. Removing the row is safe: the shield's rule set follows the controller's
+// desired-state snapshot, so the caller re-pushes the snapshot (a connected shield
+// drops the rule now, an offline one on reconnect) and notifies the policy.
+func ReapStaleTombstones(ctx context.Context, db *pgxpool.Pool, olderThan time.Duration) ([]ReapedTombstone, error) {
+	rows, err := db.Query(ctx,
+		`DELETE FROM resources r
+		  WHERE r.status = 'deleting'
+		    AND r.updated_at < NOW() - make_interval(secs => $1)
+		 RETURNING r.id, r.tenant_id, COALESCE(r.shield_id::text, ''),
+		           COALESCE((SELECT s.connector_id::text FROM shields s WHERE s.id = r.shield_id), '')`,
+		olderThan.Seconds(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reap stale tombstones: %w", err)
+	}
+	defer rows.Close()
+	var reaped []ReapedTombstone
+	for rows.Next() {
+		var t ReapedTombstone
+		if err := rows.Scan(&t.ID, &t.TenantID, &t.ShieldID, &t.ConnectorID); err != nil {
+			return nil, fmt.Errorf("reap stale tombstones: %w", err)
+		}
+		reaped = append(reaped, t)
+	}
+	return reaped, rows.Err()
+}
+
+// RunTombstoneSweeper reaps stale tombstones every interval until ctx ends,
+// calling onReaped for each removed resource (snapshot re-push + policy notify).
+func RunTombstoneSweeper(ctx context.Context, db *pgxpool.Pool, interval, grace time.Duration, onReaped func(ReapedTombstone)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		reaped, err := ReapStaleTombstones(ctx, db, grace)
+		if err != nil {
+			log.Printf("resource tombstone sweeper: %v", err)
+			continue
+		}
+		for _, t := range reaped {
+			log.Printf("resource tombstone sweeper: removed resource %s (no removal ack within %s from shield %s)", t.ID, grace, t.ShieldID)
+			onReaped(t)
+		}
+	}
 }
 
 // ForceDeleteRow hard-deletes a resource in ANY state, tenant-scoped. This is the

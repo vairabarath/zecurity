@@ -635,6 +635,21 @@ func main() {
 		shieldSvc.RunDisconnectWatcher(ctx)
 	}()
 
+	// Sprint 20 Fix 16 (F50): a deleted resource whose shield did not ack the
+	// rule removal within 2 s is removed anyway; the shield's snapshot drops
+	// the rule (now if connected, else on reconnect).
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		resource.RunTombstoneSweeper(ctx, db.Pool, time.Second, 2*time.Second, func(t resource.ReapedTombstone) {
+			if err := policyNotifier.NotifyPolicyChange(ctx, t.TenantID); err != nil {
+				log.Printf("resource tombstone sweeper: notify policy change: %v", err)
+			}
+			connector.PushSnapshotForShield(ctx, db.Pool, connectorRegistry, t.ConnectorID, t.ShieldID)
+		})
+	}()
+
 	wg.Add(1)
 
 	go func() {
