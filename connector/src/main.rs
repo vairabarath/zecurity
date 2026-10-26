@@ -52,7 +52,15 @@ async fn main() -> anyhow::Result<()> {
 
     let env_filter = tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // Sprint 20 Fix 16 (F51): a log write that fails (stdout piped to a reader
+    // that died, e.g. `| tee` on Ctrl-C) must not take the process down. With
+    // internal error logging on, tracing-subscriber reports it with eprintln!,
+    // which panics when stderr is the same broken pipe — the process then
+    // exited before its graceful shutdown (no Goodbye, no QUIC close).
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .log_internal_errors(false)
+        .init();
 
     info!(
         product = appmeta::PRODUCT_NAME,
