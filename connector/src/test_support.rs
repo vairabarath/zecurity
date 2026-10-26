@@ -221,6 +221,26 @@ impl TestPki {
         )
     }
 
+    /// Shield client identity as PEM (chain, key), valid from now + `offset`
+    /// seconds for `lifetime` seconds.
+    pub fn shield_identity_pem_with_validity(
+        &self,
+        shield_id: &str,
+        offset: i64,
+        lifetime: i64,
+    ) -> (String, String) {
+        let key = new_key();
+        let leaf_pem = self.leaf(&key, &shield_spiffe_id(shield_id), true, offset, lifetime);
+        (
+            format!(
+                "{}\n{}",
+                leaf_pem.trim_end(),
+                self.workspace_ca_pem.trim_end()
+            ),
+            key.serialize_pem(),
+        )
+    }
+
     /// A client-auth leaf with a fresh key.
     fn client_leaf(&self, spiffe_id: &str) -> (String, KeyPair) {
         let key = new_key();

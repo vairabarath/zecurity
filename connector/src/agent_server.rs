@@ -992,12 +992,25 @@ impl ShieldService for ShieldRegistry {
                 }
             }
 
+            // Fix 14 (D-1 expiry rule): the stream lives no longer than the
+            // certificate it was opened with. A shield that renewed in time
+            // is already on a newer stream; one that didn't is cut off here.
+            let cert_expiry = tokio::time::sleep(Duration::from_secs(
+                cert_not_after.saturating_sub(unix_now()).max(0) as u64,
+            ));
+            tokio::pin!(cert_expiry);
+
             loop {
                 tokio::select! {
                     biased;
                     // Certificate audit bug 3: the shield was revoked.
                     _ = cancel.cancelled() => {
                         let _ = out_tx.try_send(Err(Status::permission_denied("shield is revoked")));
+                        break;
+                    }
+                    _ = &mut cert_expiry => {
+                        warn!(shield_id = %shield_id, "shield certificate expired: closing its Control stream");
+                        let _ = out_tx.try_send(Err(Status::unauthenticated("shield certificate expired")));
                         break;
                     }
                     // Connector-revocation fail-closed: this connector stopped
@@ -1975,6 +1988,46 @@ mod shield_server_tls_tests {
             matches!(reply.body, Some(Body::ResourceSnapshot(ref s)) if s.generation == 7),
             "the newer stream lost its snapshot channel: got {reply:?}"
         );
+    }
+
+    /// Fix 14 (D-1 expiry rule): a shield Control stream is closed when the
+    /// certificate it was opened with expires.
+    #[tokio::test]
+    async fn a_shield_stream_is_closed_when_its_certificate_expires() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        // Valid for about 2 more seconds.
+        let identity = pki.shield_identity_pem_with_validity(SHIELD_ID, -60, 62);
+        let channel = channel(&pki, server.addr, Some(identity))
+            .await
+            .expect("still valid at connect");
+        let (out, out_rx) = mpsc::channel(8);
+        let mut replies = ShieldServiceClient::new(channel)
+            .control(ReceiverStream::new(out_rx))
+            .await
+            .expect("Control stream accepted")
+            .into_inner();
+        out.send(health_report()).await.unwrap();
+        assert!(matches!(
+            next_reply(&mut replies).await.body,
+            Some(Body::PeerConnectorList(_))
+        ));
+
+        match tokio::time::timeout(WAIT, replies.message()).await {
+            Err(_) => panic!("the stream outlived its certificate"),
+            Ok(Err(status)) => {
+                assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status:?}")
+            }
+            Ok(Ok(None)) => {}
+            // ReEnroll (inside the renewal window) may come first; the
+            // stream must still close right after.
+            Ok(Ok(Some(m))) => {
+                assert!(matches!(m.body, Some(Body::ReEnroll(_))), "{m:?}");
+                expect_closed(&mut replies).await;
+            }
+        }
     }
 
     #[tokio::test]
