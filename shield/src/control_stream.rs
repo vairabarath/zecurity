@@ -44,6 +44,11 @@ const CONNECTOR_NOT_SERVING_MESSAGES: [&str; 2] = [
 /// it will never serve again, so the Shield fails over instead of waiting.
 /// Must match the Connector's `CONNECTOR_TERMINAL_MESSAGE`.
 const CONNECTOR_TERMINAL_MESSAGE: &str = "connector is revoked or unknown to the controller";
+/// Sprint 20 Fix 16 (F46): once every known Connector has refused the Shield
+/// as revoked or unknown in a row, the retry interval doubles from
+/// NOT_SERVING_RETRY_SECS up to this, instead of redialling every 2 s forever
+/// (a Shield whose only Connector was revoked has nowhere else to go).
+const TERMINAL_BACKOFF_MAX_SECS: u64 = 300;
 const HEALTH_INTERVAL_SECS: u64 = 15;
 /// Ignore a ReEnroll this soon after a successful renewal (Sprint 21 K2).
 /// After renewing, the Shield reconnects and its first health report may
@@ -117,11 +122,17 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
     let mut current_state = state;
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     let mut debounce = RenewalDebounce::default();
+    // F46: consecutive "revoked or unknown" refusals, and the retry interval
+    // once every known Connector has refused.
+    let mut terminal_streak: usize = 0;
+    let mut terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
 
     loop {
         match session.run(&mut current_state, &mut debounce).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 info!("control stream closed cleanly, reconnecting");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -133,14 +144,33 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 if current_state.connectors.len() > 1 {
                     current_state.connectors.rotate_left(1);
                 }
-                warn!(
-                    retry_secs = NOT_SERVING_RETRY_SECS,
-                    "connector is revoked or unknown; trying the next peer connector"
-                );
-                tokio::time::sleep(Duration::from_secs(NOT_SERVING_RETRY_SECS)).await;
+                terminal_streak += 1;
+                let retry_secs = if terminal_streak < current_state.connectors.len().max(1) {
+                    warn!(
+                        retry_secs = NOT_SERVING_RETRY_SECS,
+                        "connector is revoked or unknown; trying the next peer connector"
+                    );
+                    NOT_SERVING_RETRY_SECS
+                } else {
+                    // F46: every known Connector refused. Nothing else to try:
+                    // back off instead of redialling every 2 s.
+                    if terminal_streak == current_state.connectors.len().max(1) {
+                        warn!(
+                            connectors = current_state.connectors.len(),
+                            "every known connector is revoked or unknown to the controller; \
+                             backing off (re-enroll this shield or add a connector to its remote network)"
+                        );
+                    }
+                    let wait = terminal_backoff_secs;
+                    terminal_backoff_secs = (terminal_backoff_secs * 2).min(TERMINAL_BACKOFF_MAX_SECS);
+                    wait
+                };
+                tokio::time::sleep(Duration::from_secs(retry_secs)).await;
                 backoff_secs = BACKOFF_INITIAL_SECS;
             }
             Err(e) if connector_not_serving(&e) => {
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 // The Connector is up but not serving (e.g. Disabled while
                 // the Controller is unreachable). Poll it at a short fixed
                 // interval and reset the backoff: with the exponential
@@ -154,6 +184,8 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 backoff_secs = BACKOFF_INITIAL_SECS;
             }
             Err(e) => {
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 // Debug formatting includes the full anyhow source chain;
                 // Display would only print the outermost context.
                 error!(
@@ -1094,6 +1126,39 @@ mod tests {
             (vec![0, 2], vec!["conn-1".into(), "conn-1".into()]),
             "single connector: retry"
         );
+    }
+
+    /// Sprint 20 Fix 16 (F46): a Shield whose only Connector was revoked no
+    /// longer redials every 2 s forever: after every known Connector refused,
+    /// the interval doubles up to TERMINAL_BACKOFF_MAX_SECS.
+    #[tokio::test(start_paused = true)]
+    async fn a_shield_whose_connectors_are_all_revoked_backs_off() {
+        let script: Vec<Result<()>> = (0..10).map(|_| Err(terminal_refusal())).collect();
+        let (times, _) = attempts(test_state(), script).await;
+        assert_eq!(
+            times,
+            vec![0, 2, 6, 14, 30, 62, 126, 254, 510, 810, 1110],
+            "2, 4, 8 … then capped at 300 s"
+        );
+
+        // Two peers: the first walk to the next peer stays fast; once both
+        // refused, every further attempt (still alternating) backs off.
+        let script: Vec<Result<()>> = (0..5).map(|_| Err(terminal_refusal())).collect();
+        let (times, heads) = attempts(two_peer_state(), script).await;
+        assert_eq!(times, vec![0, 2, 4, 8, 16, 32]);
+        assert_eq!(heads[..4], ["conn-1", "conn-2", "conn-1", "conn-2"]);
+    }
+
+    /// A successful stream resets the back-off.
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_backoff_resets_after_a_successful_stream() {
+        let script = vec![
+            Err(terminal_refusal()), // +2
+            Err(terminal_refusal()), // +4
+            Ok(()),                  // +1 (clean close)
+            Err(terminal_refusal()), // +2 again
+        ];
+        assert_eq!(attempt_times(script).await, vec![0, 2, 6, 7, 9]);
     }
 
     /// B2 live finding 1: a Connector that is Disabled (Controller outage)
