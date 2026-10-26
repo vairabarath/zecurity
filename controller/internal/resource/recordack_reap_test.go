@@ -2,36 +2,18 @@ package resource
 
 import (
 	"context"
-	"os"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestRecordAck_ReapReturnsReaped locks the RecordAck signature change: when an
 // 'unprotected' ack reaps a 'deleting' tombstone (physical DELETE), it must
 // report reaped=true so the caller can fire NotifyPolicyChange. A second ack for
-// the now-absent row must report reaped=false. Env-gated like the other resource
-// integration tests.
+// the now-absent row must report reaped=false. Runs in its own throwaway database
+// with a seeded shield (Fix 02); set RESOURCE_TEST_DATABASE_URL.
 func TestRecordAck_ReapReturnsReaped(t *testing.T) {
-	dsn := os.Getenv("RESOURCE_TEST_DATABASE_URL")
-	shieldID := os.Getenv("RESOURCE_TEST_SHIELD_ID")
-	if dsn == "" || shieldID == "" {
-		t.Skip("RESOURCE_TEST_DATABASE_URL / RESOURCE_TEST_SHIELD_ID not set")
-	}
+	db := newResourceTestDB(t)
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	var tenantID, networkID string
-	if err := db.QueryRow(ctx,
-		`SELECT tenant_id, remote_network_id FROM shields WHERE id = $1`, shieldID,
-	).Scan(&tenantID, &networkID); err != nil {
-		t.Fatalf("load shield: %v", err)
-	}
+	tenantID, networkID, shieldID := seedShield(t, db)
 
 	var resID string
 	if err := db.QueryRow(ctx,

@@ -30,7 +30,10 @@ extend type Mutation {
   generateConnectorToken(remoteNetworkId: ID!, connectorName: String!): ConnectorToken! @hasRole(roles: [ADMIN])
 
   # Revoke a connector (set status to "revoked").
-  revokeConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])
+  # Sprint 20 Fix 16 (F46): revoking the last connector of a remote network that
+  # still has enrolled shields attached is refused (they would be stranded)
+  # unless alsoRevokeShields is true, which revokes those shields as well.
+  revokeConnector(id: ID!, alsoRevokeShields: Boolean = false): Boolean! @hasRole(roles: [ADMIN])
 
   # Delete a connector row (only if status is "pending" or "revoked").
   deleteConnector(id: ID!): Boolean! @hasRole(roles: [ADMIN])

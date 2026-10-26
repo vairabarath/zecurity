@@ -162,6 +162,7 @@ async fn quic_listener_follows_the_serving_state() {
             CONNECTOR_ID.to_string(),
             tx,
             gate,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await
     });
@@ -201,6 +202,66 @@ async fn quic_listener_follows_the_serving_state() {
         quic_connect(&client, addr).await.is_none(),
         "terminal: a new QUIC connection must be refused"
     );
+}
+
+/// Sprint 20 Fix 16 (F51): on shutdown the QUIC listener closes every client
+/// connection with a CONNECTION_CLOSE (clients move on at once instead of
+/// waiting for their idle timeout), refuses new ones, and returns.
+#[tokio::test]
+async fn quic_listener_closes_client_connections_on_shutdown() {
+    install_crypto_provider();
+    let pki = TestPki::new();
+    let (_dir, holder) = pki.holder(-60, 3600);
+    let authz = AckTracker::shared(H);
+    let gate = authz.lock().gate();
+    serve(&authz);
+    let port = free_udp_port();
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let (tx, _rx) = mpsc::channel(8);
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let listener = {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            crate::quic_listener::listen(
+                &format!("127.0.0.1:{port}"),
+                &format!("127.0.0.1:{port}"),
+                holder,
+                Arc::new(PolicyCache::new()),
+                Arc::new(SessionRegistry::new()),
+                AgentTunnelHub::new(),
+                CrlManager::new(),
+                CONNECTOR_ID.to_string(),
+                tx,
+                gate,
+                shutdown,
+            )
+            .await
+        })
+    };
+    let client = pki.quic_client();
+    let deadline = Instant::now() + WAIT;
+    let conn = loop {
+        if let Some(c) = quic_connect(&client, addr).await {
+            break c;
+        }
+        assert!(Instant::now() < deadline, "QUIC listener never accepted");
+    };
+    assert!(conn.close_reason().is_none());
+
+    shutdown.cancel();
+
+    let deadline = Instant::now() + WAIT;
+    while conn.close_reason().is_none() {
+        assert!(Instant::now() < deadline, "shutdown: client QUIC connection not closed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let reason = format!("{:?}", conn.close_reason().unwrap());
+    assert!(reason.contains("shutting down"), "close reason: {reason}");
+    tokio::time::timeout(WAIT, listener)
+        .await
+        .expect("the listener returns after shutdown")
+        .unwrap()
+        .unwrap();
 }
 
 /// Relay-routed streams: reset before the inner handshake while closed.

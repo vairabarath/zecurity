@@ -87,6 +87,7 @@ pub async fn listen(
     connector_id: String,
     control_tx: mpsc::Sender<ControlMessage>,
     gate: AuthzGate,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let server_config = quic_server_config_for(&certs.current().store)?;
 
@@ -96,6 +97,18 @@ pub async fn listen(
     let endpoint = quinn::Endpoint::server(server_config, socket_addr)?;
     let _config_updates = spawn_quic_config_updates(endpoint.clone(), certs.subscribe());
     let _terminal_close = spawn_terminal_close(endpoint.clone(), &gate);
+    // Sprint 20 Fix 16 (F51): on process shutdown (SIGTERM / SIGINT) close
+    // every client QUIC connection with a CONNECTION_CLOSE, so clients move on
+    // at once instead of waiting for their idle timeout.
+    {
+        let endpoint = endpoint.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            info!("shutdown: closing every client QUIC connection");
+            endpoint.close(0u32.into(), b"connector shutting down");
+        });
+    }
 
     // Register the QUIC advertise address so device_tunnel includes it in responses.
     device_tunnel::set_quic_advertise_addr(advertise_addr.to_string());
@@ -108,6 +121,10 @@ pub async fn listen(
         let Some(incoming) = endpoint.accept().await else {
             break;
         };
+        if shutdown.is_cancelled() {
+            incoming.refuse();
+            continue;
+        }
         // Connector-revocation B1 (§7 step 2): refuse new QUIC connections
         // while the connector isn't authorized to serve.
         if !gate.admits_now() {
@@ -204,6 +221,9 @@ pub async fn listen(
         });
     }
 
+    // The endpoint was closed (shutdown or terminal state): let the
+    // CONNECTION_CLOSE frames reach the clients before the listener returns.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), endpoint.wait_idle()).await;
     Ok(())
 }
 

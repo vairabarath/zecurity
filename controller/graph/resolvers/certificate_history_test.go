@@ -184,7 +184,7 @@ func TestRevokeConnector_CRLListsEverySerialItHeld(t *testing.T) {
 	f := newCertHistoryFixture(t)
 	serials := []string{"a1a1a1a1", "a2a2a2a2", "a3a3a3a3"}
 	id := f.connector(t, "renewed-twice", serials, valid)
-	if ok, err := f.mr.RevokeConnector(f.ctx, id); err != nil || !ok {
+	if ok, err := f.mr.RevokeConnector(f.ctx, id, nil); err != nil || !ok {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	requireListed(t, f.crl(t), serials...)
@@ -194,7 +194,7 @@ func TestDeleteRevokedConnector_SerialsStayOnCRL(t *testing.T) {
 	f := newCertHistoryFixture(t)
 	serials := []string{"b1b1b1b1", "b2b2b2b2"}
 	id := f.connector(t, "deleted-after-revoke", serials, valid)
-	if _, err := f.mr.RevokeConnector(f.ctx, id); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, id, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	if ok, err := f.mr.DeleteConnector(f.ctx, id); err != nil || !ok {
@@ -221,7 +221,7 @@ func TestWorkspaceCRL_ExpiredRevokedCertificatesDropOff(t *testing.T) {
 	f := newCertHistoryFixture(t)
 	expired := time.Now().Add(-time.Hour)
 	gone := f.connector(t, "expired-only", []string{"d1d1d1d1"}, expired)
-	if _, err := f.mr.RevokeConnector(f.ctx, gone); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, gone, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	goneDevice := f.device(t, "expired-device", []string{"d2d2d2d2"}, expired)
@@ -229,7 +229,7 @@ func TestWorkspaceCRL_ExpiredRevokedCertificatesDropOff(t *testing.T) {
 		t.Fatalf("RevokeDevice: %v", err)
 	}
 	live := f.connector(t, "still-valid", []string{"d3d3d3d3"}, valid)
-	if _, err := f.mr.RevokeConnector(f.ctx, live); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, live, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	crl := f.crl(t)
@@ -244,7 +244,7 @@ func TestWorkspaceCRL_UnrevokedCertificatesAreNotListed(t *testing.T) {
 	f.connector(t, "healthy", []string{"e1e1e1e1", "e2e2e2e2"}, valid)
 	f.device(t, "healthy-laptop", []string{"e3e3e3e3", "e4e4e4e4"}, valid)
 	revoked := f.connector(t, "revoked", []string{"e5e5e5e5"}, valid)
-	if _, err := f.mr.RevokeConnector(f.ctx, revoked); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, revoked, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	crl := f.crl(t)
@@ -266,7 +266,7 @@ func TestWorkspaceCRL_OtherWorkspacesAreNotListed(t *testing.T) {
 	f.exec(t, `INSERT INTO client_devices (user_id, workspace_id, name, os, cert_serial, cert_not_after, revoked_at)
 		VALUES ($1, $2, 'their-laptop', 'linux', 'f3f3f3f3', $3, NOW())`, otherUser, other, valid)
 	mine := f.connector(t, "mine", []string{"f2f2f2f2"}, valid)
-	if _, err := f.mr.RevokeConnector(f.ctx, mine); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, mine, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	crl := f.crl(t)

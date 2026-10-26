@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 // Tokio's clock (identical to std's unless a test pauses time).
 use tokio::time::interval;
 use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::Request;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::ShieldConfig;
 use crate::discovery;
@@ -44,6 +44,11 @@ const CONNECTOR_NOT_SERVING_MESSAGES: [&str; 2] = [
 /// it will never serve again, so the Shield fails over instead of waiting.
 /// Must match the Connector's `CONNECTOR_TERMINAL_MESSAGE`.
 const CONNECTOR_TERMINAL_MESSAGE: &str = "connector is revoked or unknown to the controller";
+/// Sprint 20 Fix 16 (F46): once every known Connector has refused the Shield
+/// as revoked or unknown in a row, the retry interval doubles from
+/// NOT_SERVING_RETRY_SECS up to this, instead of redialling every 2 s forever
+/// (a Shield whose only Connector was revoked has nowhere else to go).
+const TERMINAL_BACKOFF_MAX_SECS: u64 = 300;
 const HEALTH_INTERVAL_SECS: u64 = 15;
 /// Ignore a ReEnroll this soon after a successful renewal (Sprint 21 K2).
 /// After renewing, the Shield reconnects and its first health report may
@@ -69,17 +74,55 @@ impl RenewalDebounce {
     }
 }
 
+/// Sprint 20 Fix 13 (F39): the live peer list, published for the SIGTERM
+/// goodbye. The control stream works on its own copy of the state, so
+/// without this the goodbye used the list loaded at startup, which can lead
+/// with a revoked or failed connector.
+#[derive(Clone)]
+pub struct PeerPublisher(Arc<watch::Sender<Vec<ConnectorRef>>>);
+
+impl PeerPublisher {
+    pub fn new(state: &ShieldState) -> (Self, watch::Receiver<Vec<ConnectorRef>>) {
+        let (tx, rx) = watch::channel(state.connectors.clone());
+        (Self(Arc::new(tx)), rx)
+    }
+
+    fn publish(&self, state: &ShieldState) {
+        self.0.send_if_modified(|live| {
+            if *live == state.connectors {
+                return false;
+            }
+            *live = state.connectors.clone();
+            true
+        });
+    }
+}
+
+/// The state the goodbye uses: this Shield's identity with the live peer
+/// list, never the startup one (F39). An empty list stays empty.
+pub fn with_live_peers(
+    state: &ShieldState,
+    live: &watch::Receiver<Vec<ConnectorRef>>,
+) -> ShieldState {
+    let mut state = state.clone();
+    state.connectors = live.borrow().clone();
+    state
+}
+
 pub async fn run_control_stream(
     state: ShieldState,
     cfg: ShieldConfig,
     resource_state: Arc<SharedResourceState>,
+    peers: PeerPublisher,
 ) -> Result<()> {
     reconnect_loop(
         state,
         LiveSession {
             cfg,
             resource_state,
+            peers: peers.clone(),
         },
+        peers,
     )
     .await
 }
@@ -97,6 +140,7 @@ trait ControlSession {
 struct LiveSession {
     cfg: ShieldConfig,
     resource_state: Arc<SharedResourceState>,
+    peers: PeerPublisher,
 }
 
 impl ControlSession for LiveSession {
@@ -105,7 +149,13 @@ impl ControlSession for LiveSession {
         state: &mut ShieldState,
         debounce: &mut RenewalDebounce,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        run_once(state, &self.cfg, &self.resource_state, debounce)
+        run_once(
+            state,
+            &self.cfg,
+            &self.resource_state,
+            debounce,
+            &self.peers,
+        )
     }
 }
 
@@ -113,15 +163,25 @@ impl ControlSession for LiveSession {
 /// renewal debounce is created once, here, so it survives the reconnect that
 /// follows a successful renewal (K2); a per-connection debounce would let the
 /// reconnected stream's first ReEnroll renew again.
-async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -> Result<()> {
+async fn reconnect_loop<S: ControlSession>(
+    state: ShieldState,
+    mut session: S,
+    peers: PeerPublisher,
+) -> Result<()> {
     let mut current_state = state;
     let mut backoff_secs = BACKOFF_INITIAL_SECS;
     let mut debounce = RenewalDebounce::default();
+    // F46: consecutive "revoked or unknown" refusals, and the retry interval
+    // once every known Connector has refused.
+    let mut terminal_streak: usize = 0;
+    let mut terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
 
     loop {
         match session.run(&mut current_state, &mut debounce).await {
             Ok(()) => {
                 backoff_secs = BACKOFF_INITIAL_SECS;
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 info!("control stream closed cleanly, reconnecting");
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -133,14 +193,34 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 if current_state.connectors.len() > 1 {
                     current_state.connectors.rotate_left(1);
                 }
-                warn!(
-                    retry_secs = NOT_SERVING_RETRY_SECS,
-                    "connector is revoked or unknown; trying the next peer connector"
-                );
-                tokio::time::sleep(Duration::from_secs(NOT_SERVING_RETRY_SECS)).await;
+                peers.publish(&current_state);
+                terminal_streak += 1;
+                let retry_secs = if terminal_streak < current_state.connectors.len().max(1) {
+                    warn!(
+                        retry_secs = NOT_SERVING_RETRY_SECS,
+                        "connector is revoked or unknown; trying the next peer connector"
+                    );
+                    NOT_SERVING_RETRY_SECS
+                } else {
+                    // F46: every known Connector refused. Nothing else to try:
+                    // back off instead of redialling every 2 s.
+                    if terminal_streak == current_state.connectors.len().max(1) {
+                        warn!(
+                            connectors = current_state.connectors.len(),
+                            "every known connector is revoked or unknown to the controller; \
+                             backing off (re-enroll this shield or add a connector to its remote network)"
+                        );
+                    }
+                    let wait = terminal_backoff_secs;
+                    terminal_backoff_secs = (terminal_backoff_secs * 2).min(TERMINAL_BACKOFF_MAX_SECS);
+                    wait
+                };
+                tokio::time::sleep(Duration::from_secs(retry_secs)).await;
                 backoff_secs = BACKOFF_INITIAL_SECS;
             }
             Err(e) if connector_not_serving(&e) => {
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 // The Connector is up but not serving (e.g. Disabled while
                 // the Controller is unreachable). Poll it at a short fixed
                 // interval and reset the backoff: with the exponential
@@ -154,6 +234,8 @@ async fn reconnect_loop<S: ControlSession>(state: ShieldState, mut session: S) -
                 backoff_secs = BACKOFF_INITIAL_SECS;
             }
             Err(e) => {
+                terminal_streak = 0;
+                terminal_backoff_secs = NOT_SERVING_RETRY_SECS;
                 // Debug formatting includes the full anyhow source chain;
                 // Display would only print the outermost context.
                 error!(
@@ -194,19 +276,13 @@ async fn run_once(
     cfg: &ShieldConfig,
     resource_state: &Arc<SharedResourceState>,
     debounce: &mut RenewalDebounce,
+    peers: &PeerPublisher,
 ) -> Result<()> {
     let (mut client, selected_idx) = build_client(state, cfg)
         .await
         .context("failed to build mTLS client for Control stream")?;
 
-    // If we failed over to a non-head Connector, rotate the list so the new
-    // head is the surviving Connector and persist. Next reconnect prefers it.
-    if selected_idx > 0 {
-        state.connectors.rotate_left(selected_idx);
-        if let Err(e) = state.save(&cfg.state_dir) {
-            warn!(error = %e, "failed to persist state.json after connector head rotation");
-        }
-    }
+    adopt_failover_head(state, cfg, selected_idx, peers);
 
     let hostname = util::read_hostname();
     let public_ip = util::get_public_ip().await.unwrap_or_default();
@@ -218,13 +294,18 @@ async fn run_once(
     let mut discovery_seq: u64 = 0;
 
     let tunnel_hub: TunnelHub = tunnel::new_hub();
+    // Fix 14 (F44): however this connection ends — other than by a handover,
+    // which keeps them — its tunnels end with it.
+    let _close_tunnels = CloseTunnelsOnDrop(tunnel_hub.clone());
 
-    let (out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
+    let (mut out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
     let response = client
         .control(Request::new(ReceiverStream::new(out_rx)))
         .await
         .context("failed to open Shield Control stream")?;
     let mut inbound = response.into_inner();
+    let connector_id = state.connectors[0].connector_id.clone();
+    tunnel_hub.set_upstream(Some(out_tx.clone()));
 
     info!(
         shield_id = %state.shield_id,
@@ -265,7 +346,7 @@ async fn run_once(
                     Err(e) => return Err(anyhow::Error::new(e).context("control stream recv error")),
                     Ok(None) => return Ok(()),
                     Ok(Some(msg)) => {
-                        if let Some(action) = handle_connector_msg(
+                        match handle_connector_msg(
                             msg,
                             state,
                             cfg,
@@ -273,8 +354,50 @@ async fn run_once(
                             &out_tx,
                             tunnel_hub.clone(),
                             debounce,
+                            peers,
                         ).await {
-                            return action;
+                            None => {}
+                            // The certificate was renewed: move to a stream
+                            // with it, keeping the tunnels (Fix 14, D-1 = B).
+                            Some(Ok(())) => {
+                                if !hand_over(
+                                    state,
+                                    cfg,
+                                    resource_state,
+                                    debounce,
+                                    &tunnel_hub,
+                                    &connector_id,
+                                    &mut client,
+                                    &mut out_tx,
+                                    &mut inbound,
+                                    peers,
+                                )
+                                .await?
+                                {
+                                    // Not possible here: reconnect as before
+                                    // (the tunnels are closed).
+                                    return Ok(());
+                                }
+                                let tunnels = tunnel_hub.len().await;
+                                info!(
+                                    shield_id = %state.shield_id,
+                                    tunnels,
+                                    "cert renewed — Control stream handed over, tunnels kept"
+                                );
+                                send_health(&out_tx, &version, &hostname, &public_ip, &lan_ip).await?;
+                                match discovery::run_discovery_full_sync(
+                                    &state.shield_id,
+                                    &mut discovery_sent,
+                                    &mut discovery_fingerprint,
+                                    &mut discovery_seq,
+                                )
+                                .await
+                                {
+                                    Ok(diff) => send_discovery_report(diff, &out_tx).await,
+                                    Err(e) => warn!("discovery: full sync error: {:#}", e),
+                                }
+                            }
+                            Some(Err(e)) => return Err(e),
                         }
                     }
                 }
@@ -319,9 +442,136 @@ async fn run_once(
     }
 }
 
+/// Fix 14 (D-1 = B): after a renewal, move from the current Control stream to
+/// one opened with the new certificate, to the same Connector, keeping every
+/// tunnel (make before break). In order:
+/// 1. open the new stream — the Connector registers it before answering;
+/// 2. pause tunnel traffic and half-close the old stream: the Connector gets
+///    everything sent on it, then its end, and hands the sessions over;
+/// 3. read the old stream to its end (the Connector's last device data comes
+///    on it) before reading anything from the new one;
+/// 4. resume tunnel traffic on the new stream.
+///
+/// Returns false, changing nothing, when the new stream cannot be opened to
+/// the same Connector; the caller then reconnects as before. An error after
+/// the old stream was half-closed ends the connection (tunnels closed).
+#[allow(clippy::too_many_arguments)]
+async fn hand_over(
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    resource_state: &Arc<SharedResourceState>,
+    debounce: &mut RenewalDebounce,
+    hub: &TunnelHub,
+    connector_id: &str,
+    client: &mut ShieldServiceClient<tonic::transport::Channel>,
+    out_tx: &mut mpsc::Sender<ShieldControlMessage>,
+    inbound: &mut tonic::Streaming<ShieldControlMessage>,
+    peers: &PeerPublisher,
+) -> Result<bool> {
+    let (mut new_client, idx) = match build_client(state, cfg).await {
+        Ok(found) => found,
+        Err(e) => {
+            warn!(error = %e, "renewed, but no Connector reachable with the new certificate");
+            return Ok(false);
+        }
+    };
+    if state.connectors[idx].connector_id != connector_id {
+        warn!("renewed, but the current Connector is not reachable: reconnecting");
+        return Ok(false);
+    }
+    let (new_out_tx, new_out_rx) = mpsc::channel::<ShieldControlMessage>(32);
+    let new_inbound = match new_client
+        .control(Request::new(ReceiverStream::new(new_out_rx)))
+        .await
+    {
+        Ok(response) => response.into_inner(),
+        Err(status) => {
+            warn!(error = %status, "renewed, but the new Control stream was refused: reconnecting");
+            return Ok(false);
+        }
+    };
+
+    hub.set_upstream(None);
+    drop(std::mem::replace(out_tx, new_out_tx));
+    let mut old_inbound = std::mem::replace(inbound, new_inbound);
+    let old_client = std::mem::replace(client, new_client);
+
+    let drained = tokio::time::timeout(tunnel::HANDOVER_GRACE, async {
+        loop {
+            match old_inbound.message().await {
+                Ok(None) => return Ok(()),
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("old Control stream failed during handover"))
+                }
+                Ok(Some(msg)) => {
+                    if let Some(action) = handle_connector_msg(
+                        msg,
+                        state,
+                        cfg,
+                        resource_state,
+                        out_tx,
+                        hub.clone(),
+                        debounce,
+                        peers,
+                    )
+                    .await
+                    {
+                        action?;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    drop(old_client);
+    match drained {
+        Ok(Ok(())) => {
+            hub.set_upstream(Some(out_tx.clone()));
+            Ok(true)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!(
+            "old Control stream did not end within the handover grace"
+        )),
+    }
+}
+
+/// Ends every tunnel of a Control stream when the stream's `run_once` returns.
+struct CloseTunnelsOnDrop(TunnelHub);
+
+impl Drop for CloseTunnelsOnDrop {
+    fn drop(&mut self) {
+        let hub = self.0.clone();
+        tokio::spawn(async move {
+            let closed = hub.close_all().await;
+            if closed > 0 {
+                info!(closed, "Control stream ended: its tunnels were closed");
+            }
+        });
+    }
+}
+
+/// If we failed over to a non-head Connector, rotate the list so the new
+/// head is the surviving Connector, persist it (the next reconnect prefers
+/// it) and publish it for the goodbye (F39).
+fn adopt_failover_head(
+    state: &mut ShieldState,
+    cfg: &ShieldConfig,
+    selected_idx: usize,
+    peers: &PeerPublisher,
+) {
+    if selected_idx > 0 {
+        state.connectors.rotate_left(selected_idx);
+        if let Err(e) = state.save(&cfg.state_dir) {
+            warn!(error = %e, "failed to persist state.json after connector head rotation");
+        }
+        peers.publish(state);
+    }
+}
+
 /// ReEnroll from the connector: renew unless a renewal succeeded within
-/// REENROLL_DEBOUNCE. Success → `Some(Ok(()))` (reconnect with the new
-/// certificate); debounced or failed → `None` (keep the stream).
+/// REENROLL_DEBOUNCE. Success → `Some(Ok(()))` (move to a stream with the new
+/// certificate, `hand_over`); debounced or failed → `None` (keep the stream).
 async fn handle_reenroll<F, Fut>(
     state: &mut ShieldState,
     debounce: &mut RenewalDebounce,
@@ -349,7 +599,7 @@ where
             info!(
                 shield_id = %new_state.shield_id,
                 new_expiry = new_state.cert_not_after,
-                "cert renewed — reconnecting Control stream"
+                "cert renewed — moving to a Control stream with it"
             );
             *state = new_state;
             Some(Ok(()))
@@ -369,6 +619,7 @@ async fn handle_connector_msg(
     out_tx: &mpsc::Sender<ShieldControlMessage>,
     tunnel_hub: TunnelHub,
     debounce: &mut RenewalDebounce,
+    peers: &PeerPublisher,
 ) -> Option<Result<()>> {
     match msg.body {
         Some(Body::ResourceInstruction(instr)) => {
@@ -433,7 +684,6 @@ async fn handle_connector_msg(
                 open.destination,
                 open.port,
                 open.protocol,
-                out_tx.clone(),
             )
             .await;
             None
@@ -448,6 +698,7 @@ async fn handle_connector_msg(
         }
         Some(Body::PeerConnectorList(list)) => {
             apply_peer_connector_list(state, cfg, list);
+            peers.publish(state);
             None
         }
         other => {
@@ -476,6 +727,7 @@ fn apply_peer_connector_list(
     cfg: &ShieldConfig,
     list: crate::proto::PeerConnectorList,
 ) {
+    let carried_revoked = !list.revoked_connector_ids.is_empty();
     prune_revoked_connectors(state, cfg, list.revoked_connector_ids);
     let peers: Vec<crate::proto::PeerConnector> = list
         .peers
@@ -483,7 +735,11 @@ fn apply_peer_connector_list(
         .filter(|p| !state.revoked_connectors.contains(&p.connector_id))
         .collect();
     if peers.is_empty() {
-        warn!("ignored empty PeerConnectorList");
+        if empty_list_is_expected(carried_revoked) {
+            debug!("PeerConnectorList carried only revoked connectors");
+        } else {
+            warn!("ignored empty PeerConnectorList");
+        }
         return;
     }
     let mut new_list: Vec<ConnectorRef> = peers
@@ -524,6 +780,13 @@ fn apply_peer_connector_list(
     } else {
         info!(peers = peer_count, "peer connector list refreshed");
     }
+}
+
+/// Fix 13 (F41): a list holding only revoked ids is expected (a connector
+/// on a network without resources sends one every heartbeat while a revoked
+/// peer's certificate is valid); a list with nothing at all is not.
+fn empty_list_is_expected(carried_revoked: bool) -> bool {
+    carried_revoked
 }
 
 /// Phase E (D21): remember `revoked_ids` and drop them from the current list.
@@ -682,6 +945,10 @@ async fn send_discovery_report(
 /// failover walk — if the head Connector is already gone, goodbye still
 /// reaches a healthy sibling.
 pub async fn goodbye(state: &ShieldState, cfg: &ShieldConfig) {
+    if state.connectors.is_empty() {
+        info!("no goodbye sent: every peer connector is revoked");
+        return;
+    }
     match build_client(state, cfg).await {
         Ok((mut client, _idx)) => {
             let req = Request::new(crate::proto::GoodbyeRequest {
@@ -889,7 +1156,8 @@ mod tests {
             t0: tokio::time::Instant::now(),
             done: Some(done_tx),
         };
-        let task = tokio::spawn(reconnect_loop(state, session));
+        let (peers, _live) = PeerPublisher::new(&state);
+        let task = tokio::spawn(reconnect_loop(state, session, peers));
         done_rx.await.expect("script finished");
         task.abort();
         let times = starts.lock().unwrap().clone();
@@ -943,6 +1211,65 @@ mod tests {
             (vec![0, 2], vec!["conn-1".into(), "conn-1".into()]),
             "single connector: retry"
         );
+    }
+
+    /// Sprint 20 Fix 16 (F46): a Shield whose only Connector was revoked no
+    /// longer redials every 2 s forever: after every known Connector refused,
+    /// the interval doubles up to TERMINAL_BACKOFF_MAX_SECS.
+    #[tokio::test(start_paused = true)]
+    async fn a_shield_whose_connectors_are_all_revoked_backs_off() {
+        let script: Vec<Result<()>> = (0..10).map(|_| Err(terminal_refusal())).collect();
+        let (times, _) = attempts(test_state(), script).await;
+        assert_eq!(
+            times,
+            vec![0, 2, 6, 14, 30, 62, 126, 254, 510, 810, 1110],
+            "2, 4, 8 … then capped at 300 s"
+        );
+
+        // Two peers: the first walk to the next peer stays fast; once both
+        // refused, every further attempt (still alternating) backs off.
+        let script: Vec<Result<()>> = (0..5).map(|_| Err(terminal_refusal())).collect();
+        let (times, heads) = attempts(two_peer_state(), script).await;
+        assert_eq!(times, vec![0, 2, 4, 8, 16, 32]);
+        assert_eq!(heads[..4], ["conn-1", "conn-2", "conn-1", "conn-2"]);
+    }
+
+    /// A successful stream resets the back-off.
+    #[tokio::test(start_paused = true)]
+    async fn a_terminal_backoff_resets_after_a_successful_stream() {
+        let script = vec![
+            Err(terminal_refusal()), // +2
+            Err(terminal_refusal()), // +4
+            Ok(()),                  // +1 (clean close)
+            Err(terminal_refusal()), // +2 again
+        ];
+        assert_eq!(attempt_times(script).await, vec![0, 2, 6, 7, 9]);
+    }
+
+    /// Fix 13 (F39, AF13-4): the failover after a terminal refusal is
+    /// published at once, so a goodbye during the retry goes to the new head.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_failover_is_published() {
+        let state = two_peer_state();
+        let (peers, live) = PeerPublisher::new(&state);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let session = OutcomeSession {
+            script: vec![Err(terminal_refusal())].into(),
+            starts: Default::default(),
+            heads: Default::default(),
+            t0: tokio::time::Instant::now(),
+            done: Some(done_tx),
+        };
+        let task = tokio::spawn(reconnect_loop(state, session, peers));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let ids: Vec<String> = live
+            .borrow()
+            .iter()
+            .map(|c| c.connector_id.clone())
+            .collect();
+        assert_eq!(ids, vec!["conn-2", "conn-1"], "published before the retry");
+        done_rx.await.unwrap();
+        task.abort();
     }
 
     /// B2 live finding 1: a Connector that is Disabled (Controller outage)
@@ -1010,7 +1337,8 @@ mod tests {
             started: tokio::time::Instant::now(),
             done: Some(done_tx),
         };
-        let task = tokio::spawn(reconnect_loop(test_state(), session));
+        let (peers, _live) = PeerPublisher::new(&test_state());
+        let task = tokio::spawn(reconnect_loop(test_state(), session, peers));
         done_rx.await.expect("reached the third connection");
         task.abort();
 
@@ -1157,6 +1485,83 @@ mod tests {
             .unwrap()
             .revoked_connectors
             .is_empty());
+    }
+
+    fn live_ids(live: &watch::Receiver<Vec<ConnectorRef>>) -> Vec<String> {
+        live.borrow()
+            .iter()
+            .map(|c| c.connector_id.clone())
+            .collect()
+    }
+
+    /// Fix 13 (F39, AF13-4): a peer list received mid-session (here a
+    /// revoked prune) reaches the live list the goodbye reads.
+    #[tokio::test]
+    async fn a_received_peer_list_is_published() {
+        let (mut state, cfg) = three_peer_state("f39-msg");
+        let (peers, live) = PeerPublisher::new(&state);
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let msg = ShieldControlMessage {
+            body: Some(Body::PeerConnectorList(list(
+                &["conn-1", "conn-3"],
+                &["conn-2"],
+            ))),
+        };
+        let action = handle_connector_msg(
+            msg,
+            &mut state,
+            &cfg,
+            &Arc::new(SharedResourceState::new()),
+            &out_tx,
+            tunnel::new_hub(),
+            &mut RenewalDebounce::default(),
+            &peers,
+        )
+        .await;
+        assert!(action.is_none());
+        assert_eq!(live_ids(&live), ids(&state));
+        assert!(!live_ids(&live).contains(&"conn-2".to_string()));
+    }
+
+    /// Fix 13 (F39, AF13-4): a failover at connect time is saved and
+    /// published.
+    #[test]
+    fn a_failover_at_connect_is_published() {
+        let (mut state, cfg) = three_peer_state("f39-failover");
+        let (peers, live) = PeerPublisher::new(&state);
+        adopt_failover_head(&mut state, &cfg, 0, &peers);
+        assert_eq!(live_ids(&live), vec!["conn-1", "conn-2", "conn-3"]);
+        adopt_failover_head(&mut state, &cfg, 2, &peers);
+        assert_eq!(live_ids(&live), vec!["conn-3", "conn-1", "conn-2"]);
+        assert_eq!(saved_ids(&cfg), vec!["conn-3", "conn-1", "conn-2"]);
+    }
+
+    /// Fix 13 (F39, AF13-5): every peer revoked → the goodbye gets the empty
+    /// live list, never the startup one, and sends nothing.
+    #[tokio::test]
+    async fn goodbye_uses_the_live_list_even_when_empty() {
+        let (mut state, cfg) = three_peer_state("f39-empty");
+        let startup = state.clone();
+        let (peers, live) = PeerPublisher::new(&state);
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-1", "conn-2", "conn-3"]));
+        peers.publish(&state);
+
+        let bye = with_live_peers(&startup, &live);
+        assert!(bye.connectors.is_empty(), "not the startup list");
+        assert_eq!(bye.shield_id, startup.shield_id);
+        goodbye(&bye, &cfg).await; // returns without dialling (no cert files here)
+    }
+    /// Fix 13 (F41, AF13-7): only a list with nothing at all is warned
+    /// about; one holding revoked ids still prunes them.
+    #[test]
+    fn an_empty_list_warns_only_when_it_carried_nothing() {
+        assert!(empty_list_is_expected(true));
+        assert!(!empty_list_is_expected(false));
+        let (mut state, cfg) = three_peer_state("f41");
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &["conn-2"]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"]);
+        apply_peer_connector_list(&mut state, &cfg, list(&[], &[]));
+        assert_eq!(ids(&state), vec!["conn-1", "conn-3"], "ignored, list kept");
     }
 
     /// AE-4: when every peer is revoked the Shield dials none; state.json
