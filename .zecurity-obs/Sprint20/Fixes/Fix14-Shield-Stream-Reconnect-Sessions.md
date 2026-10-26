@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: IMPLEMENTED locally and verified live (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; live renewal handover, bulk, unclean shield end and revocation PASS; expiry not run live; old/new mix not applicable (not released); deployment order connectors before shields (accepted)
+status: IMPLEMENTED locally and verified live (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; live renewal handover, bulk, unclean shield end and revocation PASS; expiry PASS live; old/new mix not applicable (not released); deployment order connectors before shields (accepted)
 owner: Sathiya (M1)
 findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
@@ -219,7 +219,9 @@ Branch `sprint20/fix14-shield-reconnect-sessions` at `ddbef089` (Fix 14 + Fix 15
 | 5 | **Bulk:** 200 MB each way, checksummed, twice | **PASS** — both intact, 13.4–13.6 MB/s; no `flow queue full`, no stall-ending on connector or shield (F48 + F49) |
 | 3 | **Unclean end of the shield stream:** `kill -9` the shield mid-stream | **PASS** — killed 09:27:50.863; connector `shield Control stream error` at .869, tunnel closed `shield stream ended`; client EOF the same second (no hang) |
 | 4 | **Revocation mid-stream** | **PASS** — revoked 09:28:57.828; connector closed the tunnel at .903; client EOF the same second |
-| 2 | Expiry ends (no renewal possible before `not_after`) | not run live (needs the shield unable to renew for ~15 min, i.e. the controller unreachable); unit-tested over real mTLS streams |
+| 2 | **Expiry ends:** fresh shield (cert `not_after` 10:05:26.42); on manoj `iptables -I OUTPUT -p tcp -d 192.168.1.75 --dport 9091 -m conntrack --ctstate NEW -j REJECT` blocks only new connections, so renewal (which dials a new mTLS channel) fails while the open Control stream stays up; a byte-checked stream on `:5556` ran across `not_after` | **PASS** — renewal failed at 09:59:26 (`connector unreachable`); connector 10:05:26.817 `shield certificate expired: closing its Control stream`, tunnel closed; client EOF at 10:05:26 after 323,973,120 bytes in order; the shield could not get back in. (Stopping the controller instead would not work: the connector stops serving after `DISABLED_SHIELD_CLOSE_SECS` and closes for that reason.) Close lands within 1 s of `not_after` (whole-second timer). |
 | 6 | New connector + old shield, one renewal → sessions close cleanly | **not applicable** (user, 2026-10-26): the project is in development and not released — no shields or connectors are installed anywhere else, so there is no mixed-version state to test. Covered by the clean-end-without-newer-stream unit test. |
 
 **Observation (not Fix 14):** stopping the **connector** process mid-session (Ctrl-C) left the client's session silent until the client's QUIC idle timeout: it noticed 30 s later (`relay failure signalled — early transport resync`). That is the client↔connector liveness path (Fix 05 area), not the shield stream. The planned check "restart the connector mid-session → close within ~1 s" was the wrong layer for F44 and was replaced by check 3 (shield killed).
+
+**Observation (lab only):** after one failed renewal the shield was not asked again before expiry: the connector re-sends ReEnroll at most once per 10 min per stream (K2 throttle), and the lab renewal window is 6 min. With production lifetimes (48 h window) there are many retries.
