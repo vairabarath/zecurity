@@ -164,6 +164,28 @@ jobs:
             echo "::error::TestAuthIntegration_LoginBootstrapAndJWTIssue did not run or did not pass."
             exit 1
           fi
+          # Sprint 20 Fix 02 (F35): the resource ACL-coherence and posture
+          # resolver tests, and the RecordAck route-change test, needed
+          # RESOURCE_TEST_SHIELD_ID, which CI never set, so they always skipped
+          # and hid real double-notify bugs. They provision their own database
+          # now and must run here.
+          for spec in \
+            "./graph/resolvers/ TestUpdateResource_InvalidatesWhenACLFieldChanges" \
+            "./graph/resolvers/ TestProtectResource_Invalidates" \
+            "./graph/resolvers/ TestAddProfileRequirement_Success" \
+            "./internal/resource/ TestRecordAckReportsACLChanges"; do
+            set -- $spec
+            out=$(go test "$1" -run "^$2\$" -count=1 -v 2>&1) || true
+            echo "$out" | tail -8
+            if echo "$out" | grep -q -- "--- SKIP: $2"; then
+              echo "::error::$2 SKIPPED — it must run in CI."
+              exit 1
+            fi
+            if ! echo "$out" | grep -q -- "--- PASS: $2"; then
+              echo "::error::$2 did not run or did not pass."
+              exit 1
+            fi
+          done
 
   rust:
     name: ${{ matrix.crate }} (rust)

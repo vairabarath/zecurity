@@ -3074,6 +3074,14 @@ serves on `127.0.0.1:9102`.
 - Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
 - Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
 
+
+## 2026-10-26 — Sprint 20 Fix 02 (F35): FIXED
+- Branch `sprint20/fix02-resource-acl-notify` (from `fixed-pendings` `7621e260`).
+- Code: duplicate NotifyPolicyChange removed from UpdateResource and ForceDeleteResource; RecordAck reports route-class changes so an unprotect completing re-compiles the ACL (Fix02 design step 3, was missing).
+- Tests: Protect test corrected (want 1); ACL-coherence/posture fixture and two resource tests self-provision a migrated throwaway DB + shield — `RESOURCE_TEST_SHIELD_ID` gone. 5 posture + 1 unprotect failures were artefacts of the borrowed lab workspace.
+- CI: ran-check requires 4 of these tests to run and pass.
+- Red 4 fail → green 35/35, also on an empty DB (CI-like); full controller 1387 pass, 0 fail, 2 intentional skips.
+
 - Committed locally, not pushed.
 
 ## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS

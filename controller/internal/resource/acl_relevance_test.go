@@ -19,10 +19,11 @@ func TestACLRelevantUpdate(t *testing.T) {
 		{"port_from only", UpdateInput{PortFrom: aclIntPtr(443)}, true},
 		{"description only", UpdateInput{Description: aclStrPtr("note")}, false},
 		{"port_to only", UpdateInput{PortTo: aclIntPtr(9000)}, false},
-		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, false},
+		// The compiler routes through the resource's remote network (Fix 02).
+		{"remote_network only", UpdateInput{RemoteNetworkID: aclStrPtr("rn-1")}, true},
 		{"empty input", UpdateInput{}, false},
 		{"irrelevant + relevant", UpdateInput{Description: aclStrPtr("note"), Protocol: aclStrPtr("udp")}, true},
-		{"all irrelevant", UpdateInput{Description: aclStrPtr("n"), PortTo: aclIntPtr(1), RemoteNetworkID: aclStrPtr("rn")}, false},
+		{"all irrelevant", UpdateInput{Description: aclStrPtr("n"), PortTo: aclIntPtr(1)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

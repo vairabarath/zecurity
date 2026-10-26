@@ -72,3 +72,39 @@ func newResourceTestDB(t *testing.T) *pgxpool.Pool {
 	}
 	return pool
 }
+
+// seedShield provisions a workspace, remote network, connector and active
+// shield in db and returns their ids (Sprint 20 Fix 02, F35). It replaces the
+// RESOURCE_TEST_SHIELD_ID variable these tests used to need, which CI never set
+// (so they always skipped there) and which made a local run depend on whatever
+// that shield's workspace held.
+func seedShield(t *testing.T, db *pgxpool.Pool) (tenantID, networkID, shieldID string) {
+	t.Helper()
+	ctx := context.Background()
+	slug := fmt.Sprintf("seed-%d", time.Now().UnixNano())
+	if err := db.QueryRow(ctx,
+		`INSERT INTO workspaces (slug, name, status, trust_domain) VALUES ($1, $1, 'active', $2) RETURNING id`,
+		slug, "ws-"+slug+".zecurity.in",
+	).Scan(&tenantID); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+	if err := db.QueryRow(ctx,
+		`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1, 'net', 'other') RETURNING id`, tenantID,
+	).Scan(&networkID); err != nil {
+		t.Fatalf("seed remote_network: %v", err)
+	}
+	var connectorID string
+	if err := db.QueryRow(ctx,
+		`INSERT INTO connectors (tenant_id, remote_network_id, name, status) VALUES ($1, $2, 'conn', 'active') RETURNING id`,
+		tenantID, networkID,
+	).Scan(&connectorID); err != nil {
+		t.Fatalf("seed connector: %v", err)
+	}
+	if err := db.QueryRow(ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status) VALUES ($1, $2, $3, 'shield', 'active') RETURNING id`,
+		tenantID, networkID, connectorID,
+	).Scan(&shieldID); err != nil {
+		t.Fatalf("seed shield: %v", err)
+	}
+	return tenantID, networkID, shieldID
+}
