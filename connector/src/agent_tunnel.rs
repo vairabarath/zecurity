@@ -13,6 +13,9 @@ use crate::shield_proto::shield_control_message::Body;
 use crate::shield_proto::{ShieldControlMessage, TunnelClose, TunnelData, TunnelOpen};
 
 const MAX_CHUNK: usize = 16 * 1024;
+/// How long a Shield chunk waits for room in a device's tunnel queue before
+/// the session is ended (Fix 14, F48).
+const DEVICE_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Events dispatched from Shield → relay session
@@ -156,32 +159,45 @@ impl AgentTunnelHub {
         }
     }
 
-    pub fn dispatch_data(&self, connection_id: &str, data: Vec<u8>) {
-        let mut state = self.state.lock();
-        let Some(entry) = state.relay_sessions.get(connection_id) else {
+    pub async fn dispatch_data(&self, connection_id: &str, data: Vec<u8>) {
+        let Some(tx) = self.session_tx(connection_id) else {
             return;
         };
-        if !matches!(
-            entry.tx.try_send(RelayEvent::Data(data)),
-            Err(mpsc::error::TrySendError::Full(_))
-        ) {
-            return;
+        // Fix 14 (F48): never drop a chunk and carry on (a hole in the byte
+        // stream). Wait for room: that pauses this Shield's Control stream,
+        // which pushes back to the resource (flow control). A device stuck
+        // for longer than DEVICE_STALL_LIMIT ends its session instead, so it
+        // cannot stall every other session through the Shield for long.
+        match tx
+            .send_timeout(RelayEvent::Data(data), DEVICE_STALL_LIMIT)
+            .await
+        {
+            Err(mpsc::error::SendTimeoutError::Timeout(_)) => {}
+            Ok(()) | Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
         }
-        // Fix 14 (F48): the device side is not keeping up. Never drop a chunk
-        // and carry on (a hole in the byte stream); end this session instead.
-        // Waiting for room would stall the Shield's whole Control stream, i.e.
-        // every other session through it. Removing the entry drops the only
-        // sender: the device gets the chunks already queued, then the end.
-        let Some(entry) = state.relay_sessions.remove(connection_id) else {
-            return;
+        // End the session (only if it is still the one we waited on). Removing
+        // the entry drops the only sender: the device gets the chunks already
+        // queued, then the end.
+        let shield_tx = {
+            let mut state = self.state.lock();
+            if !state
+                .relay_sessions
+                .get(connection_id)
+                .is_some_and(|e| e.tx.same_channel(&tx))
+            {
+                return;
+            }
+            let entry = state
+                .relay_sessions
+                .remove(connection_id)
+                .expect("checked above");
+            state
+                .shield_txs
+                .get(&entry.shield_id)
+                .filter(|(id, _)| *id == entry.stream_id)
+                .map(|(_, tx)| tx.clone())
         };
-        let shield_tx = state
-            .shield_txs
-            .get(&entry.shield_id)
-            .filter(|(id, _)| *id == entry.stream_id)
-            .map(|(_, tx)| tx.clone());
-        drop(state);
-        warn!(connection_id, "tunnel queue to the device is full: ending the session");
+        warn!(connection_id, "device stalled with its tunnel queue full: ending the session");
         if let Some(tx) = shield_tx {
             let _ = tx.try_send(ShieldControlMessage {
                 body: Some(Body::TunnelClose(TunnelClose {
@@ -520,38 +536,81 @@ mod backpressure_tests {
 
     const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
 
-    #[tokio::test]
-    async fn a_full_device_queue_ends_the_session_instead_of_dropping_data() {
-        let hub = AgentTunnelHub::new();
-        let (tx, mut shield_rx) = mpsc::channel(256);
-        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+    async fn opened_session(
+        hub: &AgentTunnelHub,
+        shield_rx: &mut mpsc::Receiver<ShieldControlMessage>,
+    ) -> (String, RelaySession) {
         let opener = hub.clone();
-        let opening =
-            tokio::spawn(async move { opener.open_relay_session(SHIELD, "10.0.0.9", 22, "tcp").await });
+        let opening = tokio::spawn(async move {
+            opener
+                .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+                .await
+        });
         let Some(Body::TunnelOpen(open)) = shield_rx.recv().await.unwrap().body else {
             panic!("expected TunnelOpen");
         };
         hub.dispatch_opened(&open.connection_id, true, String::new());
-        let mut session = opening.await.unwrap().expect("opened");
+        (open.connection_id, opening.await.unwrap().expect("opened"))
+    }
 
-        // The device reads nothing: the queue (64) fills, then one more chunk.
-        for i in 0..65u8 {
-            hub.dispatch_data(&open.connection_id, vec![i]);
+    /// A device that is merely slower than the resource gets every byte:
+    /// the chunk waits for room instead of being dropped.
+    #[tokio::test]
+    async fn a_slow_device_gets_every_chunk_in_order() {
+        let hub = AgentTunnelHub::new();
+        let (tx, mut shield_rx) = mpsc::channel(256);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
+
+        let feeder = {
+            let hub = hub.clone();
+            let cid = cid.clone();
+            tokio::spawn(async move {
+                for i in 0..200u8 {
+                    hub.dispatch_data(&cid, vec![i]).await;
+                }
+            })
+        };
+        for i in 0..200u8 {
+            if i % 50 == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            match session.event_rx.recv().await {
+                Some(RelayEvent::Data(d)) => assert_eq!(d, vec![i], "chunk {i}"),
+                _ => panic!("chunk {i} missing"),
+            }
         }
+        feeder.await.unwrap();
+        assert!(hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    /// A device that stops reading ends its session after the stall limit;
+    /// the chunk is never dropped while the session carries on.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_device_ends_the_session_instead_of_dropping_data() {
+        let hub = AgentTunnelHub::new();
+        let (tx, mut shield_rx) = mpsc::channel(256);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
+
+        for i in 0..64u8 {
+            hub.dispatch_data(&cid, vec![i]).await;
+        }
+        // The queue is full and the device reads nothing.
+        hub.dispatch_data(&cid, vec![64]).await;
 
         assert!(
-            !hub.state.lock().relay_sessions.contains_key(&open.connection_id),
+            !hub.state.lock().relay_sessions.contains_key(&cid),
             "the session carried on after a chunk could not be queued"
         );
         let Some(Body::TunnelClose(close)) = shield_rx.recv().await.unwrap().body else {
             panic!("the shield was not told to close its side");
         };
-        assert_eq!(close.connection_id, open.connection_id);
-        // The device still gets every chunk that was queued, in order, then the end.
+        assert_eq!(close.connection_id, cid);
         for i in 0..64u8 {
             match session.event_rx.recv().await {
                 Some(RelayEvent::Data(d)) => assert_eq!(d, vec![i]),
-                other => panic!("chunk {i}: got {}", other.is_some()),
+                _ => panic!("chunk {i} missing"),
             }
         }
         assert!(session.event_rx.recv().await.is_none());

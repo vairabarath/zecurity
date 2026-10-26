@@ -1079,7 +1079,7 @@ impl ShieldService for ShieldRegistry {
                                         registry.tunnel_hub.dispatch_opened(&p.connection_id, p.ok, p.error.clone());
                                     }
                                     Some(Body::TunnelData(p)) => {
-                                        registry.tunnel_hub.dispatch_data(&p.connection_id, p.data.clone());
+                                        registry.tunnel_hub.dispatch_data(&p.connection_id, p.data.clone()).await;
                                     }
                                     Some(Body::TunnelClose(p)) => {
                                         registry.tunnel_hub.dispatch_close(&p.connection_id, p.error.clone());
