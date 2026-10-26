@@ -194,7 +194,7 @@ type ComplexityRoot struct {
 		RemoveGroupMember              func(childComplexity int, groupID string, userID string) int
 		RemoveProfileRequirement       func(childComplexity int, profileID string, checkID string) int
 		ReopenScimConflict             func(childComplexity int, connectionID string, canonicalKey string, reason string) int
-		RevokeConnector                func(childComplexity int, id string) int
+		RevokeConnector                func(childComplexity int, id string, alsoRevokeShields *bool) int
 		RevokeDevice                   func(childComplexity int, deviceID string) int
 		RevokeScimToken                func(childComplexity int, connectionID string, tokenID string) int
 		RevokeShield                   func(childComplexity int, id string) int
@@ -433,7 +433,7 @@ type MutationResolver interface {
 	CreateRemoteNetwork(ctx context.Context, name string, location NetworkLocation) (*RemoteNetwork, error)
 	DeleteRemoteNetwork(ctx context.Context, id string) (bool, error)
 	GenerateConnectorToken(ctx context.Context, remoteNetworkID string, connectorName string) (*ConnectorToken, error)
-	RevokeConnector(ctx context.Context, id string) (bool, error)
+	RevokeConnector(ctx context.Context, id string, alsoRevokeShields *bool) (bool, error)
 	DeleteConnector(ctx context.Context, id string) (bool, error)
 	GenerateShieldToken(ctx context.Context, remoteNetworkID string, shieldName string) (*ShieldToken, error)
 	RevokeShield(ctx context.Context, id string) (bool, error)
@@ -1379,7 +1379,7 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 			return 0, false
 		}
 
-		return e.ComplexityRoot.Mutation.RevokeConnector(childComplexity, args["id"].(string)), true
+		return e.ComplexityRoot.Mutation.RevokeConnector(childComplexity, args["id"].(string), args["alsoRevokeShields"].(*bool)), true
 	case "Mutation.revokeDevice":
 		if e.ComplexityRoot.Mutation.RevokeDevice == nil {
 			break
@@ -4082,6 +4082,14 @@ func (ec *executionContext) field_Mutation_revokeConnector_args(ctx context.Cont
 		return nil, err
 	}
 	args["id"] = arg0
+	arg1, err := graphql.ProcessArgField(ctx, rawArgs, "alsoRevokeShields",
+		func(ctx context.Context, v any) (*bool, error) {
+			return ec.unmarshalOBoolean2ᚖbool(ctx, v)
+		})
+	if err != nil {
+		return nil, err
+	}
+	args["alsoRevokeShields"] = arg1
 	return args, nil
 }
 
@@ -6884,7 +6892,7 @@ func (ec *executionContext) _Mutation_revokeConnector(ctx context.Context, field
 		},
 		func(ctx context.Context) (any, error) {
 			fc := graphql.GetFieldContext(ctx)
-			return ec.Resolvers.Mutation().RevokeConnector(ctx, fc.Args["id"].(string))
+			return ec.Resolvers.Mutation().RevokeConnector(ctx, fc.Args["id"].(string), fc.Args["alsoRevokeShields"].(*bool))
 		},
 		func(ctx context.Context, next graphql.Resolver) graphql.Resolver {
 			directive0 := next
