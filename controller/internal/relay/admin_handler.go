@@ -2,13 +2,16 @@ package relay
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/valkey-io/valkey-go/valkeycompat"
 	"github.com/yourorg/ztna/controller/internal/provider"
@@ -18,9 +21,32 @@ import (
 // Matches the connector enrollment TTL (24h).
 const ProvisioningTokenTTL = 24 * time.Hour
 
-// AdminHandler serves POST /provider/relays.
-// RequireProvider must precede this: it verifies the provider JWT (aud=provider),
-// confirms an active provider_users row, and injects the provider Actor.
+// Relay admin API (Sprint 22 Phase A; Decision Record D-17, D-31, D-14):
+//
+//	POST   /provider/relays               super-admin, relay-ops  {name, dns_allowlist, ip_allowlist} → 201 {relay_id, provisioning_token, expires_at}
+//	POST   /provider/relays/{id}/revoke   super-admin             {reason, confirm_name} → 204
+//	DELETE /provider/relays/{id}          super-admin             {reason, confirm_name} → 204
+//
+// Every error is {"error":"<code>"} (with a safe "detail" for SAN validation);
+// internal errors are logged, never returned. Revoke and delete check the
+// operator's typed relay name against the stored name under the row lock and
+// write the audit row in the same transaction: an audit failure rolls the
+// whole mutation back. The provisioning token is returned once, with
+// Cache-Control: no-store, and never logged or audited.
+const (
+	maxRelayNameRunes = 128
+	maxReasonRunes    = 500
+)
+
+var (
+	errAlreadyRevoked       = errors.New("relay already revoked")
+	errAlreadyDeleted       = errors.New("relay already deleted")
+	errConfirmationMismatch = errors.New("typed relay name does not match")
+)
+
+// AdminHandler serves the relay admin routes. RequireProvider must precede
+// it: it verifies the provider JWT (aud=provider), confirms an active
+// provider_users row (TOTP-backed for super-admins) and injects the Actor.
 type AdminHandler struct {
 	Store         *Store
 	Redis         valkeycompat.Cmdable
@@ -45,41 +71,63 @@ type createRelayResponse struct {
 	ExpiresAt         time.Time `json:"expires_at"`
 }
 
+// destructiveRequest is the D-17 body of revoke and delete.
+type destructiveRequest struct {
+	Reason      string `json:"reason"`
+	ConfirmName string `json:"confirm_name"`
+}
+
+// validRelayName: trimmed, 1–128 runes, no control characters.
+func validRelayName(name string) bool {
+	if name == "" || utf8.RuneCountInString(name) > maxRelayNameRunes {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// Create: POST /provider/relays. Every input is validated before the first
+// write, so an invalid request leaves no relay row and no token state.
 func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		provider.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
 	// Provider identity injected by RequireProvider. Absent = wiring bug (handler
 	// registered without the middleware), never an anonymous call — fail closed.
 	actor, ok := provider.ActorFromContext(r.Context())
 	if !ok {
-		http.Error(w, "no provider actor in context", http.StatusInternalServerError)
+		log.Printf("relay admin: create without provider actor (wiring bug)")
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	// Authz chokepoint: only an actor permitted the relay.* namespace may issue a
-	// provisioning token. Alpha matrix: super-admin + relay-ops both pass.
+	// Authz chokepoint: super-admin and relay-ops may issue a provisioning token (D-31).
 	if err := h.Authz.CanIssueProvisioningToken(actor, provider.Target{Type: "relay"}); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		provider.WriteError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	var req createRelayRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+	if !provider.DecodeJSON(w, r, &req) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if req.Name == "" {
-		http.Error(w, "name required", http.StatusBadRequest)
+	name := strings.TrimSpace(req.Name)
+	if !validRelayName(name) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_name")
 		return
 	}
 	dnsAllowlist, err := validateDNSSANs(req.DNSAllowlist)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		provider.WriteErrorDetail(w, http.StatusBadRequest, "invalid_dns_san", err.Error())
 		return
 	}
 	ipAddresses, err := validateIPSANs(req.IPAllowlist)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		provider.WriteErrorDetail(w, http.StatusBadRequest, "invalid_ip_san", err.Error())
 		return
 	}
 	ipAllowlist := make([]string, len(ipAddresses))
@@ -90,27 +138,33 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	relayID, err := h.Store.CreateRelay(ctx, req.Name, dnsAllowlist, ipAllowlist)
+	relayID, err := h.Store.CreateRelay(ctx, name, dnsAllowlist, ipAllowlist)
 	if err != nil {
-		http.Error(w, "failed to create relay: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("relay admin: create relay: %v", err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
 	tokenString, jti, err := IssueProvisioningToken(h.JWTSecret, relayID, ProvisioningTokenTTL)
 	if err != nil {
-		http.Error(w, "failed to issue token: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("relay admin: issue provisioning token for relay %s: %v", relayID, err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	if err := StoreProvisioningJTI(ctx, h.Redis, jti, relayID, ProvisioningTokenTTL); err != nil {
-		http.Error(w, "failed to persist token jti: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("relay admin: persist provisioning jti for relay %s: %v", relayID, err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	if err := h.Store.AttachJTI(ctx, relayID, jti); err != nil {
-		http.Error(w, "failed to record token jti: "+err.Error(), http.StatusInternalServerError)
+		log.Printf("relay admin: record provisioning jti for relay %s: %v", relayID, err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	// Append-only provider audit. Best-effort: the relay + token already exist, so
-	// a failed audit write is logged, not surfaced to the caller.
+	// KNOWN GAP (D-14, tracked as a Sprint 22 follow-up): this audit is
+	// best-effort and outside any transaction — the relay row and token
+	// already exist, so a failed audit write is only logged. A server error
+	// part-way through the steps above can likewise leave a pending relay
+	// without a usable token. Revoke and delete ARE transactionally audited.
 	if err := h.ProviderStore.InsertAudit(ctx, provider.AuditEntry{
 		ProviderUserID: &actor.UserID,
 		ProviderEmail:  actor.Email,
@@ -118,139 +172,142 @@ func (h *AdminHandler) Create(w http.ResponseWriter, r *http.Request) {
 		TargetType:     "relay",
 		TargetID:       relayID,
 		Details: map[string]any{
-			"name": req.Name,
+			"name": name,
 			"ttl":  ProvisioningTokenTTL.String(),
 			"dns":  dnsAllowlist,
 			"ip":   ipAllowlist,
 		},
-		IPAddress: r.RemoteAddr,
+		IPAddress: provider.ClientIP(r),
 	}); err != nil {
 		log.Printf("provider audit (relay.create) failed for relay %s: %v", relayID, err)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(createRelayResponse{
+	provider.WriteJSON(w, http.StatusCreated, createRelayResponse{
 		RelayID:           relayID,
 		ProvisioningToken: tokenString,
 		ExpiresAt:         time.Now().Add(ProvisioningTokenTTL),
 	})
 }
 
-// Delete soft-deletes a relay — the PENDING-02 seam. Guarded by CanDeleteRelay
-// and audited (relay.delete). It marks the relay 'deleted' (no longer served to
-// connectors) but does NOT revoke the certificate; CRL enforcement lands in
-// PENDING-02.
-//
-// DELETE /provider/relays/{id}
+// Delete: DELETE /provider/relays/{id} {reason, confirm_name}. Super-admin
+// only (D-31). Revoke-then-remove in one transaction: every unexpired serial
+// goes on the CRL, the relay becomes 'deleted', and the audit row commits with
+// them. A revoked relay may be deleted; a deleted one can't be again.
 func (h *AdminHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		provider.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	actor, ok := provider.ActorFromContext(r.Context())
-	if !ok {
-		http.Error(w, "no provider actor in context", http.StatusInternalServerError)
-		return
-	}
-	relayID := r.PathValue("id")
-	if relayID == "" {
-		http.Error(w, "relay id required", http.StatusBadRequest)
-		return
-	}
-	if err := h.Authz.CanDeleteRelay(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	// Revoke-then-remove, atomically: revoke the certs (so they land on the CRL),
-	// flip the relay to 'deleted', and write the audit — all in one tx. The relay
-	// row + relay_certificates are preserved for the CRL.
-	_, err := h.Store.RevokeRelay(ctx, relayID, "relay deleted", func(ctx context.Context, tx pgx.Tx, revoked int) error {
-		if _, err := tx.Exec(ctx,
-			`UPDATE relays SET status = 'deleted', updated_at = NOW() WHERE id = $1`, relayID); err != nil {
-			return fmt.Errorf("mark relay deleted: %w", err)
-		}
-		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
-			ProviderUserID: &actor.UserID,
-			ProviderEmail:  actor.Email,
-			Action:         provider.ActionRelayDelete,
-			TargetType:     "relay",
-			TargetID:       relayID,
-			Details:        map[string]any{"note": "revoke-then-remove", "serials_revoked": revoked},
-			IPAddress:      r.RemoteAddr,
-		})
+	h.destructive(w, r, provider.ActionRelayDelete, func(actor provider.Actor, target provider.Target) error {
+		return h.Authz.CanDeleteRelay(actor, target)
 	})
-	if err != nil {
-		if errors.Is(err, ErrRelayNotFound) {
-			http.Error(w, "relay not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "failed to delete relay: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	// Convergence fan-out (broadcast + transport invalidation), post-commit.
-	if h.OnRelayRevoked != nil {
-		h.OnRelayRevoked(ctx, relayID)
-	}
-
-	w.WriteHeader(http.StatusNoContent)
 }
 
-// Revoke revokes a relay's certificate(s) WITHOUT removing the relay. It marks the
-// relay 'revoked' (terminal), adds every unexpired serial to the CRL, and runs the
-// convergence fan-out post-commit.
-//
-// POST /provider/relays/{id}/revoke
+// Revoke: POST /provider/relays/{id}/revoke {reason, confirm_name}. Super-admin
+// only (D-31). Revokes the relay's certificates WITHOUT removing it: the relay
+// becomes 'revoked' (terminal), every unexpired serial goes on the CRL, and the
+// audit row commits with them.
 func (h *AdminHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		provider.WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
+	h.destructive(w, r, provider.ActionRelayRevoke, func(actor provider.Actor, target provider.Target) error {
+		return h.Authz.CanRevokeRelay(actor, target)
+	})
+}
+
+// destructive is the shared revoke/delete path: authorize, validate the id and
+// the D-17 body, then revoke under the row lock with the name/status guard and
+// the audit row in the same transaction, and fan out only after commit.
+func (h *AdminHandler) destructive(w http.ResponseWriter, r *http.Request, action string,
+	authorize func(provider.Actor, provider.Target) error) {
 	actor, ok := provider.ActorFromContext(r.Context())
 	if !ok {
-		http.Error(w, "no provider actor in context", http.StatusInternalServerError)
+		log.Printf("relay admin: %s without provider actor (wiring bug)", action)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	relayID := r.PathValue("id")
 	if relayID == "" {
-		http.Error(w, "relay id required", http.StatusBadRequest)
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if err := h.Authz.CanRevokeRelay(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
+	if err := authorize(actor, provider.Target{Type: "relay", ID: relayID}); err != nil {
+		provider.WriteError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	// Validated before any query, so a malformed id never reaches a UUID cast.
+	if _, err := uuid.Parse(relayID); err != nil {
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	var req destructiveRequest
+	if !provider.DecodeJSON(w, r, &req) {
+		provider.WriteError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	reason := strings.TrimSpace(req.Reason)
+	if reason == "" {
+		provider.WriteError(w, http.StatusBadRequest, "reason_required")
+		return
+	}
+	if utf8.RuneCountInString(reason) > maxReasonRunes {
+		provider.WriteError(w, http.StatusBadRequest, "reason_too_long")
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	reason := r.URL.Query().Get("reason")
-	_, err := h.Store.RevokeRelay(ctx, relayID, reason, func(ctx context.Context, tx pgx.Tx, revoked int) error {
+	guard := func(name, status string) error {
+		switch {
+		case status == "deleted":
+			return errAlreadyDeleted
+		case action == provider.ActionRelayRevoke && status == "revoked":
+			return errAlreadyRevoked
+		case req.ConfirmName != name:
+			return errConfirmationMismatch
+		}
+		return nil
+	}
+	_, err := h.Store.RevokeRelayGuarded(ctx, relayID, reason, guard, func(ctx context.Context, tx pgx.Tx, revoked int) error {
+		if action == provider.ActionRelayDelete {
+			if _, err := tx.Exec(ctx,
+				`UPDATE relays SET status = 'deleted', updated_at = NOW() WHERE id = $1`, relayID); err != nil {
+				return fmt.Errorf("mark relay deleted: %w", err)
+			}
+		}
 		return h.ProviderStore.InsertAuditTx(ctx, tx, provider.AuditEntry{
 			ProviderUserID: &actor.UserID,
 			ProviderEmail:  actor.Email,
-			Action:         provider.ActionRelayRevoke,
+			Action:         action,
 			TargetType:     "relay",
 			TargetID:       relayID,
 			Details:        map[string]any{"serials_revoked": revoked, "reason": reason},
-			IPAddress:      r.RemoteAddr,
+			IPAddress:      provider.ClientIP(r),
 		})
 	})
-	if err != nil {
-		if errors.Is(err, ErrRelayNotFound) {
-			http.Error(w, "relay not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "failed to revoke relay: "+err.Error(), http.StatusInternalServerError)
+	switch {
+	case errors.Is(err, ErrRelayNotFound):
+		provider.WriteError(w, http.StatusNotFound, "not_found")
+		return
+	case errors.Is(err, errAlreadyDeleted):
+		provider.WriteError(w, http.StatusConflict, "already_deleted")
+		return
+	case errors.Is(err, errAlreadyRevoked):
+		provider.WriteError(w, http.StatusConflict, "already_revoked")
+		return
+	case errors.Is(err, errConfirmationMismatch):
+		provider.WriteError(w, http.StatusBadRequest, "confirmation_mismatch")
+		return
+	case err != nil:
+		log.Printf("relay admin: %s relay %s: %v", action, relayID, err)
+		provider.WriteError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
 	// Convergence fan-out (broadcast + transport invalidation), post-commit.
 	if h.OnRelayRevoked != nil {
 		h.OnRelayRevoked(ctx, relayID)
 	}
-
 	w.WriteHeader(http.StatusNoContent)
 }

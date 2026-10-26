@@ -3073,3 +3073,13 @@ serves on `127.0.0.1:9102`.
 - Decisions recorded in `Sprint22/path.md`: OQ-1 yes (super-admin resets another operator's TOTP, reason required); OQ-2 no mandatory relay-ops TOTP (voluntary enrolment deferred); OQ-3 no grace period.
 - Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
 - Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
+
+## 2026-10-26 (later) — Sprint 22 Phase A implemented test-first (Barath)
+- Relay admin API hardening (D-17, D-31):
+  - relay-ops can no longer revoke or delete (server-side `decide()` exception);
+  - revoke/delete require `{reason, confirm_name}`, checked against the stored name under the row lock (`RevokeRelayGuarded`);
+  - JSON error codes, UUID check before queries, `already_revoked` / `already_deleted`;
+  - audit IP without port, forwarding headers ignored;
+  - Create: bounded decoding, name/SAN codes, 201 + `no-store`.
+- Tests written first and confirmed failing (10). Gate: `go test ./...` 872 pass / 0 fail / 32 skip (skips outside Phase A); changed packages 0 skips. Console untouched (395 pass).
+- FU-1 recorded: Create audit not transactional (D-14 gap). Runbook revoke command updated to the JSON body. Not committed; branch `sprint22/phase-a-relay-admin-hardening`.

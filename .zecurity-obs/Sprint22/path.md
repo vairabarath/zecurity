@@ -171,12 +171,12 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 
 > **Phase file:** [[Sprint22/Member2-Go-Rust/Phase2-Relay-Admin-API-Hardening]]. **Depends on T merged.**
 
-- [ ] **A1** Tests first: role matrix (relay-ops 403 on revoke/delete, 2xx on create), every error code, reason/confirmation validation, repeat-action 409s, audit row contents (reason, actor, client IP), rollback on audit failure.
-- [ ] **A2** `decide()`: the D-31 exception for `relay.revoke` / `relay.delete`.
-- [ ] **A3** Export `provider.WriteError` / `provider.ClientIP` (thin wrappers over the existing helpers); JSON errors on all three relay admin routes; no internal error text.
-- [ ] **A4** Revoke/delete JSON body `{reason, confirm_name}`; reason into audit details and `revocation_reason`; `clientIP(r)` for the audit IP.
-- [ ] **A5** `already_revoked` / `already_deleted` handling; stale `Delete` doc comment corrected.
-- [ ] **A-gate**
+- [x] **A1** *(2026-10-26: written first; all 10 failed for the expected reasons — relay-ops allowed to revoke/delete, plain-text errors, silent repeats, leaked DB error on audit failure, `RemoteAddr` with port.)* Tests first: role matrix (relay-ops 403 on revoke/delete, 2xx on create), every error code, reason/confirmation validation, repeat-action 409s, audit row contents (reason, actor, client IP), rollback on audit failure.
+- [x] **A2** `decide()`: the D-31 exception for `relay.revoke` / `relay.delete`.
+- [x] **A3** Export `provider.WriteError` / `provider.ClientIP` (thin wrappers over the existing helpers); JSON errors on all three relay admin routes; no internal error text.
+- [x] **A4** Revoke/delete JSON body `{reason, confirm_name}`; reason into audit details and `revocation_reason`; `clientIP(r)` for the audit IP.
+- [x] **A5** `already_revoked` / `already_deleted` handling (name and status checked under the row lock via the new `Store.RevokeRelayGuarded`; `RevokeRelay` unchanged for existing callers); stale `Delete` doc comment corrected.
+- [x] **A-gate** *(2026-10-26, local: `go test ./...` 872 pass / 0 fail / 32 skip, all skips outside Phase A; relay, provider, middleware and cmd/server ran their DB- and Valkey-backed tests with 0 skips. Console untouched: 395 pass. Live AT-A on the lab still pending (M1).)*
 
 ### Phase E — M2: Relay enrolment (D-30, D-31, D-20)
 
@@ -238,6 +238,12 @@ Run with the Sprint 21 DB/Valkey test environment (throwaway databases, isolated
 - [ ] The console's writes are exactly: auth calls, operator management, relay create/revoke/delete/drain/resume (API-surface test).
 - [ ] No connector, relay, proto or `admin/` changes; `workspaces.status='active'` predicates untouched.
 - [ ] All scenarios in [[Sprint22/Acceptance-Test-Plan]] pass.
+
+## Follow-ups (tracked)
+
+| # | Item | Source | Status |
+|---|------|--------|--------|
+| FU-1 | **Create audit atomicity (D-14).** `POST /provider/relays` writes its `relay.create` audit best-effort, outside any transaction, after the relay row, the Valkey JTI and the JTI attach. A failed audit write is only logged, and a server error part-way through can leave a pending relay without a usable token. Revoke and delete are transactionally audited (Phase A). Fix: relay row + audit in one transaction, then token, Valkey JTI and attach, with clean-up on failure. | Phase A decision, 2026-10-26 | Open — separate change; Create must not be described as transactionally audited until then |
 
 ## Post-Sprint Fixes
 

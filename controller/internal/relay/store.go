@@ -344,20 +344,36 @@ func (s *Store) MarkDeleted(ctx context.Context, id string) error {
 // needs the serial until not_after. Returns ErrRelayNotFound if the relay is gone.
 func (s *Store) RevokeRelay(ctx context.Context, relayID, reason string,
 	inTx func(ctx context.Context, tx pgx.Tx, revoked int) error) (int, error) {
+	return s.RevokeRelayGuarded(ctx, relayID, reason, nil, inTx)
+}
+
+// RevokeRelayGuarded is RevokeRelay with a guard that sees the relay's stored
+// name and status under the row lock, before anything changes (Sprint 22
+// Phase A, D-17). A guard error aborts the transaction with nothing written;
+// the admin handler uses it for the typed-name confirmation and to refuse a
+// repeat revoke or any action on a deleted relay. A nil guard is RevokeRelay.
+func (s *Store) RevokeRelayGuarded(ctx context.Context, relayID, reason string,
+	guard func(name, status string) error,
+	inTx func(ctx context.Context, tx pgx.Tx, revoked int) error) (int, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin revoke relay: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	var status string
+	var name, status string
 	if err := tx.QueryRow(ctx,
-		`SELECT status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
-	).Scan(&status); err != nil {
+		`SELECT name, status FROM relays WHERE id = $1 FOR UPDATE`, relayID,
+	).Scan(&name, &status); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, ErrRelayNotFound
 		}
 		return 0, fmt.Errorf("lock relay for revoke: %w", err)
+	}
+	if guard != nil {
+		if err := guard(name, status); err != nil {
+			return 0, err
+		}
 	}
 
 	tag, err := tx.Exec(ctx,

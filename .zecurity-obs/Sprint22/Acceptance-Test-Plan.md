@@ -59,7 +59,8 @@ tags: [sprint22, tests, acceptance, provider-dashboard, totp, relay-management, 
 | AT-A3 | Valid revoke by super-admin | 204; serials on the CRL with the reason; audit row has the reason and the client IP without port; connectors migrate |
 | AT-A4 | Revoke again; revoke a deleted relay; delete a revoked relay | 409 `already_revoked`; 409 `already_deleted`; 204 |
 | AT-A5 | Any 5xx path | Body exactly `{"error":"server_error"}` |
-| AT-A6 | relay-ops creates a relay | 201 (create still allowed) |
+| AT-A6 | relay-ops creates a relay | 201 (create still allowed), `Cache-Control: no-store`; an invalid name/SAN → 400 with no relay row left behind |
+| AT-A7 | Two super-admins revoke the same relay at once | Exactly one 204; the other 409 `already_revoked` |
 
 ## Phase E — Relay enrolment
 
