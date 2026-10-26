@@ -3054,4 +3054,11 @@ serves on `127.0.0.1:9102`.
   - 60 s keep-alive hold, 0 failures during the bursts;
   - RSS 18.6 → 23.0 MB.
 - **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
-- Committed locally, not pushed.
+- Committed locally, not pushed at the time; pushed later as PR #134.
+
+
+## 2026-10-26 — Sprint 20 Fix 12 rework after the PR #134 review: SYN gate, live PASS
+- Review (Barath, changes requested): a retransmitted SYN could open a second connection (reproduced in the lab harness: 2 relays for one 4-tuple); 16 listeners per resource cost resident memory and per-packet scans; >16 SYNs per poll still reset.
+- Rework (`e87b0b34`): a SYN gate in front of smoltcp's receive path (drops a bare SYN for an owned 4-tuple; holds SYNs beyond the free listeners for the next poll, never resets them) and back to 1 listener per resource. Client tests 272 pass; mutation checks pass.
+- Live (50 resources): 64/64 ×3 and 128/128 parallel (base 2/64, PR 16/64); RSS 34.8 MB after `up` (base 35.2, PR 47.7); `syn_deferred=316`, 0 RST, 0 duplicates.
+- Docs: Fix 12 record (D-2, corrections, review table, AF12-L2), Sprint 9 Phase 1 Post-Phase Fixes, path.md F37. Not pushed.
