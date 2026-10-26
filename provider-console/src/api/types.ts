@@ -6,12 +6,31 @@ export interface LoginResponse {
   token: string
   expires_in: number
   password_change_required: boolean
+  /**
+   * Sprint 22 Phase T: set when `token` is a confined MFA-stage token. The
+   * operator must verify a TOTP code ("verify") or set TOTP up ("enroll")
+   * before any other route accepts them.
+   */
+  mfa?: MFAStage
 }
 
-/** POST /provider/auth/password → 200. The previous token is dead (generation bump). */
+export type MFAStage = 'verify' | 'enroll'
+
+/**
+ * POST /provider/auth/password and the TOTP verify/confirm calls → 200. The
+ * previous token is dead (generation bump). After a password change an
+ * operator who requires TOTP gets an MFA-stage token (`mfa`), never a full one.
+ */
 export interface SessionResponse {
   token: string
   expires_in: number
+  mfa?: MFAStage
+}
+
+/** POST /provider/auth/totp/enroll → 200. Shown once; never stored. */
+export interface TOTPEnrollResponse {
+  secret: string
+  otpauth_uri: string
 }
 
 /**
@@ -45,6 +64,14 @@ export const ErrorCode = {
   // RequireProvider middleware
   passwordChangeRequired: 'password_change_required',
   notAProviderUser: 'not a provider user',
+  // TOTP (Sprint 22 Phase T)
+  invalidCode: 'invalid_code',
+  mfaRequired: 'mfa_required',
+  totpAlreadyEnabled: 'totp_already_enabled',
+  totpNotStarted: 'totp_not_started',
+  totpNotEnrolled: 'totp_not_enrolled',
+  reasonRequired: 'reason_required',
+  reasonTooLong: 'reason_too_long',
   // operator routes (Phase U). GET /provider/users answers 403 with
   // "provider action forbidden" instead; match operator 403s on the status.
   forbidden: 'forbidden',
@@ -75,6 +102,8 @@ export interface OperatorView {
   must_change_password: boolean
   /** False after enable (the old credential is cleared) until a reset. */
   has_password: boolean
+  /** TOTP confirmed (Sprint 22 Phase T). */
+  totp_enabled: boolean
 }
 
 /**

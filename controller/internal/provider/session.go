@@ -30,20 +30,26 @@ type ProviderClaims struct {
 	// change). RequireProvider rejects it everywhere except the password route.
 	PWC bool `json:"pwc,omitempty"`
 	// AMR records how the operator authenticated (RFC 8176 values): ["pwd"] for
-	// local password login. Mandatory super-admin TOTP (D-28) adds "otp".
-	AMR                  []string `json:"amr"`
-	jwt.RegisteredClaims          // Subject=provider_user_id, Issuer=ProviderIssuer, Audience=[provider]
+	// local password login, ["pwd","otp"] once a TOTP code was verified (D-28).
+	AMR []string `json:"amr"`
+	// MFA marks a confined MFA-stage token ("verify" or "enroll"): the password
+	// was right, the TOTP step is still open. RequireProvider accepts it only on
+	// routes that opt in with AllowMFAToken for that stage.
+	MFA                  string `json:"mfa,omitempty"`
+	jwt.RegisteredClaims        // Subject=provider_user_id, Issuer=ProviderIssuer, Audience=[provider]
 }
 
 // issueProviderToken signs a provider JWT for u. Unexported on purpose: the ONLY
-// caller is IdentityService.IssueSession, the single minting path (D-29).
-func issueProviderToken(key []byte, u *ProviderUser, amr []string, pwc bool, ttl time.Duration, now time.Time) (string, error) {
+// callers are IdentityService.IssueSession and IssueMFAToken, the single
+// minting path (D-29).
+func issueProviderToken(key []byte, u *ProviderUser, amr []string, pwc bool, mfa string, ttl time.Duration, now time.Time) (string, error) {
 	claims := ProviderClaims{
 		Role:  u.Role,
 		Email: u.Email,
 		Gen:   u.SessionGeneration,
 		PWC:   pwc,
 		AMR:   amr,
+		MFA:   mfa,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   u.ID,
 			Issuer:    appmeta.ProviderIssuer,

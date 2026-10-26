@@ -55,8 +55,10 @@ func newOperatorEnv(t *testing.T) *operatorEnv {
 	mux.Handle("POST /provider/users/{id}/disable", require(http.HandlerFunc(ops.Disable)))
 	mux.Handle("POST /provider/users/{id}/enable", require(http.HandlerFunc(ops.Enable)))
 	mux.Handle("POST /provider/users/{id}/reset-password", require(http.HandlerFunc(ops.ResetPassword)))
+	rig := addTOTPRoutes(mux, ids, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	rig.register(t, srv)
 
 	env := &operatorEnv{srv: srv, pool: pool}
 	env.admin = env.activate(t, e2eEmail, e2eTempPass, e2eFinalPass)
@@ -87,7 +89,7 @@ func (e *operatorEnv) activate(t *testing.T, email, temp, final string) string {
 	}
 	var full session
 	_ = json.Unmarshal([]byte(body), &full)
-	return full.Token
+	return completeMFA(t, e.srv, full).Token
 }
 
 type createdOperator struct {
@@ -226,8 +228,17 @@ func TestChangeRole_EndsSessions(t *testing.T) {
 	if code, _ := call(t, e.srv, http.MethodGet, "/provider/me", opsTok, nil); code != http.StatusUnauthorized {
 		t.Fatalf("old token after role change: %d, want 401", code)
 	}
+	// A promoted operator is now a super-admin, so sign-in asks for TOTP
+	// enrolment first (D-28, Sprint 22 Phase T); then the new role applies.
 	_, s := e.loginAs(t, "ops@inkyank.com", "ops-real-password-1")
-	if code, _ := call(t, e.srv, http.MethodGet, "/provider/users", s.Token, nil); code != http.StatusOK {
+	if s.MFA != provider.MFAStageEnroll {
+		t.Fatalf("promoted operator must enrol TOTP before a full session: %+v", s)
+	}
+	if code, _ := call(t, e.srv, http.MethodGet, "/provider/users", s.Token, nil); code != http.StatusForbidden {
+		t.Fatalf("enrol-stage token listing users: %d, want 403", code)
+	}
+	full := completeMFA(t, e.srv, s)
+	if code, _ := call(t, e.srv, http.MethodGet, "/provider/users", full.Token, nil); code != http.StatusOK {
 		t.Fatalf("promoted operator listing users: %d, want 200", code)
 	}
 	// Same role again: 200, no-op.

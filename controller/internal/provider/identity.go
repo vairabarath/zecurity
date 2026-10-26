@@ -29,6 +29,25 @@ const (
 	minProviderKeyBytes = 32
 )
 
+// Mandatory TOTP (Sprint 22 Phase T; D-28, D-33).
+const (
+	// AMROTP is the RFC 8176 "amr" value for a verified TOTP code.
+	AMROTP = "otp"
+
+	// MFA stages of a confined token (claim "mfa"): the password was right and
+	// the operator still has to verify a code, or (a super-admin without TOTP)
+	// enrol one. Each is accepted only by its own routes (AllowMFAToken).
+	MFAStageVerify = "verify"
+	MFAStageEnroll = "enroll"
+
+	// MFATokenTTL is the lifetime of an MFA-stage token.
+	MFATokenTTL = 5 * time.Minute
+)
+
+// ErrTOTPRequired: IssueSession was asked for a full session without a
+// verified TOTP code for an operator who requires one (RequiresTOTP).
+var ErrTOTPRequired = errors.New("issue provider session: totp verification required")
+
 // ErrInvalidCredentials is the single error every failed login maps to —
 // unknown email, disabled account, no local password, wrong password — so the
 // response never reveals which accounts exist.
@@ -110,6 +129,7 @@ type IdentityService struct {
 	key     []byte
 	fullTTL time.Duration
 	pwcTTL  time.Duration
+	mfaTTL  time.Duration
 	now     func() time.Time
 }
 
@@ -123,6 +143,7 @@ func NewIdentityService(providerKey string) (*IdentityService, error) {
 		key:     []byte(providerKey),
 		fullTTL: ProviderSessionTTL,
 		pwcTTL:  PasswordChangeTokenTTL,
+		mfaTTL:  MFATokenTTL,
 		now:     time.Now,
 	}, nil
 }
@@ -146,22 +167,56 @@ func ValidateProviderSigningKey(providerKey, tenantSecret string) error {
 // the caller just loaded from provider_users: role, email and
 // session_generation come from it, never from an Authenticator's input.
 // pwcOnly issues a short-lived password-change-only token.
+//
+// A full session for an operator who requires TOTP (RequiresTOTP) must carry
+// "otp" in amr, or IssueSession refuses with ErrTOTPRequired: no caller —
+// login, password change or anything added later — can mint a full session
+// that skips the second factor (D-28, OQ-3).
 func (s *IdentityService) IssueSession(u *ProviderUser, amr []string, pwcOnly bool) (token string, expiresIn int64, err error) {
-	if u == nil || u.ID == "" || u.Email == "" || u.Role == "" {
-		return "", 0, errors.New("issue provider session: incomplete provider user")
+	if err := checkSessionUser(u, amr); err != nil {
+		return "", 0, err
 	}
-	if len(amr) == 0 {
-		return "", 0, errors.New("issue provider session: amr required")
+	if !pwcOnly && RequiresTOTP(u) && !hasAMR(amr, AMROTP) {
+		return "", 0, ErrTOTPRequired
 	}
 	ttl := s.fullTTL
 	if pwcOnly {
 		ttl = s.pwcTTL
 	}
-	token, err = issueProviderToken(s.key, u, amr, pwcOnly, ttl, s.now())
+	token, err = issueProviderToken(s.key, u, amr, pwcOnly, "", ttl, s.now())
 	if err != nil {
 		return "", 0, err
 	}
 	return token, int64(ttl / time.Second), nil
+}
+
+// IssueMFAToken mints the confined token that follows a correct password for
+// an operator who requires TOTP: stage MFAStageVerify (enter a code) or
+// MFAStageEnroll (a super-admin with no TOTP yet). It carries amr ["pwd"] and
+// works only on its stage's routes; signed by the same path as IssueSession.
+func (s *IdentityService) IssueMFAToken(u *ProviderUser, stage string) (token string, expiresIn int64, err error) {
+	if stage != MFAStageVerify && stage != MFAStageEnroll {
+		return "", 0, fmt.Errorf("issue mfa token: unknown stage %q", stage)
+	}
+	amr := []string{AMRPassword}
+	if err := checkSessionUser(u, amr); err != nil {
+		return "", 0, err
+	}
+	token, err = issueProviderToken(s.key, u, amr, false, stage, s.mfaTTL, s.now())
+	if err != nil {
+		return "", 0, err
+	}
+	return token, int64(s.mfaTTL / time.Second), nil
+}
+
+func checkSessionUser(u *ProviderUser, amr []string) error {
+	if u == nil || u.ID == "" || u.Email == "" || u.Role == "" {
+		return errors.New("issue provider session: incomplete provider user")
+	}
+	if len(amr) == 0 {
+		return errors.New("issue provider session: amr required")
+	}
+	return nil
 }
 
 // Verify validates a provider token with this service's key.

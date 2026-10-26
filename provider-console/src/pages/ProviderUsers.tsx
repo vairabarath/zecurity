@@ -9,11 +9,12 @@ import {
   enableOperator,
   listOperators,
   resetOperatorPassword,
+  resetOperatorTotp,
 } from '@/api/operators'
 import { ErrorCode, type OperatorView } from '@/api/types'
 import { ROLE_LABELS, type ProviderRole } from '@/auth/roles'
 import { useSessionStore } from '@/auth/session'
-import { AddOperatorDialog, ChangeRoleDialog, ConfirmDialog } from '@/components/OperatorDialogs'
+import { AddOperatorDialog, ChangeRoleDialog, ConfirmDialog, ResetMfaDialog } from '@/components/OperatorDialogs'
 import { PageHeader } from '@/components/PageHeader'
 import { RoleBadge } from '@/components/RoleBadge'
 import { TemporaryPasswordDialog, type TemporaryCredential } from '@/components/TemporaryPasswordDialog'
@@ -49,6 +50,7 @@ type Action =
   | { kind: 'disable'; op: OperatorView }
   | { kind: 'enable'; op: OperatorView }
   | { kind: 'reset'; op: OperatorView }
+  | { kind: 'reset-mfa'; op: OperatorView }
   /** After a successful enable: the operator has no password until a reset. */
   | { kind: 'reset-offer'; op: OperatorView }
 
@@ -281,6 +283,18 @@ export function ProviderUsers() {
         />
       )}
 
+      {action?.kind === 'reset-mfa' && (
+        <ResetMfaDialog
+          operator={action.op}
+          pending={pending}
+          error={actionError}
+          onCancel={close}
+          onConfirm={(reason) =>
+            void run(() => resetOperatorTotp(action.op.id, reason), () => done(`${action.op.email} must set up two-factor authentication again.`))
+          }
+        />
+      )}
+
       <TemporaryPasswordDialog credential={credential} onClose={() => setCredential(null)} />
     </div>
   )
@@ -363,6 +377,7 @@ function OperatorsTable({
                     {!disabled && op.has_password && op.must_change_password && (
                       <Badge variant="warning">Must change password</Badge>
                     )}
+                    {op.totp_enabled && <Badge variant="info">MFA on</Badge>}
                   </div>
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-subtle-foreground" title={formatDateTime(op.last_login_at)}>
@@ -392,6 +407,9 @@ function OperatorsTable({
                             <DropdownMenuItem onSelect={() => onAction({ kind: 'reset', op })}>
                               Reset password
                             </DropdownMenuItem>
+                            {op.totp_enabled && (
+                              <DropdownMenuItem onSelect={() => onAction({ kind: 'reset-mfa', op })}>Reset MFA</DropdownMenuItem>
+                            )}
                             <DropdownMenuItem
                               className="text-critical-text focus:text-critical-text"
                               onSelect={() => onAction({ kind: 'disable', op })}

@@ -17,6 +17,7 @@ const END_NOTICES: Record<EndReason, string> = {
   session_ended: 'Your session has ended. Sign in again.',
   disabled: 'This account is disabled. Contact a super-admin.',
   unverified: 'Your session could not be verified. Sign in again.',
+  mfa_required: 'Sign in again and confirm with your authenticator app.',
 }
 
 // What the controller enforces, stated plainly for the sign-in page.
