@@ -512,3 +512,17 @@ zecurity-client up
 ip rule show | grep 'fwmark 0x5a'
 ```
 Expected: exactly one rule, `from all fwmark 0x5a lookup 105`. No `fwmark 0x5a lookup main` rule should remain.
+
+
+### Fix: a saturating upload was cut off (Sprint 20 Fix 15, F49)
+**Issue:** an app uploading faster than the tunnel drained had its flow closed (`flow queue full; closing TCP flow`).
+
+**Root cause:** `drive_relay` read the app's bytes before knowing the 64-slot `tcp_to_quic` channel had room, so on a full channel it had bytes it could neither forward nor put back.
+
+**Fix Applied (`client/src/net_stack.rs`, `drive_relay`):**
+```
+// BEFORE: recv_slice(buf) → tx.try_send(chunk) → Full ⇒ socket.close()
+// AFTER:  let permit = tx.try_reserve()?  (Full ⇒ stop reading; bytes stay in smoltcp)
+//         recv_slice(buf) → permit.send(chunk)   // TCP window throttles the app
+```
+**Related:** `.zecurity-obs/Sprint20/Fixes/Fix15-Client-Upload-Backpressure.md`.
