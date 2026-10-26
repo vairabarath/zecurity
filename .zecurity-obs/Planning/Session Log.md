@@ -3034,6 +3034,35 @@ serves on `127.0.0.1:9102`.
 - **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
 - Committed locally, not pushed.
 
+## 2026-10-24 — PR #133 CI fixed (infra, not code)
+
+- **Cause:** the connector, shield and relay jobs failed at `Install protoc`. `apt-get install` ran without `apt-get update`, and Ubuntu had replaced protobuf `3.21.12-8.2ubuntu0.3`, so the stale runner index returned 404. The client job already updated first and passed. It would affect every PR, since `ci.yml` is the same on `fixed-pendings`.
+- **Fix:** `2352a390`, `apt-get update && apt-get install -y protobuf-compiler`.
+- **Pre-checked locally, crate by crate:** CI's build `--all-targets`, clippy and test for connector (also without `connector/.env`; build.rs uses its defaults), shield, relay and client, each cleaned afterwards (~20 GiB of `target/` freed plus the Go build cache).
+- **Pushed** with Fix 11 (`905989a2`, `3132935d`) after a clean pre-push scan. CI run 40069658645: **7/7 pass**; PR #133 mergeable.
+- `fixed-pendings` gained docs-only PR #132 meanwhile (no overlap).
+
+## 2026-10-24 — Sprint 20 Fix 12 (F37: client reset concurrent connections): FIXED, live PASS
+
+- **Cause:** one smoltcp listening socket per resource, re-armed only after `iface.poll`, so further SYNs in the same poll got a RST.
+- **Fix** (`d654879`, design approved, D-1 = 16): a pool of 16 listening sockets per resource; every accepted one is promoted and refilled each poll; removal handles the whole pool.
+- **Tests:** client 268 (+3); mutants 6/6.
+- **Live** (installed client, resource on udaya .59:18091):
+  - 3×8 parallel 4/24 → **24/24**;
+  - 3×16 8/48 → **48/48**;
+  - 24 sequential 24/24;
+  - 60 s keep-alive hold, 0 failures during the bursts;
+  - RSS 18.6 → 23.0 MB.
+- **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
+- Committed locally, not pushed at the time; pushed later as PR #134.
+
+
+## 2026-10-26 — Sprint 20 Fix 12 rework after the PR #134 review: SYN gate, live PASS
+- Review (Barath, changes requested): a retransmitted SYN could open a second connection (reproduced in the lab harness: 2 relays for one 4-tuple); 16 listeners per resource cost resident memory and per-packet scans; >16 SYNs per poll still reset.
+- Rework (`e87b0b34`): a SYN gate in front of smoltcp's receive path (drops a bare SYN for an owned 4-tuple; holds SYNs beyond the free listeners for the next poll, never resets them) and back to 1 listener per resource. Client tests 272 pass; mutation checks pass.
+- Live (50 resources): 64/64 ×3 and 128/128 parallel (base 2/64, PR 16/64); RSS 34.8 MB after `up` (base 35.2, PR 47.7); `syn_deferred=316`, 0 RST, 0 duplicates.
+- Docs: Fix 12 record (D-2, corrections, review table, AF12-L2), Sprint 9 Phase 1 Post-Phase Fixes, path.md F37. Not pushed.
+
 
 ## 2026-10-26 — Sprint 20 Fix 14 (+ Fix 15 / F49): live acceptance PASS
 - Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).

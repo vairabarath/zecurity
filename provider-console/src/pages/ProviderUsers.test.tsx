@@ -96,13 +96,13 @@ describe('Provider users: role guard', () => {
     const { calls } = mockFetch({})
     renderApp('/users')
     expect(screen.getByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Provider users' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Operators' })).not.toBeInTheDocument()
     expect(calls).toHaveLength(0)
   })
 
   it('super-admin sees the nav entry', async () => {
     setup()
-    expect(await screen.findByRole('link', { name: 'Provider users' })).toHaveAttribute('href', '/users')
+    expect(await screen.findByRole('link', { name: 'Operators' })).toHaveAttribute('href', '/users')
   })
 })
 
