@@ -1,6 +1,6 @@
 // The single role matrix for the provider console (Sprint 21 C3). Routes
 // (RequireRole) and the nav both read SECTIONS, so a new page is one entry
-// here: C-b adds Provider users, Phase P adds Relays/Tenants/Audit/
+// here: C-b added Operators, Phase P added Relays/Tenants/Audit/
 // Certificates.
 //
 // This is UX only. The controller authorizes every /provider/* request on
@@ -20,15 +20,17 @@ export interface Section {
   path: string
   label: string
   roles: readonly ProviderRole[]
+  /** Sidebar group heading; sections without one sit at the top. */
+  group?: string
 }
 
 export const SECTIONS: readonly Section[] = [
-  { key: 'home', path: '/', label: 'Home', roles: PROVIDER_ROLES },
-  { key: 'relays', path: '/relays', label: 'Relays', roles: PROVIDER_ROLES },
-  { key: 'tenants', path: '/tenants', label: 'Tenants', roles: ['super-admin'] },
-  { key: 'audit', path: '/audit', label: 'Audit', roles: ['super-admin'] },
-  { key: 'certificates', path: '/certificates', label: 'Certificates', roles: ['super-admin'] },
-  { key: 'users', path: '/users', label: 'Provider users', roles: ['super-admin'] },
+  { key: 'home', path: '/', label: 'Overview', roles: PROVIDER_ROLES },
+  { key: 'relays', path: '/relays', label: 'Relays', roles: PROVIDER_ROLES, group: 'Fleet' },
+  { key: 'tenants', path: '/tenants', label: 'Tenants', roles: ['super-admin'], group: 'Fleet' },
+  { key: 'certificates', path: '/certificates', label: 'Certificates', roles: ['super-admin'], group: 'Trust' },
+  { key: 'audit', path: '/audit', label: 'Audit log', roles: ['super-admin'], group: 'Governance' },
+  { key: 'users', path: '/users', label: 'Operators', roles: ['super-admin'], group: 'Governance' },
 ]
 
 /** The roles a section needs, for wrapping its route in RequireRole. */

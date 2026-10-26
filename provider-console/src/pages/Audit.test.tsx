@@ -70,7 +70,7 @@ describe('Audit: authorization', () => {
     mockFetch({ 'GET /provider/audit': page(ENTRIES) })
     renderAudit()
     await screen.findByRole('table', { name: 'Audit entries' })
-    expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name: 'Audit' })).toHaveAttribute('href', '/audit')
+    expect(within(screen.getByRole('navigation', { name: 'Sections' })).getByRole('link', { name: 'Audit log' })).toHaveAttribute('href', '/audit')
   })
 
   it('relay-ops: no nav entry, Forbidden on direct navigation, zero requests', async () => {
@@ -78,7 +78,7 @@ describe('Audit: authorization', () => {
     const { calls } = mockFetch({})
     renderAudit()
     expect(screen.getByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
-    expect(within(screen.getByRole('navigation', { name: 'Sections' })).queryByRole('link', { name: 'Audit' })).not.toBeInTheDocument()
+    expect(within(screen.getByRole('navigation', { name: 'Sections' })).queryByRole('link', { name: 'Audit log' })).not.toBeInTheDocument()
     await quiet()
     expect(calls).toHaveLength(0)
   })

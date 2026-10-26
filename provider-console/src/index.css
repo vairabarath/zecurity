@@ -1,45 +1,57 @@
 /* Zecurity Provider Console theme.
- * Design tokens copied from admin/src/index.css (same design language);
- * only the accent differs: violet for the provider/control-plane identity.
- * admin/ itself is not modified. */
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+ * A calm dark palette with one violet accent, so operators can always tell
+ * this control-plane app apart from a tenant's admin dashboard (admin/ is
+ * not modified). Status colours always come with a text label. */
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --font-display: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-body: 'Plus Jakarta Sans', ui-sans-serif, system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --font-display: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-body: 'Geist', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, monospace;
 
-  --color-background: oklch(0.17 0.018 255);
-  --color-foreground: oklch(0.97 0.005 250);
-  --color-card: oklch(0.25 0.018 255);
-  --color-card-foreground: oklch(0.97 0.005 250);
-  --color-popover: oklch(0.25 0.018 255);
-  --color-popover-foreground: oklch(0.97 0.005 250);
-  /* Provider Console identity: violet accent (admin uses teal 0.86 0.095 175). */
-  --color-primary: oklch(0.78 0.12 290);
-  --color-primary-foreground: oklch(0.20 0.03 290);
-  --color-secondary: oklch(0.29 0.018 255);
-  --color-secondary-foreground: oklch(0.80 0.010 250);
-  --color-muted: oklch(0.29 0.018 255);
-  --color-muted-foreground: oklch(0.62 0.012 250);
-  --color-accent: oklch(0.33 0.018 255);
-  --color-accent-foreground: oklch(0.97 0.005 250);
-  --color-destructive: oklch(0.75 0.16 25);
-  --color-destructive-foreground: oklch(0.97 0.005 250);
-  --color-border: oklch(0.33 0.016 255);
-  --color-input: oklch(0.29 0.018 255);
-  --color-ring: oklch(0.78 0.12 290 / 0.40);
+  --color-background: #0b0e14;
+  --color-foreground: #e7eaf0;
+  --color-sidebar: #0d1017;
+  --color-card: #11151d;
+  --color-card-foreground: #e7eaf0;
+  --color-popover: #151a24;
+  --color-popover-foreground: #e7eaf0;
+  /* Provider Console identity: violet accent (admin uses teal). */
+  --color-primary: #9b8cff;
+  --color-primary-foreground: #16122e;
+  --color-primary-soft: #1d1c33;
+  --color-secondary: #161b25;
+  --color-secondary-foreground: #d5dae4;
+  --color-muted: #161b25;
+  --color-muted-foreground: #8b93a7;
+  --color-subtle-foreground: #a3abbd;
+  --color-accent: #1b212c;
+  --color-accent-foreground: #e7eaf0;
+  --color-destructive: #f87171;
+  --color-destructive-foreground: #e7eaf0;
+  --color-border: #232a37;
+  --color-border-strong: #2a3140;
+  --color-input: #262d3b;
+  --color-field: #0d1017;
+  --color-ring: rgb(155 140 255 / 0.55);
 
-  --color-secure: oklch(0.82 0.12 160);
-  --color-warning: oklch(0.85 0.13 80);
-  --color-critical: oklch(0.75 0.16 25);
-  --color-info: oklch(0.78 0.10 235);
+  /* Status hues: solid (dots, bars) and readable text on a tinted pill. */
+  --color-secure: #3ecf8e;
+  --color-secure-text: #5fe0a6;
+  --color-warning: #f2b544;
+  --color-warning-text: #f5c56b;
+  --color-critical: #f87171;
+  --color-critical-text: #fb9696;
+  --color-info: #60a5fa;
+  --color-info-text: #8cbffc;
+  --color-neutral: #8b93a7;
+  --color-neutral-text: #b5bccb;
 
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
   --radius-2xl: 1.25rem;
 
   --animate-shimmer: shimmer-sweep 2.5s ease-in-out infinite;
@@ -84,6 +96,10 @@
     border-color: var(--color-border);
   }
 
+  html {
+    color-scheme: dark;
+  }
+
   html, body, #root {
     min-height: 100%;
   }
@@ -91,11 +107,7 @@
   body {
     margin: 0;
     font-family: var(--font-body);
-    background:
-      radial-gradient(circle at 18% 12%, oklch(0.78 0.12 290 / 0.10) 0, transparent 28%),
-      radial-gradient(circle at 82% 88%, oklch(0.78 0.09 310 / 0.08) 0, transparent 24%),
-      radial-gradient(circle at 75% 18%, oklch(0.83 0.11 55 / 0.05) 0, transparent 22%),
-      var(--color-background);
+    background: var(--color-background);
     color: var(--color-foreground);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -116,6 +128,14 @@
 
 @layer utilities {
   .text-faint {
-    color: oklch(0.48 0.012 250);
+    color: #7e879b;
+  }
+
+  /* Sideways-scrolling rows (the phone nav) scroll without a visible bar. */
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 }

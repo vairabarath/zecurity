@@ -79,8 +79,11 @@ describe('Layout', () => {
     await user.click(screen.getByRole('button', { name: 'Account menu' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Sign out' }))
     expect(await screen.findByText('You have signed out.')).toBeInTheDocument()
-    expect(calls[0]).toMatchObject({ method: 'POST', path: '/provider/auth/logout' })
-    expect(calls[0].headers.Authorization).toBe('Bearer tok-full')
+    // The Overview's own GETs may come first; find the logout itself.
+    const logout = calls.filter((c) => c.path === '/provider/auth/logout')
+    expect(logout).toHaveLength(1)
+    expect(logout[0]).toMatchObject({ method: 'POST', path: '/provider/auth/logout' })
+    expect(logout[0].headers.Authorization).toBe('Bearer tok-full')
     expect(useSessionStore.getState().status).toBe('anonymous')
     expect(sessionStorage.length).toBe(0)
   })

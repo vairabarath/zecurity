@@ -1,13 +1,14 @@
 import type { ReactNode } from 'react'
-import { ArrowLeft, RefreshCw } from 'lucide-react'
+import { ArrowLeft, Eye, RefreshCw } from 'lucide-react'
 import { Link, Navigate, useParams } from 'react-router-dom'
 import { getTenant } from '@/api/reads'
 import type { TenantDetail as TenantDetailDTO } from '@/api/types'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
 import { StatusBadge } from '@/components/StatusBadge'
+import { TenantAvatar } from '@/components/TenantAvatar'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { formatRelative } from '@/lib/expiry'
@@ -30,7 +31,7 @@ import { useDetailQuery } from '@/lib/useDetailQuery'
 const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
 const back = (
-  <Link to="/tenants" className="inline-flex items-center gap-1 text-sm text-primary underline-offset-4 hover:underline">
+  <Link to="/tenants" className="inline-flex items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-primary">
     <ArrowLeft className="size-4" aria-hidden />
     Back to tenants
   </Link>
@@ -93,19 +94,30 @@ function TenantDetailFetch({ id }: { id: string }) {
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <Card>
-      <CardHeader>
-        <CardTitle>
-          <h2>{title}</h2>
-        </CardTitle>
-      </CardHeader>
-      <CardContent>{children}</CardContent>
+      <h2 className="px-5 py-4 font-semibold">{title}</h2>
+      {children}
     </Card>
   )
 }
 
+function Empty({ children }: { children: ReactNode }) {
+  return <p className="px-5 pb-5 text-sm text-muted-foreground">{children}</p>
+}
+
 function TruncatedNote({ show }: { show: boolean }) {
   if (!show) return null
-  return <p className="pt-2 text-xs text-muted-foreground">Showing the first 200 entries.</p>
+  return <p className="px-5 py-3 text-xs text-muted-foreground">Showing the first 200 entries.</p>
+}
+
+/** A headline count with the API's own per-status breakdown under it. */
+function CountTile({ label, value, children }: { label: string; value: ReactNode; children: ReactNode }) {
+  return (
+    <Card className="flex min-w-0 flex-col gap-2.5 px-[18px] py-4">
+      <span className="text-xs font-medium tracking-wide text-muted-foreground">{label}</span>
+      <span className="text-[26px] font-semibold tracking-[-0.02em]">{value}</span>
+      <div className="text-[12.5px] leading-relaxed text-muted-foreground">{children}</div>
+    </Card>
+  )
 }
 
 function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefresh: () => void }) {
@@ -117,61 +129,67 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
   return (
     <div className="flex flex-col gap-6">
       {back}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="font-display text-2xl font-semibold tracking-tight">{t.name}</h1>
-          <StatusBadge status={t.status} />
+
+      <div role="note" className="flex items-center gap-2.5 rounded-lg border border-info/25 bg-info/10 px-3.5 py-2.5 text-[13px] text-[#b7d5fd]">
+        <Eye className="size-4 shrink-0" aria-hidden />
+        <span>
+          Audited view. Each load of this page, including Refresh, writes a <span className="font-mono">tenant.read</span> entry to the provider audit log under your name.
+        </span>
+      </div>
+
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-center gap-3.5">
+          <TenantAvatar name={t.name} size="lg" />
+          <div className="flex flex-col gap-1.5">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="font-display text-[26px] font-semibold tracking-[-0.02em]">{t.name}</h1>
+              <StatusBadge status={t.status} />
+            </div>
+            <p className="flex flex-wrap gap-x-2 text-sm text-subtle-foreground">
+              <span className="font-mono">{t.slug}</span>
+              <span aria-hidden>·</span>
+              <span>
+                trust domain <span className="font-mono">{t.trust_domain}</span>
+              </span>
+              <span aria-hidden>·</span>
+              <span>created {formatDateTime(t.created_at)}</span>
+            </p>
+          </div>
         </div>
         <Button variant="outline" onClick={onRefresh}>
           <RefreshCw aria-hidden />
           Refresh (records an audit entry)
         </Button>
-      </div>
+      </header>
 
-      <Section title="Overview">
-        <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm">
-          <dt className="text-muted-foreground">Slug</dt>
-          <dd className="font-mono text-xs">{t.slug}</dd>
-          <dt className="text-muted-foreground">Trust domain</dt>
-          <dd className="font-mono text-xs">{t.trust_domain}</dd>
-          <dt className="text-muted-foreground">Workspace CA</dt>
-          <dd>
-            {t.ca_not_after ? (
-              <span className="inline-flex items-center gap-2">
-                {formatDateTime(t.ca_not_after)}
-                <ExpiryBadge notAfter={t.ca_not_after} />
-              </span>
-            ) : (
-              '—'
-            )}
-          </dd>
-          <dt className="text-muted-foreground">Created</dt>
-          <dd>{formatDateTime(t.created_at)}</dd>
-          <dt className="text-muted-foreground">Connectors</dt>
-          <dd>{agentSummary(c.connectors)}</dd>
-          <dt className="text-muted-foreground">Shields</dt>
-          <dd>{agentSummary(c.shields)}</dd>
-          <dt className="text-muted-foreground">Remote networks</dt>
-          <dd>{c.remote_networks} active</dd>
-          <dt className="text-muted-foreground">Users</dt>
-          <dd aria-label="User counts">
+      <section aria-label="Overview" className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <CountTile label="Users" value={c.users.active.toLocaleString()}>
+          <span aria-label="User counts">
             {c.users.active} active · {c.users.suspended} suspended · {c.users.locked} locked · {c.users.deleted} deleted
-          </dd>
-          <dt className="text-muted-foreground">Client devices</dt>
-          <dd>
-            {c.client_devices.active} active · {c.client_devices.re_enroll_required} re-enroll required ·{' '}
-            {c.client_devices.renew_pending} renew pending · {c.client_devices.revoked} revoked
-          </dd>
-        </dl>
-      </Section>
+          </span>
+        </CountTile>
+        <CountTile label="Client devices" value={c.client_devices.active.toLocaleString()}>
+          {c.client_devices.active} active · {c.client_devices.re_enroll_required} re-enroll required · {c.client_devices.renew_pending} renew pending ·{' '}
+          {c.client_devices.revoked} revoked
+        </CountTile>
+        <CountTile label="Connectors" value={c.connectors.active.toLocaleString()}>
+          {agentSummary(c.connectors)}
+        </CountTile>
+        <CountTile label="Shields" value={c.shields.active.toLocaleString()}>
+          {agentSummary(c.shields)}
+        </CountTile>
+        <CountTile label="Workspace CA" value={<ExpiryBadge notAfter={t.ca_not_after} />}>
+          {t.ca_not_after ? `Expires ${formatDateTime(t.ca_not_after)}` : 'No CA issued'} · {c.remote_networks} active remote networks
+        </CountTile>
+      </section>
 
       <Section title="Remote networks">
         {t.remote_networks.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No remote networks.</p>
+          <Empty>No remote networks.</Empty>
         ) : (
           <Table aria-label="Remote networks">
             <TableHeader>
-              <TableRow>
+              <TableRow className="hover:bg-transparent">
                 <TableHead>Name</TableHead>
                 <TableHead>Status</TableHead>
               </TableRow>
@@ -179,7 +197,7 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
             <TableBody>
               {t.remote_networks.map((n) => (
                 <TableRow key={n.id} aria-label={n.name}>
-                  <TableCell>{n.name}</TableCell>
+                  <TableCell className="font-medium">{n.name}</TableCell>
                   <TableCell>
                     <StatusBadge status={n.status} />
                   </TableCell>
@@ -193,11 +211,11 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
 
       <Section title="Connectors">
         {t.connectors.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No connectors.</p>
+          <Empty>No connectors.</Empty>
         ) : (
           <Table aria-label="Connectors">
             <TableHeader>
-              <TableRow>
+              <TableRow className="hover:bg-transparent">
                 <TableHead>Name</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Remote network</TableHead>
@@ -210,19 +228,19 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
             <TableBody>
               {t.connectors.map((k) => (
                 <TableRow key={k.id} aria-label={k.name}>
-                  <TableCell>{k.name}</TableCell>
+                  <TableCell className="font-mono text-[13px]">{k.name}</TableCell>
                   <TableCell>
                     <StatusBadge status={k.status} />
                   </TableCell>
                   <TableCell>{networkName.get(k.remote_network_id) ?? <span className="font-mono text-xs">{k.remote_network_id}</span>}</TableCell>
-                  <TableCell>{k.version ?? '—'}</TableCell>
-                  <TableCell className="whitespace-nowrap" title={formatDateTime(k.last_heartbeat_at)}>
+                  <TableCell className="font-mono text-[13px] text-subtle-foreground">{k.version ?? '—'}</TableCell>
+                  <TableCell className="whitespace-nowrap text-subtle-foreground" title={formatDateTime(k.last_heartbeat_at)}>
                     {formatRelative(k.last_heartbeat_at)}
                   </TableCell>
                   <TableCell>
                     <ExpiryBadge notAfter={k.cert_not_after} />
                   </TableCell>
-                  <TableCell className="whitespace-nowrap">{k.revoked_at ? formatDateTime(k.revoked_at) : '—'}</TableCell>
+                  <TableCell className="whitespace-nowrap text-subtle-foreground">{k.revoked_at ? formatDateTime(k.revoked_at) : '—'}</TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -233,11 +251,11 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
 
       <Section title="Shields">
         {t.shields.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No shields.</p>
+          <Empty>No shields.</Empty>
         ) : (
           <Table aria-label="Shields">
             <TableHeader>
-              <TableRow>
+              <TableRow className="hover:bg-transparent">
                 <TableHead>Name</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Connector</TableHead>
@@ -249,13 +267,13 @@ function TenantView({ tenant: t, onRefresh }: { tenant: TenantDetailDTO; onRefre
             <TableBody>
               {t.shields.map((s) => (
                 <TableRow key={s.id} aria-label={s.name}>
-                  <TableCell>{s.name}</TableCell>
+                  <TableCell className="font-mono text-[13px]">{s.name}</TableCell>
                   <TableCell>
                     <StatusBadge status={s.status} />
                   </TableCell>
-                  <TableCell>{connectorName.get(s.connector_id) ?? <span className="font-mono text-xs">{s.connector_id}</span>}</TableCell>
+                  <TableCell className="font-mono text-[13px]">{connectorName.get(s.connector_id) ?? <span className="text-xs">{s.connector_id}</span>}</TableCell>
                   <TableCell>{networkName.get(s.remote_network_id) ?? <span className="font-mono text-xs">{s.remote_network_id}</span>}</TableCell>
-                  <TableCell className="whitespace-nowrap" title={formatDateTime(s.last_heartbeat_at)}>
+                  <TableCell className="whitespace-nowrap text-subtle-foreground" title={formatDateTime(s.last_heartbeat_at)}>
                     {formatRelative(s.last_heartbeat_at)}
                   </TableCell>
                   <TableCell>
