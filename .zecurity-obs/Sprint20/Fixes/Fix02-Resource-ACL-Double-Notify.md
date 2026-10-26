@@ -133,6 +133,7 @@ go test -count=1 -v ./graph/resolvers/ -run 'Test(UpdateResource_|ForceDeleteRes
 |---|---|
 | `e1570c2f` | code + tests (below) |
 | `1b2b4478` | CI "Verify integration tests actually ran" requires 4 of these tests to run and pass |
+| `d702e42f` | `ACLRelevantUpdate` includes `remote_network_id` (security review of `e1570c2f`) |
 
 **Code (`controller/`).**
 - `graph/resolvers/resource.resolvers.go`: `UpdateResource` — unconditional notify removed (the `ACLRelevantUpdate`-gated one stays); `ForceDeleteResource` — duplicate notify removed.
@@ -158,3 +159,5 @@ go test -count=1 -v ./graph/resolvers/ -run 'Test(UpdateResource_|ForceDeleteRes
 - [x] Green: all coherence tests pass, with no skips, and without `RESOURCE_TEST_SHIELD_ID`.
 - [x] Full gate: `go test ./...` exit 0 (1387 pass).
 - [x] CI ran-check fails if the coherence tests skip.
+
+**Follow-up (security review of `e1570c2f`).** With the unconditional notify gone, an update changing only `remote_network_id` notified nothing — but the compiler routes each resource through its remote network's connectors (`ListEnabledRulesWithResources` selects `r.remote_network_id`). `ACLRelevantUpdate`'s doc listed it as compiler-invisible (written before that column joined the query); the duplicate notify had hidden the gap. Fixed: `ACLRelevantUpdate` includes `RemoteNetworkID`; unit case corrected; new `TestUpdateResource_InvalidatesWhenRemoteNetworkChanges` (want 1, mutation-checked). Full controller: **1388 PASS, 0 FAIL, 2 SKIP**.
