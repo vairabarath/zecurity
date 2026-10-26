@@ -14,13 +14,13 @@ use crate::shield_proto::shield_control_message::Body;
 use crate::shield_proto::{ShieldControlMessage, TunnelClose, TunnelData, TunnelOpen};
 
 const MAX_CHUNK: usize = 16 * 1024;
-/// Fix 14 (F48): a session may hold up its Shield's Control stream (waiting
-/// for room in its full device queue) for at most DEVICE_STALL_LIMIT in total
-/// per DEVICE_STALL_WINDOW; then it is ended. Counted across chunks, so a
-/// device reading just under a per-chunk limit cannot stall the stream (and
-/// every other session on it) indefinitely.
+/// Fix 14 (F48): how long a Shield chunk waits for room in a device's full
+/// tunnel queue (no progress at all) before the session is ended. Accepted
+/// limit (user, 2026-10-26): while it waits, the Shield's whole Control
+/// stream waits, so a device reading just under this pace delays the other
+/// sessions through that Shield; per-tunnel flow control is the follow-up.
+/// A total stall budget was tried and ended every steadily slower download.
 const DEVICE_STALL_LIMIT: Duration = Duration::from_secs(2);
-const DEVICE_STALL_WINDOW: Duration = Duration::from_secs(10);
 /// Fix 14 handover: how many Shield events a session may hold while they
 /// arrive on the Shield's newer stream before its older stream has ended.
 /// More ends the session (never drop and carry on).
@@ -94,10 +94,6 @@ struct RelayEntry {
     /// Bytes held in `early`, and since when it has been non-empty.
     early_bytes: usize,
     early_since: Option<tokio::time::Instant>,
-    /// F48 stall budget: when the current window started, and how long this
-    /// session has held up the Control stream in it.
-    stall_window: tokio::time::Instant,
-    stalled: Duration,
 }
 
 impl RelayEntry {
@@ -319,59 +315,26 @@ impl AgentTunnelHub {
     /// Hand `event` to the session's device side. Fix 14 (F48): never drop a
     /// chunk and carry on (a hole in the byte stream). If the device queue is
     /// full, wait for room: that pauses this Shield's Control stream, which
-    /// pushes back to the resource (flow control). The wait comes out of the
-    /// session's stall budget; a session that uses it up is ended, so it
-    /// cannot keep stalling every other session through the Shield. Returns
-    /// whether the session goes on.
+    /// pushes back to the resource (flow control). A device that makes no
+    /// progress for DEVICE_STALL_LIMIT ends its session. Returns whether the
+    /// session goes on.
     async fn deliver(
         &self,
         connection_id: &str,
         tx: &mpsc::Sender<RelayEvent>,
         event: RelayEvent,
     ) -> bool {
-        let event = match tx.try_send(event) {
-            Ok(()) => return true,
-            Err(mpsc::error::TrySendError::Closed(_)) => return false,
-            Err(mpsc::error::TrySendError::Full(event)) => event,
-        };
-        let budget = self.stall_budget_left(connection_id);
-        let started = tokio::time::Instant::now();
-        let sent = if budget.is_zero() {
-            Err(mpsc::error::SendTimeoutError::Timeout(event))
-        } else {
-            tx.send_timeout(event, budget).await
-        };
-        self.record_stall(connection_id, started.elapsed());
-        match sent {
+        match tx.send_timeout(event, DEVICE_STALL_LIMIT).await {
             Ok(()) => true,
             Err(mpsc::error::SendTimeoutError::Closed(_)) => false,
             Err(mpsc::error::SendTimeoutError::Timeout(_)) => {
                 self.end_stuck_session(
                     connection_id,
                     Some(tx),
-                    "device used up its stall budget with its tunnel queue full",
+                    "device stalled with its tunnel queue full",
                 );
                 false
             }
-        }
-    }
-
-    fn stall_budget_left(&self, connection_id: &str) -> Duration {
-        let mut state = self.state.lock();
-        let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
-            return Duration::ZERO;
-        };
-        let now = tokio::time::Instant::now();
-        if now.duration_since(entry.stall_window) >= DEVICE_STALL_WINDOW {
-            entry.stall_window = now;
-            entry.stalled = Duration::ZERO;
-        }
-        DEVICE_STALL_LIMIT.saturating_sub(entry.stalled)
-    }
-
-    fn record_stall(&self, connection_id: &str, waited: Duration) {
-        if let Some(entry) = self.state.lock().relay_sessions.get_mut(connection_id) {
-            entry.stalled += waited;
         }
     }
 
@@ -528,8 +491,6 @@ impl AgentTunnelHub {
                     flushing: false,
                     early_bytes: 0,
                     early_since: None,
-                    stall_window: tokio::time::Instant::now(),
-                    stalled: Duration::ZERO,
                 },
             );
             shield_tx
@@ -1029,39 +990,39 @@ mod backpressure_tests {
         assert!(hub.state.lock().relay_sessions.contains_key(&cid));
     }
 
-    /// A device reading one chunk every 1.5 s never stalls a single chunk for
-    /// 2 s, but holds up the Shield stream most of the time: its total stall
-    /// budget runs out and the session ends.
+    /// A device that is steadily slower than the resource (a WAN client) keeps
+    /// the session's queue full for the whole transfer. It must still get
+    /// every chunk, in order, for as long as the transfer lasts.
     #[tokio::test(start_paused = true)]
-    async fn a_trickling_device_uses_up_its_stall_budget() {
+    async fn a_steadily_slower_device_completes_a_long_transfer() {
+        const CHUNKS: u32 = 3000; // 30 s at one chunk per 10 ms
         let hub = AgentTunnelHub::new();
         let (tx, mut shield_rx) = mpsc::channel(256);
         assert!(hub.register_shield(SHIELD.into(), 1, tx));
         let (cid, mut session) = opened_session(&hub, &mut shield_rx).await;
-        for i in 0..64u8 {
-            hub.dispatch_data(&cid, vec![i], 1).await;
-        }
         let reader = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                if session.event_rx.recv().await.is_none() {
-                    break;
+            let mut got = 0u32;
+            while let Some(event) = session.event_rx.recv().await {
+                match event {
+                    RelayEvent::Data(d) => {
+                        assert_eq!(d, got.to_be_bytes().to_vec(), "chunk {got} out of order");
+                        got += 1;
+                    }
+                    _ => break,
                 }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            got
         });
-        let started = tokio::time::Instant::now();
-        let mut sent = 0;
-        while hub.state.lock().relay_sessions.contains_key(&cid) {
-            hub.dispatch_data(&cid, vec![0], 1).await;
-            sent += 1;
-            assert!(sent < 10, "the trickling device was never ended");
+        for i in 0..CHUNKS {
+            hub.dispatch_data(&cid, i.to_be_bytes().to_vec(), 1).await;
         }
         assert!(
-            started.elapsed() <= DEVICE_STALL_LIMIT + Duration::from_millis(100),
-            "the Shield stream was held up for {:?}",
-            started.elapsed()
+            hub.state.lock().relay_sessions.contains_key(&cid),
+            "a merely slow device's session was ended"
         );
-        reader.abort();
+        hub.dispatch_close(&cid, String::new(), 1);
+        assert_eq!(reader.await.unwrap(), CHUNKS);
     }
 
     /// A device that stops reading ends its session after the stall limit;

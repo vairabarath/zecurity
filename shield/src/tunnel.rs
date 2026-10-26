@@ -17,13 +17,12 @@ use crate::proto::{
 const MAX_CHUNK: usize = 16 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-/// Fix 14 (F48): a tunnel may hold up the Control stream (waiting for room in
-/// its full queue to the resource) for at most RESOURCE_STALL_LIMIT in total
-/// per RESOURCE_STALL_WINDOW; then it is ended. Counted across chunks, so a
-/// resource reading just under a per-chunk limit cannot stall the stream (and
-/// every other tunnel on it) indefinitely.
+/// Fix 14 (F48): how long a chunk waits for room in a tunnel's full queue to
+/// the resource (no progress at all) before the tunnel is ended. Accepted
+/// limit (user, 2026-10-26): while it waits, the whole Control stream waits,
+/// so a resource reading just under this pace delays the other tunnels;
+/// per-tunnel flow control is the follow-up.
 const RESOURCE_STALL_LIMIT: Duration = Duration::from_secs(2);
-const RESOURCE_STALL_WINDOW: Duration = Duration::from_secs(10);
 /// Fix 14 handover: how long a tunnel message waits for an upstream (a
 /// Control stream) while the Shield moves from one stream to the next.
 pub const HANDOVER_GRACE: Duration = Duration::from_secs(15);
@@ -33,10 +32,6 @@ struct TunnelSession {
     /// The tunnel's read and write tasks, set once they are spawned. Aborting
     /// them drops the resource socket (Fix 14).
     tasks: Vec<AbortHandle>,
-    /// F48 stall budget: when the current window started, and how long this
-    /// tunnel has held up the Control stream in it.
-    stall_window: Instant,
-    stalled: Duration,
 }
 
 impl TunnelSession {
@@ -44,8 +39,6 @@ impl TunnelSession {
         Self {
             inbound_tx,
             tasks: Vec::new(),
-            stall_window: Instant::now(),
-            stalled: Duration::ZERO,
         }
     }
 
@@ -324,54 +317,39 @@ async fn handle_tunnel_open_udp(
 }
 
 pub async fn handle_tunnel_data(hub: TunnelHub, connection_id: &str, data: Vec<u8>) {
-    let (tx, budget) = {
-        let mut guard = hub.sessions.lock().await;
-        let Some(session) = guard.get_mut(connection_id) else {
-            return;
-        };
-        let now = Instant::now();
-        if now.duration_since(session.stall_window) >= RESOURCE_STALL_WINDOW {
-            session.stall_window = now;
-            session.stalled = Duration::ZERO;
-        }
-        (
-            session.inbound_tx.clone(),
-            RESOURCE_STALL_LIMIT.saturating_sub(session.stalled),
-        )
+    let Some(tx) = hub
+        .sessions
+        .lock()
+        .await
+        .get(connection_id)
+        .map(|s| s.inbound_tx.clone())
+    else {
+        return;
     };
     // Fix 14 (F48): never drop a chunk and carry on (a hole in the byte
     // stream). If the queue is full, wait for room: that pauses this Control
-    // stream, which pushes back to the device (flow control). The wait comes
-    // out of the tunnel's stall budget; a tunnel that uses it up is ended, so
-    // it cannot keep stalling every other tunnel.
-    let data = match tx.try_send(Bytes::from(data)) {
-        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => return,
-        Err(mpsc::error::TrySendError::Full(data)) => data,
-    };
-    let started = Instant::now();
-    let sent = if budget.is_zero() {
-        Err(mpsc::error::SendTimeoutError::Timeout(data))
-    } else {
-        tx.send_timeout(data, budget).await
-    };
-    let mut guard = hub.sessions.lock().await;
-    if let Some(session) = guard.get_mut(connection_id) {
-        session.stalled += started.elapsed();
-    }
-    if !matches!(sent, Err(mpsc::error::SendTimeoutError::Timeout(_))) {
-        return;
-    }
-    if !guard
-        .get(connection_id)
-        .is_some_and(|s| s.inbound_tx.same_channel(&tx))
+    // stream, which pushes back to the device (flow control). A resource that
+    // makes no progress for RESOURCE_STALL_LIMIT ends its tunnel.
+    match tx
+        .send_timeout(Bytes::from(data), RESOURCE_STALL_LIMIT)
+        .await
     {
-        return;
+        Err(mpsc::error::SendTimeoutError::Timeout(_)) => {}
+        Ok(()) | Err(mpsc::error::SendTimeoutError::Closed(_)) => return,
     }
-    if let Some(session) = guard.remove(connection_id) {
-        session.abort();
+    {
+        let mut guard = hub.sessions.lock().await;
+        if !guard
+            .get(connection_id)
+            .is_some_and(|s| s.inbound_tx.same_channel(&tx))
+        {
+            return;
+        }
+        if let Some(session) = guard.remove(connection_id) {
+            session.abort();
+        }
     }
-    drop(guard);
-    warn!(connection_id, "resource used up its stall budget with its tunnel queue full: ending the tunnel");
+    warn!(connection_id, "resource stalled with its tunnel queue full: ending the tunnel");
     // Not awaited here: the upstream may be paused for a handover, and this
     // runs on the Control stream's reader.
     let close = TunnelHub::close_msg(connection_id, "resource too slow");
@@ -395,8 +373,8 @@ fn tunnel_opened_msg(connection_id: &str, ok: bool, error: &str) -> ShieldContro
 #[cfg(test)]
 mod tests {
     //! Fix 14: a Control stream's end closes its tunnels and their resource
-    //! sockets (F44); a full resource queue waits, within a stall budget,
-    //! rather than dropping a chunk (F48); tunnel traffic follows the hub's
+    //! sockets (F44); a full resource queue waits for room rather than
+    //! dropping a chunk (F48); tunnel traffic follows the hub's
     //! upstream across a handover (D-1 = B).
 
     use super::*;
@@ -485,8 +463,8 @@ mod tests {
         assert!(hub.sessions.lock().await.contains_key("c1"));
     }
 
-    /// A resource that stops reading ends its tunnel when its stall budget
-    /// runs out; no chunk is dropped while the tunnel carries on.
+    /// A resource that stops reading ends its tunnel after the stall limit;
+    /// no chunk is dropped while the tunnel carries on.
     #[tokio::test(start_paused = true)]
     async fn a_stalled_resource_ends_the_tunnel_instead_of_dropping_data() {
         let hub = new_hub();
@@ -512,32 +490,33 @@ mod tests {
         assert!(inbound_rx.recv().await.is_none());
     }
 
-    /// A resource reading one chunk every 1.5 s never stalls a single chunk
-    /// for 2 s, but holds the stream up most of the time: its budget runs out.
+    /// A resource that is steadily slower than the device keeps the tunnel's
+    /// queue full for the whole upload. It must still get every chunk.
     #[tokio::test(start_paused = true)]
-    async fn a_trickling_resource_uses_up_its_stall_budget() {
+    async fn a_steadily_slower_resource_completes_a_long_upload() {
+        const CHUNKS: u32 = 3000; // 30 s at one chunk per 10 ms
         let hub = new_hub();
         let mut inbound_rx = tunnel_without_reader(&hub).await;
-        for i in 0..64u8 {
-            handle_tunnel_data(hub.clone(), "c1", vec![i]).await;
-        }
         let reader = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                if inbound_rx.recv().await.is_none() {
+            let mut got = 0u32;
+            while let Some(d) = inbound_rx.recv().await {
+                assert_eq!(d, Bytes::from(got.to_be_bytes().to_vec()), "chunk {got} out of order");
+                got += 1;
+                if got == CHUNKS {
                     break;
                 }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
+            got
         });
-        let started = Instant::now();
-        let mut sent = 0;
-        while hub.sessions.lock().await.contains_key("c1") {
-            handle_tunnel_data(hub.clone(), "c1", vec![0]).await;
-            sent += 1;
-            assert!(sent < 10, "the trickling resource was never ended");
+        for i in 0..CHUNKS {
+            handle_tunnel_data(hub.clone(), "c1", i.to_be_bytes().to_vec()).await;
         }
-        assert!(started.elapsed() <= RESOURCE_STALL_LIMIT + Duration::from_millis(100));
-        reader.abort();
+        assert!(
+            hub.sessions.lock().await.contains_key("c1"),
+            "a merely slow resource's tunnel was ended"
+        );
+        assert_eq!(reader.await.unwrap(), CHUNKS);
     }
 
     fn data(n: u8) -> ShieldControlMessage {
