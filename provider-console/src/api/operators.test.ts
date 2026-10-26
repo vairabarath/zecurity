@@ -24,6 +24,7 @@ const operator: OperatorView = {
   last_login_at: null,
   must_change_password: true,
   has_password: true,
+  totp_enabled: false,
 }
 
 function signedIn() {

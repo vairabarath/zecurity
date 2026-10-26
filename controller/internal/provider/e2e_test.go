@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -56,14 +57,109 @@ func newE2EServer(t *testing.T) *httptest.Server {
 		middleware.RequireProvider(ids, store, middleware.AllowPasswordChangeToken())(http.HandlerFunc(auth.ChangePassword)))
 	mux.Handle("POST /provider/auth/logout", require(http.HandlerFunc(auth.Logout)))
 	mux.Handle("GET /provider/me", require(http.HandlerFunc(handlers.Me)))
+	rig := addTOTPRoutes(mux, ids, store)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	rig.register(t, srv)
 	return srv
 }
 
 type session struct {
 	Token                  string `json:"token"`
 	PasswordChangeRequired bool   `json:"password_change_required"`
+	MFA                    string `json:"mfa"`
+}
+
+// mfaRig wires the Sprint 22 TOTP routes into an e2e server and completes the
+// TOTP step for the harness: super-admins must enrol or verify before they get
+// a full session, so sign-in helpers finish that step through the real routes.
+type mfaRig struct {
+	ids     *provider.IdentityService
+	mu      sync.Mutex
+	clock   time.Time
+	secrets map[string][]byte // by operator email
+}
+
+var mfaRigs sync.Map // server URL → *mfaRig
+
+func addTOTPRoutes(mux *http.ServeMux, ids *provider.IdentityService, store *provider.Store) *mfaRig {
+	rig := &mfaRig{ids: ids, clock: time.Unix(1_800_000_000, 0), secrets: map[string][]byte{}}
+	totp := provider.NewTOTPHandlers(ids, store, &fakeSealer{}, allowAllLimiter{})
+	provider.SetTOTPClock(totp, rig.now)
+	mux.Handle("POST /provider/auth/totp/verify",
+		middleware.RequireProvider(ids, store, middleware.AllowMFAToken(provider.MFAStageVerify))(http.HandlerFunc(totp.Verify)))
+	mux.Handle("POST /provider/auth/totp/enroll",
+		middleware.RequireProvider(ids, store, middleware.AllowMFAToken(provider.MFAStageEnroll))(http.HandlerFunc(totp.Enroll)))
+	mux.Handle("POST /provider/auth/totp/enroll/confirm",
+		middleware.RequireProvider(ids, store, middleware.AllowMFAToken(provider.MFAStageEnroll))(http.HandlerFunc(totp.ConfirmEnroll)))
+	return rig
+}
+
+func (r *mfaRig) now() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.clock
+}
+
+// tick moves to the next TOTP step, so every completion uses a fresh code
+// (a code is never accepted twice).
+func (r *mfaRig) tick() {
+	r.mu.Lock()
+	r.clock = r.clock.Add(30 * time.Second)
+	r.mu.Unlock()
+}
+
+func (r *mfaRig) register(t *testing.T, srv *httptest.Server) {
+	mfaRigs.Store(srv.URL, r)
+	t.Cleanup(func() { mfaRigs.Delete(srv.URL) })
+}
+
+// completeMFA turns an MFA-stage session into a full one (enrol or verify);
+// any other session is returned unchanged.
+func completeMFA(t *testing.T, srv *httptest.Server, s session) session {
+	t.Helper()
+	if s.MFA == "" {
+		return s
+	}
+	v, ok := mfaRigs.Load(srv.URL)
+	if !ok {
+		t.Fatalf("no TOTP rig for %s", srv.URL)
+	}
+	rig := v.(*mfaRig)
+	claims, err := rig.ids.Verify(s.Token)
+	if err != nil {
+		t.Fatalf("mfa token: %v", err)
+	}
+	path := "/provider/auth/totp/verify"
+	if s.MFA == provider.MFAStageEnroll {
+		code, body := call(t, srv, http.MethodPost, "/provider/auth/totp/enroll", s.Token, nil)
+		if code != http.StatusOK {
+			t.Fatalf("totp enroll: %d %s", code, body)
+		}
+		var started struct {
+			Secret string `json:"secret"`
+		}
+		_ = json.Unmarshal([]byte(body), &started)
+		secret, err := provider.DecodeTOTPSecret(started.Secret)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rig.mu.Lock()
+		rig.secrets[claims.Email] = secret
+		rig.mu.Unlock()
+		path = "/provider/auth/totp/enroll/confirm"
+	}
+	rig.tick()
+	rig.mu.Lock()
+	code := provider.TOTPCode(rig.secrets[claims.Email], rig.clock)
+	rig.mu.Unlock()
+	status, body := call(t, srv, http.MethodPost, path, s.Token, map[string]string{"code": code})
+	if status != http.StatusOK {
+		t.Fatalf("complete mfa (%s): %d %s", s.MFA, status, body)
+	}
+	var full session
+	_ = json.Unmarshal([]byte(body), &full)
+	return full
 }
 
 func call(t *testing.T, srv *httptest.Server, method, path, token string, body any) (int, string) {
@@ -97,7 +193,7 @@ func login(t *testing.T, srv *httptest.Server, password string) session {
 	}
 	var s session
 	_ = json.Unmarshal([]byte(body), &s)
-	return s
+	return completeMFA(t, srv, s)
 }
 
 func changePassword(t *testing.T, srv *httptest.Server, token, current, next string) session {
@@ -109,7 +205,7 @@ func changePassword(t *testing.T, srv *httptest.Server, token, current, next str
 	}
 	var s session
 	_ = json.Unmarshal([]byte(body), &s)
-	return s
+	return completeMFA(t, srv, s)
 }
 
 // Bootstrap → forced change → full session → logout, end to end.

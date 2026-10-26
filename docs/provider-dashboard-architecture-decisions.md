@@ -808,7 +808,7 @@ Decisions made by the product/architecture owner after reviewing this analysis. 
 | D-02 | Controller HA | **Out of scope.** Zecurity runs a single controller instance. Dashboard reads **and** mutations may rely on process-local state and the live-stream registry. Multi-replica HA is a separate later initiative (PENDING-12) and is **not** a dashboard prerequisite. | Q2 |
 | D-03 | Relay pools / regions | **Not in the first release.** Global relay fleet only. Q5–Q7 are deferred. | Q5–Q7 |
 | D-04 | Provider API style | **REST under `/provider/*`** for both dashboard reads and operational mutations. Provider domain/query services stay independent of the HTTP layer so a provider-specific GraphQL read API can be added later. No second GraphQL stack in the first release. | Q12 |
-| D-05 | Provider RBAC | **Keep `super-admin` / `relay-ops`** and add read actions (e.g. `relay.read`, `audit.read`, `tenant.read`) to `decide()`. No role migration. | Q8 |
+| D-05 | Provider RBAC | **Keep `super-admin` / `relay-ops`** and add read actions (e.g. `relay.read`, `audit.read`, `tenant.read`) to `decide()`. No role migration. *(Amended 2026-10-26 by D-31: `relay.revoke` and `relay.delete` are super-admin only; relay-ops keeps `relay.read`, relay creation, drain and resume.)* | Q8 |
 | D-06 | Tenant read access | **super-admin only** for all `tenant.*` actions (read, suspend, resume, delete). This follows from the existing prefix rule with no special case. | Q8 |
 | D-07 | Suspend Tenant | **Immediate full tenant access isolation.** Active tunnels and sessions are terminated immediately. Blocks tenant login, configuration mutations, new sessions and enrollment. Tenant data and PKI are retained. Provider operators keep read, resume and delete. | Q3 |
 | D-08 | Suspended agents | **Connectors and shields stay connected** and receive a deny-all ACL (the connector cancels sessions and refuses new ones). Suspended tenants' agents must be exempt from the SPIFFE active-workspace check so reconnects and renewals keep working. Resume = push the normal ACL. | Q3 |
@@ -824,7 +824,7 @@ Decisions made by the product/architecture owner after reviewing this analysis. 
 | D-18 | Console packaging | **Separate React app** (own build and domain, network-locked; may share components with `admin/`). | Q12, PENDING-07b |
 | D-19 | Relay certificate renewal | **In-band `RelayService.RenewCert` RPC** over the existing mTLS channel (same key, CSR proof of possession), scheduled by the relay before expiry and recorded in `relay_certificates`. | discovery Q6 |
 | D-20 | Expired / lost-key relay | **Replace the relay** (revoke/delete it, create a new relay id and token). No provisioning-token re-issue. | discovery Q6 |
-| D-21 | Relay drain | **Not in the first release.** | Q15 |
+| D-21 | Relay drain | **Not in the first release.** *(Amended 2026-10-26 by D-32: relay drain is in scope for Sprint 22.)* | Q15 |
 | D-22 | Relay intermediate CA | **Deferred.** Relays stay under the platform Intermediate; revisit with CA rotation work. | Q11 |
 | D-23 | Telemetry scope | **Existing data only** for the first release (status, version, capacity label, `connection_count`/`max_connections`, last heartbeat, cert expiry), after the relay-liveness fix. | Q14 |
 
@@ -925,3 +925,28 @@ Made by the product/architecture owner before Sprint 21 Phase H was implemented.
 - **Before Sprint 22:** mandatory TOTP for `super-admin` (D-28), a separate follow-up after Sprint 21.
 - **Packaging (ADR-029, 2026-09-28):** Provider Identity stays an **internal controller module** (`controller/internal/provider`): same process, database and Valkey, served under `/provider/*`. It is not a separate service.
 - **Break-glass recovery:** a future controller CLI subcommand (`zecurity-controller provider recover-admin --email …`), not an environment flag. Target: before production, at the latest with the super-admin TOTP follow-up.
+
+---
+
+## Decision record amendment — 2026-10-26: relay management in the provider console
+
+Made by the product/architecture owner after Sprint 21 shipped the read-only provider console and its redesign (PR #136). It **amends D-05 and D-21** and the Sprint 21 rule that the console is read-only except logout and operator management. Everything else in the 2026-09-23 record and the 2026-09-26 amendment stands; in particular **D-17** (mandatory reason and typed confirmation for relay revoke/delete) and **D-28** (super-admin TOTP before dangerous mutations) apply unchanged.
+
+**Rationale:** the controller already has the relay create, revoke and delete APIs (audited, CRL-backed, broadcast to connectors). Operators currently need `curl` and a provider token to use them. Exposing them in the console, behind TOTP and D-17 safeguards, is the cheapest large operability gain. Relay drain reuses the connectors' existing migration path (a relay that leaves the published list is migrated away from, with in-flight streams kept until they end or the connector's drain timeout passes), so it needs no connector or proto change.
+
+### Decided
+
+| # | Topic | Decision | Amends |
+|---|---|---|---|
+| D-30 | Console scope | The provider console may **create, revoke, delete, drain and resume relays**, in addition to logout and operator management. Every other console area stays read-only. | Sprint 21 rule "console is read-only except logout and operator management" |
+| D-31 | Relay action roles | `relay-ops` may **create** relays (issue provisioning tokens), **drain** and **resume** them, and read them. **Revoke and delete are super-admin only.** Enforced **server-side** in `decide()` as an explicit exception to the `relay.*` prefix rule; the console only mirrors it. | D-05 |
+| D-32 | Relay drain | **In scope (Sprint 22).** A drained relay is excluded from the relay list published to connectors, so no new placements reach it and connectors migrate away through their existing path. Kept as invariants: a **last-eligible-relay guard** (refuse a drain that would leave connectors no other eligible relay), **audit** of drain and resume in `provider_audit_logs`, **unchanged connector migration behaviour**, and the connector's **120-second drain timeout** (`relay_drain_timeout_secs`, default 120). Resume returns the relay to the list. | D-21 |
+| D-33 | Ordering | **Super-admin TOTP (D-28) ships first.** No relay-management mutation is released in the console before mandatory super-admin TOTP is merged and enforced. | — (applies D-28) |
+| D-34 | Tenant suspension | Stays a **separate epic** under D-07/D-08, planned and reviewed on its own. It is **not** part of the relay-management work and does not change the protected `workspaces.status='active'` predicates. | — |
+
+### Consequences
+
+- **Sprint 22** plan: `.zecurity-obs/Sprint22/path.md` (phases T → A → E → X → D, then acceptance).
+- `decide()` gains its first role exception (D-31). The relay revoke/delete handlers keep calling `CanRevokeRelay` / `CanDeleteRelay`; only the policy changes.
+- D-17 is implemented for relay revoke and delete: a required reason in the request body (not the URL) and a typed relay-name confirmation, checked by the server as well as the console.
+- Two schema files: `042_` (provider TOTP) and `043_` (relay drain). No proto change.

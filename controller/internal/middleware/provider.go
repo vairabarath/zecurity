@@ -27,6 +27,7 @@ type ProviderOption func(*providerOptions)
 
 type providerOptions struct {
 	allowPasswordChangeToken bool
+	allowMFAStage            string
 }
 
 // AllowPasswordChangeToken lets a password-change-only token (claim pwc=true)
@@ -34,6 +35,14 @@ type providerOptions struct {
 // rejects such tokens with 403 password_change_required.
 func AllowPasswordChangeToken() ProviderOption {
 	return func(o *providerOptions) { o.allowPasswordChangeToken = true }
+}
+
+// AllowMFAToken makes a route accept the confined MFA-stage token for stage
+// (provider.MFAStageVerify or MFAStageEnroll) — and ONLY that token: a full,
+// password-change-only or other-stage token gets 403 mfa_required. Use it only
+// on the TOTP routes (Sprint 22 Phase T).
+func AllowMFAToken(stage string) ProviderOption {
+	return func(o *providerOptions) { o.allowMFAStage = stage }
 }
 
 // RequireProvider authenticates a provider request and injects the provider
@@ -45,7 +54,13 @@ func AllowPasswordChangeToken() ProviderOption {
 //  3. Token gen ≠ provider_users.session_generation → 401 (logout, password
 //     change/reset, disable or role change revoked it).
 //  4. Token email ≠ current email → 401.
-//  5. A password-change-only token without AllowPasswordChangeToken → 403.
+//  5. An MFA-stage token outside its AllowMFAToken route, or any other token
+//     on such a route → 403 mfa_required.
+//  6. A password-change-only token without AllowPasswordChangeToken → 403.
+//  7. A full token without "otp" for an operator who requires TOTP (a
+//     super-admin, or anyone with TOTP enabled) → 403 mfa_required. Decided
+//     from the DB row on every request, so a token minted before TOTP was
+//     enforced is refused at once, not when it expires (D-28, OQ-3).
 //
 // The role always comes from the DB row, never the token. It NEVER calls
 // WorkspaceGuard — provider identity has no tenant.
@@ -94,8 +109,16 @@ func RequireProvider(verifier ProviderTokenVerifier, users ProviderUserLookup, o
 				writeProviderJSON(w, http.StatusUnauthorized, "provider session revoked")
 				return
 			}
+			if claims.MFA != o.allowMFAStage {
+				writeProviderJSON(w, http.StatusForbidden, "mfa_required")
+				return
+			}
 			if claims.PWC && !o.allowPasswordChangeToken {
 				writeProviderJSON(w, http.StatusForbidden, "password_change_required")
+				return
+			}
+			if !claims.PWC && claims.MFA == "" && provider.RequiresTOTP(user) && !hasOTP(claims.AMR) {
+				writeProviderJSON(w, http.StatusForbidden, "mfa_required")
 				return
 			}
 
@@ -107,6 +130,15 @@ func RequireProvider(verifier ProviderTokenVerifier, users ProviderUserLookup, o
 			next.ServeHTTP(w, r.WithContext(provider.WithActor(r.Context(), actor)))
 		})
 	}
+}
+
+func hasOTP(amr []string) bool {
+	for _, m := range amr {
+		if m == provider.AMROTP {
+			return true
+		}
+	}
+	return false
 }
 
 func writeProviderJSON(w http.ResponseWriter, status int, msg string) {

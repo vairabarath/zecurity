@@ -188,8 +188,11 @@ func activeUser(t *testing.T, id, email, role, password string, mustChange bool)
 	return &ProviderUser{ID: id, Email: email, Role: role, PasswordHash: mustHash(t, password), MustChangePassword: mustChange}
 }
 
+// A plain password sign-in yields a full, audited session for an operator who
+// doesn't require TOTP (relay-ops, OQ-2). Super-admins get an MFA-stage token
+// instead; that path is covered by totp_e2e_test.go.
 func TestLogin_Success_Audited(t *testing.T) {
-	f := newAuthFixture(t, activeUser(t, "u1", "ops@inkyank.com", RoleSuperAdmin, "correct-password-1", false))
+	f := newAuthFixture(t, activeUser(t, "u1", "ops@inkyank.com", RoleRelayOps, "correct-password-1", false))
 	rec := postJSON(t, f.h.Login, loginRequest{Email: "OPS@inkyank.com", Password: "correct-password-1"}, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)

@@ -9,6 +9,7 @@ import { ChangePassword } from '@/pages/ChangePassword'
 import { Forbidden } from '@/pages/Forbidden'
 import { Home } from '@/pages/Home'
 import { Login } from '@/pages/Login'
+import { Mfa } from '@/pages/Mfa'
 import { NotFound } from '@/pages/NotFound'
 import { ProviderUsers } from '@/pages/ProviderUsers'
 import { RelayDetail } from '@/pages/RelayDetail'
@@ -32,6 +33,8 @@ export function AppRoutes() {
         }
       />
       <Route path="/change-password" element={<ChangePassword />} />
+      {/* The TOTP step (Sprint 22 Phase T) checks the session itself, like Change password. */}
+      <Route path="/mfa" element={<Mfa />} />
       <Route element={<RequireSession />}>
         <Route element={<Layout />}>
           <Route index element={<Home />} />
