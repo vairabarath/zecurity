@@ -25,6 +25,10 @@ const DEVICE_STALL_WINDOW: Duration = Duration::from_secs(10);
 /// arrive on the Shield's newer stream before its older stream has ended.
 /// More ends the session (never drop and carry on).
 const EARLY_EVENT_LIMIT: usize = 256;
+/// ... and how many bytes, and for how long (the handover grace): a Shield
+/// that opens a second stream and never ends the first cannot make the
+/// Connector hold its data without bound.
+const EARLY_BYTES_LIMIT: usize = 1024 * 1024;
 /// Fix 14 handover: how long device data waits for the session's stream to
 /// be replaced after its send channel closed.
 const HANDOVER_SEND_GRACE: Duration = Duration::from_secs(15);
@@ -87,6 +91,9 @@ struct RelayEntry {
     /// held ones are still being delivered (`flushing`).
     early: VecDeque<RelayEvent>,
     flushing: bool,
+    /// Bytes held in `early`, and since when it has been non-empty.
+    early_bytes: usize,
+    early_since: Option<tokio::time::Instant>,
     /// F48 stall budget: when the current window started, and how long this
     /// session has held up the Control stream in it.
     stall_window: tokio::time::Instant,
@@ -94,6 +101,38 @@ struct RelayEntry {
 }
 
 impl RelayEntry {
+    /// Hold `event` until the handover delivers it. False — holding nothing —
+    /// once the held events would pass their count, byte or time limit.
+    fn hold(&mut self, event: RelayEvent) -> bool {
+        let bytes = match &event {
+            RelayEvent::Data(d) => d.len(),
+            _ => 0,
+        };
+        let now = tokio::time::Instant::now();
+        let since = *self.early_since.get_or_insert(now);
+        if self.early.len() >= EARLY_EVENT_LIMIT
+            || self.early_bytes + bytes > EARLY_BYTES_LIMIT
+            || now.duration_since(since) > HANDOVER_SEND_GRACE
+        {
+            return false;
+        }
+        self.early_bytes += bytes;
+        self.early.push_back(event);
+        true
+    }
+
+    /// The next held event, in order.
+    fn next_held(&mut self) -> Option<RelayEvent> {
+        let event = self.early.pop_front();
+        if let Some(RelayEvent::Data(d)) = &event {
+            self.early_bytes -= d.len();
+        }
+        if self.early.is_empty() {
+            self.early_since = None;
+        }
+        event
+    }
+
     /// Events for this session must queue behind `early` rather than go
     /// straight to the device: they came on another stream than the
     /// session's, or held events are still being delivered.
@@ -205,7 +244,7 @@ impl AgentTunnelHub {
                 let Some(entry) = state.relay_sessions.get_mut(connection_id) else {
                     return;
                 };
-                match entry.early.pop_front() {
+                match entry.next_held() {
                     None => {
                         entry.flushing = false;
                         return;
@@ -265,12 +304,11 @@ impl AgentTunnelHub {
             };
             if entry.must_queue(from_stream) {
                 // Fix 14 handover: wait behind the session's older stream.
-                if entry.early.len() < EARLY_EVENT_LIMIT {
-                    entry.early.push_back(RelayEvent::Data(data));
+                if entry.hold(RelayEvent::Data(data)) {
                     return;
                 }
                 drop(state);
-                self.end_stuck_session(connection_id, None, "handover backlog full");
+                self.end_stuck_session(connection_id, None, "handover backlog over its limit");
                 return;
             }
             entry.tx.clone()
@@ -379,8 +417,12 @@ impl AgentTunnelHub {
             return;
         };
         if entry.must_queue(from_stream) {
-            // Fix 14 handover: the close waits behind the held data.
-            entry.early.push_back(RelayEvent::Close(error));
+            // Fix 14 handover: the close waits behind the held data. Past the
+            // limits, the session simply ends now.
+            if !entry.hold(RelayEvent::Close(error.clone())) {
+                let entry = state.relay_sessions.remove(connection_id).expect("present");
+                let _ = entry.tx.try_send(RelayEvent::Close(error));
+            }
             return;
         }
         // Remove session — Shield closed its side.
@@ -484,6 +526,8 @@ impl AgentTunnelHub {
                     tx: event_tx,
                     early: VecDeque::new(),
                     flushing: false,
+                    early_bytes: 0,
+                    early_since: None,
                     stall_window: tokio::time::Instant::now(),
                     stalled: Duration::ZERO,
                 },
@@ -882,6 +926,34 @@ mod handover_tests {
         assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![6]));
         assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Data(d)) if d == vec![7]));
         assert!(matches!(session.event_rx.recv().await, Some(RelayEvent::Close(_))));
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    #[tokio::test]
+    async fn a_handover_backlog_over_its_byte_limit_ends_the_session() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, _session) = open_on(&hub, &mut rx1).await;
+        let (tx2, _rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        hub.dispatch_data(&cid, vec![0; EARLY_BYTES_LIMIT], 2).await;
+        assert!(hub.state.lock().relay_sessions.contains_key(&cid));
+        hub.dispatch_data(&cid, vec![0], 2).await;
+        assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_handover_backlog_held_past_the_grace_ends_the_session() {
+        let hub = AgentTunnelHub::new();
+        let (tx1, mut rx1) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx1));
+        let (cid, _session) = open_on(&hub, &mut rx1).await;
+        let (tx2, _rx2) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 2, tx2));
+        hub.dispatch_data(&cid, vec![0], 2).await;
+        tokio::time::advance(HANDOVER_SEND_GRACE + Duration::from_secs(1)).await;
+        hub.dispatch_data(&cid, vec![0], 2).await;
         assert!(!hub.state.lock().relay_sessions.contains_key(&cid));
     }
 
