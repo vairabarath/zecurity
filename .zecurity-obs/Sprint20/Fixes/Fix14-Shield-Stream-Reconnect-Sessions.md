@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: IMPLEMENTED locally (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; unit tests pass; live acceptance pending; deployment order (connectors before shields) to confirm
+status: IMPLEMENTED locally (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; unit tests pass; live acceptance pending; deployment order connectors before shields (accepted)
 owner: Sathiya (M1)
 findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
@@ -166,6 +166,7 @@ Found while running it; the run sheet's deviations list has the rest.
 | `00cb0bc` | connector: **handover** (adopt on a clean end when a newer stream is registered; per-send stream lookup with retry; old queue `close()` + drain; held early events delivered after the old stream's end) + F48 **stall budget** (2 s per 10 s per session) |
 | `23b411b` | shield: **handover** on renewal (open new stream → pause → half-close old → read old to its end → resume); one swappable upstream for all tunnel messages; F48 stall budget per tunnel |
 | `d58957e` | connector: handover backlog capped by bytes (1 MiB) and time (15 s), not only count |
+| `437577d7` | connector + shield: F48 back to a per-chunk 2 s limit; total budget reverted (ended normal slow transfers) |
 
 **Behaviour as built.**
 - Renewal (new shield + new connector): sessions survive, in order both ways.
@@ -180,17 +181,18 @@ Found while running it; the run sheet's deviations list has the rest.
 - shield: `close_all` closes the resource socket; slow resource gets every chunk; stalled / trickling resource ends; paused traffic goes to the next upstream in order; a message whose stream closed is retried; no upstream within the grace → given up.
 - Not unit-tested: the shield's `hand_over` sequence itself (needs a live connector) → live acceptance.
 
-### Deployment order (decision needed before merge)
+### Deployment order
 
 A **new shield with an old connector** hits F45 on every renewal: the shield opens its new stream, then half-closes the old one, and the old connector's cleanup of the old stream removes the new stream's tunnel, instruction and snapshot channels. New tunnels to that shield then fail and resource updates stop until its next reconnect (days at production lifetimes). The shield cannot tell the connector's version from any existing message.
 
-→ **Upgrade connectors before shields.** (New connector + old shield is safe.) Record in the release notes / PR.
+→ **Upgrade connectors before shields.** (New connector + old shield is safe.) **Decision (user, 2026-10-26): accepted.** Record in the release notes / PR.
 
 ### F48 policy and its limit
 
-- A full queue now **waits** for room (flow control), and a session or tunnel may hold its Shield's Control stream up for **at most 2 s in total per 10 s**; then it ends. This replaces "drop and carry on" (data corruption).
-- **Known limit:** all tunnels of a Shield share one Control stream, so a slow device or resource can still delay the others by up to its budget. The real fix is per-tunnel flow control (window updates) — a proto change, the same one blip survival would need. Follow-up, not this fix.
-- F48 acceptance updated: a **slow** reader (`pv -L` well above 0) gets the transfer **byte-identical**; a reader that **stops** for more than ~2 s ends the session (not a corrupted stream).
+- A full queue **waits** for room (flow control); a session or tunnel that makes **no progress for 2 s** ends. This replaces "drop and carry on" (data corruption).
+- A total stall budget (2 s per 10 s, commits `00cb0bc` / `23b411b`, from the security review) was tried and **reverted** (`see below`): it ended every transfer to a peer steadily slower than the sender after ~2 s (tests: a reader at one chunk per 10 ms for 30 s failed).
+- **Decision (user, 2026-10-26): per-chunk limit; accepted limit:** all tunnels of a Shield share one Control stream, so a peer reading just under the 2 s pace can delay the other tunnels through that Shield. The real fix is per-tunnel flow control (window updates) — a proto change, the same one blip survival would need. Follow-up, not this fix.
+- F48 acceptance: a **slow** reader (`pv -L`, or `curl --limit-rate`) gets the transfer **byte-identical**; a reader that **stops** for more than ~2 s ends the session (not a corrupted stream).
 
 ### Live acceptance (to run; one redeploy of connector + shield, lab certs 15 min)
 
