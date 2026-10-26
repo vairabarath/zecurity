@@ -218,6 +218,8 @@ async fn run_once(
     let mut discovery_seq: u64 = 0;
 
     let tunnel_hub: TunnelHub = tunnel::new_hub();
+    // Fix 14 (F44): however this stream ends, its tunnels end with it.
+    let _close_tunnels = CloseTunnelsOnDrop(tunnel_hub.clone());
 
     let (out_tx, out_rx) = mpsc::channel::<ShieldControlMessage>(32);
     let response = client
@@ -316,6 +318,21 @@ async fn run_once(
                 }
             }
         }
+    }
+}
+
+/// Ends every tunnel of a Control stream when the stream's `run_once` returns.
+struct CloseTunnelsOnDrop(TunnelHub);
+
+impl Drop for CloseTunnelsOnDrop {
+    fn drop(&mut self) {
+        let hub = self.0.clone();
+        tokio::spawn(async move {
+            let closed = hub.close_all().await;
+            if closed > 0 {
+                info!(closed, "Control stream ended: its tunnels were closed");
+            }
+        });
     }
 }
 
@@ -439,7 +456,7 @@ async fn handle_connector_msg(
             None
         }
         Some(Body::TunnelData(data)) => {
-            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data).await;
+            tunnel::handle_tunnel_data(tunnel_hub, &data.connection_id, data.data, out_tx).await;
             None
         }
         Some(Body::TunnelClose(close)) => {

@@ -6,7 +6,9 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::AbortHandle;
 use tokio::time::timeout;
+use tracing::warn;
 
 use crate::proto::{
     shield_control_message::Body, ShieldControlMessage, TunnelClose, TunnelData, TunnelOpened,
@@ -18,6 +20,17 @@ const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct TunnelSession {
     inbound_tx: mpsc::Sender<Bytes>,
+    /// The tunnel's read and write tasks, set once they are spawned. Aborting
+    /// them drops the resource socket (Fix 14).
+    tasks: Vec<AbortHandle>,
+}
+
+impl TunnelSession {
+    fn abort(self) {
+        for task in self.tasks {
+            task.abort();
+        }
+    }
 }
 
 /// Shared tunnel session registry. Cloning is cheap (Arc reference count).
@@ -26,6 +39,33 @@ pub struct TunnelHub(Arc<Mutex<HashMap<String, TunnelSession>>>);
 
 pub fn new_hub() -> TunnelHub {
     TunnelHub(Arc::new(Mutex::new(HashMap::new())))
+}
+
+impl TunnelHub {
+    /// Record a tunnel's tasks; if the tunnel was already ended, stop them.
+    async fn set_tasks(&self, connection_id: &str, tasks: Vec<AbortHandle>) {
+        let mut guard = self.0.lock().await;
+        match guard.get_mut(connection_id) {
+            Some(session) => session.tasks = tasks,
+            None => {
+                for task in tasks {
+                    task.abort();
+                }
+            }
+        }
+    }
+
+    /// End every tunnel and close its resource socket. Fix 14 (F44): called
+    /// when the Control stream these tunnels ran on ends — their queued data
+    /// died with it, so they must not carry on, nor leak their sockets.
+    pub async fn close_all(&self) -> usize {
+        let sessions: Vec<TunnelSession> = self.0.lock().await.drain().map(|(_, s)| s).collect();
+        let n = sessions.len();
+        for session in sessions {
+            session.abort();
+        }
+        n
+    }
 }
 
 /// Dispatch to TCP or UDP handler based on protocol field.
@@ -74,7 +114,13 @@ async fn handle_tunnel_open_tcp(
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
         hub.0.lock()
             .await
-            .insert(conn_id.clone(), TunnelSession { inbound_tx });
+            .insert(
+                conn_id.clone(),
+                TunnelSession {
+                    inbound_tx,
+                    tasks: Vec::new(),
+                },
+            );
 
         if upstream_tx
             .send(tunnel_opened_msg(&conn_id, true, ""))
@@ -127,6 +173,8 @@ async fn handle_tunnel_open_tcp(
             }
         });
 
+        hub.set_tasks(&conn_id, vec![read_task.abort_handle(), write_task.abort_handle()])
+            .await;
         let _ = tokio::join!(read_task, write_task);
     });
 }
@@ -163,7 +211,13 @@ async fn handle_tunnel_open_udp(
         let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
         hub.0.lock()
             .await
-            .insert(conn_id.clone(), TunnelSession { inbound_tx });
+            .insert(
+                conn_id.clone(),
+                TunnelSession {
+                    inbound_tx,
+                    tasks: Vec::new(),
+                },
+            );
 
         if upstream_tx
             .send(tunnel_opened_msg(&conn_id, true, ""))
@@ -219,15 +273,42 @@ async fn handle_tunnel_open_udp(
             }
         });
 
+        hub.set_tasks(&conn_id, vec![read_task.abort_handle(), write_task.abort_handle()])
+            .await;
         let _ = tokio::join!(read_task, write_task);
     });
 }
 
-pub async fn handle_tunnel_data(hub: TunnelHub, connection_id: &str, data: Vec<u8>) {
-    let guard = hub.0.lock().await;
-    if let Some(session) = guard.get(connection_id) {
-        let _ = session.inbound_tx.try_send(Bytes::from(data));
+pub async fn handle_tunnel_data(
+    hub: TunnelHub,
+    connection_id: &str,
+    data: Vec<u8>,
+    upstream_tx: &mpsc::Sender<ShieldControlMessage>,
+) {
+    let mut guard = hub.0.lock().await;
+    let Some(session) = guard.get(connection_id) else {
+        return;
+    };
+    if !matches!(
+        session.inbound_tx.try_send(Bytes::from(data)),
+        Err(mpsc::error::TrySendError::Full(_))
+    ) {
+        return;
     }
+    // Fix 14 (F48): the resource is not keeping up. Never drop a chunk and
+    // carry on (a hole in the byte stream); end this tunnel instead. Waiting
+    // for room would stall the whole Control stream, i.e. every other tunnel.
+    if let Some(session) = guard.remove(connection_id) {
+        session.abort();
+    }
+    drop(guard);
+    warn!(connection_id, "tunnel queue to the resource is full: ending the tunnel");
+    let _ = upstream_tx.try_send(ShieldControlMessage {
+        body: Some(Body::TunnelClose(TunnelClose {
+            connection_id: connection_id.to_string(),
+            error: "resource too slow".to_string(),
+        })),
+    });
 }
 
 pub async fn handle_tunnel_close(hub: TunnelHub, connection_id: &str) {
@@ -241,5 +322,95 @@ fn tunnel_opened_msg(connection_id: &str, ok: bool, error: &str) -> ShieldContro
             ok,
             error: error.to_string(),
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Fix 14: a Control stream's end closes its tunnels and their resource
+    //! sockets (F44); a full resource queue ends the tunnel rather than
+    //! dropping a chunk (F48).
+
+    use super::*;
+    use tokio::net::TcpListener;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn close_all_closes_the_resource_socket() {
+        let resource = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = resource.local_addr().unwrap().port();
+        let hub = new_hub();
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        handle_tunnel_open(
+            hub.clone(),
+            "c1".into(),
+            "127.0.0.1".into(),
+            port as u32,
+            "tcp".into(),
+            up_tx,
+        )
+        .await;
+        let (mut socket, _) = timeout(WAIT, resource.accept()).await.unwrap().unwrap();
+        let opened = timeout(WAIT, up_rx.recv()).await.unwrap().unwrap();
+        assert!(matches!(opened.body, Some(Body::TunnelOpened(ref o)) if o.ok));
+        // Wait until the tunnel's tasks are recorded.
+        timeout(WAIT, async {
+            while hub.0.lock().await.get("c1").is_none_or(|s| s.tasks.is_empty()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(hub.close_all().await, 1);
+
+        let mut buf = [0u8; 8];
+        let n = timeout(WAIT, socket.read(&mut buf))
+            .await
+            .expect("the resource socket must close, not stay open")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        assert!(hub.0.lock().await.is_empty());
+        // Both directions are gone: what the resource sends now goes nowhere,
+        // and the tunnel's upstream sender is dropped.
+        let _ = socket.write_all(b"late").await;
+        match timeout(WAIT, up_rx.recv()).await.expect("upstream must close") {
+            None => {}
+            Some(m) => panic!("a closed tunnel still relayed {m:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_resource_queue_ends_the_tunnel_instead_of_dropping_data() {
+        let hub = new_hub();
+        // A tunnel whose resource side reads nothing.
+        let (inbound_tx, mut inbound_rx) = mpsc::channel::<Bytes>(64);
+        hub.0.lock().await.insert(
+            "c1".into(),
+            TunnelSession {
+                inbound_tx,
+                tasks: Vec::new(),
+            },
+        );
+        let (up_tx, mut up_rx) = mpsc::channel(8);
+        for i in 0..65u8 {
+            handle_tunnel_data(hub.clone(), "c1", vec![i], &up_tx).await;
+        }
+
+        assert!(
+            hub.0.lock().await.get("c1").is_none(),
+            "the tunnel carried on after a chunk could not be queued"
+        );
+        let close = up_rx.recv().await.unwrap();
+        assert!(
+            matches!(close.body, Some(Body::TunnelClose(ref c)) if c.connection_id == "c1" && !c.error.is_empty()),
+            "the connector was not told: {close:?}"
+        );
+        // Everything queued before the overflow is intact, in order.
+        for i in 0..64u8 {
+            assert_eq!(inbound_rx.recv().await.unwrap(), Bytes::from(vec![i]));
+        }
+        assert!(inbound_rx.recv().await.is_none());
     }
 }
