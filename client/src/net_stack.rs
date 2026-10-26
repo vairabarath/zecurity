@@ -39,6 +39,19 @@ const MAX_TUNNEL_HANDSHAKE_SIZE: usize = 16 * 1024;
 const SMOL_TICK_MS: u64 = 5;
 const TUN_TX_QUEUE_CAP: usize = 1024;
 const FLOW_QUEUE_CAP: usize = 64;
+/// Sprint 20 Fix 12 (F37): listening sockets kept per resource `(ip, port)`.
+/// smoltcp handles every SYN that arrives in one `iface.poll`, and a SYN with
+/// no socket still in `Listen` gets a RST. The SYN gate (`SynGate`) lets only
+/// as many SYNs per resource into a poll as it has free listeners and holds
+/// the rest for the next poll, so one listener is enough for any burst.
+/// Every listener costs two `MAX_TCP_PAYLOAD` buffers, and they become
+/// resident memory (64 KiB is below glibc's mmap threshold and calloc zeroes
+/// reused heap chunks), so the pool is kept at one: the same as before Fix 12.
+const LISTEN_BACKLOG: usize = 1;
+/// Fix 12 review: SYNs the gate holds at most, and for how long. Past either,
+/// a SYN is dropped (not reset): the app retransmits it.
+const SYN_DEFER_CAP: usize = 1024;
+const SYN_DEFER_LIMIT: smoltcp::time::Duration = smoltcp::time::Duration::from_millis(1_000);
 const FLOW_WRITE_BUF_CAP: usize = 1024 * 1024;
 
 /// Fix 05-A back-stop: a relay socket that sits in a closing state
@@ -115,6 +128,221 @@ impl Device for TunDevice {
         caps.medium = Medium::Ip;
         caps.max_transmission_unit = 1500;
         caps
+    }
+}
+
+// --- Fix 12 review: the SYN gate in front of smoltcp's receive path ---
+
+/// A bare SYN (no ACK) in an unfragmented IPv4/TCP packet: the resource it is
+/// for, and the connection `(local ip, local port, remote ip, remote port)`
+/// from the stack's side. Anything else, or anything malformed, is None.
+fn bare_syn(p: &[u8]) -> Option<((Ipv4Addr, u16), ConnTuple)> {
+    if p.len() < 20 || p[0] >> 4 != 4 {
+        return None;
+    }
+    let ihl = usize::from(p[0] & 0x0f) * 4;
+    if ihl < 20 || p.len() < ihl + 20 || p[9] != 6 {
+        return None;
+    }
+    // Only a first (or only) fragment carries the TCP header; skip any
+    // fragment so an offset or MF packet is never misread.
+    if u16::from_be_bytes([p[6], p[7]]) & 0x3fff != 0 {
+        return None;
+    }
+    let src = Ipv4Addr::new(p[12], p[13], p[14], p[15]);
+    let dst = Ipv4Addr::new(p[16], p[17], p[18], p[19]);
+    let t = &p[ihl..];
+    let sport = u16::from_be_bytes([t[0], t[1]]);
+    let dport = u16::from_be_bytes([t[2], t[3]]);
+    let flags = t[13];
+    if flags & 0x02 == 0 || flags & 0x14 != 0 {
+        return None; // not a SYN, or SYN+ACK / SYN+RST
+    }
+    Some(((dst, dport), (dst, dport, src, sport)))
+}
+
+type ConnTuple = (Ipv4Addr, u16, Ipv4Addr, u16);
+
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct SynGateStats {
+    /// SYNs held for a later poll (no free listener yet).
+    syn_deferred: u64,
+    /// Retransmitted SYNs for a connection a socket already owns.
+    dup_syn_dropped: u64,
+    /// SYNs dropped because the hold queue was full or held too long.
+    syn_overflow_dropped: u64,
+}
+
+/// Fix 12 review (items 1 and 4). Prepared from the SocketSet before each
+/// poll, consulted for every inbound packet:
+/// - a SYN for a connection a socket already owns (half-open or established)
+///   is a retransmit: dropped, so a listener ahead of that socket in the
+///   SocketSet cannot take it and open a second connection for the same
+///   4-tuple (smoltcp gives a SYN to the first socket that accepts it). The
+///   owning socket retransmits its own SYN-ACK;
+/// - a SYN for a resource with no free listener left in this poll is held
+///   and delivered first at the next poll, after `service` refilled the
+///   listener, instead of being reset.
+#[derive(Default)]
+struct SynGate {
+    free: HashMap<(Ipv4Addr, u16), usize>,
+    owned: HashSet<ConnTuple>,
+    /// Held SYNs, with when they were first held.
+    deferred: VecDeque<(Vec<u8>, SmolInstant)>,
+    /// Held SYNs being offered again in the current poll.
+    retry: VecDeque<(Vec<u8>, SmolInstant)>,
+    /// A SYN reached a free listener in the last poll.
+    progressed: bool,
+    stats: SynGateStats,
+}
+
+impl SynGate {
+    fn prepare(
+        &mut self,
+        sockets: &SocketSet<'_>,
+        listen_handles: &HashMap<(Ipv4Addr, u16), Vec<SocketHandle>>,
+        active_relays: &HashMap<SocketHandle, ActiveRelay>,
+    ) {
+        self.free.clear();
+        for (key, pool) in listen_handles {
+            let n = pool
+                .iter()
+                .filter(|h| sockets.get::<tcp::Socket>(**h).is_listening())
+                .count();
+            self.free.insert(*key, n);
+        }
+        // Only half-open and established connections own their 4-tuple: a
+        // reconnect on the tuple of a closing socket must still get through.
+        self.owned.clear();
+        for handle in active_relays.keys() {
+            let socket = sockets.get::<tcp::Socket>(*handle);
+            if !matches!(
+                socket.state(),
+                tcp::State::SynReceived | tcp::State::Established
+            ) {
+                continue;
+            }
+            if let (Some(local), Some(remote)) = (socket.local_endpoint(), socket.remote_endpoint())
+            {
+                if let (IpAddress::Ipv4(l), IpAddress::Ipv4(r)) = (local.addr, remote.addr) {
+                    self.owned.insert((
+                        Ipv4Addr::from(l),
+                        local.port,
+                        Ipv4Addr::from(r),
+                        remote.port,
+                    ));
+                }
+            }
+        }
+        let held = std::mem::take(&mut self.deferred);
+        self.retry.extend(held);
+        self.progressed = false;
+    }
+
+    /// Whether `pkt` goes to smoltcp now (Some), or is held or dropped.
+    /// `held_since`: when it was first held, if it is being offered again.
+    fn admit(
+        &mut self,
+        pkt: Vec<u8>,
+        held_since: Option<SmolInstant>,
+        now: SmolInstant,
+    ) -> Option<Vec<u8>> {
+        let Some((key, tuple)) = bare_syn(&pkt) else {
+            return Some(pkt);
+        };
+        if self.owned.contains(&tuple) {
+            self.stats.dup_syn_dropped += 1;
+            return None;
+        }
+        let Some(free) = self.free.get_mut(&key) else {
+            return Some(pkt); // not a resource: smoltcp answers as before
+        };
+        if *free > 0 {
+            *free -= 1;
+            self.owned.insert(tuple);
+            self.progressed = true;
+            return Some(pkt);
+        }
+        let since = held_since.unwrap_or(now);
+        if self.deferred.len() >= SYN_DEFER_CAP || now - since > SYN_DEFER_LIMIT {
+            self.stats.syn_overflow_dropped += 1;
+            return None;
+        }
+        if held_since.is_none() {
+            self.stats.syn_deferred += 1;
+        }
+        self.deferred.push_back((pkt, since));
+        None
+    }
+
+    /// Poll again at once: SYNs are waiting and the last poll got some in.
+    fn repoll_now(&self) -> bool {
+        self.progressed && !self.deferred.is_empty()
+    }
+}
+
+/// The device as smoltcp sees it while the gate is in front of it.
+struct GatedDevice<'a, D: Device> {
+    inner: &'a mut D,
+    gate: &'a mut SynGate,
+}
+
+struct GateRx(Vec<u8>);
+
+impl RxToken for GateRx {
+    fn consume<R, F>(mut self, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        f(&mut self.0)
+    }
+}
+
+impl<D: Device> Device for GatedDevice<'_, D> {
+    type RxToken<'b>
+        = GateRx
+    where
+        Self: 'b;
+    type TxToken<'b>
+        = D::TxToken<'b>
+    where
+        Self: 'b;
+
+    fn receive(
+        &mut self,
+        timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        loop {
+            let (pkt, held_since) = match self.gate.retry.pop_front() {
+                Some((pkt, since)) => (pkt, Some(since)),
+                None => {
+                    let (rx, tx) = self.inner.receive(timestamp)?;
+                    let pkt = rx.consume(|buf| buf.to_vec());
+                    drop(tx);
+                    (pkt, None)
+                }
+            };
+            if let Some(pkt) = self.gate.admit(pkt, held_since, timestamp) {
+                return match self.inner.transmit(timestamp) {
+                    Some(tx) => Some((GateRx(pkt), tx)),
+                    None => {
+                        // No way to answer right now: offer it again next poll.
+                        self.gate
+                            .retry
+                            .push_front((pkt, held_since.unwrap_or(timestamp)));
+                        None
+                    }
+                };
+            }
+        }
+    }
+
+    fn transmit(&mut self, timestamp: SmolInstant) -> Option<Self::TxToken<'_>> {
+        self.inner.transmit(timestamp)
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        self.inner.capabilities()
     }
 }
 
@@ -559,25 +787,50 @@ struct RelaySpawn {
 /// Shared by `run` and the unit tests so the tests exercise the production
 /// accept/lifecycle code against a real smoltcp interface.
 struct FlowTable {
-    listen_handles: HashMap<(Ipv4Addr, u16), SocketHandle>,
+    /// Fix 12: a pool of `LISTEN_BACKLOG` listening sockets per resource.
+    listen_handles: HashMap<(Ipv4Addr, u16), Vec<SocketHandle>>,
     active_relays: HashMap<SocketHandle, ActiveRelay>,
     stats: LifecycleStats,
     // Phase 5-C: next tag for a resource-removal close batch.
     next_close_tag: u64,
+    /// Fix 12 review: what may reach smoltcp in each poll.
+    gate: SynGate,
 }
 
 impl FlowTable {
     fn new(sockets: &mut SocketSet<'_>, resources: &[(Ipv4Addr, u16)]) -> Self {
-        let mut listen_handles = HashMap::new();
-        for (ip, port) in resources {
-            listen_handles.insert((*ip, *port), new_listen_socket(sockets, (*ip, *port)));
-        }
-        Self {
-            listen_handles,
+        let mut table = Self {
+            listen_handles: HashMap::new(),
             active_relays: HashMap::new(),
             stats: LifecycleStats::default(),
             next_close_tag: 0,
-        }
+            gate: SynGate::default(),
+        };
+        table.add_listeners(sockets, resources);
+        table
+    }
+
+    /// One smoltcp poll with the SYN gate in front of the device. The only
+    /// way the loop (and the tests) poll the stack.
+    fn gated_poll<D: Device>(
+        &mut self,
+        iface: &mut Interface,
+        device: &mut D,
+        sockets: &mut SocketSet<'_>,
+        now: SmolInstant,
+    ) {
+        self.gate
+            .prepare(sockets, &self.listen_handles, &self.active_relays);
+        let mut gated = GatedDevice {
+            inner: device,
+            gate: &mut self.gate,
+        };
+        iface.poll(now, &mut gated, sockets);
+    }
+
+    /// Listening sockets currently held (idle listeners, not connections).
+    fn listener_count(&self) -> usize {
+        self.listen_handles.values().map(Vec::len).sum()
     }
 
     /// Phase 5-C (R1): stop serving `keys`. Removes their listeners and
@@ -594,19 +847,21 @@ impl FlowTable {
         let tag = self.next_close_tag;
         self.next_close_tag += 1;
         for key in keys {
-            let Some(handle) = self.listen_handles.remove(key) else {
+            let Some(pool) = self.listen_handles.remove(key) else {
                 continue;
             };
-            let socket = sockets.get_mut::<tcp::Socket>(handle);
-            if socket.is_listening() {
-                sockets.remove(handle);
-            } else {
-                // A SYN already arrived on this listener: reset it and let the
-                // lifecycle reap it once the RST is out.
-                socket.abort();
-                let mut relay = ActiveRelay::fail_closed(now);
-                relay.close_tag = Some(tag);
-                self.active_relays.insert(handle, relay);
+            for handle in pool {
+                let socket = sockets.get_mut::<tcp::Socket>(handle);
+                if socket.is_listening() {
+                    sockets.remove(handle);
+                } else {
+                    // A SYN already arrived on this listener: reset it and let
+                    // the lifecycle reap it once the RST is out.
+                    socket.abort();
+                    let mut relay = ActiveRelay::fail_closed(now);
+                    relay.close_tag = Some(tag);
+                    self.active_relays.insert(handle, relay);
+                }
             }
         }
         for (handle, relay) in self.active_relays.iter_mut() {
@@ -675,9 +930,14 @@ impl FlowTable {
     /// Phase 5-C (A2): start serving `keys` (idempotent per key).
     fn add_listeners(&mut self, sockets: &mut SocketSet<'_>, keys: &[(Ipv4Addr, u16)]) {
         for key in keys {
-            if !self.listen_handles.contains_key(key) {
-                self.listen_handles
-                    .insert(*key, new_listen_socket(sockets, *key));
+            if self.listen_handles.contains_key(key) {
+                continue;
+            }
+            // A key that cannot listen gets no entry: the gate then lets its
+            // SYNs through (smoltcp resets them) instead of holding them.
+            let pool = new_listen_pool(sockets, *key);
+            if !pool.is_empty() {
+                self.listen_handles.insert(*key, pool);
             }
         }
     }
@@ -694,17 +954,26 @@ impl FlowTable {
         // --- Promote listening sockets that have accepted a connection ---
         //
         // When smoltcp receives a SYN, the socket leaves Listen (is_active).
-        // We immediately replace it with a new listener so further
-        // connections to the same resource still work.
-        let listen_snapshot: Vec<_> = self.listen_handles.iter().map(|(k, v)| (*k, *v)).collect();
-        for ((ip, port), handle) in listen_snapshot {
-            if !sockets.get_mut::<tcp::Socket>(handle).is_active() {
-                continue;
-            }
-            // Fresh listener for the next connection.
-            self.listen_handles
-                .insert((ip, port), new_listen_socket(sockets, (ip, port)));
-
+        // Fix 12: every pooled socket that took one is promoted and its slot
+        // refilled with a fresh listener, so the pool is full again before
+        // the next poll.
+        let mut accepted = Vec::new();
+        for (key, pool) in self.listen_handles.iter_mut() {
+            pool.retain_mut(|slot| {
+                if !sockets.get_mut::<tcp::Socket>(*slot).is_active() {
+                    return true;
+                }
+                accepted.push((*key, *slot));
+                match new_listen_socket(sockets, *key) {
+                    Some(fresh) => {
+                        *slot = fresh;
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        for ((ip, port), handle) in accepted {
             let dest = ip.to_string();
             tracing::info!(dest = %dest, port, "new TCP connection");
 
@@ -947,10 +1216,12 @@ pub async fn run(
 
     let mut sockets = SocketSet::new(vec![]);
 
-    // ONE listening TCP socket per resource, created BEFORE the loop and
-    // re-created each time a connection is accepted (see FlowTable).
+    // LISTEN_BACKLOG listening sockets per resource (Fix 12), created BEFORE
+    // the loop and refilled as connections are accepted; the SYN gate holds
+    // whatever a poll cannot take (see FlowTable).
     let mut flows = FlowTable::new(&mut sockets, &resource_entries);
-    let mut stats_last_logged: (usize, usize, LifecycleStats) = (0, 0, LifecycleStats::default());
+    let mut stats_last_logged: (usize, usize, LifecycleStats, SynGateStats) =
+        (0, 0, LifecycleStats::default(), SynGateStats::default());
     let mut stats_next_at = tokio::time::Instant::now() + LIFECYCLE_STATS_INTERVAL;
     let mut relays_warned = false;
 
@@ -1014,18 +1285,12 @@ pub async fn run(
 
     loop {
         let smol_now = smoltcp_now();
-        iface.poll(smol_now, &mut tun_dev, &mut sockets);
+        flows.gated_poll(&mut iface, &mut tun_dev, &mut sockets, smol_now);
 
         // Phase 5-C: apply resource commands between two polls, before the
         // accept/relay pass. Never awaits.
         while let Ok(cmd) = resource_rx.try_recv() {
-            apply_resource_cmd(
-                cmd,
-                &mut sockets,
-                &mut flows,
-                smol_now,
-                &mut pending_closes,
-            );
+            apply_resource_cmd(cmd, &mut sockets, &mut flows, smol_now, &mut pending_closes);
         }
 
         flows.service(&mut sockets, smol_now, &transports, &mut spawn_relay);
@@ -1036,7 +1301,10 @@ pub async fn run(
         if n_relays >= ACTIVE_RELAYS_WARN && !relays_warned {
             tracing::warn!(
                 active_relays = n_relays,
-                sockets = sockets.iter().count(),
+                sockets = sockets
+                    .iter()
+                    .count()
+                    .saturating_sub(flows.listener_count()),
                 "net_stack: unusually many live relay sockets"
             );
             relays_warned = true;
@@ -1045,13 +1313,21 @@ pub async fn run(
         }
         if tokio::time::Instant::now() >= stats_next_at {
             stats_next_at = tokio::time::Instant::now() + LIFECYCLE_STATS_INTERVAL;
-            let n_sockets = sockets.iter().count();
+            // Fix 12 review: listeners apart from relay sockets, so a socket
+            // leak still shows next to active_relays (Fix 05-A).
+            let listeners = flows.listener_count();
+            let n_sockets = sockets.iter().count().saturating_sub(listeners);
             let stats = flows.stats;
-            let snapshot = (n_relays, n_sockets, stats);
+            let gate = flows.gate.stats;
+            let snapshot = (n_relays, n_sockets, stats, gate);
             if snapshot != stats_last_logged {
                 tracing::info!(
                     active_relays = n_relays,
                     sockets = n_sockets,
+                    listeners,
+                    syn_deferred = gate.syn_deferred,
+                    dup_syn_dropped = gate.dup_syn_dropped,
+                    syn_overflow_dropped = gate.syn_overflow_dropped,
                     fin_on_relay_end = stats.fin_on_relay_end,
                     rst_on_relay_failure = stats.rst_on_relay_failure,
                     rst_fail_closed = stats.rst_fail_closed,
@@ -1068,8 +1344,22 @@ pub async fn run(
             .map(|d| Duration::from_micros(d.micros()))
             .unwrap_or(Duration::from_millis(SMOL_TICK_MS));
 
+        // Fix 12 review: SYNs are held for a free listener and the last poll
+        // got some in, so the refilled listeners take the next ones at once.
+        // Only then — a held SYN that cannot progress waits for the tick.
+        if flows.gate.repoll_now() {
+            tokio::task::yield_now().await;
+            continue;
+        }
         tokio::time::sleep(poll_delay.min(Duration::from_millis(SMOL_TICK_MS))).await;
     }
+}
+
+/// Fix 12: `LISTEN_BACKLOG` listeners for one resource (see the constant).
+fn new_listen_pool(sockets: &mut SocketSet<'_>, key: (Ipv4Addr, u16)) -> Vec<SocketHandle> {
+    (0..LISTEN_BACKLOG)
+        .filter_map(|_| new_listen_socket(sockets, key))
+        .collect()
 }
 
 /// A listener for exactly one resource `(ip, port)`. Bound to the IP too, not
@@ -1077,12 +1367,18 @@ pub async fn run(
 /// destination, and two resources sharing a port must each get their own
 /// connections (a port-only listener took SYNs for every IP on that port, and
 /// `FlowTable::service` then tunnelled them to the wrong resource).
-fn new_listen_socket(sockets: &mut SocketSet<'_>, key: (Ipv4Addr, u16)) -> SocketHandle {
+///
+/// None if smoltcp refuses to listen there (e.g. port 0); logged, so a
+/// resource that can never accept is visible instead of silently dead.
+fn new_listen_socket(sockets: &mut SocketSet<'_>, key: (Ipv4Addr, u16)) -> Option<SocketHandle> {
     let rx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let tx_buf = tcp::SocketBuffer::new(vec![0u8; MAX_TCP_PAYLOAD]);
     let mut socket = tcp::Socket::new(rx_buf, tx_buf);
-    let _ = socket.listen((IpAddress::Ipv4(Ipv4Address::from(key.0)), key.1));
-    sockets.add(socket)
+    if let Err(e) = socket.listen((IpAddress::Ipv4(Ipv4Address::from(key.0)), key.1)) {
+        tracing::warn!(ip = %key.0, port = key.1, error = ?e, "cannot listen for resource");
+        return None;
+    }
+    Some(sockets.add(socket))
 }
 
 /// The tunnel's own interface address. It is the only smoltcp address.
@@ -2190,14 +2486,21 @@ mod tests {
             self.now_ms += advance_ms;
             let now = self.now();
             self.c_iface.poll(now, &mut self.c_dev, &mut self.c_sockets);
-            self.s_iface.poll(now, &mut self.s_dev, &mut self.s_sockets);
+            self.s_poll(now);
             let spawned = &mut self.spawned;
             self.flows
                 .service(&mut self.s_sockets, now, &self.transports, &mut |s| {
                     spawned.push(s)
                 });
-            self.s_iface.poll(now, &mut self.s_dev, &mut self.s_sockets);
+            self.s_poll(now);
             self.c_iface.poll(now, &mut self.c_dev, &mut self.c_sockets);
+        }
+
+        /// The net_stack side polls exactly as production does: through the
+        /// SYN gate (`FlowTable::gated_poll`).
+        fn s_poll(&mut self, now: SmolInstant) {
+            self.flows
+                .gated_poll(&mut self.s_iface, &mut self.s_dev, &mut self.s_sockets, now);
         }
 
         fn pump(&mut self, rounds: usize) {
@@ -2283,6 +2586,263 @@ mod tests {
             b"GET / HTTP/1.1\r\n\r\n"
         );
         (h, spawn)
+    }
+
+    // ---- Fix 12 (F37): a listen backlog per resource ----
+
+    /// Connections opened in one burst: more than any listener pool, so the
+    /// SYN gate has to hold most of them for later polls.
+    const BURST: u16 = 24;
+
+    /// Listening sockets left in a resource's pool.
+    fn listening(lab: &Lab, key: (Ipv4Addr, u16)) -> usize {
+        lab.flows.listen_handles[&key]
+            .iter()
+            .filter(|h| lab.s_sockets.get::<tcp::Socket>(**h).is_listening())
+            .count()
+    }
+
+    /// AF12-1/2: a burst of connections whose SYNs all arrive in the same
+    /// poll is accepted in full — no RST — although the resource has fewer
+    /// listeners than SYNs: the gate holds the rest for the next polls. The
+    /// listener is refilled, and a second burst works too.
+    #[test]
+    fn a_burst_of_connections_in_one_poll_is_accepted_and_the_pool_refills() {
+        let mut lab = Lab::new(true);
+        let key = res_key(RES_PORT);
+        for round in 0..2u16 {
+            let handles: Vec<_> = (0..BURST)
+                .map(|i| lab.connect(40_000 + round * 100 + i))
+                .collect();
+            lab.step(10); // every SYN of the burst reaches the stack in one poll
+            lab.pump(2 * BURST as usize);
+            for h in &handles {
+                assert_eq!(
+                    lab.app(*h).state(),
+                    tcp::State::Established,
+                    "round {round}: every connection of the burst is accepted"
+                );
+            }
+            assert_eq!(lab.spawned.len(), BURST as usize * (round as usize + 1));
+            assert_eq!(listening(&lab, key), LISTEN_BACKLOG, "listener refilled");
+        }
+        assert_eq!(lab.flows.stats.rst_fail_closed, 0);
+        assert!(lab.flows.gate.stats.syn_deferred > 0, "the gate held SYNs");
+        assert_eq!(lab.flows.gate.stats.syn_overflow_dropped, 0);
+    }
+
+    /// Fix 12 review, item 1: a retransmitted SYN must not open a second
+    /// connection. A listener refilled into a freed low slot sits ahead of a
+    /// half-open socket in the SocketSet; smoltcp gives a SYN (no ACK) to the
+    /// first socket that accepts it, so without the gate the app's
+    /// retransmitted SYN is taken by that listener: a second socket and relay
+    /// for one 4-tuple. The gate drops it; the half-open socket's own SYN-ACK
+    /// retransmit completes the handshake.
+    #[test]
+    fn a_retransmitted_syn_does_not_open_a_second_connection() {
+        let mut lab = Lab::new(true);
+        // Connection A comes and goes, freeing the lowest SocketSet slot.
+        let (_a, spawn_a) = establish(&mut lab, 44_000);
+        end_relay(spawn_a, RELAY_FAILED);
+        lab.pump(10);
+        assert_eq!(lab.relay_sockets(), 0, "A reaped");
+
+        // Connection B: its SYN is taken, the listener refilled (into A's
+        // freed slot, ahead of B's socket), and B's SYN-ACK is lost.
+        let b = lab.connect(44_001);
+        let now = lab.now();
+        lab.c_iface.poll(now, &mut lab.c_dev, &mut lab.c_sockets);
+        lab.s_poll(now);
+        let spawned = &mut lab.spawned;
+        lab.flows
+            .service(&mut lab.s_sockets, now, &lab.transports, &mut |s| {
+                spawned.push(s)
+            });
+        lab.s_poll(now);
+        lab.s_dev.tx.borrow_mut().clear(); // the SYN-ACK is lost
+        assert_eq!(lab.spawned.len(), 1, "B accepted once");
+
+        // The app retransmits its SYN; the handshake must still complete,
+        // with exactly one connection for B.
+        for _ in 0..40 {
+            lab.step(100);
+            if lab.app(b).state() == tcp::State::Established {
+                break;
+            }
+        }
+        lab.pump(5);
+        assert_eq!(
+            lab.spawned.len(),
+            1,
+            "the retransmitted SYN opened a second connection"
+        );
+        assert_eq!(lab.relay_sockets(), 1);
+        assert_eq!(lab.app(b).state(), tcp::State::Established);
+        assert!(
+            lab.flows.gate.stats.dup_syn_dropped > 0,
+            "the retransmit was dropped"
+        );
+    }
+
+    /// A resource that cannot listen (port 0) gets no listener and is
+    /// logged; the gate does not hold its SYNs.
+    #[test]
+    fn a_resource_that_cannot_listen_gets_no_listener() {
+        let mut lab = Lab::new(true);
+        let bad = (Ipv4Addr::from(RES_IP), 0);
+        lab.flows.add_listeners(&mut lab.s_sockets, &[bad]);
+        assert!(!lab.flows.listen_handles.contains_key(&bad));
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the good resource's"
+        );
+    }
+
+    fn syn_packet(flags: u8, ihl_words: u8, frag: u16) -> Vec<u8> {
+        let ihl = usize::from(ihl_words) * 4;
+        let mut p = vec![0u8; ihl + 20];
+        p[0] = 0x40 | ihl_words;
+        p[6..8].copy_from_slice(&frag.to_be_bytes());
+        p[9] = 6;
+        p[12..16].copy_from_slice(&[100, 64, 0, 9]);
+        p[16..20].copy_from_slice(&RES_IP);
+        p[ihl..ihl + 2].copy_from_slice(&40_000u16.to_be_bytes());
+        p[ihl + 2..ihl + 4].copy_from_slice(&RES_PORT.to_be_bytes());
+        p[ihl + 13] = flags;
+        p
+    }
+
+    #[test]
+    fn bare_syn_reads_only_unfragmented_tcp_syns() {
+        let key = res_key(RES_PORT);
+        let tuple = (key.0, key.1, Ipv4Addr::new(100, 64, 0, 9), 40_000);
+        assert_eq!(bare_syn(&syn_packet(0x02, 5, 0)), Some((key, tuple)));
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 7, 0)),
+            Some((key, tuple)),
+            "IP options"
+        );
+        assert_eq!(bare_syn(&syn_packet(0x12, 5, 0)), None, "SYN+ACK");
+        assert_eq!(bare_syn(&syn_packet(0x10, 5, 0)), None, "ACK");
+        assert_eq!(bare_syn(&syn_packet(0x06, 5, 0)), None, "SYN+RST");
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 5, 0x2000)),
+            None,
+            "more fragments"
+        );
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 5, 0x0010)),
+            None,
+            "later fragment"
+        );
+        let mut udp = syn_packet(0x02, 5, 0);
+        udp[9] = 17;
+        assert_eq!(bare_syn(&udp), None, "not TCP");
+        let short = syn_packet(0x02, 5, 0);
+        for len in 0..short.len() {
+            assert_eq!(bare_syn(&short[..len]), None, "truncated to {len}");
+        }
+        let mut v6 = syn_packet(0x02, 5, 0);
+        v6[0] = 0x65;
+        assert_eq!(bare_syn(&v6), None, "not IPv4");
+    }
+
+    #[test]
+    fn a_held_syn_is_dropped_once_it_waited_too_long_or_the_queue_is_full() {
+        let key = res_key(RES_PORT);
+        let mut gate = SynGate::default();
+        gate.free.insert(key, 0);
+        let t0 = SmolInstant::from_millis(10_000);
+        assert!(gate.admit(syn_packet(0x02, 5, 0), None, t0).is_none());
+        assert_eq!(gate.deferred.len(), 1, "held");
+        let (pkt, since) = gate.deferred.pop_front().unwrap();
+        let late = t0 + SYN_DEFER_LIMIT + smoltcp::time::Duration::from_millis(1);
+        assert!(gate.admit(pkt, Some(since), late).is_none());
+        assert!(gate.deferred.is_empty(), "dropped, not held again");
+        assert_eq!(gate.stats.syn_overflow_dropped, 1);
+
+        for _ in 0..SYN_DEFER_CAP {
+            gate.deferred.push_back((Vec::new(), t0));
+        }
+        assert!(gate.admit(syn_packet(0x02, 5, 0), None, t0).is_none());
+        assert_eq!(gate.deferred.len(), SYN_DEFER_CAP, "capped");
+        assert_eq!(gate.stats.syn_overflow_dropped, 2);
+    }
+
+    /// AF12-3: two resources sharing a port each take a full burst, and every
+    /// flow is tunnelled to its own destination (Fix 09 binding kept).
+    #[test]
+    fn bursts_to_resources_sharing_a_port_go_to_their_own_destinations() {
+        let a = (Ipv4Addr::new(10, 0, 0, 1), 80);
+        let b = (Ipv4Addr::new(10, 0, 0, 3), 80);
+        let mut lab = Lab::multi(&[a, b], |iface| {
+            iface.update_ip_addrs(|addrs| {
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 32))
+                    .unwrap();
+                addrs
+                    .push(IpCidr::new(IpAddress::v4(10, 0, 0, 3), 32))
+                    .unwrap();
+            });
+        });
+        let mut handles = Vec::new();
+        for i in 0..BURST {
+            handles.push(lab.connect_to(a.0, a.1, 41_000 + i));
+            handles.push(lab.connect_to(b.0, b.1, 42_000 + i));
+        }
+        lab.step(10);
+        lab.pump(2 * BURST as usize);
+        for h in &handles {
+            assert_eq!(lab.app(*h).state(), tcp::State::Established);
+        }
+        let to = |ip: Ipv4Addr| {
+            lab.spawned
+                .iter()
+                .filter(|s| s.dest == ip.to_string())
+                .count()
+        };
+        assert_eq!(to(a.0), BURST as usize);
+        assert_eq!(to(b.0), BURST as usize);
+    }
+
+    /// AF12-4: removing a resource removes its whole pool, including a socket
+    /// caught mid-handshake (reset, then reaped); `add_listeners` is
+    /// idempotent and builds a full pool.
+    #[test]
+    fn removing_a_resource_removes_its_whole_pool() {
+        let mut lab = Lab::new(true);
+        let key = res_key(RES_PORT);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
+
+        // A SYN reaches the stack but the FlowTable hasn't serviced it yet.
+        let h = lab.connect(43_000);
+        let now = lab.now();
+        lab.c_iface.poll(now, &mut lab.c_dev, &mut lab.c_sockets);
+        lab.s_poll(now);
+        assert_eq!(
+            listening(&lab, key),
+            LISTEN_BACKLOG - 1,
+            "one listener mid-handshake"
+        );
+
+        let tag = lab
+            .flows
+            .remove_listeners_and_close(&mut lab.s_sockets, &[key], now);
+        assert!(!lab.flows.listen_handles.contains_key(&key));
+        assert!(
+            lab.flows.close_pending(tag),
+            "the mid-handshake socket is being reset"
+        );
+        lab.pump(5);
+        assert!(!lab.flows.close_pending(tag));
+        assert_eq!(lab.stack_sockets(), 0, "nothing of the pool is left");
+        assert_ne!(lab.app(h).state(), tcp::State::Established);
+
+        lab.flows.add_listeners(&mut lab.s_sockets, &[key]);
+        lab.flows.add_listeners(&mut lab.s_sockets, &[key]);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG, "idempotent, full pool");
+        assert_eq!(listening(&lab, key), LISTEN_BACKLOG);
     }
 
     // ---- Fix 09: resources sharing a port go to their own destination ----
@@ -2402,7 +2962,11 @@ mod tests {
         lab.app(h).close();
         lab.pump(10);
         assert_eq!(lab.relay_sockets(), 0, "relay socket removed");
-        assert_eq!(lab.stack_sockets(), 1, "only the listener is left");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the listener pool is left"
+        );
         assert!(matches!(
             lab.app(h).state(),
             tcp::State::Closed | tcp::State::TimeWait
@@ -2421,7 +2985,7 @@ mod tests {
         assert_eq!(lab.flows.stats.rst_on_relay_failure, 1);
         assert_eq!(lab.flows.stats.fin_on_relay_end, 0);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
     }
 
     /// A relay task that dies without recording an outcome (e.g. a panic)
@@ -2465,7 +3029,7 @@ mod tests {
         end_relay(spawn, RELAY_ENDED_OK);
         lab.pump(5);
         assert_eq!(lab.relay_sockets(), 0, "no CLOSE-WAIT socket left behind");
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
         assert!(matches!(
             lab.app(h).state(),
             tcp::State::TimeWait | tcp::State::Closed
@@ -2486,7 +3050,11 @@ mod tests {
         assert_eq!(lab.app(h).state(), tcp::State::Closed, "RST, not a hang");
         assert_eq!(lab.flows.stats.rst_fail_closed, 1);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1, "only the listener is left");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the listener pool is left"
+        );
     }
 
     /// (5) Back-stop: a socket stuck in a closing state (here CLOSE-WAIT with a
@@ -2506,7 +3074,7 @@ mod tests {
         lab.pump(2);
         assert_eq!(lab.flows.stats.backstop_aborts, 1);
         assert_eq!(lab.relay_sockets(), 0);
-        assert_eq!(lab.stack_sockets(), 1);
+        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG);
     }
 
     /// The back-stop never touches a healthy idle ESTABLISHED flow.
@@ -2550,7 +3118,11 @@ mod tests {
             lab.pump(1);
         }
         assert_eq!(lab.flows.stats.fin_on_relay_end, 5);
-        assert_eq!(lab.stack_sockets(), 1, "bounded: only the listener");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "bounded: only the listener pool"
+        );
     }
 
     /// Control for the regression: while a socket IS stuck holding the

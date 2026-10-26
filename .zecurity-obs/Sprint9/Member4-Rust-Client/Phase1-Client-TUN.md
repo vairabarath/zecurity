@@ -512,3 +512,22 @@ zecurity-client up
 ip rule show | grep 'fwmark 0x5a'
 ```
 Expected: exactly one rule, `from all fwmark 0x5a lookup 105`. No `fwmark 0x5a lookup main` rule should remain.
+
+
+### Fix: concurrent connections to one resource were reset; a retransmitted SYN could open a second connection (Sprint 20 Fix 12, F37 + PR #134 review)
+**Issue:** `net_stack.rs` kept one listening smoltcp socket per resource. Every further SYN to that resource arriving in the same `iface.poll` got a RST (live: 4/24 parallel connections succeeded). The first fix (a pool of 16 listeners, `d6548792`) let a retransmitted SYN be taken by a listener sitting ahead of the half-open socket, opening a second connection for the same 4-tuple, and cost ~2 MiB per resource.
+
+**Root cause:** smoltcp hands each SYN to the first socket in the `SocketSet` whose `accepts()` is true, and a SYN without a free `Listen` socket is reset. Listener count was the only control over how many SYNs a poll could take.
+
+**Fix Applied (`e87b0b34`, `client/src/net_stack.rs`):**
+```
+// BEFORE: iface.poll(now, &mut tun_dev, &mut sockets);   // one listener; extra SYNs → RST
+// AFTER:  flows.gated_poll(&mut iface, &mut tun_dev, &mut sockets, now);
+//         SynGate: drop a bare SYN for an owned 4-tuple (SynReceived/Established);
+//         admit as many SYNs per resource as free listeners; hold the rest for the
+//         next poll (≤1024, ≤1 s; then drop, never RST); repoll at once on progress.
+const LISTEN_BACKLOG: usize = 1;
+```
+Also: `listen()` errors logged (key gets no listener); stats report relay sockets apart from `listeners` plus `syn_deferred` / `dup_syn_dropped` / `syn_overflow_dropped`.
+
+**Related:** `.zecurity-obs/Sprint20/Fixes/Fix12-Client-Concurrent-Connections-Listen-Backlog.md` (design, tests, live AF12-L2), `Sprint20/path.md` → F37.
