@@ -15,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yourorg/ztna/controller/graph"
 	"github.com/yourorg/ztna/controller/internal/apperr"
+	"github.com/yourorg/ztna/controller/internal/connector"
+	"github.com/yourorg/ztna/controller/internal/shield"
 	"github.com/yourorg/ztna/controller/internal/tenant"
 )
 
@@ -110,11 +112,32 @@ func (r *mutationResolver) GenerateConnectorToken(ctx context.Context, remoteNet
 }
 
 // RevokeConnector is the resolver for the revokeConnector field.
-func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool, error) {
+func (r *mutationResolver) RevokeConnector(ctx context.Context, id string, alsoRevokeShields *bool) (bool, error) {
 	tc := tenant.MustGet(ctx)
 
+	// Sprint 20 Fix 16 (F46): the last connector of a remote network that still
+	// has enrolled shields attached is not revoked silently: those shields would
+	// be stranded (a shield learns connectors only from connectors, so it could
+	// never re-attach and would redial the revoked one). The admin either adds
+	// another connector first or revokes the shields too (alsoRevokeShields).
+	stranded, err := connector.StrandedShields(ctx, r.TenantDB, tc.TenantID, id)
+	if err != nil {
+		return false, fmt.Errorf("revoke connector: %w", err)
+	}
+	revokeShields := alsoRevokeShields != nil && *alsoRevokeShields
+	if len(stranded) > 0 && !revokeShields {
+		names := make([]string, len(stranded))
+		for i, s := range stranded {
+			names[i] = s.Name
+		}
+		return false, fmt.Errorf(
+			"revoke connector: it is the last connector of its remote network and %d enrolled shield(s) are attached (%s); "+
+				"they would be stranded — add another connector first, or revoke them too with alsoRevokeShields: true",
+			len(stranded), strings.Join(names, ", "))
+	}
+
 	var discardedID string
-	err := r.TenantDB.QueryRow(ctx,
+	err = r.TenantDB.QueryRow(ctx,
 		`UPDATE connectors
 		    SET status            = 'revoked',
 		        revoked_at        = NOW(),
@@ -157,6 +180,19 @@ func (r *mutationResolver) RevokeConnector(ctx context.Context, id string) (bool
 	if r.TransportNotifier != nil {
 		if err := r.TransportNotifier.NotifyTopologyChange(ctx, tc.TenantID, []string{id}); err != nil {
 			return false, fmt.Errorf("revoke connector: notify topology change: %w", err)
+		}
+	}
+
+	// F46: the connector is revoked; now the shields it stranded, each through
+	// the normal shield revocation (tombstone + propagation, bug 3).
+	if revokeShields && len(stranded) > 0 {
+		for _, s := range stranded {
+			if err := shield.Revoke(ctx, r.TenantDB, tc.TenantID, s.ID); err != nil && !errors.Is(err, shield.ErrNotRevocable) {
+				return false, fmt.Errorf("revoke connector: revoked, but revoking shield %s failed: %w", s.Name, err)
+			}
+		}
+		if r.ShieldRevocations != nil {
+			r.ShieldRevocations.Wake()
 		}
 	}
 

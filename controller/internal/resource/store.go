@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -450,14 +451,20 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 }
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
-// compiler actually reads (ListEnabledRulesWithResources selects name, host,
-// port_from, protocol, shield_id). host is not editable via UpdateInput, so only
-// name/protocol/port_from matter here. description, port_to and remote_network_id
-// are invisible to the compiler, so changing only those must not invalidate the
-// per-workspace ACL snapshot. Callers use this to decide whether to fire
-// NotifyPolicyChange after an UpdateResource.
+// compiler actually reads (policy.ListEnabledRulesWithResources selects name,
+// host, port_from, protocol, shield, status and remote_network_id; the compiler
+// routes each resource through its remote network's connectors). Of those,
+// UpdateInput can change name, protocol, port_from and remote_network_id.
+// description and port_to are invisible to the compiler, so changing only those
+// must not invalidate the per-workspace ACL snapshot. Callers use this to decide
+// whether to fire NotifyPolicyChange after an UpdateResource.
+//
+// Sprint 20 Fix 02: remote_network_id was missing (the comment called it
+// invisible); an unconditional notify in UpdateResource hid that until Fix 02
+// removed the duplicate.
 func ACLRelevantUpdate(input UpdateInput) bool {
-	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil
+	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
+		input.RemoteNetworkID != nil
 }
 
 func joinSets(sets []string) string {
@@ -594,6 +601,95 @@ func DeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) error
 	return nil
 }
 
+// DeleteIfShieldGone hard-deletes a resource that may hold a shield rule
+// (protected, failed, or already tombstoned 'deleting') when its bound shield is
+// revoked or gone (Sprint 20 Fix 16, F50). No shield can remove the rule or ack
+// the removal, so waiting for one would leave the row in 'deleting' forever (the
+// delete twin of MarkUnprotecting's Finding 7). Returns true if a row was deleted.
+func DeleteIfShieldGone(ctx context.Context, db *pgxpool.Pool, tenantID, id string) (bool, error) {
+	ct, err := db.Exec(ctx,
+		`DELETE FROM resources
+		  WHERE id = $1 AND tenant_id = $2
+		    AND status IN ('protected', 'failed', 'deleting')
+		    AND COALESCE(
+		            (SELECT s.status FROM shields s WHERE s.id = resources.shield_id),
+		            'revoked'
+		        ) = 'revoked'`,
+		id, tenantID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("delete resource (shield gone): %w", err)
+	}
+	return ct.RowsAffected() > 0, nil
+}
+
+// ReapedTombstone is a 'deleting' resource removed by ReapStaleTombstones.
+type ReapedTombstone struct {
+	ID          string
+	TenantID    string
+	ShieldID    string
+	ConnectorID string
+}
+
+// ReapStaleTombstones hard-deletes every 'deleting' tombstone that has waited
+// longer than olderThan for its shield's removal ack (Sprint 20 Fix 16, F50).
+// A live shield acks a removal within milliseconds (the ack is forwarded at once,
+// not batched); one that has not acked is offline, revoked or gone, and the
+// controller only learns a shield is offline from batched status up to minutes
+// later. Removing the row is safe: the shield's rule set follows the controller's
+// desired-state snapshot, so the caller re-pushes the snapshot (a connected shield
+// drops the rule now, an offline one on reconnect) and notifies the policy.
+func ReapStaleTombstones(ctx context.Context, db *pgxpool.Pool, olderThan time.Duration) ([]ReapedTombstone, error) {
+	rows, err := db.Query(ctx,
+		`DELETE FROM resources r
+		  WHERE r.status = 'deleting'
+		    AND r.updated_at < NOW() - make_interval(secs => $1)
+		 RETURNING r.id, r.tenant_id, COALESCE(r.shield_id::text, ''),
+		           COALESCE((SELECT s.connector_id::text FROM shields s WHERE s.id = r.shield_id), '')`,
+		olderThan.Seconds(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reap stale tombstones: %w", err)
+	}
+	defer rows.Close()
+	var reaped []ReapedTombstone
+	for rows.Next() {
+		var t ReapedTombstone
+		if err := rows.Scan(&t.ID, &t.TenantID, &t.ShieldID, &t.ConnectorID); err != nil {
+			return nil, fmt.Errorf("reap stale tombstones: %w", err)
+		}
+		reaped = append(reaped, t)
+	}
+	return reaped, rows.Err()
+}
+
+// RunTombstoneSweeper reaps stale tombstones every interval until ctx ends,
+// calling onReaped for each removed resource (snapshot re-push + policy notify).
+func RunTombstoneSweeper(ctx context.Context, db *pgxpool.Pool, interval, grace time.Duration, onReaped func(ReapedTombstone)) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		reaped, err := ReapStaleTombstones(ctx, db, grace)
+		if err != nil {
+			log.Printf("resource tombstone sweeper: %v", err)
+			continue
+		}
+		for _, t := range reaped {
+			shieldID := t.ShieldID
+			if shieldID == "" {
+				shieldID = "(gone)"
+			}
+			log.Printf("resource tombstone sweeper: removed resource %s (no removal ack within %s from shield %s)", t.ID, grace, shieldID)
+			onReaped(t)
+		}
+	}
+}
+
 // ForceDeleteRow hard-deletes a resource in ANY state, tenant-scoped. This is the
 // break-glass escape hatch (ADR-004 Phase 4): it bypasses the confirmation-gated
 // tombstone path (MarkDeleting → ack-driven reap) for a resource permanently stuck
@@ -618,12 +714,20 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 // and there is no port_reachable column to persist it to. verified_at IS persisted
 // as last_verified_at.
 // RecordAck records a shield's ack of a resource instruction. It returns
-// reaped=true only when an 'unprotected' ack physically removed a 'deleting'
-// tombstone (the DELETE below) — that is the one path where the resource leaves
-// the ACL compiler's output, so the caller must fire NotifyPolicyChange.
-// Status updates (protected/failed/unprotected without a tombstone) never change
-// compiler-visible data, so they return reaped=false.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (reaped bool, err error) {
+// aclChanged=true when the ack changed the ACL compiler's output, so the caller
+// must fire NotifyPolicyChange:
+//   - an 'unprotected' ack physically removed a 'deleting' tombstone (the DELETE
+//     below): the resource left the output;
+//   - the status moved between the connector-routed states (pending,
+//     unprotected) and the shield-routed ones (protecting, protected, failed):
+//     the compiler routes by status (policy.routeTypeForResource), so e.g. an
+//     unprotect completing ('protecting' → 'unprotected') re-routes the resource
+//     from its shield to the connector (Sprint 20 Fix 02, F35: this transition
+//     notified nothing, leaving the ACL snapshot stale).
+//
+// Updates within one route class (e.g. protecting → protected/failed) change no
+// compiler-visible data and return false.
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (aclChanged bool, err error) {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
@@ -638,24 +742,36 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 			return true, nil
 		}
 	}
-	_, err = db.Exec(ctx,
-		`UPDATE resources
+	var oldStatus string
+	err = db.QueryRow(ctx,
+		`UPDATE resources r
 		    SET status           = $2,
 		        error_message    = NULLIF($3, ''),
 		        last_verified_at = to_timestamp($4),
-		        applied_at       = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
+		        applied_at       = CASE WHEN $2 = 'protected' AND r.applied_at IS NULL THEN NOW() ELSE r.applied_at END,
 		        updated_at       = NOW()
-		  WHERE id = $1
-		    AND tenant_id = $5
-			AND status != 'deleting'
-		    AND NOT (status = 'protecting' AND pending_action = 'remove' AND $2 != 'unprotected')
-		    AND NOT (status = 'protecting' AND pending_action = 'apply'  AND $2 = 'unprotected')`,
+		   FROM (SELECT id, status FROM resources WHERE id = $1 AND tenant_id = $5 FOR UPDATE) prev
+		  WHERE r.id = prev.id
+			AND r.status != 'deleting'
+		    AND NOT (r.status = 'protecting' AND r.pending_action = 'remove' AND $2 != 'unprotected')
+		    AND NOT (r.status = 'protecting' AND r.pending_action = 'apply'  AND $2 = 'unprotected')
+		 RETURNING prev.status`,
 		resourceID, status, errMsg, verifiedAt, tenantID,
-	)
+	).Scan(&oldStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil // guarded out: nothing changed
+	}
 	if err != nil {
 		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return false, nil
+	return connectorRouted(oldStatus) != connectorRouted(status), nil
+}
+
+// connectorRouted mirrors policy.routeTypeForResource: pending and unprotected
+// resources are routed through the connector, every other status through the
+// resource's shield.
+func connectorRouted(status string) bool {
+	return status == "pending" || status == "unprotected"
 }
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {

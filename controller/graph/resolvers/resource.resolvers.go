@@ -55,14 +55,17 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return nil, fmt.Errorf("updateResource: notify policy change: %w", err)
-	}
 
+	// Sprint 20 Fix 02 (F35): this is the one notify for an update. An extra
+	// unconditional notify from a parallel branch (49c4732, merged with 391b28b
+	// in df5a041) fired twice for every relevant change and once for irrelevant
+	// ones.
+	//
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
-	// compiler-visible field (name/protocol/port_from). description/port_to/
-	// remote_network_id are invisible to the compiler, so changing only those
-	// must not churn the ACL version or trigger a fan-out push.
+	// compiler-visible field (name/protocol/port_from/remote_network_id — the
+	// compiler routes through the resource's remote network). description/port_to
+	// are invisible to the compiler, so changing only those must not churn the
+	// ACL version or trigger a fan-out push.
 	if resource.ACLRelevantUpdate(updIn) {
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return nil, fmt.Errorf("updateResource notify: %w", err)
@@ -119,8 +122,27 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		return false, fmt.Errorf("deleteResource: %w", err)
 	}
 
+	// Sprint 20 Fix 16 (F50): a resource whose shield is revoked or gone can
+	// never have its rule removal acked, so it is deleted at once (including a
+	// tombstone already stuck in 'deleting'). Its rule, if any, belongs to a
+	// shield that no longer takes instructions.
+	if row.Status == "protected" || row.Status == "failed" || row.Status == "deleting" {
+		deleted, err := resource.DeleteIfShieldGone(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+		if err != nil {
+			return false, fmt.Errorf("deleteResource: %w", err)
+		}
+		if deleted {
+			if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+				return false, fmt.Errorf("deleteResource notify: %w", err)
+			}
+			return true, nil
+		}
+	}
+
 	switch row.Status {
 	case "protecting", "deleting":
+		// A 'deleting' tombstone without an ack is reaped within seconds by the
+		// tombstone sweeper (F50).
 		return false, fmt.Errorf("deleteResource: resource is mid-operation; wait for it to finish")
 	case "protected", "failed":
 		// May hold a shield rule → tombstone + tell the shield to remove it.
@@ -195,11 +217,9 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("forceDeleteResource: notify policy change: %w", err)
-	}
 
-	// The row left the ACL compiler's output — invalidate the workspace snapshot.
+	// The row left the ACL compiler's output — invalidate the workspace snapshot
+	// (once; Fix 02 removed the duplicate from the same merge).
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("forceDeleteResource notify: %w", err)
 	}

@@ -3,7 +3,7 @@ type: fix
 sprint: 20
 fix: 2
 title: Resource mutations fire the ACL notify the wrong number of times (tests hidden from CI)
-status: planned
+status: fixed (2026-10-26, branch sprint20/fix02-resource-acl-notify)
 source_rows: [R2]
 source_findings: [35]
 severity: medium
@@ -20,7 +20,7 @@ tags:
 
 > Source: live acceptance row **R2** (FAIL), Finding 35. The 4 failing tests are in
 > `controller/graph/resolvers/resource_acl_coherence_test.go`.
-> Status: **verified, not fixed.** No code changed.
+> Status: **FIXED 2026-10-26** (`e1570c2f` code + tests, `1b2b4478` CI). See "Implementation" at the end.
 
 ## Failure (as observed)
 
@@ -123,3 +123,41 @@ go test -count=1 -v ./graph/resolvers/ -run 'Test(UpdateResource_|ForceDeleteRes
 - [ ] Green: all 6 coherence tests pass, with no skips, and without `RESOURCE_TEST_SHIELD_ID`.
 - [ ] Full R2 gate on a throwaway DB: `go test ./...` exit 0 (together with Fix 03 and Fix 04).
 - [ ] CI ran-check fails if the coherence tests skip.
+
+
+## Implementation (2026-10-26)
+
+**Decisions (user, 2026-10-26):** Q1 — keep Protect's notify, fix the test; Q2 — self-provisioning fixture.
+
+| Commit | What |
+|---|---|
+| `e1570c2f` | code + tests (below) |
+| `1b2b4478` | CI "Verify integration tests actually ran" requires 4 of these tests to run and pass |
+| `d702e42f` | `ACLRelevantUpdate` includes `remote_network_id` (security review of `e1570c2f`) |
+
+**Code (`controller/`).**
+- `graph/resolvers/resource.resolvers.go`: `UpdateResource` — unconditional notify removed (the `ACLRelevantUpdate`-gated one stays); `ForceDeleteResource` — duplicate notify removed.
+- **Design step 3 confirmed and fixed:** the transition that finishes an unprotect (`protecting` → `unprotected`, by the shield's ack) re-routes the resource shield → connector, but nothing notified. `resource.RecordAck` now returns `aclChanged` (tombstone reaped **or** route class changed: `pending`/`unprotected` ↔ the rest, mirroring `policy.routeTypeForResource`), reading the previous status with `UPDATE … FROM (SELECT … FOR UPDATE) prev … RETURNING prev.status`; `internal/connector/control_stream.go` `handleResourceAcks` notifies on it.
+
+**Tests.**
+- `TestProtectResource_DoesNotInvalidate` → `TestProtectResource_Invalidates` (want 1).
+- `newACLCoherenceFixture` creates its own migrated throwaway database (`newMigratedTestPool`, `RESOURCE_TEST_DATABASE_URL` = admin DSN) with a workspace, network, connector and active shield (`lan_ip = aclFixtureShieldLAN` = 10.0.0.95). CI's Postgres starts empty, so writing into `ztna_platform` would not work there.
+- `internal/resource`: `seedShield` helper; `TestRecordAck_ReapReturnsReaped` and `TestBuildShieldSnapshotGeneration` use it; new `TestRecordAckReportsACLChanges` (6 cases).
+- `RESOURCE_TEST_SHIELD_ID` is no longer read anywhere.
+
+**Why 9 failed in the live run, not 4.** With `RESOURCE_TEST_SHIELD_ID` pointing at a lab shield, every fixture user ran inside the lab workspace: real devices changed posture decisions (an extra notify in `AddProfileRequirement`/`RemoveProfileRequirement`, 4 visibility rows instead of 1), and the shield was revoked (unprotect took the revoked-shield branch, which notifies). With a self-provisioned fixture those 5 posture tests and the unprotect test pass on unchanged code.
+
+**Results.**
+- Red (unchanged code, self-provisioned fixture): exactly 4 FAIL — Update ×2, ForceDelete, Protect (on the real assertion); 31 PASS, 0 SKIP.
+- Green: 35 PASS, 0 FAIL, 0 SKIP, also against an **empty** database (as in CI); throwaway databases dropped.
+- Mutation: unconditional Update notify restored → both Update tests fail; route-change report disabled → `TestRecordAckReportsACLChanges` fails.
+- Full controller suite (all DB env vars, no `RESOURCE_TEST_SHIELD_ID`): **1387 PASS, 0 FAIL, 2 SKIP** (both intentional `t.Skip` in code). Before: 1334 PASS, 32 SKIP.
+
+## Acceptance Criteria (result)
+
+- [x] Red first: the 4 tests fail on current code.
+- [x] Green: all coherence tests pass, with no skips, and without `RESOURCE_TEST_SHIELD_ID`.
+- [x] Full gate: `go test ./...` exit 0 (1387 pass).
+- [x] CI ran-check fails if the coherence tests skip.
+
+**Follow-up (security review of `e1570c2f`).** With the unconditional notify gone, an update changing only `remote_network_id` notified nothing — but the compiler routes each resource through its remote network's connectors (`ListEnabledRulesWithResources` selects `r.remote_network_id`). `ACLRelevantUpdate`'s doc listed it as compiler-invisible (written before that column joined the query); the duplicate notify had hidden the gap. Fixed: `ACLRelevantUpdate` includes `RemoteNetworkID`; unit case corrected; new `TestUpdateResource_InvalidatesWhenRemoteNetworkChanges` (want 1, mutation-checked). Full controller: **1388 PASS, 0 FAIL, 2 SKIP**.

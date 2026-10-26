@@ -1095,9 +1095,9 @@ func (h *EnrollmentHandler) handleShieldStatus(ctx context.Context, client *conn
 }
 
 func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID string, batch *pb.ResourceAckBatch) {
-	var anyReaped bool
+	var anyChanged bool
 	for _, ack := range batch.Acks {
-		reaped, err := resource.RecordAck(
+		changed, err := resource.RecordAck(
 			ctx, h.Pool, tenantID,
 			ack.ResourceId, ack.Status, ack.Error,
 			ack.VerifiedAt,
@@ -1106,13 +1106,14 @@ func (h *EnrollmentHandler) handleResourceAcks(ctx context.Context, tenantID str
 			log.Printf("control stream: record ack resource_id=%s: %v", ack.ResourceId, err)
 			continue
 		}
-		if reaped {
-			anyReaped = true
+		if changed {
+			anyChanged = true
 		}
 	}
-	// A reap physically removed a tombstoned resource from the ACL compiler's
-	// output — invalidate the workspace ACL snapshot once for the whole batch.
-	if anyReaped && h.PolicyNotifier != nil {
+	// An ack changed the ACL compiler's output (a tombstone reaped, or a resource
+	// re-routed between connector and shield, e.g. an unprotect completing) —
+	// invalidate the workspace ACL snapshot once for the whole batch (Fix 02).
+	if anyChanged && h.PolicyNotifier != nil {
 		if err := h.PolicyNotifier.NotifyPolicyChange(ctx, tenantID); err != nil {
 			log.Printf("control stream: notify after reap tenant=%s: %v", tenantID, err)
 		}
