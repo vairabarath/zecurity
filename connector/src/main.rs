@@ -320,6 +320,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let selector_attachment_slot = relay_attachment_slot.clone();
     let selector_ctrl_tx = ctrl_tx.clone();
+    let selector_gate = gate.clone();
     tokio::spawn(async move {
         relay_selector::run(
             selector_cfg,
@@ -327,6 +328,7 @@ async fn main() -> anyhow::Result<()> {
             selector_attachment_slot,
             relay_list_rx,
             selector_ctrl_tx,
+            selector_gate,
         )
         .await
     });

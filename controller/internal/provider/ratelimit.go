@@ -18,6 +18,7 @@ const (
 	loginFailMaxPerIP    = 20
 
 	defaultLoginLimitPrefix = "provider:login:fail:"
+	defaultTOTPLimitPrefix  = "provider:totp:fail:"
 )
 
 // Limit scopes reported in LimitTrip.Scope and the rate-limit audit row.
@@ -55,6 +56,13 @@ type LoginLimiter interface {
 type ValkeyLoginLimiter struct {
 	rdb    valkeycompat.Cmdable
 	prefix string
+}
+
+// NewValkeyTOTPLimiter counts failed TOTP codes (Sprint 22 Phase T) with the
+// same thresholds and window as passwords, under its own key prefix, so a
+// wrong code and a wrong password never share a counter.
+func NewValkeyTOTPLimiter(rdb valkeycompat.Cmdable) *ValkeyLoginLimiter {
+	return &ValkeyLoginLimiter{rdb: rdb, prefix: defaultTOTPLimitPrefix}
 }
 
 func NewValkeyLoginLimiter(rdb valkeycompat.Cmdable) *ValkeyLoginLimiter {

@@ -203,7 +203,11 @@ func newReadEnv(t *testing.T) *readEnv {
 
 	issue := func(email, role string) (string, string) {
 		id := scalar[string](t, pool, `INSERT INTO provider_users (email, role) VALUES ($1, $2) RETURNING id::text`, email, role)
-		tok, _, err := ids.IssueSession(&provider.ProviderUser{ID: id, Email: email, Role: role, SessionGeneration: 1}, []string{provider.AMRPassword}, false)
+		amr := []string{provider.AMRPassword}
+		if role == provider.RoleSuperAdmin {
+			amr = append(amr, provider.AMROTP) // super-admin sessions are TOTP-backed (Sprint 22 Phase T)
+		}
+		tok, _, err := ids.IssueSession(&provider.ProviderUser{ID: id, Email: email, Role: role, SessionGeneration: 1}, amr, false)
 		if err != nil {
 			t.Fatal(err)
 		}

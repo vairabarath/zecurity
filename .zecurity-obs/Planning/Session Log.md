@@ -3063,6 +3063,40 @@ serves on `127.0.0.1:9102`.
 - Live (50 resources): 64/64 ×3 and 128/128 parallel (base 2/64, PR 16/64); RSS 34.8 MB after `up` (base 35.2, PR 47.7); `syn_deferred=316`, 0 RST, 0 duplicates.
 - Docs: Fix 12 record (D-2, corrections, review table, AF12-L2), Sprint 9 Phase 1 Post-Phase Fixes, path.md F37. Not pushed.
 
+## 2026-10-26 — Provider console redesign merged; PR #134 merged; Sprint 22 planned (Barath)
+- **Provider console redesign** (PR #136, merged `18459686`): new theme, role-aware sidebar, Overview from existing read APIs, redesigned pages; 380 console tests (+6). Clicked through against a local mock built from the controller's DTOs, status codes and lock-out rules; a real-controller click-through is still to do.
+- **PR #134** (Fix 12 SYN-gate rework) reviewed against the earlier change request, approved and merged (`a9ff29dd`). Client tests 272 pass; CI green.
+- **Decision Record amendment 2026-10-26** (D-30 … D-34): console may create/revoke/delete/drain/resume relays; revoke/delete super-admin only (amends D-05); drain in scope (amends D-21); super-admin TOTP first; tenant suspension stays a separate epic.
+- **Sprint 22 planned:** `.zecurity-obs/Sprint22/` — path.md (phases T → A → {E, X} → D, checklist, test gates, done criteria), five phase files, Acceptance Test Plan. Open questions OQ-1 … OQ-3 (TOTP reset by another super-admin, relay-ops voluntary TOTP, rollout without grace window) to answer before Phase T. No code changed; docs on local branch `docs/sprint22-relay-management-plan`, not committed.
+
+## 2026-10-26 (later) — Sprint 22 OQ-1…OQ-3 decided; Phase T implemented test-first (Barath)
+- Decisions recorded in `Sprint22/path.md`: OQ-1 yes (super-admin resets another operator's TOTP, reason required); OQ-2 no mandatory relay-ops TOTP (voluntary enrolment deferred); OQ-3 no grace period.
+- Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
+- Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
+
+- Committed locally, not pushed.
+
+## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS
+
+- **Design approved;** D-1 = A (a tombstoned identity is reported as revoked). One commit per finding:
+  - F38 `14acdf1`: the connector's relay selector stops on a terminal state (aborts its session, clears the attachment).
+  - F39 `0289eba`: the shield's goodbye uses the live peer list.
+  - F41 `f1412b8`: an empty peer list that carried revoked ids is logged at debug.
+  - F40 `95af83e`: `lookupConnector` checks the 041 tombstone (same trust domain) → `revoked`.
+- **Tests:**
+  - connector 250 (+6), shield 49 (+5), controller +2 DB-backed tests;
+  - Go↔Rust marker harness pass (new case);
+  - client and relay not re-run (untouched by this diff);
+  - mutants: 19, 17 killed, 2 documented survivors (wiring that needs live TLS; an equivalent log-only mutant).
+- **Lab:** the relay on manojinkyank was down since boot (`relay.conf` missing). Re-provisioned as `f13-relay-manoj` on **.53** (manoj's IP changed .49 → .53). Controller runs the Fix 13 build.
+- **Live:**
+  - F38: revoke f11-a → selector stopped in the same ms, 0 relay attempts in 150 s.
+  - F39: shield failed over to sd-b in 2.3 s; its goodbye reached sd-b.
+  - F40: deleted f11-a refused with PermissionDenied + `revoked`.
+  - F41: not reproducible in the lab (sd-net has resources).
+- **Lab after:** f11-a revoked + deleted (to uninstall); f11-shield stopped. Build artifacts cleaned.
+- Committed locally, not pushed.
+
 
 ## 2026-10-26 — Sprint 20 Fix 14 (+ Fix 15 / F49): live acceptance PASS
 - Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).

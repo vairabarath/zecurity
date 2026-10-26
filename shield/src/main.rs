@@ -168,10 +168,15 @@ async fn main() -> anyhow::Result<()> {
     let stream_cfg = cfg.clone();
     let stream_state = state.clone();
     let stream_resource_state = Arc::clone(&resource_state);
+    let (peers, live_peers) = control_stream::PeerPublisher::new(&state);
     tokio::spawn(async move {
-        if let Err(e) =
-            control_stream::run_control_stream(stream_state, stream_cfg, stream_resource_state)
-                .await
+        if let Err(e) = control_stream::run_control_stream(
+            stream_state,
+            stream_cfg,
+            stream_resource_state,
+            peers,
+        )
+        .await
         {
             error!("control stream failed: {:#}", e);
         }
@@ -215,8 +220,9 @@ async fn main() -> anyhow::Result<()> {
             .context("failed to wait for Ctrl+C")?;
     }
 
-    // Step 8: Graceful shutdown — best-effort Goodbye RPC
-    control_stream::goodbye(&state, &cfg).await;
+    // Step 8: Graceful shutdown — best-effort Goodbye RPC, to the live peer
+    // list (Fix 13, F39), not the one loaded at startup.
+    control_stream::goodbye(&control_stream::with_live_peers(&state, &live_peers), &cfg).await;
 
     info!("shield shut down gracefully");
     Ok(())

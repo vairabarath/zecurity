@@ -32,6 +32,7 @@ type ProviderUser struct {
 	MustChangePassword bool   // login yields a password-change-only token
 	SessionGeneration  int64  `json:"-"` // embedded in every provider JWT; bump = revoke all
 	LastLoginAt        *time.Time
+	TOTPEnabledAt      *time.Time // TOTP confirmed (Sprint 22 Phase T); nil = not enrolled
 }
 
 // Provider identity audit actions (Sprint 21 Phase H). Passwords never appear
@@ -74,7 +75,8 @@ func normalizeEmail(email string) string {
 // providerUserColumns / scanProviderUser keep every read of provider_users in
 // one shape. password_hash is NULL for accounts without a local password.
 const providerUserColumns = `id, email, role, disabled_at, created_at,
-       COALESCE(password_hash, ''), must_change_password, session_generation, last_login_at`
+       COALESCE(password_hash, ''), must_change_password, session_generation, last_login_at,
+       totp_enabled_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -83,7 +85,8 @@ type rowScanner interface {
 func scanProviderUser(r rowScanner) (*ProviderUser, error) {
 	u := &ProviderUser{}
 	err := r.Scan(&u.ID, &u.Email, &u.Role, &u.DisabledAt, &u.CreatedAt,
-		&u.PasswordHash, &u.MustChangePassword, &u.SessionGeneration, &u.LastLoginAt)
+		&u.PasswordHash, &u.MustChangePassword, &u.SessionGeneration, &u.LastLoginAt,
+		&u.TOTPEnabledAt)
 	if err != nil {
 		return nil, err
 	}

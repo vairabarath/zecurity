@@ -49,8 +49,8 @@ type connectorAuthState int
 
 const (
 	connectorStateAuthorized connectorAuthState = iota + 1 // row present, not revoked
-	connectorStateRevoked                                  // status='revoked' or revoked_at set
-	connectorStateAbsent                                   // no row for (id, trust_domain)
+	connectorStateRevoked                                  // status='revoked' or revoked_at set, or a tombstone (F40)
+	connectorStateAbsent                                   // no row and no tombstone for (id, trust_domain)
 )
 
 // connectorRecord is the row read by lookupConnector.
@@ -74,6 +74,23 @@ func (h *EnrollmentHandler) lookupConnector(ctx context.Context, connectorID, tr
 		connectorID, trustDomain,
 	).Scan(&rec.status, &rec.tenantID, &rec.revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// Sprint 20 Fix 13 (F40): a deleted connector whose identity was
+		// revoked stays revoked (041 tombstone), not unknown. Only the
+		// workspace with this trust domain counts.
+		var tombstoned bool
+		err = h.Pool.QueryRow(ctx,
+			`SELECT EXISTS (
+			     SELECT 1 FROM connector_revocations cr
+			       JOIN workspaces w ON w.id = cr.tenant_id
+			      WHERE cr.connector_id = $1 AND w.trust_domain = $2)`,
+			connectorID, trustDomain,
+		).Scan(&tombstoned)
+		if err != nil {
+			return 0, rec, err
+		}
+		if tombstoned {
+			return connectorStateRevoked, rec, nil
+		}
 		return connectorStateAbsent, rec, nil
 	}
 	if err != nil {

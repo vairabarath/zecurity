@@ -50,6 +50,7 @@ export function ChangePassword() {
   const [submitting, setSubmitting] = useState(false)
 
   if (status === 'anonymous') return <Navigate to="/login" replace />
+  if (status === 'mfa') return <Navigate to="/mfa" replace />
   if (status === 'loading' && !submitting) {
     return (
       <div className="flex min-h-screen items-center justify-center p-6" aria-busy="true" aria-label="Loading session">
@@ -73,8 +74,8 @@ export function ChangePassword() {
     setError(undefined)
     setSubmitting(true)
     try {
-      await changePassword(cur, nxt)
-      navigate('/', { replace: true })
+      const next = await changePassword(cur, nxt)
+      navigate(next === 'mfa' ? '/mfa' : '/', { replace: true })
     } catch (err) {
       // The password changed but /provider/me failed for a non-session
       // reason: fail closed rather than keep an unverified session.

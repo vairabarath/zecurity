@@ -69,6 +69,10 @@ import (
 )
 
 func main() {
+	// Break-glass CLI (Sprint 22 Phase T): handled before any server setup.
+	if isRecoverAdminCommand(os.Args) {
+		os.Exit(runRecoverAdmin(os.Args[3:]))
+	}
 	loadOptionalEnv()
 
 	ctx, stop := signal.NotifyContext(
@@ -376,6 +380,24 @@ func main() {
 		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowPasswordChangeToken())(
 			http.HandlerFunc(providerAuth.ChangePassword)))
 	mux.Handle("POST /provider/auth/logout", requireProvider(http.HandlerFunc(providerAuth.Logout)))
+	// Mandatory super-admin TOTP (Sprint 22 Phase T; D-28, D-33). Each route
+	// takes only the confined MFA-stage token for its stage; the secret is
+	// sealed with the PKI master secret; code failures have their own limiter.
+	providerTOTP := provider.NewTOTPHandlers(
+		providerIdentity,
+		providerStore,
+		pkiService,
+		provider.NewValkeyTOTPLimiter(valkeycompat.NewAdapter(connectorValkey)),
+	)
+	mux.Handle("POST /provider/auth/totp/verify",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageVerify))(
+			http.HandlerFunc(providerTOTP.Verify)))
+	mux.Handle("POST /provider/auth/totp/enroll",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageEnroll))(
+			http.HandlerFunc(providerTOTP.Enroll)))
+	mux.Handle("POST /provider/auth/totp/enroll/confirm",
+		middleware.RequireProvider(providerIdentity, providerStore, middleware.AllowMFAToken(provider.MFAStageEnroll))(
+			http.HandlerFunc(providerTOTP.ConfirmEnroll)))
 	mux.Handle("GET /provider/me", requireProvider(http.HandlerFunc(providerHandlers.Me)))
 	mux.Handle("GET /provider/users", requireProvider(http.HandlerFunc(providerHandlers.ListUsers)))
 	// Operator management (Sprint 21 Phase U, D-27): super-admin only
@@ -387,6 +409,7 @@ func main() {
 	mux.Handle("POST /provider/users/{id}/disable", requireProvider(http.HandlerFunc(operatorHandlers.Disable)))
 	mux.Handle("POST /provider/users/{id}/enable", requireProvider(http.HandlerFunc(operatorHandlers.Enable)))
 	mux.Handle("POST /provider/users/{id}/reset-password", requireProvider(http.HandlerFunc(operatorHandlers.ResetPassword)))
+	mux.Handle("POST /provider/users/{id}/reset-totp", requireProvider(http.HandlerFunc(operatorHandlers.ResetTOTP)))
 	mux.Handle("/auth/callback", authSvc.CallbackHandler())
 	// Public, read-only login discovery (workspace-first). PENDING-04 / ADR-024.
 	mux.Handle("GET /workspaces/{slug}/auth", authSvc.DiscoveryHandler())

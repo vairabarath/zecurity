@@ -224,3 +224,69 @@ export function ConfirmDialog({
     </Dialog>
   )
 }
+
+const MAX_REASON = 500
+
+/**
+ * Reset another operator's TOTP (Sprint 22 Phase T, OQ-1). The reason is
+ * required and recorded in the provider audit log; the server re-checks it.
+ */
+export function ResetMfaDialog({
+  operator,
+  pending,
+  error,
+  onConfirm,
+  onCancel,
+}: {
+  operator: OperatorView
+  pending: boolean
+  error?: string
+  onConfirm: (reason: string) => void
+  onCancel: () => void
+}) {
+  const [reason, setReason] = useState('')
+  const trimmed = reason.trim()
+  const valid = trimmed !== '' && trimmed.length <= MAX_REASON
+
+  function submit(e: FormEvent) {
+    e.preventDefault()
+    if (valid && !pending) onConfirm(trimmed)
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onCancel()}>
+      <DialogContent>
+        <form onSubmit={submit} className="grid gap-4">
+          <DialogHeader>
+            <DialogTitle>Reset MFA</DialogTitle>
+            <DialogDescription>
+              <strong className="text-foreground">{operator.email}</strong> will be signed out everywhere and must set up
+              two-factor authentication again at their next sign-in.
+            </DialogDescription>
+          </DialogHeader>
+          <ErrorAlert error={error} />
+          <div className="grid gap-2">
+            <Label htmlFor="reset-mfa-reason">Reason</Label>
+            <Input
+              id="reset-mfa-reason"
+              value={reason}
+              maxLength={MAX_REASON}
+              placeholder="e.g. lost phone"
+              autoComplete="off"
+              onChange={(e) => setReason(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">Recorded in the provider audit log.</p>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onCancel}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="destructive" disabled={!valid || pending}>
+              {pending ? 'Resetting…' : 'Reset MFA'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}

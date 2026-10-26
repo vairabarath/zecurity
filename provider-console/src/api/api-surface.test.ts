@@ -6,7 +6,8 @@ import * as operatorsApi from './operators'
 import * as readsApi from './reads'
 
 // Invariant 2 (Phase C, AT-CORE-3): the console's only non-GET calls are the
-// three auth calls and the five operator mutations (C-b). Phase P adds GETs
+// auth calls (incl. the Sprint 22 TOTP steps) and the operator mutations
+// (C-b, plus reset-totp). Phase P adds GETs
 // only. Every exported API function is called here; a new write must be
 // added to ALLOWED_WRITES, and a new read to ALLOWED_READS, on purpose.
 
@@ -15,10 +16,14 @@ const ALLOWED_WRITES = [
   'POST /provider/auth/login',
   'POST /provider/auth/logout',
   'POST /provider/auth/password',
+  'POST /provider/auth/totp/enroll',
+  'POST /provider/auth/totp/enroll/confirm',
+  'POST /provider/auth/totp/verify',
   'POST /provider/users',
   'POST /provider/users/{id}/disable',
   'POST /provider/users/{id}/enable',
   'POST /provider/users/{id}/reset-password',
+  'POST /provider/users/{id}/reset-totp',
 ]
 
 const ALLOWED_READS = [
@@ -58,6 +63,10 @@ describe('API surface', () => {
       [`POST /provider/users/${ID}/disable`]: { status: 204 },
       [`POST /provider/users/${ID}/enable`]: { status: 204 },
       [`POST /provider/users/${ID}/reset-password`]: { status: 200, body: { temporary_password: 'x' } },
+      'POST /provider/auth/totp/verify': ok,
+      'POST /provider/auth/totp/enroll': { status: 200, body: { secret: 'S', otpauth_uri: 'otpauth://totp/x' } },
+      'POST /provider/auth/totp/enroll/confirm': ok,
+      [`POST /provider/users/${ID}/reset-totp`]: { status: 204 },
       'GET /provider/relays': page,
       [`GET /provider/relays/${ID}`]: { status: 200, body: {} },
       'GET /provider/tenants': page,
