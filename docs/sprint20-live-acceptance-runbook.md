@@ -308,6 +308,7 @@ Stop relay-c with Ctrl-C. It isn't needed again; it will go `inactive`, which is
 
 ```bash
 export R1_ID=$(jq -r .relay_id "$RUN/relay1.json")
+export R1_NAME=s20-relay1   # the name relay1 was created with; revoke confirms it (Sprint 22 Phase A)
 RELAY_ID="$R1_ID" RELAY_PROVISIONING_TOKEN="$(jq -r .provisioning_token "$RUN/relay1.json")" \
   LOG_LEVEL=info scripts/run-relay-local.sh s20-relay1 9093 2>&1 | tee "$RUN/logs/relay1.log"
 ```
@@ -474,9 +475,13 @@ With a 15 min certificate and a 10 min window, the controller sends `ReEnroll` a
 1. Record every serial relay1 has had (§15.3, relay certificate history). There should be at least 3 or 4 after 60+ minutes.
 2. Revoke:
    ```bash
+   # Since Sprint 22 Phase A (D-17, D-31): super-admin only (TOTP-backed token),
+   # and the reason plus the relay's exact stored name go in a JSON body.
    curl -s -o /dev/null -w '%{http_code}\n' -X POST \
-     -H "Authorization: Bearer $PTOKEN" "http://localhost:8080/provider/relays/$R1_ID/revoke?reason=s20-live"
-   # → 204
+     -H "Authorization: Bearer $PTOKEN" -H 'Content-Type: application/json' \
+     -d "{\"reason\":\"s20-live\",\"confirm_name\":\"$R1_NAME\"}" \
+     "http://localhost:8080/provider/relays/$R1_ID/revoke"
+   # → 204 (400 confirmation_mismatch if the name differs; 409 already_revoked on a repeat)
    ```
    Record `relay1_revoked_at`.
 3. Check:

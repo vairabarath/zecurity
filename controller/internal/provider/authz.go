@@ -31,6 +31,13 @@ const (
 	ActionCertRead   = "cert.read"
 )
 
+// superAdminOnlyRelayActions are the relay.* verbs relay-ops may NOT perform
+// (D-31): the destructive ones.
+var superAdminOnlyRelayActions = map[string]bool{
+	ActionRelayRevoke: true,
+	ActionRelayDelete: true,
+}
+
 // ErrForbidden is returned by decide() when the actor may not perform the
 // action. Handlers map this to HTTP 403; any other error maps to 500.
 var ErrForbidden = errors.New("provider action forbidden")
@@ -95,10 +102,14 @@ func (a *Authz) CanReadCertificates(actor Actor) error {
 	return decide(actor, ActionCertRead, Target{Type: "certificate"})
 }
 
-// decide is the ONE policy function. Alpha matrix:
+// decide is the ONE policy function. Matrix:
 //
 //	super-admin → every action
-//	relay-ops   → the "relay.*" namespace only
+//	relay-ops   → the "relay.*" namespace, EXCEPT relay.revoke and relay.delete
+//
+// The exception is Decision Record D-31 (amends D-05, Sprint 22 Phase A):
+// relay-ops may create relays, issue provisioning tokens, read (and later
+// drain/resume) relays, but revoking or deleting one is super-admin only.
 //
 // target is accepted but not yet consulted (flat model, no partner scoping).
 func decide(actor Actor, action string, target Target) error {
@@ -106,7 +117,7 @@ func decide(actor Actor, action string, target Target) error {
 	case RoleSuperAdmin:
 		return nil
 	case RoleRelayOps:
-		if strings.HasPrefix(action, "relay.") {
+		if strings.HasPrefix(action, "relay.") && !superAdminOnlyRelayActions[action] {
 			return nil
 		}
 	}

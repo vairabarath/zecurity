@@ -3074,6 +3074,29 @@ serves on `127.0.0.1:9102`.
 - Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
 - Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
 
+## 2026-10-26 (later) — Sprint 22 Phase A implemented test-first (Barath)
+- Relay admin API hardening (D-17, D-31):
+  - relay-ops can no longer revoke or delete (server-side `decide()` exception);
+  - revoke/delete require `{reason, confirm_name}`, checked against the stored name under the row lock (`RevokeRelayGuarded`);
+  - JSON error codes, UUID check before queries, `already_revoked` / `already_deleted`;
+  - audit IP without port, forwarding headers ignored;
+  - Create: bounded decoding, name/SAN codes, 201 + `no-store`.
+- Tests written first and confirmed failing (10). Gate: `go test ./...` 872 pass / 0 fail / 32 skip (skips outside Phase A); changed packages 0 skips. Console untouched (395 pass).
+- FU-1 recorded: Create audit not transactional (D-14 gap). Runbook revoke command updated to the JSON body. Not committed; branch `sprint22/phase-a-relay-admin-hardening`.
+
+## 2026-10-26 (later) — Sprint 22 Phase A live acceptance: PASS; Phase A closed (Barath)
+- Live run on an isolated stack: controller from `da0a1613`, throwaway DB, Valkey `:6390`, ports 18080/19090; a real relay provisioned. Dev DB untouched; the throwaway DB was dropped afterwards.
+- AT-CORE-2, AT-A1–A7: 38 checks, 0 failures:
+  - relay-ops 403;
+  - validation codes;
+  - real revoke with the serial on `/relay.crl` and spoofed XFF ignored;
+  - repeat 409s;
+  - concurrent revoke one 204 + one 409;
+  - forced audit failure → exact `server_error` and rollback;
+  - create 201 + `no-store`, with no rows on invalid input.
+- No secrets in the controller log.
+- Not observed: connector migration after a revoke (no connector; AT-X4 later). FU-1 stays open.
+
 ## 2026-10-26 (later) — PR #138 merged; CLAUDE.md switched to Sprint 22 (Barath)
 - PR #138 (Phase T, `[schema: reset DB]`) merged as `7621e260` after 7/7 CI jobs passed. Everyone recreates their local DB (`042_`).
 - T8: `CLAUDE.md` now names Sprint 22 as active, with the D-30 console write rule, D-31 relay roles, D-32 drain invariants, the Phase T TOTP rules and next schema `043_`. Live AT-T (Sathiya) still pending.

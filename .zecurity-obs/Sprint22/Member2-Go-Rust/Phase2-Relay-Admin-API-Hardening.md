@@ -6,7 +6,7 @@ sprint: 22
 phase: 2
 execution: A
 title: Relay Admin API Hardening (D-17, D-31)
-status: planned
+status: done   # 2026-10-26: implemented (da0a1613), live AT-A PASS on an isolated local stack; FU-1 open as a separate follow-up
 depends_on: [1]   # T merged (D-33)
 schema_change: false
 tags:
@@ -72,6 +72,32 @@ The three relay admin routes return JSON error codes only, enforce D-31 in `deci
 ## Test gate
 
 Go gate from [[Sprint22/path]] (`internal/provider`, `internal/relay`), DB-backed.
+
+## Implementation record (2026-10-26)
+
+**Files:**
+- `controller/internal/provider/authz.go`: `superAdminOnlyRelayActions` (D-31 exception in `decide()`).
+- `controller/internal/provider/httpx.go`: `WriteJSON`, `WriteError`, `WriteErrorDetail`, `ClientIP`, `DecodeJSON`, thin wrappers over the existing auth helpers.
+- `controller/internal/relay/store.go`: `RevokeRelayGuarded` (name + status guard under `FOR UPDATE`); `RevokeRelay` delegates with a nil guard, so existing callers and tests are unchanged.
+- `controller/internal/relay/admin_handler.go`: JSON error codes; UUID check before any query; D-17 body; guard; client IP; Create bounded decoding, name rules, SAN error codes, `201` + `Cache-Control: no-store`.
+- `docs/sprint20-live-acceptance-runbook.md`: the revoke command now sends the JSON body (`R1_NAME` added).
+
+**Decisions and notes:**
+- Create now answers **201 Created** (was 200), as documented in this phase file.
+- `ClientIP` uses the connection address only; `X-Forwarded-For`, `X-Real-IP` and `Forwarded` are ignored (no trusted-proxy boundary). A test pins this.
+- **Known gap FU-1 (D-14):** Create's audit stays best-effort; see [[Sprint22/path]] → Follow-ups. Revoke and delete roll the whole mutation back when the audit write fails (tested).
+
+**Tests (written first, confirmed failing first):** `TestDecide_RelayMutationMatrix`; `internal/relay/admin_handler_db_test.go`, DB-backed:
+- the role matrix over HTTP;
+- validation codes, including the exact, case-sensitive name match;
+- repeat revoke/revoke, revoke/delete and delete/revoke;
+- concurrent revoke/revoke, revoke/delete and delete/delete;
+- audit failure rolls back and leaks nothing;
+- forwarding headers are ignored;
+- invalid Create leaves no relay or audit row;
+- relay-ops Create gets `no-store`, with no token in the audit.
+
+**Live acceptance (2026-10-26): PASS.** 38 checks, 0 failures, on an isolated local stack with a real provisioned relay; see [[Sprint22/Acceptance-Test-Plan]] → "Live run — Phase A". The one remaining observation is connector migration after a revoke, which needs a connector and is covered by AT-X4.
 
 ## Post-Phase Fixes
 

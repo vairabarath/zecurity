@@ -81,3 +81,44 @@ func TestReadActionNames(t *testing.T) {
 		}
 	}
 }
+
+// Sprint 22 Phase A (D-31, amends D-05): relay-ops may create relays and
+// issue provisioning tokens; revoke and delete are super-admin only. Pinned
+// for every relay mutation entry point and for unknown or near-miss roles.
+func TestDecide_RelayMutationMatrix(t *testing.T) {
+	a := NewAuthz()
+	target := Target{Type: "relay", ID: "r1"}
+	checks := []struct {
+		name  string
+		check func(Actor) error
+	}{
+		{ActionRelayCreate, func(x Actor) error { return a.CanCreateRelay(x, target) }},
+		{ActionRelayIssueToken, func(x Actor) error { return a.CanIssueProvisioningToken(x, target) }},
+		{ActionRelayRevoke, func(x Actor) error { return a.CanRevokeRelay(x, target) }},
+		{ActionRelayDelete, func(x Actor) error { return a.CanDeleteRelay(x, target) }},
+	}
+	allowed := map[string]map[string]bool{
+		RoleSuperAdmin: {ActionRelayCreate: true, ActionRelayIssueToken: true, ActionRelayRevoke: true, ActionRelayDelete: true},
+		RoleRelayOps:   {ActionRelayCreate: true, ActionRelayIssueToken: true},
+		"":             {},
+		"Relay-Ops":    {},
+		"relay-ops ":   {},
+		"super-admin2": {},
+	}
+	for role, want := range allowed {
+		for _, c := range checks {
+			err := c.check(Actor{UserID: "u", Email: "e@x", Role: role})
+			switch {
+			case want[c.name] && err != nil:
+				t.Errorf("role %q, %s: want allow, got %v", role, c.name, err)
+			case !want[c.name] && !errors.Is(err, ErrForbidden):
+				t.Errorf("role %q, %s: want ErrForbidden, got %v", role, c.name, err)
+			}
+		}
+	}
+	// relay.read stays open to relay-ops (Phase R); the exception is only for
+	// the two destructive verbs.
+	if err := a.CanReadRelays(Actor{Role: RoleRelayOps}, target); err != nil {
+		t.Errorf("relay-ops relay.read: %v", err)
+	}
+}

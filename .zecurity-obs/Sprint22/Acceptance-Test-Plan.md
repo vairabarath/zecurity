@@ -59,7 +59,31 @@ tags: [sprint22, tests, acceptance, provider-dashboard, totp, relay-management, 
 | AT-A3 | Valid revoke by super-admin | 204; serials on the CRL with the reason; audit row has the reason and the client IP without port; connectors migrate |
 | AT-A4 | Revoke again; revoke a deleted relay; delete a revoked relay | 409 `already_revoked`; 409 `already_deleted`; 204 |
 | AT-A5 | Any 5xx path | Body exactly `{"error":"server_error"}` |
-| AT-A6 | relay-ops creates a relay | 201 (create still allowed) |
+| AT-A6 | relay-ops creates a relay | 201 (create still allowed), `Cache-Control: no-store`; an invalid name/SAN → 400 with no relay row left behind |
+| AT-A7 | Two super-admins revoke the same relay at once | Exactly one 204; the other 409 `already_revoked` |
+
+### Live run — Phase A (2026-10-26): PASS
+
+**Setup:**
+- Isolated local stack, not the lab: a controller built from `da0a1613` on its own throwaway database (`zecurity_live_phasea_*`, all 45 migrations), the isolated test Valkey `:6390` and ports 18080/19090. The dev database (`ztna_platform`) was not touched.
+- A real relay (`relay/target/debug/zecurity-relay`) was provisioned against it, giving real serial `16f73897…`.
+- Operators signed in for real: bootstrap password → forced change → TOTP enrolment (code computed from the returned secret, standing in for an authenticator app). relay-ops was created through `POST /provider/users`.
+- Run from Barath's session; the throwaway database was dropped afterwards.
+
+**Results: 38 checks passed, 0 failed.** One driver check was itself wrong (it read the IPv6 loopback `::1` as "IP with port"); it was corrected and re-run, and passed.
+
+| Case | Result | Evidence |
+|---|---|---|
+| AT-CORE-2 | PASS | relay-ops `POST …/revoke` and `DELETE` → 403 `forbidden`; relay still `active`; no audit row |
+| AT-A1 | PASS | no body → 400 `invalid_request`; blank reason → 400 `reason_required`; 501-char reason → 400 `reason_too_long` |
+| AT-A2 | PASS | wrong-case or missing `confirm_name` → 400 `confirmation_mismatch`; malformed UUID → 404 `not_found` |
+| AT-A3 | PASS (API and CRL) | revoke → 204; relay `revoked`; certificate revoked with reason `live phase-a revoke`; **published `/relay.crl` lists the serial**; audit row has the actor, reason, `serials_revoked: 1` and IP `::1`, with spoofed `X-Forwarded-For` / `X-Real-IP` ignored. *Connector migration not observed: no connector or tenant on this stack (covered later by AT-X4).* |
+| AT-A4 | PASS | revoke again → 409 `already_revoked`; delete a revoked relay → 204; revoke after delete → 409 `already_deleted`; delete again → 409 `already_deleted`; exactly one revoke and one delete audit row |
+| AT-A5 | PASS | audit write forced to fail (temporary `NOT VALID` constraint) → 500 with body exactly `{"error":"server_error"}`; relay status unchanged; the server log kept the cause; after the constraint was removed, the same revoke → 204 |
+| AT-A6 | PASS | invalid name, DNS SAN, IP SAN, unknown field and oversized body → 400 with the documented codes and **no relay row created**; relay-ops create → 201 + `Cache-Control: no-store`; create audit rows hold no provisioning token; IP without port |
+| AT-A7 | PASS | two revokes released together (thread barrier) → exactly one 204 and one 409 `already_revoked` |
+
+No provisioning token, TOTP secret or `otpauth` URI appeared in the controller log.
 
 ## Phase E — Relay enrolment
 
