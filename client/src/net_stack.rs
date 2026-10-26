@@ -225,8 +225,12 @@ impl SynGate {
             if let (Some(local), Some(remote)) = (socket.local_endpoint(), socket.remote_endpoint())
             {
                 if let (IpAddress::Ipv4(l), IpAddress::Ipv4(r)) = (local.addr, remote.addr) {
-                    self.owned
-                        .insert((Ipv4Addr::from(l), local.port, Ipv4Addr::from(r), remote.port));
+                    self.owned.insert((
+                        Ipv4Addr::from(l),
+                        local.port,
+                        Ipv4Addr::from(r),
+                        remote.port,
+                    ));
                 }
             }
         }
@@ -304,7 +308,10 @@ impl<D: Device> Device for GatedDevice<'_, D> {
     where
         Self: 'b;
 
-    fn receive(&mut self, timestamp: SmolInstant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+    fn receive(
+        &mut self,
+        timestamp: SmolInstant,
+    ) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         loop {
             let (pkt, held_since) = match self.gate.retry.pop_front() {
                 Some((pkt, since)) => (pkt, Some(since)),
@@ -320,7 +327,9 @@ impl<D: Device> Device for GatedDevice<'_, D> {
                     Some(tx) => Some((GateRx(pkt), tx)),
                     None => {
                         // No way to answer right now: offer it again next poll.
-                        self.gate.retry.push_front((pkt, held_since.unwrap_or(timestamp)));
+                        self.gate
+                            .retry
+                            .push_front((pkt, held_since.unwrap_or(timestamp)));
                         None
                     }
                 };
@@ -1281,13 +1290,7 @@ pub async fn run(
         // Phase 5-C: apply resource commands between two polls, before the
         // accept/relay pass. Never awaits.
         while let Ok(cmd) = resource_rx.try_recv() {
-            apply_resource_cmd(
-                cmd,
-                &mut sockets,
-                &mut flows,
-                smol_now,
-                &mut pending_closes,
-            );
+            apply_resource_cmd(cmd, &mut sockets, &mut flows, smol_now, &mut pending_closes);
         }
 
         flows.service(&mut sockets, smol_now, &transports, &mut spawn_relay);
@@ -1298,7 +1301,10 @@ pub async fn run(
         if n_relays >= ACTIVE_RELAYS_WARN && !relays_warned {
             tracing::warn!(
                 active_relays = n_relays,
-                sockets = sockets.iter().count().saturating_sub(flows.listener_count()),
+                sockets = sockets
+                    .iter()
+                    .count()
+                    .saturating_sub(flows.listener_count()),
                 "net_stack: unusually many live relay sockets"
             );
             relays_warned = true;
@@ -2672,7 +2678,10 @@ mod tests {
         );
         assert_eq!(lab.relay_sockets(), 1);
         assert_eq!(lab.app(b).state(), tcp::State::Established);
-        assert!(lab.flows.gate.stats.dup_syn_dropped > 0, "the retransmit was dropped");
+        assert!(
+            lab.flows.gate.stats.dup_syn_dropped > 0,
+            "the retransmit was dropped"
+        );
     }
 
     /// A resource that cannot listen (port 0) gets no listener and is
@@ -2683,7 +2692,11 @@ mod tests {
         let bad = (Ipv4Addr::from(RES_IP), 0);
         lab.flows.add_listeners(&mut lab.s_sockets, &[bad]);
         assert!(!lab.flows.listen_handles.contains_key(&bad));
-        assert_eq!(lab.stack_sockets(), LISTEN_BACKLOG, "only the good resource's");
+        assert_eq!(
+            lab.stack_sockets(),
+            LISTEN_BACKLOG,
+            "only the good resource's"
+        );
     }
 
     fn syn_packet(flags: u8, ihl_words: u8, frag: u16) -> Vec<u8> {
@@ -2705,12 +2718,24 @@ mod tests {
         let key = res_key(RES_PORT);
         let tuple = (key.0, key.1, Ipv4Addr::new(100, 64, 0, 9), 40_000);
         assert_eq!(bare_syn(&syn_packet(0x02, 5, 0)), Some((key, tuple)));
-        assert_eq!(bare_syn(&syn_packet(0x02, 7, 0)), Some((key, tuple)), "IP options");
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 7, 0)),
+            Some((key, tuple)),
+            "IP options"
+        );
         assert_eq!(bare_syn(&syn_packet(0x12, 5, 0)), None, "SYN+ACK");
         assert_eq!(bare_syn(&syn_packet(0x10, 5, 0)), None, "ACK");
         assert_eq!(bare_syn(&syn_packet(0x06, 5, 0)), None, "SYN+RST");
-        assert_eq!(bare_syn(&syn_packet(0x02, 5, 0x2000)), None, "more fragments");
-        assert_eq!(bare_syn(&syn_packet(0x02, 5, 0x0010)), None, "later fragment");
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 5, 0x2000)),
+            None,
+            "more fragments"
+        );
+        assert_eq!(
+            bare_syn(&syn_packet(0x02, 5, 0x0010)),
+            None,
+            "later fragment"
+        );
         let mut udp = syn_packet(0x02, 5, 0);
         udp[9] = 17;
         assert_eq!(bare_syn(&udp), None, "not TCP");

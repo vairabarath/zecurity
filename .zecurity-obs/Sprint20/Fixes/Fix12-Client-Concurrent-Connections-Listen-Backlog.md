@@ -124,7 +124,7 @@ Review by Barath (changes requested). What it found, and what changed:
 |---|---|---|
 | 1 | A retransmitted SYN could open a **second connection** for one 4-tuple: smoltcp 0.11 gives a SYN to the first socket whose `accepts()` is true; a listener refilled into a freed low `SocketSet` slot sits ahead of a half-open socket. Its later abort would RST the real connection too. | **Reproduced** in the lab harness first (2 relays for one 4-tuple), then fixed: a **SYN gate** in front of smoltcp's receive path drops a bare SYN (no ACK) for a connection a socket already owns (`SynReceived` / `Established`). The owning socket retransmits its SYN-ACK (smoltcp re-arms its retransmit timer in `SynReceived`). |
 | 2 | 16 listeners × 128 KiB per resource, resident after reuse; no cap. | **1 listener per resource** (as before Fix 12). |
-| 3 | 16×N listeners walked on every packet and every poll. | Back to N. |
+| 3 | 16×N listeners walked on every packet and every poll. | Back to N listeners. The gate adds its own work: each inbound packet is copied once and its IPv4/TCP header parsed, and before each poll `free`/`owned` are rebuilt from the listeners and relay sockets. **Measured (release builds, 50 resources, 200 MB each way through the echo, 2 runs each):** base 8.7–8.9 MB/s at 20.8–21.8 daemon CPU-s/GB; gate 9.3–9.4 MB/s at 19.9–21.8 CPU-s/GB — no measurable cost. |
 | F37 overflow | More than 16 SYNs to one resource in one poll still got RSTs. | The gate lets into a poll only as many SYNs per resource as it has free listeners and **holds** the rest for the next poll (≤ 1024 SYNs, ≤ 1 s each; past that a SYN is **dropped**, never reset — the app retransmits). The loop polls again at once while held SYNs make progress. **F37 is closed for any burst size.** |
 | `listen()` error | ignored; dead sockets. | Logged; such a key gets no listener (the gate then lets its SYNs through, smoltcp resets them). |
 | stats | `sockets` included idle listeners. | `sockets` = relay sockets only; new `listeners`, `syn_deferred`, `dup_syn_dropped`, `syn_overflow_dropped`. |
@@ -150,6 +150,8 @@ Mutation checks: owned-tuple check off → item-1 test fails; gate lets every SY
 
 ### Live check AF12-L2 (2026-10-26): PASS
 
+> The table below used **debug** builds (`dev-build.sh` without `--release`), so its RSS is not comparable with AF12-L's release figures (18.6 / 23.0 MB). Release builds, same 50 resources: base **17.9 MB**, gate **17.9 MB** after `up`; 64-burst base 2/64, gate 64/64.
+
 Setup: controller `fixed-pendings` `3b1f8511` (no client or proto difference from this branch's base `2352a390`); connector on inkyank, shield on manoj, resource = TCP echo on manoj `192.168.1.53:5555` (backlog 256) + 49 padding resources (ports 6000–6048) so the client holds 50 resources. Three clients built from this tree with the lab root: base `2352a390`, PR `7bbcabbf`, gate `e87b0b34`; swapped with sudo. Burst = N connections released at once, each with a unique payload checked byte for byte.
 
 | | base (before Fix 12) | PR #134 (16 listeners) | **gate (rework)** |
@@ -162,3 +164,14 @@ Setup: controller `fixed-pendings` `3b1f8511` (no client or proto difference fro
 Gate client stats after the bursts: `listeners=50 sockets=0 syn_deferred=316 dup_syn_dropped=0 syn_overflow_dropped=0 rst_fail_closed=0 fin_on_relay_end=321`; exactly 320 `new TCP connection` lines for 320 connections (no duplicate). Logs: `/tmp/cert-live/logs/f12-*.log` (lab machine).
 
 Not reproduced live: item 1's lost SYN-ACK (needs packet loss on the TUN path); covered by the lab-harness test above.
+
+### Live check AF12-L3 (2026-10-26): item 1 under real SYN-ACK loss — PASS
+
+`iptables -I INPUT -i zecurity0 -p tcp --tcp-flags SYN,ACK SYN,ACK -m statistic --mode random --probability 0.3 -j DROP` for 40 s (the client's resource TUN is `zecurity0`; a first try on `ztna0` matched nothing), gate release client, 3 × 32 parallel connections:
+- 96/96 ok, max latency 2.1–4.1 s (the app's SYN retransmits after a lost SYN-ACK);
+- exactly 96 `new TCP connection` lines — no second connection for any 4-tuple;
+- gate: `dup_syn_dropped=13` (the retransmitted SYNs it dropped), `syn_overflow_dropped=0`, `rst_fail_closed=0`.
+
+### New finding while measuring (not Fix 12): F49 — a saturating upload closes the client's flow
+
+The 200 MB transfers came back **short** (e.g. 50 MB sent, 5.37 MB echoed, then EOF; bytes received were correct) with **both** the base and the gate client. Client log: `flow queue full; closing TCP flow`. `drive_relay` reads the app's TCP data with `recv_slice` and `try_send`s it into the 64-slot `tcp_to_quic` queue; a full queue closes the flow (`1766dca0`, 2026-07-06). An upload faster than the tunnel drains is cut off. Suggested fix: read from the socket only while the queue has room (`tx.capacity() > 0`), so smoltcp's receive window throttles the app. Tracked in `Sprint20/path.md` as F49; not part of this PR.

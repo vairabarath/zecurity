@@ -391,6 +391,7 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
     - the `relay_pool.rs` close-on-age finding is unfixed.
 
     See [[Sprint20/Fixes/fix 5/Fix05-Stale-QUIC-Pool-Live-Acceptance-2026-10-06]] §15.
+  - **F49 — Medium (client data plane, found 2026-10-26 in the Fix 12 rework live run): a saturating upload closes the client's TCP flow.** `drive_relay` (`client/src/net_stack.rs`) reads the app socket and `try_send`s into the 64-slot `tcp_to_quic` queue; a full queue logs `flow queue full; closing TCP flow` and closes it (since `1766dca0`). Live: 50 MB each way through the echo stopped after 5.37 MB, with the pre-Fix-12 and the new client alike. Fix: read only while the queue has room so the TCP window applies backpressure. Open.
   - **Deployment notes (not defects):**
     - the Phase F shield-failover fix needs both the new connector and the new shield;
     - a connector must not run on a host whose client captures that connector's resources (the capture loops its own traffic);
