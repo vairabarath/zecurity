@@ -450,14 +450,20 @@ func Update(ctx context.Context, db *pgxpool.Pool, tenantID, id string, input Up
 }
 
 // ACLRelevantUpdate reports whether an UpdateInput touches a field the ACL
-// compiler actually reads (ListEnabledRulesWithResources selects name, host,
-// port_from, protocol, shield_id). host is not editable via UpdateInput, so only
-// name/protocol/port_from matter here. description, port_to and remote_network_id
-// are invisible to the compiler, so changing only those must not invalidate the
-// per-workspace ACL snapshot. Callers use this to decide whether to fire
-// NotifyPolicyChange after an UpdateResource.
+// compiler actually reads (policy.ListEnabledRulesWithResources selects name,
+// host, port_from, protocol, shield, status and remote_network_id; the compiler
+// routes each resource through its remote network's connectors). Of those,
+// UpdateInput can change name, protocol, port_from and remote_network_id.
+// description and port_to are invisible to the compiler, so changing only those
+// must not invalidate the per-workspace ACL snapshot. Callers use this to decide
+// whether to fire NotifyPolicyChange after an UpdateResource.
+//
+// Sprint 20 Fix 02: remote_network_id was missing (the comment called it
+// invisible); an unconditional notify in UpdateResource hid that until Fix 02
+// removed the duplicate.
 func ACLRelevantUpdate(input UpdateInput) bool {
-	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil
+	return input.Name != nil || input.Protocol != nil || input.PortFrom != nil ||
+		input.RemoteNetworkID != nil
 }
 
 func joinSets(sets []string) string {

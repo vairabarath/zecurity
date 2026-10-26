@@ -208,6 +208,28 @@ func TestForceDeleteResource_Invalidates(t *testing.T) {
 	}
 }
 
+// TestUpdateResource_InvalidatesWhenRemoteNetworkChanges: the compiler routes a
+// resource through its remote network's connectors, so moving it to another
+// remote network must invalidate the snapshot exactly once (Fix 02).
+func TestUpdateResource_InvalidatesWhenRemoteNetworkChanges(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	id := f.seedResource(t, "10.0.0.97", "unprotected")
+	var otherNetwork string
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1, 'net-2', 'other') RETURNING id::text`,
+		f.tenantID,
+	).Scan(&otherNetwork); err != nil {
+		t.Fatalf("insert second remote network: %v", err)
+	}
+
+	if _, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{RemoteNetworkID: &otherNetwork}); err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if got := f.fires.Load(); got != 1 {
+		t.Fatalf("push hook fired %d times on a remote network move, want 1", got)
+	}
+}
+
 // TestProtectResource_Invalidates: protect moves the resource from a
 // connector-routed status (unprotected) to a shield-routed one (protecting), and
 // the ACL compiler routes by status (policy.routeTypeForResource), so the

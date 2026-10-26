@@ -62,9 +62,10 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	// ones.
 	//
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
-	// compiler-visible field (name/protocol/port_from). description/port_to/
-	// remote_network_id are invisible to the compiler, so changing only those
-	// must not churn the ACL version or trigger a fan-out push.
+	// compiler-visible field (name/protocol/port_from/remote_network_id — the
+	// compiler routes through the resource's remote network). description/port_to
+	// are invisible to the compiler, so changing only those must not churn the
+	// ACL version or trigger a fan-out push.
 	if resource.ACLRelevantUpdate(updIn) {
 		if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 			return nil, fmt.Errorf("updateResource notify: %w", err)
