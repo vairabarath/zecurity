@@ -19,6 +19,7 @@ import (
 //	POST  /provider/users/{id}/disable                       → 204
 //	POST  /provider/users/{id}/enable                        → 204 (clears the credential; no password issued)
 //	POST  /provider/users/{id}/reset-password                → 200 {temporary_password}
+//	POST  /provider/users/{id}/reset-totp      {reason}      → 204 (Sprint 22 Phase T, OQ-1)
 //
 // A temporary password is generated and hashed HERE, returned exactly once in
 // the create/reset response (Cache-Control: no-store), and never logged,
@@ -31,6 +32,7 @@ type operatorStore interface {
 	ChangeRole(ctx context.Context, actor AuditActor, id, role string) (*ProviderUser, bool, error)
 	SetDisabled(ctx context.Context, actor AuditActor, id string, disabled bool) (bool, error)
 	ResetOperatorPassword(ctx context.Context, actor AuditActor, id, passwordHash string) error
+	ResetOperatorTOTP(ctx context.Context, actor AuditActor, id, reason string) error
 }
 
 // OperatorHandlers serves the operator management routes.
@@ -54,6 +56,7 @@ type OperatorView struct {
 	LastLoginAt        *time.Time `json:"last_login_at"`
 	MustChangePassword bool       `json:"must_change_password"`
 	HasPassword        bool       `json:"has_password"`
+	TOTPEnabled        bool       `json:"totp_enabled"`
 }
 
 func operatorViewOf(u *ProviderUser) OperatorView {
@@ -66,6 +69,7 @@ func operatorViewOf(u *ProviderUser) OperatorView {
 		LastLoginAt:        u.LastLoginAt,
 		MustChangePassword: u.MustChangePassword,
 		HasPassword:        u.PasswordHash != "",
+		TOTPEnabled:        u.TOTPEnabledAt != nil,
 	}
 }
 
@@ -280,6 +284,8 @@ func writeOperatorError(w http.ResponseWriter, op string, err error) {
 		writeAuthError(w, http.StatusConflict, "exists_disabled")
 	case errors.Is(err, ErrAccountDisabled):
 		writeAuthError(w, http.StatusConflict, "account_disabled")
+	case errors.Is(err, ErrTOTPNotEnrolled):
+		writeAuthError(w, http.StatusConflict, "totp_not_enrolled")
 	case errors.Is(err, ErrInvalidRole):
 		writeAuthError(w, http.StatusBadRequest, "invalid_role")
 	case errors.Is(err, ErrInvalidEmail):

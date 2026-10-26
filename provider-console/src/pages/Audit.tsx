@@ -3,8 +3,10 @@ import { RefreshCw } from 'lucide-react'
 import { queryAudit } from '@/api/reads'
 import type { AuditEntry, JsonValue, Page } from '@/api/types'
 import { DataState } from '@/components/DataState'
+import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -63,16 +65,16 @@ export function Audit() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Audit</h1>
-          <p className="text-sm text-muted-foreground">Actions taken by provider operators, newest first.</p>
-        </div>
-        <Button variant="outline" onClick={q.retry} aria-label="Refresh audit">
-          <RefreshCw aria-hidden />
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        title="Audit log"
+        description="What provider operators did: sessions, operator changes, relay actions and tenant views. Newest first. Tenant audit logs are separate."
+        actions={
+          <Button variant="outline" onClick={q.retry} aria-label="Refresh audit">
+            <RefreshCw aria-hidden />
+            Refresh
+          </Button>
+        }
+      />
 
       {/* Re-seeded from the URL whenever the applied filters change (Apply, Clear, back/forward). */}
       <AuditFilterForm key={JSON.stringify(q.filters)} applied={q.filters} onApply={q.setFilters} onClear={q.resetFilters} />
@@ -86,10 +88,10 @@ export function Audit() {
         onReset={q.resetFilters}
       >
         {(page) => (
-          <>
+          <Card>
             <AuditTable entries={page.items} />
             <Pager page={q.page} hasPrev={q.hasPrev} hasNext={q.hasNext} onPrev={q.prev} onNext={q.next} />
-          </>
+          </Card>
         )}
       </DataState>
     </div>
@@ -121,29 +123,64 @@ function AuditFilterForm({ applied, onApply, onClear }: { applied: Filters; onAp
     })
   }
 
-  const field = (id: string, label: string, k: keyof typeof draft, type = 'text', placeholder?: string) => (
+  const field = (id: string, label: string, k: keyof typeof draft, type = 'text', placeholder?: string, list?: string) => (
     <div className="grid gap-1.5">
-      <Label htmlFor={id}>{label}</Label>
-      <Input id={id} type={type} value={draft[k]} onChange={set(k)} placeholder={placeholder} autoComplete="off" />
+      <Label htmlFor={id} className="text-xs font-medium text-muted-foreground">
+        {label}
+      </Label>
+      <Input id={id} type={type} value={draft[k]} onChange={set(k)} placeholder={placeholder} autoComplete="off" list={list} />
     </div>
   )
 
   return (
-    <form aria-label="Audit filters" onSubmit={submit} className="grid gap-3 rounded-lg border border-border/40 p-4 sm:grid-cols-2 lg:grid-cols-3">
-      {field('audit-action', 'Action', 'action', 'text', 'e.g. tenant.read')}
+    <form aria-label="Audit filters" onSubmit={submit} className="grid gap-3 rounded-xl border border-border bg-card p-4 sm:grid-cols-2 lg:grid-cols-3">
+      {/* Suggestions only: the field still sends exactly what is typed. */}
+      <datalist id="audit-actions">
+        {AUDIT_ACTIONS.map((a) => (
+          <option key={a} value={a} />
+        ))}
+      </datalist>
+      {field('audit-action', 'Action', 'action', 'text', 'e.g. tenant.read', 'audit-actions')}
       {field('audit-target-type', 'Target type', 'target_type', 'text', 'e.g. provider_user')}
       {field('audit-target-id', 'Target ID', 'target_id')}
       {field('audit-email', 'Operator email', 'provider_email')}
       {field('audit-since', 'From (inclusive)', 'since', 'datetime-local')}
       {field('audit-until', 'Until (exclusive)', 'until', 'datetime-local')}
-      <div className="flex items-end gap-2 sm:col-span-2 lg:col-span-3">
-        <Button type="submit">Apply</Button>
+      <div className="flex items-end justify-end gap-2 sm:col-span-2 lg:col-span-3">
         <Button type="button" variant="ghost" onClick={onClear}>
           Clear
         </Button>
+        <Button type="submit">Apply</Button>
       </div>
     </form>
   )
+}
+
+/** The action strings the controller writes to provider_audit_logs. */
+const AUDIT_ACTIONS = [
+  'provider_session.login',
+  'provider_session.logout',
+  'provider_auth.rate_limit',
+  'provider_user.password_change',
+  'provider_user.create',
+  'provider_user.role_change',
+  'provider_user.disable',
+  'provider_user.enable',
+  'provider_user.password_reset',
+  'provider_user.bootstrap_create',
+  'relay.create',
+  'relay.revoke',
+  'relay.delete',
+  'tenant.read',
+] as const
+
+/** A colour cue per kind of action; the action text itself is always shown. */
+function actionDot(action: string): string {
+  if (action === 'provider_auth.rate_limit' || action === 'relay.revoke' || action === 'relay.delete') return 'bg-critical'
+  if (action.startsWith('provider_user.') && action !== 'provider_user.password_change') return 'bg-warning'
+  if (action === 'tenant.read' || action === 'relay.create') return 'bg-info'
+  if (action.startsWith('provider_session.') || action === 'provider_user.password_change') return 'bg-secure'
+  return 'bg-neutral'
 }
 
 function AuditTable({ entries }: { entries: AuditEntry[] }) {
@@ -160,7 +197,7 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
   return (
     <Table aria-label="Audit entries">
       <TableHeader>
-        <TableRow>
+        <TableRow className="hover:bg-transparent">
           <TableHead>When</TableHead>
           <TableHead>Operator</TableHead>
           <TableHead>Action</TableHead>
@@ -172,17 +209,20 @@ function AuditTable({ entries }: { entries: AuditEntry[] }) {
       <TableBody>
         {entries.map((e) => (
           <TableRow key={e.id} aria-label={`audit ${e.id}`} className="align-top">
-            <TableCell className="whitespace-nowrap" title={formatDateTime(e.created_at)}>
+            <TableCell className="whitespace-nowrap font-mono text-[12.5px] text-subtle-foreground" title={formatDateTime(e.created_at)}>
               {formatRelative(e.created_at)}
             </TableCell>
             <TableCell className="max-w-56 truncate" title={e.provider_email}>
               {e.provider_email}
             </TableCell>
-            <TableCell className="font-mono text-xs">{e.action}</TableCell>
-            <TableCell className="whitespace-nowrap text-xs" title={`${e.target_type} · ${e.target_id}`}>
+            <TableCell className="whitespace-nowrap font-mono text-xs">
+              <span aria-hidden className={`mr-2 inline-block size-1.5 rounded-full align-middle ${actionDot(e.action)}`} />
+              {e.action}
+            </TableCell>
+            <TableCell className="whitespace-nowrap text-xs text-subtle-foreground" title={`${e.target_type} · ${e.target_id}`}>
               {e.target_type} · <span className="font-mono">{shortId(e.target_id)}</span>
             </TableCell>
-            <TableCell className="font-mono text-xs">{e.ip_address ?? '—'}</TableCell>
+            <TableCell className="font-mono text-xs text-subtle-foreground">{e.ip_address ?? '—'}</TableCell>
             <TableCell>
               <DetailsCell details={e.details} expanded={open.has(e.id)} onToggle={() => toggle(e.id)} />
             </TableCell>
@@ -201,7 +241,7 @@ function DetailsCell({ details, expanded, onToggle }: { details: JsonValue; expa
       </Button>
       {expanded && (
         // React renders this as text: nothing in details is ever interpreted as HTML.
-        <pre className="max-w-md overflow-auto whitespace-pre-wrap break-all rounded bg-muted/40 p-2 font-mono text-xs" aria-label="Details JSON">
+        <pre className="max-w-md overflow-auto whitespace-pre-wrap break-all rounded-lg border border-[#1c2230] bg-background px-3.5 py-3 font-mono text-[12.5px] leading-relaxed text-[#c9cfdb]" aria-label="Details JSON">
           {JSON.stringify(details, null, 2)}
         </pre>
       )}

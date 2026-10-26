@@ -30,7 +30,7 @@ func mustIdentity(t *testing.T) *IdentityService {
 
 func TestProviderTokenRoundTrip(t *testing.T) {
 	s := mustIdentity(t)
-	tok, _, err := s.IssueSession(testUser(), []string{AMRPassword}, false)
+	tok, _, err := s.IssueSession(testUser(), []string{AMRPassword, AMROTP}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +44,13 @@ func TestProviderTokenRoundTrip(t *testing.T) {
 	if c.Issuer != appmeta.ProviderIssuer || len(c.Audience) != 1 || c.Audience[0] != ProviderAudience {
 		t.Fatalf("issuer/audience mismatch: iss=%q aud=%v", c.Issuer, c.Audience)
 	}
-	if len(c.AMR) != 1 || c.AMR[0] != AMRPassword {
+	if len(c.AMR) != 2 || c.AMR[0] != AMRPassword || c.AMR[1] != AMROTP {
 		t.Fatalf("amr = %v, want [pwd]", c.AMR)
 	}
 }
 
 func TestVerifyProviderToken_RejectsWrongKey(t *testing.T) {
-	tok, _, _ := mustIdentity(t).IssueSession(testUser(), []string{AMRPassword}, false)
+	tok, _, _ := mustIdentity(t).IssueSession(testUser(), []string{AMRPassword, AMROTP}, false)
 	if _, err := VerifyProviderToken([]byte("a-completely-different-key-0123456789"), tok); err == nil {
 		t.Fatal("token verified with the wrong key")
 	}

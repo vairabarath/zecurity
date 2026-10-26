@@ -52,6 +52,9 @@ type sessionResponse struct {
 	Token                  string `json:"token"`
 	ExpiresIn              int64  `json:"expires_in"`
 	PasswordChangeRequired bool   `json:"password_change_required"`
+	// MFA is set when Token is a confined MFA-stage token: "verify" (enter a
+	// TOTP code) or "enroll" (set TOTP up first). Sprint 22 Phase T.
+	MFA string `json:"mfa,omitempty"`
 }
 
 // loginLimiterTimeout bounds each rate-limiter step (check, record) so a dead
@@ -95,11 +98,15 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		log.Printf("provider login: record last login for %s: %v", u.ID, err)
 	}
 
-	token, expiresIn, err := h.ids.IssueSession(u, []string{h.authn.Method()}, u.MustChangePassword)
+	resp, err := h.sessionAfterPassword(u, h.authn.Method())
 	if err != nil {
 		log.Printf("provider login: issue session: %v", err)
 		writeAuthError(w, http.StatusInternalServerError, "server_error")
 		return
+	}
+	details := map[string]any{"amr": []string{h.authn.Method()}, "password_change_required": u.MustChangePassword}
+	if resp.MFA != "" {
+		details["mfa"] = resp.MFA
 	}
 	uid := u.ID
 	if err := h.store.InsertAudit(ctx, AuditEntry{
@@ -108,14 +115,38 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		Action:         AuditSessionLogin,
 		TargetType:     "provider_user",
 		TargetID:       u.ID,
-		Details:        map[string]any{"amr": []string{h.authn.Method()}, "password_change_required": u.MustChangePassword},
+		Details:        details,
 		IPAddress:      ip,
 	}); err != nil {
 		log.Printf("provider login: audit: %v", err)
 		writeAuthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, sessionResponse{Token: token, ExpiresIn: expiresIn, PasswordChangeRequired: u.MustChangePassword})
+	writeAuthJSON(w, http.StatusOK, resp)
+}
+
+// sessionAfterPassword picks the token a correct password earns (Sprint 22
+// Phase T): a password-change-only token while a change is pending; an
+// MFA-stage token for an operator who requires TOTP (verify if enrolled,
+// enroll otherwise); a full session only for everyone else. IssueSession
+// itself refuses a full session without "otp" for an operator who requires
+// TOTP, so no path here can skip the second factor.
+func (h *AuthHandlers) sessionAfterPassword(u *ProviderUser, method string) (sessionResponse, error) {
+	switch {
+	case u.MustChangePassword:
+		token, exp, err := h.ids.IssueSession(u, []string{method}, true)
+		return sessionResponse{Token: token, ExpiresIn: exp, PasswordChangeRequired: true}, err
+	case RequiresTOTP(u):
+		stage := MFAStageEnroll
+		if u.TOTPEnabledAt != nil {
+			stage = MFAStageVerify
+		}
+		token, exp, err := h.ids.IssueMFAToken(u, stage)
+		return sessionResponse{Token: token, ExpiresIn: exp, MFA: stage}, err
+	default:
+		token, exp, err := h.ids.IssueSession(u, []string{method}, false)
+		return sessionResponse{Token: token, ExpiresIn: exp}, err
+	}
 }
 
 type changePasswordRequest struct {
@@ -126,7 +157,9 @@ type changePasswordRequest struct {
 // ChangePassword: POST /provider/auth/password {current_password, new_password}.
 // Accepts full and password-change-only tokens. The new hash is stored with a
 // session_generation bump, so every earlier token — including the caller's —
-// stops working; the response carries a fresh full token.
+// stops working. The response carries a fresh full token, or — for an operator
+// who requires TOTP — an MFA-stage token: a password change never skips the
+// second factor (Sprint 22 Phase T, OQ-3).
 func (h *AuthHandlers) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	actor, ok := ActorFromContext(ctx)
@@ -202,13 +235,13 @@ func (h *AuthHandlers) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		log.Printf("provider password change: audit: %v", err)
 	}
-	token, expiresIn, err := h.ids.IssueSession(updated, []string{AMRPassword}, false)
+	resp, err := h.sessionAfterPassword(updated, AMRPassword)
 	if err != nil {
 		log.Printf("provider password change: issue session: %v", err)
 		writeAuthError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	writeAuthJSON(w, http.StatusOK, sessionResponse{Token: token, ExpiresIn: expiresIn})
+	writeAuthJSON(w, http.StatusOK, resp)
 }
 
 // Logout: POST /provider/auth/logout. Bumps session_generation, so every
@@ -242,9 +275,15 @@ func (h *AuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 // checkLimiter writes 429 (locked out) or 503 (limiter unavailable — fail
 // closed) and returns false; true means the attempt may proceed.
 func (h *AuthHandlers) checkLimiter(w http.ResponseWriter, ctx context.Context, email, ip string) bool {
+	return checkLimiter(w, ctx, h.limiter, email, ip)
+}
+
+// checkLimiter is the shared fail-closed limiter gate for passwords and TOTP
+// codes.
+func checkLimiter(w http.ResponseWriter, ctx context.Context, limiter LoginLimiter, email, ip string) bool {
 	ctx, cancel := context.WithTimeout(ctx, loginLimiterTimeout)
 	defer cancel()
-	blocked, retry, err := h.limiter.Blocked(ctx, email, ip)
+	blocked, retry, err := limiter.Blocked(ctx, email, ip)
 	if err != nil {
 		log.Printf("provider auth: login limiter unavailable, failing closed: %v", err)
 		writeAuthError(w, http.StatusServiceUnavailable, "login_unavailable")

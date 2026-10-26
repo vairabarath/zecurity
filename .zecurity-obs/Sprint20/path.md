@@ -376,7 +376,7 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - **F30 — Medium (runbook): `kill -9` doesn't exercise the disconnect watcher**; use `kill -STOP`. Runbook not yet updated. Phase D → Post-Phase Fixes.
   - **F32 — Low: a revoked relay retries its heartbeat every 5 s forever.** No fix recorded. Phase F → Post-Phase Fixes.
 - **Connector-revocation live findings (2026-10-23)**, from the end-to-end run ([[Sprint20/Fixes/connector-revocation/Connector-Revocation-E2E-Live-2026-10-23]]) and the systemd / root-shield run ([[Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23]]). Revocation itself PASSED on every layer; these are separate issues found along the way. All **open** unless noted.
-  - **F37 — High (client data plane): the client resets concurrent new connections to the same resource.** **FIXED 2026-10-24 (Sprint 20 Fix 12, `d654879`):** 16 listening sockets per resource, promoted and refilled each poll; live 3×8 4/24 → 24/24, 3×16 8/48 → 48/48, keep-alive hold unaffected. [[Sprint20/Fixes/Fix12-Client-Concurrent-Connections-Listen-Backlog]].
+  - **F37 — High (client data plane): the client resets concurrent new connections to the same resource.** **FIXED 2026-10-24 (Sprint 20 Fix 12, `d6548792`), REWORKED 2026-10-26 after the PR #134 review (`e87b0b34`): a SYN gate + 1 listener per resource replaces the pool — no duplicate connection on a retransmitted SYN, no RST for any burst, RSS as before Fix 12 (live 64/64, 128/128); first version:** 16 listening sockets per resource, promoted and refilled each poll; live 3×8 4/24 → 24/24, 3×16 8/48 → 48/48, keep-alive hold unaffected. [[Sprint20/Fixes/Fix12-Client-Concurrent-Connections-Listen-Backlog]].
     - Cause: one smoltcp listening socket per `(ip, port)` (`client/src/net_stack.rs` `new_listen_socket`), re-armed only on a later tick. SYNs arriving before that get RST and never reach the flow table.
     - Evidence: same resource, same minute, **24/24 sequential OK vs 5/24 OK in parallel bursts of 8**; the refused attempts have no `new TCP connection` line.
     - Impact: browsers open ~6 parallel connections per host. It also explains the "isolated single refusals" seen at probe start and around ACL hot-apply.
@@ -391,6 +391,7 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
     - the `relay_pool.rs` close-on-age finding is unfixed.
 
     See [[Sprint20/Fixes/fix 5/Fix05-Stale-QUIC-Pool-Live-Acceptance-2026-10-06]] §15.
+  - **F49 — Medium (client data plane, found 2026-10-26 in the Fix 12 rework live run): a saturating upload closes the client's TCP flow.** `drive_relay` (`client/src/net_stack.rs`) reads the app socket and `try_send`s into the 64-slot `tcp_to_quic` queue; a full queue logs `flow queue full; closing TCP flow` and closes it (since `1766dca0`). Live: 50 MB each way through the echo stopped after 5.37 MB, with the pre-Fix-12 and the new client alike. Fix: read only while the queue has room so the TCP window applies backpressure. Open.
   - **Deployment notes (not defects):**
     - the Phase F shield-failover fix needs both the new connector and the new shield;
     - a connector must not run on a host whose client captures that connector's resources (the capture loops its own traffic);

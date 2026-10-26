@@ -32,6 +32,11 @@ export function enableOperator(id: string): Promise<void> {
   return request<void>('POST', `${userPath(id)}/enable`)
 }
 
+/** Sprint 22 Phase T (OQ-1): clears another operator's TOTP; the reason is audited. */
+export function resetOperatorTotp(id: string, reason: string): Promise<void> {
+  return request<void>('POST', `${userPath(id)}/reset-totp`, { body: { reason } })
+}
+
 export function resetOperatorPassword(id: string): Promise<ResetPasswordResponse> {
   return request<ResetPasswordResponse>('POST', `${userPath(id)}/reset-password`)
 }

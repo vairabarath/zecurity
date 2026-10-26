@@ -17,7 +17,7 @@ export function Pager({
 }) {
   if (!hasPrev && !hasNext) return null
   return (
-    <nav aria-label="Pagination" className="flex items-center justify-end gap-2 pt-3">
+    <nav aria-label="Pagination" className="flex items-center justify-end gap-2 border-t border-border px-4 py-3">
       <Button variant="outline" size="sm" onClick={onPrev} disabled={!hasPrev}>
         <ChevronLeft aria-hidden />
         Previous

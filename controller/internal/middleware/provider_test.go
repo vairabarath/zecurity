@@ -28,7 +28,7 @@ func TestTenantMiddlewareRejectsProviderToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok, _, err := ids.IssueSession(&provider.ProviderUser{ID: "puid-1", Email: "ops@corp.com", Role: provider.RoleSuperAdmin, SessionGeneration: 1},
-		[]string{provider.AMRPassword}, false)
+		[]string{provider.AMRPassword, provider.AMROTP}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,11 @@ func newRequireProviderFixture(t *testing.T) *requireProviderFixture {
 
 func (f *requireProviderFixture) token(t *testing.T, u provider.ProviderUser, pwc bool) string {
 	t.Helper()
-	tok, _, err := f.ids.IssueSession(&u, []string{provider.AMRPassword}, pwc)
+	amr := []string{provider.AMRPassword}
+	if !pwc && provider.RequiresTOTP(&u) {
+		amr = append(amr, provider.AMROTP) // full super-admin sessions are TOTP-backed (Sprint 22 Phase T)
+	}
+	tok, _, err := f.ids.IssueSession(&u, amr, pwc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,10 +148,23 @@ func (f *requireProviderFixture) serve(t *testing.T, authz string, opts ...Provi
 func TestRequireProvider_ValidTokenInjectsActorFromDB(t *testing.T) {
 	f := newRequireProviderFixture(t)
 	// The token claims relay-ops, the DB says super-admin: the DB wins.
-	tok := f.token(t, provider.ProviderUser{ID: "u1", Email: "ops@inkyank.com", Role: provider.RoleRelayOps, SessionGeneration: 3}, false)
+	claimed := provider.ProviderUser{ID: "u1", Email: "ops@inkyank.com", Role: provider.RoleRelayOps, SessionGeneration: 3}
+	tok, _, err := f.ids.IssueSession(&claimed, []string{provider.AMRPassword, provider.AMROTP}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	code, body, actor := f.serve(t, "Bearer "+tok)
 	if code != http.StatusOK || actor == nil || actor.UserID != "u1" || actor.Role != provider.RoleSuperAdmin {
 		t.Fatalf("code=%d body=%s actor=%+v", code, body, actor)
+	}
+	// The TOTP rule also follows the DB row: the same relay-ops claim without
+	// "otp" is refused, because the row is a super-admin.
+	pwdOnly, _, err := f.ids.IssueSession(&claimed, []string{provider.AMRPassword}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, body, _ := f.serve(t, "Bearer "+pwdOnly); code != http.StatusForbidden || !strings.Contains(body, "mfa_required") {
+		t.Fatalf("relay-ops claim without otp for a super-admin row: %d %s", code, body)
 	}
 }
 

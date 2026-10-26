@@ -7,6 +7,13 @@ export function formatDateTime(value: string | number | null | undefined): strin
   return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
 }
 
+/** A calendar date in the viewer's locale; "—" when absent. */
+export function formatDate(value: string | null | undefined): string {
+  if (!value) return '—'
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString()
+}
+
 /** Remaining time as m:ss (never negative). */
 export function formatRemaining(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000))
@@ -26,4 +33,18 @@ export function tryAgainIn(retryAfterSeconds: number | undefined): string {
 export function agentSummary(c: AgentCounts): string {
   const parts = (['active', 'pending', 'disconnected', 'revoked'] as const).filter((k) => c[k] > 0).map((k) => `${c[k]} ${k}`)
   return parts.length ? parts.join(' · ') : '0'
+}
+
+const SCOPES: Record<string, string> = {
+  public: 'Public',
+  private: 'Private',
+  loopback: 'Loopback',
+  link_local: 'Link-local',
+  unknown: 'Unknown',
+}
+
+/** A relay address_scope for display; "—" when absent, raw when unknown. */
+export function formatScope(scope: string | null | undefined): string {
+  if (!scope) return '—'
+  return SCOPES[scope] ?? scope
 }

@@ -17,6 +17,7 @@ const op = (over: Partial<OperatorView>): OperatorView => ({
   last_login_at: null,
   must_change_password: false,
   has_password: true,
+  totp_enabled: false,
   ...over,
 })
 
@@ -24,7 +25,7 @@ const me = op({ id: superAdminMe.user_id, email: superAdminMe.email, role: 'supe
 const ops1 = op({ id: 'ops1', email: 'ops1@provider.test', must_change_password: true })
 const ops2 = op({ id: 'ops2', email: 'ops2@provider.test', disabled_at: '2026-10-02T10:00:00Z' })
 const ops3 = op({ id: 'ops3', email: 'ops3@provider.test', has_password: false })
-const admin2 = op({ id: 'admin2', email: 'admin2@provider.test', role: 'super-admin' })
+const admin2 = op({ id: 'admin2', email: 'admin2@provider.test', role: 'super-admin', totp_enabled: true })
 const ROSTER = [me, ops1, ops2, ops3, admin2]
 
 function setup(routes: Record<string, FakeResponse | ((c: RecordedCall) => FakeResponse)> = {}, roster = ROSTER) {
@@ -96,13 +97,13 @@ describe('Provider users: role guard', () => {
     const { calls } = mockFetch({})
     renderApp('/users')
     expect(screen.getByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Provider users' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Operators' })).not.toBeInTheDocument()
     expect(calls).toHaveLength(0)
   })
 
   it('super-admin sees the nav entry', async () => {
     setup()
-    expect(await screen.findByRole('link', { name: 'Provider users' })).toHaveAttribute('href', '/users')
+    expect(await screen.findByRole('link', { name: 'Operators' })).toHaveAttribute('href', '/users')
   })
 })
 
@@ -341,5 +342,53 @@ describe('Provider users: session handling (C-a, unchanged)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Disable' }))
     expect(await screen.findByRole('heading', { name: /don’t have access/ })).toBeInTheDocument()
     expect(useSessionStore.getState().status).toBe('authenticated')
+  })
+})
+
+// Sprint 22 Phase T (OQ-1): a super-admin resets another operator's TOTP with a
+// required reason. The server enforces who may do it; the console only offers it.
+describe('Provider users: reset MFA', () => {
+  it('is offered only for operators who have TOTP enabled', async () => {
+    const { user } = setup()
+    await user.click(await screen.findByRole('button', { name: 'Actions for admin2@provider.test' }))
+    expect(await screen.findByRole('menuitem', { name: 'Reset MFA' })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+    await user.click(screen.getByRole('button', { name: 'Actions for ops1@provider.test' }))
+    await screen.findByRole('menuitem', { name: 'Change role' })
+    expect(screen.queryByRole('menuitem', { name: 'Reset MFA' })).not.toBeInTheDocument()
+  })
+
+  it('needs a reason, sends it, and reloads the list', async () => {
+    const { user, calls } = setup({ 'POST /provider/users/admin2/reset-totp': { status: 204 } })
+    const dialog = await openRowAction(user, 'admin2@provider.test', 'Reset MFA')
+    expect(within(dialog).getByText('admin2@provider.test')).toBeInTheDocument()
+    const confirm = within(dialog).getByRole('button', { name: 'Reset MFA' })
+    expect(confirm).toBeDisabled()
+    await user.type(within(dialog).getByLabelText('Reason'), '   ')
+    expect(confirm).toBeDisabled()
+    await user.clear(within(dialog).getByLabelText('Reason'))
+    await user.type(within(dialog).getByLabelText('Reason'), 'lost phone')
+    await user.click(confirm)
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(writes(calls)).toEqual([expect.objectContaining({ method: 'POST', path: '/provider/users/admin2/reset-totp', body: { reason: 'lost phone' } })])
+    expect(listCalls(calls)).toHaveLength(2)
+  })
+
+  it.each([
+    ['totp_not_enrolled', /doesn’t have two-factor authentication set up/],
+    ['cannot_modify_self', /can’t change your own account/],
+    ['account_disabled', /This operator is disabled/],
+  ])('%s shows a readable message', async (code, message) => {
+    const { user } = setup({ 'POST /provider/users/admin2/reset-totp': { status: 409, body: { error: code } } })
+    const dialog = await openRowAction(user, 'admin2@provider.test', 'Reset MFA')
+    await user.type(within(dialog).getByLabelText('Reason'), 'lost phone')
+    await user.click(within(dialog).getByRole('button', { name: 'Reset MFA' }))
+    expect(await within(dialog).findByText(message)).toBeInTheDocument()
+  })
+
+  it('shows whether each operator has TOTP', async () => {
+    setup()
+    expect(await within(await screen.findByRole('row', { name: 'admin2@provider.test' })).findByText('MFA on')).toBeInTheDocument()
+    expect(within(screen.getByRole('row', { name: 'ops1@provider.test' })).queryByText('MFA on')).not.toBeInTheDocument()
   })
 })

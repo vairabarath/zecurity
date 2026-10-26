@@ -129,3 +129,17 @@ func TestValkeyLoginLimiter_HealsMissingExpiry(t *testing.T) {
 		t.Fatalf("expiry not restored: ttl=%v err=%v", ttl, err)
 	}
 }
+
+// Sprint 22 Phase T: TOTP code failures use their own counters, so a wrong
+// code and a wrong password never add up (and resetting one never resets the
+// other).
+func TestNewValkeyTOTPLimiter_SeparatePrefix(t *testing.T) {
+	login := NewValkeyLoginLimiter(nil)
+	totp := NewValkeyTOTPLimiter(nil)
+	if totp.prefix != defaultTOTPLimitPrefix || totp.prefix == login.prefix {
+		t.Fatalf("totp prefix %q, login prefix %q", totp.prefix, login.prefix)
+	}
+	if totp.emailKey("Ops@InkYank.com") == login.emailKey("Ops@InkYank.com") || totp.ipKey("203.0.113.7") == login.ipKey("203.0.113.7") {
+		t.Fatal("TOTP and login limiters share a key")
+	}
+}

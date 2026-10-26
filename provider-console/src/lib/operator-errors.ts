@@ -20,6 +20,12 @@ export function operatorErrorMessage(err: unknown): string {
       return 'Enter a valid email address.'
     case ErrorCode.invalidRole:
       return 'Choose a valid role.'
+    case ErrorCode.totpNotEnrolled:
+      return 'This operator doesn’t have two-factor authentication set up, so there is nothing to reset.'
+    case ErrorCode.reasonRequired:
+      return 'Enter a reason. It is recorded in the audit log.'
+    case ErrorCode.reasonTooLong:
+      return 'Keep the reason under 500 characters.'
     case ErrorCode.notFound:
       return 'This operator no longer exists. The list has been refreshed.'
     case ErrorCode.serviceUnavailable:

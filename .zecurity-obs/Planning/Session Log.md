@@ -3054,6 +3054,26 @@ serves on `127.0.0.1:9102`.
   - 60 s keep-alive hold, 0 failures during the bursts;
   - RSS 18.6 → 23.0 MB.
 - **Lab:** udaya's IP changed .41 → .59; `sd-web` is stale (bound to the uninstalled sd-shield), for clean-up. Build artifacts cleaned after each job.
+- Committed locally, not pushed at the time; pushed later as PR #134.
+
+
+## 2026-10-26 — Sprint 20 Fix 12 rework after the PR #134 review: SYN gate, live PASS
+- Review (Barath, changes requested): a retransmitted SYN could open a second connection (reproduced in the lab harness: 2 relays for one 4-tuple); 16 listeners per resource cost resident memory and per-packet scans; >16 SYNs per poll still reset.
+- Rework (`e87b0b34`): a SYN gate in front of smoltcp's receive path (drops a bare SYN for an owned 4-tuple; holds SYNs beyond the free listeners for the next poll, never resets them) and back to 1 listener per resource. Client tests 272 pass; mutation checks pass.
+- Live (50 resources): 64/64 ×3 and 128/128 parallel (base 2/64, PR 16/64); RSS 34.8 MB after `up` (base 35.2, PR 47.7); `syn_deferred=316`, 0 RST, 0 duplicates.
+- Docs: Fix 12 record (D-2, corrections, review table, AF12-L2), Sprint 9 Phase 1 Post-Phase Fixes, path.md F37. Not pushed.
+
+## 2026-10-26 — Provider console redesign merged; PR #134 merged; Sprint 22 planned (Barath)
+- **Provider console redesign** (PR #136, merged `18459686`): new theme, role-aware sidebar, Overview from existing read APIs, redesigned pages; 380 console tests (+6). Clicked through against a local mock built from the controller's DTOs, status codes and lock-out rules; a real-controller click-through is still to do.
+- **PR #134** (Fix 12 SYN-gate rework) reviewed against the earlier change request, approved and merged (`a9ff29dd`). Client tests 272 pass; CI green.
+- **Decision Record amendment 2026-10-26** (D-30 … D-34): console may create/revoke/delete/drain/resume relays; revoke/delete super-admin only (amends D-05); drain in scope (amends D-21); super-admin TOTP first; tenant suspension stays a separate epic.
+- **Sprint 22 planned:** `.zecurity-obs/Sprint22/` — path.md (phases T → A → {E, X} → D, checklist, test gates, done criteria), five phase files, Acceptance Test Plan. Open questions OQ-1 … OQ-3 (TOTP reset by another super-admin, relay-ops voluntary TOTP, rollout without grace window) to answer before Phase T. No code changed; docs on local branch `docs/sprint22-relay-management-plan`, not committed.
+
+## 2026-10-26 (later) — Sprint 22 OQ-1…OQ-3 decided; Phase T implemented test-first (Barath)
+- Decisions recorded in `Sprint22/path.md`: OQ-1 yes (super-admin resets another operator's TOTP, reason required); OQ-2 no mandatory relay-ops TOTP (voluntary enrolment deferred); OQ-3 no grace period.
+- Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
+- Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
+
 - Committed locally, not pushed.
 
 ## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS

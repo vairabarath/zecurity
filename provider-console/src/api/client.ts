@@ -11,6 +11,8 @@ import { ErrorCode, type ErrorBody } from './types'
 //       invalid or expired token, session revoked) → the session has ended
 //   403 "not a provider user" (disabled account) → the session has ended
 //   403 password_change_required → only Change password is reachable
+//   403 mfa_required → the session doesn't satisfy mandatory TOTP; it ends
+//   401 invalid_code on a TOTP step → ApiError (a form error, session kept)
 //   any other 403 (e.g. forbidden) → ApiError; the caller shows Forbidden
 //
 // None of this is authorization: the controller decides every request, the
@@ -108,7 +110,7 @@ export async function request<T>(
   const session = useSessionStore.getState()
 
   if (res.status === 401) {
-    if (credentialCheck && code === ErrorCode.invalidCredentials) {
+    if (credentialCheck && (code === ErrorCode.invalidCredentials || code === ErrorCode.invalidCode)) {
       throw new ApiError(base)
     }
     const expired = session.expiresAt !== undefined && session.expiresAt <= Date.now()
@@ -123,6 +125,13 @@ export async function request<T>(
     }
     if (code === ErrorCode.passwordChangeRequired) {
       session.requirePasswordChange()
+    }
+    // Sprint 22 Phase T: the session doesn't satisfy mandatory TOTP (e.g. a
+    // super-admin token from before TOTP was enforced). It can't be upgraded
+    // in place, so it ends; the user signs in again and gets the TOTP step.
+    if (code === ErrorCode.mfaRequired) {
+      session.endSession('mfa_required')
+      throw new ApiError({ ...base, sessionEnded: true })
     }
   }
 

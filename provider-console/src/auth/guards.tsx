@@ -41,6 +41,7 @@ export function RequireSession({ children }: { children?: ReactNode }) {
     return <Navigate to="/login" replace state={state} />
   }
   if (status === 'password_change') return <Navigate to="/change-password" replace />
+  if (status === 'mfa') return <Navigate to="/mfa" replace />
   return <Guarded>{children}</Guarded>
 }
 
@@ -58,6 +59,7 @@ export function RedirectIfAuthenticated({ children }: { children?: ReactNode }) 
   const location = useLocation()
   if (status === 'loading') return <SessionLoading />
   if (status === 'password_change') return <Navigate to="/change-password" replace />
+  if (status === 'mfa') return <Navigate to="/mfa" replace />
   if (status === 'authenticated') {
     return <Navigate to={safeReturnPath((location.state as FromState | null)?.from)} replace />
   }

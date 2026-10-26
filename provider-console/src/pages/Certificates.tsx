@@ -12,15 +12,14 @@ import {
 } from '@/api/types'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
+import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent } from '@/components/ui/card'
+import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { BUCKET_VARIANTS } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
 import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 
@@ -97,18 +96,18 @@ export function Certificates() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Certificates</h1>
-          <p className="text-sm text-muted-foreground">Certificate expiry across the platform and every tenant.</p>
-        </div>
-        <Button variant="outline" onClick={q.retry} aria-label="Refresh certificates">
-          <RefreshCw aria-hidden />
-          Refresh
-        </Button>
-      </div>
+      <PageHeader
+        title="Certificates"
+        description="Expiry across every certificate the platform issues, from the root CA to client devices. Serials and dates only."
+        actions={
+          <Button variant="outline" onClick={q.retry} aria-label="Refresh certificates">
+            <RefreshCw aria-hidden />
+            Refresh
+          </Button>
+        }
+      />
 
-      <div className="flex flex-wrap items-end gap-3">
+      <Card className="flex flex-wrap items-end gap-4 px-4 py-3.5">
         <div className="grid gap-1.5">
           <Label htmlFor="cert-within">Listing window</Label>
           <Select value={q.filters.within ?? DEFAULT} onValueChange={(v) => set('within', v === DEFAULT ? undefined : v)}>
@@ -141,7 +140,7 @@ export function Certificates() {
           </Select>
         </div>
         <TenantFilter key={q.filters.tenant_id ?? ''} applied={q.filters.tenant_id ?? ''} onApply={(v) => set('tenant_id', v || undefined)} />
-      </div>
+      </Card>
 
       <DataState
         state={q.state}
@@ -153,16 +152,21 @@ export function Certificates() {
       >
         {(res) => (
           <>
-            <SummaryTiles summary={res.summary} />
-            <p className="text-xs text-muted-foreground">
-              Platform CAs (root, intermediate) are counted in the summary; their expiry is beyond the listing window.
-            </p>
-            {res.items.length === 0 ? (
-              <p className="py-6 text-sm text-muted-foreground">No certificates expire within this window.</p>
-            ) : (
-              <CertificateTable items={res.items} />
-            )}
-            <Pager page={q.page} hasPrev={q.hasPrev} hasNext={q.hasNext} onPrev={q.prev} onNext={q.next} />
+            <section className="flex flex-col gap-2.5">
+              <SummaryTiles summary={res.summary} />
+              <div className="flex flex-col gap-0.5 text-xs text-faint">
+                <p>Counts cover every certificate matching the kind and tenant filters, whatever the listing window.</p>
+                <p>Platform CAs (root, intermediate) are counted in the summary; their expiry is beyond the listing window.</p>
+              </div>
+            </section>
+            <Card>
+              {res.items.length === 0 ? (
+                <p className="px-5 py-6 text-sm text-muted-foreground">No certificates expire within this window.</p>
+              ) : (
+                <CertificateTable items={res.items} />
+              )}
+              <Pager page={q.page} hasPrev={q.hasPrev} hasNext={q.hasNext} onPrev={q.prev} onNext={q.next} />
+            </Card>
           </>
         )}
       </DataState>
@@ -190,17 +194,33 @@ function TenantFilter({ applied, onApply }: { applied: string; onApply: (v: stri
   )
 }
 
+const TILE_NOTES: Record<keyof CertificateSummary, string> = {
+  expired: 'Past its expiry date',
+  lt_24h: 'Expiring within a day',
+  lt_7d: 'Expiring this week',
+  lt_30d: 'Expiring this month',
+  ok: 'More than 30 days left',
+}
+
+const TILE_DOTS: Record<keyof CertificateSummary, string> = {
+  expired: 'bg-critical',
+  lt_24h: 'bg-critical',
+  lt_7d: 'bg-warning',
+  lt_30d: 'bg-info',
+  ok: 'bg-secure',
+}
+
 function SummaryTiles({ summary }: { summary: CertificateSummary }) {
   return (
-    <div role="list" aria-label="Expiry summary" className="grid grid-cols-2 gap-3 sm:grid-cols-5">
+    <div role="list" aria-label="Expiry summary" className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
       {EXPIRY_BUCKETS.map((b) => (
-        <Card key={b} role="listitem" aria-label={TILE_LABELS[b]} data-bucket={b}>
-          <CardContent className="flex flex-col gap-1 p-4">
-            <Badge variant={BUCKET_VARIANTS[b]} className="w-fit whitespace-nowrap">
-              {TILE_LABELS[b]}
-            </Badge>
-            <span className="font-display text-2xl font-semibold tabular-nums">{summary[b]}</span>
-          </CardContent>
+        <Card key={b} role="listitem" aria-label={TILE_LABELS[b]} data-bucket={b} className="flex flex-col gap-2 px-[18px] py-4">
+          <span className="flex items-center gap-2">
+            <span aria-hidden className={`size-1.5 rounded-full ${TILE_DOTS[b]}`} />
+            <span className="text-xs font-medium tracking-wide text-muted-foreground">{TILE_LABELS[b]}</span>
+          </span>
+          <span className="font-display text-[28px] font-semibold tabular-nums tracking-[-0.02em]">{summary[b].toLocaleString()}</span>
+          <span className="text-[13px] text-muted-foreground">{TILE_NOTES[b]}</span>
         </Card>
       ))}
     </div>
@@ -213,7 +233,7 @@ function EntityCell({ c }: { c: CertificateEntry }) {
   if (c.kind === 'relay') {
     return (
       <span className="flex flex-col">
-        <Link to={`/relays/${encodeURIComponent(c.entity_id)}`} className="text-primary underline-offset-4 hover:underline">
+        <Link to={`/relays/${encodeURIComponent(c.entity_id)}`} className="font-medium text-foreground hover:text-primary">
           {name}
         </Link>
         {id}
@@ -232,7 +252,7 @@ function CertificateTable({ items }: { items: CertificateEntry[] }) {
   return (
     <Table aria-label="Certificates">
       <TableHeader>
-        <TableRow>
+        <TableRow className="hover:bg-transparent">
           <TableHead>Kind</TableHead>
           <TableHead>Entity</TableHead>
           <TableHead>Tenant</TableHead>
@@ -243,21 +263,21 @@ function CertificateTable({ items }: { items: CertificateEntry[] }) {
       <TableBody>
         {items.map((c) => (
           <TableRow key={`${c.kind}:${c.entity_id}`} aria-label={`${c.kind} ${c.entity_id}`}>
-            <TableCell className="font-mono text-xs">{c.kind}</TableCell>
+            <TableCell className="font-mono text-xs text-subtle-foreground">{c.kind}</TableCell>
             <TableCell>
               <EntityCell c={c} />
             </TableCell>
             <TableCell>
               {c.tenant_id ? (
                 // Explicit navigation only: tenant detail is an audited read.
-                <Link to={`/tenants/${encodeURIComponent(c.tenant_id)}`} className="font-mono text-xs text-primary underline-offset-4 hover:underline">
+                <Link to={`/tenants/${encodeURIComponent(c.tenant_id)}`} className="font-mono text-xs text-primary hover:underline">
                   {c.tenant_id}
                 </Link>
               ) : (
                 <span className="text-muted-foreground">—</span>
               )}
             </TableCell>
-            <TableCell className="font-mono text-xs">{c.serial ?? '—'}</TableCell>
+            <TableCell className="font-mono text-xs text-subtle-foreground">{c.serial ?? '—'}</TableCell>
             <TableCell className="whitespace-nowrap">
               <span className="inline-flex items-center gap-2">
                 {formatDateTime(c.not_after)}
