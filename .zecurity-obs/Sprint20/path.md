@@ -396,6 +396,7 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - **F45 — Low (code reading): an old shield stream's cleanup can unregister the newer stream** (channels keyed by shield id, removed without a stream check) → new tunnels fail until the next reconnect.
   - **F46 — Low: a shield keeps redialling a revoked connector** about every 2.4 s (the terminal connector accepts, then closes, each stream). Like F32 / F38.
   - **F47 — Low / to confirm: a suspended admin's access token keeps working until it expires** (15 min); refresh is refused.
+  - **F48 — Medium (code reading): tunnel data is dropped silently under backpressure** — shield `tunnel.rs` `handle_tunnel_data` and connector `agent_tunnel.rs` `dispatch_data` `try_send` into 64-chunk queues and ignore a full queue, so a slow resource or device gets a hole in its byte stream. Fix: backpressure (`send().await`) or end the session; never drop and continue. Also why F44 option B cannot simply "hold and adopt" sessions (Fix 14 correction).
   - Runbook corrections for `docs/certificate-audit-live-runbook.md` (grpcurl import path, CRL lists only unexpired serials, F1/F4 message, LAN relay flag, stage G order): Fix 14 → Runbook corrections.
   - **Deployment notes (not defects):**
     - the Phase F shield-failover fix needs both the new connector and the new shield;

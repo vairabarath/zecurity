@@ -1,10 +1,10 @@
 ---
-title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45) + live-run follow-ups (F46, F47)
+title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: OPEN — decision D-1 = B with an expiry rule (user, 2026-10-26); design proposed, not implemented
+status: OPEN — decision D-1 = B with an expiry rule (user, 2026-10-26); B design corrected (data loss), variant choice pending; not implemented
 owner: Sathiya (M1)
-findings: F44, F45, F46, F47 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
+findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
 
 # Fix 14 — what the certificate-audit live run turned up
@@ -77,6 +77,14 @@ Scope note: this keeps sessions across a reconnect **to the same connector** onl
 
 **Not changed:** proto, schema, controller, client. Revocation paths. ACL enforcement: carried sessions stay subject to ACL-diff teardown and fail-closed as today.
 
+> **Correction (2026-10-26, before any code): the "hold and adopt" design above loses data.** Each Control stream owns in-flight queues: on the connector the stream's `tunnel_tx`/`tunnel_rx` (64) and `out_tx` (32), and on the shield `run_once`'s `out_tx` (32) plus whatever h2 received but the shield didn't read. When a stream ends, those messages are dropped. A session adopted by the next stream then has a hole in its byte stream. SSH or TLS break confusingly, and a plaintext protocol (DB wire, HTTP) can carry wrong data silently. That is worse than F44's hang. So:
+> - **"No proto change" holds only for a renewal handover**, not for surviving an unclean stream end (blip, crash, connector restart). Surviving those needs per-tunnel sequence numbers and acks with replay buffers, i.e. new proto fields, which this sprint's proto rule (KI-2 option A only) does not allow without an exception.
+> - **Safe B without a proto change = handover on renewal only:** the shield opens the new stream (new cert) **before** closing the old one. The connector registers it per `stream_id` (F45). Each side finishes the old stream in order (flush, half-close, read to EOF), and buffers per `connection_id` any tunnel traffic that arrives on the new stream until the old stream's EOF. If the cut-over doesn't finish within the grace, the sessions close. **Any unclean stream end closes the sessions cleanly** (option A's behaviour).
+> - Live acceptance check 3 (a `kill -STOP` blip survives) applies only to the proto variant.
+> - Whichever variant is chosen must not build on the F48 paths below.
+>
+> Awaiting the user's choice between handover-only B and B with additive `seq`/`ack` fields.
+
 **Decision Record.** B touches session lifetime across a shield reconnect, next to PENDING-18. This decision (D-1 above) is the user's; add it to the Decision Record as a short entry before merging: "a shield session survives a Control stream reconnect to the same connector while the shield's certificate stays valid; it ends at certificate expiry, revocation, failover or a 15 s grace."
 
 ### Acceptance for B
@@ -103,6 +111,18 @@ Scope note: this keeps sessions across a reconnect **to the same connector** onl
 **Proposed fix.** Remove an entry only if it still belongs to this stream: keep `stream_id` next to each sender (or compare with `Sender::same_channel`). Fits naturally with F44 option A (close only the ending stream's sessions).
 
 **Acceptance.** Unit: register stream 1, register stream 2, end stream 1 → stream 2's channels and sessions remain.
+
+## F48 — Medium (code reading, 2026-10-26): tunnel data is dropped silently under backpressure
+
+**Problem.** Both ends of a shield tunnel hand each data chunk to a bounded channel with `try_send` and ignore the result:
+- shield `shield/src/tunnel.rs` `handle_tunnel_data` → the tunnel's `inbound_tx` (64 chunks) towards the resource socket;
+- connector `connector/src/agent_tunnel.rs` `dispatch_data` → the relay session's event channel (64) towards the device.
+
+When the channel is full (slow resource, slow device, or a burst of up to 64 × 16 KB), the chunk is discarded and the session carries on with a hole in its byte stream. No reconnect is involved; it can happen on any busy session today.
+
+**Proposed fix.** Backpressure instead of drop: `send().await` (the Control-stream reader then slows down, which is what TCP flow control expects), or end the session with an error when the queue is full. Never drop a chunk and continue.
+
+**Acceptance.** Unit: fill a tunnel's queue → the next chunk is delivered once there is room (or the session ends with an error), never dropped while the session continues. Live: a bulk transfer to a slow reader (`pv -L` on the resource side) arrives byte-identical (checksum).
 
 ## F46 — Low: a shield keeps redialling a revoked connector
 
