@@ -391,6 +391,12 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
     - the `relay_pool.rs` close-on-age finding is unfixed.
 
     See [[Sprint20/Fixes/fix 5/Fix05-Stale-QUIC-Pool-Live-Acceptance-2026-10-06]] §15.
+- **Certificate-audit live run findings (2026-10-26, `fixed-pendings` `3b1f8511`)**, from [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]]. All 26 checks passed; these are separate. All **open**; fix note with proposed design: [[Sprint20/Fixes/Fix14-Shield-Stream-Reconnect-Sessions]].
+  - **F44 — Medium: a shield Control stream reconnect (incl. every cert renewal) freezes all open sessions through that shield** — no data, no close; new sessions work. Connector `unregister_shield` leaves the shield's relay sessions open on the dead stream's sender; the shield starts a fresh `TunnelHub` per stream and leaks the old tunnels' sockets. On `main` too. Decision D-1 (2026-10-26): **B** — keep sessions across the reconnect while the shield renewed before its cert expired; end them if the cert expired. Design in Fix 14; F45 is fixed by the same change.
+  - **F45 — Low (code reading): an old shield stream's cleanup can unregister the newer stream** (channels keyed by shield id, removed without a stream check) → new tunnels fail until the next reconnect.
+  - **F46 — Low: a shield keeps redialling a revoked connector** about every 2.4 s (the terminal connector accepts, then closes, each stream). Like F32 / F38.
+  - **F47 — Low / to confirm: a suspended admin's access token keeps working until it expires** (15 min); refresh is refused.
+  - Runbook corrections for `docs/certificate-audit-live-runbook.md` (grpcurl import path, CRL lists only unexpired serials, F1/F4 message, LAN relay flag, stage G order): Fix 14 → Runbook corrections.
   - **Deployment notes (not defects):**
     - the Phase F shield-failover fix needs both the new connector and the new shield;
     - a connector must not run on a host whose client captures that connector's resources (the capture loops its own traffic);
