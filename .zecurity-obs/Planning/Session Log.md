@@ -3033,3 +3033,9 @@ serves on `127.0.0.1:9102`.
 - **Live:** f11-a (inkyank) and f11-shield (udaya) installed with the fixed installers → timers disabled, 0 update runs, binaries unchanged after ≥ 2 min; a manual update-service run logged `auto-update is disabled; skipping update check`.
 - **Earlier today:** pushed the 2 doc commits (PR #133); one handoff line about the local test login slipped into the push and was removed with an amend + force-push (lease).
 - Committed locally, not pushed.
+
+
+## 2026-10-26 — Sprint 20 Fix 14 (+ Fix 15 / F49): live acceptance PASS
+- Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).
+- Live with Fix 14 connector/shield/client: an 11-min byte-checked stream survived a real shield renewal (245 MB in order, max gap 0.09 s, both sides logged the handover); 200 MB each way intact twice (F48+F49); `kill -9` of the shield and a revocation both ended the session within the same second (no hang).
+- Not run live: expiry without renewal, old/new mix (unit-tested). Observation: a killed connector is noticed by the client only after the 30 s QUIC idle timeout (client↔connector path, not Fix 14).

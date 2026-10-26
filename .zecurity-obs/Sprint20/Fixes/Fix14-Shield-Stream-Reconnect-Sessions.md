@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: IMPLEMENTED locally (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; unit tests pass; live acceptance pending; deployment order connectors before shields (accepted)
+status: IMPLEMENTED locally and verified live (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; live renewal handover, bulk, unclean shield end and revocation PASS; expiry and old/new mix not run live; deployment order connectors before shields (accepted)
 owner: Sathiya (M1)
 findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
@@ -206,3 +206,19 @@ A **new shield with an old connector** hits F45 on every renewal: the shield ope
 ### Still open
 
 F46 (shield redials a revoked connector), F47 (suspended admin's access token until expiry), per-tunnel flow control (follow-up for F48 and blip survival). Decision Record entry for D-1 (user's call).
+
+
+## Live acceptance (2026-10-26): PASS
+
+Branch `sprint20/fix14-shield-reconnect-sessions` at `ddbef089` (Fix 14 + Fix 15/F49). Binaries built from it: connector `8770614d`, shield `0c38f1f2`, client `2b2e98b6` (SHA-256 prefixes, debug builds). Controller `fixed-pendings` `3b1f8511`, lab certs 15 min (shield renews every ~9 min). Connector on inkyank (identity kept, binary swapped), shield on manoj (identity kept), resource TCP echo on manoj `:5555` + 49 padding resources. Logs: `/tmp/cert-live/logs/f14-*.log` (lab machine).
+
+| # | Check | Result |
+|---|---|---|
+| 1 | **Renewal survives:** one connection carrying a counter both ways (~400 KB/s, every byte checked) for 11 min across a real shield renewal | **PASS** — 245,084,160 bytes echoed in order, max gap 0.09 s. Shield 09:18:30.268 `cert renewed — moving to a Control stream with it` → 09:18:30.287 `Control stream handed over, tunnels kept`; connector `shield Control stream handed over: sessions kept sessions=1` |
+| 5 | **Bulk:** 200 MB each way, checksummed, twice | **PASS** — both intact, 13.4–13.6 MB/s; no `flow queue full`, no stall-ending on connector or shield (F48 + F49) |
+| 3 | **Unclean end of the shield stream:** `kill -9` the shield mid-stream | **PASS** — killed 09:27:50.863; connector `shield Control stream error` at .869, tunnel closed `shield stream ended`; client EOF the same second (no hang) |
+| 4 | **Revocation mid-stream** | **PASS** — revoked 09:28:57.828; connector closed the tunnel at .903; client EOF the same second |
+| 2 | Expiry ends (no renewal possible before `not_after`) | not run live (needs the shield unable to renew for ~15 min, i.e. the controller unreachable); unit-tested over real mTLS streams |
+| 6 | New connector + old shield, one renewal → sessions close cleanly | not run live; covered by the clean-end-without-newer-stream unit test |
+
+**Observation (not Fix 14):** stopping the **connector** process mid-session (Ctrl-C) left the client's session silent until the client's QUIC idle timeout: it noticed 30 s later (`relay failure signalled — early transport resync`). That is the client↔connector liveness path (Fix 05 area), not the shield stream. The planned check "restart the connector mid-session → close within ~1 s" was the wrong layer for F44 and was replaced by check 3 (shield killed).
