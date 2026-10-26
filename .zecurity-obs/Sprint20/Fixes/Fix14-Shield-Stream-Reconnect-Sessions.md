@@ -142,6 +142,8 @@ When the channel is full (slow resource, slow device, or a burst of up to 64 × 
 
 **To decide.** Expected for stateless JWTs (it matches bug 4's known "token still valid after suspension" window, which the runbook leaves to automated tests). If an admin suspension must take effect at once, the tenant auth middleware needs a per-request user-status (or `identity_generation`) check. Record as accepted, or fix.
 
+**Decision (user, 2026-10-26): keep the design — accepted, no change.** This is the recorded PENDING-04 Phase 5 design (`internal/middleware/auth.go` Claims comment, `internal/identity/revocation.go`): a suspension bumps `identity_generation` and kills the refresh session at once; an already issued access token (≤ 15 min) is not re-checked per request, to keep a DB read off every request. The live observation used a raw SQL status change; the real suspend path also bumps the generation, with the same ≤ 15 min window.
+
 ## Runbook corrections (`docs/certificate-audit-live-runbook.md`)
 
 Found while running it; the run sheet's deviations list has the rest.
