@@ -212,7 +212,7 @@ Every item is **test-first**: write the failing test, then the code, then tick t
 ### Phase V — M1: Acceptance
 
 - [ ] **V1** Run AT-T on the lab after T merges.
-- [ ] **V2** Run AT-A, AT-E, AT-X after their merges.
+- [ ] **V2** Run AT-A, AT-E, AT-X after their merges. *(AT-A: live PASS 2026-10-26 on an isolated local stack, 38/38 checks; see the Acceptance Test Plan. AT-E and AT-X pending.)*
 - [ ] **V3** Run AT-D on the lab fleet (≥ 2 relays) after D merges.
 - [ ] **V4** Final sprint run of [[Sprint22/Acceptance-Test-Plan]]; failures filed as Post-Phase Fixes; Session Log entry.
 

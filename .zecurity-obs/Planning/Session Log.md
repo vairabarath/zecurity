@@ -3083,3 +3083,16 @@ serves on `127.0.0.1:9102`.
   - Create: bounded decoding, name/SAN codes, 201 + `no-store`.
 - Tests written first and confirmed failing (10). Gate: `go test ./...` 872 pass / 0 fail / 32 skip (skips outside Phase A); changed packages 0 skips. Console untouched (395 pass).
 - FU-1 recorded: Create audit not transactional (D-14 gap). Runbook revoke command updated to the JSON body. Not committed; branch `sprint22/phase-a-relay-admin-hardening`.
+
+## 2026-10-26 (later) — Sprint 22 Phase A live acceptance: PASS; Phase A closed (Barath)
+- Live run on an isolated stack: controller from `da0a1613`, throwaway DB, Valkey `:6390`, ports 18080/19090; a real relay provisioned. Dev DB untouched; the throwaway DB was dropped afterwards.
+- AT-CORE-2, AT-A1–A7: 38 checks, 0 failures:
+  - relay-ops 403;
+  - validation codes;
+  - real revoke with the serial on `/relay.crl` and spoofed XFF ignored;
+  - repeat 409s;
+  - concurrent revoke one 204 + one 409;
+  - forced audit failure → exact `server_error` and rollback;
+  - create 201 + `no-store`, with no rows on invalid input.
+- No secrets in the controller log.
+- Not observed: connector migration after a revoke (no connector; AT-X4 later). FU-1 stays open.

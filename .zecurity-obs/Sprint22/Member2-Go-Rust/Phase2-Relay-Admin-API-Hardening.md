@@ -6,7 +6,7 @@ sprint: 22
 phase: 2
 execution: A
 title: Relay Admin API Hardening (D-17, D-31)
-status: implemented   # 2026-10-26 on sprint22/phase-a-relay-admin-hardening, not committed; live AT-A open
+status: done   # 2026-10-26: implemented (da0a1613), live AT-A PASS on an isolated local stack; FU-1 open as a separate follow-up
 depends_on: [1]   # T merged (D-33)
 schema_change: false
 tags:
@@ -96,6 +96,8 @@ Go gate from [[Sprint22/path]] (`internal/provider`, `internal/relay`), DB-backe
 - forwarding headers are ignored;
 - invalid Create leaves no relay or audit row;
 - relay-ops Create gets `no-store`, with no token in the audit.
+
+**Live acceptance (2026-10-26): PASS.** 38 checks, 0 failures, on an isolated local stack with a real provisioned relay; see [[Sprint22/Acceptance-Test-Plan]] → "Live run — Phase A". The one remaining observation is connector migration after a revoke, which needs a connector and is covered by AT-X4.
 
 ## Post-Phase Fixes
 
