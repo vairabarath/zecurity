@@ -2,9 +2,11 @@ package resolvers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -18,8 +20,16 @@ import (
 // aclCoherenceFixture wires a mutationResolver against a real Postgres with a
 // recording push hook. NotifyPolicyChange fires the hook synchronously, so
 // fires.Load() tells us whether a resource mutation invalidated the per-workspace
-// ACL snapshot. Set RESOURCE_TEST_DATABASE_URL and RESOURCE_TEST_SHIELD_ID to run;
-// skipped otherwise (matches internal/resource/snapshot_integration_test.go).
+// ACL snapshot. Set RESOURCE_TEST_DATABASE_URL to run; skipped otherwise.
+//
+// Sprint 20 Fix 02 (F35): the fixture creates its own migrated throwaway
+// database (RESOURCE_TEST_DATABASE_URL is the admin DSN) and provisions a
+// workspace, remote network, connector and active shield (lan_ip =
+// aclFixtureShieldLAN) in it. It used to borrow the workspace
+// of an existing shield named by RESOURCE_TEST_SHIELD_ID, so the tests ran inside
+// whatever that workspace held (real devices changed posture decisions and added
+// policy notifies; a revoked shield changed unprotect's path) and skipped in CI,
+// which never set that variable.
 type aclCoherenceFixture struct {
 	mr        *mutationResolver
 	notifier  *policy.Notifier
@@ -31,25 +41,51 @@ type aclCoherenceFixture struct {
 	ctx       context.Context
 }
 
+// aclFixtureShieldLAN is the fixture shield's LAN IP: protectResource only
+// protects a resource whose host is an active shield's lan_ip.
+const aclFixtureShieldLAN = "10.0.0.95"
+
 func newACLCoherenceFixture(t *testing.T) *aclCoherenceFixture {
 	t.Helper()
 	dsn := os.Getenv("RESOURCE_TEST_DATABASE_URL")
-	shieldID := os.Getenv("RESOURCE_TEST_SHIELD_ID")
-	if dsn == "" || shieldID == "" {
-		t.Skip("RESOURCE_TEST_DATABASE_URL / RESOURCE_TEST_SHIELD_ID not set")
+	if dsn == "" {
+		t.Skip("RESOURCE_TEST_DATABASE_URL not set")
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	t.Cleanup(pool.Close)
+	// Its own migrated throwaway database: CI's Postgres starts empty.
+	pool := newMigratedTestPool(t, dsn, "resolvers_aclcoh")
 
-	var tenantID, networkID string
+	slug := fmt.Sprintf("aclcoh-%d", time.Now().UnixNano())
+	var tenantID, networkID, connectorID, shieldID string
 	if err := pool.QueryRow(ctx,
-		`SELECT tenant_id, remote_network_id FROM shields WHERE id = $1`, shieldID,
-	).Scan(&tenantID, &networkID); err != nil {
-		t.Fatalf("load shield: %v", err)
+		`INSERT INTO workspaces (slug, name, status, trust_domain)
+		 VALUES ($1, $1, 'active', $2) RETURNING id`,
+		slug, "ws-"+slug+".zecurity.in",
+	).Scan(&tenantID); err != nil {
+		t.Fatalf("insert workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM workspaces WHERE id = $1`, tenantID)
+	})
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO remote_networks (tenant_id, name, location) VALUES ($1, 'net', 'other') RETURNING id`,
+		tenantID,
+	).Scan(&networkID); err != nil {
+		t.Fatalf("insert remote_network: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO connectors (tenant_id, remote_network_id, name, status)
+		 VALUES ($1, $2, 'conn', 'active') RETURNING id`,
+		tenantID, networkID,
+	).Scan(&connectorID); err != nil {
+		t.Fatalf("insert connector: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, lan_ip)
+		 VALUES ($1, $2, $3, 'shield', 'active', $4) RETURNING id`,
+		tenantID, networkID, connectorID, aclFixtureShieldLAN,
+	).Scan(&shieldID); err != nil {
+		t.Fatalf("insert shield: %v", err)
 	}
 
 	fires := new(atomic.Int32)
@@ -172,17 +208,21 @@ func TestForceDeleteResource_Invalidates(t *testing.T) {
 	}
 }
 
-// TestProtectResource_DoesNotInvalidate: protect changes only status/pending_action,
-// which the compiler never reads — it must NOT invalidate (locks current behavior).
-func TestProtectResource_DoesNotInvalidate(t *testing.T) {
+// TestProtectResource_Invalidates: protect moves the resource from a
+// connector-routed status (unprotected) to a shield-routed one (protecting), and
+// the ACL compiler routes by status (policy.routeTypeForResource), so the
+// compiled output changes and the snapshot must be invalidated once.
+// Sprint 20 Fix 02 (F35): this test used to expect 0 — written before the
+// compiler started reading status (49c4732).
+func TestProtectResource_Invalidates(t *testing.T) {
 	f := newACLCoherenceFixture(t)
-	id := f.seedResource(t, "10.0.0.95", "unprotected")
+	id := f.seedResource(t, aclFixtureShieldLAN, "unprotected")
 
 	if _, err := f.mr.ProtectResource(f.ctx, id); err != nil {
-		t.Fatalf("ProtectResource: %v (is RESOURCE_TEST_SHIELD_ID active?)", err)
+		t.Fatalf("ProtectResource: %v", err)
 	}
-	if got := f.fires.Load(); got != 0 {
-		t.Fatalf("push hook fired %d times on protect, want 0", got)
+	if got := f.fires.Load(); got != 1 {
+		t.Fatalf("push hook fired %d times on protect, want 1", got)
 	}
 }
 

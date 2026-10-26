@@ -2,38 +2,17 @@ package resource
 
 import (
 	"context"
-	"os"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestBuildShieldSnapshotGeneration exercises the F11 fix against a real Postgres
-// (migration 018 applied). Set RESOURCE_TEST_DATABASE_URL and RESOURCE_TEST_SHIELD_ID
-// to run; skipped otherwise. It creates a throwaway resource bound to the given
-// shield and asserts the generation only advances on real desired-state changes.
+// (migration 018 applied), in its own throwaway database with a seeded shield
+// (Fix 02). Set RESOURCE_TEST_DATABASE_URL to run; skipped otherwise. It creates
+// a throwaway resource bound to that shield and asserts the generation only advances on real desired-state changes.
 func TestBuildShieldSnapshotGeneration(t *testing.T) {
-	dsn := os.Getenv("RESOURCE_TEST_DATABASE_URL")
-	shieldID := os.Getenv("RESOURCE_TEST_SHIELD_ID")
-	if dsn == "" || shieldID == "" {
-		t.Skip("RESOURCE_TEST_DATABASE_URL / RESOURCE_TEST_SHIELD_ID not set")
-	}
+	db := newResourceTestDB(t)
 	ctx := context.Background()
-	db, err := pgxpool.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
-	}
-	// Registered first so it runs LAST: t.Cleanup is LIFO and the row-delete
-	// cleanup below must still have a live pool. (A plain defer db.Close() would
-	// run before any t.Cleanup, closing the pool out from under the delete.)
-	t.Cleanup(db.Close)
-
-	var tenantID, networkID string
-	if err := db.QueryRow(ctx,
-		`SELECT tenant_id, remote_network_id FROM shields WHERE id = $1`, shieldID,
-	).Scan(&tenantID, &networkID); err != nil {
-		t.Fatalf("load shield: %v", err)
-	}
+	tenantID, networkID, shieldID := seedShield(t, db)
 
 	// Throwaway resource, cleaned up at the end.
 	var resID string

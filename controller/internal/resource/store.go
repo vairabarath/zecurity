@@ -618,12 +618,20 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 // and there is no port_reachable column to persist it to. verified_at IS persisted
 // as last_verified_at.
 // RecordAck records a shield's ack of a resource instruction. It returns
-// reaped=true only when an 'unprotected' ack physically removed a 'deleting'
-// tombstone (the DELETE below) — that is the one path where the resource leaves
-// the ACL compiler's output, so the caller must fire NotifyPolicyChange.
-// Status updates (protected/failed/unprotected without a tombstone) never change
-// compiler-visible data, so they return reaped=false.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (reaped bool, err error) {
+// aclChanged=true when the ack changed the ACL compiler's output, so the caller
+// must fire NotifyPolicyChange:
+//   - an 'unprotected' ack physically removed a 'deleting' tombstone (the DELETE
+//     below): the resource left the output;
+//   - the status moved between the connector-routed states (pending,
+//     unprotected) and the shield-routed ones (protecting, protected, failed):
+//     the compiler routes by status (policy.routeTypeForResource), so e.g. an
+//     unprotect completing ('protecting' → 'unprotected') re-routes the resource
+//     from its shield to the connector (Sprint 20 Fix 02, F35: this transition
+//     notified nothing, leaving the ACL snapshot stale).
+//
+// Updates within one route class (e.g. protecting → protected/failed) change no
+// compiler-visible data and return false.
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (aclChanged bool, err error) {
 	if status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
@@ -638,24 +646,36 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 			return true, nil
 		}
 	}
-	_, err = db.Exec(ctx,
-		`UPDATE resources
+	var oldStatus string
+	err = db.QueryRow(ctx,
+		`UPDATE resources r
 		    SET status           = $2,
 		        error_message    = NULLIF($3, ''),
 		        last_verified_at = to_timestamp($4),
-		        applied_at       = CASE WHEN $2 = 'protected' AND applied_at IS NULL THEN NOW() ELSE applied_at END,
+		        applied_at       = CASE WHEN $2 = 'protected' AND r.applied_at IS NULL THEN NOW() ELSE r.applied_at END,
 		        updated_at       = NOW()
-		  WHERE id = $1
-		    AND tenant_id = $5
-			AND status != 'deleting'
-		    AND NOT (status = 'protecting' AND pending_action = 'remove' AND $2 != 'unprotected')
-		    AND NOT (status = 'protecting' AND pending_action = 'apply'  AND $2 = 'unprotected')`,
+		   FROM (SELECT id, status FROM resources WHERE id = $1 AND tenant_id = $5 FOR UPDATE) prev
+		  WHERE r.id = prev.id
+			AND r.status != 'deleting'
+		    AND NOT (r.status = 'protecting' AND r.pending_action = 'remove' AND $2 != 'unprotected')
+		    AND NOT (r.status = 'protecting' AND r.pending_action = 'apply'  AND $2 = 'unprotected')
+		 RETURNING prev.status`,
 		resourceID, status, errMsg, verifiedAt, tenantID,
-	)
+	).Scan(&oldStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil // guarded out: nothing changed
+	}
 	if err != nil {
 		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return false, nil
+	return connectorRouted(oldStatus) != connectorRouted(status), nil
+}
+
+// connectorRouted mirrors policy.routeTypeForResource: pending and unprotected
+// resources are routed through the connector, every other status through the
+// resource's shield.
+func connectorRouted(status string) bool {
+	return status == "pending" || status == "unprotected"
 }
 
 func collectRows(rows pgx.Rows) ([]*Row, error) {

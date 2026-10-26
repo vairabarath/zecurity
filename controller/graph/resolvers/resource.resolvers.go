@@ -55,10 +55,12 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return nil, fmt.Errorf("updateResource: notify policy change: %w", err)
-	}
 
+	// Sprint 20 Fix 02 (F35): this is the one notify for an update. An extra
+	// unconditional notify from a parallel branch (49c4732, merged with 391b28b
+	// in df5a041) fired twice for every relevant change and once for irrelevant
+	// ones.
+	//
 	// Only invalidate the per-workspace ACL snapshot when the update touched a
 	// compiler-visible field (name/protocol/port_from). description/port_to/
 	// remote_network_id are invisible to the compiler, so changing only those
@@ -195,11 +197,9 @@ func (r *mutationResolver) ForceDeleteResource(ctx context.Context, id string) (
 	if row != nil && row.ConnectorID != "" && row.ShieldID != "" {
 		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, row.ConnectorID, row.ShieldID)
 	}
-	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
-		return false, fmt.Errorf("forceDeleteResource: notify policy change: %w", err)
-	}
 
-	// The row left the ACL compiler's output — invalidate the workspace snapshot.
+	// The row left the ACL compiler's output — invalidate the workspace snapshot
+	// (once; Fix 02 removed the duplicate from the same merge).
 	if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
 		return false, fmt.Errorf("forceDeleteResource notify: %w", err)
 	}
