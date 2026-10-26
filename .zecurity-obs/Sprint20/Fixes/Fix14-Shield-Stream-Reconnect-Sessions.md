@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: OPEN — decision D-1 = B with an expiry rule (user, 2026-10-26); B design corrected (data loss), variant choice pending; not implemented
+status: IMPLEMENTED locally (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; unit tests pass; live acceptance pending; deployment order (connectors before shields) to confirm
 owner: Sathiya (M1)
 findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
@@ -151,3 +151,56 @@ Found while running it; the run sheet's deviations list has the rest.
 4. **§5.1 relay on a LAN:** the controller must run with `RELAY_DEV_ALLOW_PRIVATE_ADDR=true` and the relay must dial the controller's LAN address, or connectors get an empty relay list.
 5. **§11 stage G:** run G3 (reactivate, no re-login) before G2 (logout/login), because `logout` wipes the device's local state. `zecurity-client logout` also stops the daemon; it needs `sudo systemctl start zecurity-client` before the next login.
 6. **§2.4 `buf generate`:** add `--exclude-path .worktrees` when worktrees exist under the repo.
+
+## Implementation (2026-10-26, branch `sprint20/fix14-shield-reconnect-sessions`, local)
+
+**User decisions (2026-10-26):** D-1 = B **as a handover on renewal** (no proto change), with the expiry rule; groundwork first. Blip survival (seq/ack, proto) is **not** in scope.
+
+| Commit | What |
+|---|---|
+| `4b9b69e` | connector: sessions belong to their stream; a stream end closes its sessions (no hang); an older stream's cleanup keeps the newer stream's channels (**F45**) |
+| `796a812` | connector: a shield stream is closed at its certificate's `not_after` (**expiry rule**) |
+| `0e7d934` | connector: F48, first cut (end the session as soon as the queue is full) — superseded by `5eaa9c4` |
+| `711b151` | shield: a stream's end closes its tunnels and their resource sockets; F48 first cut |
+| `5eaa9c4` | connector + shield: F48 waits for room (flow control) instead of ending at once |
+| `00cb0bc` | connector: **handover** (adopt on a clean end when a newer stream is registered; per-send stream lookup with retry; old queue `close()` + drain; held early events delivered after the old stream's end) + F48 **stall budget** (2 s per 10 s per session) |
+| `23b411b` | shield: **handover** on renewal (open new stream → pause → half-close old → read old to its end → resume); one swappable upstream for all tunnel messages; F48 stall budget per tunnel |
+| `d58957e` | connector: handover backlog capped by bytes (1 MiB) and time (15 s), not only count |
+
+**Behaviour as built.**
+- Renewal (new shield + new connector): sessions survive, in order both ways.
+- Renewal fails to reach the same connector with the new cert, or the new stream is refused: the shield reconnects as before; tunnels close cleanly (F44 groundwork).
+- Any unclean stream end (blip, crash, connector restart, revocation, close-all): sessions close cleanly, never hang.
+- Certificate expired without renewal: the connector closes the stream at `not_after`; its sessions end.
+- New connector + **old** shield (closes before reopening): sessions close cleanly — no hang.
+
+**Tests.** Connector 261, shield 51 (2 ignored), all passing. New tests (each mutation-checked: the fix removed → the test fails):
+- connector hub: stream end closes its sessions; F45; other shields untouched; handover order both ways (`1,2,4,3,5`); device data retried on the new stream; clean end without a newer stream closes; unclean end closes; early close after held data; backlog count, byte and time limits; slow device gets every chunk; stalled device ends; trickling device uses up its budget;
+- connector, real mTLS streams: F45 (newer stream keeps its snapshot channel); stream closed at cert expiry; session survives a make-before-break handover both ways;
+- shield: `close_all` closes the resource socket; slow resource gets every chunk; stalled / trickling resource ends; paused traffic goes to the next upstream in order; a message whose stream closed is retried; no upstream within the grace → given up.
+- Not unit-tested: the shield's `hand_over` sequence itself (needs a live connector) → live acceptance.
+
+### Deployment order (decision needed before merge)
+
+A **new shield with an old connector** hits F45 on every renewal: the shield opens its new stream, then half-closes the old one, and the old connector's cleanup of the old stream removes the new stream's tunnel, instruction and snapshot channels. New tunnels to that shield then fail and resource updates stop until its next reconnect (days at production lifetimes). The shield cannot tell the connector's version from any existing message.
+
+→ **Upgrade connectors before shields.** (New connector + old shield is safe.) Record in the release notes / PR.
+
+### F48 policy and its limit
+
+- A full queue now **waits** for room (flow control), and a session or tunnel may hold its Shield's Control stream up for **at most 2 s in total per 10 s**; then it ends. This replaces "drop and carry on" (data corruption).
+- **Known limit:** all tunnels of a Shield share one Control stream, so a slow device or resource can still delay the others by up to its budget. The real fix is per-tunnel flow control (window updates) — a proto change, the same one blip survival would need. Follow-up, not this fix.
+- F48 acceptance updated: a **slow** reader (`pv -L` well above 0) gets the transfer **byte-identical**; a reader that **stops** for more than ~2 s ends the session (not a corrupted stream).
+
+### Live acceptance (to run; one redeploy of connector + shield, lab certs 15 min)
+
+1. **Renewal survives:** a continuous counter stream (client → shield-protected resource, checked byte for byte in both directions) across at least one shield renewal → no gap, no reorder, session stays up.
+2. **Expiry ends:** stop the connector until the shield's cert expires, start it again → the session ended, is not resumed; the shield re-enrolls/fails as today.
+3. **Unclean end closes cleanly:** restart the connector mid-session → the client sees a close within ~1 s (no 5 s+ hang).
+4. **Revocation:** revoke the shield mid-session → ends within ~1 s (stage H unchanged).
+5. **Bulk transfer:** ≥ 100 MB download through the shield to a normal client → checksum matches, not cut.
+6. **Old/new mix:** new connector + old shield, one renewal → sessions close cleanly (no hang).
+
+### Still open
+
+F46 (shield redials a revoked connector), F47 (suspended admin's access token until expiry), per-tunnel flow control (follow-up for F48 and blip survival). Decision Record entry for D-1 (user's call).
