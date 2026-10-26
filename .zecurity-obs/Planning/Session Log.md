@@ -3039,3 +3039,10 @@ serves on `127.0.0.1:9102`.
 - Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).
 - Live with Fix 14 connector/shield/client: an 11-min byte-checked stream survived a real shield renewal (245 MB in order, max gap 0.09 s, both sides logged the handover); 200 MB each way intact twice (F48+F49); `kill -9` of the shield and a revocation both ended the session within the same second (no hang).
 - Not run live: expiry without renewal, old/new mix (unit-tested). Observation: a killed connector is noticed by the client only after the 30 s QUIC idle timeout (client↔connector path, not Fix 14).
+
+
+## 2026-10-26 — Sprint 20 Fix 16 (F46, F50, F51; F47 kept by design): FIXED, live PASS
+- On `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): F50 stuck 'deleting' resources (delete when the shield is gone; 2 s tombstone sweeper), F51 connector graceful shutdown (QUIC close, shield streams, Goodbye; plus tracing `log_internal_errors(false)` after a live Ctrl-C-under-tee crash), F46 last-connector revoke (`alsoRevokeShields`) + shield back-off. F47: keep the design.
+- Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
+- Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
+- Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
