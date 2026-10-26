@@ -43,14 +43,25 @@ pub struct AgentTunnelHub {
 
 #[derive(Debug, Default)]
 struct HubState {
-    /// shield_id → channel for sending ShieldControlMessages TO that Shield.
-    shield_txs: HashMap<String, mpsc::Sender<ShieldControlMessage>>,
-    /// connection_id → the session's Shield and the channel routing events
-    /// FROM that Shield back to the relay session. The hub holds the only
-    /// sender, so removing an entry ends the session.
-    relay_sessions: HashMap<String, (String, mpsc::Sender<RelayEvent>)>,
+    /// shield_id → the Control stream currently registered for that Shield:
+    /// its stream id and the channel for sending ShieldControlMessages TO it.
+    /// Fix 14 (F45): keyed by shield, owned by one stream — an older stream's
+    /// cleanup must not remove a newer stream's registration.
+    shield_txs: HashMap<String, (u64, mpsc::Sender<ShieldControlMessage>)>,
+    /// connection_id → the session's Shield and stream, and the channel
+    /// routing events FROM that Shield back to the relay session. The hub
+    /// holds the only sender, so removing an entry ends the session.
+    relay_sessions: HashMap<String, RelayEntry>,
     /// Revoked shields (terminal): never registered again, no new sessions.
     revoked: HashSet<String>,
+}
+
+#[derive(Debug)]
+struct RelayEntry {
+    shield_id: String,
+    /// The Control stream the session's tunnel runs on (Fix 14, F44).
+    stream_id: u64,
+    tx: mpsc::Sender<RelayEvent>,
 }
 
 impl AgentTunnelHub {
@@ -62,26 +73,54 @@ impl AgentTunnelHub {
     // Called by agent_server.rs when a Shield connects / disconnects
     // -----------------------------------------------------------------------
 
-    /// Register a channel that delivers ShieldControlMessages to `shield_id`.
-    /// Called by agent_server's `control()` after the Shield connects.
+    /// Register stream `stream_id`'s channel that delivers ShieldControlMessages
+    /// to `shield_id`. Called by agent_server's `control()` after the Shield
+    /// connects; the newest stream becomes the Shield's current one.
     /// Returns false, registering nothing, if the shield is revoked.
     #[must_use]
     pub fn register_shield(
         &self,
         shield_id: String,
+        stream_id: u64,
         tx: mpsc::Sender<ShieldControlMessage>,
     ) -> bool {
         let mut state = self.state.lock();
         if state.revoked.contains(&shield_id) {
             return false;
         }
-        state.shield_txs.insert(shield_id, tx);
+        state.shield_txs.insert(shield_id, (stream_id, tx));
         true
     }
 
-    /// Remove the Shield's send channel when it disconnects.
-    pub fn unregister_shield(&self, shield_id: &str) {
-        self.state.lock().shield_txs.remove(shield_id);
+    /// Stream `stream_id` of `shield_id` ended. Fix 14:
+    /// - F45: the Shield's registration is removed only if it is still this
+    ///   stream's; a newer stream that registered first stays.
+    /// - F44: every relay session whose tunnel ran on this stream ends now.
+    ///   Its queued tunnel data died with the stream, so it must not carry on
+    ///   (it would have a hole in its byte stream) nor hang.
+    pub fn unregister_shield(&self, shield_id: &str, stream_id: u64) {
+        let mut state = self.state.lock();
+        if state
+            .shield_txs
+            .get(shield_id)
+            .is_some_and(|(id, _)| *id == stream_id)
+        {
+            state.shield_txs.remove(shield_id);
+        }
+        let ended: Vec<String> = state
+            .relay_sessions
+            .iter()
+            .filter(|(_, e)| e.shield_id == shield_id && e.stream_id == stream_id)
+            .map(|(cid, _)| cid.clone())
+            .collect();
+        for cid in ended {
+            if let Some(entry) = state.relay_sessions.remove(&cid) {
+                // Best effort: dropping the only sender ends the session anyway.
+                let _ = entry
+                    .tx
+                    .try_send(RelayEvent::Close("shield stream ended".to_string()));
+            }
+        }
     }
 
     /// Revoke `shield_id` (certificate audit bug 3): unregister it, refuse it
@@ -94,13 +133,15 @@ impl AgentTunnelHub {
         let ended: Vec<String> = state
             .relay_sessions
             .iter()
-            .filter(|(_, (sid, _))| sid == shield_id)
+            .filter(|(_, e)| e.shield_id == shield_id)
             .map(|(cid, _)| cid.clone())
             .collect();
         for cid in ended {
-            if let Some((_, tx)) = state.relay_sessions.remove(&cid) {
+            if let Some(entry) = state.relay_sessions.remove(&cid) {
                 // Best effort: dropping the only sender ends the session anyway.
-                let _ = tx.try_send(RelayEvent::Close("shield revoked".to_string()));
+                let _ = entry
+                    .tx
+                    .try_send(RelayEvent::Close("shield revoked".to_string()));
             }
         }
     }
@@ -123,8 +164,8 @@ impl AgentTunnelHub {
 
     pub fn dispatch_close(&self, connection_id: &str, error: String) {
         // Remove session — Shield closed its side.
-        if let Some((_, tx)) = self.state.lock().relay_sessions.remove(connection_id) {
-            let _ = tx.try_send(RelayEvent::Close(error));
+        if let Some(entry) = self.state.lock().relay_sessions.remove(connection_id) {
+            let _ = entry.tx.try_send(RelayEvent::Close(error));
         }
     }
 
@@ -133,7 +174,7 @@ impl AgentTunnelHub {
             .lock()
             .relay_sessions
             .get(connection_id)
-            .map(|(_, tx)| tx.clone())
+            .map(|e| e.tx.clone())
     }
 
     // -----------------------------------------------------------------------
@@ -171,14 +212,19 @@ impl AgentTunnelHub {
             if state.revoked.contains(shield_id) {
                 return Err(anyhow!("shield {} is revoked", shield_id));
             }
-            let shield_tx = state
+            let (stream_id, shield_tx) = state
                 .shield_txs
                 .get(shield_id)
                 .cloned()
                 .ok_or_else(|| anyhow!("shield {} not connected", shield_id))?;
-            state
-                .relay_sessions
-                .insert(connection_id.clone(), (shield_id.to_string(), event_tx));
+            state.relay_sessions.insert(
+                connection_id.clone(),
+                RelayEntry {
+                    shield_id: shield_id.to_string(),
+                    stream_id,
+                    tx: event_tx,
+                },
+            );
             shield_tx
         };
 
@@ -320,6 +366,122 @@ impl RelaySession {
 }
 
 #[cfg(test)]
+mod stream_ownership_tests {
+    //! Fix 14: a Shield's relay sessions belong to the Control stream their
+    //! tunnel runs on (F44), and an older stream's cleanup never removes a
+    //! newer stream's registration (F45).
+
+    use super::*;
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
+    const SHIELD: &str = "5d1c7f0e-2b8a-4e6d-9c3f-1a7b2e4d6f80";
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A Shield on `rx` that accepts every tunnel.
+    fn accept_all(hub: AgentTunnelHub, mut rx: mpsc::Receiver<ShieldControlMessage>) {
+        tokio::spawn(async move {
+            while let Some(m) = rx.recv().await {
+                if let Some(Body::TunnelOpen(o)) = m.body {
+                    hub.dispatch_opened(&o.connection_id, true, String::new());
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn a_stream_end_closes_its_sessions_instead_of_hanging() {
+        let hub = AgentTunnelHub::new();
+        let (tx, rx) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        accept_all(hub.clone(), rx);
+        let session = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+            .await
+            .expect("opened");
+        let (mut device, relay_end) = tokio::io::duplex(1024);
+        let relay = tokio::spawn(session.relay_stream(relay_end));
+
+        hub.unregister_shield(SHIELD, 1);
+
+        tokio::time::timeout(WAIT, relay)
+            .await
+            .expect("the session must end when its stream ends")
+            .unwrap()
+            .ok();
+        let mut buf = [0u8; 8];
+        let n = tokio::time::timeout(WAIT, device.read(&mut buf))
+            .await
+            .expect("the device must see the end, not hang")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
+        assert!(hub.state.lock().relay_sessions.is_empty());
+        assert!(!hub.state.lock().shield_txs.contains_key(SHIELD));
+    }
+
+    #[tokio::test]
+    async fn an_older_streams_cleanup_keeps_the_newer_stream() {
+        let hub = AgentTunnelHub::new();
+        let (old_tx, old_rx) = mpsc::channel(64);
+        let (new_tx, new_rx) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, old_tx));
+        accept_all(hub.clone(), old_rx);
+        let on_old = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+            .await
+            .expect("opened on stream 1");
+        // Stream 2 registers before stream 1's end is noticed.
+        assert!(hub.register_shield(SHIELD.into(), 2, new_tx));
+        accept_all(hub.clone(), new_rx);
+        let on_new = hub
+            .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+            .await
+            .expect("opened on stream 2");
+
+        hub.unregister_shield(SHIELD, 1);
+
+        {
+            let state = hub.state.lock();
+            assert_eq!(
+                state.shield_txs.get(SHIELD).map(|(id, _)| *id),
+                Some(2),
+                "stream 1's cleanup removed stream 2"
+            );
+            assert!(!state.relay_sessions.contains_key(&on_old.connection_id));
+            assert!(state.relay_sessions.contains_key(&on_new.connection_id));
+        }
+        // Stream 2 still opens sessions.
+        hub.open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
+            .await
+            .expect("stream 2 still serves");
+    }
+
+    #[tokio::test]
+    async fn a_stream_end_leaves_other_shields_alone() {
+        const OTHER: &str = "9e8d7c6b-5a49-4382-a1b0-c9d8e7f6a5b4";
+        let hub = AgentTunnelHub::new();
+        let (tx, rx) = mpsc::channel(64);
+        let (other_tx, other_rx) = mpsc::channel(64);
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
+        assert!(hub.register_shield(OTHER.into(), 1, other_tx));
+        accept_all(hub.clone(), rx);
+        accept_all(hub.clone(), other_rx);
+        let other = hub
+            .open_relay_session(OTHER, "10.0.0.8", 22, "tcp")
+            .await
+            .expect("opened");
+
+        hub.unregister_shield(SHIELD, 1);
+
+        assert!(hub
+            .state
+            .lock()
+            .relay_sessions
+            .contains_key(&other.connection_id));
+    }
+}
+
+#[cfg(test)]
 mod revocation_tests {
     //! Certificate audit bug 3: a revoked shield is refused by the hub and
     //! every session through it ends.
@@ -334,9 +496,9 @@ mod revocation_tests {
     fn a_revoked_shield_cannot_register_again() {
         let hub = AgentTunnelHub::new();
         let (tx, _rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), tx.clone()));
+        assert!(hub.register_shield(SHIELD.into(), 1, tx.clone()));
         hub.revoke_shield(SHIELD);
-        assert!(!hub.register_shield(SHIELD.into(), tx));
+        assert!(!hub.register_shield(SHIELD.into(), 1, tx));
         assert!(!hub.state.lock().shield_txs.contains_key(SHIELD));
     }
 
@@ -344,7 +506,7 @@ mod revocation_tests {
     async fn no_session_opens_through_a_revoked_shield() {
         let hub = AgentTunnelHub::new();
         let (tx, _rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), tx));
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
         hub.revoke_shield(SHIELD);
         let err = hub
             .open_relay_session(SHIELD, "10.0.0.9", 22, "tcp")
@@ -358,7 +520,7 @@ mod revocation_tests {
     async fn revocation_ends_a_session_waiting_for_tunnel_opened() {
         let hub = AgentTunnelHub::new();
         let (tx, mut rx) = mpsc::channel(8);
-        assert!(hub.register_shield(SHIELD.into(), tx));
+        assert!(hub.register_shield(SHIELD.into(), 1, tx));
         let opener = hub.clone();
         let opening = tokio::spawn(async move {
             opener

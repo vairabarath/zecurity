@@ -922,9 +922,9 @@ impl ShieldService for ShieldRegistry {
                 return Err(Status::permission_denied("shield is revoked"));
             }
             maps.instruction_txs
-                .insert(identity.shield_id.clone(), instr_tx);
+                .insert(identity.shield_id.clone(), instr_tx.clone());
             maps.snapshot_txs
-                .insert(identity.shield_id.clone(), snap_tx);
+                .insert(identity.shield_id.clone(), snap_tx.clone());
             maps.stream_cancels
                 .entry(identity.shield_id.clone())
                 .or_default()
@@ -932,7 +932,7 @@ impl ShieldService for ShieldRegistry {
         }
         if !self
             .tunnel_hub
-            .register_shield(identity.shield_id.clone(), tunnel_tx)
+            .register_shield(identity.shield_id.clone(), stream_id, tunnel_tx)
         {
             // Revoked in between: apply_revocations already cleaned the maps.
             return Err(Status::permission_denied("shield is revoked"));
@@ -1108,9 +1108,24 @@ impl ShieldService for ShieldRegistry {
                 }
             }
             {
+                // Fix 14 (F45): remove the channels only if they are still this
+                // stream's. A newer stream of the same shield may have
+                // registered before this one's end was noticed (half-open TCP).
                 let mut maps = registry.maps.lock();
-                maps.instruction_txs.remove(&shield_id);
-                maps.snapshot_txs.remove(&shield_id); // cache itself survives for the next reconnect
+                if maps
+                    .instruction_txs
+                    .get(&shield_id)
+                    .is_some_and(|tx| tx.same_channel(&instr_tx))
+                {
+                    maps.instruction_txs.remove(&shield_id);
+                }
+                if maps
+                    .snapshot_txs
+                    .get(&shield_id)
+                    .is_some_and(|tx| tx.same_channel(&snap_tx))
+                {
+                    maps.snapshot_txs.remove(&shield_id); // cache itself survives for the next reconnect
+                }
                 if let Some(tokens) = maps.stream_cancels.get_mut(&shield_id) {
                     tokens.retain(|(id, _)| *id != stream_id);
                     if tokens.is_empty() {
@@ -1118,7 +1133,7 @@ impl ShieldService for ShieldRegistry {
                     }
                 }
             }
-            registry.tunnel_hub.unregister_shield(&shield_id);
+            registry.tunnel_hub.unregister_shield(&shield_id, stream_id);
             info!(shield_id = %shield_id, "shield Control stream disconnected");
         });
 
@@ -1929,6 +1944,39 @@ mod shield_server_tls_tests {
         )
     }
 
+    /// Fix 14 (F45): when a shield's newer Control stream is registered
+    /// before the older one ends, the older stream's cleanup must not remove
+    /// the newer stream's channels: snapshots still reach the newer stream.
+    #[tokio::test]
+    async fn an_older_streams_end_keeps_the_newer_streams_channels() {
+        let pki = TestPki::new();
+        let (_dir, holder) = pki.holder(-60, 3600);
+        let r = synced_registry();
+        let server = start_with(r.clone(), holder, SHIELD_TLS_HANDSHAKE_TIMEOUT).await;
+        let (old_out, mut old_replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&old_out, &mut old_replies, false).await;
+        let (new_out, mut new_replies) = open_control(&pki, server.addr).await;
+        health_round_trip(&new_out, &mut new_replies, false).await;
+
+        // The older stream ends (the shield half-closes it) after the newer
+        // one registered; wait until the connector has finished with it.
+        drop(old_out);
+        expect_closed(&mut old_replies).await;
+
+        r.push_snapshot(
+            SHIELD_ID,
+            ResourceSnapshot {
+                generation: 7,
+                ..Default::default()
+            },
+        );
+        let reply = next_reply(&mut new_replies).await;
+        assert!(
+            matches!(reply.body, Some(Body::ResourceSnapshot(ref s)) if s.generation == 7),
+            "the newer stream lost its snapshot channel: got {reply:?}"
+        );
+    }
+
     #[tokio::test]
     async fn revoking_a_shield_closes_its_open_control_stream() {
         let pki = TestPki::new();
@@ -2275,7 +2323,7 @@ mod shield_server_tls_tests {
             let (shield_tx, mut shield_rx) = mpsc::channel::<ShieldControlMessage>(1024);
             assert!(r
                 .tunnel_hub
-                .register_shield(SHIELD_ID.to_string(), shield_tx));
+                .register_shield(SHIELD_ID.to_string(), 1, shield_tx));
             // A shield that accepts every tunnel.
             let hub = r.tunnel_hub.clone();
             tokio::spawn(async move {
