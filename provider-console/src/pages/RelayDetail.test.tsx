@@ -55,7 +55,8 @@ describe('Relay detail', () => {
     mockFetch({ [`GET /provider/relays/${ID}`]: { status: 200, body: detail() } })
     renderApp(`/relays/${ID}`)
     expect(await screen.findByRole('heading', { name: 'relay-a', level: 1 })).toBeInTheDocument()
-    expect(screen.getByText('medium · 7 / 100')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: '7 of 100 connections used' })).toBeInTheDocument()
+    expect(screen.getByText('medium')).toHaveAttribute('data-tier', 'medium')
     expect(within(screen.getByRole('list', { name: 'DNS allowlist' })).getByText('relay.example.com')).toBeInTheDocument()
     expect(within(screen.getByRole('list', { name: 'IP allowlist' })).getByText('203.0.113.5')).toBeInTheDocument()
 

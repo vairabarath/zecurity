@@ -83,17 +83,17 @@ describe('DataState', () => {
 
 describe('StatusBadge', () => {
   it.each([
-    ['active', 'bg-secure'],
-    ['revoked', 'bg-destructive'],
-    ['inactive', 'bg-warning'],
-    ['deleted', 'bg-muted'],
-    ['pending', 'border'],
-    ['some-new-status', 'border'],
-  ])('%s', (status, cls) => {
+    ['active', 'ok'],
+    ['revoked', 'crit'],
+    ['inactive', 'warn'],
+    ['deleted', 'neutral'],
+    ['pending', 'info'],
+    ['some-new-status', 'neutral'],
+  ])('%s', (status, tone) => {
     render(<StatusBadge status={status} />)
     const el = screen.getByText(status)
     expect(el).toHaveAttribute('data-status', status)
-    expect(el.className).toContain(cls)
+    expect(el).toHaveAttribute('data-tone', tone)
   })
 })
 

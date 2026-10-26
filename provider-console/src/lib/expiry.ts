@@ -37,11 +37,11 @@ export const BUCKET_LABELS: Record<ExpiryBucket, string> = {
 }
 
 /** Badge colour per bucket (one fixed mapping for every page). */
-export const BUCKET_VARIANTS: Record<ExpiryBucket, 'destructive' | 'warning' | 'outline' | 'success'> = {
+export const BUCKET_VARIANTS: Record<ExpiryBucket, 'destructive' | 'warning' | 'info' | 'success'> = {
   expired: 'destructive',
   lt_24h: 'destructive',
   lt_7d: 'warning',
-  lt_30d: 'outline',
+  lt_30d: 'info',
   ok: 'success',
 }
 

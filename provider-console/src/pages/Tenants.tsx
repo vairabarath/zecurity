@@ -2,14 +2,16 @@ import { useCallback } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { listTenants } from '@/api/reads'
-import { TENANT_STATUSES, type Page, type TenantStatus, type TenantSummary } from '@/api/types'
+import { TENANT_STATUSES, type AgentCounts, type Page, type TenantStatus, type TenantSummary } from '@/api/types'
 import { DataState } from '@/components/DataState'
 import { ExpiryBadge } from '@/components/ExpiryBadge'
+import { FilterChips } from '@/components/FilterChips'
+import { PageHeader } from '@/components/PageHeader'
 import { Pager } from '@/components/Pager'
 import { StatusBadge } from '@/components/StatusBadge'
+import { TenantAvatar } from '@/components/TenantAvatar'
 import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Card } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { agentSummary } from '@/lib/format'
 import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
@@ -20,7 +22,7 @@ import { usePagedQuery, type Filters } from '@/lib/usePagedQuery'
 // Users appear only as counts (OQ-2).
 
 const FILTER_KEYS = ['status'] as const
-const ALL = 'all' // Select sentinel for "no status filter" (every status except deleted)
+const ALL = 'all' // chip value for "no status filter" (every status except deleted)
 
 function validStatus(f: Filters): boolean {
   return !f.status || (TENANT_STATUSES as readonly string[]).includes(f.status)
@@ -30,40 +32,43 @@ function fetchTenants(f: Filters, cursor: string | undefined): Promise<Page<Tena
   return listTenants({ status: f.status as TenantStatus | undefined, cursor })
 }
 
+/**
+ * agentSummary that wraps only between statuses: spaces inside a part are
+ * non-breaking, so "1 disconnected" never splits across lines.
+ */
+function WrappingSummary({ counts }: { counts: AgentCounts }) {
+  return agentSummary(counts)
+    .split(' · ')
+    .map((part) => part.replace(/ /g, '\u00a0'))
+    .join(' · ')
+}
+
+const STATUS_OPTIONS = [
+  { value: ALL, label: 'All except deleted' },
+  { value: 'active', label: 'Active' },
+  { value: 'provisioning', label: 'Provisioning' },
+  { value: 'suspended', label: 'Suspended' },
+  { value: 'deleted', label: 'Deleted' },
+] satisfies { value: typeof ALL | TenantStatus; label: string }[]
+
 export function Tenants() {
   const q = usePagedQuery<Page<TenantSummary>>({ filterKeys: FILTER_KEYS, validate: validStatus, fetchPage: fetchTenants })
   const onStatus = useCallback((v: string) => q.setFilters(v === ALL ? {} : { status: v }), [q])
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-display text-2xl font-semibold tracking-tight">Tenants</h1>
-          <p className="text-sm text-muted-foreground">Customer workspaces and their infrastructure counts.</p>
-        </div>
-        <div className="flex items-end gap-2">
-          <div className="grid gap-1.5">
-            <Label htmlFor="tenant-status">Status</Label>
-            <Select value={q.filters.status ?? ALL} onValueChange={onStatus}>
-              <SelectTrigger id="tenant-status" aria-label="Status filter" className="w-44">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={ALL}>All (except deleted)</SelectItem>
-                {TENANT_STATUSES.map((s) => (
-                  <SelectItem key={s} value={s} className="capitalize">
-                    {s}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+      <PageHeader
+        title="Tenants"
+        description="Every workspace and its footprint, as counts. The list isn't audited; opening a tenant is."
+        actions={
           <Button variant="outline" onClick={q.retry} aria-label="Refresh tenants">
             <RefreshCw aria-hidden />
             Refresh
           </Button>
-        </div>
-      </div>
+        }
+      />
+
+      <FilterChips label="Status filter" options={STATUS_OPTIONS} value={q.filters.status ?? ALL} onChange={onStatus} />
 
       <DataState
         state={q.state}
@@ -74,53 +79,64 @@ export function Tenants() {
         onReset={q.resetFilters}
       >
         {(page) => (
-          <>
+          <Card>
             <Table aria-label="Tenants">
               <TableHeader>
-                <TableRow>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead>Tenant</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>Trust domain</TableHead>
-                  <TableHead>CA expiry</TableHead>
                   <TableHead>Connectors</TableHead>
                   <TableHead>Shields</TableHead>
                   <TableHead className="text-right">Networks</TableHead>
                   <TableHead className="text-right">Users</TableHead>
                   <TableHead className="text-right">Devices</TableHead>
+                  <TableHead>Workspace CA</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {page.items.map((t) => (
                   <TableRow key={t.id} aria-label={t.name}>
                     <TableCell>
+                      <div className="flex items-center gap-3">
+                        <TenantAvatar name={t.name} />
+                        <div className="flex min-w-0 flex-col">
+                          <Link to={`/tenants/${encodeURIComponent(t.id)}`} className="font-medium text-foreground hover:text-primary">
+                            {t.name}
+                          </Link>
+                          <span className="flex flex-col whitespace-nowrap font-mono text-xs text-muted-foreground">
+                            <span>{t.slug}</span>
+                            <span className="max-w-48 truncate" title={t.trust_domain}>
+                              {t.trust_domain}
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell>
                       <StatusBadge status={t.status} />
                     </TableCell>
-                    <TableCell className="font-medium">
-                      <Link to={`/tenants/${encodeURIComponent(t.id)}`} className="text-primary underline-offset-4 hover:underline">
-                        {t.name}
-                      </Link>
+                    <TableCell className="min-w-28 max-w-36 text-[13px] leading-snug text-subtle-foreground">
+                      <WrappingSummary counts={t.counts.connectors} />
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{t.slug}</TableCell>
-                    <TableCell className="font-mono text-xs">{t.trust_domain}</TableCell>
+                    <TableCell className="min-w-28 max-w-36 text-[13px] leading-snug text-subtle-foreground">
+                      <WrappingSummary counts={t.counts.shields} />
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-[13px] tabular-nums">{t.counts.remote_networks}</TableCell>
+                    <TableCell className="text-right font-mono text-[13px] tabular-nums" title="Active users (counts only)">
+                      {t.counts.users.active.toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-[13px] tabular-nums" title="Active devices">
+                      {t.counts.client_devices.active.toLocaleString()}
+                    </TableCell>
                     <TableCell>
                       <ExpiryBadge notAfter={t.ca_not_after} />
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap text-xs">{agentSummary(t.counts.connectors)}</TableCell>
-                    <TableCell className="whitespace-nowrap text-xs">{agentSummary(t.counts.shields)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{t.counts.remote_networks}</TableCell>
-                    <TableCell className="text-right tabular-nums" title="Active users (counts only)">
-                      {t.counts.users.active}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums" title="Active devices">
-                      {t.counts.client_devices.active}
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
             <Pager page={q.page} hasPrev={q.hasPrev} hasNext={q.hasNext} onPrev={q.prev} onNext={q.next} />
-          </>
+          </Card>
         )}
       </DataState>
     </div>

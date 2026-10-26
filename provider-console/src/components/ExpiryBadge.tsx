@@ -2,6 +2,15 @@ import type { ExpiryBucket } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
 import { BUCKET_LABELS, BUCKET_VARIANTS, bucketFor } from '@/lib/expiry'
 import { formatDateTime } from '@/lib/format'
+import { cn } from '@/lib/utils'
+
+const BUCKET_DOTS: Record<ExpiryBucket, string> = {
+  expired: 'bg-critical',
+  lt_24h: 'bg-critical',
+  lt_7d: 'bg-warning',
+  lt_30d: 'bg-info',
+  ok: 'bg-secure',
+}
 
 /**
  * A certificate expiry as a coloured badge. Pass the server's `bucket` when
@@ -22,6 +31,7 @@ export function ExpiryBadge({
   if (!b) return <span className="text-muted-foreground">—</span>
   return (
     <Badge variant={BUCKET_VARIANTS[b]} className="whitespace-nowrap" title={formatDateTime(notAfter)} data-bucket={b}>
+      <span aria-hidden className={cn('size-1.5 shrink-0 rounded-full', BUCKET_DOTS[b])} />
       {BUCKET_LABELS[b]}
     </Badge>
   )
