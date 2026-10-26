@@ -3074,6 +3074,10 @@ serves on `127.0.0.1:9102`.
 - Phase T built: `042_provider_totp.sql`; RFC 6238 TOTP with sealed secrets (`pki.EncryptSecret`), replay protection, separate Valkey limiter; `IssueSession` refuses full sessions without `otp` for operators who require TOTP; `RequireProvider` enforces the same rule per request; login and password change end in the TOTP step; `reset-totp`; `recover-admin` CLI; console `/mfa` page and Reset MFA.
 - Gates (local): Go 862 pass / 0 fail / 32 skip (skips outside Phase T); console 395 pass, lint, build. Dev DB not reset; `[schema: reset DB]` at merge. Not committed. Open: T8 (CLAUDE.md switch), live AT-T with a real authenticator.
 
+## 2026-10-26 (later) — PR #138 merged; CLAUDE.md switched to Sprint 22 (Barath)
+- PR #138 (Phase T, `[schema: reset DB]`) merged as `7621e260` after 7/7 CI jobs passed. Everyone recreates their local DB (`042_`).
+- T8: `CLAUDE.md` now names Sprint 22 as active, with the D-30 console write rule, D-31 relay roles, D-32 drain invariants, the Phase T TOTP rules and next schema `043_`. Live AT-T (Sathiya) still pending.
+
 
 ## 2026-10-26 — Sprint 20 Fix 02 (F35): FIXED
 - Branch `sprint20/fix02-resource-acl-notify` (from `fixed-pendings` `7621e260`).
