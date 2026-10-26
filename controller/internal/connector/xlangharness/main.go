@@ -54,6 +54,7 @@ type seeded struct {
 	ActiveZero  string `json:"active_zero"` // seq=0
 	ActiveDown  string `json:"active_down"` // open after dbdown
 	Revoked     string `json:"revoked"`     // refused at open
+	RevokedDel  string `json:"revoked_del"` // revoked, then its row deleted (tombstone only)
 	Unknown     string `json:"unknown"`     // no row
 }
 
@@ -171,6 +172,11 @@ func seed(ctx context.Context, pool *pgxpool.Pool) seeded {
 		must(pool.QueryRow(ctx, q, wsID, rnID, td, status, revoked).Scan(&id), "seed connector")
 		return id
 	}
+	deleted := func(id string) string {
+		_, err := pool.Exec(ctx, `DELETE FROM connectors WHERE id = $1`, id)
+		must(err, "delete revoked connector")
+		return id
+	}
 	return seeded{
 		TrustDomain: td,
 		Active:      conn("active", false),
@@ -178,6 +184,7 @@ func seed(ctx context.Context, pool *pgxpool.Pool) seeded {
 		ActiveZero:  conn("active", false),
 		ActiveDown:  conn("active", false),
 		Revoked:     conn("revoked", true),
+		RevokedDel:  deleted(conn("revoked", true)),
 		Unknown:     uuid.NewString(),
 	}
 }
