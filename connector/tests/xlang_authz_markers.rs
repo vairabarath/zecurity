@@ -215,6 +215,14 @@ async fn go_controller_and_tonic_connector_agree_on_authorization_contract() {
         "status: {st:?}"
     );
 
+    // 2b. Revoked, then deleted (Fix 13, F40): the tombstone keeps it revoked.
+    let st = open(&mut client, &hx.id("revoked_del"), &t)
+        .await
+        .err()
+        .expect("a deleted revoked connector must be refused at Control()");
+    assert_eq!(st.code(), Code::PermissionDenied);
+    assert_eq!(classify_status(&st), StatusClass::Revoked, "status: {st:?}");
+
     // 3. Authorized: capability first, then an ack the production tracker
     //    accepts for the request it actually sent.
     let t = AckTracker::shared(H);

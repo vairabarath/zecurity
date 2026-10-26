@@ -445,6 +445,77 @@ func TestAuthz_ActivationRevokedVsDeleted(t *testing.T) {
 	}
 }
 
+// ── Fix 13 (F40): a deleted revoked connector stays revoked (041 tombstone) ──
+
+func (f *authzFixture) deleteRow(connID string) {
+	f.t.Helper()
+	if _, err := f.pool.Exec(f.ctx, `DELETE FROM connectors WHERE id=$1`, connID); err != nil {
+		f.t.Fatalf("delete: %v", err)
+	}
+}
+
+func TestAuthz_DeletedRevokedConnectorIsStillRevoked(t *testing.T) {
+	t.Run("open", func(t *testing.T) {
+		f := newAuthzFixture(t, "active")
+		f.revokeInDB(f.connID)
+		f.deleteRow(f.connID)
+		r := f.openControl(f.connID)
+		err := r.wait(t)
+		assertStatus(t, err, codes.PermissionDenied, "open deleted revoked")
+		assertMarker(t, r.stream, ConnectorStateRevoked, "open deleted revoked")
+	})
+	t.Run("mid-stream", func(t *testing.T) {
+		f := newAuthzFixture(t, "active")
+		r := f.openControl(f.connID)
+		r.stream.in <- health(1)
+		r.stream.waitFor(t, "ack 1", func(m []*pb.ConnectorControlMessage) bool { return len(ackSeqs(m)) == 1 })
+		f.revokeInDB(f.connID)
+		f.deleteRow(f.connID)
+		r.stream.in <- health(2)
+		err := r.wait(t)
+		assertStatus(t, err, codes.PermissionDenied, "mid-stream deleted revoked")
+		assertMarker(t, r.stream, ConnectorStateRevoked, "mid-stream deleted revoked")
+	})
+	t.Run("activation", func(t *testing.T) {
+		f := newAuthzFixture(t, "active")
+		c := f.client()
+		f.revokeInDB(f.connID)
+		f.deleteRow(f.connID)
+		if _, rej := f.h.activateStream(f.ctx, c); rej == nil || rej.code != codes.PermissionDenied || rej.marker != ConnectorStateRevoked {
+			t.Fatalf("activation of deleted revoked: %s, want PermissionDenied+revoked", describeRejection(rej))
+		}
+	})
+}
+
+func TestAuthz_TombstoneLookup(t *testing.T) {
+	f := newAuthzFixture(t, "active")
+	f.revokeInDB(f.connID)
+	f.deleteRow(f.connID)
+	_, otherTD, _ := seedRevocationWorkspace(t, f.pool, f.ctx, fmt.Sprintf("authz-other-%d", time.Now().UnixNano()))
+
+	for _, tc := range []struct {
+		name, id, td string
+		want         connectorAuthState
+	}{
+		{"tombstoned, same trust domain", f.connID, f.td, connectorStateRevoked},
+		{"tombstoned in another trust domain", f.connID, otherTD, connectorStateAbsent},
+		{"never existed", "00000000-0000-0000-0000-000000000abc", f.td, connectorStateAbsent},
+	} {
+		state, _, err := f.h.lookupConnector(f.ctx, tc.id, tc.td)
+		if err != nil || state != tc.want {
+			t.Fatalf("%s: state=%v err=%v, want %v", tc.name, state, err, tc.want)
+		}
+	}
+
+	// The tombstone query failing is undetermined, never "unknown".
+	if _, err := f.pool.Exec(f.ctx, `ALTER TABLE connector_revocations RENAME TO connector_revocations_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.h.lookupConnector(f.ctx, f.connID, f.td); err == nil {
+		t.Fatal("tombstone query failed but the lookup reported a state")
+	}
+}
+
 // ── T4 / T21 / T22: DB failure → Unavailable, never NotFound, never marked ──
 
 func TestAuthz_OpenDBFailureIsUnavailableUnmarked(t *testing.T) {

@@ -3081,3 +3081,39 @@ serves on `127.0.0.1:9102`.
 - Tests: Protect test corrected (want 1); ACL-coherence/posture fixture and two resource tests self-provision a migrated throwaway DB + shield — `RESOURCE_TEST_SHIELD_ID` gone. 5 posture + 1 unprotect failures were artefacts of the borrowed lab workspace.
 - CI: ran-check requires 4 of these tests to run and pass.
 - Red 4 fail → green 35/35, also on an empty DB (CI-like); full controller 1387 pass, 0 fail, 2 intentional skips.
+
+- Committed locally, not pushed.
+
+## 2026-10-24 — Sprint 20 Fix 13 (F38–F41, connector-revocation low findings): FIXED, live F38/F39/F40 PASS
+
+- **Design approved;** D-1 = A (a tombstoned identity is reported as revoked). One commit per finding:
+  - F38 `14acdf1`: the connector's relay selector stops on a terminal state (aborts its session, clears the attachment).
+  - F39 `0289eba`: the shield's goodbye uses the live peer list.
+  - F41 `f1412b8`: an empty peer list that carried revoked ids is logged at debug.
+  - F40 `95af83e`: `lookupConnector` checks the 041 tombstone (same trust domain) → `revoked`.
+- **Tests:**
+  - connector 250 (+6), shield 49 (+5), controller +2 DB-backed tests;
+  - Go↔Rust marker harness pass (new case);
+  - client and relay not re-run (untouched by this diff);
+  - mutants: 19, 17 killed, 2 documented survivors (wiring that needs live TLS; an equivalent log-only mutant).
+- **Lab:** the relay on manojinkyank was down since boot (`relay.conf` missing). Re-provisioned as `f13-relay-manoj` on **.53** (manoj's IP changed .49 → .53). Controller runs the Fix 13 build.
+- **Live:**
+  - F38: revoke f11-a → selector stopped in the same ms, 0 relay attempts in 150 s.
+  - F39: shield failed over to sd-b in 2.3 s; its goodbye reached sd-b.
+  - F40: deleted f11-a refused with PermissionDenied + `revoked`.
+  - F41: not reproducible in the lab (sd-net has resources).
+- **Lab after:** f11-a revoked + deleted (to uninstall); f11-shield stopped. Build artifacts cleaned.
+- Committed locally, not pushed.
+
+
+## 2026-10-26 — Sprint 20 Fix 14 (+ Fix 15 / F49): live acceptance PASS
+- Branch `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): Fix 14 (shield stream handover on renewal, F44/F45/F48, expiry rule) and Fix 15 (F49 client upload backpressure, `2e02938c`).
+- Live with Fix 14 connector/shield/client: an 11-min byte-checked stream survived a real shield renewal (245 MB in order, max gap 0.09 s, both sides logged the handover); 200 MB each way intact twice (F48+F49); `kill -9` of the shield and a revocation both ended the session within the same second (no hang).
+- Not run live: expiry without renewal, old/new mix (unit-tested). Observation: a killed connector is noticed by the client only after the 30 s QUIC idle timeout (client↔connector path, not Fix 14).
+
+
+## 2026-10-26 — Sprint 20 Fix 16 (F46, F50, F51; F47 kept by design): FIXED, live PASS
+- On `sprint20/fix14-shield-reconnect-sessions` (local, not pushed): F50 stuck 'deleting' resources (delete when the shield is gone; 2 s tombstone sweeper), F51 connector graceful shutdown (QUIC close, shield streams, Goodbye; plus tracing `log_internal_errors(false)` after a live Ctrl-C-under-tee crash), F46 last-connector revoke (`alsoRevokeShields`) + shield back-off. F47: keep the design.
+- Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
+- Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
+- Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.

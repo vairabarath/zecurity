@@ -136,3 +136,23 @@ Each check disabled one enforcement line against `63e9e90`, ran the full `cargo 
 - `pm-disposable` deleted and stopped;
 - shield and relay still running;
 - **the nftables block on this PC is still in place** (`sudo bash ~/.cache/zecurity-b2/l7-unblock.sh` removes it).
+
+## Post-Phase Fixes
+
+### Fix: the relay selector kept dialling after a terminal state (F38, Sprint 20 Fix 13, `14acdf1`)
+**Issue:** after revocation the fail-closed task ended sessions and shield streams, but `relay_selector::run` kept registering with relays on its backoff; every relay refused.
+
+**Root Cause:** the selector took no serving state; nothing told it to stop.
+
+**Fix Applied (`connector/src/relay_selector.rs`, `connector/src/main.rs`):**
+```rust
+// BEFORE:
+pub async fn run(cfg, relay_handler, attachment_slot, relay_list_rx, ctrl_tx) -> ! { loop { … } }
+
+// AFTER:
+pub async fn run(cfg, relay_handler, attachment_slot, relay_list_rx, ctrl_tx, gate: AuthzGate) -> ! {
+    run_until_terminal(…, gate).await;   // loop top: terminal → stop_on_terminal (abort + clear slot)
+    std::future::pending().await
+}
+```
+The first-list wait, `wait_backoff` and `connected_step` also wake on the gate (`wait_terminal`). Recoverable states don't stop it. Details: [[Sprint20/Fixes/Fix13-Connector-Revocation-Low-Findings]].

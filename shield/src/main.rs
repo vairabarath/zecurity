@@ -107,7 +107,15 @@ async fn main() -> anyhow::Result<()> {
     // All subsequent tracing::info!() / tracing::error!() calls go through this.
     let env_filter = tracing_subscriber::EnvFilter::try_new(&cfg.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // Sprint 20 Fix 16 (F51): a log write that fails (stdout piped to a reader
+    // that died, e.g. `| tee` on Ctrl-C) must not take the process down. With
+    // internal error logging on, tracing-subscriber reports it with eprintln!,
+    // which panics when stderr is the same broken pipe — the process then
+    // exited before its graceful shutdown (no Goodbye, no QUIC close).
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .log_internal_errors(false)
+        .init();
 
     info!(
         product  = appmeta::PRODUCT_NAME,
@@ -160,10 +168,15 @@ async fn main() -> anyhow::Result<()> {
     let stream_cfg = cfg.clone();
     let stream_state = state.clone();
     let stream_resource_state = Arc::clone(&resource_state);
+    let (peers, live_peers) = control_stream::PeerPublisher::new(&state);
     tokio::spawn(async move {
-        if let Err(e) =
-            control_stream::run_control_stream(stream_state, stream_cfg, stream_resource_state)
-                .await
+        if let Err(e) = control_stream::run_control_stream(
+            stream_state,
+            stream_cfg,
+            stream_resource_state,
+            peers,
+        )
+        .await
         {
             error!("control stream failed: {:#}", e);
         }
@@ -207,8 +220,9 @@ async fn main() -> anyhow::Result<()> {
             .context("failed to wait for Ctrl+C")?;
     }
 
-    // Step 8: Graceful shutdown — best-effort Goodbye RPC
-    control_stream::goodbye(&state, &cfg).await;
+    // Step 8: Graceful shutdown — best-effort Goodbye RPC, to the live peer
+    // list (Fix 13, F39), not the one loaded at startup.
+    control_stream::goodbye(&control_stream::with_live_peers(&state, &live_peers), &cfg).await;
 
     info!("shield shut down gracefully");
     Ok(())

@@ -32,6 +32,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep_until, Instant as TokioInstant};
 use tracing::{debug, info, warn};
 
+use crate::authorization::{AuthzGate, AuthzSnapshot};
 use crate::proto::connector_control_message;
 use crate::proto::{
     ConnectorControlMessage, ConnectorRelayState, LabelledRelayInfo, LabelledRelayList,
@@ -128,20 +129,55 @@ pub async fn run(
     cfg: RelaySelectorConfig,
     relay_handler: Arc<RelayHandler>,
     attachment_slot: RelayAttachmentSlot,
+    relay_list_rx: watch::Receiver<Option<LabelledRelayList>>,
+    ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
+    gate: AuthzGate,
+) -> ! {
+    run_until_terminal(
+        cfg,
+        relay_handler,
+        attachment_slot,
+        relay_list_rx,
+        ctrl_tx,
+        gate,
+    )
+    .await;
+    // Terminal is never left within the process: nothing to resume.
+    std::future::pending().await
+}
+
+/// The selector loop. Returns only once the connector is terminal (revoked
+/// or unknown to the controller), after stopping its relay session (Sprint 20
+/// Fix 13, F38): every relay refuses a revoked connector, so dialling on
+/// would only repeat refused registrations.
+async fn run_until_terminal(
+    cfg: RelaySelectorConfig,
+    relay_handler: Arc<RelayHandler>,
+    attachment_slot: RelayAttachmentSlot,
     mut relay_list_rx: watch::Receiver<Option<LabelledRelayList>>,
     ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
-) -> ! {
+    gate: AuthzGate,
+) {
     info!("Relay selector starting");
+    let mut gate_rx = gate.subscribe();
     let mut state = State::Disconnected {
         next_backoff: cfg.reconnect_base,
     };
     let mut current_list = relay_list_rx.borrow_and_update().clone();
 
     loop {
+        if gate_rx.borrow().state().is_terminal() {
+            stop_on_terminal(state, &attachment_slot).await;
+            return;
+        }
+
         // Block on first list arrival if we haven't seen one yet.
         if current_list.is_none() {
             info!("Relay selector waiting for first LabelledRelayList push");
-            let _ = relay_list_rx.changed().await;
+            tokio::select! {
+                _ = relay_list_rx.changed() => {}
+                _ = wait_terminal(&mut gate_rx) => continue,
+            }
             current_list = relay_list_rx.borrow_and_update().clone();
             continue;
         }
@@ -169,6 +205,7 @@ pub async fn run(
                     &ctrl_tx,
                     &mut relay_list_rx,
                     &mut current_list,
+                    &mut gate_rx,
                 )
                 .await
             }
@@ -176,10 +213,14 @@ pub async fn run(
                 emit_event(SelectorEvent::EnteredBackoff {
                     delay_ms: delay.as_millis() as u64,
                 });
-                if wait_backoff(delay, &mut relay_list_rx, &mut current_list).await
-                    == BackoffWake::ListChanged
+                match wait_backoff(delay, &mut relay_list_rx, &mut current_list, &mut gate_rx).await
                 {
-                    info!("New LabelledRelayList during backoff; retrying now");
+                    BackoffWake::ListChanged => {
+                        info!("New LabelledRelayList during backoff; retrying now")
+                    }
+                    // The loop top stops the selector.
+                    BackoffWake::Terminal => continue,
+                    BackoffWake::Elapsed => {}
                 }
                 // The backoff keeps growing either way, so a controller that
                 // keeps pushing lists of unreachable relays can't make the
@@ -196,6 +237,33 @@ pub async fn run(
 enum BackoffWake {
     Elapsed,
     ListChanged,
+    /// The connector became terminal (F38).
+    Terminal,
+}
+
+/// Resolves once the published serving state is terminal; never otherwise
+/// (also not when the tracker is gone). Cancel-safe.
+async fn wait_terminal(gate_rx: &mut watch::Receiver<AuthzSnapshot>) {
+    loop {
+        if gate_rx.borrow_and_update().state().is_terminal() {
+            return;
+        }
+        if gate_rx.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// F38: end the active relay session (aborting a `JoinHandle` stops the task;
+/// dropping it would only detach it) and stop reporting a relay attachment.
+async fn stop_on_terminal(state: State, attachment_slot: &RelayAttachmentSlot) {
+    if let State::Connected(active) = state {
+        active.handle.abort();
+        info!(relay_id = %active.info.relay_id, "relay session ended: connector is terminal");
+    }
+    attachment_slot.set_active(None).await;
+    warn!("relay selector stopped: connector is revoked or unknown to the controller");
+    emit_event(SelectorEvent::StoppedTerminal);
 }
 
 /// Sleep out a backoff `delay`, ending early when the controller pushes a new
@@ -208,9 +276,11 @@ async fn wait_backoff(
     delay: Duration,
     relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
     current_list: &mut Option<LabelledRelayList>,
+    gate_rx: &mut watch::Receiver<AuthzSnapshot>,
 ) -> BackoffWake {
     tokio::select! {
         _ = tokio::time::sleep(delay) => BackoffWake::Elapsed,
+        _ = wait_terminal(gate_rx) => BackoffWake::Terminal,
         changed = relay_list_rx.changed() => {
             if changed.is_err() {
                 // Sender gone (shutdown): no list will ever arrive; finish the delay.
@@ -299,6 +369,7 @@ async fn connected_step(
     ctrl_tx: &mpsc::Sender<ConnectorControlMessage>,
     relay_list_rx: &mut watch::Receiver<Option<LabelledRelayList>>,
     current_list: &mut Option<LabelledRelayList>,
+    gate_rx: &mut watch::Receiver<AuthzSnapshot>,
 ) -> State {
     let reprobe_at = TokioInstant::now() + cfg.reprobe_interval;
 
@@ -314,6 +385,9 @@ async fn connected_step(
             }
             failover(cfg, list, relay_handler, attachment_slot, ctrl_tx).await
         }
+
+        // Terminal (F38): back to the loop top, which stops the session.
+        _ = wait_terminal(gate_rx) => State::Connected(active),
 
         // New LabelledRelayList push.
         changed = relay_list_rx.changed() => {
@@ -854,14 +928,27 @@ fn rotate<T: Clone>(items: Vec<&T>, offset: usize) -> Vec<T> {
 
 #[derive(Clone, Debug)]
 pub enum SelectorEvent {
-    EnteredConnected { relay_id: String },
+    EnteredConnected {
+        relay_id: String,
+    },
     EnteredFailover,
-    EnteredBackoff { delay_ms: u64 },
-    ProbeSweepCompleted { results: Vec<RelayProbeResult> },
-    RankingPersisted { entries: usize },
-    MigrationStarted { from: String, to: String },
+    EnteredBackoff {
+        delay_ms: u64,
+    },
+    ProbeSweepCompleted {
+        results: Vec<RelayProbeResult>,
+    },
+    RankingPersisted {
+        entries: usize,
+    },
+    MigrationStarted {
+        from: String,
+        to: String,
+    },
     MigrationCompleted,
     DrainTimeoutFired,
+    /// F38: the connector became terminal; the selector stopped for good.
+    StoppedTerminal,
 }
 
 #[cfg(any(test, feature = "test-hooks"))]
@@ -990,6 +1077,11 @@ mod tests {
 
     // ---- Disconnected selector re-reads pushed relay lists (B2 finding 3) ----
 
+    /// A gate that stays Serving (its sender is gone: never terminal).
+    fn open_gate() -> watch::Receiver<AuthzSnapshot> {
+        AuthzGate::open_for_tests().subscribe()
+    }
+
     fn one_relay_list(version: u64) -> LabelledRelayList {
         LabelledRelayList {
             relays: vec![info("r1", RelayCapacityLabel::RelayCapacityHigh)],
@@ -1012,7 +1104,13 @@ mod tests {
         });
 
         let start = TokioInstant::now();
-        let wake = wait_backoff(Duration::from_secs(120), &mut rx, &mut current).await;
+        let wake = wait_backoff(
+            Duration::from_secs(120),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
 
         assert_eq!(wake, BackoffWake::ListChanged);
         assert_eq!(
@@ -1032,7 +1130,13 @@ mod tests {
         tx.send(Some(one_relay_list(7))).unwrap();
 
         let start = TokioInstant::now();
-        let wake = wait_backoff(Duration::from_secs(60), &mut rx, &mut current).await;
+        let wake = wait_backoff(
+            Duration::from_secs(60),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
 
         assert_eq!(wake, BackoffWake::ListChanged);
         assert_eq!(start.elapsed(), Duration::ZERO);
@@ -1046,7 +1150,13 @@ mod tests {
         let mut current = rx.borrow().clone();
 
         let start = TokioInstant::now();
-        let wake = wait_backoff(Duration::from_secs(20), &mut rx, &mut current).await;
+        let wake = wait_backoff(
+            Duration::from_secs(20),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
 
         assert_eq!(wake, BackoffWake::Elapsed);
         assert_eq!(start.elapsed(), Duration::from_secs(20));
@@ -1062,7 +1172,13 @@ mod tests {
         drop(tx);
 
         let start = TokioInstant::now();
-        let wake = wait_backoff(Duration::from_secs(30), &mut rx, &mut current).await;
+        let wake = wait_backoff(
+            Duration::from_secs(30),
+            &mut rx,
+            &mut current,
+            &mut open_gate(),
+        )
+        .await;
 
         assert_eq!(wake, BackoffWake::Elapsed);
         assert_eq!(start.elapsed(), Duration::from_secs(30));
@@ -1299,5 +1415,269 @@ mod renewal_tests {
             after.workspace_ca_pem, before.workspace_ca_pem,
             "CA bundle is pinned across renewals"
         );
+    }
+}
+
+/// Sprint 20 Fix 13 (F38): a terminal connector stops dialling relays.
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use crate::agent_tunnel::AgentTunnelHub;
+    use crate::authorization::ServingState;
+    use crate::crl::CrlManager;
+    use crate::policy::PolicyCache;
+    use crate::relay_attachment::RelayAttachment;
+    use crate::session_registry::SessionRegistry;
+    use crate::test_support::{selector_config, TestPki, CONNECTOR_ID};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Fx {
+        _dir: tempfile::TempDir,
+        cfg: RelaySelectorConfig,
+        handler: Arc<RelayHandler>,
+        slot: RelayAttachmentSlot,
+        ctrl_tx: mpsc::Sender<ConnectorControlMessage>,
+        _ctrl_rx: mpsc::Receiver<ConnectorControlMessage>,
+    }
+
+    fn fx() -> Fx {
+        let pki = TestPki::new();
+        let (dir, holder) = pki.holder(-60, 3600);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
+        let handler = Arc::new(
+            RelayHandler::new(
+                holder.clone(),
+                Arc::new(PolicyCache::new()),
+                Arc::new(SessionRegistry::new()),
+                AgentTunnelHub::new(),
+                CrlManager::new(),
+                CONNECTOR_ID.to_string(),
+                ctrl_tx.clone(),
+                5,
+                16,
+                AuthzGate::open_for_tests(),
+            )
+            .unwrap(),
+        );
+        Fx {
+            cfg: selector_config(holder, dir.path()),
+            _dir: dir,
+            handler,
+            slot: RelayAttachmentSlot::new(),
+            ctrl_tx,
+            _ctrl_rx: ctrl_rx,
+        }
+    }
+
+    fn attachment(relay_id: &str) -> RelayAttachment {
+        RelayAttachment {
+            relay_id: relay_id.into(),
+            relay_spiffe_id: format!("spiffe://zecurity.in/relay/{relay_id}"),
+            attached_at: 0,
+        }
+    }
+
+    /// A stand-in relay session: runs until aborted; `ended` is set when its
+    /// future is dropped (abort), not when the handle is merely dropped.
+    fn session() -> (ActiveRelay, Arc<AtomicBool>) {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let ended = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(ended.clone());
+        let handle = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<anyhow::Result<()>>().await
+        });
+        let active = ActiveRelay {
+            info: LabelledRelayInfo {
+                relay_id: "r1".into(),
+                relay_addr: "127.0.0.1:1".into(),
+                spiffe_id: "spiffe://zecurity.in/relay/r1".into(),
+                label: RelayCapacityLabel::RelayCapacityHigh as i32,
+            },
+            handle,
+            drain_tracker: RelayDrainTracker::new(),
+            last_score: None,
+        };
+        (active, ended)
+    }
+
+    fn set_after(ctl: crate::authorization::TestGateControl, after: Duration, state: ServingState) {
+        tokio::spawn(async move {
+            tokio::time::sleep(after).await;
+            ctl.set(state);
+            // Keep the sender alive: a closed channel must not be what wakes anyone.
+            std::future::pending::<()>().await;
+        });
+    }
+
+    fn empty_list() -> watch::Receiver<Option<LabelledRelayList>> {
+        let (tx, rx) = watch::channel(Some(LabelledRelayList {
+            relays: vec![],
+            version: 1,
+        }));
+        std::mem::forget(tx);
+        rx
+    }
+
+    /// AF13-2: a terminal state ends the backoff at once.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_ends_backoff_at_once() {
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::UnknownIdentity);
+        let mut rx = empty_list();
+        let mut current = rx.borrow_and_update().clone();
+        let start = TokioInstant::now();
+        let wake = wait_backoff(
+            Duration::from_secs(120),
+            &mut rx,
+            &mut current,
+            &mut gate.subscribe(),
+        )
+        .await;
+        assert_eq!(wake, BackoffWake::Terminal);
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+    }
+
+    /// AF13-3: a recoverable loss doesn't end the backoff early.
+    #[tokio::test(start_paused = true)]
+    async fn a_recoverable_state_does_not_end_backoff() {
+        for state in [ServingState::Disabled, ServingState::Recovering] {
+            let (gate, ctl) = AuthzGate::controllable_for_tests();
+            set_after(ctl, Duration::from_secs(1), state);
+            let mut rx = empty_list();
+            let mut current = rx.borrow_and_update().clone();
+            let start = TokioInstant::now();
+            let wake = wait_backoff(
+                Duration::from_secs(20),
+                &mut rx,
+                &mut current,
+                &mut gate.subscribe(),
+            )
+            .await;
+            assert_eq!(wake, BackoffWake::Elapsed, "{state:?}");
+            assert_eq!(start.elapsed(), Duration::from_secs(20), "{state:?}");
+        }
+    }
+
+    /// AF13-1: stopping aborts the session task and clears the attachment.
+    #[tokio::test]
+    async fn stopping_aborts_the_session_and_clears_the_attachment() {
+        let slot = RelayAttachmentSlot::new();
+        slot.set_active(Some(attachment("r1"))).await;
+        let (active, ended) = session();
+        stop_on_terminal(State::Connected(active), &slot).await;
+        for _ in 0..100 {
+            if ended.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            ended.load(Ordering::SeqCst),
+            "the session task must be aborted, not detached"
+        );
+        assert!(
+            slot.active().await.is_none(),
+            "no relay is reported once terminal"
+        );
+    }
+
+    /// AF13-1: a connected selector notices the terminal state at once, not
+    /// at the next re-probe (300 s here).
+    #[tokio::test(start_paused = true)]
+    async fn terminal_wakes_a_connected_selector() {
+        let f = fx();
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::Revoked);
+        let mut rx = empty_list();
+        let mut current = rx.borrow_and_update().clone();
+        let list = current.clone().unwrap();
+        let (active, ended) = session();
+        let start = TokioInstant::now();
+        let next = connected_step(
+            &f.cfg,
+            &list,
+            active,
+            &f.handler,
+            &f.slot,
+            &f.ctrl_tx,
+            &mut rx,
+            &mut current,
+            &mut gate.subscribe(),
+        )
+        .await;
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert!(
+            matches!(next, State::Connected(_)),
+            "handed back to the loop top"
+        );
+        stop_on_terminal(next, &f.slot).await;
+        tokio::task::yield_now().await;
+        assert!(ended.load(Ordering::SeqCst));
+    }
+
+    /// AF13-1/2/3: the selector loop runs on through a recoverable loss and
+    /// returns (stopped) as soon as the connector is terminal.
+    #[tokio::test(start_paused = true)]
+    async fn the_selector_stops_on_terminal_only() {
+        let f = fx();
+        f.slot.set_active(Some(attachment("stale"))).await;
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        let ctl = Arc::new(ctl);
+        let task = tokio::spawn(run_until_terminal(
+            f.cfg.clone(),
+            f.handler.clone(),
+            f.slot.clone(),
+            empty_list(),
+            f.ctrl_tx.clone(),
+            gate,
+        ));
+
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        ctl.set(ServingState::Disabled);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(
+            !task.is_finished(),
+            "Disabled is recoverable: the selector keeps running"
+        );
+
+        let at = TokioInstant::now();
+        ctl.set(ServingState::Revoked);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stops at once on terminal, not after the backoff")
+            .unwrap();
+        assert!(at.elapsed() < Duration::from_secs(1));
+        assert!(f.slot.active().await.is_none());
+    }
+
+    /// A selector still waiting for its first relay list stops too.
+    #[tokio::test(start_paused = true)]
+    async fn terminal_stops_a_selector_waiting_for_its_first_list() {
+        let f = fx();
+        let (gate, ctl) = AuthzGate::controllable_for_tests();
+        set_after(ctl, Duration::from_secs(1), ServingState::Revoked);
+        let (tx, rx) = watch::channel(None);
+        let start = TokioInstant::now();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            run_until_terminal(
+                f.cfg.clone(),
+                f.handler.clone(),
+                f.slot.clone(),
+                rx,
+                f.ctrl_tx.clone(),
+                gate,
+            ),
+        )
+        .await
+        .expect("stops without a list ever arriving");
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        drop(tx);
     }
 }

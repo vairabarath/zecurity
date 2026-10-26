@@ -617,24 +617,30 @@ fn drive_relay(
 
     // Client → resource: drain bytes from the TCP socket into the channel;
     // the relay task reads them and writes to the QUIC stream.
+    //
+    // Sprint 20 Fix 15 (F49): backpressure. A slot in the channel is reserved
+    // BEFORE the bytes are read, so the client never takes bytes it cannot
+    // hand on. With the channel full the bytes stay in smoltcp's receive
+    // buffer, its window closes and the app's TCP stops sending; the next pass
+    // after the relay task drained some reads again (smoltcp re-opens the
+    // window). Before, a full channel closed the flow mid-upload.
     if let Some(tx) = relay.tcp_to_quic_tx.as_ref() {
         while socket.can_recv() {
+            let permit = match tx.try_reserve() {
+                Ok(permit) => permit,
+                // Full: leave the bytes in the socket for a later pass.
+                Err(mpsc::error::TrySendError::Full(())) => break,
+                // The relay task is gone; its outcome decides FIN vs RST
+                // below. Nothing more can be delivered.
+                Err(mpsc::error::TrySendError::Closed(())) => break,
+            };
             let mut buf = vec![0u8; 4096];
             match socket.recv_slice(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     relay.last_activity = now;
-                    match tx.try_send(buf[..n].to_vec()) {
-                        Ok(()) => {}
-                        Err(mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!("flow queue full; closing TCP flow");
-                            socket.close();
-                            break;
-                        }
-                        // The relay task is gone; its outcome decides FIN vs
-                        // RST below. Nothing more can be delivered.
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                    }
+                    buf.truncate(n);
+                    permit.send(buf);
                 }
             }
         }
@@ -2586,6 +2592,49 @@ mod tests {
             b"GET / HTTP/1.1\r\n\r\n"
         );
         (h, spawn)
+    }
+
+    /// Fix 15 (F49): an app uploading much faster than the relay drains is
+    /// throttled by TCP flow control, not cut off: every byte arrives, in
+    /// order, and the flow stays open. Before, the first full channel closed
+    /// the flow ("flow queue full; closing TCP flow").
+    #[test]
+    fn a_saturating_upload_is_throttled_not_closed() {
+        const TOTAL: usize = 2 * 1024 * 1024; // 8 × the 64 × 4 KiB channel
+        let mut lab = Lab::new(true);
+        let (h, mut spawn) = establish(&mut lab, 45_000);
+        let pattern = |i: usize| (i % 251) as u8;
+        let mut sent = 0usize;
+        let mut got: Vec<u8> = Vec::new();
+        for _ in 0..20_000 {
+            while sent < TOTAL && lab.app(h).can_send() {
+                let chunk: Vec<u8> = (sent..(sent + 8192).min(TOTAL)).map(pattern).collect();
+                match lab.app(h).send_slice(&chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sent += n,
+                }
+            }
+            lab.step(1);
+            // A slow relay: at most 4 chunks per step.
+            for _ in 0..4 {
+                match spawn.tcp_to_quic_rx.try_recv() {
+                    Ok(chunk) => got.extend(chunk),
+                    Err(_) => break,
+                }
+            }
+            if got.len() == TOTAL {
+                break;
+            }
+            assert_eq!(
+                lab.app(h).state(),
+                tcp::State::Established,
+                "the upload was cut off after {} bytes",
+                got.len()
+            );
+        }
+        assert_eq!(got.len(), TOTAL, "every byte arrived");
+        assert!(got.iter().enumerate().all(|(i, b)| *b == pattern(i)), "in order");
+        assert_eq!(lab.app(h).state(), tcp::State::Established);
     }
 
     // ---- Fix 12 (F37): a listen backlog per resource ----
