@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 14 — shield Control stream reconnect freezes open sessions (F44, F45), tunnel data dropped under backpressure (F48) + live-run follow-ups (F46, F47)
 date: 2026-10-26
 type: fix note (investigation + proposed design; not implemented)
-status: IMPLEMENTED locally and verified live (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; live renewal handover, bulk, unclean shield end and revocation PASS; expiry and old/new mix not run live; deployment order connectors before shields (accepted)
+status: IMPLEMENTED locally and verified live (2026-10-26) — D-1 = B as a renewal handover + expiry rule; F45, F48 fixed; live renewal handover, bulk, unclean shield end and revocation PASS; expiry not run live; old/new mix not applicable (not released); deployment order connectors before shields (accepted)
 owner: Sathiya (M1)
 findings: F44, F45, F46, F47, F48 (Sprint20/path.md → Post-Sprint Fixes), found in the certificate-audit live run, [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]] (observations O1, O3, O4)
 ---
@@ -186,6 +186,7 @@ Found while running it; the run sheet's deviations list has the rest.
 A **new shield with an old connector** hits F45 on every renewal: the shield opens its new stream, then half-closes the old one, and the old connector's cleanup of the old stream removes the new stream's tunnel, instruction and snapshot channels. New tunnels to that shield then fail and resource updates stop until its next reconnect (days at production lifetimes). The shield cannot tell the connector's version from any existing message.
 
 → **Upgrade connectors before shields.** (New connector + old shield is safe.) **Decision (user, 2026-10-26): accepted.** Record in the release notes / PR.
+> **Note (user, 2026-10-26):** the project is in development and not released; nothing is installed outside the lab. The order only matters once there is a real rollout; until then every lab host simply runs the same build.
 
 ### F48 policy and its limit
 
@@ -219,6 +220,6 @@ Branch `sprint20/fix14-shield-reconnect-sessions` at `ddbef089` (Fix 14 + Fix 15
 | 3 | **Unclean end of the shield stream:** `kill -9` the shield mid-stream | **PASS** — killed 09:27:50.863; connector `shield Control stream error` at .869, tunnel closed `shield stream ended`; client EOF the same second (no hang) |
 | 4 | **Revocation mid-stream** | **PASS** — revoked 09:28:57.828; connector closed the tunnel at .903; client EOF the same second |
 | 2 | Expiry ends (no renewal possible before `not_after`) | not run live (needs the shield unable to renew for ~15 min, i.e. the controller unreachable); unit-tested over real mTLS streams |
-| 6 | New connector + old shield, one renewal → sessions close cleanly | not run live; covered by the clean-end-without-newer-stream unit test |
+| 6 | New connector + old shield, one renewal → sessions close cleanly | **not applicable** (user, 2026-10-26): the project is in development and not released — no shields or connectors are installed anywhere else, so there is no mixed-version state to test. Covered by the clean-end-without-newer-stream unit test. |
 
 **Observation (not Fix 14):** stopping the **connector** process mid-session (Ctrl-C) left the client's session silent until the client's QUIC idle timeout: it noticed 30 s later (`relay failure signalled — early transport resync`). That is the client↔connector liveness path (Fix 05 area), not the shield stream. The planned check "restart the connector mid-session → close within ~1 s" was the wrong layer for F44 and was replaced by check 3 (shield killed).
