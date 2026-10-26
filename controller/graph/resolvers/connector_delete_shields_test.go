@@ -25,9 +25,12 @@ func (f *certHistoryFixture) count(t *testing.T, sql string, args ...any) string
 func TestDeleteConnector_RefusedWhileShieldsAttached(t *testing.T) {
 	f := newCertHistoryFixture(t)
 	id := f.connector(t, "with-shields", []string{"d1d1d1d1"}, valid)
+	// A peer connector in the same remote network, so the revoke itself is
+	// allowed (Fix 16 F46 refuses revoking the last one with shields attached).
+	f.connector(t, "peer", nil, valid)
 	f.shield(t, "sh-active", id, "active")
 	f.shield(t, "sh-disconnected", id, "disconnected")
-	if _, err := f.mr.RevokeConnector(f.ctx, id); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, id, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 
@@ -53,7 +56,7 @@ func TestDeleteConnector_AllowedOnceShieldsRevokedOrMoved(t *testing.T) {
 	revoked := f.shield(t, "sh-revoked", id, "active")
 	moved := f.shield(t, "sh-moved", id, "active")
 	f.shield(t, "sh-pending", id, "pending")
-	if _, err := f.mr.RevokeConnector(f.ctx, id); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, id, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	if _, err := f.mr.DeleteConnector(f.ctx, id); err == nil {

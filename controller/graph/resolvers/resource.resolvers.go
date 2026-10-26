@@ -119,8 +119,27 @@ func (r *mutationResolver) DeleteResource(ctx context.Context, id string) (bool,
 		return false, fmt.Errorf("deleteResource: %w", err)
 	}
 
+	// Sprint 20 Fix 16 (F50): a resource whose shield is revoked or gone can
+	// never have its rule removal acked, so it is deleted at once (including a
+	// tombstone already stuck in 'deleting'). Its rule, if any, belongs to a
+	// shield that no longer takes instructions.
+	if row.Status == "protected" || row.Status == "failed" || row.Status == "deleting" {
+		deleted, err := resource.DeleteIfShieldGone(ctx, r.ResourceCfg.DB, tc.TenantID, id)
+		if err != nil {
+			return false, fmt.Errorf("deleteResource: %w", err)
+		}
+		if deleted {
+			if err := r.PolicyNotifier.NotifyPolicyChange(ctx, tc.TenantID); err != nil {
+				return false, fmt.Errorf("deleteResource notify: %w", err)
+			}
+			return true, nil
+		}
+	}
+
 	switch row.Status {
 	case "protecting", "deleting":
+		// A 'deleting' tombstone without an ack is reaped within seconds by the
+		// tombstone sweeper (F50).
 		return false, fmt.Errorf("deleteResource: resource is mid-operation; wait for it to finish")
 	case "protected", "failed":
 		// May hold a shield rule → tombstone + tell the shield to remove it.

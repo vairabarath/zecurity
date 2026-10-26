@@ -38,7 +38,7 @@ func TestConnectorRevocations_TombstoneAndNoReuse(t *testing.T) {
 		t.Fatal("tombstone before revocation")
 	}
 
-	if _, err := f.mr.RevokeConnector(f.ctx, id); err != nil {
+	if _, err := f.mr.RevokeConnector(f.ctx, id, nil); err != nil {
 		t.Fatalf("RevokeConnector: %v", err)
 	}
 	if n := f.count(t, `connector_revocations WHERE connector_id = $1 AND tenant_id = $2`, id, f.ws); n != "1" {
