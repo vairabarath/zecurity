@@ -3153,3 +3153,14 @@ serves on `127.0.0.1:9102`.
   - the relay ends its heartbeat on that marker and keeps retrying on anything else.
 - Tests: relay 118, controller 1418 pass, 0 fail; 5/5 mutants killed. Live check pending (needs a super-admin with TOTP to revoke a lab relay).
 - Still open: F24, F25, F30 (runbook), F43, F4/F5 controller half.
+
+
+## 2026-10-27 — docs PR: runbook corrections, gqlgen command
+- Branch `sprint20/docs-runbook-corrections` (on top of #144).
+- `docs/sprint20-live-acceptance-runbook.md` §11: `kill -STOP` instead of `pkill -9` (F30, closed).
+- `docs/certificate-audit-live-runbook.md`:
+  - the six Fix 14 corrections (grpcurl import path, unexpired-only CRL, token messages, LAN relay flag, stage G order + `logout` stops the daemon, `buf generate` exclude);
+  - Sprint 22 provider TOTP login;
+  - Fix 16 / F19 guards on connector revoke and delete.
+- gqlgen command corrected in CLAUDE.md, agent.md, studyplan.md and CodeStudy 01; verified it regenerates with no diff.
+- Live F32 + F20 PASS recorded in #144. PRs #143 and #144 opened.

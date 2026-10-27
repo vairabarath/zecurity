@@ -502,7 +502,9 @@ With a 15 min certificate and a 10 min window, the controller sends `ReEnroll` a
 **Case:** AT-D.1.
 
 1. Note the client's current transport snapshot version: the last `transport snapshot stored` line in `$RUN/logs/client.log` (field `version`).
-2. Kill the connector **without** a clean shutdown: `pkill -9 -f 'connector/target/debug/zecurity-connector'`. Record `conn_killed_at`.
+2. Freeze the connector so it vanishes **without closing its connection**: `kill -STOP $(pgrep -f 'connector/target/debug/zecurity-connector')`. Record `conn_killed_at`.
+   - Don't use `kill -9`. The kernel then closes the TCP socket, the controller's stream loop ends at once and marks the connector `disconnected` itself, so the watcher is never exercised (Finding 30).
+   - With SIGSTOP the socket stays open and the kernel keeps ACKing, but no heartbeats arrive, which is the case the watcher exists for.
 3. Check:
    - [ ] `connectors.status = disconnected` within **~90–120 s** (`CONNECTOR_DISCONNECT_THRESHOLD` 90 s + the 30 s watcher tick).
    - [ ] Controller log: `disconnect watcher: marked connector(s) disconnected workspaces=1`.
@@ -510,7 +512,7 @@ With a 15 min certificate and a 10 min window, the controller sends `ReEnroll` a
 
 > The transport version is in memory in the controller and resets on controller restart, so don't restart the controller during Stages 3–6.
 
-4. Restart the connector with the §7.2 command minus `ENROLLMENT_TOKEN`; its state is in `$RUN/connector`. It goes back to `active`, and a new snapshot version appears.
+4. Resume the frozen process with `kill -CONT <pid>` and stop it (Ctrl-C or `kill <pid>`; a stopped process acts on SIGTERM only after SIGCONT), then restart the connector with the §7.2 command minus `ENROLLMENT_TOKEN`; its state is in `$RUN/connector`. It goes back to `active`, and a new snapshot version appears.
 
 ---
 

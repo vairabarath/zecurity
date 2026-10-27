@@ -112,7 +112,7 @@ cd connector && cargo build                                  # Rust connector
 cargo build --manifest-path shield/Cargo.toml               # Rust shield
 cd client && cargo build                                   # Rust client CLI
 buf generate                                                 # Proto → Go stubs (from repo root)
-cd controller && go generate ./graph/...                     # GraphQL codegen
+cd controller && go tool gqlgen generate --config graph/gqlgen.yml   # GraphQL codegen (go generate ./graph/... does nothing: no directive)
 cd admin && npm run codegen                                  # Frontend TS hooks
 cd provider-console && npm run build                         # Provider console (npm test, npm run lint too)
 cd controller && docker compose down -v && docker compose up -d   # Recreate local DB after any schema change

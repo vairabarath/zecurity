@@ -1197,7 +1197,7 @@ KEY MUTATIONS:
 
 HOW CODEGEN WORKS:
   1. You write/change controller/graph/*.graphqls
-  2. Run: cd controller && go generate ./graph/...  → regenerates models_gen.go
+  2. Run: cd controller && go tool gqlgen generate --config graph/gqlgen.yml  → regenerates models_gen.go
   3. Run: cd admin && npm run codegen               → regenerates src/generated/graphql.ts
   4. Now TypeScript hooks (useGetGroupsQuery etc.) reflect the new schema.
 
@@ -1259,7 +1259,7 @@ STEP 15 — BUILD + DEV COMMANDS  ~10 min
   buf generate                                        # from repo root
 
   # GraphQL codegen
-  cd controller && go generate ./graph/...            # → models_gen.go
+  cd controller && go tool gqlgen generate --config graph/gqlgen.yml            # → models_gen.go
   cd admin && npm run codegen                         # → src/generated/graphql.ts
 
   # Build all
