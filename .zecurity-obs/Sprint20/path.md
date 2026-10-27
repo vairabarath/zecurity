@@ -245,7 +245,12 @@ DB-backed Go tests need the CI env vars (`ENROLLMENT_TEST_DATABASE_URL`, `SHIELD
 
 > **Run and closed out.** The live run took place on 2026-09-26/28 (at `5a4f940`, code-identical to `46ab87d`) and was closed out on 2026-10-17: 40 PASS, 1 PASS only under a TEMP patch (U2), 3 FAIL (U5 hold, G9, R2), 1 not exercised (G4). The boxes above are ticked only where the run sheet shows PASS. See [[Sprint20/Live-Acceptance-Run-Sheet]] → "Close-out — 2026-10-17".
 
-All code phases (A–G) are merged. The two boxes still unticked (Phase G live, "all scenarios pass") are **failures, not pending checks**. Passing them needs Fix02 (F35) plus a re-run of R2 with `RESOURCE_TEST_SHIELD_ID`, and a decision on G9 / AT-G.6. For reference, the original instructions were:
+All code phases (A–G) are merged. **Update 2026-10-27:**
+- G9 / AT-G.6 was accepted on 2026-10-20.
+- R2 now **passes**: Fix02 (#141) is merged, and its tests provision their own database, so `RESOURCE_TEST_SHIELD_ID` is gone.
+- The only open item in "all scenarios pass" is **G4 / AT-G.1**, which is unit-tested but has never been run live.
+
+Originally (2026-10-17) these were failures, not pending checks: passing them needed Fix02 (F35), a re-run of R2 and a decision on G9. For reference, the original instructions were:
 - **Runbook:** `docs/sprint20-live-acceptance-runbook.md`, one ~95 min sitting that covers A, B, C, D, E, F and G.
 - **Run sheet** to fill in: [[Sprint20/Live-Acceptance-Run-Sheet]]. Each row names the box below that it closes.
 - **Operator:** Sathiya (M1).
@@ -286,7 +291,10 @@ Read the runbook's §2 first. KI-1 and KI-2 (below) change the env values.
 - [x] The controller keeps accepting new gRPC handshakes past the original cert's `NotAfter`. *(Live PASS: E1–E4; 6 rotations, 10-min cadence, 0 failures.)*
 - [x] A relay renews its own cert in-band (same key); the new serial is in `relay_certificates`; revoking the relay revokes **every** serial, including one issued concurrently with the revoke. *(Live PASS: F1–F7. The concurrent-revoke race is covered by `store_renew_integration_test.go`.)*
 - [x] A connector renews automatically inside `CONNECTOR_RENEWAL_WINDOW` and keeps serving device tunnels, relay sessions and shield renewals after the **original** cert's `NotAfter`. *(Live PASS: G1–G3, G5–G8. The shield-renewal part rests on evidence from before 17:16, while the shield TTL was 24h. Established tunnels during a swap are AT-G.6, which FAILED; see Phase G.)*
-- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **Not met (2026-10-20):** R2 regression gate FAIL (Finding 35: 4 `graph/resolvers` tests, still failing on `fixed-pendings`, waiting on Fix02); G4 / AT-G.1 not exercised live (unit-tested). G9 / AT-G.6 was accepted on 2026-10-20 on the `a25bb33` re-test (see Phase G).
+- [ ] All scenarios in [[Sprint20/Acceptance-Test-Plan]] pass. **2026-10-27: everything passes except G4 / AT-G.1** (a duplicate ReEnroll within 60 s is ignored), which is unit-tested and was never run live.
+  - R2 re-run on `65447e4e` (`fixed-pendings` + #146/#147) with the CI env: `go build` and `go vet` OK; `go test ./...` **1435 PASS, 0 FAIL, 2 SKIP**. The skips are by design: `TestEnroll_CSRSignatureInvalid` and a SCIM test covered by `mapping_probe_test.go`. The 30 skips that hid Finding 35 are gone.
+  - The box can be ticked once G4 runs live, or is accepted on its unit test.
+  - *Earlier:* **Not met (2026-10-20):** R2 regression gate FAIL (Finding 35: 4 `graph/resolvers` tests, still failing on `fixed-pendings`, waiting on Fix02); G4 / AT-G.1 not exercised live (unit-tested). G9 / AT-G.6 was accepted on 2026-10-20 on the `a25bb33` re-test (see Phase G).
 
 ## Out of Scope (tracked, not in the Decision Record prerequisites)
 
@@ -365,7 +373,12 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
   - **F35 — Medium (R2 FAIL): 4 `graph/resolvers` ACL-coherence tests fail, hidden from CI** (they skip without `RESOURCE_TEST_SHIELD_ID`). **Still failing on `fixed-pendings` 2026-10-17** (run with a seeded shield). 3 are real double or extra `NotifyPolicyChange` calls (over-invalidation only); `TestProtectResource_DoesNotInvalidate` is outdated since migration 021. [[Sprint20/Fixes/Fix02-Resource-ACL-Double-Notify]] (`status: planned`).
     - **FIXED 2026-10-26 (Sprint 20 Fix 02, `e1570c2f` + CI `1b2b4478`):** duplicate notifies removed (Update, ForceDelete); Protect test corrected (protect does re-route, want 1); an unprotect completing now notifies (RecordAck reports route-class changes); fixtures self-provision, so `RESOURCE_TEST_SHIELD_ID` is gone and CI must run them. Controller 1387 pass, 0 fail. See [[Sprint20/Fixes/Fix02-Resource-ACL-Double-Notify]]. **Merged** (PR #141, 2026-10-26). **Closed.**
   - **F36 — Medium (R2): the auth integration test always skipped** (`/15` in the Valkey URL). **Fixed** in `411e216` (Sprint 21 K6); passes on `fixed-pendings` 2026-10-17. [[Sprint20/Fixes/Fix03-Auth-Integration-Test-Skip-Valkey-URL]]. **Closed.**
-  - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. (Selector half **fixed**: Fix 07, 2026-10-22.) U2 passed only under a TEMP patch. No fix recorded. Phase A → Post-Phase Fixes.
+  - **F4 / F5 / F22 — Medium: relays on private IPs are never pushed to connectors**, and a disconnected connector's relay selector never re-reads a new relay list. (Selector half **fixed**: Fix 07, 2026-10-22.) U2 passed only under a TEMP patch. **FIXED:**
+    - the controller half by `c76c7837`: the dev-only `RELAY_DEV_ALLOW_PRIVATE_ADDR`, honoured only with `ENV=development`, advertises LAN relays;
+    - the B2 retest on 2026-10-22 passed (row 6: off → empty list, on → relay pushed);
+    - and the flag was used for every LAN-relay run since, last on 2026-10-27 (relay `f43-relay-local` on .164, connector registered 80 ms after the list).
+
+    In production, relays are public by design. **Closed 2026-10-27.** Phase A → Post-Phase Fixes.
   - **F7 / F18 / F23 / F31 — High (test validity): install scripts enable update timers that replace branch binaries**, ignoring `AUTO_UPDATE_ENABLED=false`; the units can't be masked. **Reproduced again 2026-10-23 on current code** with the product installers: sd-a replaced by release `983a4ac2` 5 s after install, sd-shield by release v1.0.11 (`0131b3a8`) 4 s after start, so a revocation-capable build was silently replaced by a release without it. Lab workaround `sd-pin.sh`; see [[Sprint20/Fixes/connector-revocation/Connector-Revocation-Systemd-Live-2026-10-23]] Finding A. **FIXED 2026-10-24 (Sprint 20 Fix 11, `905989a2`):** `--check-update` honours `AUTO_UPDATE_ENABLED`, timers have no `Requires=`, services no hard-coded env, installers enable the timer only when auto-update is true; 10/10 mutants; live systemd check PASS (no update runs, binaries unchanged, manual update run skipped). [[Sprint20/Fixes/Fix11-Update-Timer-Honours-Auto-Update]]. **Closed.**
   - **F19 / F20 / F24 / F25 — Medium (admin):**
     - deleting a connector silently deletes its shield; **fixed 2026-10-23** (`faa957f`): `deleteConnector` is refused while an enrolled, non-revoked shield is attached (live AF-L and systemd run);
