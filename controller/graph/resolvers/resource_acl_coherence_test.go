@@ -261,3 +261,64 @@ func TestUnprotectResource_DoesNotInvalidate(t *testing.T) {
 		t.Fatalf("push hook fired %d times on unprotect, want 0", got)
 	}
 }
+
+// Sprint 20 Fix 18 (F24): a host edit is compiler-visible, so it invalidates
+// exactly once (Fix 02's one-notify rule).
+func TestUpdateResource_HostEditInvalidatesOnce(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	id := f.seedResource(t, "10.0.0.93", "unprotected")
+
+	host := "10.0.0.94"
+	got, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &host})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if got.Host != host {
+		t.Fatalf("host = %q, want %q", got.Host, host)
+	}
+	if n := f.fires.Load(); n != 1 {
+		t.Fatalf("push hook fired %d times, want 1", n)
+	}
+}
+
+// Sprint 20 Fix 18 (F24): a protected resource's host edit moves it to the
+// active shield on the new host (protecting/apply) with one notify; a host
+// without a shield is refused and changes nothing.
+func TestUpdateResource_ProtectedHostEditMovesShield(t *testing.T) {
+	f := newACLCoherenceFixture(t)
+	const otherLAN = "10.0.0.97"
+	var shield2 string
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO shields (tenant_id, remote_network_id, connector_id, name, status, lan_ip)
+		 SELECT tenant_id, remote_network_id, connector_id, 'shield-2', 'active', $2 FROM shields WHERE id = $1
+		 RETURNING id`,
+		f.shieldID, otherLAN,
+	).Scan(&shield2); err != nil {
+		t.Fatalf("insert second shield: %v", err)
+	}
+	id := f.seedResource(t, aclFixtureShieldLAN, "protected")
+
+	nowhere := "10.0.0.98"
+	if _, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &nowhere}); err == nil {
+		t.Fatal("host without a shield accepted")
+	}
+	if n := f.fires.Load(); n != 0 {
+		t.Fatalf("refused edit fired the push hook %d times", n)
+	}
+
+	host := otherLAN
+	got, err := f.mr.UpdateResource(f.ctx, id, graph.UpdateResourceInput{Host: &host})
+	if err != nil {
+		t.Fatalf("UpdateResource: %v", err)
+	}
+	if n := f.fires.Load(); n != 1 {
+		t.Fatalf("push hook fired %d times, want 1", n)
+	}
+	var shieldID, status string
+	if err := f.pool.QueryRow(f.ctx, `SELECT shield_id::text, status FROM resources WHERE id = $1`, id).Scan(&shieldID, &status); err != nil {
+		t.Fatal(err)
+	}
+	if shieldID != shield2 || status != "protecting" || got.Host != otherLAN {
+		t.Fatalf("after move: shield=%s status=%s host=%s, want shield-2/protecting/%s", shieldID, status, got.Host, otherLAN)
+	}
+}

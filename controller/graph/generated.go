@@ -15481,7 +15481,7 @@ func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Contex
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "protocol", "portFrom", "portTo"}
+	fieldsInOrder := [...]string{"remoteNetworkId", "name", "description", "host", "protocol", "portFrom", "portTo"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -15509,6 +15509,13 @@ func (ec *executionContext) unmarshalInputUpdateResourceInput(ctx context.Contex
 				return it, err
 			}
 			it.Description = data
+		case "host":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("host"))
+			data, err := ec.unmarshalOString2ᚖstring(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.Host = data
 		case "protocol":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("protocol"))
 			data, err := ec.unmarshalOString2ᚖstring(ctx, v)

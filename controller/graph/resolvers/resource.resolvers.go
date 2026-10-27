@@ -47,11 +47,12 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 		RemoteNetworkID: input.RemoteNetworkID,
 		Name:            input.Name,
 		Description:     input.Description,
+		Host:            input.Host,
 		Protocol:        input.Protocol,
 		PortFrom:        input.PortFrom,
 		PortTo:          input.PortTo,
 	}
-	row, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
+	res, err := resource.Update(ctx, r.ResourceCfg.DB, tc.TenantID, id, updIn)
 	if err != nil {
 		return nil, fmt.Errorf("updateResource: %w", err)
 	}
@@ -72,7 +73,17 @@ func (r *mutationResolver) UpdateResource(ctx context.Context, id string, input 
 		}
 	}
 
-	return toResourceGQL(row), nil
+	// Sprint 20 Fix 18 (F24): the shields enforcing this resource get its new
+	// host/port at once — the new shield first on a move, then the old one, which
+	// drops the rule from its snapshot (never a remove instruction).
+	if res.Moved {
+		r.ConnectorRegistry.PushInstruction(res.Row)
+	}
+	for _, p := range res.ShieldPushes {
+		connector.PushSnapshotForShield(ctx, r.Pool, r.ConnectorRegistry, p.ConnectorID, p.ShieldID)
+	}
+
+	return toResourceGQL(res.Row), nil
 }
 
 // ProtectResource is the resolver for the protectResource field.

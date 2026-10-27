@@ -19,6 +19,8 @@ interface EditResourceModalProps {
     id: string
     name: string
     description?: string | null
+    host: string
+    status: string
     protocol: string
     portFrom: number
     portTo: number
@@ -30,6 +32,7 @@ interface EditResourceModalProps {
 export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: EditResourceModalProps) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
+  const [host, setHost] = useState('')
   const [protocol, setProtocol] = useState('tcp')
   const [portFrom, setPortFrom] = useState('')
   const [portTo, setPortTo] = useState('')
@@ -45,6 +48,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
     if (resource) {
       setName(resource.name)
       setDescription(resource.description ?? '')
+      setHost(resource.host)
       setProtocol(resource.protocol)
       setPortFrom(resource.portFrom.toString())
       setPortTo(resource.portTo.toString())
@@ -67,8 +71,8 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
     e.preventDefault()
     setError(null)
 
-    if (!name.trim() || !portFrom || !remoteNetworkId) {
-      setError('Name, Remote Network and Port From are required')
+    if (!name.trim() || !host.trim() || !portFrom || !remoteNetworkId) {
+      setError('Name, Host, Remote Network and Port From are required')
       return
     }
 
@@ -91,6 +95,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
           remoteNetworkId,
           name: name.trim(),
           description: description.trim() || null,
+          host: host.trim(),
           protocol,
           portFrom: pFrom,
           portTo: pTo,
@@ -102,6 +107,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
   function handleClose() {
     setName('')
     setDescription('')
+    setHost('')
     setProtocol('tcp')
     setPortFrom('')
     setPortTo('')
@@ -113,6 +119,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
   if (!open || !resource) return null
 
   const networks = (networksData?.remoteNetworks ?? []) as GetRemoteNetworksQuery['remoteNetworks']
+  const shieldBound = ['protected', 'failed', 'protecting'].includes(resource.status.toLowerCase())
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -129,7 +136,7 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
             <div className="flex-1">
               <h2 className="text-lg font-semibold">Edit Resource</h2>
               <p className="text-sm text-muted-foreground">
-                Update resource details. Host IP cannot be changed.
+                Update resource details.
               </p>
             </div>
             <button
@@ -173,6 +180,24 @@ export function EditResourceModal({ open, onOpenChange, resource, onSuccess }: E
                   placeholder="e.g. prod-web-01"
                   className="h-11 font-medium"
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-sm font-semibold">
+                  Host <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  placeholder="e.g. 192.168.1.10"
+                  className="h-11 font-mono text-sm"
+                />
+                {shieldBound && host.trim() !== resource.host && (
+                  <p className="text-xs text-muted-foreground">
+                    This resource is protected: the new host must be the LAN IP of an active shield in its
+                    remote network. The resource moves to that shield.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-2">

@@ -74,6 +74,10 @@ func TestRecordAckReportsACLChanges(t *testing.T) {
 		{"protect fails: same (shield) route", "protecting", "apply", "failed", false, "failed"},
 		{"protected re-verified as failed: same route", "protected", "apply", "failed", false, "failed"},
 		{"stale unprotected ack during an apply: guarded out", "protecting", "apply", "unprotected", false, "protecting"},
+		// Fix 18: 'unprotected' completes only an unprotect; a stray one (e.g. from
+		// the shield a resource was moved away from) is ignored.
+		{"stray unprotected ack on protected: guarded out", "protected", "apply", "unprotected", false, "protected"},
+		{"stray unprotected ack on failed: guarded out", "failed", "apply", "unprotected", false, "failed"},
 		{"tombstone reaped", "deleting", "remove", "unprotected", true, "(gone)"},
 	}
 	for _, c := range cases {
