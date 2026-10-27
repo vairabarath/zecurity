@@ -3164,3 +3164,13 @@ serves on `127.0.0.1:9102`.
   - Fix 16 / F19 guards on connector revoke and delete.
 - gqlgen command corrected in CLAUDE.md, agent.md, studyplan.md and CodeStudy 01; verified it regenerates with no diff.
 - Live F32 + F20 PASS recorded in #144. PRs #143 and #144 opened.
+
+
+## 2026-10-27 — Sprint 20 Fix 18 (F24 + F52 + F53): FIXED, live PASS
+- Branch `sprint20/fix18-resource-host-edit` (local; merged #143–#145 in for path.md).
+- F24: `updateResource` takes host. A protected resource moves to the active shield on the new host, or is refused. Decision (user): protected too; admin UI Host field as an exception to the admin/ rule.
+- F52 (new): editing a protected resource's port never reached its shield; the new port stayed open on the LAN (reproduced live). Fixed: shield-relevant edits re-push the shield.
+- `RecordAck` takes `unprotected` only for an unprotect.
+- F53 (new): the Edit Resource dialog lost typed values on each poll; fixed.
+- Tests: controller 1426 pass; admin 114 pass; 17 mutants killed.
+- Live: port edit applied on the shield in 20 ms; API host move s1→s2 and UI move back s2→s1 with LAN firewall checks; no-shield host refused.
