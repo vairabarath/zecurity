@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 17 — a revoked relay stops its heartbeat (F32)
 date: 2026-10-27
 type: fix
-status: FIXED in code (2026-10-27), commit d89c0310 (local). Unit tests + 5/5 mutants killed. Live check pending.
+status: FIXED and verified live (2026-10-27), commit d89c0310 (local). Unit tests + 5/5 mutants killed; live PASS.
 owner: Sathiya (M1)
 findings: F32 (Sprint20/path.md → Post-Sprint Fixes; live run F5–F7, 2026-09-28)
 ---
@@ -59,11 +59,44 @@ No proto change, no schema change.
 - **Renewal.** A revoked relay's renewal is refused too (`PermissionDenied`, `renew.go`). It already backs off from 60 s up to 30 min and stops at expiry, so it isn't a 5 s loop. Left as is.
 - **The relay's QUIC listener** keeps running. Connectors and clients already refuse a revoked relay through the relay CRL.
 
-## Live check (pending)
+## Live check — PASS (2026-10-27)
 
-1. Revoke a running lab relay (`POST /provider/relays/{id}/revoke` with a reason and `confirm_name`; super-admin with TOTP since Sprint 22 T/A).
-2. Expect:
-   - one relay log line `controller reports this Relay revoked; heartbeat stopped`;
-   - no further `relay heartbeat: received` lines for it on the controller over 2 min;
-   - the process still running.
-3. Control: a live relay whose renewal superseded a serial keeps heartbeating.
+**Setup:**
+- Controller and relay `f17-relay-local` (`62383d9b`) ran on 192.168.1.164 from the fix17 branch (`351c8a66`, controller sha `28371b2a…`, relay `ccf4f291…`).
+- The relay ran as a plain user process.
+- Before the revoke, the controller had received 2 heartbeats, 30 s apart.
+- The local dev DB got `042_provider_totp.sql` applied by hand (it predated #138).
+- The super-admin was reset with `provider recover-admin`, then went through the password change and TOTP enrolment.
+
+| Time (UTC) | Event |
+|---|---|
+| 05:26:25.397 | `POST /provider/relays/{id}/revoke` (reason + `confirm_name`) → 204 |
+| 05:26:35.690 | relay: `ERROR … controller reports this Relay revoked; heartbeat stopped. Replace the relay to bring it back` |
+| 05:26:35 → 05:35:22 | no further relay log line (1 in total since the revoke); controller `relay heartbeat: received` count stays 2; relay pid 123001 still running |
+
+Before the fix this would have been a refused reconnect every 5 s, about 100 in that window.
+
+**Not run live:** the superseded-serial control (a live relay with a revoked old serial keeps retrying). It's covered by the interceptor test "relay active, serial superseded" and the relay test for a `PermissionDenied` without the marker.
+
+## F20 live check (same session) — PASS
+
+F20 was closed in code by bug 3; this is its first live run of the original scenario.
+
+**Setup:**
+- connector `f20-conn` on inkyank .75;
+- shield `f20-shield` on manoj .53;
+- client on .164, rebuilt with `client/scripts/dev-build.sh`;
+- `f20-prot` (manoj :8000) protected through the shield;
+- `f20-direct` (nika :8001), unprotected;
+- both in `cl-group`.
+
+| Time (UTC) | Event |
+|---|---|
+| 05:33:43 | through the tunnel both return 200 (client: `tunnel opened` for .44:8001 and .53:8000) |
+| 05:33:51.929 | `revokeShield`; connector: `shield revoked: stream closed, sessions ended`; **ACL v9 stored at 05:33:51.972** |
+| 05:33:54.968 | `deleteShield` → `f20-prot` is `protected` with `shield_id` NULL, shield row gone (the F20 orphan) |
+| 05:34:01 | new resource `f20-after` (nika :8002) assigned → connector ACL v10, v11 |
+| 05:34:51 | client: `ACL snapshot synced version=11 entries=2`, hot-applied (removed 1, added 1); resources = `f20-direct`, `f20-after` |
+| 05:34:58 | `f20-direct` via the tunnel → 200; manoj :8000 → not captured, unreachable (000) |
+
+The controller log has 0 `compile acl` / `requires a shield` errors for the whole run. With F20, the connector would have stayed at the pre-orphan version, and `f20-after` would never have arrived.
