@@ -3144,3 +3144,11 @@ serves on `127.0.0.1:9102`.
 - Tests: controller 26 packages (DB-backed running), connector 262, shield 53; new tests mutation-checked.
 - Live: sweeper cleared 3 stuck rows on start; offline-shield delete reaped after 2.4 s, live-shield delete 82 ms; SIGTERM/SIGINT/Ctrl-C-under-tee all closed the client session at once with a Goodbye; last-connector revoke refused, then both revoked with the flag; shield back-off ~5/8/17/32 s.
 - Note: CLAUDE.md's `go generate ./graph/...` does not regenerate gqlgen here; `cd controller && go tool gqlgen generate --config graph/gqlgen.yml` does.
+
+
+## 2026-10-27 — Sprint 22 AT-T live acceptance: PASS
+- Isolated stack: throwaway DB with 45 migrations, its own Valkey on :6390, controller on :18080; the provider code matches `fixed-pendings` `fcb7e4eb`.
+- Driver `~/.cache/zecurity-phaset/at_t.py` (local): 40/40 API checks, AT-T1…T12 and AT-CORE-1.
+- Console (Orca browser): forced change → QR + setup key → confirm → dashboard; sign out → verify page → wrong code alert → correct code → dashboard.
+- Note: on the 5-wrong-codes lockout, the 6th attempt gets 429.
+- Recorded in Acceptance-Test-Plan → "Live run — Phase T"; Sprint22 path.md V1 ticked. Branch `sprint22/at-t-live-run` (local).
