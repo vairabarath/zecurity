@@ -3191,3 +3191,16 @@ serves on `127.0.0.1:9102`.
 - A shield LAN-IP change now pushes the shield its snapshot.
 - Tests: controller 1435, connector 269, shield 59; mutants killed (one equivalent).
 - Live with all-new binaries: port edit and two host moves reached `protected`; the old shield's late acks were ignored as "wrong shield"; LAN firewall state correct.
+
+
+## 2026-10-27 — Sprint 20 Fix 20 (F43): FIXED, live old-vs-new PASS
+- Client commit `f8906bb0` on the #146 branch.
+- `relay_pool`: an aged relay connection is retired (closed when its last flow ends) instead of closed with its flows on it.
+- `transport`: after a cooldown expires, flows keep the relay and a single-flight background probe re-checks the direct path; max cooldown 2 h → 2 min.
+- Tests: 3 + 6 new; 11 mutants killed; client 282 pass.
+- Live, with the direct path blocked by nft and a new relay `f43-relay-local`:
+  - held flow at 75 s: old reset → new 200;
+  - the flow at cooldown expiry: 2.09 s → 0.07 s;
+  - 3 min with no stall over 1 s;
+  - unblocked → direct again in 99 s.
+- With this, every Sprint 20 finding is closed apart from the close-out paperwork (F4/F5 status, Phase G boxes).

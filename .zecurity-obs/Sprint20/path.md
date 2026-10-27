@@ -394,9 +394,10 @@ Found during discovery/planning; **do not fix in this sprint** without a separat
     - cooldown expiry re-dials a dead or frozen connector (2 × 2 s), and the backoff then delays reuse of a recovered one (5-B "Finding 3");
     - the `relay_pool.rs` close-on-age finding is unfixed.
 
-    Still open 2026-10-27 (no change to `relay_pool.rs` since).
 
     See [[Sprint20/Fixes/fix 5/Fix05-Stale-QUIC-Pool-Live-Acceptance-2026-10-06]] §15.
+
+    **FIXED 2026-10-27 (Sprint 20 Fix 20, `f8906bb0`):** an aged relay connection is retired (closed when its last flow ends), not closed with its flows; after a cooldown, flows keep the relay and one background probe re-checks the direct path; max cooldown 2 h → 2 min. Live old-vs-new PASS (held flow reset → survives; 2.09 s → 0.07 s; recovery 99 s). [[Sprint20/Fixes/Fix20-Client-Relay-Retire-And-Direct-Probe]]
 - **Certificate-audit live run findings (2026-10-26, `fixed-pendings` `3b1f8511`)**, from [[Sprint21/Certificate-Audit-Live-Run-Sheet-2026-10-26]]. All 26 checks passed; these are separate. **All closed 2026-10-26** (F44/F45/F48 Fix 14, F49 Fix 15, F46/F50/F51 Fix 16, all merged in PR #137; F47 accepted by design). Fix note: [[Sprint20/Fixes/Fix14-Shield-Stream-Reconnect-Sessions]].
   - **F44 — Medium: a shield Control stream reconnect (incl. every cert renewal) freezes all open sessions through that shield** — no data, no close; new sessions work. Connector `unregister_shield` leaves the shield's relay sessions open on the dead stream's sender; the shield starts a fresh `TunnelHub` per stream and leaks the old tunnels' sockets. On `main` too. Decision D-1 (2026-10-26): **B** — keep sessions across the reconnect while the shield renewed before its cert expired; end them if the cert expired. Design in Fix 14; F45 is fixed by the same change.
   - **F45 — Low (code reading): an old shield stream's cleanup can unregister the newer stream** (channels keyed by shield id, removed without a stream check) → new tunnels fail until the next reconnect.
