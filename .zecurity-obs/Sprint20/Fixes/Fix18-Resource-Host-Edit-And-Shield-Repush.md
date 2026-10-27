@@ -2,7 +2,7 @@
 title: Sprint 20 Fix 18 — a resource's host can be edited; a protected resource's edit reaches its shield (F24 + a port-edit gap)
 date: 2026-10-27
 type: fix
-status: FIXED and verified live (2026-10-27) — commits 29b00684, 85a482cc, 8f3ec1a5 (local). 12 + 5 mutants killed.
+status: FIXED and verified live (2026-10-27) — commits 29b00684, 85a482cc, 8f3ec1a5, 3e6e5b4a, 599a7804 (local). 22 mutants killed.
 owner: Sathiya (M1)
 findings: F24 (Sprint20/path.md → Post-Sprint Fixes); new finding F52 (port/protocol edit of a protected resource never reached its shield); new finding F53 (Edit Resource dialog lost typed values on each poll)
 ---
@@ -114,3 +114,45 @@ findings: F24 (Sprint20/path.md → Post-Sprint Fixes); new finding F52 (port/pr
 There were 0 `compile acl` errors in the controller log.
 
 **Observation:** a shield process stopped with Ctrl-C keeps its nftables rules (the revoked f20 shield's :8000 drop was still active). That fails closed, as intended.
+
+## Revision — edit flow for a protected resource (user design, 2026-10-27)
+
+**The user's spec:**
+- With no shield involved, add, edit and delete are free.
+- When a shield protects the resource, an edit is allowed, but the admin is first told it will be unprotected and protected again with the changes.
+- On confirm, the shield removes the old rule and protects the changed resource.
+- If the shield is offline, the dialog says so, and the edit is applied when the shield comes back.
+
+**What was built** (`3e6e5b4a`, `599a7804`):
+- **Status on a rule-relevant edit:**
+  - Applies to a `protected`, `failed` or in-flight (`protecting`/`apply`) resource when host, protocol, ports or network change.
+  - The resource goes back to `protecting`/`apply` and its shield is re-pushed.
+  - The shield swaps the old and new rule **in one nftables transaction**. This is deliberately not a literal unprotect-then-protect, which would leave the resource open between the two steps.
+  - The shield's ack turns the resource `protected`, or `failed` if the port isn't listening.
+- **Edits while waiting:** allowed while a protect is in flight (for example the shield is offline). Only an unprotect or delete in flight refuses them.
+- **Offline shield:** the connector caches each shield's latest snapshot and replays it on reconnect. Until then the resource shows `Protecting`, the old rule stays, and the **new** settings are not firewalled. The dialog says exactly that.
+- **Host or network move:** needs an **active** target shield.
+  - A first version also allowed a `disconnected` target. The automated security review of `3e6e5b4a` flagged that the old shield drops its rule at once while the new host stays unfirewalled until the target reconnects. Reverted in `599a7804`.
+- **Admin dialog:** Save on a protected resource with a rule change first shows a confirmation, with **Back** and **Unprotect & re-protect** buttons. It names the shield, says which shield takes over on a host move, and adds the offline notice when the shield isn't `ACTIVE`.
+
+**Open (security review of `3e6e5b4a`, finding 1, not fixed):**
+- Acks carry only a resource id and status. For a moment after an edit, a periodic `protected` ack the shield sent for the **old** rule can turn `protecting` into `protected` before the new rule is applied.
+- Routing and enforcement are the same either way, and the next ack corrects the status.
+- The fix is a rule generation and the sending shield's id on `ResourceAck`, stamped by the connector and checked in `RecordAck`. That's a proto change, so it waits for the user's decision.
+
+**Extra tests:**
+- port edit → `protecting`/`apply` → the shield's `protected` ack → `protected`;
+- `failed` → `protecting`;
+- an edit while `protecting`/`apply` is allowed and pushed;
+- `protecting`/`remove` and `deleting` are refused;
+- a move to an offline, pending or revoked shield, or to a host with no shield, is refused;
+- 5 more mutants (re-protect status dropped, in-flight not enforced, busy on `apply`, offline target accepted, pending target accepted), all killed.
+
+**Live (controller `45951e66`, then `23397601`):**
+
+| Time (UTC) | Action | Result |
+|---|---|---|
+| 07:19:02.246 | UI: port 8000 → 8003, Save → confirmation shown (nothing saved yet) → **Unprotect & re-protect** | s1 applied port 8003 at .312 (66 ms); `protected` within 0.6 s; LAN :8003 000, :8000 200 |
+| 07:19:18 | shield s1 stopped (Ctrl-C) | marked `disconnected` at 07:21:45 (120 s threshold) |
+| 07:22:05.717 | UI: port 8003 → 8000, Save → confirmation with the offline notice → confirm | `protecting`/`apply` port 8000; LAN :8003 000 (old rule kept), :8000 200 (as warned) |
+| 07:26:03.146 | s1 restarted | connector replayed the snapshot: port 8000 rule at .150, generation 7; resource `protected`; LAN :8000 000, :8003 200 |
