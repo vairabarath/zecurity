@@ -3174,3 +3174,11 @@ serves on `127.0.0.1:9102`.
 - F53 (new): the Edit Resource dialog lost typed values on each poll; fixed.
 - Tests: controller 1426 pass; admin 114 pass; 17 mutants killed.
 - Live: port edit applied on the shield in 20 ms; API host move s1→s2 and UI move back s2→s1 with LAN firewall checks; no-shield host refused.
+
+
+## 2026-10-27 — Sprint 20 Fix 19 (F25 + F54): FIXED, live PASS
+- On the #146 branch (local commit `dfcaed60`).
+- F25: Delete opens a dialog that lists the groups losing access and offers Edit instead (user decision).
+- F54 (new): resource list queries never returned groups; now one batched query.
+- Live: the dialog names `cl-group`; Edit instead opens Edit without deleting; a real delete removes the resource and its rule; the Groups column is filled.
+- Tests: controller 1435 pass; admin 114 pass; ESLint clean.
