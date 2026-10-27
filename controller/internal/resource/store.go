@@ -867,13 +867,30 @@ func ForceDeleteRow(ctx context.Context, db *pgxpool.Pool, tenantID, id string) 
 //
 // Updates within one route class (e.g. protecting → protected/failed) change no
 // compiler-visible data and return false.
-func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, status, errMsg string, verifiedAt int64) (aclChanged bool, err error) {
-	if status == "unprotected" {
+// Ack is a shield's report about one resource (shield.v1.ResourceAck as
+// forwarded by the connector). ShieldID is the connector-stamped, verified
+// shield identity; Host/Protocol/PortFrom/PortTo echo the rule the shield
+// enforces (Sprint 20 Fix 18).
+type Ack struct {
+	ResourceID string
+	Status     string
+	Error      string
+	VerifiedAt int64
+	ShieldID   string
+	Host       string
+	Protocol   string
+	PortFrom   int
+	PortTo     int
+}
+
+func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) (aclChanged bool, err error) {
+	if ack.Status == "unprotected" {
 		ct, err := db.Exec(ctx,
 			`DELETE FROM resources
 			 WHERE id = $1 AND tenant_id = $2
-			   AND status = 'deleting'`,
-			resourceID, tenantID,
+			   AND status = 'deleting'
+			   AND shield_id::text = $3`,
+			ack.ResourceID, tenantID, ack.ShieldID,
 		)
 		if err != nil {
 			return false, fmt.Errorf("record ack (reap): %w", err)
@@ -898,16 +915,51 @@ func RecordAck(ctx context.Context, db *pgxpool.Pool, tenantID, resourceID, stat
 		    -- A stray one (e.g. a late ack from the shield a resource was moved
 		    -- away from) must not flip a protected resource to connector routing.
 		    AND ($2 != 'unprotected' OR (r.status = 'protecting' AND r.pending_action = 'remove'))
+		    -- Fix 18: only the resource's current shield may ack it, and a
+		    -- protected/failed verdict counts only for the current rule; an ack
+		    -- the shield sent for the old host/port right before an edit is stale.
+		    AND r.shield_id::text = $6
+		    AND ($2 NOT IN ('protected', 'failed')
+		         OR (r.host = $7 AND r.protocol = $8 AND r.port_from = $9 AND r.port_to = $10))
 		 RETURNING prev.status`,
-		resourceID, status, errMsg, verifiedAt, tenantID,
+		ack.ResourceID, ack.Status, ack.Error, ack.VerifiedAt, tenantID,
+		ack.ShieldID, ack.Host, ack.Protocol, ack.PortFrom, ack.PortTo,
 	).Scan(&oldStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
+		logIgnoredAck(ctx, db, tenantID, ack)
 		return false, nil // guarded out: nothing changed
 	}
 	if err != nil {
 		return false, fmt.Errorf("record ack: %w", err)
 	}
-	return connectorRouted(oldStatus) != connectorRouted(status), nil
+	return connectorRouted(oldStatus) != connectorRouted(ack.Status), nil
+}
+
+// logIgnoredAck says why an ack changed nothing, when the reason is a wrong
+// shield or a stale rule (Fix 18), so a resource stuck in 'protecting' can be
+// diagnosed from the controller log. Status-guard cases stay silent: they are
+// routine (a periodic ack while an unprotect is in flight).
+func logIgnoredAck(ctx context.Context, db *pgxpool.Pool, tenantID string, ack Ack) {
+	var (
+		shieldID, host, protocol string
+		portFrom, portTo         int
+	)
+	if err := db.QueryRow(ctx,
+		`SELECT COALESCE(shield_id::text, ''), host, protocol, port_from, port_to
+		   FROM resources WHERE id = $1 AND tenant_id = $2`,
+		ack.ResourceID, tenantID,
+	).Scan(&shieldID, &host, &protocol, &portFrom, &portTo); err != nil {
+		return
+	}
+	switch {
+	case shieldID != ack.ShieldID:
+		log.Printf("resource ack ignored: resource=%s status=%s from shield %q, but the resource is bound to %q",
+			ack.ResourceID, ack.Status, ack.ShieldID, shieldID)
+	case (ack.Status == "protected" || ack.Status == "failed") &&
+		(host != ack.Host || protocol != ack.Protocol || portFrom != ack.PortFrom || portTo != ack.PortTo):
+		log.Printf("resource ack ignored: resource=%s status=%s is for rule %s %s/%d-%d, current rule is %s %s/%d-%d (stale)",
+			ack.ResourceID, ack.Status, ack.Host, ack.Protocol, ack.PortFrom, ack.PortTo, host, protocol, portFrom, portTo)
+	}
 }
 
 // connectorRouted mirrors policy.routeTypeForResource: pending and unprotected

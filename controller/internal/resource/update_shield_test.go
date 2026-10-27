@@ -110,6 +110,7 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 
 	t.Run("protected: port edit re-protects on its shield with the new port", func(t *testing.T) {
 		id := mk("protected", "apply", "10.0.0.1", s1)
+		port0 := port
 		res, err := Update(ctx, db, tenantID, id, UpdateInput{PortFrom: num(9555), PortTo: num(9555)})
 		if err != nil {
 			t.Fatal(err)
@@ -120,7 +121,17 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 		if st := stateOf(id); st.status != "protecting" || st.action != "apply" || st.shield != s1 {
 			t.Fatalf("state = %+v, want protecting/apply on s1 until the shield acks", st)
 		}
-		if _, err := RecordAck(ctx, db, tenantID, id, "protected", "", time.Now().Unix()); err != nil {
+		// The shield's periodic ack for the OLD port is stale and ignored.
+		old := Ack{ResourceID: id, Status: "protected", ShieldID: s1, Host: "10.0.0.1", Protocol: "tcp",
+			PortFrom: port0, PortTo: port0, VerifiedAt: time.Now().Unix()}
+		if _, err := RecordAck(ctx, db, tenantID, old); err != nil {
+			t.Fatal(err)
+		}
+		if st := stateOf(id); st.status != "protecting" {
+			t.Fatalf("after a stale ack for the old port: %+v, want protecting", st)
+		}
+		if _, err := RecordAck(ctx, db, tenantID, Ack{ResourceID: id, Status: "protected", ShieldID: s1,
+			Host: "10.0.0.1", Protocol: "tcp", PortFrom: 9555, PortTo: 9555, VerifiedAt: time.Now().Unix()}); err != nil {
 			t.Fatal(err)
 		}
 		if st := stateOf(id); st.status != "protected" {
@@ -181,7 +192,7 @@ func TestUpdateShieldEnforcedResource(t *testing.T) {
 			t.Fatalf("returned row shield = %s, want s2", res.Row.ShieldID)
 		}
 		// A late ack from s1 can't undo the move.
-		if _, err := RecordAck(ctx, db, tenantID, id, "unprotected", "", time.Now().Unix()); err != nil {
+		if _, err := RecordAck(ctx, db, tenantID, Ack{ResourceID: id, Status: "unprotected", ShieldID: s1}); err != nil {
 			t.Fatal(err)
 		}
 		if st := stateOf(id); st.status != "protecting" || st.shield != s2 {
