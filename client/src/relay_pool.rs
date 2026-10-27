@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use quinn::Connection;
 use rustls::version::TLS13;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::Mutex;
 use tokio_rustls::TlsConnector;
 use x509_parser::prelude::{FromDer, X509Certificate};
@@ -49,9 +52,117 @@ pub struct RelayPool {
 struct CachedRelay {
     connection: Connection,
     established_at: Instant,
+    flows: Arc<RelayFlows>,
 }
 
+/// Sprint 20 F43: after this age a cached relay connection is *retired*, not
+/// closed: new flows dial a fresh connection, and the old one is closed when
+/// its last flow ends. Closing it at once (as before) killed every flow still
+/// multiplexed on it. Revocation does not depend on this: each connection's
+/// revocation monitor closes it within 1 s of a revoked serial or an
+/// unavailable CRL.
 const MAX_RELAY_CONNECTION_AGE: Duration = Duration::from_secs(60);
+
+/// Open flows on one relay connection and whether it has been retired. The
+/// relay keeps connections alive (keep-alive pings) and the revocation monitor
+/// holds a handle, so a retired connection never idles out on its own: the
+/// last flow guard closes it.
+struct RelayFlows {
+    connection: Connection,
+    active: AtomicUsize,
+    retired: AtomicBool,
+}
+
+impl RelayFlows {
+    fn new(connection: Connection) -> Arc<Self> {
+        Arc::new(Self {
+            connection,
+            active: AtomicUsize::new(0),
+            retired: AtomicBool::new(false),
+        })
+    }
+
+    /// Counts a flow. Called under the pool lock, so a connection can't be
+    /// retired between being handed out and its flow being counted.
+    fn guard(self: &Arc<Self>) -> RelayFlowGuard {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        RelayFlowGuard(self.clone())
+    }
+
+    /// Stops new flows (caller removes it from the cache) and closes it now if
+    /// no flow is open. Called under the pool lock.
+    fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        if self.active.load(Ordering::SeqCst) == 0 {
+            self.connection
+                .close(0u32.into(), b"relay connection retired");
+        }
+    }
+}
+
+/// One open flow on a relay connection; dropping it ends the flow.
+struct RelayFlowGuard(Arc<RelayFlows>);
+
+impl Drop for RelayFlowGuard {
+    fn drop(&mut self) {
+        let flows = &self.0;
+        if flows.active.fetch_sub(1, Ordering::SeqCst) == 1 && flows.retired.load(Ordering::SeqCst)
+        {
+            flows
+                .connection
+                .close(0u32.into(), b"relay connection retired");
+        }
+    }
+}
+
+/// A relay stream that keeps its connection's flow count while it lives.
+struct RelayFlowStream<S> {
+    inner: S,
+    _flow: RelayFlowGuard,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for RelayFlowStream<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for RelayFlowStream<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
 
 impl RelayPool {
     pub fn new(
@@ -111,11 +222,13 @@ impl RelayPool {
         connector_id: &str,
         connector_spiffe: &str,
     ) -> Result<AuthenticatedStream, TunnelOpenError> {
-        let conn = self.get_or_connect(relay_addr).await?;
+        let (conn, flow) = self.get_or_connect(relay_addr).await?;
         let (mut send, mut recv) = match conn.open_bi().await {
             Ok(streams) => streams,
             Err(error) => {
-                self.connections.lock().await.remove(relay_addr);
+                if let Some(stale) = self.connections.lock().await.remove(relay_addr) {
+                    stale.flows.retire();
+                }
                 return Err(TunnelOpenError::Connect(anyhow::anyhow!(
                     "open Relay Lookup stream: {error}"
                 )));
@@ -154,10 +267,16 @@ impl RelayPool {
                     "inner Client-to-Connector TLS handshake: {e}"
                 ))
             })?;
-        Ok(Box::new(tls_stream))
+        Ok(Box::new(RelayFlowStream {
+            inner: tls_stream,
+            _flow: flow,
+        }))
     }
 
-    async fn get_or_connect(&self, relay_addr: &str) -> Result<Connection, TunnelOpenError> {
+    async fn get_or_connect(
+        &self,
+        relay_addr: &str,
+    ) -> Result<(Connection, RelayFlowGuard), TunnelOpenError> {
         if !self.relay_crl.has_valid_cache() {
             self.close_cached(relay_addr, b"relay revocation state unavailable")
                 .await;
@@ -171,12 +290,10 @@ impl RelayPool {
                 if conn.connection.close_reason().is_none()
                     && conn.established_at.elapsed() < MAX_RELAY_CONNECTION_AGE
                 {
-                    return Ok(conn.connection.clone());
+                    return Ok((conn.connection.clone(), conn.flows.guard()));
                 }
                 if let Some(stale) = conns.remove(relay_addr) {
-                    stale
-                        .connection
-                        .close(0u32.into(), b"relay CRL revalidation");
+                    stale.flows.retire();
                 }
             }
         }
@@ -204,17 +321,22 @@ impl RelayPool {
                 && existing.established_at.elapsed() < MAX_RELAY_CONNECTION_AGE
             {
                 new_conn.close(0u32.into(), b"raced");
-                return Ok(existing.connection.clone());
+                return Ok((existing.connection.clone(), existing.flows.guard()));
             }
         }
-        conns.insert(
+        let flows = RelayFlows::new(new_conn.clone());
+        let flow = flows.guard();
+        if let Some(stale) = conns.insert(
             relay_addr.to_string(),
             CachedRelay {
                 connection: new_conn.clone(),
                 established_at: Instant::now(),
+                flows,
             },
-        );
-        Ok(new_conn)
+        ) {
+            stale.flows.retire();
+        }
+        Ok((new_conn, flow))
     }
 
     async fn close_cached(&self, relay_addr: &str, reason: &'static [u8]) {
@@ -334,6 +456,82 @@ where
 mod tests {
     use super::*;
     use tokio::io::BufReader;
+
+    /// A real QUIC connection to a local server that never closes it.
+    async fn quic_connection() -> Connection {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = rcgen::generate_simple_self_signed(vec!["relay".to_string()]).unwrap();
+        let der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
+        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+        let mut server_tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![der.clone()], key.into())
+            .unwrap();
+        server_tls.alpn_protocols = vec![b"t".to_vec()];
+        let server_cfg = quinn::ServerConfig::with_crypto(Arc::new(
+            quinn::crypto::rustls::QuicServerConfig::try_from(server_tls).unwrap(),
+        ));
+        let server = quinn::Endpoint::server(server_cfg, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Some(incoming) = server.accept().await {
+                if let Ok(conn) = incoming.await {
+                    conn.closed().await;
+                }
+            }
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(der).unwrap();
+        let mut client_tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_tls.alpn_protocols = vec![b"t".to_vec()];
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
+        client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(client_tls).unwrap(),
+        )));
+        client.connect(addr, "relay").unwrap().await.unwrap()
+    }
+
+    /// Sprint 20 F43: an aged relay connection is retired, not closed — flows
+    /// still on it keep running, and it closes when the last one ends.
+    #[tokio::test]
+    async fn retired_relay_connection_closes_when_its_last_flow_ends() {
+        let conn = quic_connection().await;
+        let flows = RelayFlows::new(conn.clone());
+        let first = flows.guard();
+        let second = flows.guard();
+        flows.retire();
+        assert!(
+            conn.close_reason().is_none(),
+            "open flows keep a retired connection"
+        );
+        drop(first);
+        assert!(conn.close_reason().is_none(), "one flow is still open");
+        drop(second);
+        assert!(
+            conn.close_reason().is_some(),
+            "the last flow closes a retired connection"
+        );
+    }
+
+    /// Retiring a connection with no open flow closes it at once.
+    #[tokio::test]
+    async fn retiring_an_idle_relay_connection_closes_it() {
+        let conn = quic_connection().await;
+        RelayFlows::new(conn.clone()).retire();
+        assert!(conn.close_reason().is_some());
+    }
+
+    /// Flows ending on a connection that is still cached don't close it.
+    #[tokio::test]
+    async fn a_cached_relay_connection_outlives_its_flows() {
+        let conn = quic_connection().await;
+        let flows = RelayFlows::new(conn.clone());
+        drop(flows.guard());
+        drop(flows.guard());
+        assert!(conn.close_reason().is_none());
+    }
 
     #[test]
     fn lookup_frame_matches_protocol() {
